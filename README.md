@@ -152,7 +152,7 @@ These are targets until the published results say otherwise.
 
 ## Contributing
 
-bay is built in the open, and contributions are welcome once the repository opens. Before you send a pull
+bay is built in the open, and contributions are welcome. Before you send a pull
 request, run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test`. A new promise comes with
 a failure test that fails without the change. bay stays organisation-neutral: no one company's names,
 hosts, paths or defaults go into this repository.

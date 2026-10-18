@@ -64,6 +64,13 @@ impl fmt::Display for Version {
     }
 }
 
+/// This build's version: `BAY_RELEASE_VERSION` when `scripts/release.sh` built it (a pre-release
+/// such as `0.1.0-pilot.1` names itself), otherwise the crate version.
+pub const BAY: &str = match option_env!("BAY_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
 /// Git floors (`GIT-FEATURES` § 1, `DESIGN` § 15.2).
 pub const GIT_FLOOR_AGENT_VIEW: &str = "2.40";
 pub const GIT_FLOOR_HOSTED_TRUNK: &str = "2.54";

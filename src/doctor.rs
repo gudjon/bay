@@ -133,7 +133,7 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
         report.doctor_note,
     );
     let detail = json!({
-        "bay": env!("CARGO_PKG_VERSION"),
+        "bay": crate::version::BAY,
         "git": git_line,
         "repository": info.toplevel,
         "object format": info.object_format,
@@ -276,6 +276,6 @@ fn status_line(
     };
     format!(
         "bay {} | {git_field} | {claude_field} | {doctor_field}",
-        env!("CARGO_PKG_VERSION")
+        crate::version::BAY
     )
 }

@@ -220,7 +220,7 @@ pub fn run_all(
             manifest_digest: policy.manifest_digest.clone(),
             producer: Producer {
                 name: producer.to_owned(),
-                version: env!("CARGO_PKG_VERSION").to_owned(),
+                version: crate::version::BAY.to_owned(),
             },
             verdict,
             at: now_rfc3339(),

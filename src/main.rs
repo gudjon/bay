@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 use bay::result::BayResult;
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version = bay::version::BAY, about)]
 struct Cli {
     /// Run as if bay was started in <PATH> (like `git -C`)
     #[arg(short = 'C', global = true, value_name = "PATH", default_value = ".")]

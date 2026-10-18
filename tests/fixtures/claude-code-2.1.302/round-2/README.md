@@ -1,8 +1,6 @@
 # Claude Code 2.1.302 hook payloads, round 2
 
-Recorded by the bay-researcher session on 2026-10-18, redacted (no machine paths, session ids or
-assistant text). Method and findings: research chapter 23, round 2
-(research chapter 23, `23-claude-code-hook-probe.md`).
+Recorded on 2026-10-18, redacted (no machine paths, session ids or assistant text).
 
 - `00-Notification-interactive.json`: a permission prompt in an interactive session.
 - `01`–`10` (`-inter`): an interactive session with agent teams on and one teammate. The

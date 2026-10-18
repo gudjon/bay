@@ -1,8 +1,7 @@
 # Claude Code 2.1.302 hook payloads, round 3 (interactive)
 
-Recorded by the bay-researcher session on 2026-10-18 in one interactive session driven in a detached
-`tmux`, redacted (no machine paths, session or prompt ids, workspace). Findings: research chapter 23,
-round 3, in the private project repository (`getbay.io`, `docs/research/…/23-claude-code-hook-probe.md`).
+Recorded on 2026-10-18 in one interactive session driven in a detached `tmux`, redacted (no
+machine paths, session or prompt ids, workspace).
 
 - `01`, `07`: `SessionStart` with `source: "startup"`, then `source: "compact"` after `/compact`.
 - `02`: the status line's input, with `context_window` (`used_percentage`, `remaining_percentage`,
