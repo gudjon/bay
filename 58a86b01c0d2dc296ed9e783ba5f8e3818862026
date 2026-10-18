@@ -67,5 +67,28 @@
     "verdict": "pass",
     "at": "2026-10-18T22:48:04Z",
     "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgZH29GA7iyrTUuOSMm8HGxbXDM0\nlvFpC/mdieLnounwQAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQIl/KviZSiHtXtI8w0++K7clY5yBU2nobUrOspnmCTtDdGxxOqEFJh\nuEJJhYPGMmFCNhhVTSq8CVnx5HDErUFQY=\n-----END SSH SIGNATURE-----\n"
+  },
+  {
+    "schema": "bay.evidence/1",
+    "id": "gudjon-mac/test-sha256-reftable-darwin-arm64-git2.54.0-35ce17279484",
+    "kind": "check",
+    "subject": {
+      "tree": "58a86b01c0d2dc296ed9e783ba5f8e3818862026",
+      "commit": "35ce17279484be2a95b0c9d774864e9b9bdf9990",
+      "base_tree": "fa10a32d9e4262183df1499890e8828010e8a584"
+    },
+    "check": {
+      "id": "test-sha256-reftable",
+      "environment": "darwin-arm64-git2.54.0"
+    },
+    "policy_revision": 0,
+    "manifest_digest": "gate",
+    "producer": {
+      "name": "gudjon-mac",
+      "version": "0.1.0"
+    },
+    "verdict": "pass",
+    "at": "2026-10-18T22:54:42Z",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgZH29GA7iyrTUuOSMm8HGxbXDM0\nlvFpC/mdieLnounwQAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQLGydS+HB+lAJERBwPsIAGSj1UMEe1Wdd1b5DKF+pKvihjR3gw6ExW\napTcoBH+h3KZ4ssmwL42U8RWg+xZITkAk=\n-----END SSH SIGNATURE-----\n"
   }
 ]
