@@ -1,0 +1,14 @@
+{
+ "session_id": "<redacted>",
+ "turn_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "apply_patch",
+ "tool_input": {
+  "command": "*** Begin Patch\n*** Add File: <repo>/a.txt\n+a\n*** End Patch"
+ },
+ "tool_use_id": "exec-39c0a70c-f446-458e-b3f4-09581472791c"
+}

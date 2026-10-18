@@ -1,0 +1,22 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolBatch",
+ "tool_calls": [
+  {
+   "tool_name": "Bash",
+   "tool_input": {
+    "command": "echo denied > d.txt",
+    "description": "Write 'denied' into d.txt"
+   },
+   "tool_use_id": "toolu_01BBEGv5ocT97bTWiHC9wG2a",
+   "tool_response": "Permission to use Bash with command echo denied > d.txt has been denied."
+  }
+ ]
+}

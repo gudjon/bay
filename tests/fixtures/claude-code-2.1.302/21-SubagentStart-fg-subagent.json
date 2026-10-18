@@ -1,0 +1,9 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "agent_id": "a925312a1c85ffc97",
+ "agent_type": "general-purpose",
+ "hook_event_name": "SubagentStart"
+}

@@ -1,0 +1,14 @@
+{
+ "session_id": "<redacted>",
+ "turn_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "collaborationwait_agent",
+ "tool_input": {
+  "timeout_ms": 10000
+ },
+ "tool_use_id": "call_039e91c027464099b9bf7d1647982066"
+}

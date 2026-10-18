@@ -1,0 +1,23 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "<redacted>",
+ "background_tasks": [
+  {
+   "id": "tqcvoh5zi",
+   "type": "teammate",
+   "status": "running",
+   "description": "Create t.txt with Write tool"
+  }
+ ],
+ "session_crons": []
+}

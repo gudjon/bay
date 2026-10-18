@@ -1,0 +1,11 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "agent_type": "general-purpose",
+ "hook_event_name": "TeammateIdle",
+ "teammate_name": "t1",
+ "team_name": "session-1c7ac5aa"
+}

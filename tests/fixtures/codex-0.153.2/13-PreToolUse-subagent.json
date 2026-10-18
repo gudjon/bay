@@ -1,0 +1,16 @@
+{
+ "session_id": "<redacted>",
+ "turn_id": "<redacted>",
+ "agent_id": "<redacted>",
+ "agent_type": "default",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "printf s > <repo>/s.txt"
+ },
+ "tool_use_id": "exec-31175c63-93e3-40c9-8586-7dc424b84aa3"
+}

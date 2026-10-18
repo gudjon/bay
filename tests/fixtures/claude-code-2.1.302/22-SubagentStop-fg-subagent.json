@@ -1,0 +1,18 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "agent_id": "a925312a1c85ffc97",
+ "agent_type": "general-purpose",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "SubagentStop",
+ "stop_hook_active": false,
+ "agent_transcript_path": "<redacted>",
+ "last_assistant_message": "done",
+ "background_tasks": [],
+ "session_crons": []
+}

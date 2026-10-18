@@ -1,0 +1,26 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "Write",
+ "tool_input": {
+  "file_path": "<repo>/a.txt",
+  "content": "a"
+ },
+ "tool_response": {
+  "type": "create",
+  "filePath": "<repo>/a.txt",
+  "content": "a",
+  "structuredPatch": [],
+  "originalFile": null,
+  "userModified": false
+ },
+ "tool_use_id": "toolu_01XSG1EFC6yVyng5CMhk5vRc",
+ "duration_ms": 3
+}

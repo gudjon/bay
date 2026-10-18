@@ -1,0 +1,29 @@
+[
+ {
+  "id": "<redacted>",
+  "cwd": "<redacted>",
+  "kind": "background",
+  "startedAt": 1790023056563,
+  "sessionId": "<redacted>",
+  "name": "<redacted>",
+  "state": "blocked"
+ },
+ {
+  "pid": 7783,
+  "cwd": "<redacted>",
+  "kind": "interactive",
+  "startedAt": 1791795726697,
+  "sessionId": "<redacted>",
+  "name": "<redacted>",
+  "status": "busy"
+ },
+ {
+  "pid": 7845,
+  "cwd": "<redacted>",
+  "kind": "interactive",
+  "startedAt": 1791795726794,
+  "sessionId": "<redacted>",
+  "name": "<redacted>",
+  "status": "idle"
+ }
+]

@@ -1,0 +1,11 @@
+{
+ "session_id": "<redacted>",
+ "turn_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "hook_event_name": "Stop",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "stop_hook_active": false,
+ "last_assistant_message": "<redacted>"
+}

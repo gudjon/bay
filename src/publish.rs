@@ -1,0 +1,2272 @@
+//! Publication: freeze → merge-tree → commit-tree → check → persist → push → derive
+//! (`DESIGN` § 6).
+//!
+//! Only the trunk push makes a change landed. Before it, everything is retained in the
+//! change chain and the evidence notes; after it, "landed" is derived from trunk. Every
+//! attempt first scans `base_first..B` for an earlier publication of the change.
+//!
+//! `bay land` does the agent's part and returns at once; `bay executor run` (or `land --wait`)
+//! does the rest. Not yet: signatures (item 11), so the scan matches trailers only; the
+//! publication queue (item 19d), so a third trunk move returns `TRUNK_MOVED`; the
+//! landed-intent marker (item 19e).
+
+use std::cell::Cell;
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+
+use crate::canonical::digest;
+use crate::change::{
+    Attempt, Chain, ChangeRecord, ChangeState, OpState, Operation, change_ref, freeze_draft,
+};
+use crate::check::{self, Candidate};
+use crate::evidence::{self, Combined};
+use crate::git::{Git, GitError};
+use crate::merge::{Merge, merge_onto};
+use crate::policy;
+use crate::receipts;
+use crate::registry::{KeyClass, REGISTRY_REF, Registry};
+use crate::repo::Repo;
+use crate::result::{BayResult, Decision, Reason};
+use crate::signing::{self, Keys, Signer};
+use crate::view;
+
+/// The producer name of the built-in local executor's evidence.
+pub const LOCAL_PRODUCER: &str = "local";
+/// After this many `TRUNK_MOVED` refusals an operation stops rebuilding.
+const TRUNK_MOVED_LIMIT: u32 = 2;
+
+/// The identity bay commits candidates under until executor keys exist (item 11).
+const EXECUTOR_IDENTITY: &[(&str, &str)] = &[
+    ("GIT_AUTHOR_NAME", "bay executor"),
+    ("GIT_AUTHOR_EMAIL", "executor@bay.invalid"),
+    ("GIT_COMMITTER_NAME", "bay executor"),
+    ("GIT_COMMITTER_EMAIL", "executor@bay.invalid"),
+];
+
+/// Ends the process at a named publication boundary when `BAY_TEST_KILL_AT` names it.
+/// Used only by the crash tests (G4, G5); a real kill leaves the same state.
+fn kill_point(name: &str) {
+    if std::env::var("BAY_TEST_KILL_AT").is_ok_and(|at| at == name) {
+        std::process::exit(137);
+    }
+    // `BAY_TEST_PAUSE_AT` holds the process at the boundary until `BAY_TEST_PAUSE_FILE` exists
+    // (it writes `<file>.paused` first), for the ownership tests (G24).
+    if std::env::var("BAY_TEST_PAUSE_AT").is_ok_and(|at| at == name)
+        && let Ok(file) = std::env::var("BAY_TEST_PAUSE_FILE")
+    {
+        let _ = std::fs::write(format!("{file}.paused"), name);
+        while !Path::new(&file).exists() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[must_use]
+pub fn land(
+    dir: &Path,
+    change: Option<&str>,
+    wait: bool,
+    observe: Option<Duration>,
+    abandon: bool,
+) -> BayResult {
+    let repo = match Repo::open(dir) {
+        Ok(repo) => repo,
+        Err(message) => return BayResult::failed(message),
+    };
+    let _ = receipts::sync(&repo);
+    let Some(id) = change.map(str::to_owned).or_else(|| repo.view_change(dir)) else {
+        return BayResult::failed("run bay land in a change's view, or name the change");
+    };
+    let step = Cell::new("read");
+    let mut result = Err(CHAIN_MOVED.to_owned());
+    for _ in 0..3 {
+        adopt_remote_chain(&repo, &id);
+        if abandon {
+            result = abandon_change(&repo, &id, &step);
+            break;
+        }
+        result = match observe.filter(|_| wait) {
+            Some(timeout) => observe_land(&repo, dir, &id, &step, timeout),
+            None => submit_land(&repo, &id, &step, wait),
+        };
+        if result.as_ref().is_err_and(|why| why == CHAIN_MOVED) {
+            continue;
+        }
+        break;
+    }
+    let result = result.unwrap_or_else(BayResult::failed);
+    with_receipt(&repo, &id, step.get(), result)
+}
+
+/// `land --wait` with an observation timeout (§ 9a): the run happens in a detached process,
+/// and the caller watches the change chain for at most `timeout`. When the timeout expires the
+/// caller returns `queued`/`running` and the run continues on its own.
+fn observe_land(
+    repo: &Repo,
+    dir: &Path,
+    id: &str,
+    step: &Cell<&'static str>,
+    timeout: Duration,
+) -> Result<BayResult, String> {
+    let submitted = submit_land(repo, id, step, false)?;
+    if submitted.decision != Decision::Queued
+        || submitted.waiting_for.as_deref() != Some("executor")
+    {
+        return Ok(submitted);
+    }
+    let op_id = submitted.op_id.clone().unwrap_or_default();
+    let bay = std::env::current_exe().map_err(|error| error.to_string())?;
+    std::process::Command::new(bay)
+        .arg("-C")
+        .arg(dir)
+        .args(["land", "--wait", "--change", id])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("the run could not be started: {error}"))?;
+    let started = Instant::now();
+    let chain = Chain::new(&repo.git);
+    while started.elapsed() < timeout {
+        std::thread::sleep(Duration::from_millis(200));
+        let Ok((_, record)) = chain.read(id) else {
+            continue;
+        };
+        let done = record
+            .operations
+            .iter()
+            .find(|op| op.op_id == op_id)
+            .is_some_and(|op| op.state.is_terminal() || op.state == OpState::Blocked);
+        if done {
+            // The outcome is in the chain; reading it again returns the same result the run did.
+            return submit_land(repo, id, step, false);
+        }
+    }
+    let mut result = BayResult::new(Decision::Queued)
+        .with_change(id)
+        .with_op(op_id);
+    result.state = Some("running".to_owned());
+    result.published = Some(false);
+    result.waiting_for = Some("executor".to_owned());
+    Ok(result.with_detail(json!({
+        "observation_timeout_s": timeout.as_secs(),
+        "the run continues": true,
+    })))
+}
+
+/// Writes the receipt for a failed or blocked result before it is returned (§ 9): outside
+/// the view, then synchronized when the remote takes it.
+#[must_use]
+pub fn with_receipt(repo: &Repo, id: &str, step: &str, mut result: BayResult) -> BayResult {
+    if result.change.is_none() {
+        result = result.with_change(id);
+    }
+    if matches!(result.decision, Decision::Failed | Decision::Blocked) {
+        let actor = Chain::new(&repo.git)
+            .read(id)
+            .ok()
+            .map(|(_, record)| record.actor);
+        let receipt = receipts::from_result(id, actor, step, &result);
+        match receipts::write_pending(repo, &receipt) {
+            Ok(_) => {
+                result.receipt = Some(receipt.id);
+                let _ = receipts::sync(repo);
+            }
+            Err(error) => {
+                result.receipt = Some(format!("not written: {error}"));
+            }
+        }
+    }
+    result
+}
+
+/// A commit on trunk that carries the change's `Change-Id`.
+pub struct Found {
+    pub commit: String,
+    pub revision: String,
+}
+
+/// What a scan found: verified publications, and commits that only carry the trailer.
+#[derive(Default)]
+pub struct Scan {
+    pub publications: Vec<Found>,
+    /// Unsigned, unverifiable or wrongly signed commits that quote the `Change-Id`: reported,
+    /// never counted as a landing (§ 6).
+    pub anomalies: Vec<Found>,
+}
+
+/// Scans `base_first..trunk` for publication commits of `id` (§ 6). With a registry, a
+/// commit counts only when its signature verifies against the executor file of the registry
+/// version its `Registry-Id` names, under the executor that committed it; without one, bay
+/// runs unsigned and trailers decide.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn scan(git: &Git, base_first: &str, trunk: &str, id: &str) -> Result<Scan, String> {
+    let range = format!("{base_first}..{trunk}");
+    let log = git
+        .run(&[
+            "log",
+            "--format=%H%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Revision-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%cn%x1e",
+            &range,
+        ])
+        .map_err(|error| error.message())?;
+    let signatures = git
+        .ref_target(REGISTRY_REF)
+        .map_err(|error| error.message())?
+        .is_some();
+    let mut scan = Scan::default();
+    for entry in log.split('\u{1e}') {
+        let fields: Vec<&str> = entry.trim().split('\u{1f}').map(str::trim).collect();
+        let [commit, change, revision, registry_id, committer] = fields.as_slice() else {
+            continue;
+        };
+        if commit.is_empty() || *change != id {
+            continue;
+        }
+        let found = Found {
+            commit: (*commit).to_owned(),
+            revision: (*revision).to_owned(),
+        };
+        if !signatures || verify_publication(git, commit, registry_id, committer) {
+            scan.publications.push(found);
+        } else {
+            scan.anomalies.push(found);
+        }
+    }
+    Ok(scan)
+}
+
+/// Whether `commit` verifies against the executor file of the registry version `registry_id`
+/// names, under the executor that committed it.
+#[must_use]
+pub fn verify_publication(git: &Git, commit: &str, registry_id: &str, committer: &str) -> bool {
+    if registry_id.is_empty() || registry_id == "none" {
+        return false;
+    }
+    let Ok(registry) = Registry::load_at(git, registry_id) else {
+        return false;
+    };
+    let Ok(executors) = registry.class_file(git, KeyClass::Executor) else {
+        return false;
+    };
+    matches!(signing::verify_commit(git, commit, &executors), Ok(Some(principal)) if principal == committer)
+}
+
+struct Ctx<'a> {
+    repo: &'a Repo,
+    /// The publication step in progress, named in a receipt if it fails.
+    step: &'a Cell<&'static str>,
+    chain: Chain<'a>,
+    id: String,
+    head: String,
+    record: ChangeRecord,
+    /// The current registry after the last fetch; `None` means bay runs unsigned.
+    registry: Option<Registry>,
+    keys: Keys,
+    /// The chain head this process last pushed: later pushes are leased on it, so a chain
+    /// another executor moved is never overwritten.
+    pushed_head: Option<String>,
+    /// The epoch this process claimed, when it acts as the executor.
+    my_epoch: u64,
+    /// The registry principal that signed the request, when it is a policy repair (§ 7).
+    repair: Option<String>,
+    /// Whether the remote answered this run's fetch.
+    online: bool,
+    /// The chain head the last heartbeat pushed, while a check runs (§ 9a).
+    beat_pushed: std::cell::RefCell<Option<String>>,
+}
+
+impl<'a> Ctx<'a> {
+    fn load(repo: &'a Repo, step: &'a Cell<&'static str>, id: &str) -> Result<Self, String> {
+        let keys = Keys::load(&repo.git);
+        keys.validate()?;
+        let chain = Chain::new(&repo.git);
+        let (head, record) = chain.read(id).map_err(|error| error.message())?;
+        Ok(Self {
+            repo,
+            step,
+            chain,
+            id: id.to_owned(),
+            head,
+            record,
+            registry: None,
+            keys,
+            pushed_head: None,
+            my_epoch: 0,
+            repair: None,
+            online: true,
+            beat_pushed: std::cell::RefCell::new(None),
+        })
+    }
+
+    /// The agent's signer: its key under the change's actor name. Required with a registry.
+    fn agent_signer(&self) -> Result<Option<Signer>, String> {
+        if self.registry.is_none() {
+            return Ok(None);
+        }
+        let key = self.keys.agent.clone().ok_or(
+            "the repository has a key registry and this machine has no agent key (git config bay.agentKey); requests must be signed",
+        )?;
+        Ok(Some(Signer {
+            key,
+            name: self.record.actor.name.clone(),
+        }))
+    }
+
+    /// The executor's signer. Required with a registry.
+    fn executor_signer(&self) -> Result<Option<Signer>, String> {
+        if self.registry.is_none() {
+            return Ok(None);
+        }
+        self.keys.executor.clone().map(Some).ok_or_else(|| {
+            "the repository has a key registry and this machine has no executor key (git config bay.executorKey)".to_owned()
+        })
+    }
+
+    /// The producer name evidence is recorded under, and its signer when signing is on.
+    fn producer(&self) -> Result<(String, Option<Signer>), String> {
+        let name = self.keys.producer_name.clone();
+        if self.registry.is_none() {
+            return Ok((name, None));
+        }
+        let signer = self.keys.producer.clone().ok_or(
+            "the repository has a key registry and this machine has no producer key (git config bay.producerKey)",
+        )?;
+        Ok((name, Some(signer)))
+    }
+
+    /// Fetches trunk and refuses a remote rewound behind what this change has seen.
+    fn fetch_trunk(&mut self) -> Result<Result<String, BayResult>, String> {
+        self.step.set("fetch");
+        let trunk = self.repo.fetch_trunk().map_err(|error| error.message())?;
+        self.repo.fetch_registry();
+        self.registry = Registry::current(&self.repo.git)?;
+        if !is_ancestor(&self.repo.git, &self.record.observed_remote, &trunk)? {
+            return Ok(Err(BayResult::failed(format!(
+                "trunk was rewound: {} is no longer an ancestor of the remote trunk {trunk}; bay never forces",
+                self.record.observed_remote
+            ))
+            .with_change(self.id.clone())));
+        }
+        self.record.observed_remote.clone_from(&trunk);
+        Ok(Ok(trunk))
+    }
+
+    fn op_mut(&mut self, op_id: &str) -> &mut Operation {
+        self.record
+            .operations
+            .iter_mut()
+            .find(|op| op.op_id == op_id)
+            .unwrap_or_else(|| unreachable!("operation {op_id} is in the record"))
+    }
+
+    fn op(&self, op_id: &str) -> &Operation {
+        self.record
+            .operations
+            .iter()
+            .find(|op| op.op_id == op_id)
+            .unwrap_or_else(|| unreachable!("operation {op_id} is in the record"))
+    }
+
+    fn save(&mut self, draft: &str, candidate: Option<&str>, message: &str) -> Result<(), String> {
+        self.head = self
+            .chain
+            .append_linking(&self.head, &self.record, draft, candidate, message)
+            .map_err(|error| error.message())?;
+        Ok(())
+    }
+
+    /// Pushes the chain. It only appends, so this is a fast-forward and never forced; once this
+    /// process has pushed, the push is leased on that head, so it fails when another executor
+    /// moved the chain since.
+    fn push_chain(&mut self) -> bool {
+        let name = change_ref(&self.id);
+        let lease = self
+            .pushed_head
+            .as_ref()
+            .map(|expected| format!("--force-with-lease={name}:{expected}"));
+        let mut args = vec!["push", "-q"];
+        if let Some(lease) = &lease {
+            args.push(lease);
+        }
+        let refspec = format!("{name}:{name}");
+        args.extend([self.repo.remote(), refspec.as_str()]);
+        let pushed = self.repo.git.run(&args).is_ok();
+        if pushed {
+            self.pushed_head = Some(self.head.clone());
+        }
+        pushed
+    }
+
+    /// Pushes the chain and moves `refs/bay/requests/<id>` to `request` in one atomic push
+    /// (§ 10a). The requests ref always names the latest land request.
+    fn push_chain_and_request(&mut self, request: &str) -> bool {
+        let name = change_ref(&self.id);
+        let requests = format!("refs/bay/requests/{}", self.id);
+        let _ = self.repo.git.run(&["update-ref", &requests, request]);
+        let lease = self
+            .pushed_head
+            .as_ref()
+            .map(|expected| format!("--force-with-lease={name}:{expected}"));
+        let mut args = vec!["push", "-q", "--atomic"];
+        if let Some(lease) = &lease {
+            args.push(lease);
+        }
+        let chain = format!("{name}:{name}");
+        let request_spec = format!("+{requests}:{requests}");
+        args.extend([self.repo.remote(), chain.as_str(), request_spec.as_str()]);
+        let pushed = self.repo.git.run(&args).is_ok();
+        if pushed {
+            self.pushed_head = Some(self.head.clone());
+        }
+        pushed
+    }
+
+    /// Replaces the local chain with the remote's and reloads it.
+    fn refetch(&mut self) -> Result<(), String> {
+        let name = change_ref(&self.id);
+        self.repo
+            .git
+            .run(&[
+                "fetch",
+                "-q",
+                "--no-tags",
+                self.repo.remote(),
+                &format!("+{name}:{name}"),
+            ])
+            .map_err(|error| error.message())?;
+        let (head, record) = self.chain.read(&self.id).map_err(|error| error.message())?;
+        self.head = head;
+        self.record = record;
+        self.pushed_head = Some(self.head.clone());
+        Ok(())
+    }
+
+    fn executor_name(&self) -> String {
+        self.keys.executor_name.clone()
+    }
+}
+
+/// The agent's part of `land` (§ 9a): freeze, scan, and append the request. Returns at once
+/// with the operation id; with `wait` it also runs the executor's part inline.
+fn submit_land(
+    repo: &Repo,
+    id: &str,
+    step: &Cell<&'static str>,
+    wait: bool,
+) -> Result<BayResult, String> {
+    let mut ctx = Ctx::load(repo, step, id)?;
+    // § 10a offline work: with the remote unreachable, the request is committed locally and
+    // pushed by a later bay command when the remote returns.
+    let (trunk, online) = match ctx.fetch_trunk() {
+        Ok(Ok(trunk)) => (trunk, true),
+        Ok(Err(refusal)) => return Ok(refusal),
+        Err(why) => match repo.git.ref_target(&repo.trunk_tracking_ref()) {
+            Ok(Some(trunk)) => {
+                ctx.registry = Registry::current(&repo.git)?;
+                ctx.online = false;
+                (trunk, false)
+            }
+            _ => return Err(why),
+        },
+    };
+    // An actor whose change was adopted away learns it here (§ 4, the `adopted` event).
+    let me = crate::change::current_actor()?;
+    if me.name != ctx.record.actor.name
+        && ctx
+            .record
+            .adopted_from
+            .iter()
+            .any(|actor| actor.name == me.name)
+    {
+        return Ok(BayResult::blocked(Reason::ChangeSuperseded)
+            .with_change(id)
+            .with_detail(json!({"event": "adopted", "adopted_by": ctx.record.actor})));
+    }
+    let agent = ctx.agent_signer()?;
+    ctx.chain.sign_with(agent);
+
+    step.set("freeze");
+    let revision = match freeze(&ctx)? {
+        Ok(revision) => revision,
+        Err(refusal) => return Ok(refusal),
+    };
+    observe_inputs(&mut ctx)?;
+
+    if let Some(result) = scanned(&mut ctx, &trunk, &revision)? {
+        return Ok(result);
+    }
+
+    let op_id = match ctx
+        .record
+        .operations
+        .iter()
+        .find(|op| op.revision == revision && !op.state.is_terminal())
+    {
+        Some(op) => op.op_id.clone(),
+        None => submit(&mut ctx, &revision)?,
+    };
+    if ctx.op(&op_id).state == OpState::Blocked
+        && let Some(refusal) = retry_blocked(&mut ctx, &op_id, &revision, &trunk)?
+    {
+        return Ok(refusal);
+    }
+    kill_point("after-freeze");
+
+    if wait && online {
+        return execute_op(&mut ctx, &op_id, trunk);
+    }
+    let op = ctx.op(&op_id);
+    let mut result = BayResult::new(Decision::Queued)
+        .with_change(id)
+        .with_op(op_id.clone());
+    result.state = serde_json::to_value(op.state)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned));
+    result.published = Some(false);
+    result.waiting_for = Some(if online { "executor" } else { "remote" }.to_owned());
+    Ok(result)
+}
+
+/// The executor's part: runs operation `op_id` of change `id` to a stated outcome.
+///
+/// # Errors
+///
+/// A fault of bay's own; refusals are results.
+pub fn execute(
+    repo: &Repo,
+    id: &str,
+    op_id: &str,
+    step: &Cell<&'static str>,
+) -> Result<BayResult, String> {
+    let mut ctx = Ctx::load(repo, step, id)?;
+    if !ctx.record.operations.iter().any(|op| op.op_id == op_id) {
+        if ctx.record.retention_cut {
+            // § 9a: a retry of an op id whose record expired is ambiguous, never new work.
+            return Ok(BayResult::failed(format!(
+                "operation {op_id} expired with change {id}'s retention; a retry of it is refused as ambiguous"
+            ))
+            .with_change(id)
+            .with_op(op_id));
+        }
+        return Err(format!("change {id} has no operation {op_id}"));
+    }
+    let trunk = match ctx.fetch_trunk()? {
+        Ok(trunk) => trunk,
+        Err(refusal) => return Ok(refusal),
+    };
+    let revision = ctx.op(op_id).revision.clone();
+    if let Some(result) = scanned(&mut ctx, &trunk, &revision)? {
+        return Ok(existing(result));
+    }
+    execute_op(&mut ctx, op_id, trunk)
+}
+
+/// Steps 2–7 for one operation, rebuilding when trunk moves.
+fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, String> {
+    let revision = ctx.op(op_id).revision.clone();
+    let executor = ctx.executor_signer()?;
+    ctx.chain.sign_with(executor);
+    if let Some(refusal) = verify_request(ctx, op_id)? {
+        return Ok(refusal);
+    }
+    // § 6: while a queue is live only its head runs; anyone else holds a place and no check.
+    let mut seq = match queue_gate(ctx, op_id)? {
+        Gate::Wait(result) => return Ok(*result),
+        Gate::Head(seq) => Some(seq),
+        Gate::Free => None,
+    };
+    if let Some(report) = claim(ctx, op_id, &revision, &trunk)? {
+        return Ok(report);
+    }
+    let outcome = run_attempts(ctx, op_id, &revision, trunk, &mut seq);
+    // The head always releases: an outcome other than its own publication (which released in
+    // the publishing push) passes the head on.
+    if let Some(at) = seq
+        && !crate::queue::Queue::read(ctx.repo)?.released.contains(&at)
+    {
+        let reason = match &outcome {
+            Ok(result) => result.reason.map_or_else(
+                || {
+                    if result.decision == Decision::Landed {
+                        "published".to_owned()
+                    } else {
+                        "failed".to_owned()
+                    }
+                },
+                |reason| reason.code().to_lowercase(),
+            ),
+            Err(_) => "failed".to_owned(),
+        };
+        let signer = ctx.executor_signer().ok().flatten();
+        let _ = crate::queue::release(ctx.repo, signer.as_ref(), at, op_id, &reason);
+    }
+    outcome
+}
+
+/// Steps 2–7 for one operation, rebuilding when trunk moves; joins the queue after two
+/// `TRUNK_MOVED` refusals. `seq` is this operation's place when it is the queue's head.
+fn run_attempts(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    mut trunk: String,
+    seq: &mut Option<u64>,
+) -> Result<BayResult, String> {
+    let revision = revision.to_owned();
+    let id = ctx.id.clone();
+    loop {
+        // A candidate checked and persisted on this very trunk is published without a rebuild.
+        let ready = ctx.op(op_id).attempts.last().filter(|attempt| {
+            ctx.op(op_id).state == OpState::Checked
+                && attempt.base == trunk
+                && attempt.epoch == ctx.my_epoch
+        });
+        let attempt = match ready {
+            Some(attempt) => attempt.clone(),
+            None => match build_and_check(ctx, op_id, &revision, &trunk)? {
+                Ok(attempt) => attempt,
+                Err(refusal) => return Ok(refusal),
+            },
+        };
+
+        ctx.step.set("publish");
+        if let Some(report) = still_owner(ctx, op_id, &revision)? {
+            return Ok(report);
+        }
+        kill_point("before-publish");
+        let release = match *seq {
+            Some(at) => {
+                let signer = ctx.executor_signer().ok().flatten();
+                Some((
+                    at,
+                    crate::queue::release_commit(
+                        &ctx.repo.git,
+                        signer.as_ref(),
+                        at,
+                        op_id,
+                        "published",
+                    )?,
+                ))
+            }
+            None => None,
+        };
+        let claim = ctx.record.claim.clone();
+        match publish_push(
+            ctx.repo,
+            &id,
+            &attempt.commit,
+            release.as_ref(),
+            claim.as_ref(),
+        ) {
+            Ok(()) => {
+                kill_point("after-publish");
+                return derive_landed(ctx, op_id, &revision, &attempt.commit);
+            }
+            Err(error) => {
+                if let Some(result) =
+                    after_refused_push(ctx, op_id, &revision, &mut trunk, seq, &attempt, &error)?
+                {
+                    return Ok(result);
+                }
+            }
+        }
+    }
+}
+
+/// A publishing push was refused (§ 6): reports the existing landing, retries the same
+/// candidate after a hook timeout, rejoins the queue, or moves to the new trunk (`None`: build
+/// and check again).
+fn after_refused_push(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &mut String,
+    seq: &mut Option<u64>,
+    attempt: &Attempt,
+    error: &str,
+) -> Result<Option<BayResult>, String> {
+    let now = ctx
+        .repo
+        .fetch_trunk()
+        .map_err(|fetch| format!("{error}; then trunk could not be read: {}", fetch.message()))?;
+    if let Some(result) = scanned(ctx, &now, revision)? {
+        return Ok(Some(existing(result)));
+    }
+    // Another change landed this generation of the intent: never a retry (§ 6).
+    if let Some(claim) = &ctx.record.claim
+        && !ctx
+            .repo
+            .git
+            .run(&["ls-remote", ctx.repo.remote(), &claim.landed_ref()])
+            .unwrap_or_default()
+            .is_empty()
+    {
+        return Ok(Some(
+            BayResult::blocked(Reason::ChangeAlreadyLanded)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(json!({"landed_intent": claim.landed_ref()})),
+        ));
+    }
+    if error.contains("HOOK_TIMEOUT") {
+        return hook_timed_out(ctx, op_id, revision);
+    }
+    // A release created while this head was publishing (its progress deadline), whether or not
+    // trunk moved: rejoin, uncounted toward `QUEUE_DEADLINE_EXCEEDED`, one publish retry (§ 6).
+    if let Some(at) = *seq
+        && crate::queue::Queue::read(ctx.repo)?.released.contains(&at)
+    {
+        *seq = None;
+        if let Some(blocked) =
+            uncounted_retry(ctx, op_id, revision, "deadline release mid-publish")?
+        {
+            return Ok(Some(blocked));
+        }
+        return enqueue(ctx, op_id, revision, Reason::PublicationQueued).map(Some);
+    }
+    if now == *trunk {
+        return Ok(Some(
+            BayResult::failed(format!("the publishing push was refused: {error}"))
+                .with_change(ctx.id.clone())
+                .with_op(op_id),
+        ));
+    }
+    let held = error.contains("QUEUE_HELD");
+    *trunk = now;
+    ctx.record.observed_remote.clone_from(trunk);
+    let moved = Moved {
+        base: &attempt.base,
+        trunk,
+        held,
+    };
+    after_trunk_moved(ctx, op_id, revision, seq, &moved)
+}
+
+/// After this many uncounted publish retries an operation is `PUBLISH_RETRY_EXHAUSTED` (§ 6).
+const PUBLISH_RETRY_LIMIT: u32 = 5;
+/// The short wait before a publishing push the hook timed out is tried again.
+const HOOK_RETRY_WAIT: Duration = Duration::from_secs(1);
+
+/// The trunk hook timed out on the publishing push: retry the same candidate after a short wait
+/// (`None`), uncounted toward `TRUNK_MOVED` and the queue's deadline (`INTERFACES` § 2).
+fn hook_timed_out(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<BayResult>, String> {
+    if let Some(blocked) = uncounted_retry(ctx, op_id, revision, "hook timeout")? {
+        return Ok(Some(blocked));
+    }
+    std::thread::sleep(HOOK_RETRY_WAIT);
+    Ok(None)
+}
+
+/// Counts one uncounted retry (a `HOOK_TIMEOUT`, or a deadline release during a publish): the
+/// fifth blocks the operation with `PUBLISH_RETRY_EXHAUSTED` (`DESIGN` § 6). The count lives in
+/// the chain, since the next pass re-reads the record from the remote.
+fn uncounted_retry(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    why: &str,
+) -> Result<Option<BayResult>, String> {
+    let op = ctx.op_mut(op_id);
+    op.publish_retries += 1;
+    let retries = op.publish_retries;
+    if retries < PUBLISH_RETRY_LIMIT {
+        ctx.save(revision, None, &format!("{op_id}: {why}, retry {retries}"))?;
+        ctx.push_chain();
+        return Ok(None);
+    }
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Blocked;
+    op.outcome = Some(Reason::PublishRetryExhausted.code().to_owned());
+    ctx.save(
+        revision,
+        None,
+        &format!("blocked {op_id}: publish retries exhausted"),
+    )?;
+    ctx.push_chain();
+    Ok(Some(
+        BayResult::blocked(Reason::PublishRetryExhausted)
+            .with_change(ctx.id.clone())
+            .with_op(op_id),
+    ))
+}
+
+/// A publishing push refused because trunk moved from `base` to `trunk`.
+struct Moved<'a> {
+    base: &'a str,
+    trunk: &'a str,
+    /// The hook refused the push because the publication queue is held.
+    held: bool,
+}
+
+/// What a refused publishing push leads to: a place in the queue, or `None` to rebuild on the
+/// moved trunk and check again.
+fn after_trunk_moved(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    seq: &mut Option<u64>,
+    moved: &Moved,
+) -> Result<Option<BayResult>, String> {
+    if moved.held {
+        return enqueue(ctx, op_id, revision, Reason::QueueHeld).map(Some);
+    }
+    if policy_identity(&ctx.repo.git, moved.base)? != policy_identity(&ctx.repo.git, moved.trunk)? {
+        return recheck_under_new_policy(ctx, op_id, revision, seq);
+    }
+    let op = ctx.op_mut(op_id);
+    op.trunk_moved += 1;
+    // § 6: bay retries once more, then the operation joins the publication queue.
+    if op.trunk_moved >= TRUNK_MOVED_LIMIT && seq.is_none() {
+        return enqueue(ctx, op_id, revision, Reason::PublicationQueued).map(Some);
+    }
+    Ok(None)
+}
+
+/// § 7: a candidate checked under an older policy is `POLICY_CHANGED` and rechecked under the new
+/// one. That is no `TRUNK_MOVED` refusal. A queue head is released with `policy_changed`, which
+/// counts toward no limit (§ 6), and rejoins; any other operation rechecks at once (`None`).
+fn recheck_under_new_policy(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    seq: &mut Option<u64>,
+) -> Result<Option<BayResult>, String> {
+    ctx.op_mut(op_id).policy_changed += 1;
+    let Some(at) = seq.take() else {
+        return Ok(None);
+    };
+    let signer = ctx.executor_signer().ok().flatten();
+    crate::queue::release(ctx.repo, signer.as_ref(), at, op_id, "policy_changed")?;
+    enqueue(ctx, op_id, revision, Reason::PolicyChanged).map(Some)
+}
+
+/// The acceptance policy at `commit`, by the two things that make a policy older (§ 7): its
+/// `revision` and its manifest digest. `None` when the commit has no policy.
+fn policy_identity(git: &Git, commit: &str) -> Result<Option<(u64, String)>, String> {
+    Ok(policy::load_at(git, commit)?.map(|policy| (policy.revision, policy.manifest_digest)))
+}
+
+enum Gate {
+    /// No live queue: publish directly.
+    Free,
+    /// This operation is the head, at this place.
+    Head(u64),
+    /// This operation holds a place behind the head, or is blocked by its deadline releases.
+    Wait(Box<BayResult>),
+}
+
+/// The queue gate (§ 6). A newer revision replaces its change's entry in place, or releases it
+/// when it is the head; an operation that is not the head reserves a place and runs no check.
+fn queue_gate(ctx: &mut Ctx, op_id: &str) -> Result<Gate, String> {
+    let signer = ctx.executor_signer().ok().flatten();
+    let mut queue = crate::queue::Queue::read(ctx.repo)?;
+    if queue.deadline_releases(op_id) >= 3 {
+        let op = ctx.op_mut(op_id);
+        op.state = OpState::Blocked;
+        op.outcome = Some(Reason::QueueDeadlineExceeded.code().to_owned());
+        let revision = op.revision.clone();
+        ctx.save(
+            &revision,
+            None,
+            &format!("blocked {op_id}: queue deadline exceeded"),
+        )?;
+        ctx.push_chain();
+        return Ok(Gate::Wait(Box::new(
+            BayResult::blocked(Reason::QueueDeadlineExceeded)
+                .with_change(ctx.id.clone())
+                .with_op(op_id),
+        )));
+    }
+    if queue.of(op_id).is_none()
+        && let Some(older) = queue.of_change(&ctx.id).cloned()
+    {
+        if queue.head().is_some_and(|head| head.seq == older.seq) {
+            // A newer revision of the head releases it and joins at the back.
+            crate::queue::release(
+                ctx.repo,
+                signer.as_ref(),
+                older.seq,
+                &older.op_id,
+                "superseded",
+            )?;
+        } else {
+            // A newer revision of a queued entry takes its place.
+            crate::queue::replace(ctx.repo, signer.as_ref(), &older, op_id)?;
+        }
+        queue = crate::queue::Queue::read(ctx.repo)?;
+    }
+    let Some(head) = queue.head().cloned() else {
+        return Ok(Gate::Free);
+    };
+    if head.op_id == op_id {
+        return Ok(Gate::Head(head.seq));
+    }
+    let revision = ctx.op(op_id).revision.clone();
+    let reason = if queue.of(op_id).is_some() {
+        Reason::PublicationQueued
+    } else {
+        Reason::QueueHeld
+    };
+    enqueue(ctx, op_id, &revision, reason).map(|result| Gate::Wait(Box::new(result)))
+}
+
+/// Holds a place in the queue: reserves one if the operation has none, gives up ownership so
+/// no lease must expire before the head reaches it, and reports the position.
+fn enqueue(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    reason: Reason,
+) -> Result<BayResult, String> {
+    let signer = ctx.executor_signer().ok().flatten();
+    let mut queue = crate::queue::Queue::read(ctx.repo)?;
+    if queue.of(op_id).is_none() {
+        crate::queue::join(ctx.repo, signer.as_ref(), op_id, &ctx.id)?;
+        queue = crate::queue::Queue::read(ctx.repo)?;
+    }
+    let entry = queue
+        .of(op_id)
+        .cloned()
+        .ok_or("the queue reservation vanished")?;
+    let op = ctx.op_mut(op_id);
+    if op.state != OpState::Admitted || op.owner.is_some() {
+        op.state = OpState::Admitted;
+        op.owner = None;
+        op.outcome = Some(Reason::PublicationQueued.code().to_owned());
+        ctx.save(revision, None, &format!("queued {op_id} at {}", entry.seq))?;
+        ctx.push_chain();
+    }
+    let mut result = BayResult::refused(Decision::Queued, reason)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(json!({
+            "position": queue.position(entry.seq),
+            "seq": entry.seq,
+            "head": queue.head().map(|head| head.op_id.clone()),
+        }));
+    result.published = Some(false);
+    result.waiting_for = Some("queue".to_owned());
+    Ok(result)
+}
+
+/// The ownership claim (§ 9a): a compare-and-swap on the remote chain that raises the epoch.
+/// Returns a report when this executor does not get to run the operation: it already
+/// published, it is not runnable, or another executor's claim won the race.
+fn claim(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Option<BayResult>, String> {
+    if ctx.refetch().is_err() {
+        // Offline or unpushed: the local chain is the newest this executor can see.
+        ctx.pushed_head = None;
+    }
+    if let Some(result) = scanned(ctx, trunk, revision)? {
+        return Ok(Some(existing(result)));
+    }
+    let name = ctx.executor_name();
+    let id = ctx.id.clone();
+    let held = {
+        let op = ctx.op(op_id);
+        op.owner.is_some() && matches!(op.state, OpState::Running | OpState::Checked)
+    };
+    // Another process holds the operation: take it over only once its lease expired, on this
+    // process's own clock. A restarted supervisor watches a full lease again.
+    if held && !lease_expired(ctx) {
+        let op = ctx.op(op_id);
+        let mut result = BayResult::new(Decision::Ok).with_change(&id).with_op(op_id);
+        result.state = Some("running".to_owned());
+        return Ok(Some(result.with_detail(
+            json!({"lease": "held", "owner": op.owner, "epoch": op.epoch}),
+        )));
+    }
+    let op = ctx.op_mut(op_id);
+    if op.state.is_terminal() {
+        return Ok(Some(superseded(&id, op_id, op.epoch, op.owner.as_ref())));
+    }
+    op.epoch += 1;
+    op.owner = Some(name.clone());
+    if op.state != OpState::Checked {
+        op.state = OpState::Running;
+    }
+    let epoch = op.epoch;
+    ctx.save(
+        revision,
+        None,
+        &format!("claim {op_id} epoch {epoch} by {name}"),
+    )?;
+    if !ctx.push_chain() {
+        ctx.refetch()?;
+        let op = ctx.op(op_id);
+        return Ok(Some(superseded(
+            &ctx.id,
+            op_id,
+            op.epoch,
+            op.owner.as_ref(),
+        )));
+    }
+    ctx.my_epoch = epoch;
+    Ok(None)
+}
+
+/// Before the publishing push: the executor reads the chain from the remote, and if its epoch
+/// is no longer current it never pushes (§ 9a, G24). It reports the existing publication, or
+/// that it was superseded.
+fn still_owner(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<BayResult>, String> {
+    if ctx.refetch().is_err() {
+        return Ok(None);
+    }
+    let op = ctx.op(op_id);
+    if op.epoch == ctx.my_epoch && op.state != OpState::Superseded {
+        return Ok(None);
+    }
+    let (epoch, owner) = (op.epoch, op.owner.clone());
+    let trunk = ctx.repo.fetch_trunk().map_err(|error| error.message())?;
+    if let Some(result) = scanned(ctx, &trunk, revision)? {
+        return Ok(Some(existing(result)));
+    }
+    Ok(Some(superseded(&ctx.id, op_id, epoch, owner.as_ref())))
+}
+
+/// Marks a landed result as a publication this executor found, not one it made.
+fn existing(mut result: BayResult) -> BayResult {
+    if let Some(detail) = result
+        .detail
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        detail.insert("existing".to_owned(), json!(true));
+    }
+    result
+}
+
+fn superseded(id: &str, op_id: &str, epoch: u64, owner: Option<&String>) -> BayResult {
+    let mut result = BayResult::new(Decision::Ok).with_change(id).with_op(op_id);
+    result.state = Some("superseded".to_owned());
+    result.with_detail(json!({"superseded": true, "epoch": epoch, "owner": owner}))
+}
+
+/// The condition an operation was blocked on: the revision, the trunk, and the evidence on the
+/// candidate tree. A retry under the same condition can only reach the same outcome.
+fn condition(git: &Git, revision: &str, trunk: &str, tree: Option<&str>) -> Result<String, String> {
+    let mut evidence: Vec<String> = match tree {
+        Some(tree) => evidence::records_for(git, tree)?
+            .into_iter()
+            .map(|record| record.id)
+            .collect(),
+        None => Vec::new(),
+    };
+    evidence.sort();
+    digest(&json!({"revision": revision, "trunk": trunk, "evidence": evidence}))
+}
+
+/// A blocked operation retried (§ 2 of the interfaces): an unchanged condition is refused with
+/// the same code and no work, unless the code is transient; a changed one re-arms the operation.
+fn retry_blocked(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Option<BayResult>, String> {
+    let op = ctx.op(op_id);
+    let reason = op.outcome.as_deref().and_then(Reason::from_code);
+    let tree = op.attempts.last().map(|attempt| attempt.tree.clone());
+    let then = op.blocked_on.clone();
+    let now = condition(&ctx.repo.git, revision, trunk, tree.as_deref())?;
+    if let Some(reason) = reason
+        && !reason.transient()
+        && then.as_deref() == Some(now.as_str())
+    {
+        return Ok(Some(
+            BayResult::blocked(reason)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(json!({"unchanged": true, "condition": now})),
+        ));
+    }
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Submitted;
+    op.outcome = None;
+    op.blocked_on = None;
+    op.trunk_moved = 0;
+    ctx.save(revision, None, &format!("rearmed {op_id}"))?;
+    ctx.push_chain();
+    Ok(None)
+}
+
+/// G28: the request commit must name this op id, revision and request digest, and the digest
+/// must be the one the request's content gives. An op id reused with a different request is
+/// refused before any work.
+fn verify_request_digest(ctx: &Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
+    let op = ctx.op(op_id);
+    let refuse = |why: &str| {
+        Ok(Some(
+            BayResult::failed(format!("operation {op_id} is refused, no work done: {why}"))
+                .with_change(ctx.id.clone())
+                .with_op(op_id),
+        ))
+    };
+    let Some(request_id) = &op.request_id else {
+        return refuse("it names no request");
+    };
+    let Ok(text) = ctx
+        .repo
+        .git
+        .run(&["cat-file", "blob", &format!("{request_id}:request.json")])
+    else {
+        return refuse("its request is not a request commit");
+    };
+    let request: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    let expected = digest(&json!({
+        "change": ctx.id,
+        "revision": op.revision,
+        "intent": {"reference": ctx.record.intent.reference, "revision": ctx.record.intent.revision},
+    }))?;
+    if request["op_id"] != op_id
+        || request["revision"] != op.revision.as_str()
+        || request["request_digest"] != op.request_digest.as_str()
+        || op.request_digest != expected
+    {
+        return refuse("the op id is reused with a different request digest");
+    }
+    Ok(None)
+}
+
+/// The executor verifies the agent-signed request before it builds anything (§ 9a): signed by
+/// a key in the agent file, under the actor the change records (G25).
+fn verify_request(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
+    if let Some(refusal) = verify_request_digest(ctx, op_id)? {
+        return Ok(Some(refusal));
+    }
+    let Some(registry) = &ctx.registry else {
+        return Ok(None);
+    };
+    let request = ctx.op(op_id).request_id.clone().unwrap_or_default();
+    // A request is judged by the registry version it names, so revoking a departed agent's key
+    // later does not strand its queued request (§ 10a).
+    let named = ctx
+        .repo
+        .git
+        .run(&["cat-file", "blob", &format!("{request}:request.json")])
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|json| json["registry"].as_str().map(str::to_owned));
+    let named = match named {
+        Some(commit) => Registry::load_at(&ctx.repo.git, &commit)?,
+        None => registry.clone(),
+    };
+    let registry = &named;
+    let agents = registry.class_file(&ctx.repo.git, KeyClass::Agent)?;
+    let principal = signing::verify_commit(&ctx.repo.git, &request, &agents)
+        .map_err(|error| error.message())?;
+    if principal.as_deref() == Some(ctx.record.actor.name.as_str()) {
+        return Ok(None);
+    }
+    // The last resort (§ 7): a request signed by a registry key is a policy repair.
+    let registrars = registry.class_file(&ctx.repo.git, KeyClass::Registry)?;
+    if let Some(registrar) = signing::verify_commit(&ctx.repo.git, &request, &registrars)
+        .map_err(|error| error.message())?
+    {
+        ctx.repair = Some(registrar);
+        return Ok(None);
+    }
+    Ok(Some(
+        BayResult::failed(format!(
+            "the request {request} of {op_id} is not signed by an agent key of the change's actor {}",
+            ctx.record.actor.name
+        ))
+        .with_change(ctx.id.clone())
+        .with_op(op_id),
+    ))
+}
+
+/// Step 1: freezes the view into the revision. An unchanged view keeps the latest draft, so a
+/// retry names the same revision. A view that is not ready is refused (§ 10).
+fn freeze(ctx: &Ctx) -> Result<Result<String, BayResult>, String> {
+    let (repo, id) = (ctx.repo, ctx.id.as_str());
+    if !view::journal(repo, id).is_some_and(view::Journal::is_complete) {
+        return Ok(Err(BayResult::blocked(Reason::WorkspaceIncomplete)
+            .with_change(id)
+            .with_detail(
+                json!({"view": repo.view_path(id).display().to_string()}),
+            )));
+    }
+    let view = Git::new(repo.view_path(id));
+    let latest = ctx.chain.drafts(id).map_err(|error| error.message())?[0].clone();
+    let frozen = freeze_draft(&view, &ctx.record.base, "draft").map_err(|error| error.message())?;
+    let revision = if tree_of(&repo.git, &frozen)? == tree_of(&repo.git, &latest)?
+        && parent_of(&repo.git, &latest)?.as_deref() == Some(ctx.record.base.as_str())
+    {
+        latest
+    } else {
+        frozen
+    };
+    if view::journal(repo, id) == Some(view::Journal::Ready) {
+        view::set_journal(repo, id, view::Journal::Checkpointed)?;
+    }
+    Ok(Ok(revision))
+}
+
+/// Records the view's undeclared paths as observed inputs before the request is written.
+fn observe_inputs(ctx: &mut Ctx) -> Result<(), String> {
+    let path = ctx.repo.view_path(&ctx.id);
+    let declared = ctx.record.declared_inputs.clone();
+    view::record_observed(&path, &declared, &mut ctx.record.observed_inputs)
+        .map(|_| ())
+        .map_err(|error| error.message())
+}
+
+/// Appends the request for a new operation; the compare-and-swap allocates its number.
+fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
+    let request_digest = digest(&json!({
+        "change": ctx.id,
+        "revision": revision,
+        "intent": {"reference": ctx.record.intent.reference, "revision": ctx.record.intent.revision},
+    }))?;
+    let op_id = format!("{}.{}", ctx.id, ctx.record.operations.len() + 1);
+    ctx.record.state = ChangeState::Ready;
+    // § 10a: a newer revision supersedes every unpublished operation of the change by itself;
+    // their executors find it before they publish.
+    for earlier in &mut ctx.record.operations {
+        if !earlier.state.is_terminal() {
+            earlier.state = OpState::Superseded;
+            earlier.outcome = Some(format!("superseded by {op_id}"));
+        }
+    }
+    ctx.record.operations.push(Operation {
+        op_id: op_id.clone(),
+        revision: revision.to_owned(),
+        request_digest,
+        request_id: None,
+        state: OpState::Submitted,
+        attempts: Vec::new(),
+        outcome: None,
+        job: None,
+        blocked_on: None,
+        epoch: 0,
+        owner: None,
+        trunk_moved: 0,
+        policy_changed: 0,
+        publish_retries: 0,
+    });
+    // The request: an agent-signed commit on the revision, linked into the chain. Appending it
+    // allocates the op id by compare-and-swap; `refs/bay/requests/<id>` moves with it.
+    let request = json!({
+        "schema": "bay.request/1",
+        "op_id": op_id,
+        "change": ctx.id,
+        "revision": revision,
+        "request_digest": ctx.op(&op_id).request_digest,
+        "actor": ctx.record.actor,
+        "registry": ctx.registry.as_ref().map(|registry| registry.commit.clone()),
+    });
+    let request_id = ctx
+        .chain
+        .request_commit(&request, revision, &format!("request {op_id}"))
+        .map_err(|error| error.message())?;
+    ctx.op_mut(&op_id).request_id = Some(request_id.clone());
+    ctx.save(revision, Some(&request_id), &format!("request {op_id}"))?;
+    if !ctx.push_chain_and_request(&request_id) && ctx.online {
+        // The remote chain moved while this request was written (an executor appended): the
+        // caller re-reads the chain and writes the request again.
+        return Err(CHAIN_MOVED.to_owned());
+    }
+    admit(ctx, &op_id, revision)?;
+    Ok(op_id)
+}
+
+/// `submit` lost a race with another writer of the chain.
+const CHAIN_MOVED: &str = "the change chain moved on the remote while the request was written";
+
+/// The abandon request (§ 4, G40): an agent-signed request of kind `abandon` on the change
+/// chain, by the actor the chain records as current. The change becomes `abandoned` and any
+/// actor may then adopt its intent. Its pending operations are cancelled; trunk, the requests
+/// ref and the view stay as they are.
+fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<BayResult, String> {
+    let mut ctx = Ctx::load(repo, step, id)?;
+    let trunk = match ctx.fetch_trunk()? {
+        Ok(trunk) => trunk,
+        Err(refusal) => return Ok(refusal),
+    };
+    let me = crate::change::current_actor()?;
+    if me.name != ctx.record.actor.name {
+        return Ok(BayResult::blocked(Reason::AbandonRefused)
+            .with_change(id)
+            .with_detail(json!({"current_actor": ctx.record.actor})));
+    }
+    let landed = !scan(&repo.git, &ctx.record.base_first, &trunk, id)?
+        .publications
+        .is_empty()
+        || !repo
+            .git
+            .run(&["ls-remote", repo.remote(), &format!("refs/bay/landed/{id}")])
+            .unwrap_or_default()
+            .is_empty();
+    if landed {
+        return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded).with_change(id));
+    }
+    let agent = ctx.agent_signer()?;
+    ctx.chain.sign_with(agent);
+    let draft = ctx.chain.drafts(id).map_err(|error| error.message())?[0].clone();
+    let request = json!({
+        "schema": "bay.request/1",
+        "kind": "abandon",
+        "change": id,
+        "actor": ctx.record.actor,
+        "registry": ctx.registry.as_ref().map(|registry| registry.commit.clone()),
+    });
+    let request_id = ctx
+        .chain
+        .request_commit(&request, &draft, "abandon")
+        .map_err(|error| error.message())?;
+    ctx.record.state = ChangeState::Abandoned;
+    for op in &mut ctx.record.operations {
+        if !op.state.is_terminal() {
+            op.state = OpState::Superseded;
+            op.outcome = Some("abandoned".to_owned());
+        }
+    }
+    ctx.save(&draft, Some(&request_id), &format!("abandon {id}"))?;
+    if !ctx.push_chain() {
+        return Err(CHAIN_MOVED.to_owned());
+    }
+    Ok(
+        BayResult::ok(json!({"state": "abandoned", "event": "abandoned", "request": request_id}))
+            .with_change(id),
+    )
+}
+
+/// Makes the remote's chain the local one (§ 9a): the remote holds what executors recorded.
+/// Local-only work was pushed by the sync before this, or is re-made by landing again.
+fn adopt_remote_chain(repo: &Repo, id: &str) {
+    let name = change_ref(id);
+    let _ = repo.git.run(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        repo.remote(),
+        &format!("+{name}:{name}"),
+    ]);
+}
+
+/// § 3a submission order: the request is persisted; then the configured executor's `submit`
+/// returns a durable job handle, which is persisted before admission is acknowledged. With no
+/// external executor configured the request in the chain is the submission.
+fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
+    let Some(command) = ctx
+        .repo
+        .config
+        .executor
+        .as_ref()
+        .and_then(|executor| executor.command.clone())
+    else {
+        return Ok(());
+    };
+    let op = ctx.op(op_id);
+    let request = json!({
+        "action": "submit",
+        "op_id": op_id,
+        "attempt_id": null,
+        "request_digest": op.request_digest,
+        "candidate": revision,
+    });
+    let mut words = command.split_whitespace();
+    let program = ctx.repo.work_root.join(words.next().unwrap_or_default());
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(words)
+        .arg("submit")
+        .current_dir(&ctx.repo.work_root);
+    let output = match crate::git::run_bounded_for(
+        cmd,
+        "executor submit",
+        Some(request.to_string().as_bytes()),
+        ctx.repo.config.submission_timeout(),
+    ) {
+        Ok(output) => output,
+        Err(crate::git::GitError::Timeout { secs, .. }) => {
+            // The submission timeout ends the operation with a stated outcome (§ 9a).
+            let op = ctx.op_mut(op_id);
+            op.state = OpState::Failed;
+            op.outcome = Some("submission_timeout".to_owned());
+            ctx.save(
+                revision,
+                None,
+                &format!("failed {op_id}: submission timeout"),
+            )?;
+            ctx.push_chain();
+            return Err(format!(
+                "the executor did not admit {op_id} within the submission timeout of {secs}s"
+            ));
+        }
+        Err(error) => return Err(error.message()),
+    };
+    if !output.status.success() {
+        return Err(format!(
+            "the executor refused the submission: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let reply: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("the executor's submit reply is not JSON: {error}"))?;
+    let job = reply["job"]
+        .as_str()
+        .ok_or("the executor's submit reply has no job")?
+        .to_owned();
+    let op = ctx.op_mut(op_id);
+    op.job = Some(job);
+    op.state = OpState::Admitted;
+    ctx.save(revision, None, &format!("admitted {op_id}"))?;
+    ctx.push_chain();
+    Ok(())
+}
+
+/// Steps 2–5: merge onto `trunk`, commit the candidate, check it, persist it.
+fn build_and_check(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Result<Attempt, BayResult>, String> {
+    let git = &ctx.repo.git;
+    ctx.step.set("merge");
+    let tree = match merge_onto(git, trunk, revision).map_err(|error| error.message())? {
+        Merge::Clean(tree) => tree,
+        Merge::Conflict(paths) => {
+            let condition = condition(git, revision, trunk, None)?;
+            let op = ctx.op_mut(op_id);
+            op.state = OpState::Blocked;
+            op.outcome = Some(Reason::MergeConflict.code().to_owned());
+            op.blocked_on = Some(condition);
+            ctx.save(revision, None, "blocked: merge conflict")?;
+            ctx.push_chain();
+            return Ok(Err(BayResult::blocked(Reason::MergeConflict)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(json!({"conflicts": paths, "trunk": trunk}))));
+        }
+    };
+
+    let candidate_id = format!("{op_id}.{}", ctx.op(op_id).attempts.len() + 1);
+    let request_id = ctx.op(op_id).request_id.clone().unwrap_or_default();
+    let registry_id = ctx
+        .registry
+        .as_ref()
+        .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
+    let message = candidate_message(ctx, revision, &request_id, &candidate_id, &registry_id);
+    let commit = commit_candidate(ctx, &tree, trunk, &message)?;
+    kill_point("after-commit");
+
+    // Step 4: check the exact candidate under the policy at its base.
+    ctx.step.set("check");
+    let (has_policy, verdict, refusal) =
+        check_candidate(ctx, op_id, &candidate_id, &commit, &tree, trunk)?;
+    // Heartbeats moved the chain while the check ran; continue from the last one pushed.
+    if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
+        ctx.head.clone_from(&beat);
+        ctx.pushed_head = Some(beat);
+    }
+
+    ctx.step.set("persist");
+    // Step 5: persist before publishing. The candidate is linked into the chain; the evidence
+    // is pushed and read back from the remote.
+    let attempt = Attempt {
+        candidate_id: candidate_id.clone(),
+        base: trunk.to_owned(),
+        commit: commit.clone(),
+        tree,
+        verdict: verdict.to_owned(),
+        epoch: ctx.my_epoch,
+    };
+    let blocked_on = if refusal.is_some() {
+        Some(condition(
+            &ctx.repo.git,
+            revision,
+            trunk,
+            Some(&attempt.tree),
+        )?)
+    } else {
+        None
+    };
+    let op = ctx.op_mut(op_id);
+    op.attempts.push(attempt.clone());
+    if let Some(refusal) = refusal {
+        op.state = OpState::Blocked;
+        op.outcome = refusal.reason.map(|reason| reason.code().to_owned());
+        op.blocked_on = blocked_on;
+        ctx.save(revision, Some(&commit), &format!("blocked {candidate_id}"))?;
+        ctx.push_chain();
+        return Ok(Err(refusal));
+    }
+    op.state = OpState::Checked;
+    op.outcome = None;
+    ctx.save(revision, Some(&commit), &format!("checked {candidate_id}"))?;
+    if has_policy {
+        push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0)?;
+    }
+    if !ctx.push_chain() {
+        // Another executor moved the chain: a newer claim means this one was superseded.
+        if ctx.refetch().is_ok() && ctx.op(op_id).epoch != ctx.my_epoch {
+            let op = ctx.op(op_id);
+            return Ok(Err(superseded(&ctx.id, op_id, op.epoch, op.owner.as_ref())));
+        }
+        return Err("the change chain could not be pushed; nothing was published".to_owned());
+    }
+    kill_point("after-persist");
+    Ok(Ok(attempt))
+}
+
+/// Step 4: runs the base policy's checks on the candidate and combines the evidence on its
+/// tree. Returns whether a policy exists, the attempt's verdict word, and the refusal when
+/// any required check is not `pass`.
+fn check_candidate(
+    ctx: &Ctx,
+    op_id: &str,
+    candidate_id: &str,
+    commit: &str,
+    tree: &str,
+    trunk: &str,
+) -> Result<(bool, &'static str, Option<BayResult>), String> {
+    let git = &ctx.repo.git;
+    let refuse = |why: String| {
+        Ok((
+            true,
+            "unknown",
+            Some(
+                BayResult::failed(why)
+                    .with_change(ctx.id.clone())
+                    .with_op(op_id),
+            ),
+        ))
+    };
+    let base_policy = match policy::load_at(git, trunk) {
+        Ok(policy) => policy,
+        Err(why) => return refuse(why),
+    };
+    let changed = policy_changed(git, trunk, commit, base_policy.as_ref())?;
+    if !changed {
+        if ctx.repair.is_some() {
+            return refuse("a policy repair changes only .bay/policy.toml and adapter paths, and this change does not change them".to_owned());
+        }
+        let Some(policy) = &base_policy else {
+            return Ok((false, "pass", None));
+        };
+        let (verdict, refusal) =
+            run_policy(ctx, op_id, candidate_id, commit, tree, trunk, policy, trunk)?;
+        return Ok((true, verdict, refusal));
+    }
+
+    // A change to the policy or an adapter path (§ 7): it must raise the revision; it is
+    // checked by the base's adapter and by its own new adapter, and both must pass. A
+    // registry-signed repair is checked by its own new adapter alone.
+    let own_policy = match policy::load_at(git, commit) {
+        Ok(Some(policy)) => policy,
+        Ok(None) => {
+            return refuse(format!(
+                "this change removes {}; the policy cannot be removed",
+                policy::POLICY_PATH
+            ));
+        }
+        Err(why) => return refuse(why),
+    };
+    let base_revision = base_policy.as_ref().map_or(0, |policy| policy.revision);
+    if own_policy.revision <= base_revision {
+        return refuse(format!(
+            "this change edits the policy or an adapter path, so it must raise revision above {base_revision}; it has {}",
+            own_policy.revision
+        ));
+    }
+    if let Some(principal) = &ctx.repair {
+        if !only_policy_paths(git, trunk, commit, base_policy.as_ref(), &own_policy)? {
+            return refuse(format!(
+                "a policy repair signed by {principal} may touch only .bay/policy.toml and adapter paths"
+            ));
+        }
+        let own_id = format!("{candidate_id}-own");
+        let (verdict, refusal) = run_policy(
+            ctx,
+            op_id,
+            &own_id,
+            commit,
+            tree,
+            trunk,
+            &own_policy,
+            commit,
+        )?;
+        return Ok((true, verdict, refusal));
+    }
+    if let Some(policy) = &base_policy {
+        let (verdict, refusal) =
+            run_policy(ctx, op_id, candidate_id, commit, tree, trunk, policy, trunk)?;
+        if refusal.is_some() {
+            return Ok((true, verdict, refusal));
+        }
+    }
+    let own_id = format!("{candidate_id}-own");
+    let (verdict, refusal) = run_policy(
+        ctx,
+        op_id,
+        &own_id,
+        commit,
+        tree,
+        trunk,
+        &own_policy,
+        commit,
+    )?;
+    Ok((true, verdict, refusal))
+}
+
+/// Whether the candidate changes `.bay/policy.toml` or any adapter path of the base policy.
+fn policy_changed(
+    git: &Git,
+    trunk: &str,
+    commit: &str,
+    base: Option<&policy::Policy>,
+) -> Result<bool, String> {
+    let mut paths = vec![policy::POLICY_PATH.to_owned()];
+    if let Some(base) = base {
+        paths.extend(
+            base.checks
+                .iter()
+                .flat_map(|check| check.adapter.iter().cloned()),
+        );
+    }
+    let mut args = vec!["diff", "--name-only", trunk, commit, "--"];
+    args.extend(paths.iter().map(String::as_str));
+    Ok(!git.run(&args).map_err(|error| error.message())?.is_empty())
+}
+
+/// Whether every path the candidate changes is the policy file or an adapter path (of either
+/// policy): the only change a repair may make.
+fn only_policy_paths(
+    git: &Git,
+    trunk: &str,
+    commit: &str,
+    base: Option<&policy::Policy>,
+    own: &policy::Policy,
+) -> Result<bool, String> {
+    let adapters: Vec<String> = base
+        .into_iter()
+        .chain(std::iter::once(own))
+        .flat_map(|policy| {
+            policy
+                .checks
+                .iter()
+                .flat_map(|check| check.adapter.iter().cloned())
+        })
+        .collect();
+    let changed = git
+        .run(&["diff", "--name-only", trunk, commit])
+        .map_err(|error| error.message())?;
+    Ok(changed.lines().all(|path| {
+        path == policy::POLICY_PATH
+            || adapters.iter().any(|adapter| {
+                if adapter.ends_with('/') {
+                    path.starts_with(adapter.as_str())
+                } else {
+                    path == adapter
+                }
+            })
+    }))
+}
+
+/// Runs `policy`'s checks on the candidate with the adapter materialized from `adapter_from`,
+/// and combines the evidence on its tree under that policy's manifest.
+#[allow(clippy::too_many_arguments)]
+fn run_policy(
+    ctx: &Ctx,
+    op_id: &str,
+    candidate_id: &str,
+    commit: &str,
+    tree: &str,
+    trunk: &str,
+    policy: &policy::Policy,
+    adapter_from: &str,
+) -> Result<(&'static str, Option<BayResult>), String> {
+    let git = &ctx.repo.git;
+    let base_tree = tree_of(git, trunk)?;
+    let scratch = ctx
+        .repo
+        .common_dir
+        .join("bay")
+        .join("check")
+        .join(candidate_id);
+    let (producer, producer_signer) = ctx.producer()?;
+    let finished = finished_checks(ctx, op_id, policy, tree)?;
+    let mut keep = |record: &mut evidence::EvidenceRecord| -> Result<(), String> {
+        // The producer signs outside the check's sandbox, after reading its output (§ 7).
+        if let Some(signer) = &producer_signer {
+            record.sign(&signer.key)?;
+        }
+        evidence::append(git, &producer, record)
+    };
+    let records = check::run_all(
+        git,
+        &scratch,
+        policy,
+        &Candidate {
+            commit,
+            tree,
+            base: adapter_from,
+            base_tree: &base_tree,
+            id: candidate_id,
+        },
+        &producer,
+        &check::Limits {
+            budget: ctx.repo.config.execution_budget(),
+            finished,
+            heartbeat: Some(ctx.repo.config.heartbeat()),
+            hidden: hidden_paths(ctx),
+        },
+        &mut check::Hooks {
+            keep: &mut keep,
+            beat: &mut || heartbeat(ctx, op_id),
+        },
+    )?;
+    let _ = std::fs::remove_dir_all(&scratch);
+    let all = evidence::counted(
+        git,
+        evidence::records_for(git, tree)?,
+        ctx.registry.as_ref(),
+    )?;
+    // G30: coverage is judged against the frozen manifest, never against counts.
+    let gaps: Vec<(String, Combined)> = evidence::aggregate(
+        &all,
+        &policy.manifest,
+        &policy.manifest_digest,
+        &|id| policy.commit_keyed(id),
+        commit,
+    )
+    .into_iter()
+    .map(|(id, combined)| (id.id, combined))
+    .collect();
+    let Some((_, worst)) = gaps
+        .iter()
+        .find(|(_, combined)| *combined == Combined::Flaky)
+        .or_else(|| {
+            gaps.iter()
+                .find(|(_, combined)| *combined == Combined::ProductFailure)
+        })
+        .or_else(|| gaps.first())
+    else {
+        return Ok(("pass", None));
+    };
+    let (code, word) = match worst {
+        Combined::Flaky => (Reason::CheckFlaky, "flaky"),
+        Combined::ProductFailure => (Reason::CheckFailed, "product_failure"),
+        Combined::Unknown | Combined::Pass => (Reason::CheckUnknown, "unknown"),
+    };
+    let why: Vec<_> = records
+        .iter()
+        .filter(|record| gaps.iter().any(|(id, _)| *id == record.check.id))
+        .map(|record| json!({"check": record.check.id, "verdict": record.verdict, "why": record.why}))
+        .collect();
+    Ok((
+        word,
+        Some(
+            BayResult::blocked(code)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(
+                    json!({"candidate": candidate_id, "adapter_from": adapter_from, "checks": why}),
+                ),
+        ),
+    ))
+}
+
+/// Renews the executor's lease while a check runs (§ 9a): one heartbeat commit on the chain,
+/// signed by the executor, pushed under the lease of the head this executor last pushed. A
+/// push that fails means the chain moved (a takeover); the persist step then finds out.
+fn heartbeat(ctx: &Ctx, op_id: &str) {
+    let git = &ctx.repo.git;
+    let mut chain = Chain::new(git);
+    chain.sign_with(ctx.executor_signer().ok().flatten());
+    let Ok(Some(head)) = chain.head(&ctx.id) else {
+        return;
+    };
+    let expected = ctx
+        .beat_pushed
+        .borrow()
+        .clone()
+        .or_else(|| ctx.pushed_head.clone());
+    if expected.as_deref() != Some(head.as_str()) {
+        return;
+    }
+    let (Ok(record), Ok(drafts)) = (chain.record_at(&head), chain.drafts(&ctx.id)) else {
+        return;
+    };
+    let Ok(beat) = chain.append(
+        &head,
+        &record,
+        &drafts[0],
+        &format!("heartbeat {op_id} epoch {}", ctx.my_epoch),
+    ) else {
+        return;
+    };
+    let name = change_ref(&ctx.id);
+    let pushed = git
+        .run(&[
+            "push",
+            "-q",
+            &format!("--force-with-lease={name}:{head}"),
+            ctx.repo.remote(),
+            &format!("{name}:{name}"),
+        ])
+        .is_ok();
+    if pushed {
+        *ctx.beat_pushed.borrow_mut() = Some(beat);
+    } else {
+        let _ = git.run(&["update-ref", &name, &head, &beat]);
+    }
+}
+
+/// Watches an operation another executor holds for one full lease on this process's monotonic
+/// clock, from its own first sighting (§ 9a). Returns whether the lease expired: the chain head
+/// never changed. Any change means the owner is alive.
+fn lease_expired(ctx: &mut Ctx) -> bool {
+    let lease = ctx.repo.config.lease();
+    let first = ctx.head.clone();
+    let seen = Instant::now();
+    while seen.elapsed() < lease {
+        std::thread::sleep(Duration::from_millis(200).min(lease));
+        if ctx.refetch().is_ok() && ctx.head != first {
+            return false;
+        }
+    }
+    true
+}
+
+/// What a check may neither read nor write (§ 7): the repository with every view in it, and
+/// every key this machine holds, so code under test can never read a producer key or write a
+/// signed record.
+fn hidden_paths(ctx: &Ctx) -> Vec<std::path::PathBuf> {
+    let mut hidden = vec![ctx.repo.work_root.clone(), ctx.repo.common_dir.clone()];
+    let keys = [
+        ctx.keys.agent.clone(),
+        ctx.keys.executor.as_ref().map(|signer| signer.key.clone()),
+        ctx.keys.producer.as_ref().map(|signer| signer.key.clone()),
+    ];
+    hidden.extend(keys.into_iter().flatten());
+    hidden
+}
+
+/// Checks that already finished on `tree` under the policy's manifest: a resume after a dead
+/// worker runs only what did not finish (§ 7, G22).
+fn finished_checks(
+    ctx: &Ctx,
+    op_id: &str,
+    policy: &policy::Policy,
+    tree: &str,
+) -> Result<Vec<evidence::CheckId>, String> {
+    let git = &ctx.repo.git;
+    // Only this operation's own records: a resume, not evidence reuse (reuse is off in
+    // increment 1, so another operation on the same tree is rechecked, G29).
+    let mine = format!("/{op_id}.");
+    let earlier: Vec<evidence::EvidenceRecord> = evidence::counted(
+        git,
+        evidence::records_for(git, tree)?,
+        ctx.registry.as_ref(),
+    )?
+    .into_iter()
+    .filter(|record| record.id.contains(&mine))
+    .collect();
+    Ok(policy
+        .manifest
+        .iter()
+        .map(|entry| evidence::CheckId {
+            id: entry.id.clone(),
+            environment: entry.environment.clone(),
+        })
+        .filter(|id| {
+            matches!(
+                evidence::combine(&earlier, id, &policy.manifest_digest, None),
+                Combined::Pass | Combined::ProductFailure | Combined::Flaky
+            )
+        })
+        .collect())
+}
+
+/// Step 3: the candidate commit, signed by the publishing executor when signing is on.
+fn commit_candidate(ctx: &Ctx, tree: &str, trunk: &str, message: &str) -> Result<String, String> {
+    let git = &ctx.repo.git;
+    let signer = ctx.executor_signer()?;
+    let mut args: Vec<String> = Vec::new();
+    if let Some(signer) = &signer {
+        args.extend(signer.config_args());
+    }
+    args.extend(["commit-tree", tree, "-p", trunk].map(str::to_owned));
+    args.push(
+        if signer.is_some() {
+            "-S"
+        } else {
+            "--no-gpg-sign"
+        }
+        .to_owned(),
+    );
+    args.extend(["-m".to_owned(), message.to_owned()]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let identity: Vec<(String, String)> = signer.as_ref().map_or_else(
+        || {
+            EXECUTOR_IDENTITY
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+                .collect()
+        },
+        Signer::identity,
+    );
+    let envs: Vec<(&str, &str)> = identity
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    git.run_with(&args, &envs, None)
+        .map_err(|error| error.message())
+}
+
+fn candidate_message(
+    ctx: &Ctx,
+    revision: &str,
+    request_id: &str,
+    candidate_id: &str,
+    registry_id: &str,
+) -> String {
+    let config = &ctx.repo.config;
+    let record = &ctx.record;
+    format!(
+        "{reference}: change {id}\n\nChange-Id: {id}\nRevision-Id: {revision}\nRequest-Id: {request_id}\nCandidate-Id: {candidate_id}\nRegistry-Id: {registry_id}\nBay-Epoch: {epoch}\n{intent_key}: {reference}@{intent_revision}\n{actor_key}: {actor}/{session}\n{supersedes}",
+        reference = record.intent.reference,
+        id = ctx.id,
+        intent_key = config.intent_trailer(),
+        intent_revision = record.intent.revision,
+        actor_key = config.actor_trailer(),
+        epoch = ctx.my_epoch,
+        supersedes = record
+            .supersedes
+            .as_ref()
+            .map_or_else(String::new, |landed| format!("Supersedes: {landed}\n")),
+        actor = record.actor.name,
+        session = record.actor.session,
+    )
+}
+
+/// Pushes the producer's notes ref and confirms the remote now holds exactly that commit.
+fn push_and_read_back_evidence(repo: &Repo, producer: &str) -> Result<(), String> {
+    let notes = evidence::notes_ref(producer);
+    let local = repo
+        .git
+        .run(&["rev-parse", "--verify", &notes])
+        .map_err(|error| error.message())?;
+    repo.git
+        .run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
+        .map_err(|error| {
+            let message = error.message();
+            if message.contains("non-fast-forward") || message.contains("fetch first") || message.contains("rejected") {
+                // § 7: one producer name used by two executors is a collision.
+                format!(
+                    "producer {producer} collides with another executor: the remote's {notes} holds records this executor never wrote; give each executor its own bay.producerName"
+                )
+            } else {
+                format!("evidence could not be pushed: {message}")
+            }
+        })?;
+    let remote = repo
+        .git
+        .run(&["ls-remote", repo.remote(), &notes])
+        .map_err(|error| error.message())?;
+    if remote.split_whitespace().next() == Some(local.as_str()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "the remote does not hold the evidence for {notes}; nothing was published"
+        ))
+    }
+}
+
+/// Step 6: one atomic push of trunk and the landed marker. Never forced.
+fn publish_push(
+    repo: &Repo,
+    id: &str,
+    commit: &str,
+    release: Option<&(u64, String)>,
+    claim: Option<&crate::change::IntentClaim>,
+) -> Result<(), String> {
+    let trunk = format!("{commit}:refs/heads/{}", repo.trunk());
+    let landed = format!("{commit}:refs/bay/landed/{id}");
+    let done =
+        release.map(|(seq, release)| format!("{release}:{}{seq}", crate::queue::DONE_PREFIX));
+    // § 6: each generation of an intent lands once, even if two changes were opened for it.
+    let landed_intent = claim.map(|claim| format!("{commit}:{}", claim.landed_ref()));
+    // The markers are create-only: a lease that expects no ref refuses one that exists, even
+    // when the new value fast-forwards it (a later publication descends from an earlier one).
+    let landed_lease = format!("--force-with-lease=refs/bay/landed/{id}:");
+    let intent_lease = claim.map(|claim| format!("--force-with-lease={}:", claim.landed_ref()));
+    let mut args = vec!["push", "-q", "--atomic", landed_lease.as_str()];
+    if let Some(lease) = &intent_lease {
+        args.push(lease);
+    }
+    args.extend([repo.remote(), trunk.as_str(), landed.as_str()]);
+    if let Some(done) = &done {
+        // § 6: trunk, the head's release and the landed marker move in one transaction.
+        args.push(done);
+    }
+    if let Some(landed_intent) = &landed_intent {
+        args.push(landed_intent);
+    }
+    repo.git
+        .run(&args)
+        .map(|_| ())
+        .map_err(|error| error.message())
+}
+
+/// When trunk already holds a publication of the change, returns the result: this revision
+/// is landed, or another revision landed (`CHANGE_ALREADY_LANDED`).
+fn scanned(ctx: &mut Ctx, trunk: &str, revision: &str) -> Result<Option<BayResult>, String> {
+    let found = scan(&ctx.repo.git, &ctx.record.base_first, trunk, &ctx.id)?;
+    let Some(publication) = found.publications.first() else {
+        return Ok(None);
+    };
+    if publication.revision == revision {
+        let op_id = ctx
+            .record
+            .operations
+            .iter()
+            .find(|op| op.revision == revision)
+            .map(|op| op.op_id.clone());
+        let commit = publication.commit.clone();
+        return match op_id {
+            Some(op_id) => derive_landed(ctx, &op_id, revision, &commit).map(Some),
+            None => Ok(Some(landed_result(&ctx.id, None, &commit, revision))),
+        };
+    }
+    Ok(Some(
+        BayResult::blocked(Reason::ChangeAlreadyLanded)
+            .with_change(ctx.id.clone())
+            .with_detail(
+                json!({"landed": publication.commit, "landed_revision": publication.revision}),
+            ),
+    ))
+}
+
+/// Step 7: derive "landed" from trunk, record it, and push the chain (idempotent).
+fn derive_landed(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    commit: &str,
+) -> Result<BayResult, String> {
+    if ctx.op(op_id).state != OpState::Published || ctx.record.state != ChangeState::Landed {
+        ctx.record.state = ChangeState::Landed;
+        let op = ctx.op_mut(op_id);
+        op.state = OpState::Published;
+        op.outcome = None;
+        ctx.save(revision, Some(commit), &format!("landed {op_id}"))?;
+    }
+    if view::journal(ctx.repo, &ctx.id).is_some() {
+        view::set_journal(ctx.repo, &ctx.id, view::Journal::Published)?;
+    }
+    ctx.push_chain();
+    write_terminal(ctx, op_id, "published", Some(commit))?;
+    Ok(landed_result(&ctx.id, Some(op_id), commit, revision))
+}
+
+/// The compact terminal record that outlives the drafts (§ 9a). Written once per operation.
+fn write_terminal(
+    ctx: &Ctx,
+    op_id: &str,
+    outcome: &str,
+    published: Option<&str>,
+) -> Result<(), String> {
+    let executor = ctx.executor_name();
+    crate::log::fetch(ctx.repo);
+    let existing = crate::log::records_for(&ctx.repo.git, &ctx.id)?;
+    if existing
+        .iter()
+        .any(|record| record["op_id"] == op_id && record["outcome"] == outcome)
+    {
+        return Ok(());
+    }
+    let op = ctx.op(op_id);
+    let attempt = op.attempts.last();
+    let record = json!({
+        "schema": "bay.terminal/1",
+        "op_id": op_id,
+        "change": ctx.id,
+        "request_digest": op.request_digest,
+        "request": op.request_id,
+        "revision": op.revision,
+        "outcome": outcome,
+        "published": published,
+        "evidence_tree": attempt.map(|attempt| attempt.tree.clone()),
+        "candidate": attempt.map(|attempt| attempt.candidate_id.clone()),
+        "executor": executor,
+        "policy_repair": ctx.repair,
+    });
+    let signer = ctx.executor_signer().ok().flatten();
+    crate::log::append(ctx.repo, &executor, signer.as_ref(), &record).map(|_| ())
+}
+
+fn landed_result(id: &str, op_id: Option<&str>, commit: &str, revision: &str) -> BayResult {
+    let mut result = BayResult::new(Decision::Landed)
+        .with_change(id)
+        .with_detail(json!({"commit": commit, "revision": revision}));
+    result.published = Some(true);
+    if let Some(op_id) = op_id {
+        result = result.with_op(op_id);
+    }
+    result
+}
+
+fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
+    git.run(&["rev-parse", &format!("{commit}^{{tree}}")])
+        .map_err(|error| error.message())
+}
+
+fn parent_of(git: &Git, commit: &str) -> Result<Option<String>, String> {
+    match git.run(&["rev-parse", "--verify", "-q", &format!("{commit}^1")]) {
+        Ok(parent) => Ok(Some(parent)),
+        Err(GitError::Failed { .. }) => Ok(None),
+        Err(error) => Err(error.message()),
+    }
+}
+
+/// Whether `ancestor` is an ancestor of (or equal to) `descendant`.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn is_ancestor(git: &Git, ancestor: &str, descendant: &str) -> Result<bool, String> {
+    let (code, _, stderr) = git
+        .run_status(&["merge-base", "--is-ancestor", ancestor, descendant])
+        .map_err(|error| error.message())?;
+    match code {
+        0 => Ok(true),
+        1 => Ok(false),
+        _ => Err(format!("merge-base --is-ancestor: {stderr}")),
+    }
+}
+
+/// What a retention cut keeps, and since when the change has been closed.
+struct Kept {
+    /// Unix seconds of the landing or the abandon.
+    since: u64,
+    /// The commits the cut head links as parents.
+    links: Vec<String>,
+    /// For a landing: the published operation and commit, for its terminal record.
+    terminal: Option<(String, String)>,
+}
+
+fn commit_time(git: &Git, commit: &str) -> Result<u64, String> {
+    Ok(git
+        .run(&["log", "-1", "--format=%ct", commit])
+        .map_err(|error| error.message())?
+        .trim()
+        .parse()
+        .unwrap_or(0))
+}
+
+/// A landed change keeps the landed revision, the published commit and the latest land request.
+fn landed_keeps(ctx: &Ctx) -> Result<Option<Kept>, String> {
+    let Some(op) = ctx
+        .record
+        .operations
+        .iter()
+        .rev()
+        .find(|op| op.state == OpState::Published)
+    else {
+        return Ok(None);
+    };
+    let Some(published) = op.attempts.last().map(|attempt| attempt.commit.clone()) else {
+        return Ok(None);
+    };
+    let mut links = vec![op.revision.clone(), published.clone()];
+    links.extend(op.request_id.clone().filter(|request| !request.is_empty()));
+    Ok(Some(Kept {
+        since: commit_time(&ctx.repo.git, &published)?,
+        links,
+        terminal: Some((op.op_id.clone(), published)),
+    }))
+}
+
+/// An abandoned change keeps what its abandoning state commit links (the latest draft, which an
+/// adopter re-roots from, and the abandon request) and the latest land request, if any (§ 10a).
+fn abandoned_keeps(ctx: &Ctx) -> Result<Option<Kept>, String> {
+    let git = &ctx.repo.git;
+    let parents = git
+        .run(&["rev-list", "--parents", "-n", "1", &ctx.head])
+        .map_err(|error| error.message())?;
+    let mut links: Vec<String> = parents
+        .split_whitespace()
+        .skip(2)
+        .map(str::to_owned)
+        .collect();
+    if let Some(request) = git
+        .ref_target(&format!("refs/bay/requests/{}", ctx.id))
+        .map_err(|error| error.message())?
+        && !links.contains(&request)
+    {
+        links.push(request);
+    }
+    Ok(Some(Kept {
+        since: commit_time(git, &ctx.head)?,
+        links,
+        terminal: None,
+    }))
+}
+
+/// The retention cut (§ 5): once a landed or abandoned change is older than the retention
+/// window, its chain is cut to one head that keeps what still matters. Superseded drafts become
+/// collectable; a landed change's terminal record stays in the log.
+///
+/// # Errors
+///
+/// A fault of bay's own.
+pub fn retain(repo: &Repo, id: &str) -> Result<Option<String>, String> {
+    let step = Cell::new("retention");
+    let mut ctx = Ctx::load(repo, &step, id)?;
+    if ctx.refetch().is_err() || ctx.record.retention_cut {
+        return Ok(None);
+    }
+    let kept = match ctx.record.state {
+        ChangeState::Landed => landed_keeps(&ctx)?,
+        ChangeState::Abandoned => abandoned_keeps(&ctx)?,
+        _ => None,
+    };
+    let Some(kept) = kept else {
+        return Ok(None);
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    if now.saturating_sub(kept.since) < repo.config.retention_window().as_secs() {
+        return Ok(None);
+    }
+    // The cut must be signed by an executor key, so read the registry even when no operation
+    // on this machine fetched it.
+    repo.fetch_registry();
+    ctx.registry = Registry::current(&repo.git)?;
+    let executor = ctx.executor_signer()?;
+    ctx.chain.sign_with(executor);
+    if let Some((op_id, published)) = &kept.terminal {
+        write_terminal(&ctx, op_id, "published", Some(published))?;
+    }
+    let mut record = ctx.record.clone();
+    record.retention_cut = true;
+    record.operations.clear();
+    record.receipts.clear();
+    let links: Vec<&str> = kept.links.iter().map(String::as_str).collect();
+    let head = ctx
+        .chain
+        .cut(&ctx.head, &record, &links, &format!("retention cut {id}"))
+        .map_err(|error| error.message())?;
+    ctx.head.clone_from(&head);
+    ctx.record = record;
+    if !ctx.push_chain() {
+        return Err(format!("the retention cut of {id} could not be pushed"));
+    }
+    Ok(Some(head))
+}

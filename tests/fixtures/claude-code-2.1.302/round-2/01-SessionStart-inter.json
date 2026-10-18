@@ -1,0 +1,9 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "hook_event_name": "SessionStart",
+ "source": "startup",
+ "model": "claude-haiku-5-5"
+}

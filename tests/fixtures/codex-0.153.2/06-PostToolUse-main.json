@@ -1,0 +1,15 @@
+{
+ "session_id": "<redacted>",
+ "turn_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "hook_event_name": "PostToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "echo b > b.txt"
+ },
+ "tool_response": "",
+ "tool_use_id": "exec-a851103d-a9ea-463e-a4d4-4aa2cdfa342a"
+}

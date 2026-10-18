@@ -1,0 +1,16 @@
+{
+ "session_id": "<redacted>",
+ "turn_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "collaborationspawn_agent",
+ "tool_input": {
+  "task_name": "create_s",
+  "fork_turns": "none",
+  "message": "<encrypted>"
+ },
+ "tool_use_id": "call_8af2832bc349431f9c4e4a9bfe98fcc0"
+}

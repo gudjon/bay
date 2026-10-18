@@ -1,0 +1,15 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "Step 1 failed: the Bash call `echo denied > d.txt` was denied by the permission system, so I did not create `d.txt`.\n\nI stopped there and did not run step 2. Since the steps were ordered and step 1 didn't go through, I didn't want to start the subagent and have it write `e.txt` through a different route. If you want step 2 to run anyway, tell me and I'll spawn the subagent to create `e.txt` containing `e`. If you'd rather approve the Bash call, allow it and I'll rerun step 1 and then step 2.",
+ "background_tasks": [],
+ "session_crons": []
+}

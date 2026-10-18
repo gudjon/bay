@@ -1,0 +1,25 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "agent_id": "af5bb5e29d65fdd3c",
+ "agent_type": "",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "SubagentStop",
+ "stop_hook_active": false,
+ "agent_transcript_path": "<redacted>",
+ "background_tasks": [
+  {
+   "id": "tqcvoh5zi",
+   "type": "teammate",
+   "status": "running",
+   "description": "Create t.txt with Write tool"
+  }
+ ],
+ "session_crons": []
+}

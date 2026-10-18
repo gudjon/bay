@@ -1,0 +1,23 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "Steps 1 and 2 are done. Step 3 is still running, so I'm not replying DONE yet.\n\n- **a.txt:** created in the hookprobe directory, containing `a`.\n- **b.txt:** created by `echo b > b.txt`, containing `b`.\n- **c.txt:** a general-purpose subagent is writing `c` to `c.txt`. It runs in the background, and I'll confirm once it reports back.",
+ "background_tasks": [
+  {
+   "id": "af9b166e249d0c0a9",
+   "type": "subagent",
+   "status": "running",
+   "description": "Create c.txt with content c",
+   "agent_type": "general-purpose"
+  }
+ ],
+ "session_crons": []
+}

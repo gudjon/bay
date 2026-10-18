@@ -1,0 +1,11 @@
+{
+ "session_id": "<redacted>",
+ "turn_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "hook_event_name": "SubagentStart",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "agent_id": "<redacted>",
+ "agent_type": "default"
+}

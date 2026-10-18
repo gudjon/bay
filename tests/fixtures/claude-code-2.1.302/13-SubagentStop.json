@@ -1,0 +1,26 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "agent_id": "af9b166e249d0c0a9",
+ "agent_type": "general-purpose",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "SubagentStop",
+ "stop_hook_active": false,
+ "agent_transcript_path": "<redacted>",
+ "last_assistant_message": "done",
+ "background_tasks": [
+  {
+   "id": "af9b166e249d0c0a9",
+   "type": "subagent",
+   "status": "running",
+   "description": "Create c.txt with content c",
+   "agent_type": "general-purpose"
+  }
+ ],
+ "session_crons": []
+}

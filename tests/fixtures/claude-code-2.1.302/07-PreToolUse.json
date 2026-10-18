@@ -1,0 +1,18 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PreToolUse",
+ "tool_name": "Agent",
+ "tool_input": {
+  "description": "Create c.txt with content c",
+  "prompt": "Your only job: use the Write tool to create a file at <repo>/c.txt containing exactly the text `c` (no trailing newline needed). Do nothing else. Do not read or modify any other file. When done, reply with one word: done.",
+  "subagent_type": "general-purpose"
+ },
+ "tool_use_id": "toolu_013fSF3o7Hwaft8GhNbfYtZD"
+}

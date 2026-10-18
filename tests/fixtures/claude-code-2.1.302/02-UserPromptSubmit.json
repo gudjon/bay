@@ -1,0 +1,9 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "hook_event_name": "UserPromptSubmit",
+ "prompt": "Do exactly three things, then stop: 1) use the Write tool to create a.txt containing 'a'. 2) use the Bash tool to run: echo b > b.txt. 3) use the Agent tool to start one general-purpose subagent whose only job is to use the Write tool to create c.txt containing 'c'. Then reply DONE."
+}

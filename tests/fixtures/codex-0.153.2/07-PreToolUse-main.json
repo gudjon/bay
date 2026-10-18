@@ -1,0 +1,14 @@
+{
+ "session_id": "<redacted>",
+ "turn_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "hook_event_name": "PreToolUse",
+ "model": "gpt-6-astra",
+ "permission_mode": "bypassPermissions",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "echo denied > d.txt"
+ },
+ "tool_use_id": "exec-ed9b3044-1c3f-44fd-8c0b-5078288dbebb"
+}

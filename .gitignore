@@ -1,0 +1,15 @@
+/target
+
+# OS
+.DS_Store
+._*
+Thumbs.db
+
+# editors
+.idea/
+.vscode/
+*.swp
+*~
+
+# local agent state
+.claude/

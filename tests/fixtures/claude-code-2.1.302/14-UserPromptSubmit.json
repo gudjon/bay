@@ -1,0 +1,9 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "bypassPermissions",
+ "hook_event_name": "UserPromptSubmit",
+ "prompt": "<task-notification>\n<task-id>af9b166e249d0c0a9</task-id>\n<tool-use-id>toolu_013fSF3o7Hwaft8GhNbfYtZD</tool-use-id>\n<output-file><repo>/da56ab3e-8639-4539-a4e6-bddc41efc7ad/tasks/af9b166e249d0c0a9.output</output-file>\n<status>completed</status>\n<summary>Agent \"Create c.txt with content c\" finished</summary>\n<note>A task-notification fires each time this agent stops with no live background children of its own. The user can send it another message and resume it, so the same task-id may notify more than once.</note>\n<result>done</result>\n<usage><subagent_tokens>28422</subagent_tokens><tool_uses>1</tool_uses><duration_ms>6205</duration_ms></usage>\n</task-notification>"
+}
