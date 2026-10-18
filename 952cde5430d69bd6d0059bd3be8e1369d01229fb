@@ -21,5 +21,28 @@
     "verdict": "pass",
     "at": "2026-10-18T22:54:47Z",
     "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgZH29GA7iyrTUuOSMm8HGxbXDM0\nlvFpC/mdieLnounwQAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQGYQb18kP3L125xXdkdc7SDs4wMiJEWK+9ewfq9Ri1BqRafKpRM+W/\n7H5lmbLecI81m3QAXPegTat6Mn1rmboAk=\n-----END SSH SIGNATURE-----\n"
+  },
+  {
+    "schema": "bay.evidence/1",
+    "id": "gudjon-mac/clippy-darwin-arm64-git2.54.0-479faf76b305",
+    "kind": "check",
+    "subject": {
+      "tree": "952cde5430d69bd6d0059bd3be8e1369d01229fb",
+      "commit": "479faf76b305b30928bccf9a6b8559090658c52e",
+      "base_tree": "58a86b01c0d2dc296ed9e783ba5f8e3818862026"
+    },
+    "check": {
+      "id": "clippy",
+      "environment": "darwin-arm64-git2.54.0"
+    },
+    "policy_revision": 0,
+    "manifest_digest": "gate",
+    "producer": {
+      "name": "gudjon-mac",
+      "version": "0.1.0"
+    },
+    "verdict": "pass",
+    "at": "2026-10-18T22:55:01Z",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgZH29GA7iyrTUuOSMm8HGxbXDM0\nlvFpC/mdieLnounwQAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQMVDwiubIatOXVNyjKeNqdzy/0r0sjI7sYSf0SjO3H9esTDWja5lI3\n9HklA0k6tbhWxpg9S4PaFVrRb+yVxQTw4=\n-----END SSH SIGNATURE-----\n"
   }
 ]
