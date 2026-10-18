@@ -6,7 +6,10 @@
 //! request; a producer key updates only its own notes ref; only the registry key advances the
 //! registry, and a registry with one key in two files or an option line is refused; an executor
 //! appends only to its own log; no change chain is deleted; a request signed by a key already
-//! revoked is refused at its push; a later revocation does not strand a queued request.
+//! revoked is refused at its push; a later revocation does not strand a queued request. A
+//! newer revision or a cancel that races the publishing push wins at the hook and the losing
+//! operation is told it was superseded; a cancel or newer revision after the publish gets
+//! `CHANGE_ALREADY_LANDED`.
 //! `REGISTRY_CHANGED` re-signing needs a revocation between signing and pushing, and adoption
 //! and live heartbeats need item 19e; those cases leave `#[ignore]`.
 
@@ -393,6 +396,129 @@ fn a_revoked_agent_key_is_refused_at_push_but_a_queued_request_is_not_stranded()
     );
     assert!(String::from_utf8_lossy(&out.stdout).contains("could not be pushed"));
     assert_eq!(test_box.trunk_change_ids(&host).len(), 1);
+}
+
+/// An executor clone running `executor run --once`, held at `before-publish` until `release`
+/// exists: it has built, checked and confirmed it still owns the operation, and its publishing
+/// push has not started.
+fn held_executor(
+    test_box: &TestBox,
+    host: &Path,
+    keys: &TestKeys,
+    release: &Path,
+) -> (std::process::Child, PathBuf) {
+    let executor = test_box.clone_of(host, "executor");
+    test_box.use_keys(&executor, keys);
+    let child = test_box
+        .bay_process(&executor)
+        .env("BAY_TEST_PAUSE_AT", "before-publish")
+        .env("BAY_TEST_PAUSE_FILE", release)
+        .args(["--json", "executor", "run", "--once"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let paused = PathBuf::from(format!("{}.paused", release.display()));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !paused.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the executor never reached its publish"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    (child, executor)
+}
+
+/// Lets a held executor push, and returns the one operation result it reports.
+fn finish(child: std::process::Child, release: &Path) -> serde_json::Value {
+    std::fs::write(release, "").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let ran: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let results = ran["detail"]["ran"].as_array().cloned().unwrap_or_default();
+    assert_eq!(results.len(), 1, "{ran}");
+    results[0].clone()
+}
+
+/// A newer revision races the publishing push: the hook's own transaction sees the newer
+/// request, refuses the publish, and the losing operation is told it was superseded (never
+/// `failed`, never pending). The newer revision then lands, once.
+#[test]
+fn a_newer_revision_that_races_the_publishing_push_wins_with_a_stated_answer() {
+    let (test_box, host, repo, keys) = hosted();
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{r1}");
+
+    let release = test_box.path().join("release");
+    let (held, executor) = held_executor(&test_box, &host, &keys, &release);
+    std::fs::write(view.join("src/new.rs"), "fn new() { r2 }\n").unwrap();
+    let (code, r2) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{r2}");
+    let lost = finish(held, &release);
+    assert_eq!(lost["op_id"], format!("{id}.1"), "{lost}");
+    assert_eq!(lost["decision"], "ok", "{lost}");
+    assert_eq!(lost["detail"]["superseded"], true, "{lost}");
+    assert_eq!(test_box.trunk_change_ids(&host), Vec::<String>::new());
+
+    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["op_id"], format!("{id}.2"), "{ran}");
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    assert_eq!(test_box.trunk_change_ids(&host), vec![id]);
+    assert_eq!(
+        test_box.git_bare(&host, &["show", "main:src/new.rs"]),
+        "fn new() { r2 }"
+    );
+}
+
+/// A cancel (the actor's abandon request) races the publishing push: the publish is refused,
+/// the operation ends cancelled with a stated answer, and nothing lands.
+#[test]
+fn a_cancel_that_races_the_publishing_push_wins_with_a_stated_answer() {
+    let (test_box, host, repo, keys) = hosted();
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{r1}");
+
+    let release = test_box.path().join("release");
+    let (executor, _) = held_executor(&test_box, &host, &keys, &release);
+    let (code, abandoned) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    assert_eq!(code, 0, "{abandoned}");
+    let lost = finish(executor, &release);
+    assert_eq!(lost["op_id"], format!("{id}.1"), "{lost}");
+    assert_eq!(lost["decision"], "ok", "{lost}");
+    assert_eq!(lost["detail"]["superseded"], true, "{lost}");
+    assert_eq!(test_box.trunk_change_ids(&host), Vec::<String>::new());
+    let record = test_box.git_bare(
+        &host,
+        &["show", &format!("refs/bay/changes/{id}:change.json")],
+    );
+    let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+    assert_eq!(record["state"], "abandoned", "{record}");
+    assert_eq!(record["operations"][0]["outcome"], "abandoned", "{record}");
+}
+
+/// The publish wins the race: a cancel or a newer revision that arrives after it is answered
+/// with the landing, `CHANGE_ALREADY_LANDED`, never left pending.
+#[test]
+fn a_cancel_or_newer_revision_after_the_publish_is_answered_with_the_landing() {
+    let (test_box, host, repo, keys) = hosted();
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{r1}");
+    let executor = test_box.clone_of(&host, "executor");
+    test_box.use_keys(&executor, &keys);
+    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+
+    let (code, cancel) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    assert_eq!(code, 10, "{cancel}");
+    assert_eq!(cancel["reason"], "CHANGE_ALREADY_LANDED", "{cancel}");
+    std::fs::write(view.join("src/new.rs"), "fn new() { late }\n").unwrap();
+    let (code, newer) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    assert_eq!(code, 10, "{newer}");
+    assert_eq!(newer["reason"], "CHANGE_ALREADY_LANDED", "{newer}");
+    assert_eq!(test_box.trunk_change_ids(&host), vec![id]);
 }
 
 #[test]

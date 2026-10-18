@@ -713,6 +713,11 @@ fn after_refused_push(
                 .with_detail(json!({"landed_intent": claim.landed_ref()})),
         ));
     }
+    // A cancel or a newer request that the hook's own transaction saw: the refusal is the
+    // stated answer, never `failed` (G33).
+    if let Some(report) = still_owner(ctx, op_id, revision)? {
+        return Ok(Some(report));
+    }
     if error.contains("HOOK_TIMEOUT") {
         return hook_timed_out(ctx, op_id, revision);
     }
