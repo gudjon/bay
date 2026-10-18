@@ -69,7 +69,9 @@ build)
         BAY_RELEASE_VERSION=$version cargo "$build" -q --release --locked --target "$target"
         stage=$(mktemp -d)
         cp "target/$target/release/bay" "$stage/bay"
-        tar -C "$stage" -czf "$out/bay-$target.tar.gz" bay
+        # No extended attributes: macOS tar adds com.apple.provenance headers, which GNU tar
+        # on Linux warns about while unpacking.
+        COPYFILE_DISABLE=1 tar --no-xattrs -C "$stage" -czf "$out/bay-$target.tar.gz" bay
         rm -rf "$stage"
     done
     printf '%s\n' "$version" > "$out/VERSION"
