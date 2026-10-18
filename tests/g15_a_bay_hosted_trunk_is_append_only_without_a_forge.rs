@@ -102,3 +102,30 @@ fn doctor_refuses_a_host_without_the_trunk_hook() {
     assert_eq!(code, 10, "{result}");
     assert_eq!(row(&result, "trunk-hook")["state"], "red");
 }
+
+#[test]
+fn host_init_below_2_54_is_refused_and_creates_nothing() {
+    // Git runs a hook defined in configuration only from 2.54. Below it the trunk hook is
+    // silently ignored and a force push is accepted, so Host init not found: 2(SERVFAIL) must refuse to create
+    // a host whose trunk would not be append-only.
+    let test_box = TestBox::new();
+    test_box.fake_git_version("2.53.0");
+    let host = test_box.path().join("host.git");
+    let (code, result) =
+        result_json(
+            test_box
+                .bay(test_box.path())
+                .args(["host", "init", host.to_str().unwrap()]),
+        );
+    assert_eq!(code, 10, "{result}");
+    assert_eq!(result["decision"], "blocked");
+    assert_eq!(result["reason"], "GIT_BELOW_FLOOR");
+    assert_eq!(result["detail"]["role"], "bay-hosted-trunk");
+    assert_eq!(result["detail"]["version"], "2.53.0");
+    assert_eq!(result["detail"]["floor"], "2.54");
+    assert!(
+        !host.exists(),
+        "a refused host init created {}",
+        host.display()
+    );
+}

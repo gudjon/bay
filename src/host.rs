@@ -3,7 +3,8 @@
 //! The host is a bare repository on the reftable backend (atomic, crash-safe multi-ref
 //! transactions). Its `refs/heads/<trunk>` is append-only, enforced by an `update` hook defined
 //! in configuration (Git ≥ 2.54) that refuses a non-fast-forward, a deletion or a recreation of
-//! trunk only. `refs/bay/*` and `refs/notes/bay/*` stay rewritable so retention cuts work; the
+//! trunk only. Below that floor Git ignores the hook, so `host init` refuses with
+//! `GIT_BELOW_FLOOR` and creates nothing. `refs/bay/*` and `refs/notes/bay/*` stay rewritable so retention cuts work; the
 //! repository-wide `receive.denyNonFastForwards` / `receive.denyDeletes` are not used.
 //!
 //! Ref-prefix scoping by key class and the publication checks are kickstart item 19c.
@@ -13,7 +14,8 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::git::{Git, GitError};
-use crate::result::BayResult;
+use crate::result::{BayResult, Reason};
+use crate::version::{GIT_FLOOR_HOSTED_TRUNK, Version};
 
 /// The configured hook's name: `hook.bay-trunk.command` and `hook.bay-trunk.event`.
 pub const TRUNK_HOOK: &str = "bay-trunk";
@@ -28,6 +30,22 @@ pub fn init(path: &Path, trunk: &str, object_format: &str) -> BayResult {
 }
 
 fn run_init(path: &Path, trunk: &str, object_format: &str) -> Result<BayResult, String> {
+    // Git runs a hook defined in configuration only from 2.54. Below it the trunk hook would
+    // be silently ignored and trunk would accept a force push, so refuse first.
+    let git_line = Git::new(Path::new("."))
+        .version()
+        .map_err(|error| error.message())?;
+    let git_version = Version::parse(&git_line);
+    if git_version < Version::parse(GIT_FLOOR_HOSTED_TRUNK) {
+        return Ok(
+            BayResult::blocked(Reason::GitBelowFloor).with_detail(json!({
+                "role": "bay-hosted-trunk",
+                "version": git_version.to_string(),
+                "floor": GIT_FLOOR_HOSTED_TRUNK,
+                "recovery": "upgrade git",
+            })),
+        );
+    }
     if path.exists()
         && std::fs::read_dir(path)
             .map_err(|error| error.to_string())?
