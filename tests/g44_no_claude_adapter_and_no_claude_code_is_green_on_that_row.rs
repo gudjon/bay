@@ -15,12 +15,12 @@ fn no_adapter_and_no_claude_is_green() {
     assert_eq!(code, 0, "{result}");
     let claude = row(&result, "claude");
     assert_eq!(claude["state"], "green");
-    assert_eq!(claude["note"], "not the agent on this box");
+    assert_eq!(claude["note"], "Claude adapter not configured");
 
     let line = test_box.bay(&repo).arg("doctor").output().unwrap();
     // The human status line is on stderr; stdout is the result document (INTERFACES § 8).
     let line = String::from_utf8(line.stderr).unwrap();
-    assert!(line.contains("claude not the agent on this box"), "{line}");
+    assert!(line.contains("claude adapter not configured"), "{line}");
 }
 
 #[test]

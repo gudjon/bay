@@ -23,7 +23,7 @@ pub const UNRELATED_HOOKS_KEY: &str = "bay.unrelated-hooks-digest";
 const CLAUDE_RECOVERY: &str = "upgrade Claude Code or run without the Claude adapter";
 
 enum Claude {
-    NotTheAgent,
+    NotConfigured,
     Absent,
     Found(Version),
 }
@@ -97,12 +97,12 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     let claude = if config.claude_adapter() {
         probe_claude()?
     } else {
-        Claude::NotTheAgent
+        Claude::NotConfigured
     };
     let minimum = Version::parse(CLAUDE_HOOK_MINIMUM);
     let claude_row = match &claude {
-        Claude::NotTheAgent => {
-            json!({"name": "claude", "state": "green", "note": "not the agent on this box"})
+        Claude::NotConfigured => {
+            json!({"name": "claude", "state": "green", "note": "Claude adapter not configured"})
         }
         Claude::Absent => {
             report.red(Reason::ClaudeAbsent, None);
@@ -262,7 +262,7 @@ fn status_line(
         (false, false) => format!("git {git_version} (floor {floor}, upgrade git)"),
     };
     let claude_field = match claude {
-        Claude::NotTheAgent => "claude not the agent on this box".to_owned(),
+        Claude::NotConfigured => "claude adapter not configured".to_owned(),
         Claude::Absent => format!("claude absent ({CLAUDE_RECOVERY})"),
         Claude::Found(version) if version < minimum => {
             format!("claude {version} (floor {CLAUDE_HOOK_MINIMUM}, {CLAUDE_RECOVERY})")
