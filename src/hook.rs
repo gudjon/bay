@@ -5,10 +5,10 @@
 //! rejects the whole push on any refusal. It applies only on a host with a key registry;
 //! without one the host keeps just the append-only trunk (`host.rs`).
 //!
-//! Built here: trunk publications, the landed marker, change chains (agent, executor and
-//! registry signatures; no deletion; the retention cut), requests, evidence notes, executor
-//! logs and the registry. The queue (item 19d), intent claims and adoption (19e) and the full
-//! name validation (19f) add their own rules.
+//! Judged here: bay ref names (the fixed alphabet), trunk publications, the landed marker,
+//! change chains (agent, executor and registry signatures; adoption; no deletion; the
+//! retention cut), requests, evidence notes, executor logs, the registry, queue reservations
+//! and releases, intent claims and the landed intent.
 
 use std::collections::HashSet;
 
