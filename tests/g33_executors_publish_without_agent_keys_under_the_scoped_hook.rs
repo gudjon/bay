@@ -9,9 +9,16 @@
 //! revoked is refused at its push; a later revocation does not strand a queued request. A
 //! newer revision or a cancel that races the publishing push wins at the hook and the losing
 //! operation is told it was superseded; a cancel or newer revision after the publish gets
-//! `CHANGE_ALREADY_LANDED`.
-//! `REGISTRY_CHANGED` re-signing needs a revocation between signing and pushing, and adoption
-//! and live heartbeats need item 19e; those cases leave `#[ignore]`.
+//! `CHANGE_ALREADY_LANDED`. A publication whose executor key was revoked after signing is
+//! refused with `REGISTRY_CHANGED`, even when it names the older registry; an executor with a
+//! valid key re-signs it on the same tree and parent (taking it over at once, without waiting
+//! out a lease, when the revoked key was the publisher's own), reusing tree-keyed evidence and rerunning commit-keyed checks, and
+//! rechecking first when the same change revoked the producer key behind the pass. Revoking only
+//! that producer key is `REGISTRY_CHANGED` too: the executor rechecks and re-signs. The hook
+//! answers `REGISTRY_CHANGED` only when the revocation is the one reason for its refusal, and it
+//! refuses a publication or a request that names a registry commit off the registry chain. An
+//! executor that cannot read the newer registry yet leaves the operation waiting, never failed.
+//! Adoption and live heartbeats need item 19e; that case leaves `#[ignore]`.
 
 mod support;
 
@@ -23,17 +30,22 @@ use support::{EXECUTOR, PRODUCER, TestBox, TestKeys, check_files, passing_result
 
 /// A bay host with a registry, an agent clone using the keys, and a change in a view.
 fn hosted() -> (TestBox, PathBuf, PathBuf, TestKeys) {
+    hosted_with(|_| check_files("true", &passing_result(1), 1, 60))
+}
+
+/// Like [`hosted`], with `files(<test box root>)` as trunk's policy and check adapter.
+fn hosted_with(
+    files: impl FnOnce(&Path) -> Vec<(String, String)>,
+) -> (TestBox, PathBuf, PathBuf, TestKeys) {
     let test_box = TestBox::new();
+    let files = files(test_box.path());
+    let files = files.as_slice();
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
     let repo = test_box.repo_without_remote_any("repo");
     test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
     // Trunk is seeded before the registry exists: from then on only executors publish.
-    test_box.seed_with_check(
-        &repo,
-        &[("src/a.rs", "fn a() {}\n")],
-        &check_files("true", &passing_result(1), 1, 60),
-    );
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], files);
     let keys = test_box.keys();
     test_box.enroll(&repo, &keys);
     test_box.use_keys(&repo, &keys);
@@ -68,7 +80,20 @@ fn signed_commit(
         args.extend(["-p", parent]);
     }
     args.extend(["-m", message]);
-    test_box.git_ok(repo, &args)
+    // The box's environment names a test identity; the commit is `name`'s.
+    let out = test_box
+        .git(repo)
+        .args(&args)
+        .env("GIT_AUTHOR_NAME", name)
+        .env("GIT_COMMITTER_NAME", name)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
 
 fn refused(test_box: &TestBox, repo: &Path, refspecs: &[&str]) -> String {
@@ -224,7 +249,7 @@ fn the_hook_refuses_what_a_key_class_may_not_write() {
         &repo,
         "request.json",
         &format!(
-            "{{\"change\":\"{id}\",\"revision\":\"{trunk}\",\"actor\":{{\"name\":\"agent\"}}}}\n"
+            "{{\"change\":\"{id}\",\"revision\":\"{trunk}\",\"actor\":{{\"name\":\"agent\"}},\"registry\":\"{registry}\"}}\n"
         ),
     );
     let request = signed_commit(
@@ -398,6 +423,158 @@ fn a_revoked_agent_key_is_refused_at_push_but_a_queued_request_is_not_stranded()
     assert_eq!(test_box.trunk_change_ids(&host).len(), 1);
 }
 
+/// A registry-shaped commit that is not on `refs/bay/registry`: anyone can write one. Its agent
+/// file enrols `agent` under the agent principal.
+fn forged_registry(test_box: &TestBox, repo: &Path, agent: &Path, keys: &TestKeys) -> String {
+    let line = |principal: &str, key: &Path| {
+        let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        let words: Vec<&str> = public.split_whitespace().collect();
+        format!("{principal} {} {}\n", words[0], words[1])
+    };
+    let tree = files_tree(
+        test_box,
+        repo,
+        &[
+            ("agent", &line(support::AGENT, agent)),
+            ("executor", &line(EXECUTOR, &keys.executor)),
+            ("registry", &line(support::REGISTRAR, &keys.registry)),
+        ],
+    );
+    signed_commit(
+        test_box,
+        repo,
+        &keys.rogue,
+        support::REGISTRAR,
+        &tree,
+        &[],
+        "forged registry",
+    )
+}
+
+/// A request JSON for `change` at `revision` by the agent principal, naming `registry`.
+fn request_text(change: &str, revision: &str, registry: &str) -> String {
+    format!(
+        "{{\"change\":\"{change}\",\"revision\":\"{revision}\",\"actor\":{{\"name\":\"{}\"}},\"registry\":\"{registry}\"}}\n",
+        support::AGENT
+    )
+}
+
+/// § 10a: a request is judged under the registry version it names, and the hook requires that
+/// version to be on the registry chain when the request is pushed. A request signed by a
+/// currently valid agent key, naming a registry commit off the chain (even one pushed beside
+/// it), is refused at its push.
+#[test]
+fn a_request_naming_a_registry_off_the_chain_is_refused_at_its_push() {
+    let (test_box, _host, repo, keys) = hosted();
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, landed) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{landed}");
+    test_box.git_ok(&repo, &["fetch", "-q", "origin"]);
+    let trunk = test_box.git_ok(&repo, &["rev-parse", "origin/main"]);
+    let latest = test_box.git_ok(&repo, &["rev-parse", &format!("refs/bay/requests/{id}")]);
+    let forged = forged_registry(&test_box, &repo, &keys.agent, &keys);
+    for named in [forged.as_str(), trunk.as_str(), "none"] {
+        let tree = blob_tree(
+            &test_box,
+            &repo,
+            "request.json",
+            &request_text(&id, &trunk, named),
+        );
+        let request = signed_commit(
+            &test_box,
+            &repo,
+            &keys.agent,
+            support::AGENT,
+            &tree,
+            &[&latest],
+            "request",
+        );
+        let why = refused(
+            &test_box,
+            &repo,
+            &[
+                &format!("+{request}:refs/bay/requests/{id}"),
+                &format!("{forged}:refs/heads/forged-registry"),
+            ],
+        );
+        assert!(why.contains("not on the registry chain"), "{named}: {why}");
+    }
+}
+
+/// § 10a: a publication names a request the hook judges under the registry version the request
+/// names. A request signed by a key that is enrolled nowhere, naming a forged registry commit
+/// that enrols it, never verifies, so an executor-signed C naming it does not land.
+#[test]
+fn a_publication_naming_a_request_under_a_forged_registry_is_refused() {
+    let (test_box, host, repo, keys) = hosted();
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{r1}");
+    let release = test_box.path().join("release");
+    let (mut held, executor) = held_executor(&test_box, &host, &keys, &release);
+    // C is signed and its evidence pushed; the executor dies before its publishing push.
+    held.kill().unwrap();
+    let _ = held.wait();
+    let candidate = last_candidate(&test_box, &host, &id);
+    let field = |key: &str| {
+        test_box
+            .git_ok(
+                &executor,
+                &[
+                    "log",
+                    "-1",
+                    &format!("--format=%(trailers:key={key},valueonly)"),
+                    &candidate,
+                ],
+            )
+            .trim()
+            .to_owned()
+    };
+    let (revision, request_id) = (field("Revision-Id"), field("Request-Id"));
+    let forged = forged_registry(&test_box, &executor, &keys.rogue, &keys);
+    let tree = blob_tree(
+        &test_box,
+        &executor,
+        "request.json",
+        &request_text(&id, &revision, &forged),
+    );
+    let request = signed_commit(
+        &test_box,
+        &executor,
+        &keys.rogue,
+        support::AGENT,
+        &tree,
+        &[&request_id],
+        "request",
+    );
+    let message = test_box
+        .git_ok(&executor, &["log", "-1", "--format=%B", &candidate])
+        .replace(&request_id, &request);
+    let parent = test_box.git_ok(&executor, &["rev-parse", &format!("{candidate}^1")]);
+    let tree = test_box.git_ok(&executor, &["rev-parse", &format!("{candidate}^{{tree}}")]);
+    let forged_c = signed_commit(
+        &test_box,
+        &executor,
+        &keys.executor,
+        EXECUTOR,
+        &tree,
+        &[&parent],
+        &message,
+    );
+    let why = refused(
+        &test_box,
+        &executor,
+        &[
+            &format!("{forged_c}:refs/heads/main"),
+            &format!("{forged_c}:refs/bay/landed/{id}"),
+            &format!("{request}:refs/heads/forged-request"),
+            &format!("{forged}:refs/heads/forged-registry"),
+        ],
+    );
+    assert!(why.contains("not on the registry chain"), "{why}");
+    assert_eq!(test_box.trunk_change_ids(&host), Vec::<String>::new());
+}
+
 /// An executor clone running `executor run --once`, held at `before-publish` until `release`
 /// exists: it has built, checked and confirmed it still owns the operation, and its publishing
 /// push has not started.
@@ -521,10 +698,473 @@ fn a_cancel_or_newer_revision_after_the_publish_is_answered_with_the_landing() {
     assert_eq!(test_box.trunk_change_ids(&host), vec![id]);
 }
 
+/// A new ed25519 key at `<root>/keys/<name>`, enrolled nowhere yet.
+fn fresh_key(test_box: &TestBox, name: &str) -> PathBuf {
+    let path = test_box.path().join("keys").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let status = std::process::Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-C", name, "-f"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    path
+}
+
+/// The last candidate commit the remote chain of `id` records.
+fn last_candidate(test_box: &TestBox, host: &Path, id: &str) -> String {
+    let record = test_box.git_bare(
+        host,
+        &["show", &format!("refs/bay/changes/{id}:change.json")],
+    );
+    let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+    record["operations"][0]["attempts"]
+        .as_array()
+        .and_then(|attempts| attempts.last())
+        .and_then(|attempt| attempt["commit"].as_str())
+        .unwrap_or_else(|| panic!("no candidate in {record}"))
+        .to_owned()
+}
+
+/// § 10a: the hook judges a publication's executor key against the current registry, not the
+/// registry version its `Registry-Id` names. C signed under the old registry by a key revoked
+/// since is refused with `REGISTRY_CHANGED`, and nothing lands.
 #[test]
-#[ignore = "REGISTRY_CHANGED re-signing is not built"]
+fn a_revoked_executor_key_cannot_publish_by_naming_the_older_registry_id() {
+    let (test_box, host, repo, keys) = hosted();
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{r1}");
+    let release = test_box.path().join("release");
+    let (mut held, executor) = held_executor(&test_box, &host, &keys, &release);
+    // C is signed and its evidence pushed; the executor dies before its publishing push.
+    held.kill().unwrap();
+    let _ = held.wait();
+    let signed_under = test_box.git_ok(&repo, &["rev-parse", "refs/bay/registry"]);
+    let rotated = fresh_key(&test_box, "executor-2");
+    test_box.enroll_executor(&repo, &keys, &rotated);
+
+    let candidate = last_candidate(&test_box, &host, &id);
+    let named = test_box.git_ok(
+        &executor,
+        &[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Registry-Id,valueonly)",
+            &candidate,
+        ],
+    );
+    assert_eq!(named.trim(), signed_under);
+    // § 10a: `REGISTRY_CHANGED` is the answer only when the revocation is the one reason. A push
+    // that does not create the landed marker is refused for that.
+    let why = refused(
+        &test_box,
+        &executor,
+        &[&format!("{candidate}:refs/heads/main")],
+    );
+    assert!(why.contains("must create refs/bay/landed/"), "{why}");
+    assert!(!why.contains("REGISTRY_CHANGED"), "{why}");
+    let why = refused(
+        &test_box,
+        &executor,
+        &[
+            &format!("{candidate}:refs/heads/main"),
+            &format!("{candidate}:refs/bay/landed/{id}"),
+        ],
+    );
+    assert!(why.contains("REGISTRY_CHANGED"), "{why}");
+    assert_eq!(test_box.trunk_change_ids(&host), Vec::<String>::new());
+}
+
+/// A copy of `commit` on its own tree and parent, signed by `key` as the executor, with `from`
+/// replaced by `to` in its message.
+fn copy_of(
+    test_box: &TestBox,
+    repo: &Path,
+    commit: &str,
+    key: &Path,
+    (from, to): (&str, &str),
+) -> String {
+    let message = test_box
+        .git_ok(repo, &["log", "-1", "--format=%B", commit])
+        .replace(from, to);
+    let parent = test_box.git_ok(repo, &["rev-parse", &format!("{commit}^1")]);
+    let tree = test_box.git_ok(repo, &["rev-parse", &format!("{commit}^{{tree}}")]);
+    signed_commit(test_box, repo, key, EXECUTOR, &tree, &[&parent], &message)
+}
+
+/// § 10a: the hook checks that a publication's `Registry-Id` is on the registry chain. A C
+/// signed by a valid executor key but naming a registry commit off the chain is refused; and
+/// a C whose key the current registry revoked, naming an off-chain registry that still enrols
+/// that key, is no publication at all, never `REGISTRY_CHANGED`.
+#[test]
+fn a_publication_naming_a_registry_off_the_chain_is_refused() {
+    let (test_box, host, repo, keys) = hosted();
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{r1}");
+    let release = test_box.path().join("release");
+    let (mut held, executor) = held_executor(&test_box, &host, &keys, &release);
+    held.kill().unwrap();
+    let _ = held.wait();
+    let candidate = last_candidate(&test_box, &host, &id);
+    let signed_under = test_box.git_ok(&repo, &["rev-parse", "refs/bay/registry"]);
+    let forged = forged_registry(&test_box, &executor, &keys.agent, &keys);
+    let push = |commit: &str| {
+        refused(
+            &test_box,
+            &executor,
+            &[
+                &format!("{commit}:refs/heads/main"),
+                &format!("{commit}:refs/bay/landed/{id}"),
+                &format!("{forged}:refs/heads/forged-registry"),
+            ],
+        )
+    };
+    let off_chain = copy_of(
+        &test_box,
+        &executor,
+        &candidate,
+        &keys.executor,
+        (&signed_under, &forged),
+    );
+    let why = push(&off_chain);
+    assert!(why.contains("not on the registry chain"), "{why}");
+
+    let rotated = fresh_key(&test_box, "executor-2");
+    test_box.enroll_executor(&repo, &keys, &rotated);
+    let why = push(&off_chain);
+    assert!(
+        why.contains("trunk takes only commits signed by an executor key"),
+        "{why}"
+    );
+    assert!(!why.contains("REGISTRY_CHANGED"), "{why}");
+    assert_eq!(test_box.trunk_change_ids(&host), Vec::<String>::new());
+}
+
+/// Two required checks that log each run to `<root>/runs`: `tests` is keyed by tree, `meta`
+/// reads the commit (`inputs = ["commit"]`, ruling 9a), so its result never stands for a
+/// re-signed C.
+fn two_checks(root: &Path) -> Vec<(String, String)> {
+    let base = check_files(
+        &format!("echo \"$1\" >> '{}'", root.join("runs").display()),
+        &passing_result(1),
+        1,
+        60,
+    );
+    let script = base
+        .iter()
+        .find(|(path, _)| path == "scripts/bay-check")
+        .unwrap()
+        .1
+        .clone();
+    let policy = "revision = 1\n\n[[check]]\nid = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check tests\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\n\n[[check]]\nid = \"meta\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check meta\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\ninputs = [\"commit\"]\n";
+    vec![
+        ("scripts/bay-check".to_owned(), script),
+        (".bay/policy.toml".to_owned(), policy.to_owned()),
+        // A lease far longer than a takeover after a revocation may take (§ 10a: a revoked
+        // holder's lease is not waited out).
+        (
+            ".bay/config.toml".to_owned(),
+            format!("[executor]\nlease_s = {LONG_LEASE_S}\nheartbeat_s = 1\n"),
+        ),
+    ]
+}
+
+/// The lease of [`two_checks`], in seconds.
+const LONG_LEASE_S: u64 = 60;
+
+fn runs_of(test_box: &TestBox) -> Vec<String> {
+    std::fs::read_to_string(test_box.path().join("runs"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A second executor clone serving the same principal under `key`, with its own producer.
+fn other_executor(
+    test_box: &TestBox,
+    host: &Path,
+    keys: &TestKeys,
+    key: &Path,
+    producer: (&str, &Path),
+) -> PathBuf {
+    let clone = test_box.clone_of(host, "executor-2");
+    test_box.use_keys(&clone, keys);
+    test_box.git_ok(
+        &clone,
+        &["config", "bay.executorKey", key.to_str().unwrap()],
+    );
+    test_box.git_ok(&clone, &["config", "bay.producerName", producer.0]);
+    test_box.git_ok(
+        &clone,
+        &["config", "bay.producerKey", producer.1.to_str().unwrap()],
+    );
+    clone
+}
+
+/// What a re-signed publication keeps from the refused C: tree and parent; what it changes:
+/// the commit, its executor key and its `Registry-Id` (now the current registry).
+fn assert_resigned(test_box: &TestBox, host: &Path, refused: &str, registry: &str) {
+    let tip = test_box.git_bare(host, &["rev-parse", "main"]);
+    assert_ne!(tip, refused);
+    for part in ["^{tree}", "^1"] {
+        assert_eq!(
+            test_box.git_bare(host, &["rev-parse", &format!("{tip}{part}")]),
+            test_box.git_bare(host, &["rev-parse", &format!("{refused}{part}")]),
+            "{part}"
+        );
+    }
+    let named = test_box.git_bare(
+        host,
+        &[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Registry-Id,valueonly)",
+            &tip,
+        ],
+    );
+    assert_eq!(named.trim(), registry);
+}
+
+/// `REGISTRY_CHANGED` is not a retry of the same push (`INTERFACES` § 2): no publish retry was
+/// counted toward `PUBLISH_RETRY_EXHAUSTED`.
+fn assert_no_publish_retry(test_box: &TestBox, host: &Path, id: &str) {
+    let record = test_box.git_bare(
+        host,
+        &["show", &format!("refs/bay/changes/{id}:change.json")],
+    );
+    let record: serde_json::Value = serde_json::from_str(&record).unwrap();
+    assert_eq!(
+        record["operations"][0]["publish_retries"]
+            .as_u64()
+            .unwrap_or(0),
+        0,
+        "{record}"
+    );
+}
+
+/// The publishing executor's key is revoked between signing and pushing: the hook refuses C
+/// with `REGISTRY_CHANGED`; the executor, whose own key is the revoked one, gives the operation
+/// up, and the revocation releases it: another executor under the same principal with a valid
+/// key takes it over at once, without waiting out the revoked holder's lease, and re-signs C on
+/// the same tree and parent. It lands once; the tree-keyed check is reused and only the
+/// commit-keyed check runs again (ruling 9a).
+#[test]
 fn revoking_the_publishing_executor_key_between_signing_and_pushing_resigns_once() {
-    panic!("G33: REGISTRY_CHANGED re-signing is not implemented");
+    let Held {
+        test_box,
+        host,
+        repo,
+        keys,
+        id,
+        child: held,
+        release,
+    } = signed_and_held();
+    let refused_c = last_candidate(&test_box, &host, &id);
+    let rotated = fresh_key(&test_box, "executor-2");
+    let producer = fresh_key(&test_box, "producer-2");
+    let registry = test_box.enroll_classes(
+        &repo,
+        &keys,
+        &rotated,
+        &[],
+        &[(PRODUCER, &keys.producer), ("ci-2", &producer)],
+    );
+
+    let lost = finish(held, &release);
+    assert_eq!(lost["decision"], "queued", "{lost}");
+    assert_eq!(lost["reason"], "REGISTRY_CHANGED", "{lost}");
+    assert_eq!(lost["detail"]["released"], true, "{lost}");
+    assert_eq!(lost["detail"]["registry"], registry.as_str(), "{lost}");
+    assert_eq!(test_box.trunk_change_ids(&host), Vec::<String>::new());
+
+    let other = other_executor(&test_box, &host, &keys, &rotated, ("ci-2", &producer));
+    let started = Instant::now();
+    let ran = test_box.bay_ok(&other, &["executor", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    assert!(
+        started.elapsed() < Duration::from_secs(LONG_LEASE_S / 2),
+        "the takeover waited out the revoked holder's lease: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
+    assert_eq!(runs_of(&test_box), ["tests", "meta", "meta"]);
+    assert_resigned(&test_box, &host, &refused_c, &registry);
+    assert_no_publish_retry(&test_box, &host, &id);
+}
+
+/// `REGISTRY_CHANGED`, but the executor cannot read the newer registry (its fetch fails): it
+/// re-signs nothing and never reports `failed`; the operation waits for the registry. Once the
+/// registry can be read, a later pass re-signs C and lands it once.
+#[test]
+fn a_registry_change_the_executor_cannot_read_yet_leaves_the_operation_waiting() {
+    let Held {
+        test_box,
+        host,
+        repo,
+        keys,
+        id,
+        child: held,
+        release,
+    } = signed_and_held();
+    let refused_c = last_candidate(&test_box, &host, &id);
+    let rotated = fresh_key(&test_box, "executor-2");
+    let signed_under = test_box.git_ok(&repo, &["rev-parse", "refs/bay/registry"]);
+    let registry = test_box.enroll_executor(&repo, &keys, &rotated);
+    let executor = test_box.path().join("executor");
+    test_box.git_ok(
+        &executor,
+        &["config", "bay.executorKey", rotated.to_str().unwrap()],
+    );
+    // The host serves every ref but the registry to fetches; its hook still reads it.
+    test_box.git_bare(
+        &host,
+        &["config", "uploadpack.hideRefs", "refs/bay/registry"],
+    );
+
+    let waiting = finish(held, &release);
+    assert_eq!(waiting["decision"], "queued", "{waiting}");
+    assert_eq!(waiting["reason"], "REGISTRY_CHANGED", "{waiting}");
+    assert_eq!(waiting["detail"]["released"], false, "{waiting}");
+    assert_eq!(
+        waiting["detail"]["registry"],
+        signed_under.as_str(),
+        "{waiting}"
+    );
+    assert_eq!(test_box.trunk_change_ids(&host), Vec::<String>::new());
+
+    test_box.git_bare(&host, &["config", "--unset", "uploadpack.hideRefs"]);
+    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
+    assert_eq!(runs_of(&test_box), ["tests", "meta", "meta"]);
+    assert_resigned(&test_box, &host, &refused_c, &registry);
+    assert_no_publish_retry(&test_box, &host, &id);
+}
+
+/// The executor's box now holds a valid key for the same principal: the executor re-signs C
+/// itself, on the same tree and parent, and only the commit-keyed check runs again.
+#[test]
+fn an_executor_whose_box_holds_a_valid_key_re_signs_c_itself() {
+    let Held {
+        test_box,
+        host,
+        repo,
+        keys,
+        id,
+        child: held,
+        release,
+    } = signed_and_held();
+    let refused_c = last_candidate(&test_box, &host, &id);
+    let rotated = fresh_key(&test_box, "executor-2");
+    let registry = test_box.enroll_executor(&repo, &keys, &rotated);
+    let executor = test_box.path().join("executor");
+    test_box.git_ok(
+        &executor,
+        &["config", "bay.executorKey", rotated.to_str().unwrap()],
+    );
+
+    let ran = finish(held, &release);
+    assert_eq!(ran["decision"], "landed", "{ran}");
+    assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
+    assert_eq!(runs_of(&test_box), ["tests", "meta", "meta"]);
+    assert_resigned(&test_box, &host, &refused_c, &registry);
+    assert_no_publish_retry(&test_box, &host, &id);
+}
+
+/// G33: a registry change that revokes only the producer key behind the pass (the executor key
+/// stays valid) makes that evidence stop counting at once. The hook answers `REGISTRY_CHANGED`,
+/// and the executor, whose box now holds the producer's new key, rechecks and re-signs C on
+/// the same tree and parent under the current registry. It is never `failed`.
+#[test]
+fn a_registry_change_revoking_only_the_producer_key_rechecks_and_re_signs() {
+    let Held {
+        test_box,
+        host,
+        repo,
+        keys,
+        id,
+        child: held,
+        release,
+    } = signed_and_held();
+    let refused_c = last_candidate(&test_box, &host, &id);
+    let producer = fresh_key(&test_box, "producer-2");
+    let registry =
+        test_box.enroll_classes(&repo, &keys, &keys.executor, &[], &[(PRODUCER, &producer)]);
+    let executor = test_box.path().join("executor");
+    test_box.git_ok(
+        &executor,
+        &["config", "bay.producerKey", producer.to_str().unwrap()],
+    );
+
+    let ran = finish(held, &release);
+    assert_eq!(ran["decision"], "landed", "{ran}");
+    assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
+    assert_eq!(runs_of(&test_box), ["tests", "meta", "tests", "meta"]);
+    assert_resigned(&test_box, &host, &refused_c, &registry);
+    assert_no_publish_retry(&test_box, &host, &id);
+}
+
+/// The same registry change also revokes the producer key whose signature backs the pass:
+/// that evidence stops counting at once, so the operation is rechecked before it is
+/// re-signed: both checks run again.
+#[test]
+fn a_revoked_producer_key_behind_the_pass_is_rechecked_before_the_re_sign() {
+    let Held {
+        test_box,
+        host,
+        repo,
+        keys,
+        id,
+        child: held,
+        release,
+    } = signed_and_held();
+    let refused_c = last_candidate(&test_box, &host, &id);
+    let rotated = fresh_key(&test_box, "executor-2");
+    let producer = fresh_key(&test_box, "producer-2");
+    let registry = test_box.enroll_classes(&repo, &keys, &rotated, &[], &[("ci-2", &producer)]);
+
+    let lost = finish(held, &release);
+    assert_eq!(lost["reason"], "REGISTRY_CHANGED", "{lost}");
+    let other = other_executor(&test_box, &host, &keys, &rotated, ("ci-2", &producer));
+    let ran = test_box.bay_ok(&other, &["executor", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    assert_eq!(test_box.trunk_change_ids(&host), vec![id]);
+    assert_eq!(runs_of(&test_box), ["tests", "meta", "tests", "meta"]);
+    assert_resigned(&test_box, &host, &refused_c, &registry);
+}
+
+/// A hosted trunk with [`two_checks`], one landed request, and an executor held at its
+/// publishing push after both checks passed on the signed C.
+fn signed_and_held() -> Held {
+    let (test_box, host, repo, keys) = hosted_with(two_checks);
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{r1}");
+    let release = test_box.path().join("release");
+    let (child, _) = held_executor(&test_box, &host, &keys, &release);
+    assert_eq!(runs_of(&test_box), ["tests", "meta"]);
+    Held {
+        test_box,
+        host,
+        repo,
+        keys,
+        id,
+        child,
+        release,
+    }
+}
+
+struct Held {
+    test_box: TestBox,
+    host: PathBuf,
+    repo: PathBuf,
+    keys: TestKeys,
+    id: String,
+    child: std::process::Child,
+    release: PathBuf,
 }
 
 #[test]

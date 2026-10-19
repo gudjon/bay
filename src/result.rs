@@ -93,6 +93,7 @@ reasons! {
     CheckUnavailable => "CHECK_UNAVAILABLE", ["wait"], "capable_worker_reachable", true;
     CheckUnknown => "CHECK_UNKNOWN", ["wait", "repair"], "check_produced_result", false;
     PolicyChanged => "POLICY_CHANGED", ["refresh"], "rechecked_under_current_policy", false;
+    PolicyInvalid => "POLICY_INVALID", ["repair"], "policy_repaired", false;
     WorkspaceIncomplete => "WORKSPACE_INCOMPLETE", ["resume"], "journal_ready", false;
     PublishOutcomeUnknown => "PUBLISH_OUTCOME_UNKNOWN", [], "trunk_read_again", false;
     ChangeAlreadyLanded => "CHANGE_ALREADY_LANDED", ["read"], "never", false;
@@ -107,6 +108,11 @@ reasons! {
     RemoteUnreachable => "REMOTE_UNREACHABLE", ["read"], "remote_answers_with_box_key", false;
     HooksMissing => "HOOKS_MISSING", ["read"], "install_wrote_hook_entries", false;
     SkillMismatch => "SKILL_MISMATCH", ["read"], "install_copied_skill_for_this_version", false;
+    // INTERFACES § 2 (`bay update`, the binary's lifecycle in `DESIGN`)
+    UpdateUnavailable => "UPDATE_UNAVAILABLE", ["read"], "release_reachable", false;
+    UpdateUnverified => "UPDATE_UNVERIFIED", ["read"], "release_republished", false;
+    UpdatePinned => "UPDATE_PINNED", ["read"], "pin_moved", false;
+    UpdateInUse => "UPDATE_IN_USE", ["wait"], "operation_finished", false;
 }
 
 impl Reason {
@@ -357,7 +363,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 29);
+        assert_eq!(Reason::ALL.len(), 34);
     }
 
     #[test]

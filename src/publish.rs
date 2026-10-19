@@ -247,9 +247,14 @@ pub fn verify_publication(git: &Git, commit: &str, registry_id: &str, committer:
     if registry_id.is_empty() || registry_id == "none" {
         return false;
     }
-    let Ok(registry) = Registry::load_at(git, registry_id) else {
-        return false;
-    };
+    Registry::load_at(git, registry_id)
+        .is_ok_and(|registry| verifies_under(git, commit, &registry, committer))
+}
+
+/// Whether `commit` verifies against `registry`'s executor file, under the executor that
+/// committed it.
+#[must_use]
+pub fn verifies_under(git: &Git, commit: &str, registry: &Registry, committer: &str) -> bool {
     let Ok(executors) = registry.class_file(git, KeyClass::Executor) else {
         return false;
     };
@@ -585,8 +590,14 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     }
     let outcome = run_attempts(ctx, op_id, &revision, trunk, &mut seq);
     // The head always releases: an outcome other than its own publication (which released in
-    // the publishing push) passes the head on.
+    // the publishing push) passes the head on. Not an operation given up on `REGISTRY_CHANGED`:
+    // its key can sign no release, and the place stays with the operation, which the executor
+    // that takes it over publishes as the head (§ 10a).
+    let given_up = outcome
+        .as_ref()
+        .is_ok_and(|result| result.reason == Some(Reason::RegistryChanged));
     if let Some(at) = seq
+        && !given_up
         && !crate::queue::Queue::read(ctx.repo)?.released.contains(&at)
     {
         let reason = match &outcome {
@@ -718,15 +729,50 @@ fn after_refused_push(
     if let Some(report) = still_owner(ctx, op_id, revision)? {
         return Ok(Some(report));
     }
+    if error.contains("REGISTRY_CHANGED") {
+        let registry = match registry_after_change(ctx, op_id, attempt)? {
+            Ok(registry) => registry,
+            Err(given_up) => return Ok(Some(given_up)),
+        };
+        if now == *trunk {
+            return registry_changed(ctx, op_id, revision, attempt, &registry);
+        }
+        // Trunk moved as well: C can no longer be re-signed on its parent. The move is the
+        // refusal that counts (`TRUNK_MOVED`, § 6), and the rebuild signs under the current
+        // registry.
+    }
     if error.contains("HOOK_TIMEOUT") {
         return hook_timed_out(ctx, op_id, revision);
     }
     // A release created while this head was publishing (its progress deadline), whether or not
     // trunk moved: rejoin, uncounted toward `QUEUE_DEADLINE_EXCEEDED`, one publish retry (§ 6).
+    // A release for any other reason is no publish retry and no reason to rejoin: a newer
+    // revision, a cancel or another executor's outcome ended this head's turn, and the chain
+    // says which on the next pass.
+    let reason = match *seq {
+        Some(at) => crate::queue::Queue::read(ctx.repo)?
+            .release_reasons
+            .get(&at)
+            .cloned(),
+        None => None,
+    };
+    if let Some(reason) = reason.as_ref().filter(|reason| *reason != "deadline") {
+        *seq = None;
+        return Ok(Some(
+            BayResult::failed(format!(
+                "the publishing push was refused: this head's queue place was released ({reason}) while it published; nothing was published"
+            ))
+            .with_change(ctx.id.clone())
+            .with_op(op_id),
+        ));
+    }
     if let Some(at) = *seq
-        && crate::queue::Queue::read(ctx.repo)?.released.contains(&at)
+        && reason.is_some()
     {
         *seq = None;
+        // Saved in the chain with the retry it counts, so a later pass never counts this place
+        // toward `QUEUE_DEADLINE_EXCEEDED`.
+        ctx.op_mut(op_id).mid_publish_releases.push(at);
         if let Some(blocked) =
             uncounted_retry(ctx, op_id, revision, "deadline release mid-publish")?
         {
@@ -750,6 +796,112 @@ fn after_refused_push(
         held,
     };
     after_trunk_moved(ctx, op_id, revision, seq, &moved)
+}
+
+/// The hook refused C with `REGISTRY_CHANGED` (`DESIGN` § 10a): a key behind C (its executor
+/// key, or a producer key behind its evidence) was revoked after C was signed. Re-reads the
+/// registry and this box's keys. Returns the current registry when this executor's key is valid
+/// in it, and its chain is signed with that key from now on. Otherwise returns the answer that
+/// gives the operation up (queued `REGISTRY_CHANGED`), never `failed`:
+/// - this box's executor key is the revoked one: it writes nothing more, since the hook takes
+///   no transition it signs. The revocation itself releases the operation: an executor with a
+///   valid key takes it over at once, without waiting out the lease ([`holder_revoked`], § 9a);
+/// - the registry read back is still the one C names (the fetch failed): no newer registry is
+///   in sight to act on, so nothing is re-signed (never a loop of re-signs), and the operation
+///   waits for the registry. A later pass reads it again.
+fn registry_after_change(
+    ctx: &mut Ctx,
+    op_id: &str,
+    attempt: &Attempt,
+) -> Result<Result<Registry, BayResult>, String> {
+    ctx.repo.fetch_registry();
+    ctx.registry = Registry::current(&ctx.repo.git)?;
+    let signed_under = ctx
+        .repo
+        .git
+        .run(&[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Registry-Id,valueonly,separator=%x2c)",
+            &attempt.commit,
+        ])
+        .map_err(|error| error.message())?;
+    let given_up = |registry: &str, released: bool, waiting_for: &str| {
+        let mut result = BayResult::refused(Decision::Queued, Reason::RegistryChanged)
+            .with_change(ctx.id.clone())
+            .with_op(op_id)
+            .with_detail(json!({
+                "candidate": attempt.candidate_id,
+                "signed_under": signed_under,
+                "registry": registry,
+                "released": released,
+            }));
+        result.published = Some(false);
+        result.waiting_for = Some(waiting_for.to_owned());
+        result
+    };
+    let registry = match &ctx.registry {
+        Some(registry) if registry.commit != signed_under => registry.clone(),
+        _ => return Ok(Err(given_up(&signed_under, false, "registry"))),
+    };
+    // The box may hold a new key for the same principal by now.
+    ctx.keys = Keys::load(&ctx.repo.git);
+    if !executor_key_valid(ctx, &registry)? {
+        return Ok(Err(given_up(&registry.commit, true, "executor_capacity")));
+    }
+    let signer = ctx.executor_signer()?;
+    ctx.chain.sign_with(signer);
+    Ok(Ok(registry))
+}
+
+/// `REGISTRY_CHANGED` on an unmoved trunk, with a valid key: re-sign a C with the same tree and
+/// parent and the current `Registry-Id` (`None`: build again, where tree-keyed evidence is
+/// reused, commit-keyed checks run again, and evidence whose producer key the registry revoked
+/// no longer counts, so it is rechecked first). Not counted toward `PUBLISH_RETRY_EXHAUSTED`.
+fn registry_changed(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    attempt: &Attempt,
+    registry: &Registry,
+) -> Result<Option<BayResult>, String> {
+    ctx.op_mut(op_id).state = OpState::Running;
+    ctx.save(
+        revision,
+        None,
+        &format!(
+            "{op_id}: REGISTRY_CHANGED, re-sign {} under registry {}",
+            attempt.candidate_id, registry.commit
+        ),
+    )?;
+    if !ctx.push_chain() {
+        return Err("the change chain could not be pushed; nothing was published".to_owned());
+    }
+    Ok(None)
+}
+
+/// § 10a: whether the operation's holder signed its last chain commit with an executor key the
+/// current registry no longer holds. That key can write nothing more (no heartbeat, no
+/// release), so its lease is not waited out: the revocation released the operation.
+fn holder_revoked(ctx: &Ctx, op_id: &str) -> Result<bool, String> {
+    let (Some(registry), Some(owner)) = (&ctx.registry, &ctx.op(op_id).owner) else {
+        return Ok(false);
+    };
+    let committer = ctx
+        .repo
+        .git
+        .run(&["log", "-1", "--format=%cn", &ctx.head])
+        .map_err(|error| error.message())?;
+    Ok(committer == *owner && !verifies_under(&ctx.repo.git, &ctx.head, registry, owner))
+}
+
+/// Whether this machine's executor key is enrolled for its executor name in `registry`.
+fn executor_key_valid(ctx: &Ctx, registry: &Registry) -> Result<bool, String> {
+    let Some(signer) = &ctx.keys.executor else {
+        return Ok(false);
+    };
+    let (key_type, blob) = signing::public_key(&signer.key)?;
+    Ok(registry.holds(KeyClass::Executor, &signer.name, &key_type, &blob))
 }
 
 /// After this many uncounted publish retries an operation is `PUBLISH_RETRY_EXHAUSTED` (§ 6).
@@ -870,7 +1022,7 @@ enum Gate {
 fn queue_gate(ctx: &mut Ctx, op_id: &str) -> Result<Gate, String> {
     let signer = ctx.executor_signer().ok().flatten();
     let mut queue = crate::queue::Queue::read(ctx.repo)?;
-    if queue.deadline_releases(op_id) >= 3 {
+    if queue.deadline_releases(op_id, &ctx.op(op_id).mid_publish_releases) >= 3 {
         let op = ctx.op_mut(op_id);
         op.state = OpState::Blocked;
         op.outcome = Some(Reason::QueueDeadlineExceeded.code().to_owned());
@@ -982,8 +1134,9 @@ fn claim(
         op.owner.is_some() && matches!(op.state, OpState::Running | OpState::Checked)
     };
     // Another process holds the operation: take it over only once its lease expired, on this
-    // process's own clock. A restarted supervisor watches a full lease again.
-    if held && !lease_expired(ctx) {
+    // process's own clock. A restarted supervisor watches a full lease again. A holder whose
+    // executor key the registry revoked holds no lease (§ 10a).
+    if held && !holder_revoked(ctx, op_id)? && !lease_expired(ctx) {
         let op = ctx.op(op_id);
         let mut result = BayResult::new(Decision::Ok).with_change(&id).with_op(op_id);
         result.state = Some("running".to_owned());
@@ -1155,17 +1308,24 @@ fn verify_request(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, Strin
     };
     let request = ctx.op(op_id).request_id.clone().unwrap_or_default();
     // A request is judged by the registry version it names, so revoking a departed agent's key
-    // later does not strand its queued request (§ 10a).
+    // later does not strand its queued request (§ 10a). That version is on the registry chain,
+    // as the hook requires; a request naming any other commit is judged under none.
     let named = ctx
         .repo
         .git
         .run(&["cat-file", "blob", &format!("{request}:request.json")])
         .ok()
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-        .and_then(|json| json["registry"].as_str().map(str::to_owned));
-    let named = match named {
-        Some(commit) => Registry::load_at(&ctx.repo.git, &commit)?,
-        None => registry.clone(),
+        .and_then(|json| json["registry"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let Some(named) = registry.version_on_chain(&ctx.repo.git, &named)? else {
+        return Ok(Some(
+            BayResult::failed(format!(
+                "the request {request} of {op_id} names registry {named:?}, which is not on the registry chain"
+            ))
+            .with_change(ctx.id.clone())
+            .with_op(op_id),
+        ));
     };
     let registry = &named;
     let agents = registry.class_file(&ctx.repo.git, KeyClass::Agent)?;
@@ -1260,6 +1420,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         trunk_moved: 0,
         policy_changed: 0,
         publish_retries: 0,
+        mid_publish_releases: Vec::new(),
     });
     // The request: an agent-signed commit on the revision, linked into the chain. Appending it
     // allocates the op id by compare-and-swap; `refs/bay/requests/<id>` moves with it.
@@ -1552,7 +1713,15 @@ fn check_candidate(
     };
     let base_policy = match policy::load_at(git, trunk) {
         Ok(policy) => policy,
-        Err(why) => return refuse(why),
+        // § 7: a registry-signed repair is judged by its own new policy alone, so an invalid
+        // base policy stays repairable.
+        Err(policy::LoadError::Invalid(_)) if ctx.repair.is_some() => None,
+        // § 7: the policy at the accepted base breaks a validity rule, so no candidate can be
+        // judged by it; a bad policy never passes its own candidate.
+        Err(policy::LoadError::Invalid(why)) => {
+            return Ok(policy_invalid(ctx, op_id, trunk, "base", &why));
+        }
+        Err(policy::LoadError::Git(why)) => return refuse(why),
     };
     let changed = policy_changed(git, trunk, commit, base_policy.as_ref())?;
     if !changed {
@@ -1578,9 +1747,19 @@ fn check_candidate(
                 policy::POLICY_PATH
             ));
         }
-        Err(why) => return refuse(why),
+        // § 7: the candidate's own new policy breaks a validity rule. The same refusal as for
+        // the base's, naming the candidate, so the agent repairs it in a new revision.
+        Err(policy::LoadError::Invalid(why)) => {
+            return Ok(policy_invalid(ctx, op_id, commit, "candidate", &why));
+        }
+        Err(policy::LoadError::Git(why)) => return refuse(why),
     };
-    let base_revision = base_policy.as_ref().map_or(0, |policy| policy.revision);
+    // An invalid base policy still states its revision; a repair must raise it too.
+    let base_revision = base_policy
+        .as_ref()
+        .map(|policy| policy.revision)
+        .or_else(|| policy::revision_at(git, trunk))
+        .unwrap_or(0);
     if own_policy.revision <= base_revision {
         return refuse(format!(
             "this change edits the policy or an adapter path, so it must raise revision above {base_revision}; it has {}",
@@ -1625,6 +1804,27 @@ fn check_candidate(
         commit,
     )?;
     Ok((true, verdict, refusal))
+}
+
+/// `POLICY_INVALID` (§ 2, § 7): the policy at `at`, the base's or the candidate's own (`which`),
+/// breaks a validity rule, so it judges nothing.
+fn policy_invalid(
+    ctx: &Ctx,
+    op_id: &str,
+    at: &str,
+    which: &str,
+    why: &str,
+) -> (bool, &'static str, Option<BayResult>) {
+    (
+        true,
+        "unknown",
+        Some(
+            BayResult::blocked(Reason::PolicyInvalid)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(json!({"policy_at": at, "policy": which, "why": why})),
+        ),
+    )
 }
 
 /// Whether the candidate changes `.bay/policy.toml` or any adapter path of the base policy.
@@ -1703,7 +1903,14 @@ fn run_policy(
         .join("check")
         .join(candidate_id);
     let (producer, producer_signer) = ctx.producer()?;
-    let finished = finished_checks(ctx, op_id, policy, tree)?;
+    // A candidate's own new policy reaches trunk through this publication; the base's policy
+    // reached it however its paths last changed.
+    let policy_provenance = if adapter_from == trunk {
+        provenance(ctx, trunk, policy)?
+    } else {
+        policy::Provenance::Bay
+    };
+    let finished = finished_checks(ctx, op_id, policy, tree, commit)?;
     let mut keep = |record: &mut evidence::EvidenceRecord| -> Result<(), String> {
         // The producer signs outside the check's sandbox, after reading its output (§ 7).
         if let Some(signer) = &producer_signer {
@@ -1720,7 +1927,9 @@ fn run_policy(
             tree,
             base: adapter_from,
             base_tree: &base_tree,
+            changed_paths: &check::changed_paths(git, trunk, commit)?,
             id: candidate_id,
+            policy_provenance,
         },
         &producer,
         &check::Limits {
@@ -1783,6 +1992,103 @@ fn run_policy(
                 ),
         ),
     ))
+}
+
+/// How the policy at `trunk` reached trunk (`DESIGN` § 10a, `INTERFACES` § 6). Each edit
+/// outside bay that it still stands on is recorded as a `policy_changed_outside_bay` event
+/// (`INTERFACES` § 5) in this executor's log, unless a log already holds it. Two executors
+/// that land at once may both write it; its id (`evt_<commit>`) is the same in both, so a
+/// reader de-duplicates (`INTERFACES` § 4).
+fn provenance(
+    ctx: &Ctx,
+    trunk: &str,
+    policy: &policy::Policy,
+) -> Result<policy::Provenance, String> {
+    // One read of the remote's landed markers serves every path (§ 10a).
+    let landed: std::cell::OnceCell<std::collections::HashMap<String, String>> =
+        std::cell::OnceCell::new();
+    let edits = policy::outside_edits(&ctx.repo.git, trunk, policy, &|commit| {
+        let markers = if let Some(markers) = landed.get() {
+            markers
+        } else {
+            let read = landed_markers(ctx.repo)?;
+            landed.get_or_init(|| read)
+        };
+        is_publication(&ctx.repo.git, markers, commit)
+    })?;
+    if edits.is_empty() {
+        return Ok(policy::Provenance::Bay);
+    }
+    crate::log::fetch(ctx.repo);
+    let recorded = crate::log::events(&ctx.repo.git, OUTSIDE_EVENT)?;
+    let executor = ctx.executor_name();
+    let signer = ctx.executor_signer().ok().flatten();
+    for edit in edits {
+        if recorded
+            .iter()
+            .any(|event| event["commit"] == edit.commit.as_str())
+        {
+            continue;
+        }
+        let event = json!({
+            "schema": crate::log::EVENT_SCHEMA,
+            "id": format!("evt_{}", edit.commit),
+            "at": crate::clock::now_rfc3339(),
+            "kind": OUTSIDE_EVENT,
+            "change": ctx.id,
+            "actor": {"name": executor},
+            "commit": edit.commit,
+            "paths": edit.paths,
+            "other_paths": edit.other_paths,
+            "recurrence_key": format!("{OUTSIDE_EVENT}/{}", edit.commit),
+        });
+        crate::log::append(ctx.repo, &executor, signer.as_ref(), &event)?;
+    }
+    Ok(policy::Provenance::OutsideBay)
+}
+
+const OUTSIDE_EVENT: &str = "policy_changed_outside_bay";
+
+/// Whether trunk commit `commit` is a bay publication (`DESIGN` § 10a): it carries one
+/// `Change-Id` and the remote's `refs/bay/landed/<Change-Id>` (in `markers`) names it.
+fn is_publication(
+    git: &Git,
+    markers: &std::collections::HashMap<String, String>,
+    commit: &str,
+) -> Result<bool, String> {
+    let change = git
+        .run(&[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Change-Id,valueonly,separator=%x2c)",
+            commit,
+        ])
+        .map_err(|error| error.message())?;
+    let change = change.trim();
+    if change.is_empty() || change.contains(',') {
+        return Ok(false);
+    }
+    Ok(markers.get(change).map(String::as_str) == Some(commit))
+}
+
+/// The remote's landed markers: `Change-Id` to the commit its `refs/bay/landed/<Change-Id>`
+/// names, in one `ls-remote`. A remote that cannot be read is an error, never "no marker":
+/// an unread provenance is never taken for either answer.
+fn landed_markers(repo: &Repo) -> Result<std::collections::HashMap<String, String>, String> {
+    let listed = repo
+        .git
+        .run(&["ls-remote", repo.remote(), "refs/bay/landed/*"])
+        .map_err(|error| error.message())?;
+    Ok(listed
+        .lines()
+        .filter_map(|line| {
+            let (oid, name) = line.split_once('\t')?;
+            Some((
+                name.strip_prefix("refs/bay/landed/")?.to_owned(),
+                oid.to_owned(),
+            ))
+        })
+        .collect())
 }
 
 /// Renews the executor's lease while a check runs (§ 9a): one heartbeat commit on the chain,
@@ -1862,14 +2168,28 @@ fn hidden_paths(ctx: &Ctx) -> Vec<std::path::PathBuf> {
 }
 
 /// Checks that already finished on `tree` under the policy's manifest: a resume after a dead
-/// worker runs only what did not finish (§ 7, G22).
+/// worker runs only what did not finish (§ 7, G22). A check whose inputs include the commit
+/// finished only for `commit` itself, so a re-signed C runs it again (ruling 9a, G33). Only
+/// records that verify against the current registry count, so a revoked producer key's
+/// results are rechecked.
 fn finished_checks(
     ctx: &Ctx,
     op_id: &str,
     policy: &policy::Policy,
     tree: &str,
+    commit: &str,
 ) -> Result<Vec<evidence::CheckId>, String> {
     let git = &ctx.repo.git;
+    // An attempt under another epoch may have run on another executor (a takeover); this
+    // epoch's own attempts wrote only this producer's local records.
+    if ctx
+        .op(op_id)
+        .attempts
+        .iter()
+        .any(|attempt| attempt.epoch != ctx.my_epoch)
+    {
+        ctx.repo.fetch_evidence(&ctx.keys.producer_name);
+    }
     // Only this operation's own records: a resume, not evidence reuse (reuse is off in
     // increment 1, so another operation on the same tree is rechecked, G29).
     let mine = format!("/{op_id}.");
@@ -1890,7 +2210,12 @@ fn finished_checks(
         })
         .filter(|id| {
             matches!(
-                evidence::combine(&earlier, id, &policy.manifest_digest, None),
+                evidence::combine(
+                    &earlier,
+                    id,
+                    &policy.manifest_digest,
+                    policy.commit_keyed(id).then_some(commit)
+                ),
                 Combined::Pass | Combined::ProductFailure | Combined::Flaky
             )
         })
@@ -1943,7 +2268,7 @@ fn candidate_message(
     let config = &ctx.repo.config;
     let record = &ctx.record;
     format!(
-        "{reference}: change {id}\n\nChange-Id: {id}\nRevision-Id: {revision}\nRequest-Id: {request_id}\nCandidate-Id: {candidate_id}\nRegistry-Id: {registry_id}\nBay-Epoch: {epoch}\n{intent_key}: {reference}@{intent_revision}\n{actor_key}: {actor}/{session}\n{supersedes}",
+        "{reference}: change {id}\n\nChange-Id: {id}\nRevision-Id: {revision}\nRequest-Id: {request_id}\nCandidate-Id: {candidate_id}\nRegistry-Id: {registry_id}\nBay-Epoch: {epoch}\n{intent_key}: {reference}@{intent_revision}\n{actor_key}: {actor}\nBay-Session: {session}\n{supersedes}",
         reference = record.intent.reference,
         id = ctx.id,
         intent_key = config.intent_trailer(),
@@ -1962,10 +2287,15 @@ fn candidate_message(
 /// Pushes the producer's notes ref and confirms the remote now holds exactly that commit.
 fn push_and_read_back_evidence(repo: &Repo, producer: &str) -> Result<(), String> {
     let notes = evidence::notes_ref(producer);
-    let local = repo
+    let Some(local) = repo
         .git
-        .run(&["rev-parse", "--verify", &notes])
-        .map_err(|error| error.message())?;
+        .ref_target(&notes)
+        .map_err(|error| error.message())?
+    else {
+        // This producer wrote nothing: every record the pass rests on was resumed from
+        // another producer's ref, fetched from the remote (a takeover, G22).
+        return Ok(());
+    };
     repo.git
         .run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
         .map_err(|error| {
@@ -2076,7 +2406,98 @@ fn derive_landed(
     }
     ctx.push_chain();
     write_terminal(ctx, op_id, "published", Some(commit))?;
-    Ok(landed_result(&ctx.id, Some(op_id), commit, revision))
+    let mut result = landed_result(&ctx.id, Some(op_id), commit, revision);
+    // The change is published: a fault while reading its gaps never turns the landing into
+    // an error. The result says the gaps could not be read, so none is hidden.
+    let gaps = match coverage_gaps(ctx, op_id) {
+        Ok(gaps) if gaps.is_empty() => None,
+        Ok(gaps) => Some(("coverage_gaps", serde_json::Value::Array(gaps))),
+        Err(why) => Some(("coverage_gaps_unread", serde_json::Value::String(why))),
+    };
+    if let Some((key, value)) = gaps
+        && let Some(detail) = result
+            .detail
+            .as_mut()
+            .and_then(|detail| detail.as_object_mut())
+    {
+        detail.insert(key.to_owned(), value);
+    }
+    Ok(result)
+}
+
+/// G30: the checks the landing passed without testing code, each a coverage gap: a check
+/// that passed on a `declared_empty` selection under a policy that judged it (§ 7), and each
+/// quarantined check that no policy judging the landing required (ruling 8c).
+///
+/// The judging policies are read from the base and the candidate, never from the request, so
+/// a replay gives the same answer: the base's policy when it is valid, and the candidate's own
+/// when it differs (a policy change is checked by both; a registry-signed repair of an
+/// invalid base policy by its own alone).
+fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let Some(attempt) = ctx.op(op_id).attempts.last() else {
+        return Ok(Vec::new());
+    };
+    let git = &ctx.repo.git;
+    let mut judged: Vec<policy::Policy> = Vec::new();
+    for at in [&attempt.base, &attempt.commit] {
+        match policy::load_at(git, at) {
+            Ok(Some(policy))
+                if !judged.iter().any(|other| {
+                    other.manifest_digest == policy.manifest_digest
+                        && other.quarantined == policy.quarantined
+                }) =>
+            {
+                judged.push(policy);
+            }
+            Ok(_) | Err(policy::LoadError::Invalid(_)) => {}
+            Err(policy::LoadError::Git(why)) => return Err(why),
+        }
+    }
+    if judged.is_empty() {
+        return Ok(Vec::new());
+    }
+    let records = evidence::counted(
+        git,
+        evidence::records_for(git, &attempt.tree)?,
+        ctx.registry.as_ref(),
+    )?;
+    let mut gaps: Vec<serde_json::Value> = Vec::new();
+    for policy in &judged {
+        for entry in &policy.manifest {
+            let empty_pass = records.iter().any(|record| {
+                record.check.id == entry.id
+                    && record.check.environment == entry.environment
+                    && record.manifest_digest == policy.manifest_digest
+                    && record.verdict == evidence::Verdict::Pass
+                    && record.selection.as_deref() == Some(check::DECLARED_EMPTY)
+            });
+            let gap = json!({
+                "check": entry.id,
+                "environment": entry.environment,
+                "selection": check::DECLARED_EMPTY,
+            });
+            if empty_pass && !gaps.contains(&gap) {
+                gaps.push(gap);
+            }
+        }
+    }
+    // Ruling 8c: a quarantined check that no judging policy required was never tested.
+    for quarantine in judged.iter().flat_map(|policy| policy.quarantined.iter()) {
+        let required = judged.iter().any(|policy| {
+            policy.manifest.iter().any(|entry| {
+                entry.id == quarantine.id && entry.environment == quarantine.environment
+            })
+        });
+        let gap = json!({
+            "check": quarantine.id,
+            "environment": quarantine.environment,
+            "quarantine": {"reason": quarantine.reason, "end": quarantine.end},
+        });
+        if !required && !gaps.contains(&gap) {
+            gaps.push(gap);
+        }
+    }
+    Ok(gaps)
 }
 
 /// The compact terminal record that outlives the drafts (§ 9a). Written once per operation.

@@ -72,6 +72,9 @@ pub const BAY: &str = match option_env!("BAY_RELEASE_VERSION") {
 };
 
 /// Git floors (`GIT-FEATURES` § 1, `DESIGN` § 15.2).
+///
+/// `GIT_FLOOR_ANY` is the floor of any machine running bay; doctor uses it outside a repository.
+pub const GIT_FLOOR_ANY: &str = "2.40";
 pub const GIT_FLOOR_AGENT_VIEW: &str = "2.40";
 pub const GIT_FLOOR_HOSTED_TRUNK: &str = "2.54";
 pub const GIT_SHARED_CACHE: &str = "2.48";

@@ -1,7 +1,8 @@
 //! G1. What lands is exactly what was checked.
 //!
 //! Trunk advances while a check runs. The old candidate is refused at publication,
-//! rebuilt on the new trunk, and rechecked.
+//! rebuilt on the new trunk, and rechecked. The check request names exactly the paths the
+//! candidate changes against the trunk it was merged onto.
 
 mod support;
 
@@ -69,4 +70,62 @@ fn trunk_advances_while_a_check_runs() {
         "the evidence names the published commit: {note}"
     );
     assert!(note.contains("\"verdict\": \"pass\""), "{note}");
+}
+
+#[test]
+fn the_check_request_names_exactly_the_paths_the_candidate_changes() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let seen = test_box.path().join("request.json");
+    // The adapter keeps the request it was handed.
+    let before = format!("printf '%s' \"$req\" > '{}'", seen.display());
+    test_box.seed_with_check(
+        &repo,
+        &[
+            ("src/a.rs", "fn a() {}\n"),
+            ("src/gone.rs", "fn gone() {}\n"),
+            ("src/same.rs", "fn same() {}\n"),
+            ("docs/b.md", "b\n"),
+        ],
+        &check_files(&before, &passing_result(1), 1, 60),
+    );
+    let (_, view) = test_box.start_and_edit(&repo);
+    std::fs::write(view.join("src/a.rs"), "fn a() { 1; }\n").unwrap();
+    std::fs::remove_file(view.join("src/gone.rs")).unwrap();
+    // Git quotes this name unless it is asked for NUL-separated output.
+    std::fs::write(view.join("src/na\u{ef}ve.rs"), "fn naive() {}\n").unwrap();
+
+    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["decision"], "landed", "{result}");
+
+    let request: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
+    // Added, modified and deleted paths, sorted; unchanged ones are absent.
+    assert_eq!(
+        request["changed_paths"],
+        serde_json::json!(["src/a.rs", "src/gone.rs", "src/na\u{ef}ve.rs", "src/new.rs"]),
+        "{request}"
+    );
+    // The request carries nothing beyond its documented fields.
+    let mut keys: Vec<&str> = request
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "candidate",
+            "changed_paths",
+            "inputs",
+            "plan",
+            "requires",
+            "schema",
+            "timeout_s"
+        ],
+        "{request}"
+    );
 }

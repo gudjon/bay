@@ -26,8 +26,40 @@ pub struct Candidate<'a> {
     pub tree: &'a str,
     pub base: &'a str,
     pub base_tree: &'a str,
+    /// The paths the candidate's tree changes against the trunk commit it was merged onto,
+    /// sorted: the request's `changed_paths`.
+    pub changed_paths: &'a [String],
     /// `<op id>.<attempt>`.
     pub id: &'a str,
+    /// How the judging policy reached trunk (`INTERFACES` § 6).
+    pub policy_provenance: crate::policy::Provenance,
+}
+
+/// The paths `commit`'s tree adds, modifies or deletes against `base`'s, sorted. Renames are
+/// a deletion and an addition; names are read NUL-separated, so Git never quotes them.
+///
+/// # Errors
+///
+/// Git cannot compare the two commits.
+pub fn changed_paths(git: &Git, base: &str, commit: &str) -> Result<Vec<String>, String> {
+    let out = git
+        .run(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            base,
+            commit,
+        ])
+        .map_err(|error| error.message())?;
+    let mut paths: Vec<String> = out
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    paths.sort_unstable();
+    Ok(paths)
 }
 
 /// What bounds one run of the checks.
@@ -59,6 +91,17 @@ fn sandbox_kind() -> &'static str {
     } else {
         "none"
     }
+}
+
+/// `program` as found on this process's `PATH`, or the bare name when it is not there.
+fn on_path(program: &str) -> PathBuf {
+    std::env::var_os("PATH")
+        .and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| dir.join(program))
+                .find(|candidate| candidate.is_file())
+        })
+        .unwrap_or_else(|| PathBuf::from(program))
 }
 
 fn real(path: &Path) -> PathBuf {
@@ -102,7 +145,8 @@ fn sandboxed(
             cmd
         }
         "bwrap" => {
-            let mut cmd = Command::new("bwrap");
+            // Found on the executor's own `PATH`: the check's cleared environment may not have it.
+            let mut cmd = Command::new(on_path("bwrap"));
             cmd.args(["--dev-bind", "/", "/"]);
             for path in hidden {
                 if path.is_file() {
@@ -144,6 +188,32 @@ struct Plan {
     #[serde(default)]
     selected: u64,
     completed: u64,
+    /// `declared_empty` when the adapter's map selects nothing for this candidate (§ 7).
+    #[serde(default)]
+    selection: Option<String>,
+}
+
+/// The one recorded value of `plan.selection` (`INTERFACES` § 7).
+pub const DECLARED_EMPTY: &str = "declared_empty";
+
+/// What one check's run returns: its verdict, why it is not `pass`, its units, and its
+/// `selection` when the selection was declared empty.
+struct Judged {
+    verdict: Verdict,
+    why: Option<String>,
+    units: Vec<Unit>,
+    selection: Option<String>,
+}
+
+impl Judged {
+    const fn without_units(verdict: Verdict, why: Option<String>) -> Self {
+        Self {
+            verdict,
+            why,
+            units: Vec::new(),
+            selection: None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -179,7 +249,8 @@ pub fn run_all(
             id: entry.id.clone(),
             environment: entry.environment.clone(),
         };
-        if finished.contains(&id) {
+        // A quarantined check is not required (ruling 8c): it does not run.
+        if finished.contains(&id) || policy.is_quarantined(entry) {
             continue;
         }
         let dir = work_dir.join(format!("check-{index}"));
@@ -197,7 +268,12 @@ pub fn run_all(
             sandbox,
         };
         let remaining = budget.map(|budget| budget.saturating_sub(started.elapsed()));
-        let (verdict, why, units) = within_budget(
+        let Judged {
+            verdict,
+            why,
+            units,
+            selection,
+        } = within_budget(
             hooks.beat,
             limits.heartbeat,
             entry,
@@ -218,6 +294,7 @@ pub fn run_all(
             check: id,
             policy_revision: policy.revision,
             manifest_digest: policy.manifest_digest.clone(),
+            policy_provenance: Some(candidate.policy_provenance.as_str().to_owned()),
             producer: Producer {
                 name: producer.to_owned(),
                 version: crate::version::BAY.to_owned(),
@@ -226,8 +303,10 @@ pub fn run_all(
             at: now_rfc3339(),
             why,
             units,
+            selection,
             sandbox: Some(sandbox.to_owned()),
             signature: None,
+            unknown: serde_json::Map::new(),
         };
         make_writable(&dir);
         let _ = std::fs::remove_dir_all(&dir);
@@ -258,25 +337,23 @@ fn within_budget(
     candidate: &Candidate,
     place: &Place,
     remaining: Option<Duration>,
-) -> (Verdict, Option<String>, Vec<Unit>) {
+) -> Judged {
     let own = Duration::from_secs(entry.timeout_s);
     match remaining {
-        Some(remaining) if remaining.is_zero() => (
+        Some(remaining) if remaining.is_zero() => Judged::without_units(
             Verdict::Unknown,
             Some("the execution budget was exhausted before this check started".to_owned()),
-            Vec::new(),
         ),
         Some(remaining) if remaining < own => {
-            let (verdict, why, units) =
-                run_one(beat, heartbeat, entry, policy, candidate, place, remaining);
-            let why = why.map(|why| {
+            let mut judged = run_one(beat, heartbeat, entry, policy, candidate, place, remaining);
+            judged.why = judged.why.map(|why| {
                 if why.contains("timed out") {
                     format!("the execution budget was exhausted: {why}")
                 } else {
                     why
                 }
             });
-            (verdict, why, units)
+            judged
         }
         _ => run_one(beat, heartbeat, entry, policy, candidate, place, own),
     }
@@ -299,21 +376,38 @@ fn run_one(
     candidate: &Candidate,
     place: &Place,
     timeout: Duration,
-) -> (Verdict, Option<String>, Vec<Unit>) {
+) -> Judged {
     let (tree_dir, adapter_dir) = (place.tree, place.adapter);
     let mut words = entry.command.split_whitespace();
     let executable = adapter_dir.join(words.next().unwrap_or_default());
     let request = json!({
         "schema": "bay.check.request/1",
         "candidate": {"commit": candidate.commit, "tree": candidate.tree},
+        "changed_paths": candidate.changed_paths,
         "plan": {"id": entry.id, "version": policy.revision.to_string()},
         "requires": {"environment": entry.environment},
         "timeout_s": entry.timeout_s,
         "inputs": [],
     });
     let args: Vec<&str> = words.collect();
+    // Ruling 8b: a named variable the executor does not set is an infrastructure failure;
+    // the check never runs without what its policy declares.
+    let mut declared = Vec::new();
+    for name in &entry.env {
+        let Some(value) = std::env::var_os(name) else {
+            return Judged::without_units(
+                Verdict::InfraFailure,
+                Some(format!(
+                    "the policy declares {name} in env, and this executor does not set it"
+                )),
+            );
+        };
+        declared.push((name, value));
+    }
     let scratch_tmp = place.scratch.join("tmp");
+    let scratch_home = place.scratch.join("home");
     let _ = std::fs::create_dir_all(&scratch_tmp);
+    let _ = std::fs::create_dir_all(&scratch_home);
     let mut cmd = sandboxed(
         place.sandbox,
         &executable,
@@ -321,13 +415,24 @@ fn run_one(
         place.hidden,
         place.scratch,
     );
+    // `INTERFACES` § 7: the check starts from a fixed baseline and nothing else, so evidence
+    // names everything it could read: `PATH` from the policy, `HOME` and `TMPDIR` inside the
+    // sandbox's scratch, `LANG=C.UTF-8`, bay's own `BAY_ADAPTER_DIR`, and the declared names.
     cmd.current_dir(tree_dir)
+        .env_clear()
         .env("BAY_ADAPTER_DIR", adapter_dir)
-        .env("TMPDIR", &scratch_tmp);
+        .env("HOME", &scratch_home)
+        .env("TMPDIR", &scratch_tmp)
+        .env("LANG", "C.UTF-8")
+        // The policy states `path` or takes its stated default, so `PATH` is always set: a
+        // shell never falls back to a search path no policy names.
+        .env("PATH", entry.path.join(":"))
+        // `policy::load_at` refuses an `env` name of the baseline, so none overrides it.
+        .envs(declared);
     let (output, stderr) =
         match run_with_timeout(cmd, &request.to_string(), timeout, beat, heartbeat) {
             Ok(output) => output,
-            Err(why) => return (Verdict::Unknown, Some(why), Vec::new()),
+            Err(why) => return Judged::without_units(Verdict::Unknown, Some(why)),
         };
     // § 7, G26: a check that reached outside its adapter and candidate is an infrastructure
     // failure, never a pass.
@@ -335,50 +440,36 @@ fn run_one(
         stderr.contains(&hidden.display().to_string())
             || stderr.contains(&real(hidden).display().to_string())
     });
+    let outside = || {
+        Judged::without_units(
+            Verdict::InfraFailure,
+            Some("the check read or wrote outside its adapter and candidate".to_owned()),
+        )
+    };
     let result: CheckResult = match serde_json::from_slice(&output) {
         Ok(result) => result,
-        Err(_) if reached_out => {
-            return (
-                Verdict::InfraFailure,
-                Some("the check read or wrote outside its adapter and candidate".to_owned()),
-                Vec::new(),
-            );
-        }
+        Err(_) if reached_out => return outside(),
         Err(error) => {
-            return (
+            return Judged::without_units(
                 Verdict::Unknown,
                 Some(format!("no bay.check.result/1 on stdout: {error}")),
-                Vec::new(),
             );
         }
     };
     if reached_out {
-        return (
-            Verdict::InfraFailure,
-            Some("the check read or wrote outside its adapter and candidate".to_owned()),
-            Vec::new(),
-        );
+        return outside();
     }
     judge(&result, entry, candidate)
 }
 
-fn judge(
-    result: &CheckResult,
-    entry: &CheckEntry,
-    candidate: &Candidate,
-) -> (Verdict, Option<String>, Vec<Unit>) {
+fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Judged {
     if result.schema != "bay.check.result/1" {
-        return (
-            Verdict::Unknown,
-            Some(format!("schema {}", result.schema)),
-            Vec::new(),
-        );
+        return Judged::without_units(Verdict::Unknown, Some(format!("schema {}", result.schema)));
     }
     if result.exercised.commit != candidate.commit || result.exercised.tree != candidate.tree {
-        return (
+        return Judged::without_units(
             Verdict::Unknown,
             Some("the result is for a different commit or tree; rejected whole".to_owned()),
-            Vec::new(),
         );
     }
     let units: Vec<Unit> = result
@@ -389,15 +480,48 @@ fn judge(
             verdict: unit.verdict,
         })
         .collect();
+    let with = |verdict: Verdict, why: Option<String>, units: Vec<Unit>| Judged {
+        verdict,
+        why,
+        units,
+        selection: None,
+    };
     if units
         .iter()
         .any(|unit| unit.verdict == Verdict::ProductFailure)
     {
-        return (Verdict::ProductFailure, None, units);
+        return with(Verdict::ProductFailure, None, units);
+    }
+    // § 7: `declared_empty` is valid only with `selected` = 0 and `expected_minimum` = 0; any
+    // other combination is `unknown`.
+    let declared = result.plan.selection.as_deref();
+    if let Some(selection) = declared
+        && (selection != DECLARED_EMPTY || result.plan.selected > 0 || entry.expected_minimum > 0)
+    {
+        return with(
+            Verdict::Unknown,
+            Some(format!(
+                "selection {selection} with {} selected under the policy's expected_minimum {}; {DECLARED_EMPTY} needs both at zero",
+                result.plan.selected, entry.expected_minimum
+            )),
+            units,
+        );
     }
     let collected = u64::try_from(units.len()).unwrap_or(u64::MAX);
+    // A selection of tests with no result for any of them is no empty selection: the units
+    // the adapter says it ran are missing, so the run is `unknown`, never `declared_empty`.
+    if collected == 0 && result.plan.selected > 0 {
+        return with(
+            Verdict::Unknown,
+            Some(format!(
+                "selected {} and reported no unit",
+                result.plan.selected
+            )),
+            units,
+        );
+    }
     if collected < entry.expected_minimum {
-        return (
+        return with(
             Verdict::Unknown,
             Some(format!(
                 "collected {collected} of the policy's expected_minimum {}",
@@ -407,7 +531,7 @@ fn judge(
         );
     }
     if result.plan.completed < result.plan.selected {
-        return (
+        return with(
             Verdict::Unknown,
             Some(format!(
                 "completed {} of {} selected",
@@ -420,16 +544,24 @@ fn judge(
         .iter()
         .any(|unit| unit.verdict == Verdict::InfraFailure)
     {
-        return (Verdict::InfraFailure, None, units);
+        return with(Verdict::InfraFailure, None, units);
     }
     if units.iter().any(|unit| unit.verdict == Verdict::Unknown) {
-        return (
+        return with(
             Verdict::Unknown,
             Some("a unit has no result".to_owned()),
             units,
         );
     }
-    (Verdict::Pass, None, units)
+    // § 7: a pass on an empty selection under an explicit zero minimum is recorded as
+    // `declared_empty`, so it is reported as a coverage gap, never as tested code.
+    let empty = declared.is_some() || collected == 0;
+    Judged {
+        verdict: Verdict::Pass,
+        why: None,
+        units,
+        selection: empty.then(|| DECLARED_EMPTY.to_owned()),
+    }
 }
 
 /// Runs the adapter with the request on stdin; returns its stdout. A spawn failure, a

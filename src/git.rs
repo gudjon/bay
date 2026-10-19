@@ -213,6 +213,64 @@ impl Git {
         })
     }
 
+    /// Whether `dir` is outside every Git repository. Git's own discovery message decides, read
+    /// in the C locale, and only when no directory Git would search holds a `.git` entry or a
+    /// bare repository: Git prints that same message for a `.git` it cannot read (its objects
+    /// gone, for example), and that is a damaged repository, never "outside". Any other
+    /// failure (a gitfile to a missing admin directory, a `GIT_DIR` that names no repository)
+    /// is an error too.
+    ///
+    /// # Errors
+    ///
+    /// See [`Git::run`]; also a repository Git found but cannot read.
+    pub fn outside_repository(&self) -> Result<bool, GitError> {
+        match self.run_with(&["rev-parse", "--git-dir"], &[("LC_ALL", "C")], None) {
+            Ok(_) => Ok(false),
+            Err(GitError::Failed { args, stderr })
+                if stderr.contains("not a git repository (or any") =>
+            {
+                match self.damaged_repository() {
+                    None => Ok(true),
+                    Some(path) => Err(GitError::Failed {
+                        args,
+                        stderr: format!(
+                            "{} holds a repository Git cannot read: {}",
+                            path.display(),
+                            stderr.trim()
+                        ),
+                    }),
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The first directory Git's discovery searches, from `dir` up to a
+    /// `GIT_CEILING_DIRECTORIES` entry (which Git does not search), that holds a `.git` entry
+    /// or is a bare repository.
+    fn damaged_repository(&self) -> Option<PathBuf> {
+        let start = std::fs::canonicalize(&self.dir).unwrap_or_else(|_| self.dir.clone());
+        let ceilings: Vec<PathBuf> = std::env::var_os("GIT_CEILING_DIRECTORIES")
+            .map(|value| {
+                std::env::split_paths(&value)
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut current = Some(start.as_path());
+        while let Some(dir) = current {
+            if dir != start && ceilings.iter().any(|ceiling| ceiling == dir) {
+                return None;
+            }
+            if std::fs::symlink_metadata(dir.join(".git")).is_ok() || is_bare_dir(dir) {
+                return Some(dir.to_path_buf());
+            }
+            current = dir.parent();
+        }
+        None
+    }
+
     /// The URL of `remote`, or `None` when no such remote is configured.
     ///
     /// # Errors

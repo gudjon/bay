@@ -70,8 +70,13 @@ fn write(view: &Path, path: &str, text: &str) {
 #[test]
 fn a_candidate_that_edits_the_policy_is_judged_by_the_bases_policy() {
     let (test_box, _repo, _remote, _id, view) = change(false);
-    // The candidate drops the failing check and raises the revision: the base policy still judges it.
-    write(&view, ".bay/policy.toml", "revision = 2\n");
+    // The candidate renames the failing check away and raises the revision: the base policy
+    // still judges it.
+    write(
+        &view,
+        ".bay/policy.toml",
+        &policy(2, 1).replace("id = \"tests\"", "id = \"other\""),
+    );
     let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_FAILED");
@@ -81,7 +86,7 @@ fn a_candidate_that_edits_the_policy_is_judged_by_the_bases_policy() {
 fn a_policy_edit_that_keeps_the_old_revision_is_refused() {
     let (test_box, _repo, remote, _id, view) = change(true);
     let trunk = test_box.git_bare(&remote, &["rev-parse", "main"]);
-    write(&view, ".bay/policy.toml", &policy(1, 0));
+    write(&view, ".bay/policy.toml", &policy(1, 2));
     let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
     // No reason code covers an invalid policy edit (INTERFACES § 2), so it is a refused
     // operation with a receipt.
@@ -184,9 +189,9 @@ fn a_policy_with_two_entries_for_one_check_is_refused() {
     test_box.git_ok(&repo, &["commit", "-q", "-am", "invalid policy"]);
     test_box.git_ok(&repo, &["push", "-q", "origin", "main"]);
     let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
-    // No reason code covers an invalid policy edit (INTERFACES § 2), so it is a refused
-    // operation with a receipt.
-    assert_eq!(code, 20, "{refused}");
+    // The policy at the accepted base breaks a validity rule (INTERFACES § 2, § 7).
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
     assert!(
         refused.to_string().contains("two [[check]] entries"),
         "{refused}"
@@ -249,6 +254,383 @@ fn a_registry_signed_repair_restores_a_broken_adapter_and_an_agent_signed_one_is
     );
     let record = test_box.git_bare(&remote, &["show", &format!("{log}:record.json")]);
     assert!(record.contains("\"policy_repair\": \"admin\""), "{record}");
+}
+
+#[test]
+fn an_invalid_policy_on_trunk_is_policy_invalid_until_a_registry_signed_repair() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let files = vec![
+        (
+            "scripts/bay-check".to_owned(),
+            script(true, PASS_SCRIPT_MARK),
+        ),
+        (".bay/policy.toml".to_owned(), policy(1, 1)),
+    ];
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    let keys = test_box.keys();
+    test_box.enroll(&repo, &keys);
+    test_box.use_keys(&repo, &keys);
+    // A policy with no check above zero reaches trunk outside bay, at revision 7.
+    write(&repo, ".bay/policy.toml", &policy(7, 0));
+    test_box.git_ok(&repo, &["commit", "-q", "-am", "no minimum"]);
+    test_box.git_ok(&repo, &["push", "-q", "origin", "main"]);
+
+    let repair_at = |key: &Path, intent: &str, revision: u32| {
+        let started = test_box.bay_ok(&repo, &["start", intent, "--paths", ".bay/", "scripts/"]);
+        let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+        write(&view, ".bay/policy.toml", &policy(revision, 1));
+        test_box.git_ok(&repo, &["config", "bay.agentKey", key.to_str().unwrap()]);
+        result_json(test_box.bay(&view).args([
+            "land",
+            "--wait",
+            "--change",
+            started["change"].as_str().unwrap(),
+        ]))
+    };
+
+    // An ordinary change is judged by the invalid base policy: refused, never passed.
+    let (code, refused) = repair_at(&keys.agent, "REPAIR-1", 8);
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
+    assert_eq!(refused["retry_when"], "policy_repaired");
+
+    // An invalid policy still states its revision: a repair below it would move revision
+    // back, so it is refused.
+    let (code, lowered) = repair_at(&keys.registry, "REPAIR-LOW", 3);
+    assert_ne!(code, 0, "{lowered}");
+    assert!(
+        lowered.to_string().contains("raise revision above 7"),
+        "{lowered}"
+    );
+
+    // A registry-signed repair is judged by its own new policy alone.
+    let (code, repaired) = repair_at(&keys.registry, "REPAIR-2", 8);
+    assert_eq!(code, 0, "{repaired}");
+    assert_eq!(repaired["decision"], "landed");
+}
+
+/// The `policy_provenance` of every evidence record on the remote trunk's tree.
+fn provenance_at_trunk(test_box: &TestBox, repo: &Path, remote: &Path) -> Vec<String> {
+    let tree = test_box.git_bare(remote, &["rev-parse", "main^{tree}"]);
+    let notes = test_box.git_ok(
+        repo,
+        &[
+            "notes",
+            "--ref=refs/notes/bay/evidence/local",
+            "show",
+            &tree,
+        ],
+    );
+    let records: Vec<serde_json::Value> = serde_json::from_str(&notes).unwrap();
+    assert!(!records.is_empty(), "{notes}");
+    records
+        .iter()
+        .map(|record| {
+            record["policy_provenance"]
+                .as_str()
+                .unwrap_or("absent")
+                .to_owned()
+        })
+        .collect()
+}
+
+/// Every `policy_changed_outside_bay` event in the remote's executor logs.
+fn outside_events(test_box: &TestBox, remote: &Path) -> Vec<serde_json::Value> {
+    let logs = test_box.git_bare(
+        remote,
+        &["for-each-ref", "--format=%(refname)", "refs/bay/log/"],
+    );
+    let mut events = Vec::new();
+    for log in logs.lines() {
+        for commit in test_box.git_bare(remote, &["rev-list", log]).lines() {
+            let text = test_box.git_bare(remote, &["show", &format!("{commit}:record.json")]);
+            let record: serde_json::Value = serde_json::from_str(&text).unwrap();
+            if record["kind"] == "policy_changed_outside_bay" {
+                events.push(record);
+            }
+        }
+    }
+    events
+}
+
+/// Starts a change on `paths`, writes `files` in its view, and lands it.
+fn land_files(
+    test_box: &TestBox,
+    repo: &Path,
+    intent: &str,
+    paths: &[&str],
+    files: &[(&str, String)],
+) {
+    let mut args = vec!["start", intent, "--paths"];
+    args.extend(paths);
+    let started = test_box.bay_ok(repo, &args);
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    for (path, text) in files {
+        write(&view, path, text);
+    }
+    let (code, landed) = result_json(test_box.bay(&view).args([
+        "land",
+        "--wait",
+        "--change",
+        started["change"].as_str().unwrap(),
+    ]));
+    assert_eq!(code, 0, "{landed}");
+}
+
+#[test]
+fn evidence_says_how_its_policy_reached_trunk() {
+    let (test_box, repo, remote, _id, view) = change(true);
+
+    // The seed added the first policy by hand. That is the bootstrap, the one way a first
+    // policy reaches any trunk, and there was no policy before it to weaken: evidence under it
+    // is `bay`, and no event is recorded.
+    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    assert_eq!(code, 0, "{landed}");
+    let provenance = provenance_at_trunk(&test_box, &repo, &remote);
+    assert!(provenance.iter().all(|p| p == "bay"), "{provenance:?}");
+    assert_eq!(
+        outside_events(&test_box, &remote),
+        Vec::<serde_json::Value>::new()
+    );
+
+    // An adapter edit pushed straight to the forge together with code: `outside_bay`, and one
+    // event naming the adapter path and saying the landing mixed in other paths.
+    let forge = test_box.clone_of(&remote, "forge-mixed");
+    write(&forge, "scripts/bay-check", &script(true, "# adapter v2"));
+    write(&forge, "src/m.rs", "fn m() {}\n");
+    test_box.git_ok(&forge, &["add", "src/m.rs"]);
+    test_box.git_ok(
+        &forge,
+        &["commit", "-q", "-am", "adapter and code on the forge"],
+    );
+    test_box.git_ok(&forge, &["push", "-q", "origin", "main"]);
+    let mixed = test_box.git_ok(&forge, &["rev-parse", "HEAD"]);
+    land_files(
+        &test_box,
+        &repo,
+        "CARD-B",
+        &["src/"],
+        &[("src/b.rs", "fn b() {}\n".to_owned())],
+    );
+    let provenance = provenance_at_trunk(&test_box, &repo, &remote);
+    assert!(
+        provenance.iter().all(|p| p == "outside_bay"),
+        "{provenance:?}"
+    );
+    let events = outside_events(&test_box, &remote);
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_eq!(events[0]["schema"], "bay.event/1");
+    assert_eq!(events[0]["commit"], mixed.as_str());
+    assert_eq!(events[0]["paths"], serde_json::json!(["scripts/bay-check"]));
+    assert_eq!(events[0]["other_paths"], true, "{events:?}");
+
+    // A policy change through bay that touches the policy and its adapter: evidence under it is
+    // `bay`, and the old edit is not recorded again.
+    land_files(
+        &test_box,
+        &repo,
+        "POLICY-2",
+        &[".bay/", "scripts/"],
+        &[
+            ("scripts/bay-check", script(true, "# adapter v3")),
+            (".bay/policy.toml", policy(2, 1)),
+        ],
+    );
+    land_files(
+        &test_box,
+        &repo,
+        "CARD-C",
+        &["src/"],
+        &[("src/c.rs", "fn c() {}\n".to_owned())],
+    );
+    let provenance = provenance_at_trunk(&test_box, &repo, &remote);
+    assert!(provenance.iter().all(|p| p == "bay"), "{provenance:?}");
+    assert_eq!(outside_events(&test_box, &remote).len(), 1);
+
+    // An adapter edit alone pushed straight to the forge: `outside_bay` again, one new event.
+    let forge = test_box.clone_of(&remote, "forge");
+    write(&forge, "scripts/bay-check", &script(true, "# adapter v4"));
+    test_box.git_ok(
+        &forge,
+        &["commit", "-q", "-am", "adapter edit on the forge"],
+    );
+    test_box.git_ok(&forge, &["push", "-q", "origin", "main"]);
+    let outside = test_box.git_ok(&forge, &["rev-parse", "HEAD"]);
+    land_files(
+        &test_box,
+        &repo,
+        "CARD-D",
+        &["src/"],
+        &[("src/d.rs", "fn d() {}\n".to_owned())],
+    );
+    let provenance = provenance_at_trunk(&test_box, &repo, &remote);
+    assert!(
+        provenance.iter().all(|p| p == "outside_bay"),
+        "{provenance:?}"
+    );
+    let events = outside_events(&test_box, &remote);
+    assert_eq!(events.len(), 2, "{events:?}");
+    let new = events
+        .iter()
+        .find(|event| event["commit"] == outside.as_str())
+        .unwrap_or_else(|| panic!("no event for {outside}: {events:?}"));
+    assert_eq!(new["paths"], serde_json::json!(["scripts/bay-check"]));
+    assert_eq!(new["other_paths"], false, "{new}");
+}
+
+#[test]
+fn a_policy_removed_and_added_again_outside_bay_is_no_bootstrap() {
+    let (test_box, repo, remote, _id, _view) = change(true);
+    // Only the first add of the policy file is the bootstrap.
+    let forge = test_box.clone_of(&remote, "forge-readd");
+    let text = std::fs::read_to_string(forge.join(".bay/policy.toml")).unwrap();
+    test_box.git_ok(&forge, &["rm", "-q", ".bay/policy.toml"]);
+    test_box.git_ok(
+        &forge,
+        &["commit", "-q", "-m", "policy removed on the forge"],
+    );
+    write(&forge, ".bay/policy.toml", &text);
+    test_box.git_ok(&forge, &["add", ".bay/policy.toml"]);
+    test_box.git_ok(
+        &forge,
+        &["commit", "-q", "-m", "policy added again on the forge"],
+    );
+    test_box.git_ok(&forge, &["push", "-q", "origin", "main"]);
+    let readded = test_box.git_ok(&forge, &["rev-parse", "HEAD"]);
+    land_files(
+        &test_box,
+        &repo,
+        "CARD-E",
+        &["src/"],
+        &[("src/e.rs", "fn e() {}\n".to_owned())],
+    );
+    let provenance = provenance_at_trunk(&test_box, &repo, &remote);
+    assert!(
+        provenance.iter().all(|p| p == "outside_bay"),
+        "{provenance:?}"
+    );
+    let events = outside_events(&test_box, &remote);
+    assert!(
+        events
+            .iter()
+            .any(|event| event["commit"] == readded.as_str()
+                && event["paths"] == serde_json::json!([".bay/policy.toml"])),
+        "{events:?}"
+    );
+}
+
+/// Lands a change under a check whose policy entry ends with `fields` and whose adapter
+/// first runs `before`; the executor's environment adds `env`.
+fn land_with_environment(
+    fields: &str,
+    before: &str,
+    env: &[(&str, &str)],
+) -> (i32, serde_json::Value) {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let script = check_files(before, &passing_result(1), 1, 60)
+        .into_iter()
+        .find(|(path, _)| path == "scripts/bay-check")
+        .unwrap()
+        .1;
+    let policy = format!("{}{fields}", policy(1, 1));
+    test_box.seed_with_check(
+        &repo,
+        &[("src/a.rs", "fn a() {}\n")],
+        &[
+            ("scripts/bay-check".to_owned(), script),
+            (".bay/policy.toml".to_owned(), policy),
+        ],
+    );
+    let (_, view) = test_box.start_and_edit(&repo);
+    let mut land = test_box.bay(&view);
+    land.args(["land", "--wait"]);
+    for (key, value) in env {
+        land.env(key, value);
+    }
+    result_json(&mut land)
+}
+
+#[test]
+fn a_check_sees_only_the_fixed_baseline_and_its_declared_variables() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    // Each failed condition exits without a result, so the check is unknown, never a pass.
+    let before = format!(
+        "[ -z \"$UNDECLARED_VAR\" ] || {{ echo inherited UNDECLARED_VAR >&2; exit 3; }}\n\
+         [ \"$DECLARED_VAR\" = declared ] || {{ echo no DECLARED_VAR >&2; exit 3; }}\n\
+         [ \"$PATH\" = /usr/bin:/bin ] || {{ echo PATH is $PATH >&2; exit 3; }}\n\
+         [ \"$LANG\" = C.UTF-8 ] || {{ echo LANG is $LANG >&2; exit 3; }}\n\
+         [ -n \"$HOME\" ] && [ \"$HOME\" != '{home}' ] && touch \"$HOME/written\" || {{ echo HOME is $HOME >&2; exit 3; }}\n\
+         [ -n \"$TMPDIR\" ] && touch \"$TMPDIR/written\" || {{ echo TMPDIR is $TMPDIR >&2; exit 3; }}"
+    );
+    let (code, result) = land_with_environment(
+        "path = [\"/usr/bin\", \"/bin\"]\nenv = [\"DECLARED_VAR\"]\n",
+        &before,
+        &[("UNDECLARED_VAR", "leak"), ("DECLARED_VAR", "declared")],
+    );
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["decision"], "landed", "{result}");
+}
+
+#[test]
+fn a_declared_variable_the_executor_does_not_set_is_an_infra_failure() {
+    let (code, result) = land_with_environment("env = [\"MISSING_VAR\"]\n", "true", &[]);
+    assert_eq!(code, 10, "{result}");
+    assert_eq!(result["reason"], "CHECK_UNKNOWN", "{result}");
+    assert_eq!(result["detail"]["checks"][0]["verdict"], "infra_failure");
+    assert!(result.to_string().contains("MISSING_VAR"), "{result}");
+}
+
+#[test]
+fn a_relative_path_entry_makes_the_policy_invalid() {
+    let (code, result) = land_with_environment("path = [\"bin\"]\n", "true", &[]);
+    assert_eq!(code, 10, "{result}");
+    assert_eq!(result["reason"], "POLICY_INVALID", "{result}");
+    assert!(result.to_string().contains("bin"), "{result}");
+}
+
+#[test]
+fn a_check_without_path_runs_under_the_stated_default_path() {
+    // An absent `path` takes its stated default, so no shell falls back to a search path the
+    // policy does not name.
+    let (code, result) = land_with_environment(
+        "",
+        "[ \"$PATH\" = /usr/bin:/bin ] || { echo PATH is $PATH >&2; exit 3; }",
+        &[],
+    );
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["decision"], "landed", "{result}");
+}
+
+#[test]
+fn an_empty_path_or_a_baseline_name_in_env_makes_the_policy_invalid() {
+    // `path = []` would be an empty PATH, which a shell reads as the current directory: the
+    // candidate's tree. An `env` name of the baseline would override it from the executor.
+    for fields in [
+        "path = []\n",
+        "env = [\"HOME\"]\n",
+        "env = [\"PATH\"]\n",
+        "path = [\"/usr/bin:/tmp\"]\n",
+    ] {
+        let (code, result) = land_with_environment(fields, "true", &[]);
+        assert_eq!(code, 10, "{fields}: {result}");
+        assert_eq!(result["reason"], "POLICY_INVALID", "{fields}: {result}");
+    }
+}
+
+#[test]
+fn a_candidates_own_invalid_policy_is_policy_invalid() {
+    let (test_box, _repo, _remote, _id, view) = change(true);
+    write(
+        &view,
+        ".bay/policy.toml",
+        &format!("{}path = [\"bin\"]\n", policy(2, 1)),
+    );
+    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
+    assert_eq!(refused["detail"]["policy"], "candidate", "{refused}");
 }
 
 #[test]

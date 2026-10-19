@@ -1,7 +1,12 @@
 //! `.bay/config.toml` in the repository (`INTERFACES` § 7).
 //!
-//! Only the keys a built feature reads are parsed. Unknown keys are ignored, so a
-//! config written for a later increment still loads.
+//! Every key § 7 lists is parsed and typed, so a mistyped one is a config error. Keys whose
+//! feature is not built yet (`[check] command`, `[notify] command`, `[policy]`, `[hooks]`) are
+//! held and read by nothing. `[executor]` and `[retention]` are read by built features but are
+//! not in § 7's list yet (BACKLOG 18). A key or table bay does not know is a config error that
+//! names it, as is `evidence_reuse` set to anything but `"off"`: a misspelled or unbuilt
+//! setting never loads as a silent default. A config written for a later bay is refused by
+//! this one, and the recovery is `bay update`.
 
 use std::path::Path;
 
@@ -10,6 +15,7 @@ use serde::Deserialize;
 pub const CONFIG_PATH: &str = ".bay/config.toml";
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub trunk: Option<String>,
     pub remote: Option<String>,
@@ -17,16 +23,59 @@ pub struct Config {
     pub trailers: Option<Trailers>,
     pub executor: Option<Executor>,
     pub retention: Option<Retention>,
+    pub check: Option<Check>,
+    pub notify: Option<Notify>,
+    pub policy: Option<PolicyProfile>,
+    pub hooks: Option<Hooks>,
+    /// `[update]` is accepted and ignored: the update pin, channel and switch are the box's
+    /// (`git config --global bay.update*`, `DESIGN` § 15.6), never a repository's, and an older
+    /// config that still carries the table must keep loading.
+    #[allow(dead_code)]
+    update: Option<toml::Table>,
+}
+
+/// `[check] command`: the check adapter. Not read: checks are declared in `.bay/policy.toml`
+/// (§ 7), whose `[[check]]` entries name their own commands.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Check {
+    pub command: Option<String>,
+}
+
+/// `[notify] command`: the notify adapter (`INTERFACES` § 4). Not read until events are built.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Notify {
+    pub command: Option<String>,
+}
+
+/// `[policy]`: the completion profile and evidence reuse. Not read: reuse stays off until G7
+/// passes, and one profile is built.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PolicyProfile {
+    pub profile: Option<String>,
+    pub evidence_reuse: Option<String>,
+}
+
+/// `[hooks] cache_max_age_s` (`DESIGN` § 11): the coordination cache's maximum age for
+/// `pre-tool`. Not read until `pre-tool` judges writes against that cache.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hooks {
+    pub cache_max_age_s: Option<u64>,
 }
 
 /// How long a closed change keeps its drafts before the retention cut (§ 5).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Retention {
     pub window_s: Option<u64>,
 }
 
 /// An external executor implementing the contract of `INTERFACES` § 3a.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Executor {
     pub command: Option<String>,
     /// How long the executor's `submit` may take before the submission ends as timed out.
@@ -46,14 +95,17 @@ pub struct Executor {
 }
 
 /// The configurable trailer keys. `Change-Id`, `Revision-Id`, `Request-Id`, `Candidate-Id`,
-/// `Registry-Id` and `Bay-Epoch` are fixed names.
+/// `Registry-Id`, `Bay-Epoch` and `Bay-Session` are fixed names. The actor trailer carries
+/// the actor's bare name; its session goes in `Bay-Session`.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Trailers {
     pub intent: Option<String>,
     pub actor: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Agent {
     pub product: String,
 }
@@ -67,9 +119,7 @@ impl Config {
     pub fn load(root: &Path) -> Result<Self, String> {
         let path = root.join(CONFIG_PATH);
         match std::fs::read_to_string(&path) {
-            Ok(text) => {
-                toml::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
-            }
+            Ok(text) => Self::parse(&text).map_err(|error| format!("{}: {error}", path.display())),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(error) => Err(format!("{}: {error}", path.display())),
         }
@@ -86,11 +136,31 @@ impl Config {
             return Self::load(root);
         }
         match git.run(&["cat-file", "blob", &format!("HEAD:{CONFIG_PATH}")]) {
-            Ok(text) => {
-                toml::from_str(&text).map_err(|error| format!("HEAD:{CONFIG_PATH}: {error}"))
-            }
+            Ok(text) => Self::parse(&text).map_err(|error| format!("HEAD:{CONFIG_PATH}: {error}")),
             Err(_) => Ok(Self::default()),
         }
+    }
+
+    /// Parses a config text. A key bay does not know, a value of the wrong type, and a value
+    /// this bay does not build are each an error that names it, never a silent default.
+    ///
+    /// # Errors
+    ///
+    /// The text is not a config this bay can honour.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let config: Self = toml::from_str(text).map_err(|error| error.to_string())?;
+        if let Some(reuse) = config
+            .policy
+            .as_ref()
+            .and_then(|policy| policy.evidence_reuse.as_deref())
+            && reuse != "off"
+        {
+            return Err(format!(
+                "[policy] evidence_reuse = \"{reuse}\": this bay builds only \"off\" (evidence \
+                 reuse waits for G7)"
+            ));
+        }
+        Ok(config)
     }
 
     #[must_use]
@@ -197,5 +267,85 @@ impl Config {
         self.agent
             .as_ref()
             .is_some_and(|agent| agent.product == "claude")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    /// `INTERFACES` § 7's example `.bay/config.toml`, verbatim.
+    const INTERFACES_7: &str = r#"
+trunk = "main"
+remote = "origin"
+[trailers]            # map Intent and Actor to an organisation's own keys (defaults shown);
+                      # Change-Id, Revision-Id, Request-Id, Candidate-Id, Registry-Id and
+                      # Bay-Epoch are fixed names
+intent = "Intent"
+actor = "Actor"
+[check]
+command = "scripts/bay-check"      # the check adapter
+[notify]
+command = "scripts/bay-notify"
+[policy]
+profile = "default"                # completion dimensions per change kind
+evidence_reuse = "off"             # "exact-inputs" once its test (G7) passes
+[hooks]
+cache_max_age_s = 30               # older coordination cache → writes to declared inputs get COVERAGE_UNKNOWN
+[agent]
+product = "claude"                 # leave this table out when the box does not use an agent adapter. Another product names its own adapter (`DESIGN` § 15)
+"#;
+
+    #[test]
+    fn every_key_interfaces_7_lists_is_read() {
+        let config: Config = toml::from_str(INTERFACES_7).unwrap();
+        assert_eq!(config.trunk(), "main");
+        assert_eq!(config.remote(), "origin");
+        assert_eq!(config.intent_trailer(), "Intent");
+        assert_eq!(config.actor_trailer(), "Actor");
+        assert!(config.claude_adapter());
+        let check = config.check.as_ref().unwrap();
+        assert_eq!(check.command.as_deref(), Some("scripts/bay-check"));
+        let notify = config.notify.as_ref().unwrap();
+        assert_eq!(notify.command.as_deref(), Some("scripts/bay-notify"));
+        let policy = config.policy.as_ref().unwrap();
+        assert_eq!(policy.profile.as_deref(), Some("default"));
+        assert_eq!(policy.evidence_reuse.as_deref(), Some("off"));
+        let hooks = config.hooks.as_ref().unwrap();
+        assert_eq!(hooks.cache_max_age_s, Some(30));
+    }
+
+    #[test]
+    fn a_listed_key_of_the_wrong_type_does_not_load() {
+        // A key bay reads is typed; a mistyped one is a config error, never a silent default.
+        assert!(toml::from_str::<Config>("[hooks]\ncache_max_age_s = \"30\"\n").is_err());
+        assert!(toml::from_str::<Config>("[notify]\ncommand = 1\n").is_err());
+    }
+
+    #[test]
+    fn a_key_bay_does_not_know_does_not_load() {
+        // A misspelled key is an error that names it, never a silent default.
+        let error = Config::parse("[hooks]\ncache_max_age = 30\n").unwrap_err();
+        assert!(error.contains("cache_max_age"), "{error}");
+        assert!(Config::parse("trnk = \"main\"\n").is_err());
+        assert!(Config::parse("[hook]\ncache_max_age_s = 30\n").is_err());
+        assert!(Config::parse("[executor]\nlease = 5\n").is_err());
+    }
+
+    #[test]
+    fn evidence_reuse_is_off_until_g7() {
+        assert!(Config::parse("[policy]\nevidence_reuse = \"off\"\n").is_ok());
+        let error = Config::parse("[policy]\nevidence_reuse = \"exact-inputs\"\n").unwrap_err();
+        assert!(error.contains("exact-inputs"), "{error}");
+    }
+
+    #[test]
+    fn the_executor_and_retention_keys_built_features_use_are_read() {
+        let config: Config =
+            toml::from_str("[executor]\nlease_s = 5\nheartbeat_s = 2\n[retention]\nwindow_s = 0\n")
+                .unwrap();
+        assert_eq!(config.lease().as_secs(), 5);
+        assert_eq!(config.heartbeat().as_secs(), 2);
+        assert_eq!(config.retention_window().as_secs(), 0);
     }
 }

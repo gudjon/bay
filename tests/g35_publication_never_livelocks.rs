@@ -7,9 +7,12 @@
 //! a newer revision of a queued entry replaces it in place; a head released by its deadline
 //! three times becomes `QUEUE_DEADLINE_EXCEEDED`; the hook refuses a reservation number that is
 //! not above every existing one; a `HOOK_TIMEOUT` retries the same candidate, and five
-//! uncounted retries (hook timeouts, a deadline release during a publish) end in
-//! `PUBLISH_RETRY_EXHAUSTED`. The 20-agent load and worker outages and capabilities leave
-//! `#[ignore]`; a policy landing during the head's check is G26's.
+//! uncounted retries (hook timeouts, deadline releases during a publish) end in
+//! `PUBLISH_RETRY_EXHAUSTED`; a policy landing during the head's check releases it with
+//! `POLICY_CHANGED` while the queue keeps its order; 20 agents and three executors at once all
+//! land with bounded check time. The worker outage and the worker capabilities stay
+//! `#[ignore]`: how a box reports that it has no check capability (`CHECK_UNAVAILABLE`) is not
+//! decided yet.
 
 mod support;
 
@@ -27,6 +30,12 @@ struct Queued {
 }
 
 fn setup(moves: u32, fail_from: u32) -> Queued {
+    setup_with_policy_edit(moves, fail_from, 0)
+}
+
+/// As [`setup`], and run `policy_at` (when above zero) lands a rules-only policy edit
+/// (`revision = 2`, the same checks) from the other clone while it checks.
+fn setup_with_policy_edit(moves: u32, fail_from: u32, policy_at: u32) -> Queued {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
@@ -35,6 +44,7 @@ fn setup(moves: u32, fail_from: u32) -> Queued {
     let before = format!(
         "echo \"$tree\" >> '{runs}'; n=$(wc -l < '{runs}' | tr -d ' '); \
          if [ \"$n\" -le {moves} ]; then ( cd '{other}' && git pull -q --rebase && echo \"$n\" > docs/move-$n.md && git add docs && git -c user.name=t -c user.email=t@t commit -q -m \"move $n\" && git push -q origin main ); fi; \
+         if [ {policy_at} -gt 0 ] && [ \"$n\" -eq {policy_at} ]; then ( cd '{other}' && git pull -q --rebase && sed 's/^revision = .*/revision = 2/' .bay/policy.toml > policy.new && mv policy.new .bay/policy.toml && git add .bay/policy.toml && git -c user.name=t -c user.email=t@t commit -q -m \"policy revision 2\" && git push -q origin main ); fi; \
          if [ {fail_from} -gt 0 ] && [ \"$n\" -ge {fail_from} ]; then printf '%s' \"{{\\\"schema\\\":\\\"bay.check.result/1\\\",\\\"exercised\\\":{{\\\"commit\\\":\\\"$commit\\\",\\\"tree\\\":\\\"$tree\\\"}},\\\"plan\\\":{{\\\"selected\\\":1,\\\"completed\\\":1}},\\\"checks\\\":[{{\\\"id\\\":\\\"t\\\",\\\"verdict\\\":\\\"product_failure\\\"}}]}}\"; exit 0; fi",
         runs = runs.display(),
         other = other.display(),
@@ -362,10 +372,434 @@ fn the_hook_refuses_a_reservation_that_is_not_above_every_existing_one() {
     );
 }
 
+/// A livelock is a stall: the load case's executors stop once no change landed for this long,
+/// however long the whole run takes on a loaded box (each landing takes seconds there).
+const LOAD_STALL: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Runs `executor run --once` in `clone` until `agents` changes are on trunk or no change has
+/// landed for [`LOAD_STALL`]; `progress` is the landed count and when it last grew, shared by
+/// every executor. Returns each pass's result.
+fn executor_passes(
+    test_box: &TestBox,
+    clone: &Path,
+    remote: &Path,
+    progress: &std::sync::Mutex<(usize, std::time::Instant)>,
+    agents: usize,
+) -> Vec<serde_json::Value> {
+    let mut ran = Vec::new();
+    loop {
+        let landed = test_box.trunk_change_ids(remote).len();
+        let stalled = {
+            let mut last = progress.lock().unwrap();
+            if landed > last.0 {
+                *last = (landed, std::time::Instant::now());
+            }
+            last.1.elapsed() >= LOAD_STALL
+        };
+        if landed >= agents || stalled {
+            return ran;
+        }
+        let out = test_box
+            .bay_process(clone)
+            .args(["--json", "executor", "run", "--once"])
+            .output()
+            .unwrap();
+        let pass: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
+            serde_json::json!({"decision": "failed", "stdout": String::from_utf8_lossy(&out.stdout)})
+        });
+        ran.push(pass);
+    }
+}
+
+/// The load case, scaled to a test: 20 agents each submit one change and leave, and three
+/// executors (each its own executor and producer name) work them at once, so their own
+/// publications move trunk under each other's checks. Every operation reaches a stated
+/// outcome, here a landing, each change lands exactly once, no executor reports a failure,
+/// and worker time per landing stays bounded: the checks run are at most three per landing
+/// (two `TRUNK_MOVED` refusals before the queue, then one check as head) plus one per
+/// executor for a head checked while a publisher that passed the gate before the queue was
+/// live landed (`DESIGN` § 6, `ROADMAP` G35). The 12-minute checks are scaled down to a
+/// fraction of a second; the arithmetic of the example load is the design's, not this test's.
 #[test]
-#[ignore = "load, retry exhaustion, worker outages and policy releases are not built"]
-fn twenty_agents_with_twelve_minute_checks_all_reach_a_stated_outcome() {
-    panic!("G35: the load and failure-injection cases are not implemented");
+fn twenty_agents_and_three_executors_all_land_with_bounded_check_time() {
+    const AGENTS: usize = 20;
+    const EXECUTORS: usize = 3;
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let remote = test_box.path().join("repo-remote.git");
+    let runs = test_box.path().join("runs");
+    test_box.seed_with_check(
+        &repo,
+        &[("src/a.rs", "fn a() {}\n")],
+        &check_files(
+            &format!("echo \"$tree\" >> '{}'; sleep 0.3", runs.display()),
+            &passing_result(1),
+            1,
+            60,
+        ),
+    );
+    let mut ids = Vec::new();
+    for agent in 0..AGENTS {
+        let file = format!("agent{agent}");
+        let started = test_box.bay_ok(&repo, &["start", &file, "--paths", "src/"]);
+        let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+        std::fs::write(view.join(format!("src/{file}.rs")), "fn x() {}\n").unwrap();
+        let (code, submitted) = result_json(test_box.bay(&view).arg("land"));
+        assert_eq!(code, 0, "{submitted}");
+        ids.push(started["change"].as_str().unwrap().to_owned());
+    }
+    let executors: Vec<PathBuf> = (0..EXECUTORS)
+        .map(|n| {
+            let clone = test_box.clone_of(&remote, &format!("executor-{n}"));
+            test_box.git_ok(
+                &clone,
+                &["config", "bay.executorName", &format!("exec-{n}")],
+            );
+            test_box.git_ok(
+                &clone,
+                &["config", "bay.producerName", &format!("exec-{n}-checks")],
+            );
+            clone
+        })
+        .collect();
+
+    let progress = std::sync::Mutex::new((0usize, std::time::Instant::now()));
+    let reports: Vec<Vec<serde_json::Value>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = executors
+            .iter()
+            .map(|clone| {
+                let (test_box, remote, progress) = (&test_box, &remote, &progress);
+                scope.spawn(move || executor_passes(test_box, clone, remote, progress, AGENTS))
+            })
+            .collect();
+        workers
+            .into_iter()
+            .map(|worker| worker.join().unwrap())
+            .collect()
+    });
+
+    // No pass and no operation in it ends in an undefined state.
+    for pass in reports.iter().flatten() {
+        assert_eq!(pass["decision"], "ok", "{pass}");
+        for result in pass["detail"]["ran"].as_array().unwrap() {
+            assert_ne!(result["decision"], "failed", "{result}");
+        }
+    }
+    let mut landed = test_box.trunk_change_ids(&remote);
+    assert_eq!(landed.len(), AGENTS, "every change lands, once: {landed:?}");
+    landed.sort();
+    landed.dedup();
+    let mut expected = ids.clone();
+    expected.sort();
+    assert_eq!(landed, expected);
+    let status = test_box.bay_ok(&repo, &["status"]);
+    let changes = status["detail"]["changes"].as_array().unwrap();
+    assert_eq!(changes.len(), AGENTS, "{status}");
+    for change in changes {
+        assert_eq!(change["operation"]["state"], "published", "{change}");
+    }
+    let checks = std::fs::read_to_string(&runs).unwrap().lines().count();
+    eprintln!("G35 load: {checks} checks for {AGENTS} landings");
+    assert!(
+        checks <= 3 * AGENTS + EXECUTORS,
+        "worker time per landing is bounded: {checks} checks for {AGENTS} landings"
+    );
+}
+
+/// The head always releases (`DESIGN` § 6): a reservation whose operation already landed (a
+/// second place two executors took for it at once, or one whose release a crash lost) is never
+/// run again, so the executor releases it at once instead of letting it hold the queue for
+/// good, and the next change publishes.
+#[test]
+fn a_head_whose_operation_already_landed_is_released_at_once() {
+    let queued = setup(2, 0);
+    let (first, _) = land(&queued, "first");
+    let executor = queued.test_box.clone_of(&queued.remote, "executor");
+    for _ in 0..2 {
+        queued
+            .test_box
+            .bay_ok(&executor, &["executor", "run", "--once"]);
+    }
+    assert_eq!(
+        queued.test_box.trunk_change_ids(&queued.remote),
+        vec![first.clone()]
+    );
+    // A second place for the landed operation, behind its released first one.
+    let repo = bay::repo::Repo::open(&queued.repo).unwrap();
+    let stale = bay::queue::join(&repo, None, &format!("{first}.1"), &first).unwrap();
+    assert_eq!(stale, 2);
+
+    let (second, _) = land(&queued, "second");
+    let ran = queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    let result = ran["detail"]["ran"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["change"] == second.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(result["decision"], "landed", "{ran}");
+    let release = queued.test_box.git_bare(
+        &queued.remote,
+        &["show", "refs/bay/queue-done/2:release.json"],
+    );
+    assert!(release.contains("\"published\""), "{release}");
+    assert_eq!(
+        queued.test_box.trunk_change_ids(&queued.remote),
+        vec![second, first]
+    );
+}
+
+/// The head always releases (`DESIGN` § 6), also for a place of a change that the retention
+/// cut closed: the cut chain keeps no operations, and an expired op id is never run again
+/// (§ 5, § 9a). The executor releases that place at once with the change's state, and the next
+/// change publishes; nothing waits for a progress deadline, which `--once` never sees fire.
+#[test]
+fn a_head_whose_change_the_retention_cut_closed_is_released_at_once() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let remote = test_box.path().join("repo-remote.git");
+    let mut files = check_files("true", &passing_result(1), 1, 60);
+    files.push((
+        ".bay/config.toml".to_owned(),
+        "[retention]\nwindow_s = 0\n".to_owned(),
+    ));
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    let runs = test_box.path().join("runs");
+    let queued = Queued {
+        test_box,
+        repo,
+        remote,
+        runs,
+    };
+    let (first, _) = land(&queued, "first");
+    let executor = queued.test_box.clone_of(&queued.remote, "executor");
+    let landed = queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    assert_eq!(landed["detail"]["ran"][0]["decision"], "landed", "{landed}");
+    let cut = queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    assert!(
+        cut["detail"]["ran"][0]["retention_cut"].is_string(),
+        "{cut}"
+    );
+    // A place for the expired operation, as a crash that lost its release would leave it.
+    let repo = bay::repo::Repo::open(&queued.repo).unwrap();
+    let stale = bay::queue::join(&repo, None, &format!("{first}.1"), &first).unwrap();
+    assert_eq!(stale, 1);
+
+    let (second, _) = land(&queued, "second");
+    let ran = queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    let result = ran["detail"]["ran"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["change"] == second.as_str())
+        .cloned()
+        .unwrap();
+    assert_eq!(result["decision"], "landed", "{ran}");
+    let release = queued.test_box.git_bare(
+        &queued.remote,
+        &["show", "refs/bay/queue-done/1:release.json"],
+    );
+    assert!(release.contains("\"landed\""), "{release}");
+}
+
+/// A release the remote refuses never stops the supervisor (`DESIGN` § 6, § 9a): the pass
+/// reports it under `unreleased`, runs every operation it can, and the next pass tries the
+/// release again. Here the remote refuses every release while a landed operation's stale place
+/// is head, then accepts them again.
+#[test]
+fn a_release_the_remote_refuses_is_reported_and_tried_again_on_the_next_pass() {
+    let queued = setup(0, 0);
+    let (first, _) = land(&queued, "first");
+    let executor = queued.test_box.clone_of(&queued.remote, "executor");
+    queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    assert_eq!(
+        queued.test_box.trunk_change_ids(&queued.remote),
+        vec![first.clone()]
+    );
+    let repo = bay::repo::Repo::open(&queued.repo).unwrap();
+    let stale = bay::queue::join(&repo, None, &format!("{first}.1"), &first).unwrap();
+    assert_eq!(stale, 1);
+    let hook = queued.remote.join("hooks/pre-receive");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\nwhile read old new name; do case \"$name\" in refs/bay/queue-done/*) echo 'no releases today' >&2; exit 1;; esac; done\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+
+    let (second, _) = land(&queued, "second");
+    let held = queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    assert_eq!(held["decision"], "ok", "{held}");
+    assert!(
+        held["detail"]["unreleased"]
+            .as_str()
+            .is_some_and(|message| message.contains("queue entry 1")),
+        "{held}"
+    );
+    assert_eq!(
+        queued.test_box.trunk_change_ids(&queued.remote),
+        vec![first.clone()]
+    );
+
+    std::fs::remove_file(&hook).unwrap();
+    let ran = queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    assert!(ran["detail"]["unreleased"].is_null(), "{ran}");
+    assert_eq!(
+        queued.test_box.trunk_change_ids(&queued.remote),
+        vec![second, first]
+    );
+}
+
+/// Two executors that queue one operation at once both create a reservation; the later one
+/// sees the earlier and releases its own, so the operation holds one place (`DESIGN` § 6).
+#[test]
+fn one_operation_queued_twice_at_once_holds_one_place() {
+    let queued = setup(0, 0);
+    let repo = bay::repo::Repo::open(&queued.repo).unwrap();
+    let first = bay::queue::join(&repo, None, "aaaaaaaa.1", "aaaaaaaa").unwrap();
+    // The second executor read the queue before the first reservation existed.
+    let second = bay::queue::join(&repo, None, "aaaaaaaa.1", "aaaaaaaa").unwrap();
+    assert_eq!((first, second), (1, 1));
+    assert_eq!(
+        queue_refs(&queued.test_box, &queued.remote),
+        "refs/bay/queue-done/2\nrefs/bay/queue/1\nrefs/bay/queue/2"
+    );
+    let queue = bay::queue::Queue::read(&repo).unwrap();
+    assert_eq!(queue.of("aaaaaaaa.1").map(|entry| entry.seq), Some(1));
+    assert_eq!(queue.position(1), 1);
+}
+
+/// A two-hour worker outage with three queued operations and their agents gone ends with all
+/// three landing after the workers return, none `QUEUE_DEADLINE_EXCEEDED` (`ROADMAP` G35).
+/// It needs a head that cannot start its check to be released `CHECK_UNAVAILABLE` and wait
+/// outside the queue (`waiting_for: "worker"`, `DESIGN` § 6), and the spec does not yet say how a
+/// box or its adapter reports that no capable worker answered (BACKLOG 12).
+#[test]
+#[ignore = "how a box reports no check capability is not decided (CHECK_UNAVAILABLE, BACKLOG 12)"]
+fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
+    panic!("G35: CHECK_UNAVAILABLE has no decided source yet");
+}
+
+/// A worker with the wrong capabilities is not a substitute (`DESIGN` § 7, `ROADMAP` G35). The
+/// check request names its `requires`, but how a worker's capabilities are declared and matched
+/// is not decided.
+#[test]
+#[ignore = "how a worker's capabilities are declared and matched is not decided (DESIGN § 7)"]
+fn a_worker_with_the_wrong_capabilities_is_not_a_substitute() {
+    panic!("G35: worker capabilities have no decided form yet");
+}
+
+/// A policy change lands while the head checks: the head is released with `POLICY_CHANGED` and
+/// rejoins at the back; the queued entries keep their positions and are rechecked under the new
+/// policy when they become head; the release counts toward neither `QUEUE_DEADLINE_EXCEEDED`
+/// nor `PUBLISH_RETRY_EXHAUSTED` (`DESIGN` § 6, `ROADMAP` G35).
+#[test]
+fn a_policy_landing_during_the_heads_check_releases_it_and_the_queue_keeps_its_order() {
+    // Runs 1–2 move trunk, so the first change queues; its run 3 as head lands a policy edit.
+    let queued = setup_with_policy_edit(2, 0, 3);
+    let (first, _) = land(&queued, "first");
+    let executor = queued.test_box.clone_of(&queued.remote, "executor");
+    queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    let mut behind = Vec::new();
+    for file in ["second", "third"] {
+        let (id, view) = land(&queued, file);
+        let (code, held) = result_json(queued.test_box.bay(&view).args(["land", "--wait"]));
+        assert_eq!(code, 0, "{held}");
+        assert_eq!(held["decision"], "queued", "{held}");
+        behind.push((id, held["detail"]["seq"].as_u64().unwrap()));
+    }
+    assert_eq!(
+        behind.iter().map(|(_, seq)| *seq).collect::<Vec<_>>(),
+        vec![2, 3]
+    );
+    assert_eq!(
+        runs(&queued),
+        2,
+        "no check ran for the entries behind the head"
+    );
+
+    for _ in 0..8 {
+        if queued.test_box.trunk_change_ids(&queued.remote).len() == 3 {
+            break;
+        }
+        queued
+            .test_box
+            .bay_ok(&executor, &["executor", "run", "--once"]);
+    }
+    let release = queued.test_box.git_bare(
+        &queued.remote,
+        &["show", "refs/bay/queue-done/1:release.json"],
+    );
+    assert!(release.contains("\"policy_changed\""), "{release}");
+    // The entries behind the head kept their places and landed first, in order; the released
+    // head rejoined at the back.
+    for (id, seq) in &behind {
+        let entry = queued.test_box.git_bare(
+            &queued.remote,
+            &["show", &format!("refs/bay/queue/{seq}:entry.json")],
+        );
+        assert!(entry.contains(&format!("{id}.1")), "{entry}");
+    }
+    let rejoined = queued
+        .test_box
+        .git_bare(&queued.remote, &["show", "refs/bay/queue/4:entry.json"]);
+    assert!(rejoined.contains(&format!("{first}.1")), "{rejoined}");
+    assert_eq!(
+        queued.test_box.trunk_change_ids(&queued.remote),
+        vec![first.clone(), behind[1].0.clone(), behind[0].0.clone()],
+        "the queue's order, newest first on trunk"
+    );
+    // One check per entry as head under the new policy, and one recheck of the released head.
+    assert_eq!(runs(&queued), 6);
+    let status = queued.test_box.bay_ok(&queued.repo, &["status", &first]);
+    let op = &status["detail"]["changes"][0]["operation"];
+    assert_eq!(op["policy_changed"], 1, "{status}");
+    assert_eq!(op["publish_retries"], 0, "{status}");
+    assert_eq!(op["state"], "published", "{status}");
+    // Each landed tree was checked under the policy it landed with.
+    let notes = queued.test_box.git_bare(
+        &queued.remote,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/notes/bay/evidence/",
+        ],
+    );
+    for back in ["main", "main~1", "main~2"] {
+        let tree = queued
+            .test_box
+            .git_bare(&queued.remote, &["rev-parse", &format!("{back}^{{tree}}")]);
+        let evidence: String = notes
+            .lines()
+            .map(|notes_ref| {
+                queued.test_box.git_bare(
+                    &queued.remote,
+                    &["notes", &format!("--ref={notes_ref}"), "show", &tree],
+                )
+            })
+            .collect();
+        assert!(
+            evidence.contains("\"policy_revision\": 2"),
+            "{back}: {evidence}"
+        );
+    }
 }
 
 /// A bay-hosted, signed trunk whose trunk hook has a 3 s time bound (an honest judgement takes about 1 s), and a change ready to land.
@@ -442,19 +876,50 @@ fn head_released_mid_publish() -> (Queued, String, PathBuf, std::process::Child,
     queued
         .test_box
         .bay_ok(&executor, &["executor", "run", "--once"]);
-    let go = queued.test_box.path().join("go");
-    let child = queued
+    let (child, go) = pause_head_and_release(&queued, &executor, &id, 1);
+    (queued, id, executor, child, go)
+}
+
+/// Runs the head attempt of `id` at queue place `seq` paused just before its publishing push,
+/// and creates that place's release there, as a progress deadline would. Returns the paused
+/// child and the file that lets it go on.
+fn pause_head_and_release(
+    queued: &Queued,
+    executor: &Path,
+    id: &str,
+    seq: u64,
+) -> (std::process::Child, PathBuf) {
+    pause_head_and_release_as(queued, executor, id, seq, "deadline")
+}
+
+/// As [`pause_head_and_release`], with the release's `reason`.
+fn pause_head_and_release_as(
+    queued: &Queued,
+    executor: &Path,
+    id: &str,
+    seq: u64,
+    reason: &str,
+) -> (std::process::Child, PathBuf) {
+    let go = queued.test_box.path().join(format!("go-{seq}"));
+    let mut child = queued
         .test_box
-        .bay_process(&executor)
+        .bay_process(executor)
         .env("BAY_TEST_PAUSE_AT", "before-publish")
         .env("BAY_TEST_PAUSE_FILE", &go)
         .args(["--json", "executor", "run", "--once"])
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    let paused = queued.test_box.path().join("go.paused");
+    let paused = queued.test_box.path().join(format!("go-{seq}.paused"));
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while !paused.exists() {
+        if child.try_wait().unwrap().is_some() {
+            let out = child.wait_with_output().unwrap();
+            panic!(
+                "the head at place {seq} ended without reaching its publishing push: {}",
+                String::from_utf8_lossy(&out.stdout)
+            );
+        }
         assert!(
             std::time::Instant::now() < deadline,
             "the head never paused"
@@ -462,18 +927,17 @@ fn head_released_mid_publish() -> (Queued, String, PathBuf, std::process::Child,
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let git = bay::git::Git::new(&queued.repo);
-    let release =
-        bay::queue::release_commit(&git, None, 1, &format!("{id}.1"), "deadline").unwrap();
+    let release = bay::queue::release_commit(&git, None, seq, &format!("{id}.1"), reason).unwrap();
     queued.test_box.git_ok(
         &queued.repo,
         &[
             "push",
             "-q",
             "origin",
-            &format!("{release}:refs/bay/queue-done/1"),
+            &format!("{release}:refs/bay/queue-done/{seq}"),
         ],
     );
-    (queued, id, executor, child, go)
+    (child, go)
 }
 
 /// A head whose release the progress deadline created while it was publishing has its push
@@ -498,4 +962,85 @@ fn a_deadline_release_mid_publish_rejoins_and_counts_as_a_publish_retry() {
     let status = queued.test_box.bay_ok(&queued.repo, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
     assert_eq!(op["publish_retries"], 1, "{status}");
+}
+
+/// The progress deadline releases the head while it publishes, five times in a row. Each
+/// release rejoins the queue and counts as an uncounted publish retry, never toward
+/// `QUEUE_DEADLINE_EXCEEDED`, so the third does not block it; the fifth ends the operation in
+/// `PUBLISH_RETRY_EXHAUSTED`, and trunk never moves (`DESIGN` § 6, `INTERFACES` § 2).
+#[test]
+fn the_fifth_deadline_release_mid_publish_ends_in_publish_retry_exhausted() {
+    let queued = setup(2, 0);
+    let (id, _) = land(&queued, "first");
+    let executor = queued.test_box.clone_of(&queued.remote, "executor");
+    queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    let trunk = queued
+        .test_box
+        .git_bare(&queued.remote, &["rev-parse", "main"]);
+    for seq in 1..=5u64 {
+        let (child, go) = pause_head_and_release(&queued, &executor, &id, seq);
+        std::fs::write(&go, "go").unwrap();
+        let out = child.wait_with_output().unwrap();
+        let ran: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let result = &ran["detail"]["ran"][0];
+        if seq < 5 {
+            assert_eq!(
+                result["reason"], "PUBLICATION_QUEUED",
+                "release {seq}: {ran}"
+            );
+            assert_eq!(result["detail"]["seq"], seq + 1, "release {seq}: {ran}");
+        } else {
+            assert_eq!(result["reason"], "PUBLISH_RETRY_EXHAUSTED", "{ran}");
+        }
+    }
+    assert_eq!(
+        queued
+            .test_box
+            .git_bare(&queued.remote, &["rev-parse", "main"]),
+        trunk
+    );
+    let status = queued.test_box.bay_ok(&queued.repo, &["status", &id]);
+    let op = &status["detail"]["changes"][0]["operation"];
+    assert_eq!(op["publish_retries"], 5, "{status}");
+    assert_eq!(op["outcome"], "PUBLISH_RETRY_EXHAUSTED", "{status}");
+}
+
+/// Only a release the progress deadline created is a publish retry (`DESIGN` § 6). A head
+/// whose place was released for another reason while it published (here `superseded`, as a
+/// newer revision's executor releases it) neither rejoins the queue nor uses a publish retry:
+/// the newer revision is the one that joins at the back. Nothing is published.
+#[test]
+fn a_release_for_another_reason_mid_publish_is_no_publish_retry() {
+    let queued = setup(2, 0);
+    let (id, _) = land(&queued, "first");
+    let executor = queued.test_box.clone_of(&queued.remote, "executor");
+    queued
+        .test_box
+        .bay_ok(&executor, &["executor", "run", "--once"]);
+    let (child, go) = pause_head_and_release_as(&queued, &executor, &id, 1, "superseded");
+    std::fs::write(&go, "go").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let ran: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let result = &ran["detail"]["ran"][0];
+    assert_ne!(result["decision"], "queued", "{ran}");
+    assert!(
+        result["detail"]
+            .as_str()
+            .is_some_and(|message| message.contains("superseded")),
+        "{ran}"
+    );
+    assert_eq!(
+        queue_refs(&queued.test_box, &queued.remote),
+        "refs/bay/queue-done/1\nrefs/bay/queue/1",
+        "no second place"
+    );
+    assert_eq!(
+        queued.test_box.trunk_change_ids(&queued.remote),
+        Vec::<String>::new()
+    );
+    let status = queued.test_box.bay_ok(&queued.repo, &["status", &id]);
+    let op = &status["detail"]["changes"][0]["operation"];
+    assert_eq!(op["publish_retries"], 0, "{status}");
 }

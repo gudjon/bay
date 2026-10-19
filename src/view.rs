@@ -122,9 +122,16 @@ pub fn journal(repo: &Repo, id: &str) -> Option<Journal> {
 ///
 /// The journal cannot be written.
 pub fn set_journal(repo: &Repo, id: &str, state: Journal) -> Result<(), String> {
+    // A temporary file of this writer's own: two processes recording the same journal at once
+    // (two `bay status` runs) each rename a whole file, and the later rename wins.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     std::fs::create_dir_all(repo.views_dir()).map_err(|error| error.to_string())?;
     let path = journal_path(repo, id);
-    let tmp = path.with_extension("journal.tmp");
+    let tmp = path.with_extension(format!(
+        "journal.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let created_unix = read_journal(repo, id).map_or_else(unix_now, |file| file.created_unix);
     let file = JournalFile {
         change: id.to_owned(),
@@ -248,4 +255,39 @@ pub fn record_observed(
         }
     }
     Ok(added)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Journal, journal, set_journal};
+    use crate::repo::Repo;
+
+    #[test]
+    fn concurrent_journal_writes_never_fail() {
+        // Two `bay status` runs record the same view's journal at once; each writes a whole
+        // file of its own and renames it into place.
+        let dir = tempfile::TempDir::new().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let repo = Repo::open(dir.path()).unwrap();
+        std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        (0..100)
+                            .map(|_| set_journal(&repo, "abcd2345", Journal::Releasable))
+                            .collect::<Result<Vec<()>, String>>()
+                    })
+                })
+                .collect();
+            for writer in writers {
+                writer.join().unwrap().unwrap();
+            }
+        });
+        assert_eq!(journal(&repo, "abcd2345"), Some(Journal::Releasable));
+    }
 }

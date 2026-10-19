@@ -66,6 +66,7 @@ fn record(
         // bay's own repository has no acceptance policy; the gate is its policy.
         policy_revision: 0,
         manifest_digest: "gate".to_owned(),
+        policy_provenance: None,
         producer: Producer {
             name: producer.to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -74,8 +75,10 @@ fn record(
         at: now_rfc3339(git)?,
         why: None,
         units: Vec::new(),
+        selection: None,
         sandbox: None,
         signature: None,
+        unknown: serde_json::Map::new(),
     };
     record.sign(Path::new(key))?;
     evidence::append(git, producer, &record)?;

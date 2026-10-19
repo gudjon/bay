@@ -1,4 +1,4 @@
-//! G11. A workspace is never half-made.
+//! G11. A view is never half-made.
 //!
 //! Kill `start` mid-creation: no candidate can be built from the view; `--resume` completes it.
 

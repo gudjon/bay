@@ -74,9 +74,7 @@ pub fn intent_hash(reference: &str, revision: &str) -> String {
 ///
 /// The random source for a session id cannot be read.
 pub fn current_actor() -> Result<Actor, String> {
-    let name = std::env::var("BAY_ACTOR")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "agent".to_owned());
+    let name = actor_name();
     let session = match std::env::var("BAY_SESSION") {
         Ok(session) => session,
         Err(_) => format!(
@@ -85,6 +83,15 @@ pub fn current_actor() -> Result<Actor, String> {
         ),
     };
     Ok(Actor { name, session })
+}
+
+/// The acting identity's stable name: `BAY_ACTOR`, else the user name, else `agent`. A later
+/// session of the same actor has this name and a session of its own.
+#[must_use]
+pub fn actor_name() -> String {
+    std::env::var("BAY_ACTOR")
+        .or_else(|_| std::env::var("USER"))
+        .unwrap_or_else(|_| "agent".to_owned())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,10 +204,16 @@ pub struct Operation {
     /// they were checked (`POLICY_CHANGED`, § 7); these are not `trunk_moved` refusals.
     #[serde(default)]
     pub policy_changed: u32,
-    /// Uncounted publish retries: pushes the trunk hook refused with `HOOK_TIMEOUT` (§ 6). Five
+    /// Uncounted publish retries: pushes the trunk hook refused with `HOOK_TIMEOUT`, and
+    /// releases the progress deadline created while this operation was publishing (§ 6). Five
     /// end the operation as `PUBLISH_RETRY_EXHAUSTED`.
     #[serde(default)]
     pub publish_retries: u32,
+    /// The queue places whose deadline release came while this operation was publishing. Such a
+    /// release is a publish retry and never counts toward `QUEUE_DEADLINE_EXCEEDED` (§ 6); the
+    /// release ref is create-only and cannot say so itself, so the chain records it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mid_publish_releases: Vec<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -2,6 +2,7 @@
 //! chain per executor, no shared tip. Each commit's tree holds `record.json`, a compact
 //! terminal record: op id, request digest, outcome, published commit, evidence and policy ids.
 //! It outlives the change's drafts, so `status` explains an outcome after retention and gc.
+//! The same log holds the `bay.event/1` events trunk cannot derive (`INTERFACES` § 5).
 
 use serde_json::Value;
 
@@ -11,6 +12,8 @@ use crate::repo::Repo;
 use crate::signing::Signer;
 
 pub const LOG_PREFIX: &str = "refs/bay/log/";
+/// An event trunk cannot derive (`INTERFACES` § 5), kept in the same log.
+pub const EVENT_SCHEMA: &str = "bay.event/1";
 
 #[must_use]
 pub fn log_ref(executor: &str) -> String {
@@ -75,13 +78,19 @@ pub fn append(
         }
         .to_owned(),
     );
-    args.extend([
-        "-m".to_owned(),
+    let subject = if record["schema"] == EVENT_SCHEMA {
+        format!(
+            "event {} {}",
+            record["kind"].as_str().unwrap_or_default(),
+            record["id"].as_str().unwrap_or_default()
+        )
+    } else {
         format!(
             "terminal record {}",
             record["op_id"].as_str().unwrap_or_default()
-        ),
-    ]);
+        )
+    };
+    args.extend(["-m".to_owned(), subject]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let identity: Vec<(String, String)> = signer.map_or_else(
         || {
@@ -115,6 +124,23 @@ pub fn append(
 ///
 /// A git fault.
 pub fn records_for(git: &Git, id: &str) -> Result<Vec<Value>, String> {
+    every_record(git, &|record| {
+        record["change"] == id && record["schema"] != EVENT_SCHEMA
+    })
+}
+
+/// Every `bay.event/1` of kind `kind`, from every executor log this repository holds.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn events(git: &Git, kind: &str) -> Result<Vec<Value>, String> {
+    every_record(git, &|record| {
+        record["schema"] == EVENT_SCHEMA && record["kind"] == kind
+    })
+}
+
+fn every_record(git: &Git, keep: &dyn Fn(&Value) -> bool) -> Result<Vec<Value>, String> {
     let logs = git
         .run(&["for-each-ref", "--format=%(refname)", LOG_PREFIX])
         .map_err(|error| error.message())?;
@@ -128,7 +154,7 @@ pub fn records_for(git: &Git, id: &str) -> Result<Vec<Value>, String> {
                 continue;
             };
             if let Ok(record) = serde_json::from_str::<Value>(&text)
-                && record["change"] == id
+                && keep(&record)
             {
                 out.push(record);
             }

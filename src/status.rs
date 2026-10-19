@@ -2,7 +2,8 @@
 //!
 //! "Landed" comes from trunk, never from the chain alone: a change whose publication is on
 //! trunk is landed even when its chain was not updated before a crash. Built here: one change
-//! or every local change, with freshness. Leftovers (G41) and the fleet map are later items.
+//! or every local change, with freshness. Leftovers (G41) and the fleet map are later items;
+//! `--fleet` builds only its fail-closed path (G49).
 
 use std::path::Path;
 
@@ -19,6 +20,129 @@ use crate::view;
 #[must_use]
 pub fn status(dir: &Path, change: Option<&str>) -> BayResult {
     run(dir, change).unwrap_or_else(BayResult::failed)
+}
+
+/// `bay status --fleet`: the fleet map read from the local cache (`DESIGN` § 11a,
+/// `INTERFACES` § 5a). It fetches nothing, opens no SSH to find machines and starts no session.
+///
+/// Built here: the fail-closed path (G49). A cache with no fetch of the configured remote is
+/// not the fleet, so the result is `blocked` with `REMOTE_NOT_FETCHED`, and its detail lists
+/// no machines, actors, talks or sessions. The map itself reads `refs/bay/live/<machine>`,
+/// which increment 2 brings; until then a fetched cache is an operation fault that says so,
+/// never an empty map presented as the fleet.
+#[must_use]
+pub fn fleet(dir: &Path) -> BayResult {
+    run_fleet(dir).unwrap_or_else(BayResult::failed)
+}
+
+fn run_fleet(dir: &Path) -> Result<BayResult, String> {
+    let repo = Repo::open(dir)?;
+    let remote = repo.remote();
+    let url = repo
+        .git
+        .remote_url(remote)
+        .map_err(|error| error.message())?;
+    let configured = url.is_some();
+    let fetched = match &url {
+        Some(url) => fleet_fetch_recorded(&repo, remote, url)?,
+        None => false,
+    };
+    if !fetched {
+        return Ok(
+            BayResult::blocked(Reason::RemoteNotFetched).with_detail(json!({
+                "remote": remote,
+                "remote_configured": configured,
+                "fetched": false,
+                "note": "the local cache has no fetch of the configured remote, so it is not the fleet",
+            })),
+        );
+    }
+    Err(format!(
+        "bay status --fleet: the remote {remote} has been fetched, but this bay version does not \
+         build the fleet map (refs/bay/live, increment 2); only the fail-closed path is built"
+    ))
+}
+
+/// Where bay records a fetch of the remote's fleet refs (`refs/bay/live/*`): a local file
+/// beside the views, never pushed (ruling: what "fetched" means for `--fleet`).
+fn fleet_fetch_record(repo: &Repo) -> std::path::PathBuf {
+    repo.common_dir
+        .join("bay")
+        .join("fleet")
+        .join("fetched.json")
+}
+
+/// Whether this cache holds a fetch of `remote`'s fleet refs: the record a fetch of
+/// `refs/bay/live/*` writes, naming the remote and the URL it was fetched from. A trunk
+/// tracking ref is not that fetch: a plain push writes it, and bay's trunk fetch brings no
+/// `refs/bay/live`. A record for another URL is a fetch of another remote. No command in this
+/// version writes the record (the live refs are increment 2), so `--fleet` fails closed.
+fn fleet_fetch_recorded(repo: &Repo, remote: &str, url: &str) -> Result<bool, String> {
+    let path = fleet_fetch_record(repo);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    // An unreadable record is no proof of a fetch: fail closed.
+    let Ok(record) = serde_json::from_str::<Value>(&text) else {
+        return Ok(false);
+    };
+    Ok(record["remote"] == remote && record["url"] == url && record["at"].is_string())
+}
+
+/// What a cached read says instead of a fetch time: it never synchronized.
+pub const CACHED: &str = "local cache (not fetched by this read)";
+
+/// The state of the local changes `select` picks, read from this repository's own refs only
+/// (`DESIGN` § 11: "Local caches and cursors are allowed; status shows its last
+/// synchronization point"). Used by the agent hook, where latency is a measured interface: it
+/// pushes no receipt, fetches nothing, and writes no view journal (leftovers are not read).
+/// The trunk it judges against is the remote-tracking ref, the last synchronization point,
+/// and `freshness.fetched_at` says it was not fetched. `select` sees each change's id and
+/// record before any trunk scan, so changes it drops cost one chain read.
+///
+/// # Errors
+///
+/// No repository, no tracking ref of the remote trunk, or a git fault.
+pub fn cached(
+    repo: &Repo,
+    select: &dyn Fn(&str, &ChangeRecord) -> bool,
+) -> Result<BayResult, String> {
+    let trunk = repo
+        .git
+        .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
+        .map_err(|error| error.message())?;
+    let pending = receipts::pending(repo);
+    let chain = Chain::new(&repo.git);
+    let ids = repo
+        .git
+        .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
+        .map_err(|error| error.message())?;
+    let mut changes = Vec::new();
+    for id in ids
+        .lines()
+        .map(|name| name.trim_start_matches(CHANGES_PREFIX))
+    {
+        let Ok((_, record)) = chain.read(id) else {
+            continue;
+        };
+        if !select(id, &record) {
+            continue;
+        }
+        let unsynced: Vec<&Receipt> = pending
+            .iter()
+            .map(|(_, receipt)| receipt)
+            .filter(|receipt| receipt.change == id)
+            .collect();
+        changes.push(describe(repo, &record, &trunk, &unsynced)?);
+    }
+    let mut result = BayResult::ok(json!({"changes": changes, "trunk": trunk}));
+    result.freshness = Some(Freshness {
+        trunk,
+        fetched_at: CACHED.to_owned(),
+    });
+    Ok(result)
 }
 
 fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
@@ -107,8 +231,13 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     }
     let leftovers = leftovers(&repo, &trunk)?;
     let _ = &leftovers;
-    let mut result =
-        BayResult::ok(json!({"changes": changes, "leftovers": leftovers, "trunk": trunk}));
+    let quarantines = quarantines(&repo, &trunk);
+    let mut result = BayResult::ok(json!({
+        "changes": changes,
+        "leftovers": leftovers,
+        "quarantines": quarantines,
+        "trunk": trunk,
+    }));
     if let [only] = ids.as_slice() {
         result = result.with_change(only.clone());
     }
@@ -117,6 +246,36 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         fetched_at: fetched_at.unwrap_or_else(|| "not fetched (remote unreachable)".to_owned()),
     });
     Ok(result)
+}
+
+/// The open quarantines of the policy at trunk (ruling 8c), so a set-aside check is never
+/// silent. One past its end date stays in force and is shown as `overdue`. An unreadable
+/// policy lists none here; `land` names it with `POLICY_INVALID`.
+fn quarantines(repo: &Repo, trunk: &str) -> Vec<Value> {
+    open_quarantines(&repo.git, trunk)
+}
+
+/// The open quarantines of the policy at `at`, each with whether it is overdue today. Read
+/// by `status` and by `bay doctor` (`DESIGN` § 7).
+pub(crate) fn open_quarantines(git: &crate::git::Git, at: &str) -> Vec<Value> {
+    let Ok(Some(policy)) = crate::policy::load_at(git, at) else {
+        return Vec::new();
+    };
+    let now = now_rfc3339();
+    let today = now.get(..10).unwrap_or_default();
+    policy
+        .quarantined
+        .iter()
+        .map(|quarantine| {
+            json!({
+                "check": quarantine.id,
+                "environment": quarantine.environment,
+                "reason": quarantine.reason,
+                "end": quarantine.end,
+                "overdue": quarantine.overdue(today),
+            })
+        })
+        .collect()
 }
 
 /// Every view this machine still holds, with its change state, its age and whether it has

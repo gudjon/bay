@@ -99,6 +99,31 @@ impl Repo {
         ]);
     }
 
+    /// Fetches every other producer's evidence notes ref from the remote, so an operation
+    /// resumed on this machine sees the records its earlier attempts wrote elsewhere (§ 7).
+    /// `own`'s ref is never fetched: only this producer writes it, and a remote copy this
+    /// machine did not write is a collision its push reports. Best effort: offline, the local
+    /// records are what this machine can see.
+    pub fn fetch_evidence(&self, own: &str) {
+        let own = crate::evidence::notes_ref(own);
+        let pattern = format!("{}*", crate::evidence::EVIDENCE_PREFIX);
+        let Ok(listed) = self.git.run(&["ls-remote", self.remote(), &pattern]) else {
+            return;
+        };
+        let refspecs: Vec<String> = listed
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .filter(|name| *name != own)
+            .map(|name| format!("+{name}:{name}"))
+            .collect();
+        if refspecs.is_empty() {
+            return;
+        }
+        let mut args = vec!["fetch", "-q", "--no-tags", self.remote()];
+        args.extend(refspecs.iter().map(String::as_str));
+        let _ = self.git.run(&args);
+    }
+
     /// Fetches `refs` (full ref names) from the remote into the same names. A ref the
     /// remote lacks is an error.
     ///

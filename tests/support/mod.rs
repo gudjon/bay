@@ -459,6 +459,24 @@ impl TestBox {
         executor: &Path,
         more_agents: &[(&str, &Path)],
     ) -> String {
+        self.enroll_classes(
+            repo,
+            keys,
+            executor,
+            more_agents,
+            &[(PRODUCER, &keys.producer)],
+        )
+    }
+
+    /// Like [`TestBox::enroll_with`], with `producers` as the whole producer file.
+    pub fn enroll_classes(
+        &self,
+        repo: &Path,
+        keys: &TestKeys,
+        executor: &Path,
+        more_agents: &[(&str, &Path)],
+        producers: &[(&str, &Path)],
+    ) -> String {
         let line = |principal: &str, key: &Path| {
             let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
             let mut words = public.split_whitespace();
@@ -472,10 +490,14 @@ impl TestBox {
         for (name, key) in more_agents {
             agents.push_str(&line(name, key));
         }
+        let producers: String = producers
+            .iter()
+            .map(|(name, key)| line(name, key))
+            .collect();
         let files = [
             ("agent", agents),
             ("executor", line(EXECUTOR, executor)),
-            ("producer", line(PRODUCER, &keys.producer)),
+            ("producer", producers),
             ("registry", line(REGISTRAR, &keys.registry)),
         ];
         let mut tree_input = String::new();

@@ -112,6 +112,27 @@ pub fn verify_commit(git: &Git, commit: &str, allowed: &Path) -> Result<Option<S
     }))
 }
 
+/// The public half of the private key at `key`: its key type and key blob.
+///
+/// # Errors
+///
+/// ssh-keygen cannot read the key.
+pub fn public_key(key: &Path) -> Result<(String, String), String> {
+    let mut cmd = Command::new("ssh-keygen");
+    cmd.args(["-y", "-f"]).arg(key);
+    let output = git::run_bounded(cmd, "ssh-keygen -y").map_err(|error| error.message())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut words = text.split_whitespace();
+    match (output.status.success(), words.next(), words.next()) {
+        (true, Some(key_type), Some(blob)) => Ok((key_type.to_owned(), blob.to_owned())),
+        _ => Err(format!(
+            "ssh-keygen could not read {}: {}",
+            key.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
 /// Signs `data` with `key` under `namespace`; returns the armored signature.
 ///
 /// # Errors

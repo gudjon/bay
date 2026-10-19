@@ -57,6 +57,10 @@ pub struct EvidenceRecord {
     pub check: CheckId,
     pub policy_revision: u64,
     pub manifest_digest: String,
+    /// How the policy at the accepted base reached trunk: `bay` or `outside_bay`
+    /// (`INTERFACES` § 6). Absent only on records written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_provenance: Option<String>,
     pub producer: Producer,
     pub verdict: Verdict,
     pub at: String,
@@ -65,6 +69,10 @@ pub struct EvidenceRecord {
     pub why: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub units: Vec<Unit>,
+    /// `declared_empty` when the check passed on an empty selection under an explicit
+    /// `expected_minimum = 0` (`INTERFACES` § 7): a coverage gap (G30), never tested code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<String>,
     /// The sandbox the check ran in: `sandbox-exec`, `bwrap`, or `none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
@@ -72,6 +80,10 @@ pub struct EvidenceRecord {
     /// field (`ssh-keygen -Y sign -n bay-producer`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
+    /// Top-level fields this version does not know, kept as read: they are part of the signed
+    /// payload, so a record a later version wrote still verifies here.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 impl EvidenceRecord {
@@ -337,6 +349,7 @@ mod tests {
             },
             policy_revision: 1,
             manifest_digest: "m".to_owned(),
+            policy_provenance: None,
             producer: Producer {
                 name: "ci".to_owned(),
                 version: "1".to_owned(),
@@ -345,8 +358,10 @@ mod tests {
             at: "now".to_owned(),
             why: None,
             units: Vec::new(),
+            selection: None,
             sandbox: None,
             signature: None,
+            unknown: serde_json::Map::new(),
         }
     }
 
@@ -431,6 +446,18 @@ mod tests {
         );
         assert_eq!(gaps[0].0.id, "lint");
         assert_eq!(gaps[0].1, Combined::Unknown);
+    }
+
+    /// A record a later version wrote, with a top-level field this version does not know,
+    /// signs over the same bytes once read here: the field is kept, so its signature still
+    /// verifies on a box running an older bay.
+    #[test]
+    fn a_field_this_version_does_not_know_stays_in_the_signed_payload() {
+        let mut written = serde_json::to_value(record("ci/1", "x", "c", Verdict::Pass)).unwrap();
+        written["a_later_field"] = serde_json::json!({"since": "0.2"});
+        let expected = crate::canonical::canonical(&written).unwrap().into_bytes();
+        let read: EvidenceRecord = serde_json::from_value(written).unwrap();
+        assert_eq!(read.signing_payload().unwrap(), expected);
     }
 
     #[test]

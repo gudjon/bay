@@ -1,7 +1,7 @@
 //! `install`: the release's admin command (`DESIGN` § 15.1, § 15.3, § 15.4).
 //!
-//! Writes `$HOME/.local/bin/bay` and, when the Claude adapter is configured, bay's hook
-//! entries in the project agent settings. Global Git config, user-global Claude settings,
+//! Writes `$HOME/.local/bin/bay`, the skill at `$HOME/.claude/skills/bay/` and, when the
+//! Claude adapter is configured, bay's hook entries in the project agent settings. Global Git config, user-global Claude settings,
 //! `user.name`, `user.email` and other tools' hook entries stay unchanged.
 //!
 //! With a key registry, it also writes the repository-local signing identity (§ 15.3 item 3):
@@ -19,18 +19,23 @@ use crate::git::{Git, GitError};
 use crate::registry::{KeyClass, Registry};
 use crate::result::BayResult;
 use crate::signing::Keys;
+use crate::skill;
 
+/// With `machine`, only what belongs to the box (the binary and the skill): no repository's agent settings
+/// or Git config, whatever directory it runs in. `bay update` installs this way.
 #[must_use]
-pub fn install(dir: &Path) -> BayResult {
-    match run(dir) {
+pub fn install(dir: &Path, machine: bool) -> BayResult {
+    match run(dir, machine) {
         Ok(result) => result,
         Err(message) => BayResult::failed(message),
     }
 }
 
-fn run(dir: &Path) -> Result<BayResult, String> {
-    let home = std::env::var_os("HOME").ok_or("HOME is not set; install cannot name its path")?;
-    let bin_dir = PathBuf::from(home).join(".local").join("bin");
+fn run(dir: &Path, machine: bool) -> Result<BayResult, String> {
+    let home = PathBuf::from(
+        std::env::var_os("HOME").ok_or("HOME is not set; install cannot name its path")?,
+    );
+    let bin_dir = home.join(".local").join("bin");
     if !on_path(&bin_dir) {
         return Err(format!(
             "{} is not on PATH. Put that directory on PATH and run install again",
@@ -40,7 +45,15 @@ fn run(dir: &Path) -> Result<BayResult, String> {
     let target = bin_dir.join("bay");
     place_binary(&bin_dir, &target)?;
 
-    let mut detail = json!({"binary": target.display().to_string()});
+    // § 15.3 item 4: the skill this binary carries, at the one path doctor checks.
+    let skill_dir = skill::installed_path(&home);
+    skill::install(&skill_dir)?;
+
+    let mut detail = json!({"binary": target.display().to_string(),
+        "skill": skill_dir.display().to_string()});
+    if machine {
+        return Ok(BayResult::ok(detail));
+    }
 
     let git = Git::new(dir);
     if let Ok(info) = git.repo_info()

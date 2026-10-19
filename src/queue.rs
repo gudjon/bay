@@ -143,12 +143,20 @@ impl Queue {
             .count()
     }
 
-    /// How many times `op_id` was released by a progress deadline.
+    /// How many times `op_id` was released by a progress deadline, leaving out the places in
+    /// `mid_publish`: a release created while the head was publishing is a publish retry, not
+    /// a deadline release that counts toward `QUEUE_DEADLINE_EXCEEDED` (`DESIGN` § 6).
+    ///
+    /// This is narrower than § 6's rule. Only places whose refused push the head's own
+    /// executor saw and saved are left out; a head that crashed before saving it still counts
+    /// that place. A head released before its check started still counts too: the check-start
+    /// record § 6 names is not built, and § 6 ties that case to `CHECK_UNAVAILABLE`, whose
+    /// source is not decided (BACKLOG 12).
     #[must_use]
-    pub fn deadline_releases(&self, op_id: &str) -> usize {
+    pub fn deadline_releases(&self, op_id: &str, mid_publish: &[u64]) -> usize {
         self.entries
             .values()
-            .filter(|entry| entry.op_id == op_id)
+            .filter(|entry| entry.op_id == op_id && !mid_publish.contains(&entry.seq))
             .filter(|entry| {
                 self.release_reasons
                     .get(&entry.seq)
@@ -249,6 +257,23 @@ pub fn join(
             .is_ok()
         {
             let _ = repo.git.run(&["update-ref", &name, &reservation]);
+            // Two executors that queue one operation at once both reserve a place. The later
+            // one always sees the earlier, since its number is above it, and releases its own,
+            // so the operation holds one place (§ 6).
+            let queue = Queue::read(repo)?;
+            if let Some(earlier) = queue
+                .entries
+                .values()
+                .find(|entry| {
+                    entry.op_id == op_id
+                        && entry.seq < above
+                        && !queue.released.contains(&entry.seq)
+                })
+                .map(|entry| entry.seq)
+            {
+                release(repo, signer, above, op_id, "duplicate")?;
+                return Ok(earlier);
+            }
             return Ok(above);
         }
     }

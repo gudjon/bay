@@ -1,4 +1,5 @@
-//! `bay doctor`: the capability probe (`DESIGN` § 15.2, `INTERFACES` § 8).
+//! `bay doctor`: the capability probe (`DESIGN` § 15.2, `INTERFACES` § 8), and the `bay`
+//! row of `bay update` (installed version, channel, newest recorded release, pin).
 //!
 //! Doctor reads. It writes no settings file and no Git config.
 
@@ -12,9 +13,10 @@ use crate::config::Config;
 use crate::git::{self, Git, GitError, RepoInfo};
 use crate::host;
 use crate::result::{BayResult, Decision, Reason};
+use crate::skill;
 use crate::version::{
-    CLAUDE_HOOK_MINIMUM, GIT_FLOOR_AGENT_VIEW, GIT_FLOOR_HOSTED_TRUNK, GIT_RECOMMENDED,
-    GIT_SHARED_CACHE, Version,
+    CLAUDE_HOOK_MINIMUM, GIT_FLOOR_AGENT_VIEW, GIT_FLOOR_ANY, GIT_FLOOR_HOSTED_TRUNK,
+    GIT_RECOMMENDED, GIT_SHARED_CACHE, Version,
 };
 
 /// Where `bay install` records the digest of the hook entries that are not bay's.
@@ -53,46 +55,63 @@ pub fn doctor(dir: &Path) -> BayResult {
     }
 }
 
+/// The role of this box, which names its Git floor (`DESIGN` § 15.2, `GIT-FEATURES` § 1).
+#[derive(Clone, Copy)]
+enum Role {
+    /// A repository that is not a bay-hosted trunk.
+    AgentView,
+    /// The bare repository `bay host init` creates (§ 10a).
+    HostedTrunk,
+    /// Doctor runs outside every repository: only the machine rows apply, at the floor of any
+    /// machine running bay.
+    NoRepository,
+}
+
+impl Role {
+    /// The role name `DESIGN` § 15.2 gives. Outside a repository there is no role: `null`.
+    const fn name(self) -> Option<&'static str> {
+        match self {
+            Self::AgentView => Some("agent-view"),
+            Self::HostedTrunk => Some("bay-hosted-trunk"),
+            Self::NoRepository => None,
+        }
+    }
+
+    const fn floor(self) -> &'static str {
+        match self {
+            Self::AgentView => GIT_FLOOR_AGENT_VIEW,
+            Self::HostedTrunk => GIT_FLOOR_HOSTED_TRUNK,
+            Self::NoRepository => GIT_FLOOR_ANY,
+        }
+    }
+}
+
 fn probe(dir: &Path) -> Result<BayResult, String> {
     let git = Git::new(dir);
     let git_line = git.version().map_err(|error| error.message())?;
     let git_version = Version::parse(&git_line);
-    let info = git.repo_info().map_err(|error| error.message())?;
-    let config = if info.bare {
-        Config::default()
+    // Outside a repository the machine rows still answer; the repository rows do not apply.
+    let info = if git.outside_repository().map_err(|error| error.message())? {
+        None
     } else {
-        Config::load(Path::new(&info.toplevel))?
+        Some(git.repo_info().map_err(|error| error.message())?)
+    };
+    let config = match &info {
+        Some(info) if !info.bare => Config::load(Path::new(&info.toplevel))?,
+        _ => Config::default(),
     };
 
     let mut report = Report::default();
+    report.rows.push(crate::update::doctor_row());
 
-    let (role, floor) = if info.bare {
-        ("bay-hosted-trunk", GIT_FLOOR_HOSTED_TRUNK)
-    } else {
-        ("agent-view", GIT_FLOOR_AGENT_VIEW)
+    let role = match &info {
+        None => Role::NoRepository,
+        Some(info) if info.bare => Role::HostedTrunk,
+        Some(_) => Role::AgentView,
     };
-    let git_green = git_version >= Version::parse(floor);
-    let mut git_row = json!({"name": "git", "role": role, "version": git_version.to_string(),
-        "floor": floor, "state": state(git_green)});
-    if !git_green {
-        git_row["recovery"] = json!("upgrade git");
-        report.red(Reason::GitBelowFloor, None);
-    }
-    report.rows.push(git_row);
-
-    // Below 2.48 the shared cache is refused and bay uses a full clone per cache (§ 10).
-    let cache_ok = git_version >= Version::parse(GIT_SHARED_CACHE);
-    report.rows.push(if cache_ok {
-        json!({"name": "shared-cache", "required": false, "floor": GIT_SHARED_CACHE, "state": "green"})
-    } else {
-        json!({"name": "shared-cache", "required": false, "floor": GIT_SHARED_CACHE,
-            "state": "refused", "fallback": "full clone per cache"})
-    });
-    let features_ok = git_version >= Version::parse(GIT_RECOMMENDED);
-    report
-        .rows
-        .push(json!({"name": "features", "required": false,
-        "recommended": GIT_RECOMMENDED, "state": if features_ok { "green" } else { "degraded" }}));
+    let floor = role.floor();
+    let git_green = git_rows(&git_version, role, &mut report);
+    let role = role.name();
 
     let claude = if config.claude_adapter() {
         probe_claude()?
@@ -119,8 +138,28 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     };
     report.rows.push(claude_row);
 
-    remote_row(&git, &config, info.bare, &mut report)?;
-    hooks_row(&git, &config, &info, &mut report)?;
+    if let Some(info) = &info {
+        remote_row(&git, &config, info.bare, &mut report)?;
+        hooks_row(&git, &config, info, &mut report)?;
+        quarantine_row(&git, &config, info.bare, &mut report);
+    } else {
+        let note = "not in a git repository";
+        report
+            .rows
+            .push(json!({"name": "remote", "remote": config.remote(),
+            "state": "not configured", "note": note}));
+        report
+            .rows
+            .push(json!({"name": "hooks", "state": "not applicable", "note": note}));
+    }
+
+    skill_row(&config, &mut report)?;
+    if info.is_none() {
+        // § 15.2: with no configured remote the box is not ready, and outside a repository no
+        // remote is configured. A red machine row names the reason first, since those rows are
+        // what doctor outside a repository is run for (ruling: doctor outside a repository).
+        report.red(Reason::RemoteUnreachable, Some("not in a git repository"));
+    }
 
     let ready = report.first_red.is_none();
     let line = status_line(
@@ -135,10 +174,10 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     let detail = json!({
         "bay": crate::version::BAY,
         "git": git_line,
-        "repository": info.toplevel,
-        "object format": info.object_format,
-        "ref format": info.ref_format,
-        "branch": info.branch,
+        "repository": info.as_ref().map(|info| &info.toplevel),
+        "object format": info.as_ref().map(|info| &info.object_format),
+        "ref format": info.as_ref().map(|info| &info.ref_format),
+        "branch": info.as_ref().and_then(|info| info.branch.as_ref()),
         "role": role,
         "rows": report.rows,
     });
@@ -149,6 +188,35 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     .with_detail(detail);
     result.human = Some(line);
     Ok(result)
+}
+
+/// The Git rows: the floor for `role`, the shared cache and the recommended features. Returns
+/// whether the floor row is green.
+fn git_rows(git_version: &Version, role: Role, report: &mut Report) -> bool {
+    let floor = role.floor();
+    let git_green = *git_version >= Version::parse(floor);
+    let mut git_row = json!({"name": "git", "role": role.name(),
+        "version": git_version.to_string(), "floor": floor, "state": state(git_green)});
+    if !git_green {
+        git_row["recovery"] = json!("upgrade git");
+        report.red(Reason::GitBelowFloor, None);
+    }
+    report.rows.push(git_row);
+
+    // Below 2.48 the shared cache is refused and bay uses a full clone per cache (§ 10).
+    let cache_ok = *git_version >= Version::parse(GIT_SHARED_CACHE);
+    report.rows.push(if cache_ok {
+        json!({"name": "shared-cache", "required": false, "floor": GIT_SHARED_CACHE, "state": "green"})
+    } else {
+        json!({"name": "shared-cache", "required": false, "floor": GIT_SHARED_CACHE,
+            "state": "refused", "fallback": "full clone per cache"})
+    });
+    let features_ok = *git_version >= Version::parse(GIT_RECOMMENDED);
+    report
+        .rows
+        .push(json!({"name": "features", "required": false,
+        "recommended": GIT_RECOMMENDED, "state": if features_ok { "green" } else { "degraded" }}));
+    git_green
 }
 
 const fn state(green: bool) -> &'static str {
@@ -217,6 +285,61 @@ fn hooks_row(
     if let Some(recorded) = recorded_unrelated_digest(git)? {
         row["unrelated_hooks_unchanged"] =
             json!(recorded == agent_settings::unrelated_digest(&settings));
+    }
+    report.rows.push(row);
+    Ok(())
+}
+
+/// The open quarantines of the policy at trunk as this box last read it (`DESIGN` § 7: an
+/// overdue quarantine is shown by `bay doctor`). Present only when a quarantine is open. It is
+/// never red: `INTERFACES` § 8 has no reason code for it, and an overdue quarantine stays in
+/// force until the fixing change removes it.
+fn quarantine_row(git: &Git, config: &Config, bare: bool, report: &mut Report) {
+    let trunk = if bare {
+        let name = git
+            .run(&["config", "--get", host::TRUNK_KEY])
+            .unwrap_or_else(|_| config.trunk().to_owned());
+        format!("refs/heads/{name}")
+    } else {
+        format!("refs/remotes/{}/{}", config.remote(), config.trunk())
+    };
+    let open = crate::status::open_quarantines(git, &trunk);
+    if open.is_empty() {
+        return;
+    }
+    let overdue = open.iter().any(|quarantine| quarantine["overdue"] == true);
+    report.rows.push(json!({
+        "name": "quarantine",
+        "required": false,
+        "state": if overdue { "overdue" } else { "green" },
+        "quarantines": open,
+    }));
+}
+
+/// The installed skill at `$HOME/.claude/skills/bay/` against the skill this bay version
+/// installs (§ 15.2, G49). A consumer repository's skills are never this copy. A mismatch is
+/// red on every box; a missing copy is red only where the Claude adapter is configured.
+fn skill_row(config: &Config, report: &mut Report) -> Result<(), String> {
+    let home =
+        std::env::var_os("HOME").ok_or("HOME is not set; doctor cannot name the skill path")?;
+    let path = skill::installed_path(Path::new(&home));
+    let required = config.claude_adapter();
+    let mut row =
+        json!({"name": "skill", "path": path.display().to_string(), "required": required});
+    match skill::compare(&path)? {
+        skill::Installed::Matches => row["state"] = json!("green"),
+        skill::Installed::Missing if !required => row["state"] = json!("missing"),
+        installed => {
+            let note = if installed == skill::Installed::Missing {
+                "skill not installed"
+            } else {
+                "skill does not match this bay"
+            };
+            row["state"] = json!("red");
+            row["note"] = json!(note);
+            row["recovery"] = json!("run install again");
+            report.red(Reason::SkillMismatch, Some(note));
+        }
     }
     report.rows.push(row);
     Ok(())

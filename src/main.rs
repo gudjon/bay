@@ -60,11 +60,18 @@ enum Command {
     Status {
         /// One change (default: the view's change, else every local change)
         change: Option<String>,
+        /// The fleet map from the local cache; fails closed when the remote was never fetched
+        #[arg(long, conflicts_with = "change")]
+        fleet: bool,
     },
-    /// Admin: probe this box (git and Claude Code floors, remote, hook entries)
+    /// Admin: probe this box (git and Claude Code floors, remote, hook entries, installed skill)
     Doctor,
-    /// Admin: place bay at $HOME/.local/bin/bay and add its project hook entries
-    Install,
+    /// Admin: place bay at $HOME/.local/bin/bay, its skill and its project hook entries
+    Install {
+        /// Only the box's part: the binary and the skill, never a repository's settings or Git config
+        #[arg(long)]
+        machine: bool,
+    },
     /// Admin: a bay-hosted trunk
     Host {
         #[command(subcommand)]
@@ -84,6 +91,18 @@ enum Command {
         /// The remote to push to (default: the configured remote)
         #[arg(long)]
         remote: Option<String>,
+    },
+    /// Admin: replace this binary with a verified release (the box's pin wins)
+    Update {
+        /// The release channel (default: git config --global bay.updateChannel, else stable)
+        #[arg(long, value_parser = ["stable", "latest"])]
+        channel: Option<String>,
+        /// Move to this exact version (X.Y.Z or X.Y.Z-suffix)
+        #[arg(long)]
+        version: Option<String>,
+        /// Report the installed version, the target and whether an update is due; change nothing
+        #[arg(long)]
+        check: bool,
     },
     /// Admin: the agent hook entry point (`bay hook <event>`)
     Hook {
@@ -170,15 +189,40 @@ fn main() -> ExitCode {
         Command::Executor {
             action: ExecutorAction::Run { once, interval_s },
         } => bay::executor::run(&cli.dir, once, std::time::Duration::from_secs(interval_s)),
-        Command::Status { change } => bay::status::status(&cli.dir, change.as_deref()),
-        Command::Doctor => bay::doctor::doctor(&cli.dir),
-        Command::Install => bay::install::install(&cli.dir),
+        Command::Status { fleet: true, .. } => bay::status::fleet(&cli.dir),
+        Command::Status { change, .. } => {
+            let result = bay::status::status(&cli.dir, change.as_deref());
+            bay::update::auto();
+            result
+        }
+        Command::Doctor => {
+            let result = bay::doctor::doctor(&cli.dir);
+            bay::update::auto();
+            result
+        }
+        Command::Install { machine } => bay::install::install(&cli.dir, machine),
+        Command::Update {
+            channel,
+            version,
+            check,
+        } => bay::update::update(&bay::update::Request {
+            channel,
+            version,
+            check,
+        }),
         Command::Hook { event } => {
             // The agent hook follows the agent product's exit protocol (INTERFACES § 1): for
-            // Claude Code, exit 2 denies. Only the shell deny list (G39) is built; every other
-            // event is allowed and silent until the hook adapter (increment 2).
+            // Claude Code, exit 2 denies. Built: the session work record of every event in a
+            // repository but pre-tool, the blocking path (ruling 10, § 11a), the shell deny list
+            // (G39) and session-start's state (ruling 8a); every other event is allowed and
+            // silent until the hook adapter (increment 2).
             let mut input = String::new();
             let _ = std::io::stdin().read_to_string(&mut input);
+            bay::session::record(&cli.dir, &event, &input);
+            if event == "session-start" {
+                print!("{}", bay::session::session_start(&cli.dir, &input));
+                return ExitCode::SUCCESS;
+            }
             return match bay::deny::judge_hook(&event, &input, &cli.dir) {
                 Some(reason) => {
                     eprintln!("{reason}");

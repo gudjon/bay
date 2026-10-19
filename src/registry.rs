@@ -159,4 +159,47 @@ impl Registry {
         }
         Ok(path)
     }
+
+    /// The registry version `named`, when it is on this registry's chain: this version or one of
+    /// its ancestors (§ 10a). `None` for any other id, a commit this repository lacks, or one
+    /// off the chain, so a forged registry commit is never a version anything is judged under.
+    ///
+    /// # Errors
+    ///
+    /// A git fault, or a version on the chain that does not load.
+    pub fn version_on_chain(&self, git: &Git, named: &str) -> Result<Option<Self>, String> {
+        let hex = named.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !hex || !matches!(named.len(), 40 | 64) {
+            return Ok(None);
+        }
+        if named == self.commit {
+            return Ok(Some(self.clone()));
+        }
+        let known = git
+            .run_status(&["cat-file", "-e", &format!("{named}^{{commit}}")])
+            .map_err(|error| error.message())?
+            .0
+            == 0;
+        if !known {
+            return Ok(None);
+        }
+        let (code, _, stderr) = git
+            .run_status(&["merge-base", "--is-ancestor", named, &self.commit])
+            .map_err(|error| error.message())?;
+        match code {
+            0 => Self::load_at(git, named).map(Some),
+            1 => Ok(None),
+            _ => Err(format!("merge-base --is-ancestor: {stderr}")),
+        }
+    }
+
+    /// Whether `class`'s file enrols `principal` with this public key. Keys are compared by
+    /// key type and key blob, never by line (§ 10a).
+    #[must_use]
+    pub fn holds(&self, class: KeyClass, principal: &str, key_type: &str, blob: &str) -> bool {
+        self.files[&class].lines().any(|line| {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            matches!(words.as_slice(), [name, kind, key, ..] if *name == principal && *kind == key_type && *key == blob)
+        })
+    }
 }

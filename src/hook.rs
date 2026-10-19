@@ -193,13 +193,34 @@ impl Judge<'_> {
             .git
             .run(&["log", "-1", "--format=%cn", commit])
             .map_err(|error| message(&error))?;
-        if change.is_empty()
-            || !crate::publish::verify_publication(self.git, commit, &registry_id, &committer)
-        {
-            return Err(format!(
+        let not_a_publication = || {
+            format!(
                 "{commit} is not a publication: trunk takes only commits signed by an executor key"
-            ));
+            )
+        };
+        if change.is_empty() {
+            return Err(not_a_publication());
         }
+        // § 10a: the `Registry-Id` is on the registry chain, and the signing key is valid in the
+        // current registry, so naming an older registry version cannot revive a revoked key. A
+        // key valid under the version C names but not under the current one was revoked after C
+        // was signed: that is `REGISTRY_CHANGED`, answered only once every other rule holds.
+        let named = self.registry.version_on_chain(self.git, &registry_id)?;
+        let key_revoked =
+            if crate::publish::verifies_under(self.git, commit, self.registry, &committer) {
+                false
+            } else if named.as_ref().is_some_and(|named| {
+                crate::publish::verifies_under(self.git, commit, named, &committer)
+            }) {
+                true
+            } else {
+                return Err(not_a_publication());
+            };
+        let Some(named) = named else {
+            return Err(format!(
+                "{commit} names Registry-Id {registry_id}, which is not on the registry chain {REGISTRY_REF}"
+            ));
+        };
         let request = self.request(&request_id, &change)?;
         if request.revision != revision {
             return Err(format!(
@@ -251,12 +272,36 @@ impl Judge<'_> {
         {
             return Err(format!("change {change} already landed"));
         }
-        self.evidence_passes(commit, request.repair)
+        // § 10a, G33: evidence counts only under the current registry. Evidence that passes
+        // under the version C names but not under the current one rests on a producer key the
+        // registry revoked since: that is `REGISTRY_CHANGED` too, and the executor rechecks.
+        let evidence = self.evidence_passes(commit, request.repair, self.registry);
+        let producer_revoked = evidence.is_err()
+            && named.commit != self.registry.commit
+            && self.evidence_passes(commit, request.repair, &named).is_ok();
+        // Refused for a reason of its own, or accepted: never `REGISTRY_CHANGED`.
+        if !producer_revoked && (evidence.is_err() || !key_revoked) {
+            return evidence;
+        }
+        let revoked = match (key_revoked, producer_revoked) {
+            (true, true) => "its executor key and a producer key behind its evidence are",
+            (true, false) => "its executor key is",
+            _ => "a producer key behind its evidence is",
+        };
+        Err(format!(
+            "REGISTRY_CHANGED: {commit} was signed under registry {registry_id}, and {revoked} not valid in the current registry {}; an executor with a valid key re-signs it",
+            self.registry.commit
+        ))
     }
 
-    /// The producer-signed evidence on the commit's tree passes the policy at its parent (or,
-    /// for a registry-signed repair, the candidate's own policy).
-    fn evidence_passes(&self, commit: &str, repair: bool) -> Result<(), String> {
+    /// The producer-signed evidence on the commit's tree, counted under `registry`, passes the
+    /// policy at its parent (or, for a registry-signed repair, the candidate's own policy).
+    fn evidence_passes(
+        &self,
+        commit: &str,
+        repair: bool,
+        registry: &Registry,
+    ) -> Result<(), String> {
         let judged_by = if repair {
             commit.to_owned()
         } else {
@@ -272,7 +317,7 @@ impl Judge<'_> {
         let records = evidence::counted(
             self.git,
             evidence::records_for(self.git, &tree)?,
-            Some(self.registry),
+            Some(registry),
         )?;
         let gaps = evidence::aggregate(
             &records,
@@ -296,6 +341,8 @@ impl Judge<'_> {
 
     /// A request commit of `change`, signed by its actor's agent key under the registry version
     /// it names (so a later revocation does not strand it), or by a registry key (a repair).
+    /// That version must be on the registry chain (§ 10a): a request naming a registry commit
+    /// off the chain, which anyone can write, is never judged under it.
     fn request(&self, request_id: &str, change: &str) -> Result<Request, String> {
         let text = self
             .git
@@ -305,11 +352,15 @@ impl Judge<'_> {
         if request["change"] != change {
             return Err(format!("request {request_id} is for another change"));
         }
-        let named = request["registry"].as_str().map(str::to_owned);
-        let registry = match named {
-            Some(commit) => Registry::load_at(self.git, &commit)?,
-            None => self.registry.clone(),
-        };
+        let named = request["registry"].as_str().unwrap_or_default();
+        let registry = self
+            .registry
+            .version_on_chain(self.git, named)?
+            .ok_or_else(|| {
+                format!(
+                    "request {request_id} names registry {named:?}, which is not on the registry chain {REGISTRY_REF}"
+                )
+            })?;
         let agents = registry.class_file(self.git, KeyClass::Agent)?;
         let actor = request["actor"]["name"].as_str().unwrap_or_default();
         if signing::verify_commit(self.git, request_id, &agents)
@@ -490,8 +541,6 @@ impl Judge<'_> {
         if is_zero(&update.new) {
             return Err("a requests ref is never deleted".to_owned());
         }
-        // Judged against the current registry: a request signed by a key already revoked is
-        // refused at its push.
         let text = self
             .git
             .run(&["cat-file", "blob", &format!("{}:request.json", update.new)])
@@ -500,6 +549,11 @@ impl Judge<'_> {
         if request["change"] != id {
             return Err("names a request of another change".to_owned());
         }
+        // Judged under the registry version it names, which must already be on the registry
+        // chain (§ 10a), as a publication of it will be judged ...
+        self.request(&update.new, id)?;
+        // ... and against the current registry: a request signed by a key already revoked is
+        // refused at its push.
         let actor = request["actor"]["name"].as_str().unwrap_or_default();
         match self.signer(&update.new, &[KeyClass::Agent, KeyClass::Registry])? {
             Some((KeyClass::Agent, principal)) if principal == actor => Ok(()),
