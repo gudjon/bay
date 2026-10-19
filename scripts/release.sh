@@ -10,7 +10,10 @@
 # bay-<target>.tar.gz per target (`bay` at its root), VERSION (the version and a newline),
 # SHA256SUMS over all of them, and SHA256SUMS.sig: an SSH signature in the namespace bay-release
 # by the release key, a key of its own that signs nothing else. A version with a suffix
-# (0.1.0-pilot.1) is a pre-release.
+# (0.1.0-pilot.1), or whose CHANGELOG.md section starts with the line "Pre-release.", is a
+# pre-release. Every version needs its "## <version>" section in CHANGELOG.md; that section is
+# the release's notes. BAY_RELEASE_TARGETS narrows the target list (a release may ship fewer
+# platforms; the changelog says which).
 #
 # Configuration (git config, per clone): bay.releaseKey (the SSH private key). Its public key is
 # scripts/release/allowed_signers under the principal bay-release.
@@ -31,6 +34,13 @@ check_version() {
         "$crate" | "$crate"-*) ;;
         *) echo "release: $1 does not match the crate version $crate" >&2; exit 1 ;;
     esac
+    grep -qx "## $1" CHANGELOG.md ||
+        { echo "release: CHANGELOG.md has no '## $1' section" >&2; exit 1; }
+}
+
+# The CHANGELOG.md section of version $1, without its heading.
+notes() {
+    awk -v head="## $1" '$0 == head { on = 1; next } on && /^## / { exit } on' CHANGELOG.md
 }
 
 key() {
@@ -92,8 +102,11 @@ publish)
     git merge-base --is-ancestor "$commit" origin/main || { echo "release: HEAD is not on origin/main" >&2; exit 1; }
     pre=""
     case "$version" in *-*) pre="--prerelease" ;; esac
+    notes "$version" | sed '/./,$!d' | head -1 | grep -qx 'Pre-release.' && pre="--prerelease"
+    notes_file="$out/NOTES.md"
+    { notes "$version"; printf '\nBuilt from %s. Verify SHA256SUMS with SHA256SUMS.sig (ssh-keygen -Y verify, namespace bay-release).\n' "$commit"; } > "$notes_file"
     gh release create "v$version" --target "$commit" $pre --title "bay $version" \
-        --notes "bay $version, built from $commit. Verify SHA256SUMS with SHA256SUMS.sig (ssh-keygen -Y verify, namespace bay-release)." \
+        --notes-file "$notes_file" \
         "$out/VERSION" "$out/SHA256SUMS" "$out/SHA256SUMS.sig" "$out"/bay-*.tar.gz
     ;;
 *) usage ;;
