@@ -191,4 +191,9 @@ fn talk_help_names_flags() {
     ] {
         assert!(text.contains(flag), "{flag}: {text}");
     }
+    // Owner ruling (2026-10-19): talk's help says agent, never actor.
+    assert!(text.contains("[AGENT]"), "{text}");
+    assert!(text.contains("--decides <AGENT>"), "{text}");
+    assert!(text.contains("one talk to one agent"), "{text}");
+    assert!(!text.to_lowercase().contains("actor"), "{text}");
 }

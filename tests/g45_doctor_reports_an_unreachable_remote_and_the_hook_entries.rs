@@ -48,7 +48,7 @@ fn no_configured_remote_is_reported() {
 fn missing_hook_entries_are_red_until_install_writes_them() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
-    TestBox::bay_config(&repo, CLAUDE_ADAPTER);
+    test_box.commit_config(&repo, CLAUDE_ADAPTER);
     test_box.fake_claude(Some("2.1.302"));
 
     // Another tool's entry, and user-global settings and global Git config bay must not touch.

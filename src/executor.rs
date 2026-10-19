@@ -37,14 +37,16 @@ use crate::signing::Keys;
 
 #[must_use]
 pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
-    let repo = match Repo::open(dir) {
-        Ok(repo) => repo,
-        Err(message) => return BayResult::failed(message),
-    };
     // The supervisor's own sightings of queue heads, on its monotonic clock (§ 6).
     let mut heads: HashMap<u64, Instant> = HashMap::new();
     let binary = Binary::now();
     loop {
+        // Each pass reads the config at the trunk tip it fetched (ruling: config location),
+        // so a config that landed since the last pass governs this one.
+        let repo = match Repo::open_fetched(dir) {
+            Ok(repo) => repo,
+            Err(error) => return error.into_result(),
+        };
         // A release that could not be pushed never stops the supervisor, which every queued
         // operation depends on: it is reported and tried again on the next pass (§ 6, § 9a).
         let unreleased = deadlines(&repo, &mut heads).err();

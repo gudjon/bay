@@ -1,9 +1,26 @@
 # Changelog
 
+## 0.1.3
+Pre-release.
+
+Builds for Linux (x86_64 and aarch64, musl) and macOS. Apple silicon is tested; Intel (x86_64) is built but not yet run on an Intel Mac.
+
+- Changed where bay reads `.bay/config.toml`: only from the trunk's committed copy, never from a work tree or a change.
+- Added `bay install --trunk <name> --remote <name>`, which records where bay finds the trunk on this clone.
+- Added `CONFIG_MISSING`: a repository with no config at its trunk is refused, naming where bay looked.
+- Added `POLICY_MISSING`: a change never lands without a policy at its base, unless that policy says `unchecked = true`.
+- Changed checks to materialize the candidate without a tar of the whole tree, so large repositories check quickly.
+- Added `paths` and `materialize_timeout_s` to `[[check]]`; a materialization that runs over is `infra_failure`.
+- Added the bay skill under `CLAUDE_CONFIG_DIR` when it is set, and doctor checks it there.
+- Changed `bay talk --help` to say agent, not actor.
+- Changed `bay update` to take the newest release that has a build for this machine; releases are no longer split into stable and latest.
+- Fixed the bay skill: it lists watch, talk, status --fleet and land --wait, which 0.1.2 already had but its skill told agents not to run.
+- Removed update channels: `--channel`, `BAY_UPDATE_CHANNEL` and `bay.updateChannel` are no longer read, and doctor names one that is still set.
+
 ## 0.1.2
 Pre-release.
 
-Linux builds only (x86_64 and aarch64, musl). macOS builds come in a later release.
+Builds for Linux (x86_64 and aarch64, musl) and macOS. The macOS builds were added on 19 October 2026, from the same commit. Apple silicon is tested; Intel (x86_64) is built but not yet run on an Intel Mac.
 
 - Added `bay status --fleet`: every session on every machine, from signed live summaries, with its change, state and age.
 - Added `bay watch [--since <cursor>]`: landings, events and invalidations since a cursor, so a missed notice never hides one.
@@ -23,7 +40,7 @@ Linux builds only (x86_64 and aarch64, musl). macOS builds come in a later relea
 ## 0.1.1
 Pre-release.
 
-Linux builds only (x86_64 and aarch64, musl). macOS builds come in a later release.
+Builds for Linux (x86_64 and aarch64, musl) and macOS. The macOS builds were added on 19 October 2026, from the same commit. Apple silicon is tested; Intel (x86_64) is built but not yet run on an Intel Mac.
 
 - Added `bay undo <change>`: it lands a new, checked change that reverses one landing; history stays.
 - Added check cost: each evidence record keeps the check's seconds, and `bay status` sums them per operation and landing.

@@ -1,44 +1,286 @@
 //! The repository bay runs in: its common git directory, its main work tree, its config,
 //! and where views live.
+//!
+//! The config (ruling: config location) is the `.bay/config.toml` committed at the fetched
+//! trunk tracking ref, `refs/remotes/<remote>/<trunk>`: the same for the main work tree, a
+//! linked worktree and every view, and never a work tree's file or a change's own commits, so
+//! neither an agent's draft nor a change selects the settings it runs and lands under (as
+//! policy is judged at the base). The trunk is found without reading any file a change can
+//! write: the bootstrap is this repository's own git config `bay.trunk` and `bay.remote`
+//! (written by `bay install`), else the remote's default branch, `refs/remotes/<remote>/HEAD`
+//! (remote `origin` unless `bay.remote` names another). A missing bootstrap, or no config at
+//! the trunk tip, is `CONFIG_MISSING`, never a silent default.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use crate::config::Config;
+use serde_json::{Value, json};
+
+use crate::config::{CONFIG_PATH, Config};
 use crate::git::{Git, GitError};
+use crate::result::{BayResult, Reason};
+
+/// The repository-local git config key naming the trunk (`bay install --trunk`).
+pub const TRUNK_KEY: &str = "bay.trunk";
+/// The repository-local git config key naming the trunk's remote (`bay install --remote`).
+pub const REMOTE_KEY: &str = "bay.remote";
+/// The remote when `bay.remote` is unset.
+pub const DEFAULT_REMOTE: &str = "origin";
+
+/// How the trunk was found before any file is read: the operator's choice in this repository's
+/// own git config, or the remote's default branch.
+#[derive(Clone, Debug)]
+pub struct Bootstrap {
+    pub remote: String,
+    pub trunk: String,
+    /// Where the trunk name came from, as a reader would look it up.
+    pub source: String,
+}
+
+/// Why [`Bootstrap::read`] found no trunk.
+pub enum BootstrapError {
+    /// Neither place names one: what bay looked at, in order.
+    Missing(Vec<String>),
+    /// Git could not be read.
+    Unreadable(String),
+}
+
+impl Bootstrap {
+    /// Reads the bootstrap from the repository-local git config of the common directory `git`
+    /// runs in (never a worktree's own config), then `refs/remotes/<remote>/HEAD`.
+    ///
+    /// # Errors
+    ///
+    /// See [`BootstrapError`].
+    pub fn read(git: &Git) -> Result<Self, BootstrapError> {
+        let remote = local_config(git, REMOTE_KEY)?.unwrap_or_else(|| DEFAULT_REMOTE.to_owned());
+        if let Some(trunk) = local_config(git, TRUNK_KEY)? {
+            return Ok(Self {
+                remote,
+                trunk,
+                source: format!("git config {TRUNK_KEY}"),
+            });
+        }
+        let head = format!("refs/remotes/{remote}/HEAD");
+        let prefix = format!("refs/remotes/{remote}/");
+        match git.run(&["symbolic-ref", "-q", &head]) {
+            Ok(target) => match target.strip_prefix(&prefix) {
+                Some(trunk) if !trunk.is_empty() && trunk != "HEAD" => Ok(Self {
+                    trunk: trunk.to_owned(),
+                    remote,
+                    source: head,
+                }),
+                _ => Err(BootstrapError::Unreadable(format!(
+                    "{head} points at {target}, not a branch of {remote}"
+                ))),
+            },
+            Err(GitError::Failed { .. }) => Err(BootstrapError::Missing(vec![
+                format!("git config {TRUNK_KEY}"),
+                head,
+            ])),
+            Err(error) => Err(BootstrapError::Unreadable(error.message())),
+        }
+    }
+
+    /// [`Bootstrap::read`] for the repository that contains `dir`; `None` when no repository
+    /// holds it.
+    #[must_use]
+    pub fn of(dir: &Path) -> Option<Result<Self, BootstrapError>> {
+        let common = Git::new(dir)
+            .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .ok()?;
+        Some(Self::read(&Git::new(common)))
+    }
+
+    /// The local tracking ref of the remote trunk.
+    #[must_use]
+    pub fn tracking_ref(&self) -> String {
+        format!("refs/remotes/{}/{}", self.remote, self.trunk)
+    }
+}
+
+/// A key of the repository-local git config (`$GIT_COMMON_DIR/config`); `None` when unset.
+fn local_config(git: &Git, key: &str) -> Result<Option<String>, BootstrapError> {
+    match git.run(&["config", "--local", "--get", key]) {
+        Ok(value) if !value.is_empty() => Ok(Some(value)),
+        Ok(_) => Ok(None),
+        // Exit 1 with nothing on stderr: the key is unset. Anything else is not "unset".
+        Err(GitError::Failed { stderr, .. }) if stderr.trim().is_empty() => Ok(None),
+        Err(error) => Err(BootstrapError::Unreadable(error.message())),
+    }
+}
+
+/// When [`Repo`] fetches the trunk before it reads the config there.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Fetch {
+    /// Never: a reader that must not touch the network (the agent hook, `bay doctor`,
+    /// `bay install`, `bay status --fleet`).
+    Never,
+    /// Only when the tracking ref does not exist yet (before the first fetch).
+    IfMissing,
+    /// Always first: a command that fetches trunk reads the config at the tip it fetched.
+    First,
+}
 
 pub struct Repo {
     /// Git on the common directory: every view of this repository shares it.
     pub git: Git,
     pub common_dir: PathBuf,
-    /// The main work tree, where `.bay/config.toml` lives.
+    /// The main work tree.
     pub work_root: PathBuf,
+    /// The directory bay was started in (`-C`).
+    pub opened_in: PathBuf,
+    /// How the trunk was found.
+    pub bootstrap: Bootstrap,
+    /// The config committed at the trunk tip bay read, with `trunk` and `remote` set to the
+    /// bootstrap's.
     pub config: Config,
+    /// What an opening fetch ([`Fetch::First`]) found, handed to the first
+    /// [`Repo::fetch_trunk`] so one command fetches once.
+    prefetched: Mutex<Option<Result<String, GitError>>>,
+}
+
+/// Why [`Repo::open_with`] could not open a repository.
+pub enum OpenError {
+    /// No repository holds the directory.
+    NoRepository(String),
+    /// A repository bay cannot open (a bare one, a config that does not parse or that names
+    /// another trunk than the bootstrap, git that cannot be read).
+    Known(PathBuf, String),
+    /// No bootstrap, or no config at the trunk tip: the refusal's detail.
+    ConfigMissing(PathBuf, Value),
+}
+
+impl OpenError {
+    /// This error as a command's result: the `CONFIG_MISSING` refusal, or a failure.
+    #[must_use]
+    pub fn into_result(self) -> BayResult {
+        match self {
+            Self::ConfigMissing(_, detail) => {
+                BayResult::blocked(Reason::ConfigMissing).with_detail(detail)
+            }
+            Self::NoRepository(message) | Self::Known(_, message) => BayResult::failed(message),
+        }
+    }
+
+    /// This error as a message; a `CONFIG_MISSING` one starts with its code.
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self {
+            Self::NoRepository(message) | Self::Known(_, message) => message.clone(),
+            Self::ConfigMissing(_, detail) => format!(
+                "{}: {}",
+                Reason::ConfigMissing.code(),
+                detail["message"].as_str().unwrap_or_default()
+            ),
+        }
+    }
+}
+
+fn missing_bootstrap(missing: &[String]) -> Value {
+    json!({
+        "message": format!(
+            "bay cannot tell this repository's trunk: neither {} names it; run bay install --trunk <name>, or git remote set-head <remote> --auto",
+            missing.join(" nor ")
+        ),
+        "missing": missing,
+        "fetched": false,
+    })
+}
+
+/// `fetched`: whether the tracking ref exists (a fetch of trunk, or a push, wrote it).
+fn missing_config(
+    bootstrap: &Bootstrap,
+    read: &str,
+    fetched: bool,
+    fetch_error: Option<String>,
+) -> Value {
+    let mut message = format!(
+        "no {CONFIG_PATH} committed at {read} (trunk {} from {}); commit one to trunk: bay reads the config only there, never from a work tree",
+        bootstrap.trunk, bootstrap.source
+    );
+    if let Some(error) = &fetch_error {
+        message = format!("{message}; the fetch of trunk failed: {error}");
+    }
+    let mut detail = json!({
+        "message": message,
+        "bootstrap": bootstrap.source,
+        "trunk": bootstrap.trunk,
+        "ref": read,
+        "fetched": fetched,
+    });
+    if let Some(error) = fetch_error {
+        detail["fetch_error"] = json!(error);
+    }
+    detail
 }
 
 impl Repo {
-    /// Opens the repository that contains `dir` (the main work tree or one of its views).
+    /// Opens the repository that contains `dir` (the main work tree, a linked worktree, or one
+    /// of its views) without a fetch ([`Fetch::Never`]): the agent hook calls it on every tool
+    /// call, and a command that needs the config has fetched trunk before its first read
+    /// ([`Repo::config_missing`]).
     ///
     /// # Errors
     ///
-    /// `dir` is not inside a work repository, or its config does not parse.
+    /// `dir` is not inside a work repository, its config does not parse, or there is no
+    /// bootstrap or no config at the trunk tip (a message that starts `CONFIG_MISSING`).
     pub fn open(dir: &Path) -> Result<Self, String> {
-        Self::open_known(dir).map_err(|(_, message)| message)
+        Self::open_with(dir, Fetch::Never).map_err(|error| error.message())
+    }
+
+    /// [`Repo::open`] for a command that fetches trunk: it fetches first, then reads the
+    /// config at the tip it fetched. Offline, it reads the tracking ref as it is.
+    ///
+    /// # Errors
+    ///
+    /// As [`Repo::open_with`].
+    pub fn open_fetched(dir: &Path) -> Result<Self, OpenError> {
+        Self::open_with(dir, Fetch::First)
     }
 
     /// [`Repo::open`], whose error carries the common git directory when `dir` is in a
-    /// repository bay cannot open (a bare one, or a config that does not parse), and `None`
-    /// when no repository holds `dir`.
+    /// repository bay cannot open, and `None` when no repository holds `dir`.
     ///
     /// # Errors
     ///
     /// As [`Repo::open`].
     pub fn open_known(dir: &Path) -> Result<Self, (Option<PathBuf>, String)> {
+        Self::open_with(dir, Fetch::Never).map_err(|error| {
+            let message = error.message();
+            match error {
+                OpenError::NoRepository(_) => (None, message),
+                OpenError::Known(common, _) | OpenError::ConfigMissing(common, _) => {
+                    (Some(common), message)
+                }
+            }
+        })
+    }
+
+    /// The `CONFIG_MISSING` refusal for a command that needs the trunk or policy, when `dir`
+    /// is in a work repository with no bootstrap or no config at the trunk tip. Before the
+    /// first fetch it fetches trunk with the bootstrap's remote and trunk. `None` otherwise:
+    /// the command opens the repository itself and reports any other fault.
+    #[must_use]
+    pub fn config_missing(dir: &Path) -> Option<BayResult> {
+        match Self::open_with(dir, Fetch::IfMissing) {
+            Err(error @ OpenError::ConfigMissing(..)) => Some(error.into_result()),
+            _ => None,
+        }
+    }
+
+    /// Opens the repository that contains `dir`, fetching trunk as `fetch` says.
+    ///
+    /// # Errors
+    ///
+    /// See [`OpenError`].
+    pub fn open_with(dir: &Path, fetch: Fetch) -> Result<Self, OpenError> {
         let here = Git::new(dir);
         let common = here
             .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .map_err(|error| (None, error.message()))?;
+            .map_err(|error| OpenError::NoRepository(error.message()))?;
         let common_dir = PathBuf::from(common);
-        let known = |message: String| (Some(common_dir.clone()), message);
+        let known = |message: String| OpenError::Known(common_dir.clone(), message);
         let work_root = if common_dir.file_name().is_some_and(|name| name == ".git") {
             common_dir
                 .parent()
@@ -50,13 +292,71 @@ impl Repo {
                 common_dir.display()
             )));
         };
-        let config =
-            Config::load_or_committed(&work_root, &Git::new(&common_dir)).map_err(known)?;
+        let git = Git::new(&common_dir);
+        let bootstrap = match Bootstrap::read(&git) {
+            Ok(bootstrap) => bootstrap,
+            Err(BootstrapError::Missing(missing)) => {
+                return Err(OpenError::ConfigMissing(
+                    common_dir.clone(),
+                    missing_bootstrap(&missing),
+                ));
+            }
+            Err(BootstrapError::Unreadable(message)) => return Err(known(message)),
+        };
+        let tracking = bootstrap.tracking_ref();
+        let tip_of = |git: &Git| {
+            git.ref_target(&format!("{tracking}^{{commit}}"))
+                .map_err(|error| error.message())
+        };
+        let mut prefetched = None;
+        let mut fetch_error = None;
+        let have = tip_of(&git).map_err(known)?;
+        if fetch == Fetch::First || (fetch == Fetch::IfMissing && have.is_none()) {
+            let fetched = fetch_into(&git, &bootstrap, &work_root);
+            if let Err(error) = &fetched {
+                fetch_error = Some(error.message());
+            }
+            prefetched = Some(fetched);
+        }
+        let Some(tip) = tip_of(&git).map_err(known)? else {
+            return Err(OpenError::ConfigMissing(
+                common_dir.clone(),
+                missing_config(&bootstrap, &tracking, false, fetch_error),
+            ));
+        };
+        let config = committed_config(&git, &tip)
+            .map_err(|message| known(format!("{tracking}:{CONFIG_PATH}: {message}")))?;
+        let Some(mut config) = config else {
+            return Err(OpenError::ConfigMissing(
+                common_dir.clone(),
+                missing_config(&bootstrap, &tracking, true, None),
+            ));
+        };
+        // The config cannot move the trunk it was read from: a committed `trunk` or `remote`
+        // other than the bootstrap's is refused, never followed.
+        for (key, named, used) in [
+            ("trunk", config.trunk.as_deref(), &bootstrap.trunk),
+            ("remote", config.remote.as_deref(), &bootstrap.remote),
+        ] {
+            if let Some(named) = named
+                && named != used
+            {
+                return Err(known(format!(
+                    "{tracking}:{CONFIG_PATH} names {key} \"{named}\", but this repository's {key} is \"{used}\" (trunk from {}); run bay install --{key} {named}",
+                    bootstrap.source
+                )));
+            }
+        }
+        config.trunk = Some(bootstrap.trunk.clone());
+        config.remote = Some(bootstrap.remote.clone());
         Ok(Self {
-            git: Git::new(&common_dir),
+            git,
+            opened_in: dir.to_path_buf(),
             common_dir,
             work_root,
+            bootstrap,
             config,
+            prefetched: Mutex::new(prefetched),
         })
     }
 
@@ -72,33 +372,33 @@ impl Repo {
 
     #[must_use]
     pub fn remote(&self) -> &str {
-        self.config.remote()
+        &self.bootstrap.remote
     }
 
     #[must_use]
     pub fn trunk(&self) -> &str {
-        self.config.trunk()
+        &self.bootstrap.trunk
     }
 
     /// The local tracking ref of the remote trunk.
     #[must_use]
     pub fn trunk_tracking_ref(&self) -> String {
-        format!("refs/remotes/{}/{}", self.remote(), self.trunk())
+        self.bootstrap.tracking_ref()
     }
 
     /// Fetches the remote trunk and returns its tip. A fetch that succeeds is recorded for the
-    /// coordination cache (`crate::coord`), which the command writes when it finishes.
+    /// coordination cache (`crate::coord`), which the command writes when it finishes. The
+    /// first call after [`Repo::open_fetched`] returns what that opening fetch found.
     ///
     /// # Errors
     ///
     /// The fetch fails or the remote has no trunk.
     pub fn fetch_trunk(&self) -> Result<String, GitError> {
-        let refspec = format!("+refs/heads/{}:{}", self.trunk(), self.trunk_tracking_ref());
-        self.git
-            .run(&["fetch", "-q", "--no-tags", self.remote(), &refspec])?;
-        crate::coord::fetched(&self.work_root);
-        self.git
-            .run(&["rev-parse", "--verify", &self.trunk_tracking_ref()])
+        let opened = self.prefetched.lock().ok().and_then(|mut slot| slot.take());
+        if let Some(opened) = opened {
+            return opened;
+        }
+        fetch_into(&self.git, &self.bootstrap, &self.work_root)
     }
 
     /// Fetches `refs/bay/registry` when the remote has one. A remote without a registry leaves
@@ -159,5 +459,118 @@ impl Repo {
         let toplevel = PathBuf::from(toplevel).canonicalize().ok()?;
         let views = self.views_dir().canonicalize().ok()?;
         (toplevel.parent()? == views).then(|| toplevel.file_name()?.to_str().map(str::to_owned))?
+    }
+}
+
+/// Fetches the trunk `bootstrap` names into its tracking ref and returns its tip.
+fn fetch_into(git: &Git, bootstrap: &Bootstrap, work_root: &Path) -> Result<String, GitError> {
+    let tracking = bootstrap.tracking_ref();
+    let refspec = format!("+refs/heads/{}:{tracking}", bootstrap.trunk);
+    git.run(&["fetch", "-q", "--no-tags", &bootstrap.remote, &refspec])?;
+    crate::coord::fetched(work_root);
+    git.run(&["rev-parse", "--verify", &tracking])
+}
+
+/// The config committed at `commit`; `None` when that commit's tree has no
+/// `.bay/config.toml`. A tree git cannot read is an error, never "no config".
+fn committed_config(git: &Git, commit: &str) -> Result<Option<Config>, String> {
+    let listed = git
+        .run(&["ls-tree", "-z", "--full-tree", commit, "--", CONFIG_PATH])
+        .map_err(|error| error.message())?;
+    let entry = listed.trim_end_matches('\0');
+    if entry.is_empty() {
+        return Ok(None);
+    }
+    let Some(("blob", blob)) = entry
+        .split('\t')
+        .next()
+        .and_then(|head| head.split_once(' ').map(|(_, rest)| rest))
+        .and_then(|rest| rest.split_once(' '))
+    else {
+        return Err(format!("{commit}:{CONFIG_PATH} is not a file"));
+    };
+    let text = git
+        .run(&["cat-file", "blob", blob])
+        .map_err(|error| error.message())?;
+    Config::parse(&text).map(Some)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{Fetch, Repo};
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t.invalid"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    fn write_config(dir: &Path, text: &str) {
+        std::fs::create_dir_all(dir.join(".bay")).unwrap();
+        std::fs::write(dir.join(".bay/config.toml"), text).unwrap();
+    }
+
+    const TRUNK: &str =
+        "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[executor]\ncommand = \"trunk-executor\"\n";
+    const DRAFT: &str = "trunk = \"decoy\"\n\n[policy]\nevidence_reuse = \"off\"\n\n[executor]\ncommand = \"draft-executor\"\n";
+
+    #[test]
+    fn every_setting_is_the_trunks_never_a_drafts() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        write_config(&root, TRUNK);
+        git(&root, &["add", ".bay"]);
+        git(&root, &["commit", "-q", "-m", "trunk"]);
+        git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let head = [
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ];
+        git(&root, &head);
+        // A draft on the main work tree's disk, and one committed in a change's own branch.
+        write_config(&root, DRAFT);
+        let change = dir.path().join("change");
+        let path = change.to_str().unwrap();
+        git(&root, &["worktree", "add", "-q", "-b", "change", path]);
+        write_config(&change, DRAFT);
+        git(&change, &["commit", "-q", "-am", "draft"]);
+        write_config(&change, "trunk = \"decoy-on-disk\"\n");
+
+        for dir in [&root, &change] {
+            let repo = Repo::open_with(dir, Fetch::Never)
+                .unwrap_or_else(|error| panic!("{}: {}", dir.display(), error.message()));
+            assert_eq!(repo.trunk(), "main");
+            assert_eq!(repo.config.trunk(), "main");
+            assert_eq!(repo.trunk_tracking_ref(), "refs/remotes/origin/main");
+            assert!(repo.config.evidence_reuse(), "{}", dir.display());
+            let command = repo
+                .config
+                .executor
+                .as_ref()
+                .and_then(|executor| executor.command.as_deref());
+            assert_eq!(command, Some("trunk-executor"), "{}", dir.display());
+        }
+
+        // The repository's own git config names the trunk before the remote's default branch.
+        git(
+            &root,
+            &["update-ref", "refs/remotes/origin/release", "HEAD~0"],
+        );
+        git(&root, &["config", "bay.trunk", "release"]);
+        let repo = Repo::open_with(&change, Fetch::Never)
+            .unwrap_or_else(|error| panic!("{}", error.message()));
+        assert_eq!(repo.trunk_tracking_ref(), "refs/remotes/origin/release");
+        assert_eq!(repo.bootstrap.source, "git config bay.trunk");
     }
 }

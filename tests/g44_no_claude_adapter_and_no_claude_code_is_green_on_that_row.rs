@@ -30,7 +30,7 @@ fn no_adapter_and_no_claude_is_green() {
 fn another_products_adapter_does_not_fail_for_a_missing_claude() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
-    TestBox::bay_config(&repo, "[agent]\nproduct = \"another-agent\"\n");
+    test_box.commit_config(&repo, "[agent]\nproduct = \"another-agent\"\n");
     test_box.fake_claude(None);
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 0, "{result}");

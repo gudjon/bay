@@ -1,23 +1,27 @@
 //! `install`: the release's admin command (`DESIGN` § 15.1, § 15.3, § 15.4).
 //!
-//! Writes `$HOME/.local/bin/bay`, the skill at `$HOME/.claude/skills/bay/` and, when the
+//! Writes `$HOME/.local/bin/bay`, the skill at `$HOME/.claude/skills/bay/` (or
+//! `$CLAUDE_CONFIG_DIR/skills/bay/` when that is set) and, when the
 //! Claude adapter is configured, bay's hook entries in the project agent settings. Global Git config, user-global Claude settings,
 //! `user.name`, `user.email` and other tools' hook entries stay unchanged.
 //!
 //! With a key registry, it also writes the repository-local signing identity (§ 15.3 item 3):
 //! `gpg.format=ssh` and `gpg.ssh.allowedSignersFile` set to the class file of the key this box
 //! uses. Keys and the registry themselves are enrolment, never install's job. In a repository it
-//! writes `bay.machine` when it is unset: the folded host name (`live.rs`).
+//! writes `bay.machine` when it is unset: the folded host name (`live.rs`), and the bootstrap
+//! of the config (ruling: config location): `bay.trunk` and `bay.remote`, from `--trunk` and
+//! `--remote`, else what they already hold, else the remote's default branch
+//! (`refs/remotes/<remote>/HEAD`) and `origin`.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
 use crate::agent_settings;
-use crate::config::Config;
 use crate::doctor::UNRELATED_HOOKS_KEY;
 use crate::git::{Git, GitError};
 use crate::registry::{KeyClass, Registry};
+use crate::repo::{Bootstrap, DEFAULT_REMOTE, Fetch, OpenError, REMOTE_KEY, Repo, TRUNK_KEY};
 use crate::result::BayResult;
 use crate::signing::Keys;
 use crate::skill;
@@ -26,13 +30,26 @@ use crate::skill;
 /// or Git config, whatever directory it runs in. `bay update` installs this way.
 #[must_use]
 pub fn install(dir: &Path, machine: bool) -> BayResult {
-    match run(dir, machine) {
+    install_with(dir, machine, &Trunk::default())
+}
+
+/// The trunk and remote `bay install --trunk --remote` names for this repository.
+#[derive(Default)]
+pub struct Trunk {
+    pub trunk: Option<String>,
+    pub remote: Option<String>,
+}
+
+/// [`install`], writing the repository's bootstrap from `trunk`.
+#[must_use]
+pub fn install_with(dir: &Path, machine: bool, trunk: &Trunk) -> BayResult {
+    match run(dir, machine, trunk) {
         Ok(result) => result,
         Err(message) => BayResult::failed(message),
     }
 }
 
-fn run(dir: &Path, machine: bool) -> Result<BayResult, String> {
+fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
     let home = PathBuf::from(
         crate::platform::home().ok_or("HOME is not set; install cannot name its path")?,
     );
@@ -47,7 +64,7 @@ fn run(dir: &Path, machine: bool) -> Result<BayResult, String> {
     place_binary(&bin_dir, &target)?;
 
     // § 15.3 item 4: the skill this binary carries, at the one path doctor checks.
-    let skill_dir = skill::installed_path(&home);
+    let skill_dir = skill::installed_path(&home, skill::config_dir().as_deref());
     skill::install(&skill_dir)?;
 
     let mut detail = json!({"binary": target.display().to_string(),
@@ -61,8 +78,17 @@ fn run(dir: &Path, machine: bool) -> Result<BayResult, String> {
         && !info.bare
     {
         let root = Path::new(&info.toplevel);
-        let config = Config::load(root)?;
-        if config.claude_adapter() {
+        detail["bootstrap"] = write_bootstrap(&git, trunk)?;
+        // The adapter is the config's at the trunk tip, never the work tree's file.
+        let claude = match Repo::open_with(dir, Fetch::Never) {
+            Ok(repo) => repo.config.claude_adapter(),
+            Err(OpenError::ConfigMissing(_, missing)) => {
+                detail["config"] = missing;
+                false
+            }
+            Err(error) => return Err(error.message()),
+        };
+        if claude {
             let path = agent_settings::claude_settings_path(root);
             let mut settings = agent_settings::read(&path)?;
             let before = agent_settings::unrelated_digest(&settings);
@@ -81,6 +107,45 @@ fn run(dir: &Path, machine: bool) -> Result<BayResult, String> {
         }
     }
     Ok(BayResult::ok(detail))
+}
+
+/// Writes `bay.trunk` and `bay.remote` (repository-local): the names given, else what they
+/// hold, else the remote's default branch and `origin`. With no trunk to write, writes nothing
+/// and says so: bay's commands are `CONFIG_MISSING` until one is set.
+fn write_bootstrap(git: &Git, trunk: &Trunk) -> Result<serde_json::Value, String> {
+    let get = |key: &str| {
+        git.run(&["config", "--local", "--get", key])
+            .ok()
+            .filter(|value| !value.is_empty())
+    };
+    let remote = trunk
+        .remote
+        .clone()
+        .or_else(|| get(REMOTE_KEY))
+        .unwrap_or_else(|| DEFAULT_REMOTE.to_owned());
+    let name = trunk.trunk.clone().or_else(|| get(TRUNK_KEY)).or_else(|| {
+        let head = git
+            .run(&["symbolic-ref", "-q", &format!("refs/remotes/{remote}/HEAD")])
+            .ok()?;
+        head.strip_prefix(&format!("refs/remotes/{remote}/"))
+            .map(str::to_owned)
+    });
+    let Some(name) = name else {
+        return Ok(json!({
+            "trunk": null,
+            "remote": remote,
+            "note": "no trunk: run bay install --trunk <name>",
+        }));
+    };
+    for (key, value) in [(REMOTE_KEY, remote.as_str()), (TRUNK_KEY, name.as_str())] {
+        git.run(&["config", "--local", key, value])
+            .map_err(|error| error.message())?;
+    }
+    let read = Bootstrap::of(git.dir()).and_then(Result::ok);
+    Ok(json!({
+        "trunk": read.as_ref().map(|bootstrap| bootstrap.trunk.clone()),
+        "remote": read.map(|bootstrap| bootstrap.remote),
+    }))
 }
 
 /// Sets this repository's local signing identity when it has a key registry: the class file

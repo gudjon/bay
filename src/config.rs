@@ -32,7 +32,7 @@ pub struct Config {
     pub runtime: Option<Runtime>,
     pub policy: Option<PolicyProfile>,
     pub hooks: Option<Hooks>,
-    /// `[update]` is accepted and ignored: the update pin, channel and switch are the box's
+    /// `[update]` is accepted and ignored: the update pin and switch are the box's
     /// (`git config --global bay.update*`, `DESIGN` § 15.6), never a repository's, and an older
     /// config that still carries the table must keep loading.
     #[allow(dead_code)]

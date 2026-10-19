@@ -30,7 +30,7 @@ fn the_trunk_hook_refuses_rewrites_and_allows_retention_cuts() {
     );
 
     let repo = test_box.repo_without_remote_any("repo");
-    test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
+    test_box.add_origin(&repo, &host);
     test_box.seed_with_check(
         &repo,
         &[("src/a.rs", "fn a() {}\n")],

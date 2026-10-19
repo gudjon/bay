@@ -8,6 +8,19 @@
 /// name; `current` is the branch checked out where the command runs, if any.
 #[must_use]
 pub fn denied(command: &str, trunk: &str, current: Option<&str>) -> Option<String> {
+    denied_with(command, Trunk::Named(trunk), current)
+}
+
+/// The trunk a push is judged against.
+#[derive(Clone, Copy)]
+enum Trunk<'a> {
+    Named(&'a str),
+    /// The repository names no trunk bay can read (`CONFIG_MISSING`): every push that is not
+    /// only of `refs/bay/*` could be of trunk, and is denied (fail closed).
+    Unknown,
+}
+
+fn denied_with(command: &str, trunk: Trunk<'_>, current: Option<&str>) -> Option<String> {
     simple_commands(command)
         .into_iter()
         .find_map(|words| denied_simple(&words, trunk, current))
@@ -68,7 +81,7 @@ fn is_git(word: &str) -> bool {
     stem.eq_ignore_ascii_case("git")
 }
 
-fn denied_simple(words: &[String], trunk: &str, current: Option<&str>) -> Option<String> {
+fn denied_simple(words: &[String], trunk: Trunk<'_>, current: Option<&str>) -> Option<String> {
     let git = words.iter().position(|word| is_git(word))?;
     // Skip git's own options (`-C <dir>`, `-c key=value`, `--git-dir=…`) to the subcommand.
     let mut rest = words[git + 1..].iter().peekable();
@@ -106,7 +119,7 @@ fn denied_simple(words: &[String], trunk: &str, current: Option<&str>) -> Option
     }
 }
 
-fn denied_push(args: &[&str], trunk: &str, current: Option<&str>) -> Option<String> {
+fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option<String> {
     let force = args.iter().any(|arg| {
         *arg == "-f"
             || *arg == "--force"
@@ -129,6 +142,21 @@ fn denied_push(args: &[&str], trunk: &str, current: Option<&str>) -> Option<Stri
         .filter(|arg| !arg.starts_with('-'))
         .collect();
     let refspecs = positional.get(1..).unwrap_or_default();
+    let trunk = match trunk {
+        Trunk::Named(trunk) => trunk,
+        Trunk::Unknown => {
+            let only_bay = !refspecs.is_empty()
+                && refspecs.iter().all(|refspec| {
+                    refspec
+                        .rsplit(':')
+                        .next()
+                        .is_some_and(|destination| destination.starts_with("refs/bay/"))
+                });
+            return (!only_bay).then(|| {
+                "bay cannot tell this repository's trunk (CONFIG_MISSING: no git config bay.trunk and no remote default branch), so it denies a push that could be of trunk from an agent shell".to_owned()
+            });
+        }
+    };
     let pushes_trunk = |refspec: &str| {
         let destination = refspec.rsplit(':').next().unwrap_or(refspec);
         destination == trunk
@@ -160,12 +188,17 @@ pub fn judge_hook(event: &str, input: &str, dir: &std::path::Path) -> Option<Str
     let cwd = payload["cwd"]
         .as_str()
         .map_or_else(|| dir.to_path_buf(), std::path::PathBuf::from);
-    let trunk = crate::repo::Repo::open(&cwd)
-        .map_or_else(|_| "main".to_owned(), |repo| repo.trunk().to_owned());
     let current = crate::git::Git::new(&cwd)
         .run(&["symbolic-ref", "--short", "-q", "HEAD"])
         .ok();
-    denied(command, &trunk, current.as_deref())
+    // The trunk is the one every bay command uses (ruling: config location): the bootstrap of
+    // this repository's own git config or its remote's default branch, never a file in the
+    // agent's work tree. Outside a repository a push fails anyway; `main` keeps the shape.
+    match crate::repo::Bootstrap::of(&cwd) {
+        None => denied(command, "main", current.as_deref()),
+        Some(Ok(bootstrap)) => denied(command, &bootstrap.trunk, current.as_deref()),
+        Some(Err(_)) => denied_with(command, Trunk::Unknown, current.as_deref()),
+    }
 }
 
 #[cfg(test)]

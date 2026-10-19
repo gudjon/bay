@@ -114,7 +114,7 @@ fn a_missing_copy_is_red_only_with_the_claude_adapter() {
     assert_eq!(skill["state"], "missing");
     assert_eq!(skill["required"], false);
 
-    TestBox::bay_config(&repo, CLAUDE_ADAPTER);
+    test_box.commit_config(&repo, CLAUDE_ADAPTER);
     test_box.fake_claude(Some("2.1.302"));
     for consumer in ["skills/bay", ".claude/skills/bay"] {
         let dir = repo.join(consumer);
@@ -142,7 +142,7 @@ fn a_missing_copy_is_red_only_with_the_claude_adapter() {
 fn a_mismatched_copy_is_red_with_the_claude_adapter() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
-    TestBox::bay_config(&repo, CLAUDE_ADAPTER);
+    test_box.commit_config(&repo, CLAUDE_ADAPTER);
     test_box.fake_claude(Some("2.1.302"));
     let (code, installed) = result_json(test_box.bay(&repo).arg("install"));
     assert_eq!(code, 0, "{installed}");
@@ -268,6 +268,8 @@ fn status_fleet_fails_closed_after_a_push_or_a_trunk_fetch() {
 fn status_fleet_passes_the_guard_only_for_a_fetch_of_this_remote() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
+    // The trunk, with the config the map is read under (ruling: config location).
+    test_box.seed_trunk(&repo, &[("README", "trunk\n")]);
     let url = test_box.git_ok(&repo, &["remote", "get-url", "origin"]);
     let record = repo.join(".git/bay/fleet/fetched.json");
     std::fs::create_dir_all(record.parent().unwrap()).unwrap();

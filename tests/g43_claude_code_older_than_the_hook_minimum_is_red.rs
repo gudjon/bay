@@ -15,7 +15,7 @@ const CLAUDE_ADAPTER: &str = "[agent]\nproduct = \"claude\"\n";
 fn claude_older_than_2_1_302_is_red() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
-    TestBox::bay_config(&repo, CLAUDE_ADAPTER);
+    test_box.commit_config(&repo, CLAUDE_ADAPTER);
     test_box.fake_claude(Some("2.1.200"));
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 10, "{result}");
@@ -43,7 +43,7 @@ fn claude_older_than_2_1_302_is_red() {
 fn a_configured_adapter_with_claude_absent_is_red() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
-    TestBox::bay_config(&repo, CLAUDE_ADAPTER);
+    test_box.commit_config(&repo, CLAUDE_ADAPTER);
     test_box.fake_claude(None);
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 10, "{result}");
@@ -57,7 +57,7 @@ fn a_configured_adapter_with_claude_absent_is_red() {
 fn claude_at_the_minimum_is_green() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
-    TestBox::bay_config(&repo, CLAUDE_ADAPTER);
+    test_box.commit_config(&repo, CLAUDE_ADAPTER);
     test_box.fake_claude(Some("2.1.302"));
     let (_, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(row(&result, "claude")["state"], "green");

@@ -1465,7 +1465,7 @@ fn notices_beyond_the_budget_are_counted_not_emitted_and_stay_on_watch() {
     assert!(used <= 2048, "{used}");
 
     // The window has `used` bytes told: a budget of that leaves no room for a second notice.
-    TestBox::bay_config(
+    at.test_box.commit_config(
         &at.repo,
         &format!("[hooks]\nnotice_budget_bytes = {used}\n"),
     );

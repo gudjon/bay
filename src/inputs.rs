@@ -350,8 +350,26 @@ fn run_provider(
     let tree_dir = scratch.join("tree");
     let home = scratch.join("home");
     let tmp = scratch.join("tmp");
-    crate::check::materialize(git, policy_commit, &entry.adapter, &adapter_dir)?;
-    crate::check::materialize(git, commit, &[], &tree_dir)?;
+    // A provider has no bound of its own on materialization: it takes a check's default.
+    let bound = crate::policy::DEFAULT_MATERIALIZE_TIMEOUT_S;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(bound);
+    let unmade = |unmade| match unmade {
+        crate::materialize::Unmade::TimedOut => {
+            format!("materializing the provider and the tree exceeded {bound}s")
+        }
+        crate::materialize::Unmade::Refused(why) | crate::materialize::Unmade::Failed(why) => why,
+    };
+    crate::materialize::materialize(
+        git,
+        policy_commit,
+        Some(&entry.adapter),
+        &adapter_dir,
+        deadline,
+        &mut || {},
+    )
+    .map_err(unmade)?;
+    crate::materialize::materialize(git, commit, None, &tree_dir, deadline, &mut || {})
+        .map_err(unmade)?;
     for dir in [&home, &tmp] {
         std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     }

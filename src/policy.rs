@@ -21,6 +21,10 @@ const DEFAULT_TIMEOUT_S: u64 = 1800;
 #[derive(Debug, Deserialize)]
 struct PolicyFile {
     revision: u64,
+    /// The repository declares that a change lands with no check (the missing-policy ruling):
+    /// valid only with no `[[check]]`, and judged at the base like every other field.
+    #[serde(default)]
+    unchecked: bool,
     #[serde(default)]
     check: Vec<CheckEntry>,
     #[serde(default)]
@@ -91,6 +95,41 @@ pub struct CheckEntry {
     /// the definition digest; their values never do, so the digest never pins a secret.
     #[serde(default)]
     pub env: Vec<String>,
+    /// The only paths of the candidate's tree the check sees, each a file or a directory
+    /// ending in `/`, matched as an `adapter` entry is: the rest of the tree is absent from
+    /// its materialization. Absent, the check gets the whole tree. A field of the entry, so it
+    /// is judged at the base and enters the definition digest; left out of the canonical entry
+    /// when absent, so a policy without it keeps its digest (the G26 vector). An empty list
+    /// makes the policy invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
+    /// The bound on materializing the candidate and the adapter for this check, in seconds,
+    /// apart from the bound on one Git call: exceeding it is `infra_failure` that names it,
+    /// never a pass. Left out of the canonical entry at its default, so a policy without it
+    /// keeps its digest; any other value enters the definition digest.
+    #[serde(default, skip_serializing_if = "MaterializeTimeout::is_default")]
+    pub materialize_timeout_s: MaterializeTimeout,
+}
+
+/// The `materialize_timeout_s` of a `[[check]]` entry that states none.
+pub const DEFAULT_MATERIALIZE_TIMEOUT_S: u64 = 600;
+
+/// A check's `materialize_timeout_s`: whole seconds, [`DEFAULT_MATERIALIZE_TIMEOUT_S`] when the
+/// entry states none.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct MaterializeTimeout(pub u64);
+
+impl Default for MaterializeTimeout {
+    fn default() -> Self {
+        Self(DEFAULT_MATERIALIZE_TIMEOUT_S)
+    }
+}
+
+impl MaterializeTimeout {
+    fn is_default(&self) -> bool {
+        self.0 == DEFAULT_MATERIALIZE_TIMEOUT_S
+    }
 }
 
 impl Policy {
@@ -323,6 +362,9 @@ pub struct ManifestEntry {
 #[derive(Clone, Debug)]
 pub struct Policy {
     pub revision: u64,
+    /// `unchecked = true`: the policy declares that a change lands with no check. It has no
+    /// `[[check]]` and an empty manifest, and its landing says "unchecked by policy".
+    pub unchecked: bool,
     /// Every `[[check]]` entry, quarantined or not: each one's adapter paths stay policy paths.
     pub checks: Vec<CheckEntry>,
     /// The `[[quarantine]]` entries: their checks are not required.
@@ -356,7 +398,9 @@ impl From<LoadError> for String {
     }
 }
 
-/// The policy at `commit`, or `None` when that tree has no policy file (no required checks).
+/// The policy at `commit`, or `None` when that tree has no policy file. No policy is unknown
+/// criteria, never "no required checks": land refuses it with `POLICY_MISSING`. A repository
+/// that wants no checks says `unchecked = true`.
 ///
 /// # Errors
 ///
@@ -366,8 +410,9 @@ impl From<LoadError> for String {
 /// relative `path` entry, names a baseline variable in `env`, declares an input other than
 /// `commit` or a fixture that is not `<name>@sha256:<hex>`, has a `[[quarantine]]` that names
 /// no check or whose `end` is neither a date nor a `Change-Id`, has a `[profile.<name>]` that
-/// requires nothing, an unknown dimension or one twice, or has no required check whose
-/// `expected_minimum` is above zero. [`LoadError::Git`] on a git fault.
+/// requires nothing, an unknown dimension or one twice, declares `unchecked = true` beside a
+/// `[[check]]`, or, not unchecked, has no required check whose `expected_minimum` is above
+/// zero. [`LoadError::Git`] on a git fault.
 pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
     let text = match git.run(&["cat-file", "blob", &format!("{commit}:{POLICY_PATH}")]) {
         Ok(text) => text,
@@ -376,34 +421,8 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
     };
     let invalid = |why: String| LoadError::Invalid(format!("{POLICY_PATH} is invalid: {why}"));
     let file: PolicyFile = toml::from_str(&text).map_err(|error| invalid(error.to_string()))?;
-    // Ruling 8c: a quarantine that names no check, or whose end is neither a date nor a
-    // Change-Id, would set nothing aside or never show as overdue: a typo is never silent.
-    for quarantine in &file.quarantine {
-        if !file.check.iter().any(|entry| quarantine.sets_aside(entry)) {
-            return Err(invalid(format!(
-                "[[quarantine]] ({}, {}) names no [[check]] entry",
-                quarantine.id, quarantine.environment
-            )));
-        }
-        if !is_quarantine_end(&quarantine.end) {
-            return Err(invalid(format!(
-                "[[quarantine]] ({}, {}) ends at {:?}, which is neither a date (YYYY-MM-DD) nor a Change-Id",
-                quarantine.id, quarantine.environment, quarantine.end
-            )));
-        }
-    }
+    validate_shape(&file).map_err(invalid)?;
     let quarantined = |entry: &CheckEntry| file.quarantine.iter().any(|q| q.sets_aside(entry));
-    // § 7: a policy whose every required check may collect nothing could pass any candidate
-    // untested.
-    if !file
-        .check
-        .iter()
-        .any(|entry| entry.expected_minimum > 0 && !quarantined(entry))
-    {
-        return Err(invalid(
-            "no required check has an expected_minimum above zero".to_owned(),
-        ));
-    }
 
     let mut seen = std::collections::HashSet::new();
     let mut manifest = Vec::new();
@@ -415,37 +434,10 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
             )));
         }
         let executable = entry.command.split_whitespace().next().unwrap_or_default();
-        // An empty `PATH`, or an empty element, means the current directory to a POSIX
-        // shell: the candidate's tree. A `:` would split one entry into two.
-        if entry.path.is_empty() {
-            return Err(invalid(format!(
-                "check {} has an empty path; leave path out for its default ({})",
-                entry.id,
-                DEFAULT_PATH.join(", ")
-            )));
-        }
-        if let Some(relative) = entry
-            .path
-            .iter()
-            .find(|dir| !Path::new(dir.as_str()).is_absolute() || dir.contains(':'))
-        {
-            return Err(invalid(format!(
-                "check {} has the path entry {relative}; path takes absolute directories, each without ':'",
-                entry.id
-            )));
-        }
-        if let Some(name) = entry.env.iter().find(|name| {
-            name.is_empty()
-                || name.contains(['=', '\0'])
-                || BASELINE_VARIABLES.contains(&name.as_str())
-        }) {
-            return Err(invalid(format!(
-                "check {} names {name:?} in env; env names other variables than the fixed baseline ({})",
-                entry.id,
-                BASELINE_VARIABLES.join(", ")
-            )));
-        }
-        validate_declared_inputs(entry).map_err(invalid)?;
+        validate_environment(entry)
+            .and_then(|()| validate_declared_inputs(entry))
+            .and_then(|()| validate_materialization(entry))
+            .map_err(invalid)?;
         if !entry.adapter.iter().any(|path| covers(path, executable)) {
             return Err(invalid(format!(
                 "check {} runs {executable}, which is not in its adapter list",
@@ -470,6 +462,7 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
     let manifest_digest = manifest_digest(&mut manifest).map_err(LoadError::Git)?;
     Ok(Some(Policy {
         revision: file.revision,
+        unchecked: file.unchecked,
         checks: file.check,
         quarantined: file.quarantine,
         inputs: file.input,
@@ -477,6 +470,45 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
         profiles,
         manifest_digest,
     }))
+}
+
+/// The rules on the file's shape: its quarantines, `unchecked` and the minimum of its checks.
+fn validate_shape(file: &PolicyFile) -> Result<(), String> {
+    // Ruling 8c: a quarantine that names no check, or whose end is neither a date nor a
+    // Change-Id, would set nothing aside or never show as overdue: a typo is never silent.
+    for quarantine in &file.quarantine {
+        if !file.check.iter().any(|entry| quarantine.sets_aside(entry)) {
+            return Err(format!(
+                "[[quarantine]] ({}, {}) names no [[check]] entry",
+                quarantine.id, quarantine.environment
+            ));
+        }
+        if !is_quarantine_end(&quarantine.end) {
+            return Err(format!(
+                "[[quarantine]] ({}, {}) ends at {:?}, which is neither a date (YYYY-MM-DD) nor a Change-Id",
+                quarantine.id, quarantine.environment, quarantine.end
+            ));
+        }
+    }
+    let quarantined = |entry: &CheckEntry| file.quarantine.iter().any(|q| q.sets_aside(entry));
+    // The missing-policy ruling: `unchecked = true` says no check runs, so a check beside it
+    // would make the policy say two things.
+    if file.unchecked && !file.check.is_empty() {
+        return Err(
+            "unchecked = true declares that no check runs, and this policy has [[check]] entries; remove one or the other".to_owned(),
+        );
+    }
+    // § 7: a policy whose every required check may collect nothing could pass any candidate
+    // untested. An unchecked policy says so instead of passing.
+    if !file.unchecked
+        && !file
+            .check
+            .iter()
+            .any(|entry| entry.expected_minimum > 0 && !quarantined(entry))
+    {
+        return Err("no required check has an expected_minimum above zero".to_owned());
+    }
+    Ok(())
 }
 
 /// The one `inputs` value is `commit` (BACKLOG 28, `INTERFACES` § 7): any other is an input bay
@@ -500,6 +532,76 @@ fn validate_declared_inputs(entry: &CheckEntry) -> Result<(), String> {
         };
         if !names.insert(name) {
             return Err(format!("check {} names the fixture {name} twice", entry.id));
+        }
+    }
+    Ok(())
+}
+
+/// The environment rules of one `[[check]]` (ruling 8b): `path` lists absolute directories,
+/// and `env` names variables outside the fixed baseline.
+fn validate_environment(entry: &CheckEntry) -> Result<(), String> {
+    // An empty `PATH`, or an empty element, means the current directory to a POSIX
+    // shell: the candidate's tree. A `:` would split one entry into two.
+    if entry.path.is_empty() {
+        return Err(format!(
+            "check {} has an empty path; leave path out for its default ({})",
+            entry.id,
+            DEFAULT_PATH.join(", ")
+        ));
+    }
+    if let Some(relative) = entry
+        .path
+        .iter()
+        .find(|dir| !Path::new(dir.as_str()).is_absolute() || dir.contains(':'))
+    {
+        return Err(format!(
+            "check {} has the path entry {relative}; path takes absolute directories, each without ':'",
+            entry.id
+        ));
+    }
+    if let Some(name) = entry.env.iter().find(|name| {
+        name.is_empty() || name.contains(['=', '\0']) || BASELINE_VARIABLES.contains(&name.as_str())
+    }) {
+        return Err(format!(
+            "check {} names {name:?} in env; env names other variables than the fixed baseline ({})",
+            entry.id,
+            BASELINE_VARIABLES.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+/// The materialization rules of one `[[check]]`: `paths`, when present, lists at least one
+/// path, each a plain relative file or directory (ending in `/`) that the tree could hold, once;
+/// `materialize_timeout_s` is at least one second. A check that could see nothing, or whose
+/// bound is always exceeded, is a typo, never silent.
+fn validate_materialization(entry: &CheckEntry) -> Result<(), String> {
+    if entry.materialize_timeout_s.0 == 0 {
+        return Err(format!(
+            "check {} has materialize_timeout_s = 0; leave it out for its default ({DEFAULT_MATERIALIZE_TIMEOUT_S})",
+            entry.id
+        ));
+    }
+    let Some(paths) = &entry.paths else {
+        return Ok(());
+    };
+    if paths.is_empty() {
+        return Err(format!(
+            "check {} has an empty paths list; leave paths out for the whole tree",
+            entry.id
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for path in paths {
+        let name = path.strip_suffix('/').unwrap_or(path);
+        if !covers(name, name) || path.contains('\\') {
+            return Err(format!(
+                "check {} names the path {path:?}; paths takes relative files and directories ending in '/', without '.', '..' or empty parts",
+                entry.id
+            ));
+        }
+        if !seen.insert(path.as_str()) {
+            return Err(format!("check {} names the path {path} twice", entry.id));
         }
     }
     Ok(())
@@ -633,6 +735,53 @@ mod tests {
         assert_eq!(digest_of(""), digest_of("fixtures = []\n"));
         assert_ne!(digest_of(""), digest_of(&one));
         assert_ne!(digest_of(&one), digest_of(&two));
+    }
+
+    /// A check's `paths` and `materialize_timeout_s` are fields of the entry, so changing
+    /// either changes its definition digest (judged at the base like the rest of policy); an
+    /// absent `paths` and the default bound leave the digest as it was (the G26 vector).
+    #[test]
+    fn paths_and_the_materialize_bound_enter_the_definition_digest() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let ids = BTreeMap::new();
+        let digest_of = |extra: &str| {
+            let entry: CheckEntry = toml::from_str(&format!("{text}{extra}")).unwrap();
+            manifest_entry(&entry, &ids).unwrap().definition_digest
+        };
+        let plain = digest_of("");
+        let board = digest_of("paths = [\"board/\", \".bay/\"]\n");
+        assert_ne!(plain, board);
+        assert_ne!(board, digest_of("paths = [\"board/\"]\n"));
+        assert_eq!(plain, digest_of("materialize_timeout_s = 600\n"));
+        assert_ne!(plain, digest_of("materialize_timeout_s = 60\n"));
+    }
+
+    /// A check that could see nothing, a path bay could never find in a tree, and a bound
+    /// that is always exceeded make the policy invalid.
+    #[test]
+    fn a_bad_paths_list_or_bound_is_invalid() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let check = |extra: &str| {
+            let entry: CheckEntry = toml::from_str(&format!("{text}{extra}")).unwrap();
+            super::validate_materialization(&entry)
+        };
+        assert!(check("").is_ok());
+        assert!(check("paths = [\"board/\", \".bay/\", \"README.md\"]\n").is_ok());
+        assert!(check("materialize_timeout_s = 1\n").is_ok());
+        for bad in [
+            "paths = []\n",
+            "paths = [\"/etc/\"]\n",
+            "paths = [\"../up/\"]\n",
+            "paths = [\"a//b\"]\n",
+            "paths = [\"./a\"]\n",
+            "paths = [\"\"]\n",
+            "paths = [\"/\"]\n",
+            "paths = [\"a\\\\b\"]\n",
+            "paths = [\"board/\", \"board/\"]\n",
+            "materialize_timeout_s = 0\n",
+        ] {
+            assert!(check(bad).is_err(), "{bad}");
+        }
     }
 
     /// BACKLOG 28: `commit` is the one input bay identifies; R18: a fixture names its digest.

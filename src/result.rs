@@ -94,6 +94,8 @@ reasons! {
     CheckUnknown => "CHECK_UNKNOWN", ["wait", "repair"], "check_produced_result", false;
     PolicyChanged => "POLICY_CHANGED", ["refresh"], "rechecked_under_current_policy", false;
     PolicyInvalid => "POLICY_INVALID", ["repair"], "policy_repaired", false;
+    // The missing-policy ruling; not yet in INTERFACES § 2: no `.bay/policy.toml` at the base.
+    PolicyMissing => "POLICY_MISSING", ["read"], "policy_added", false;
     WorkspaceIncomplete => "WORKSPACE_INCOMPLETE", ["resume"], "journal_ready", false;
     PublishOutcomeUnknown => "PUBLISH_OUTCOME_UNKNOWN", [], "trunk_read_again", false;
     ChangeAlreadyLanded => "CHANGE_ALREADY_LANDED", ["read"], "never", false;
@@ -101,6 +103,9 @@ reasons! {
     AbandonRefused => "ABANDON_REFUSED", ["read"], "current_actor_abandons_or_adopt_rules_apply", false;
     CoverageUnknown => "COVERAGE_UNKNOWN", ["edit_locally"], "coordination_data_reachable", false;
     RemoteNotFetched => "REMOTE_NOT_FETCHED", ["read"], "remote_fetched", false;
+    // Ruling: config location (a repository with no `.bay/config.toml` anywhere bay looks);
+    // not yet in INTERFACES § 2
+    ConfigMissing => "CONFIG_MISSING", ["read"], "config_added", false;
     // INTERFACES § 8 (doctor)
     GitBelowFloor => "GIT_BELOW_FLOOR", ["read"], "git_upgraded_to_floor", false;
     ClaudeBelowFloor => "CLAUDE_BELOW_FLOOR", ["read"], "claude_upgraded_or_adapter_removed", false;
@@ -372,7 +377,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 42);
+        assert_eq!(Reason::ALL.len(), 44);
     }
 
     #[test]

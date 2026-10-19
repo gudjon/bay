@@ -65,7 +65,7 @@ fn trunk(config: &str, policy: &str, verdict: &str, signed: bool) -> Trunk {
         let host = test_box.path().join("host.git");
         test_box.host_init(&host);
         let repo = test_box.repo_without_remote_any("repo");
-        test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
+        test_box.add_origin(&repo, &host);
         (repo, host)
     } else {
         let repo = test_box.repo_any("repo");

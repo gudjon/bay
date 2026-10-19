@@ -16,6 +16,9 @@ pub mod talk;
 /// What a new test box's global Git config holds: the box's choice of no check sandbox.
 pub const UNSANDBOXED_CHOICE: &str = "[bay]\n\texecutorSandbox = none\n";
 
+/// The config a new work repository starts with.
+pub const MINIMAL_CONFIG: &str = "trunk = \"main\"\n";
+
 pub struct TestBox {
     root: TempDir,
     pub fakebin: PathBuf,
@@ -240,8 +243,22 @@ impl TestBox {
     pub fn repo(&self, name: &str, object_format: &str, ref_format: &str) -> PathBuf {
         let remote = self.bare(&format!("{name}-remote.git"), object_format, ref_format);
         let dir = self.repo_without_remote(name, object_format, ref_format);
-        self.git_ok(&dir, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        self.add_origin(&dir, &remote);
         dir
+    }
+
+    /// Adds `origin` at `url` to `repo` and, as a clone would, names its default branch
+    /// `main`: the bootstrap bay finds the trunk by (ruling: config location).
+    pub fn add_origin(&self, repo: &Path, url: &Path) {
+        self.git_ok(repo, &["remote", "add", "origin", url.to_str().unwrap()]);
+        self.git_ok(
+            repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        );
     }
 
     pub fn repo_without_remote(
@@ -263,7 +280,66 @@ impl TestBox {
                 dir.to_str().unwrap(),
             ],
         );
+        // bay never runs on a default config (ruling: config location): every work
+        // repository starts with a minimal one, which the first seed commits to trunk, where
+        // bay reads it.
+        Self::bay_config(&dir, MINIMAL_CONFIG);
         dir
+    }
+
+    /// Commits `text` as `.bay/config.toml` on the remote's trunk, on top of its tip (or as its
+    /// first commit), and fetches it: bay reads the config only there (ruling: config
+    /// location). The work tree and its index stay as they are.
+    pub fn commit_config(&self, repo: &Path, text: &str) -> String {
+        let _ = self
+            .git(repo)
+            .args(["fetch", "-q", "origin", "main"])
+            .output();
+        let parent = self
+            .git(repo)
+            .args([
+                "rev-parse",
+                "-q",
+                "--verify",
+                "refs/remotes/origin/main^{commit}",
+            ])
+            .output()
+            .unwrap();
+        let parent = String::from_utf8(parent.stdout).unwrap().trim().to_owned();
+        let scratch = self.path().join(".commit-config");
+        std::fs::create_dir_all(&scratch).unwrap();
+        let file = scratch.join("config.toml");
+        std::fs::write(&file, text).unwrap();
+        let blob = self.git_ok(repo, &["hash-object", "-w", file.to_str().unwrap()]);
+        let index = scratch.join("index");
+        let _ = std::fs::remove_file(&index);
+        let with_index = |args: &[&str]| {
+            let out = self
+                .git(repo)
+                .env("GIT_INDEX_FILE", &index)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        if !parent.is_empty() {
+            with_index(&["read-tree", &parent]);
+        }
+        let entry = format!("100644,{blob},.bay/config.toml");
+        with_index(&["update-index", "--add", "--cacheinfo", &entry]);
+        let tree = with_index(&["write-tree"]);
+        let mut args = vec!["commit-tree", tree.as_str(), "-m", "config"];
+        if !parent.is_empty() {
+            args.extend(["-p", parent.as_str()]);
+        }
+        let commit = self.git_ok(repo, &args);
+        self.git_ok(
+            repo,
+            &["push", "-q", "origin", &format!("{commit}:refs/heads/main")],
+        );
+        self.git_ok(repo, &["update-ref", "refs/remotes/origin/main", &commit]);
+        commit
     }
 
     /// Writes `<repo>/.bay/config.toml`.
@@ -315,6 +391,17 @@ pub fn check_files(
         ("scripts/bay-check".to_owned(), script),
         (".bay/policy.toml".to_owned(), policy),
     ]
+}
+
+/// A policy that declares the repository unchecked (`unchecked = true`, no `[[check]]`): a
+/// change lands with no check, and its landing says so. Without a policy at its base a change
+/// is refused with `POLICY_MISSING`, so a test that lands without checks seeds this.
+pub const UNCHECKED_POLICY: &str = "revision = 1\nunchecked = true\n";
+
+/// [`UNCHECKED_POLICY`] as the files [`TestBox::seed_with_check`] takes.
+#[must_use]
+pub fn unchecked_files() -> Vec<(String, String)> {
+    vec![(".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned())]
 }
 
 /// A check result with `units` passing tests.

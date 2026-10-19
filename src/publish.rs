@@ -72,9 +72,9 @@ pub fn land(
     observe: Option<Duration>,
     abandon: bool,
 ) -> BayResult {
-    let repo = match Repo::open(dir) {
+    let repo = match Repo::open_fetched(dir) {
         Ok(repo) => repo,
-        Err(message) => return BayResult::failed(message),
+        Err(error) => return error.into_result(),
     };
     let _ = receipts::sync(&repo);
     let Some(id) = change.map(str::to_owned).or_else(|| repo.view_change(dir)) else {
@@ -2025,8 +2025,9 @@ fn input_refusal(
 }
 
 /// Step 4: runs the base policy's checks on the candidate and combines the evidence on its
-/// tree. Returns whether a policy exists, the attempt's verdict word, and the refusal when
-/// any required check is not `pass`.
+/// tree. Returns whether a judging policy ran checks (so there is evidence to push), the
+/// attempt's verdict word ([`UNCHECKED`] when the policy that judges it is unchecked), and the
+/// refusal when any required check is not `pass` or the base has no policy.
 fn check_candidate(
     ctx: &Ctx,
     op_id: &str,
@@ -2060,8 +2061,18 @@ fn check_candidate(
         }
         Err(policy::LoadError::Git(why)) => return refuse(why),
     };
-    // Runs `policy`'s checks with the adapter from `from`, under check id prefix `id`.
+    // The missing-policy ruling: no policy at the base is unknown criteria, and unknown is
+    // never pass. Only a registry-signed repair, judged by its own new policy alone (§ 7), may
+    // stand on such a base; a candidate's own policy never judges it otherwise.
+    if base_policy.is_none() && ctx.repair.is_none() {
+        return Ok(policy_missing(ctx, op_id, trunk));
+    }
+    // Runs `policy`'s checks with the adapter from `from`, under check id prefix `id`. An
+    // unchecked policy runs nothing and says so.
     let run = |id: &str, policy: &policy::Policy, from: &str| {
+        if policy.unchecked {
+            return Ok((UNCHECKED, None));
+        }
         run_policy(ctx, op_id, id, commit, tree, trunk, policy, from, inputs)
     };
     let changed = policy_changed(git, trunk, commit, base_policy.as_ref())?;
@@ -2070,10 +2081,10 @@ fn check_candidate(
             return refuse("a policy repair changes only .bay/policy.toml and adapter paths, and this change does not change them".to_owned());
         }
         let Some(policy) = &base_policy else {
-            return Ok((false, "pass", None));
+            return Ok(policy_missing(ctx, op_id, trunk));
         };
         let (verdict, refusal) = run(candidate_id, policy, trunk)?;
-        return Ok((true, verdict, refusal));
+        return Ok((!policy.unchecked, verdict, refusal));
     }
 
     // A change to the policy or an adapter path (§ 7): it must raise the revision; it is
@@ -2114,17 +2125,60 @@ fn check_candidate(
         }
         let own_id = format!("{candidate_id}-own");
         let (verdict, refusal) = run(&own_id, &own_policy, commit)?;
+        return Ok((!own_policy.unchecked, verdict, refusal));
+    }
+    let Some(policy) = &base_policy else {
+        return Ok(policy_missing(ctx, op_id, trunk));
+    };
+    // The unchecked-base ruling: the criteria are judged at the base. Under an unchecked base
+    // the candidate lands unchecked by the base's policy; a policy or adapter it adds takes
+    // effect only after it lands, never for its own landing, so none of its checks runs here.
+    if policy.unchecked {
+        return Ok((false, UNCHECKED, None));
+    }
+    let (verdict, refusal) = run(candidate_id, policy, trunk)?;
+    if refusal.is_some() {
         return Ok((true, verdict, refusal));
     }
-    if let Some(policy) = &base_policy {
-        let (verdict, refusal) = run(candidate_id, policy, trunk)?;
-        if refusal.is_some() {
-            return Ok((true, verdict, refusal));
-        }
-    }
     let own_id = format!("{candidate_id}-own");
-    let (verdict, refusal) = run(&own_id, &own_policy, commit)?;
+    let (own_verdict, refusal) = run(&own_id, &own_policy, commit)?;
+    // Checked twice (§ 7): the base's checks ran and passed, so a candidate whose own new
+    // policy is unchecked is still a checked pass by the base.
+    let verdict = if own_verdict == UNCHECKED {
+        verdict
+    } else {
+        own_verdict
+    };
     Ok((true, verdict, refusal))
+}
+
+/// The verdict word of an attempt whose judging policies declare `unchecked = true`: it ran
+/// no check, so it is never a `pass` (the missing-policy ruling).
+pub const UNCHECKED: &str = "unchecked";
+
+/// What a landing under an unchecked policy says, in its result and its terminal record.
+pub const UNCHECKED_BY_POLICY: &str = "unchecked by policy";
+
+/// `POLICY_MISSING` (the missing-policy ruling): the base has no `.bay/policy.toml`, so the
+/// criteria are unknown. The detail names the base commit and the path.
+fn policy_missing(ctx: &Ctx, op_id: &str, base: &str) -> (bool, &'static str, Option<BayResult>) {
+    (
+        true,
+        "unknown",
+        Some(
+            BayResult::blocked(Reason::PolicyMissing)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(json!({
+                    "base": base,
+                    "path": policy::POLICY_PATH,
+                    "why": format!(
+                        "the base {base} has no {}, so the criteria are unknown; add a policy there, or declare unchecked = true in it to land without checks",
+                        policy::POLICY_PATH
+                    ),
+                })),
+        ),
+    )
 }
 
 /// `POLICY_INVALID` (§ 2, § 7): the policy at `at`, the base's or the candidate's own (`which`),
@@ -2759,10 +2813,17 @@ fn scanned(ctx: &mut Ctx, trunk: &str, revision: &str) -> Result<Option<BayResul
             .find(|op| op.revision == revision)
             .map(|op| op.op_id.clone());
         let commit = publication.commit.clone();
-        return match op_id {
-            Some(op_id) => derive_landed(ctx, &op_id, revision, &commit).map(Some),
-            None => Ok(Some(landed_result(&ctx.id, None, &commit, revision))),
-        };
+        if let Some(op_id) = op_id {
+            return derive_landed(ctx, &op_id, revision, &commit).map(Some);
+        }
+        // No operation of this revision in the chain, so no attempt shows a check passed:
+        // judged at its base, fail closed.
+        let mut result = landed_result(&ctx.id, None, &commit, revision);
+        let unchecked = unchecked_reason(&ctx.repo.git, None, &commit);
+        if let (Some(detail), Some(why)) = (result.detail.as_mut(), unchecked) {
+            detail["unchecked"] = json!(why);
+        }
+        return Ok(Some(result));
     }
     Ok(Some(
         BayResult::blocked(Reason::ChangeAlreadyLanded)
@@ -2793,6 +2854,10 @@ fn derive_landed(
     ctx.push_chain();
     write_terminal(ctx, op_id, "published", Some(commit))?;
     let mut result = landed_result(&ctx.id, Some(op_id), commit, revision);
+    let unchecked = unchecked_landing(ctx, op_id, commit);
+    if let (Some(detail), Some(why)) = (result.detail.as_mut(), unchecked) {
+        detail["unchecked"] = json!(why);
+    }
     // The change is published: a fault while reading its gaps or its inputs never turns the
     // landing into an error. The result says what could not be read, so none is hidden.
     let gaps = match coverage_gaps(ctx, op_id) {
@@ -2920,7 +2985,7 @@ fn write_terminal(
     }
     let op = ctx.op(op_id);
     let attempt = op.attempts.last();
-    let record = json!({
+    let mut record = json!({
         "schema": "bay.terminal/1",
         "op_id": op_id,
         "change": ctx.id,
@@ -2934,8 +2999,58 @@ fn write_terminal(
         "executor": executor,
         "policy_repair": ctx.repair,
     });
+    if let Some(why) = published
+        .filter(|_| outcome == "published")
+        .and_then(|commit| unchecked_landing(ctx, op_id, commit))
+    {
+        // Executor-signed with the record, so status never shows this landing as checked.
+        record["unchecked"] = json!(why);
+    }
     let signer = ctx.executor_signer().ok().flatten();
     crate::log::append(ctx.repo, &executor, signer.as_ref(), &record).map(|_| ())
+}
+
+/// Why landed `commit` was never checked (the missing-policy and unchecked-base rulings), or
+/// `None` when it was. `verdict` is the verdict of the attempt that built `commit`, when the
+/// chain holds it. Judged at the base (`commit^1`), and fail closed: a base that cannot be
+/// read, or a missing attempt where only a passing one would show a check ran, never reads as
+/// checked.
+#[must_use]
+pub fn unchecked_reason(git: &Git, verdict: Option<&str>, commit: &str) -> Option<&'static str> {
+    if verdict == Some(UNCHECKED) {
+        return Some(UNCHECKED_BY_POLICY);
+    }
+    let passed = verdict == Some("pass");
+    match policy::load_at(git, &format!("{commit}^1")) {
+        Ok(Some(base)) if !base.unchecked => None,
+        // Only a registry-signed repair runs checks under an unchecked base (its own new
+        // policy's), and its attempt says they passed.
+        Ok(Some(_)) => (!passed).then_some(UNCHECKED_BY_POLICY),
+        // Only a registry-signed repair lands on a base without a policy, judged by its own
+        // new policy alone: checked only when that policy has checks and they passed.
+        Ok(None) => match policy::load_at(git, commit) {
+            Ok(Some(own)) if passed && !own.unchecked => None,
+            _ => Some("no policy at its base"),
+        },
+        // An invalid base policy judges nothing; only a passing repair lands over it.
+        Err(policy::LoadError::Invalid(_)) => {
+            (!passed).then_some("the policy at its base is invalid")
+        }
+        Err(policy::LoadError::Git(_)) => Some("the policy at its base could not be read"),
+    }
+}
+
+/// [`unchecked_reason`] for `commit`, published by `op_id`, judged by the attempt that built
+/// it.
+fn unchecked_landing(ctx: &Ctx, op_id: &str, commit: &str) -> Option<&'static str> {
+    let verdict = ctx
+        .op(op_id)
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.commit == commit)
+        .map(|attempt| attempt.verdict.as_str());
+    unchecked_reason(&ctx.repo.git, verdict, commit)
 }
 
 fn landed_result(id: &str, op_id: Option<&str>, commit: &str, revision: &str) -> BayResult {
@@ -3097,4 +3212,102 @@ pub fn retain(repo: &Repo, id: &str) -> Result<Option<String>, String> {
         return Err(format!("the retention cut of {id} could not be pushed"));
     }
     Ok(Some(head))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
+    use super::{UNCHECKED, UNCHECKED_BY_POLICY, unchecked_reason};
+    use crate::git::Git;
+
+    const CHECKED: &str = "revision = 1\n\n[[check]]\nid = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+    const UNCHECKED_POLICY: &str = "revision = 1\nunchecked = true\n";
+
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@bay.invalid"])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    }
+
+    /// A commit holding `own` as `.bay/policy.toml` whose parent holds `base` (`None`: no
+    /// policy); returns (dir, git, commit).
+    fn landing(base: Option<&str>, own: Option<&str>) -> (tempfile::TempDir, Git, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        std::fs::create_dir_all(root.join(".bay")).unwrap();
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(root.join("scripts/bay-check"), "#!/bin/sh\n").unwrap();
+        for (policy, message) in [(base, "base"), (own, "landing")] {
+            let path = root.join(".bay/policy.toml");
+            match policy {
+                Some(text) => std::fs::write(&path, text).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            std::fs::write(root.join("a"), message).unwrap();
+            git(root, &["add", "-A"]);
+            git(root, &["commit", "-q", "-m", message]);
+        }
+        let commit = git(root, &["rev-parse", "HEAD"]);
+        let git = Git::new(root);
+        (dir, git, commit)
+    }
+
+    /// Judged at the base and fail closed: a landing reads as checked only when a checked base
+    /// judged it, or a passing attempt on the repair path shows its own new checks ran.
+    #[test]
+    fn a_landing_reads_as_checked_only_when_a_check_judged_it() {
+        // `unchecked = true` beside a `[[check]]` is invalid.
+        let invalid = CHECKED.replacen("revision = 1\n", "revision = 1\nunchecked = true\n", 1);
+        let own = CHECKED.replacen("revision = 1", "revision = 2", 1);
+
+        let (_dir, git, commit) = landing(Some(CHECKED), Some(CHECKED));
+        assert_eq!(unchecked_reason(&git, None, &commit), None);
+        assert_eq!(unchecked_reason(&git, Some("pass"), &commit), None);
+        assert_eq!(
+            unchecked_reason(&git, Some(UNCHECKED), &commit),
+            Some(UNCHECKED_BY_POLICY)
+        );
+
+        // Under an unchecked base a candidate's own checks never judge its landing; only a
+        // passing attempt (the repair path) shows that a check ran.
+        let (_dir, git, commit) = landing(Some(UNCHECKED_POLICY), Some(&own));
+        assert_eq!(
+            unchecked_reason(&git, None, &commit),
+            Some(UNCHECKED_BY_POLICY)
+        );
+        assert_eq!(unchecked_reason(&git, Some("pass"), &commit), None);
+
+        let (_dir, git, commit) = landing(None, Some(&own));
+        assert_eq!(
+            unchecked_reason(&git, None, &commit),
+            Some("no policy at its base")
+        );
+        assert_eq!(unchecked_reason(&git, Some("pass"), &commit), None);
+        let (_dir, git, commit) = landing(None, None);
+        assert_eq!(
+            unchecked_reason(&git, Some("pass"), &commit),
+            Some("no policy at its base")
+        );
+
+        // An invalid base judges nothing: unknown, never checked.
+        let (_dir, git, commit) = landing(Some(&invalid), Some(&own));
+        assert_eq!(
+            unchecked_reason(&git, None, &commit),
+            Some("the policy at its base is invalid")
+        );
+    }
 }

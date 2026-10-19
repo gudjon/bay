@@ -107,7 +107,10 @@ fn synchronize(repo: &Repo) -> Result<(String, Option<String>), String> {
 }
 
 fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
-    let repo = Repo::open(dir)?;
+    let repo = match Repo::open_fetched(dir) {
+        Ok(repo) => repo,
+        Err(error) => return Ok(error.into_result()),
+    };
     let _ = receipts::sync(&repo);
     let pending = receipts::pending(&repo);
     let (trunk, fetched_at) = synchronize(&repo)?;
@@ -459,12 +462,44 @@ fn completion(
     landed: Option<&crate::publish::Found>,
     read: &Read,
 ) -> Result<Value, String> {
-    let checked = landed.is_some()
-        || record.operations.last().is_some_and(|op| {
-            op.attempts
-                .last()
-                .is_some_and(|attempt| attempt.verdict == "pass")
-        });
+    let unchecked = landed.and_then(|found| unchecked(&repo.git, record, found));
+    let checked = unchecked.is_none()
+        && (landed.is_some()
+            || record.operations.last().is_some_and(|op| {
+                op.attempts
+                    .last()
+                    .is_some_and(|attempt| attempt.verdict == "pass")
+            }));
+    let mut out = completion_dimensions(repo, record, trunk, landed, read, checked)?;
+    out["unchecked"] = json!(unchecked);
+    Ok(out)
+}
+
+/// Why landed `found` was never checked, or `None` when it was: judged at its base by
+/// [`crate::publish::unchecked_reason`] with the attempt that built it, fail closed.
+fn unchecked(
+    git: &crate::git::Git,
+    record: &ChangeRecord,
+    found: &crate::publish::Found,
+) -> Option<&'static str> {
+    let verdict = record
+        .operations
+        .iter()
+        .flat_map(|op| op.attempts.iter())
+        .find(|attempt| attempt.commit == found.commit)
+        .map(|attempt| attempt.verdict.as_str());
+    crate::publish::unchecked_reason(git, verdict, &found.commit)
+}
+
+/// The completion dimensions of [`completion`], with `checked` as judged there.
+fn completion_dimensions(
+    repo: &Repo,
+    record: &ChangeRecord,
+    trunk: &str,
+    landed: Option<&crate::publish::Found>,
+    read: &Read,
+    checked: bool,
+) -> Result<Value, String> {
     let Read::Full {
         registry,
         ask_runtime,

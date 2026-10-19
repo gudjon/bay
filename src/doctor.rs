@@ -1,5 +1,5 @@
 //! `bay doctor`: the capability probe (`DESIGN` § 15.2, `INTERFACES` § 8), and the `bay`
-//! row of `bay update` (installed version, channel, newest recorded release, pin).
+//! row of `bay update` (installed version, newest recorded release, pin).
 //!
 //! Doctor reads. It writes no settings file and no Git config.
 
@@ -12,6 +12,7 @@ use crate::agent_settings;
 use crate::config::Config;
 use crate::git::{self, Git, GitError, RepoInfo};
 use crate::host;
+use crate::repo::{Bootstrap, Fetch, OpenError, Repo};
 use crate::result::{BayResult, Decision, Reason};
 use crate::skill;
 use crate::version::{
@@ -96,9 +97,11 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     } else {
         Some(git.repo_info().map_err(|error| error.message())?)
     };
-    let config = match &info {
-        Some(info) if !info.bare => Config::load(Path::new(&info.toplevel))?,
-        _ => Config::default(),
+    // The config every command runs under: the one committed at the trunk tracking ref
+    // (ruling: config location), read without a fetch, since doctor only reads.
+    let (config, config_row) = match &info {
+        Some(info) if !info.bare => repository_config(dir)?,
+        _ => (Config::default(), None),
     };
 
     let mut report = Report::default();
@@ -139,6 +142,7 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     report.rows.push(claude_row);
 
     if let Some(info) = &info {
+        report.rows.extend(config_row);
         remote_row(&git, &config, info.bare, &mut report)?;
         hooks_row(&git, &config, info, &mut report)?;
         quarantine_row(&git, &config, info.bare, &mut report);
@@ -197,6 +201,27 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     .with_detail(detail);
     result.human = Some(line);
     Ok(result)
+}
+
+/// The config of the work repository at `dir`, and a `config` row when it has none. With none,
+/// the other rows name the bootstrap's remote and trunk where there is one, and otherwise the
+/// defaults. The row is not red: the box is ready, and the repository's commands refuse
+/// `CONFIG_MISSING` until trunk has a config.
+fn repository_config(dir: &Path) -> Result<(Config, Option<Value>), String> {
+    match Repo::open_with(dir, Fetch::Never) {
+        Ok(repo) => Ok((repo.config, None)),
+        Err(OpenError::ConfigMissing(_, detail)) => {
+            let mut config = Config::default();
+            if let Some(Ok(bootstrap)) = Bootstrap::of(dir) {
+                config.trunk = Some(bootstrap.trunk);
+                config.remote = Some(bootstrap.remote);
+            }
+            let row = json!({"name": "config", "required": false, "state": "missing",
+                "reason": Reason::ConfigMissing.code(), "detail": detail});
+            Ok((config, Some(row)))
+        }
+        Err(error) => Err(error.message()),
+    }
 }
 
 /// The Git rows: the floor for `role`, the shared cache and the recommended features. Returns
@@ -367,13 +392,14 @@ fn sandbox_row(sandbox: &crate::check::Sandbox, runs_checks: bool, report: &mut 
     report.rows.push(row);
 }
 
-/// The installed skill at `$HOME/.claude/skills/bay/` against the skill this bay version
+/// The installed skill at `$HOME/.claude/skills/bay/` (or `$CLAUDE_CONFIG_DIR/skills/bay/`
+/// when that is set, the path install writes, G65) against the skill this bay version
 /// installs (§ 15.2, G49). A consumer repository's skills are never this copy. A mismatch is
 /// red on every box; a missing copy is red only where the Claude adapter is configured.
 fn skill_row(config: &Config, report: &mut Report) -> Result<(), String> {
     let home =
         crate::platform::home().ok_or("HOME is not set; doctor cannot name the skill path")?;
-    let path = skill::installed_path(Path::new(&home));
+    let path = skill::installed_path(Path::new(&home), skill::config_dir().as_deref());
     let required = config.claude_adapter();
     let mut row =
         json!({"name": "skill", "path": path.display().to_string(), "required": required});

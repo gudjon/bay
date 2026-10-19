@@ -35,7 +35,10 @@ fn run(dir: &Path, change: &str, wait: bool) -> Result<BayResult, String> {
     if !is_change_id(change) {
         return Err(format!("{change} is not a change id"));
     }
-    let repo = Repo::open(dir)?;
+    let repo = match Repo::open_fetched(dir) {
+        Ok(repo) => repo,
+        Err(error) => return Ok(error.into_result()),
+    };
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
     let Some(commit) = landed_commit(&repo, change, &trunk)? else {
         return Ok(BayResult::blocked(Reason::ChangeNotLanded)

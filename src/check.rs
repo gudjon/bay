@@ -17,6 +17,7 @@ use serde_json::json;
 use crate::clock::now_rfc3339;
 use crate::evidence::{CheckId, EVIDENCE_SCHEMA, EvidenceRecord, Producer, Subject, Unit, Verdict};
 use crate::git::Git;
+use crate::materialize::{Unmade, materialize};
 use crate::policy::{CheckEntry, Policy};
 
 /// What is being checked.
@@ -85,6 +86,14 @@ pub struct Limits {
 #[must_use]
 pub fn hidden_for(repo: &crate::repo::Repo, keys: &crate::signing::Keys) -> Vec<PathBuf> {
     let mut hidden = vec![repo.work_root.clone(), repo.common_dir.clone()];
+    // A linked worktree bay was started in is the repository's too (a view is already under
+    // the common directory).
+    if let Ok(top) = Git::new(&repo.opened_in).run(&["rev-parse", "--show-toplevel"]) {
+        let top = PathBuf::from(top);
+        if !top.starts_with(&repo.common_dir) && !hidden.contains(&top) {
+            hidden.push(top);
+        }
+    }
     let keys = [
         keys.agent.clone(),
         keys.executor.as_ref().map(|signer| signer.key.clone()),
@@ -354,11 +363,20 @@ pub fn run_all(
         let tree_dir = dir.join("candidate");
         let adapter_dir = dir.join("adapter");
         // R14: with no sandbox and no choice by the box, nothing of the check runs.
-        if limits.sandbox.refusal.is_none() {
-            materialize(git, candidate.commit, &[], &tree_dir)?;
-            materialize(git, candidate.base, &entry.adapter, &adapter_dir)?;
-            make_read_only(&adapter_dir);
-        }
+        let not_run = match &limits.sandbox.refusal {
+            Some(why) => Some(Judged::without_units(
+                Verdict::InfraFailure,
+                Some(why.clone()),
+            )),
+            None => prepare(
+                git,
+                entry,
+                candidate,
+                (&tree_dir, &adapter_dir),
+                budget.map(|budget| budget.saturating_sub(started.elapsed())),
+                (&mut *hooks.beat, limits.heartbeat),
+            )?,
+        };
         let place = Place {
             tree: &tree_dir,
             adapter: &adapter_dir,
@@ -373,8 +391,8 @@ pub fn run_all(
             why,
             units,
             selection,
-        } = match &limits.sandbox.refusal {
-            Some(why) => Judged::without_units(Verdict::InfraFailure, Some(why.clone())),
+        } = match not_run {
+            Some(judged) => judged,
             None => within_budget(
                 hooks.beat,
                 limits.heartbeat,
@@ -742,35 +760,102 @@ fn run_with_timeout(
     Ok((output, stderr))
 }
 
-/// Writes `commit`'s tree (or just `paths` of it) into `dir`, with no `.git`.
-pub(crate) fn materialize(
+/// Materializes what `entry` sees of the candidate (its `paths`, or the whole tree) into
+/// `tree_dir` and its adapter paths from the base into `adapter_dir`, read-only, both within
+/// the entry's `materialize_timeout_s` and what is left of the execution budget (`left`),
+/// renewing the lease (`beat`, every `heartbeat`) as it goes. Returns what is on record when
+/// the check does not run: `infra_failure` naming the bound when it is exceeded or naming a
+/// path of the tree bay does not write, `unknown` when the budget runs out first; never a pass.
+///
+/// # Errors
+///
+/// Either tree cannot be materialized for another reason (a fault of bay's own).
+fn prepare(
     git: &Git,
-    commit: &str,
-    paths: &[String],
-    dir: &Path,
-) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
-    let tar: PathBuf = dir.with_extension("tar");
-    let tar_text = tar.display().to_string();
-    let mut args = vec!["archive", "--format=tar", "-o", tar_text.as_str(), commit];
-    if !paths.is_empty() {
-        args.push("--");
-        args.extend(paths.iter().map(|path| path.trim_end_matches('/')));
+    entry: &CheckEntry,
+    candidate: &Candidate,
+    (tree_dir, adapter_dir): (&Path, &Path),
+    left: Option<Duration>,
+    (beat, heartbeat): (&mut dyn FnMut(), Option<Duration>),
+) -> Result<Option<Judged>, String> {
+    let budget_out = |when: &str| {
+        Some(Judged::without_units(
+            Verdict::Unknown,
+            Some(format!("the execution budget was exhausted {when}")),
+        ))
+    };
+    if left.is_some_and(|left| left.is_zero()) {
+        return Ok(budget_out("before this check started"));
     }
-    git.run(&args).map_err(|error| error.message())?;
-    let status = Command::new("tar")
-        .arg("-xf")
-        .arg(&tar)
-        .arg("-C")
-        .arg(dir)
-        .status()
-        .map_err(|error| format!("tar: {error}"))?;
-    let _ = std::fs::remove_file(&tar);
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("tar could not extract {commit}"))
+    let seconds = entry.materialize_timeout_s.0;
+    let bound = materialize_bound(seconds);
+    let by_budget = left.is_some_and(|left| left < bound);
+    let now = Instant::now();
+    let within = match left {
+        Some(left) if by_budget => left,
+        _ => bound,
+    };
+    // A bound beyond what the clock can hold is never reached: the latest deadline it holds
+    // instead, never an overflow.
+    let deadline = now
+        .checked_add(within)
+        .or_else(|| now.checked_add(Duration::from_secs(u64::from(u32::MAX))))
+        .unwrap_or(now);
+    let mut last_beat = Instant::now();
+    let mut tick = || {
+        if heartbeat.is_some_and(|every| last_beat.elapsed() >= every) {
+            beat();
+            last_beat = Instant::now();
+        }
+    };
+    let made = materialize(
+        git,
+        candidate.commit,
+        entry.paths.as_deref(),
+        tree_dir,
+        deadline,
+        &mut tick,
+    )
+    .and_then(|()| {
+        materialize(
+            git,
+            candidate.base,
+            Some(&entry.adapter),
+            adapter_dir,
+            deadline,
+            &mut tick,
+        )
+    });
+    match made {
+        Ok(()) => {
+            make_read_only(adapter_dir);
+            Ok(None)
+        }
+        Err(Unmade::TimedOut) if by_budget => Ok(budget_out(
+            "while materializing the candidate and the adapter; the check did not run",
+        )),
+        Err(Unmade::TimedOut) => Ok(Some(Judged::without_units(
+            Verdict::InfraFailure,
+            Some(format!(
+                "materializing the candidate and the adapter exceeded the check's materialize_timeout_s ({seconds}s); the check did not run"
+            )),
+        ))),
+        Err(Unmade::Refused(why)) => Ok(Some(Judged::without_units(
+            Verdict::InfraFailure,
+            Some(format!("{why}; the check did not run")),
+        ))),
+        Err(Unmade::Failed(why)) => Err(why),
     }
+}
+
+/// `materialize_timeout_s` as a duration. Under test a second of it is a millisecond, so a
+/// test can exceed the smallest valid bound without a tree that takes a second to write.
+fn materialize_bound(seconds: u64) -> Duration {
+    #[cfg(test)]
+    if tests::MILLISECOND_BOUNDS.with(std::cell::Cell::get) {
+        return Duration::from_millis(seconds);
+    }
+    Duration::from_secs(seconds)
 }
 
 #[cfg(unix)]
@@ -842,6 +927,13 @@ fn make_writable(dir: &Path) {
 #[cfg(test)]
 mod tests {
     use super::{NO_SANDBOX, Sandbox};
+
+    thread_local! {
+        /// Set by a test that needs a bound smaller than one second: then a second of
+        /// `materialize_timeout_s` is a millisecond (see `materialize_bound`).
+        pub(super) static MILLISECOND_BOUNDS: std::cell::Cell<bool> =
+            const { std::cell::Cell::new(false) };
+    }
 
     #[test]
     fn no_sandbox_refuses_unless_the_box_chose_none() {
@@ -976,3 +1068,7 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
         }
     }
 }
+
+/// Materialization through a whole run: `paths`, `materialize_timeout_s`, a large tree.
+#[cfg(all(test, unix))]
+mod materializing;

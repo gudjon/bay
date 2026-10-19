@@ -26,7 +26,7 @@ use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, ChangeState};
 use crate::clock::{now_rfc3339, unix_of};
 use crate::git::Git;
 use crate::live;
-use crate::repo::Repo;
+use crate::repo::{Bootstrap, DEFAULT_REMOTE, Fetch, OpenError, Repo};
 use crate::result::{BayResult, Freshness, Reason};
 
 /// Where `bay status` keeps its copy of the remote's live refs, one ref per machine.
@@ -43,7 +43,26 @@ pub fn fleet(dir: &Path) -> BayResult {
 }
 
 fn run(dir: &Path) -> Result<BayResult, String> {
-    let repo = Repo::open(dir)?;
+    // Never a fetch (G49). A trunk never fetched is a fleet never fetched: `bay status` fetches
+    // trunk before the fleet refs.
+    let repo = match Repo::open_with(dir, Fetch::Never) {
+        Ok(repo) => repo,
+        Err(OpenError::ConfigMissing(_, detail)) if detail["fetched"] == false => {
+            let remote = match Bootstrap::of(dir) {
+                Some(Ok(bootstrap)) => bootstrap.remote,
+                _ => DEFAULT_REMOTE.to_owned(),
+            };
+            return Ok(
+                BayResult::blocked(Reason::RemoteNotFetched).with_detail(json!({
+                    "remote": remote,
+                    "fetched": false,
+                    "config": detail,
+                    "note": "this repository's trunk was never fetched, so the local cache is not the fleet",
+                })),
+            );
+        }
+        Err(error) => return Ok(error.into_result()),
+    };
     let remote = repo.remote();
     let url = repo
         .git

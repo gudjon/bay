@@ -38,10 +38,14 @@ pub struct StartRequest {
 
 #[must_use]
 pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
-    let result = Repo::open(dir).and_then(|repo| match &request.resume {
+    let repo = match Repo::open_fetched(dir) {
+        Ok(repo) => repo,
+        Err(error) => return error.into_result(),
+    };
+    let result = match &request.resume {
         Some(id) => resume(&repo, id),
         None => open(&repo, request),
-    });
+    };
     result.unwrap_or_else(BayResult::failed)
 }
 

@@ -45,7 +45,7 @@ pub fn hosted_talk() -> TalkCase {
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
     let a = test_box.repo_without_remote_any("a");
-    test_box.git_ok(&a, &["remote", "add", "origin", host.to_str().unwrap()]);
+    test_box.add_origin(&a, &host);
     test_box.seed_trunk(&a, &[("src/a.rs", "fn a() {}\n")]);
     let keys = test_box.keys();
     let b_key = fresh_key(&test_box, "agent-b");

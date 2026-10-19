@@ -148,7 +148,7 @@ These are targets until the published results say otherwise.
 - [Configuration](https://getbay.io/docs/configuration): `.bay/config.toml` and `.bay/policy.toml`
 - [Executors](https://getbay.io/docs/executors) and [Agents and hooks](https://getbay.io/docs/agents)
 - [CLI reference](https://getbay.io/docs/cli) and [Results and refusals](https://getbay.io/docs/results)
-- [Update](https://getbay.io/docs/update): `bay update`, channels and pins
+- [Update](https://getbay.io/docs/update): `bay update`, pins
 
 ## Contributing
 

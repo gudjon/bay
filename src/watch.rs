@@ -95,7 +95,10 @@ pub fn watch(dir: &Path, since: Option<&Cursor>) -> BayResult {
 }
 
 fn run(dir: &Path, since: Option<&Cursor>) -> Result<BayResult, String> {
-    let repo = Repo::open(dir)?;
+    let repo = match Repo::open_fetched(dir) {
+        Ok(repo) => repo,
+        Err(error) => return Ok(error.into_result()),
+    };
     let change = repo.view_change(dir);
     // Best effort, as `status`: offline, the local cache is what this read can see, and
     // `freshness` says so.

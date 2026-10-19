@@ -1,9 +1,8 @@
-//! A process's `BAY_UPDATE_VERSION` and `BAY_UPDATE_CHANNEL` override the box's global Git
-//! config `bay.updateVersion` and `bay.updateChannel` for that process; `--version` and
-//! `--channel` override both. On a shared login every seat shares one global config, so a
-//! seat's supervisor chooses for that seat in its environment. A set variable that is not a
-//! version or a channel is refused by name, never ignored. The fixture release is the one of
-//! G50.
+//! A process's `BAY_UPDATE_VERSION` overrides the box's global Git config `bay.updateVersion`
+//! for that process; with no pin, `--version` picks the target. On a shared login every agent
+//! shares one global config, so its supervisor chooses for it in its environment. A set
+//! variable that is not a version is refused by name, never ignored. The fixture release is the
+//! one of G50.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -17,7 +16,7 @@ const NEWER: &str = "9.0.0";
 const NEWEST: &str = "9.1.0";
 const RC: &str = "9.2.0-rc.1";
 
-/// Releases `NEWER` and `NEWEST`, and a list that also holds a pre-release.
+/// Releases `NEWER` and `NEWEST`, and a list whose newest is a pre-release.
 fn fixture() -> Fixture {
     let fixture = Fixture::new();
     fixture.release(NEWER, NEWER, None);
@@ -69,35 +68,14 @@ fn the_env_pin_wins_over_the_box_pin() {
 }
 
 #[test]
-fn the_env_channel_wins_over_the_box_channel() {
+fn the_version_flag_picks_the_target_over_the_newest() {
     let fixture = fixture();
-    fixture.box_config("bay.updateChannel", "latest");
-
-    let (code, result) = update(&fixture, &[("BAY_UPDATE_CHANNEL", "stable")], &["--check"]);
+    let (code, result) = update(&fixture, &[], &["--check"]);
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["detail"]["channel"], "stable", "{result}");
-    assert_eq!(result["detail"]["target"], NEWEST, "{result}");
-
-    fixture.box_config("bay.updateChannel", "stable");
-    let (code, result) = update(&fixture, &[("BAY_UPDATE_CHANNEL", "latest")], &["--check"]);
-    assert_eq!(code, 0, "{result}");
-    assert_eq!(result["detail"]["channel"], "latest", "{result}");
     assert_eq!(result["detail"]["target"], RC, "{result}");
-    fixture.assert_untouched();
-}
 
-#[test]
-fn the_flag_beats_the_env() {
-    let fixture = fixture();
-    let env = [("BAY_UPDATE_CHANNEL", "latest")];
-
-    let (code, result) = update(&fixture, &env, &["--check", "--channel", "stable"]);
-    assert_eq!(code, 0, "{result}");
-    assert_eq!(result["detail"]["channel"], "stable", "{result}");
-    assert_eq!(result["detail"]["target"], NEWEST, "{result}");
-
-    // With no pin, --version picks the target over the env channel's newest.
-    let (code, result) = update(&fixture, &env, &["--check", "--version", NEWER]);
+    // With no pin, --version picks the target over the newest release.
+    let (code, result) = update(&fixture, &[], &["--check", "--version", NEWER]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["detail"]["target"], NEWER, "{result}");
     fixture.assert_untouched();
@@ -112,7 +90,6 @@ fn an_invalid_env_value_is_refused_by_name() {
         ("BAY_UPDATE_VERSION", "latest"),
         ("BAY_UPDATE_VERSION", "9.1"),
         ("BAY_UPDATE_VERSION", ""),
-        ("BAY_UPDATE_CHANNEL", "nightly"),
     ] {
         let (code, result) = update(&fixture, &[(name, value)], &["--check"]);
         assert_eq!(code, 20, "{name}={value:?}: {result}");

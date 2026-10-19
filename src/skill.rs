@@ -1,11 +1,13 @@
 //! The bay skill: the `skills/bay/` directory a release carries (`DESIGN` § 15.1).
 //!
 //! The files are embedded at build time, so a released binary installs the skill of its own
-//! version. `install` copies them to `$HOME/.claude/skills/bay/` (§ 15.3 item 4); doctor
-//! compares that copy with them (§ 15.2, G49). Nothing else under `$HOME/.claude/skills/` is
-//! read or written (§ 15.4).
+//! version. `install` copies them to `$HOME/.claude/skills/bay/`, or to
+//! `$CLAUDE_CONFIG_DIR/skills/bay/` when that is set (§ 15.3 item 4, G65); doctor compares that
+//! copy with them (§ 15.2, G49). Nothing else under the skills directory is read or written
+//! (§ 15.4), and no other config directory is looked for.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 /// Every file of `skills/bay/`, by its path inside that directory. A unit test holds this list
@@ -23,10 +25,22 @@ pub enum Installed {
     Differs,
 }
 
-/// `$HOME/.claude/skills/bay`.
+/// The variable Claude Code reads for its config directory, in place of `$HOME/.claude`.
+pub const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
+
+/// `CLAUDE_CONFIG_DIR` from this process's environment, when set and not empty.
 #[must_use]
-pub fn installed_path(home: &Path) -> PathBuf {
-    home.join(".claude").join("skills").join("bay")
+pub fn config_dir() -> Option<OsString> {
+    std::env::var_os(CONFIG_DIR_VAR).filter(|dir| !dir.is_empty())
+}
+
+/// `<config_dir>/skills/bay` when a config directory is given, else `$HOME/.claude/skills/bay`.
+#[must_use]
+pub fn installed_path(home: &Path, config_dir: Option<&OsStr>) -> PathBuf {
+    config_dir
+        .map_or_else(|| home.join(".claude"), PathBuf::from)
+        .join("skills")
+        .join("bay")
 }
 
 /// Compares the copy at `dir` with [`FILES`]. Reads only.

@@ -76,7 +76,7 @@ fn doctor_updates_in_the_background_without_changing_its_result() {
 #[test]
 fn status_checks_once_a_day() {
     let fixture = Fixture::new();
-    // The channel's newest is the installed version, so a check changes nothing on disk.
+    // The newest release is the installed version, so a check changes nothing on disk.
     fixture.list(&[(bay::version::BAY, false)]);
     let repo = fixture.repo("");
 
@@ -92,7 +92,7 @@ fn status_checks_once_a_day() {
     let _ = fixture.bay(&repo).arg("status").output_busy();
     let checked = checked_at(&fixture).unwrap();
     assert!(checked > two_days_ago + DAY_S, "due after a day: {checked}");
-    eventually("the background check records the channel's newest", || {
+    eventually("the background check records the newest release", || {
         fixture
             .state()
             .is_some_and(|state| state["newest"] == bay::version::BAY)

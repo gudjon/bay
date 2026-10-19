@@ -1,17 +1,17 @@
 //! `bay update`: the binary's lifecycle (`DESIGN`, the § on `bay update`; `INTERFACES` § 2).
 //!
-//! The pin, the channel and the auto switch are the box's, never a repository's: global Git
-//! config `bay.updateVersion`, `bay.updateChannel` and `bay.updateAuto` (owner ruling
-//! 2026-10-18), or `--version` and `--channel` for one run. A process's `BAY_UPDATE_VERSION` and
-//! `BAY_UPDATE_CHANNEL` override the first two for that process, so one seat on a shared login
-//! can choose its own (flags, then the environment, then global config, then defaults). A cloned
-//! repository never moves the box.
+//! The pin and the auto switch are the box's, never a repository's: global Git config
+//! `bay.updateVersion` and `bay.updateAuto` (owner ruling 2026-10-18), or `--version` for one
+//! run. A process's `BAY_UPDATE_VERSION` overrides the pin for that process, so one agent on a
+//! shared login can choose its own. A cloned repository never moves the box.
 //!
-//! Resolves a target (an exact pin wins, then `--version`, then the channel's newest release),
-//! downloads the release beside the installed binary (`$HOME/.local/bin/bay`, bay's one install
-//! path, whichever copy runs), verifies it all or nothing, unpacks only `bay` from the bytes it
-//! hashed, and swaps it in with one `rename(2)`. A miss anywhere leaves the old binary
-//! byte-identical (G50).
+//! bay is 0.x, so every release is a pre-release, offered best effort, and every release is a
+//! candidate: there are no update channels. Resolves a target (an exact pin wins, then
+//! `--version`, then the newest release that has a build for this platform, skipping back past
+//! a newer one that has none), downloads the release beside the installed binary
+//! (`$HOME/.local/bin/bay`, bay's one install path, whichever copy runs), verifies it all or
+//! nothing, unpacks only `bay` from the bytes it hashed, and swaps it in with one `rename(2)`.
+//! A miss anywhere leaves the old binary byte-identical (G50).
 //!
 //! A release is `bay-<target>.tar.gz` per platform, `VERSION`, `SHA256SUMS` over both, and
 //! `SHA256SUMS.sig`: an SSH signature by the release key, principal and namespace
@@ -44,7 +44,6 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(5);
 /// What `bay update` was asked for.
 #[derive(Debug, Default)]
 pub struct Request {
-    pub channel: Option<String>,
     pub version: Option<String>,
     pub check: bool,
 }
@@ -124,31 +123,33 @@ pub fn update(request: &Request) -> BayResult {
 pub const FROM_ENV: &str = "env";
 pub const FROM_GIT_CONFIG: &str = "git config";
 
-/// The environment variables that set the pin and the channel for one process (and its
-/// children), over global Git config: on a shared login every seat shares that config, so a
-/// seat's supervisor sets its choice here.
+/// The environment variable that sets the pin for one process (and its children), over global
+/// Git config: on a shared login every agent shares that config, so its supervisor sets its
+/// choice here.
 pub const VERSION_VAR: &str = "BAY_UPDATE_VERSION";
-pub const CHANNEL_VAR: &str = "BAY_UPDATE_CHANNEL";
+/// The update channel's old variable and key. They are no longer read; doctor names one that is
+/// still set, so a setting is never ignored silently.
+pub const OLD_CHANNEL_VAR: &str = "BAY_UPDATE_CHANNEL";
+pub const OLD_CHANNEL_KEY: &str = "bay.updateChannel";
 
-/// This box's update settings: the process's `BAY_UPDATE_VERSION` and `BAY_UPDATE_CHANNEL`,
-/// else global Git config. A repository's config is never read.
+/// This box's update settings: the process's `BAY_UPDATE_VERSION`, else global Git config. A
+/// repository's config is never read.
 #[derive(Debug, Default)]
 pub struct BoxSettings {
-    pub channel: Option<String>,
     pub version: Option<String>,
     /// `bay.updateAuto`; unset is on.
     pub auto: bool,
-    /// Where `channel` came from ([`FROM_ENV`] or [`FROM_GIT_CONFIG`]), when set.
-    pub channel_from: Option<&'static str>,
-    /// Where `version` came from, when set.
+    /// Where `version` came from ([`FROM_ENV`] or [`FROM_GIT_CONFIG`]), when set.
     pub version_from: Option<&'static str>,
+    /// The old channel variable or key that is still set, if any; it is not read.
+    pub channel_ignored: Option<String>,
 }
 
 impl BoxSettings {
     /// # Errors
     ///
-    /// An environment value that is not a version or a channel, naming the variable: a set
-    /// variable is never silently ignored.
+    /// An environment pin that is not a version, naming the variable: a set variable is never
+    /// silently ignored.
     pub fn load() -> Result<Self, String> {
         let get = |args: &[&str]| {
             let mut cmd = Command::new("git");
@@ -172,33 +173,26 @@ impl BoxSettings {
                 "{VERSION_VAR} must be an exact version (X.Y.Z or X.Y.Z-suffix), not {version:?}"
             ));
         }
-        let env_channel = env(CHANNEL_VAR)?;
-        if let Some(channel) = &env_channel
-            && channel != "stable"
-            && channel != "latest"
-        {
-            return Err(format!(
-                "{CHANNEL_VAR} must be stable or latest, not {channel:?}"
-            ));
-        }
-        let pick = |env: Option<String>, key: &str| {
-            env.map_or_else(
-                || {
-                    let value = get(&["--get", key]);
-                    let from = value.as_ref().map(|_| FROM_GIT_CONFIG);
-                    (value, from)
-                },
-                |value| (Some(value), Some(FROM_ENV)),
-            )
-        };
-        let (channel, channel_from) = pick(env_channel, "bay.updateChannel");
-        let (version, version_from) = pick(env_version, "bay.updateVersion");
+        let (version, version_from) = env_version.map_or_else(
+            || {
+                let value = get(&["--get", "bay.updateVersion"]);
+                let from = value.as_ref().map(|_| FROM_GIT_CONFIG);
+                (value, from)
+            },
+            |value| (Some(value), Some(FROM_ENV)),
+        );
+        let ignored: Vec<&str> = [
+            std::env::var_os(OLD_CHANNEL_VAR).map(|_| OLD_CHANNEL_VAR),
+            get(&["--get", OLD_CHANNEL_KEY]).map(|_| OLD_CHANNEL_KEY),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
         Ok(Self {
-            channel,
             version,
             auto: get(&["--type=bool", "--get", "bay.updateAuto"]).is_none_or(|on| on != "false"),
-            channel_from,
             version_from,
+            channel_ignored: (!ignored.is_empty()).then(|| ignored.join(" and ")),
         })
     }
 
@@ -222,14 +216,13 @@ fn failed(message: impl Into<String>) -> Refusal {
 /// The resolved target and the fields every result carries.
 struct Plan {
     target: String,
-    channel: String,
     pin: Option<String>,
 }
 
 impl Plan {
     fn detail(&self, updated: bool) -> Value {
-        json!({"installed": BAY, "target": self.target, "channel": self.channel,
-            "pinned": self.pin, "updated": updated})
+        json!({"installed": BAY, "target": self.target, "pinned": self.pin,
+            "updated": updated})
     }
 
     fn refuse(&self, decision: Decision, reason: Reason, why: impl Into<String>) -> Refusal {
@@ -251,15 +244,6 @@ fn run(request: &Request) -> Result<BayResult, Refusal> {
     let settings = BoxSettings::load().map_err(failed)?;
     let pin_name = settings.pin_name();
     let pin = settings.version;
-    let channel = request.channel.clone().or(settings.channel);
-    if let Some(channel) = &channel
-        && channel != "stable"
-        && channel != "latest"
-    {
-        return Err(failed(format!(
-            "bay.updateChannel must be stable or latest, not {channel}"
-        )));
-    }
     for version in [&pin, &request.version].into_iter().flatten() {
         if !valid(version) {
             return Err(failed(format!(
@@ -268,7 +252,7 @@ fn run(request: &Request) -> Result<BayResult, Refusal> {
         }
     }
     let source = Source::current();
-    let plan = resolve(&source, pin, channel, request.version.clone())?;
+    let plan = resolve(&source, pin, request.version.clone())?;
 
     if let (Some(pin), Some(version)) = (&plan.pin, &request.version)
         && pin != version
@@ -324,71 +308,50 @@ fn run(request: &Request) -> Result<BayResult, Refusal> {
     swap(&plan, &tmp.0, &archive, &installed)
 }
 
-/// A pin wins, then `--version`, then the channel's newest release. With no channel given, a
-/// box running a pre-release follows `latest` (`stable` stays empty until the first one).
-fn resolve(
-    source: &Source,
-    pin: Option<String>,
-    channel: Option<String>,
-    version: Option<String>,
-) -> Result<Plan, Refusal> {
-    let unavailable = |channel: &str, why: String| {
+/// A pin wins, then `--version`, then the newest release that has a build for this platform.
+/// Every release is a candidate: whether GitHub marks it a pre-release plays no part.
+fn resolve(source: &Source, pin: Option<String>, version: Option<String>) -> Result<Plan, Refusal> {
+    let unavailable = |why: String| {
         Box::new(
             BayResult::blocked(Reason::UpdateUnavailable)
-                .with_detail(json!({"installed": BAY, "channel": channel, "why": why})),
+                .with_detail(json!({"installed": BAY, "why": why})),
         )
     };
     if let Some(target) = pin.clone().or(version) {
-        let channel = channel.unwrap_or_else(|| default_channel(false).to_owned());
-        return Ok(Plan {
-            target,
-            channel,
-            pin,
-        });
+        return Ok(Plan { target, pin });
     }
-    // With no channel given, the channel depends on whether the installed version is itself a
-    // pre-release, so it is decided again with every page read.
-    let decide = |releases: &[(String, bool)]| {
-        channel.clone().unwrap_or_else(|| {
-            let pre = releases.iter().any(|(version, pre)| *pre && version == BAY);
-            default_channel(pre).to_owned()
-        })
-    };
-    let releases = release_list(source, |releases| {
-        let channel = decide(releases);
-        releases.iter().any(|(_, pre)| channel == "latest" || !pre)
-    })
-    .map_err(|why| unavailable(channel.as_deref().unwrap_or(default_channel(false)), why))?;
-    let channel = decide(&releases);
+    let platform =
+        platform().ok_or_else(|| unavailable("no release build for this platform".to_owned()))?;
+    let archive = format!("bay-{platform}.tar.gz");
+    let built = |release: &Release| release.assets.contains(&archive);
+    let releases =
+        release_list(source, |releases| releases.iter().any(built)).map_err(unavailable)?;
     let newest = releases
         .into_iter()
-        .filter(|(_, pre)| channel == "latest" || !pre)
-        .map(|(version, _)| version)
+        .filter(built)
+        .map(|release| release.version)
         .max_by(|a, b| compare(a, b));
-    State::record(&channel, newest.as_deref());
-    let newest = newest
-        .ok_or_else(|| unavailable(&channel, format!("no release on the {channel} channel")))?;
+    State::record(newest.as_deref());
+    let newest =
+        newest.ok_or_else(|| unavailable(format!("no release has a build for {platform}")))?;
     Ok(Plan {
         target: newest,
-        channel,
         pin,
     })
 }
 
-fn default_channel(installed_is_pre_release: bool) -> &'static str {
-    if installed_is_pre_release || BAY.contains('-') {
-        "latest"
-    } else {
-        "stable"
-    }
+/// A published release: its version and the names of its assets.
+struct Release {
+    version: String,
+    assets: Vec<String>,
 }
 
-/// The published releases as `(version, prerelease)`, read page by page until `enough` holds
-/// for what was read or the list ends; drafts and tags that are not versions are skipped.
+/// The published releases, read page by page until `enough` holds for what was read or the
+/// list ends; drafts and tags that are not versions are skipped.
 fn release_list(
     source: &Source,
-    enough: impl Fn(&[(String, bool)]) -> bool,
-) -> Result<Vec<(String, bool)>, String> {
+    enough: impl Fn(&[Release]) -> bool,
+) -> Result<Vec<Release>, String> {
     let dir = TempDir::new(&std::env::temp_dir())?;
     let file = dir.0.join("releases.json");
     let mut releases = Vec::new();
@@ -406,7 +369,16 @@ fn release_list(
                 .filter(|release| release["draft"] != true)
                 .filter_map(|release| {
                     let version = release["tag_name"].as_str()?.trim_start_matches('v');
-                    valid(version).then(|| (version.to_owned(), release["prerelease"] == true))
+                    let assets = release["assets"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|asset| asset["name"].as_str().map(str::to_owned))
+                        .collect();
+                    valid(version).then(|| Release {
+                        version: version.to_owned(),
+                        assets,
+                    })
                 }),
         );
         if enough(&releases) {
@@ -531,13 +503,13 @@ fn swap(plan: &Plan, tmp: &Path, archive: &[u8], installed: &Path) -> Result<Bay
 }
 
 /// What the last check saw, in `$XDG_STATE_HOME/bay/update.json` (else
-/// `~/.local/state/bay/update.json`): when it ran, and the channel's newest release.
+/// `~/.local/state/bay/update.json`): when it ran, and the newest release with a build for
+/// this platform. Unknown fields are ignored, so a file that still holds the old `channel`
+/// reads.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
     /// Seconds since the Unix epoch.
     pub checked_at: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub channel: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub newest: Option<String>,
     /// Why the new binary's `install` failed after the last update, until one succeeds.
@@ -570,11 +542,10 @@ impl State {
         std::fs::rename(&tmp, &path).map_err(|error| error.to_string())
     }
 
-    /// A check of `channel` that found `newest`.
-    fn record(channel: &str, newest: Option<&str>) {
+    /// A check that found `newest`.
+    fn record(newest: Option<&str>) {
         let mut state = Self::read().unwrap_or_default();
         state.checked_at = now_s();
-        state.channel = Some(channel.to_owned());
         state.newest = newest.map(str::to_owned);
         let _ = state.write();
     }
@@ -685,31 +656,30 @@ pub fn auto() {
     let _ = cmd.spawn();
 }
 
-/// Doctor's `bay` row: the installed version, the box's channel and pin, and the channel's
-/// newest release when the last recorded check was of this channel. Doctor makes no network
-/// call. A pinned box has no update available: only its pin moves it.
+/// Doctor's `bay` row: the installed version, the box's pin, and the newest release from the
+/// last recorded check. Doctor makes no network call. A pinned box has no update available:
+/// only its pin moves it. An old channel setting that is still set is named, and the row stays
+/// green.
 #[must_use]
 pub fn doctor_row() -> Value {
     let settings = match BoxSettings::load() {
         Ok(settings) => settings,
         Err(why) => {
             return json!({"name": "bay", "version": BAY, "state": "red", "why": why,
-                "recovery": format!("set {VERSION_VAR} and {CHANNEL_VAR} to valid values, or unset them")});
+                "recovery": format!("set {VERSION_VAR} to a valid version, or unset it")});
         }
     };
     let state = State::read();
-    let channel_from = settings.channel_from.unwrap_or("default");
-    let channel = settings
-        .channel
-        .unwrap_or_else(|| default_channel(false).to_owned());
     let pin = settings.version;
-    let mut row = json!({"name": "bay", "version": BAY, "channel": channel,
-        "channel_source": channel_from, "pin": pin, "pin_source": settings.version_from,
-        "state": "green"});
-    if let Some(newest) = state
-        .filter(|state| state.channel.as_deref() == Some(channel.as_str()))
-        .and_then(|state| state.newest)
-    {
+    let mut row = json!({"name": "bay", "version": BAY, "pin": pin,
+        "pin_source": settings.version_from, "state": "green"});
+    if let Some(ignored) = settings.channel_ignored {
+        row["channel_ignored"] = json!(ignored);
+        row["note"] = json!(format!(
+            "every release is a candidate; {ignored} is no longer read"
+        ));
+    }
+    if let Some(newest) = state.and_then(|state| state.newest) {
         row["update_available"] =
             json!(pin.is_none() && compare(&newest, BAY) == Ordering::Greater);
         row["newest"] = json!(newest);
@@ -852,6 +822,14 @@ mod tests {
     fn only_release_versions_are_valid() {
         assert!(valid("0.1.0") && valid("0.1.0-pilot.1"));
         assert!(!valid("0.1") && !valid("v0.1.0") && !valid("0.1.0-") && !valid("0.1.0-a/b"));
+    }
+
+    #[test]
+    fn a_state_file_with_the_old_channel_still_reads() {
+        let state: super::State =
+            serde_json::from_str(r#"{"checked_at":1,"channel":"stable","newest":"9.1.0"}"#)
+                .unwrap();
+        assert_eq!(state.newest.as_deref(), Some("9.1.0"));
     }
 
     #[test]

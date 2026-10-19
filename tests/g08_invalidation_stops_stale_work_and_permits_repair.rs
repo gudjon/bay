@@ -733,10 +733,12 @@ fn age_cache(test_box: &TestBox, repo: &Path, secs: u64) {
     std::fs::write(&path, coord.to_string()).unwrap();
 }
 
-/// The committed `.bay/config.toml` with `[hooks] <hooks>` added, in the main work tree.
+/// The committed `.bay/config.toml` with `[hooks] <hooks>` in place of any earlier `[hooks]`,
+/// committed to trunk, where bay reads it (ruling: config location).
 fn hooks_config(test_box: &TestBox, repo: &Path, hooks: &str) {
-    let committed = test_box.git_ok(repo, &["show", "HEAD:.bay/config.toml"]);
-    TestBox::bay_config(repo, &format!("{committed}\n[hooks]\n{hooks}\n"));
+    let committed = test_box.git_ok(repo, &["show", "refs/remotes/origin/main:.bay/config.toml"]);
+    let base = committed.split("\n[hooks]\n").next().unwrap_or_default();
+    test_box.commit_config(repo, &format!("{base}\n[hooks]\n{hooks}\n"));
 }
 
 /// A change on `src/` and `docs/archive/` that declares the input, and a trunk that moved its
@@ -792,7 +794,7 @@ fn the_hook_judges_the_target_where_it_lands_and_a_config_it_cannot_read_is_not_
     let (code, stdout, stderr) = pre_tool(&test_box, &outside, "Write", &through, "s-6");
     assert_eq!(code, Some(2), "{through:?}: {stdout} {stderr}");
     // A config bay cannot read cannot say how old a cache may be: a notice, never silent.
-    TestBox::bay_config(&repo, "[hooks]\ncache_max_age_s = \"soon\"\n");
+    test_box.commit_config(&repo, "[hooks]\ncache_max_age_s = \"soon\"\n");
     let found = pre_tool(&test_box, &view, "Write", &target, "s-6");
     let context = assert_notice(&found, "an unreadable config");
     assert!(context.contains(&id), "{context}");

@@ -45,7 +45,7 @@ fn with_the_host_rule_on_a_force_push_is_refused() {
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
     let repo = test_box.repo_without_remote_any("repo");
-    test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
+    test_box.add_origin(&repo, &host);
     let trunk = test_box.seed_with_check(
         &repo,
         &[("src/a.rs", "fn a() {}\n")],

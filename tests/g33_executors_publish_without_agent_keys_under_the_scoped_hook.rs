@@ -48,7 +48,7 @@ fn hosted_with(
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
     let repo = test_box.repo_without_remote_any("repo");
-    test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
+    test_box.add_origin(&repo, &host);
     // Trunk is seeded before the registry exists: from then on only executors publish.
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], files);
     let keys = test_box.keys();
@@ -1498,8 +1498,11 @@ fn adoption_and_live_heartbeats_are_scoped_to_their_actor() {
     assert_eq!(code, 0, "{adopted}");
     assert_eq!(adopted["change"], id.as_str());
     assert_eq!(adopted["detail"]["adopted"], true, "{adopted}");
+    // The refusal above is the guard: a heartbeat other than A's that counted would refuse B's
+    // start. This bound only catches a start that waits on the beats, which never stop while it
+    // runs; it allows the gate box's load (90 s, as every background wait there).
     assert!(
-        asked.elapsed() < Duration::from_secs(TAKEOVER_S * 4),
+        asked.elapsed() < Duration::from_secs(90),
         "a heartbeat other than A's delayed the adoption: {:?}",
         asked.elapsed()
     );

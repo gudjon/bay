@@ -615,8 +615,14 @@ impl Judge<'_> {
         } else {
             format!("{commit}^1")
         };
+        // The missing-policy ruling: no policy where the publication is judged is unknown
+        // criteria, never a pass. An unchecked policy has an empty manifest, so it needs no
+        // evidence.
         let Some(policy) = policy::load_at(self.git, &judged_by)? else {
-            return Ok(());
+            return Err(format!(
+                "POLICY_MISSING: {commit} is judged at {judged_by}, which has no {}; add a policy there, or declare unchecked = true in it",
+                policy::POLICY_PATH
+            ));
         };
         let tree = self
             .git

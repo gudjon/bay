@@ -21,8 +21,9 @@ const NEWER: &str = "9.0.0";
 fn a_good_release_replaces_the_binary_and_runs_its_install() {
     let fixture = Fixture::new();
     fixture.release(NEWER, NEWER, None);
-    // The stable channel's newest is on the list's second page, behind a pre-release.
-    fixture.list(&[("9.1.0-rc.1", true), (NEWER, false)]);
+    // The newest release with a build here is on the list's second page, behind a newer one
+    // built only for another platform.
+    fixture.list_with(&[("9.1.0", false, false), (NEWER, true, true)]);
 
     // --check reports and does nothing.
     let (code, checked) = fixture.update(fixture.path(), &["--check"]);
@@ -39,7 +40,6 @@ fn a_good_release_replaces_the_binary_and_runs_its_install() {
     let detail = &result["detail"];
     assert_eq!(detail["installed"], bay::version::BAY);
     assert_eq!(detail["target"], NEWER);
-    assert_eq!(detail["channel"], "stable");
     assert_eq!(detail["pinned"], serde_json::Value::Null);
     assert_eq!(detail["updated"], true);
 
@@ -122,7 +122,7 @@ fn a_downgrade_is_refused_pinned() {
     assert_eq!(result["retry_when"], "pin_moved");
     fixture.assert_untouched();
 
-    // The channel's newest being older is a downgrade too.
+    // The newest release being older is a downgrade too.
     let (code, result) = fixture.update(fixture.path(), &[]);
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "UPDATE_PINNED");
@@ -144,7 +144,7 @@ fn a_target_off_the_pin_is_refused_pinned() {
     assert_eq!(result["detail"]["pinned"], NEWER);
     fixture.assert_untouched();
 
-    // The pin wins over the channel's newest.
+    // The pin wins over the newest release.
     let (code, result) = fixture.update(&repo, &["--check"]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["detail"]["target"], NEWER);
@@ -164,24 +164,23 @@ fn the_installed_version_is_ok_and_nothing_is_done() {
 
 #[test]
 fn a_repository_never_moves_the_box() {
-    // Pins, channels and the auto switch are box-level: a cloned repository's [update] keys
-    // change nothing.
+    // The pin and the auto switch are box-level: a cloned repository's [update] keys change
+    // nothing.
     let fixture = Fixture::new();
     fixture.release(NEWER, NEWER, None);
-    fixture.list(&[("9.1.0-rc.1", true), (NEWER, false)]);
+    fixture.list(&[(NEWER, false)]);
     let repo = fixture.repo("[update]\nversion = \"0.0.1\"\nchannel = \"latest\"\nauto = false\n");
 
     let (code, result) = fixture.update(&repo, &["--check"]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["detail"]["target"], NEWER);
-    assert_eq!(result["detail"]["channel"], "stable");
     assert_eq!(result["detail"]["pinned"], serde_json::Value::Null);
 
-    // The box's own channel does move it.
-    fixture.box_config("bay.updateChannel", "latest");
+    // The box's own pin does move it.
+    fixture.box_config("bay.updateVersion", "0.0.1");
     let (code, result) = fixture.update(&repo, &["--check"]);
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["detail"]["target"], "9.1.0-rc.1");
+    assert_eq!(result["detail"]["target"], "0.0.1");
     fixture.assert_untouched();
 }
 
@@ -238,9 +237,9 @@ fn a_bay_that_is_not_a_regular_file_is_refused() {
 }
 
 #[test]
-fn no_release_on_the_channel_or_for_the_platform_is_unavailable() {
+fn no_release_or_no_build_for_the_platform_is_unavailable() {
     let fixture = Fixture::new();
-    fixture.list(&[("9.1.0-rc.1", true)]);
+    fixture.list(&[]);
     let (code, result) = fixture.update(fixture.path(), &[]);
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "UPDATE_UNAVAILABLE");
@@ -256,6 +255,14 @@ fn no_release_on_the_channel_or_for_the_platform_is_unavailable() {
     let (code, result) = fixture.update(fixture.path(), &[]);
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "UPDATE_UNAVAILABLE");
+    fixture.assert_untouched();
+
+    // Asked for by version, the release's own sums still name no archive for this platform.
+    let (code, result) = fixture.update(fixture.path(), &["--version", NEWER]);
+    assert_eq!(code, 10, "{result}");
+    assert_eq!(result["reason"], "UPDATE_UNAVAILABLE");
+    let why = result["detail"]["why"].as_str().unwrap();
+    assert!(why.contains(&target()), "{why}");
     fixture.assert_untouched();
 }
 

@@ -259,11 +259,24 @@ impl Fixture {
         dir
     }
 
-    /// The release list the channel is resolved from: `(tag, prerelease)`, newest first, one
+    /// The release list the target is resolved from: `(tag, prerelease)`, newest first, one
     /// release per page (`releases-<n>.json`), then an empty page, as the GitHub API pages it.
+    /// Each release lists the assets the fixture built for it, or, for one it did not build,
+    /// every asset a release has, including this platform's archive.
     pub fn list(&self, releases: &[(&str, bool)]) {
-        for (index, (tag, pre)) in releases.iter().enumerate() {
-            let page = serde_json::json!([{"tag_name": format!("v{tag}"), "prerelease": pre, "draft": false}]);
+        let listed: Vec<(&str, bool, bool)> = releases
+            .iter()
+            .map(|&(tag, pre)| (tag, pre, true))
+            .collect();
+        self.list_with(&listed);
+    }
+
+    /// As [`Fixture::list`], with `(tag, prerelease, built)`: a release that is not `built`
+    /// lists only another platform's archive, so it has no build for this one.
+    pub fn list_with(&self, releases: &[(&str, bool, bool)]) {
+        for (index, &(tag, pre, built)) in releases.iter().enumerate() {
+            let page = serde_json::json!([{"tag_name": format!("v{tag}"), "prerelease": pre,
+                "draft": false, "assets": self.assets(tag, built)}]);
             std::fs::write(
                 self.path()
                     .join(format!("release/releases-{}.json", index + 1)),
@@ -277,6 +290,34 @@ impl Fixture {
             "[]",
         )
         .unwrap();
+    }
+
+    /// The `assets` the release list names for `tag`, as `[{"name": ...}]`.
+    fn assets(&self, tag: &str, built: bool) -> serde_json::Value {
+        let dir = self.path().join("release/download").join(format!("v{tag}"));
+        let mut names: Vec<String> = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect(),
+            Err(_) => ["VERSION", "SHA256SUMS", "SHA256SUMS.sig"]
+                .iter()
+                .map(|name| (*name).to_owned())
+                .chain([format!("bay-{}.tar.gz", target())])
+                .collect(),
+        };
+        if !built {
+            let own = format!("bay-{}.tar.gz", target());
+            names.retain(|name| *name != own);
+            names.push("bay-other-platform.tar.gz".to_owned());
+        }
+        names.sort();
+        names.dedup();
+        serde_json::Value::Array(
+            names
+                .into_iter()
+                .map(|name| serde_json::json!({"name": name}))
+                .collect(),
+        )
     }
 
     /// The copied bay, with the fixture release and key.
@@ -334,6 +375,25 @@ impl Fixture {
             .env("GIT_CONFIG_NOSYSTEM", "1"));
         std::fs::create_dir_all(repo.join(".bay")).unwrap();
         std::fs::write(repo.join(".bay/config.toml"), config).unwrap();
+        // bay reads the config committed at the trunk tracking ref (ruling: config location):
+        // commit it and name that ref the remote's default branch, as a clone of it would.
+        let git = |args: &[&str]| {
+            run(Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t.invalid"])
+                .args(args)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1"))
+        };
+        git(&["add", ".bay/config.toml"]);
+        git(&["commit", "-q", "-m", "config"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
         repo
     }
 

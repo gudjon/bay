@@ -273,6 +273,24 @@ mod tests {
             .status()
             .unwrap();
         assert!(init.success());
+        // bay reads its config at the trunk tracking ref (ruling: config location).
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@t.invalid"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}");
+            String::from_utf8(out.stdout).unwrap().trim().to_owned()
+        };
+        std::fs::create_dir_all(dir.path().join(".bay")).unwrap();
+        std::fs::write(dir.path().join(".bay/config.toml"), "trunk = \"main\"\n").unwrap();
+        git(&["add", ".bay/config.toml"]);
+        git(&["commit", "-q", "-m", "config"]);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(&["config", "bay.trunk", "main"]);
         let repo = Repo::open(dir.path()).unwrap();
         std::thread::scope(|scope| {
             let writers: Vec<_> = (0..8)

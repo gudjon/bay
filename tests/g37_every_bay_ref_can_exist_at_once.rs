@@ -128,7 +128,7 @@ fn the_hook_refuses_names_outside_the_alphabet_and_the_name_rules() {
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
     let repo = test_box.repo_without_remote_any("repo");
-    test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
+    test_box.add_origin(&repo, &host);
     test_box.seed_with_check(
         &repo,
         &[("src/a.rs", "fn a() {}\n")],

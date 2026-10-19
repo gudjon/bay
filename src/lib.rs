@@ -25,6 +25,7 @@ pub mod inputs;
 pub mod install;
 pub mod live;
 pub mod log;
+pub mod materialize;
 pub mod merge;
 pub mod names;
 pub mod notice;

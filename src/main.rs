@@ -82,17 +82,13 @@ enum Command {
         #[arg(long, value_name = "CURSOR", value_parser = bay::watch::Cursor::parse)]
         since: Option<bay::watch::Cursor>,
     },
-    /// Send one talk to one actor: one action, one target, the time the reply is owed. Arrival is
+    /// Send one talk to one agent: one action, one target, the time the reply is owed. Arrival is
     /// the recipient's ack, written when its bay fetches
     Talk(Box<TalkArgs>),
     /// Admin: probe this box (git and Claude Code floors, remote, hook entries, installed skill)
     Doctor,
     /// Admin: place bay at $HOME/.local/bin/bay, its skill and its project hook entries
-    Install {
-        /// Only the box's part: the binary and the skill, never a repository's settings or Git config
-        #[arg(long)]
-        machine: bool,
-    },
+    Install(InstallArgs),
     /// Admin: a bay-hosted trunk
     Host {
         #[command(subcommand)]
@@ -121,8 +117,8 @@ enum Command {
     },
     /// Admin: replace this binary with a verified release (the box's pin wins)
     Update {
-        /// The release channel (default: the environment's, else global git config, else stable)
-        #[arg(long, value_parser = ["stable", "latest"])]
+        /// Accepted and ignored, so older scripts keep working: every release is a candidate
+        #[arg(long, hide = true)]
         channel: Option<String>,
         /// Move to this exact version (X.Y.Z or X.Y.Z-suffix)
         #[arg(long)]
@@ -139,8 +135,24 @@ enum Command {
 }
 
 #[derive(Args)]
+struct InstallArgs {
+    /// Only the box's part: the binary and the skill, never a repository's settings or Git config
+    #[arg(long)]
+    machine: bool,
+    /// The repository's trunk branch, written to git config bay.trunk (default: what it holds,
+    /// else the remote's default branch)
+    #[arg(long, conflicts_with = "machine")]
+    trunk: Option<String>,
+    /// The trunk's remote, written to git config bay.remote (default: what it holds, else
+    /// origin)
+    #[arg(long, conflicts_with = "machine")]
+    remote: Option<String>,
+}
+
+#[derive(Args)]
 struct TalkArgs {
-    /// The registry actor who owes the reply (always a name, even one spelled like a verb)
+    /// The agent who owes the reply (a person's name works too)
+    #[arg(value_name = "AGENT")]
     actor: Option<String>,
     /// The action: the decision, the question or the change asked for
     what: Option<String>,
@@ -162,8 +174,8 @@ struct TalkArgs {
     /// When the reply is owed, a UTC time after now (2026-10-19T12:00:00Z)
     #[arg(long, value_name = "TIME")]
     follow_up: Option<String>,
-    /// The registry actor who decides if the two disagree
-    #[arg(long, value_name = "ACTOR")]
+    /// The agent who decides if the two disagree (a person's name works too)
+    #[arg(long, value_name = "AGENT")]
     decides: Option<String>,
     /// The sender's reading of the fact
     #[arg(long)]
@@ -249,8 +261,38 @@ enum ExecutorAction {
     },
 }
 
+/// The `CONFIG_MISSING` refusal of a command that needs the trunk or policy, so needs the
+/// `.bay/config.toml` committed at trunk (ruling: config location). The host, doctor's box
+/// rows, install, update and the agent hook do not.
+fn config_refusal(cli: &Cli) -> Option<BayResult> {
+    // `status --fleet` never fetches (G49): it reads the config without a fetch itself.
+    let needs_config = !matches!(
+        cli.command,
+        Command::Status { fleet: true, .. }
+            | Command::Host { .. }
+            | Command::Doctor
+            | Command::Install(_)
+            | Command::Update { .. }
+            | Command::Hook { .. }
+    );
+    needs_config
+        .then(|| bay::repo::Repo::config_missing(&cli.dir))
+        .flatten()
+}
+
+fn install(dir: &std::path::Path, args: InstallArgs) -> BayResult {
+    let trunk = bay::install::Trunk {
+        trunk: args.trunk,
+        remote: args.remote,
+    };
+    bay::install::install_with(dir, args.machine, &trunk)
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Some(refusal) = config_refusal(&cli) {
+        return render(&refusal, cli.json);
+    }
     let result = match cli.command {
         Command::Start {
             intent,
@@ -319,16 +361,12 @@ fn main() -> ExitCode {
             bay::update::auto();
             result
         }
-        Command::Install { machine } => bay::install::install(&cli.dir, machine),
+        Command::Install(args) => install(&cli.dir, args),
         Command::Update {
-            channel,
+            channel: _,
             version,
             check,
-        } => bay::update::update(&bay::update::Request {
-            channel,
-            version,
-            check,
-        }),
+        } => bay::update::update(&bay::update::Request { version, check }),
         Command::Hook { event } => {
             // The agent hook follows the agent product's exit protocol (INTERFACES § 1): for
             // Claude Code, exit 2 denies. The payload adapter decides (agent_hook.rs).

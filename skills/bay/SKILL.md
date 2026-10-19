@@ -18,12 +18,17 @@ Use the verb in bay design § 4.
 | --- | --- |
 | Open one change | `bay start <intent> --paths <paths> [--input <kind>:<name>]` |
 | Read what trunk now requires (after `INPUT_UNOBSERVED`) | `bay start --resume <change>` |
-| Publish the checked result | `bay land` |
+| Publish the checked result | `bay land` (returns at once; an executor checks and lands it) |
+| Wait for the landing's outcome here | `bay land --wait` |
 | Give the change up, so another actor may adopt it | `bay land --abandon` |
 | Read state | `bay status` |
+| See every machine and session the local cache knows | `bay status --fleet` |
+| Read landings and events that touch your change's inputs | `bay watch [--since <cursor>]` (pass the returned cursor next time) |
+| Ask another agent for one thing, with a reply time | `bay talk <agent> <what> --kind delivery\|discovery\|reliability … --follow-up <time>` (run `bay talk --help`) |
+| Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
 | Undo a landed change with a new change | `bay undo <change>` |
 
-This version has no `watch`, `talk` or `status --fleet`. Do not run them. Run `bay --help` for the commands this binary has.
+Run `bay <command> --help` for every flag this binary has.
 
 Do not grant a key. Do not move trunk. Do not widen policy. Do not run `install` to land work (bay design § 15).
 

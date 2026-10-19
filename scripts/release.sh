@@ -86,9 +86,11 @@ build)
     rm -rf "$out"
     mkdir -p "$out"
     for target in $targets; do
-        case "$target" in
-            *-linux-*) build="zigbuild" ;;
-            *) build="build" ;;
+        # A macOS host builds its own targets natively; every other target, and macOS targets
+        # from a Linux host, build with cargo-zigbuild.
+        case "$(uname -s):$target" in
+            Darwin:*-apple-darwin) build="build" ;;
+            *) build="zigbuild" ;;
         esac
         BAY_RELEASE_VERSION=$version cargo "$build" -q --release --locked --target "$target"
         stage=$(mktemp -d)

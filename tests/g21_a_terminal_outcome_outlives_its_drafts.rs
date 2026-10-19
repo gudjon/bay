@@ -121,7 +121,7 @@ fn the_hook_refuses_a_cut_of_an_open_change_or_one_dropping_the_latest_request()
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
     let repo = test_box.repo_without_remote_any("repo");
-    test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
+    test_box.add_origin(&repo, &host);
     test_box.seed_with_check(
         &repo,
         &[("src/a.rs", "fn a() {}\n")],
@@ -338,7 +338,7 @@ fn an_abandoned_change_is_cut_after_retention_and_keeps_its_draft() {
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
     let repo = test_box.repo_without_remote_any("repo");
-    test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
+    test_box.add_origin(&repo, &host);
     let mut files = check_files("true", &passing_result(1), 1, 60);
     files.push((
         ".bay/config.toml".to_owned(),
@@ -405,7 +405,7 @@ fn a_compacted_marker_is_never_created_again_and_still_answers() {
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
     let repo = test_box.repo_without_remote_any("repo");
-    test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
+    test_box.add_origin(&repo, &host);
     let mut files = check_files("true", &passing_result(1), 1, 60);
     files.push((
         ".bay/config.toml".to_owned(),
@@ -782,7 +782,7 @@ fn a_landed_claim_is_created_only_by_its_own_landing() {
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
     let repo = test_box.repo_without_remote_any("repo");
-    test_box.git_ok(&repo, &["remote", "add", "origin", host.to_str().unwrap()]);
+    test_box.add_origin(&repo, &host);
     test_box.seed_with_check(
         &repo,
         &[("src/a.rs", "fn a() {}\n")],

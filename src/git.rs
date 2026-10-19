@@ -106,18 +106,29 @@ impl Git {
         envs: &[(&str, &str)],
         input: Option<&[u8]>,
     ) -> Result<Vec<u8>, GitError> {
+        self.run_bytes_for(args, envs, input, GIT_CALL_TIMEOUT)
+    }
+
+    /// [`Git::run_bytes`] bounded by `timeout` instead of [`GIT_CALL_TIMEOUT`]: for a call
+    /// whose bound the policy states (a check's `materialize_timeout_s`).
+    ///
+    /// # Errors
+    ///
+    /// The git binary is missing, the call exceeds `timeout`, or git exits non-zero.
+    pub fn run_bytes_for(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        input: Option<&[u8]>,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<u8>, GitError> {
         let args_display = args.join(" ");
-        let mut cmd = Command::new("git");
-        if self.bare_dir {
-            cmd.arg(format!("--git-dir={}", self.dir.display()));
-        } else {
-            cmd.arg("-C").arg(&self.dir);
-        }
-        cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
+        let mut cmd = self.command();
+        cmd.args(args);
         for (key, value) in envs {
             cmd.env(key, value);
         }
-        let output = run_bounded_input(cmd, &args_display, input)?;
+        let output = run_bounded_for(cmd, &args_display, input, timeout)?;
         let stderr = String::from_utf8(output.stderr).map_err(|_| GitError::NotUtf8 {
             args: args_display.clone(),
         })?;
@@ -153,6 +164,20 @@ impl Git {
                 .to_owned(),
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ))
+    }
+
+    /// `git` aimed at this repository, with no arguments yet: for a call that streams its
+    /// output instead of collecting it, and so bounds itself.
+    #[must_use]
+    pub fn command(&self) -> Command {
+        let mut cmd = Command::new("git");
+        if self.bare_dir {
+            cmd.arg(format!("--git-dir={}", self.dir.display()));
+        } else {
+            cmd.arg("-C").arg(&self.dir);
+        }
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        cmd
     }
 
     #[must_use]

@@ -98,6 +98,11 @@ fn drafts_survive_gc(object_format: &str, ref_format: &str) {
     );
     let (_, read_back) = chain.read(&id).unwrap();
     assert_eq!(read_back, record);
+    // Nothing was pushed, so the remote's default branch names no ref yet.
+    test_box.git_ok(
+        &repo,
+        &["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+    );
     test_box.git_ok(&repo, &["fsck", "--no-dangling", "--no-progress"]);
 }
 

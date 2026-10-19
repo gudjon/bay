@@ -261,7 +261,8 @@ pub struct Attempt {
     pub base: String,
     pub commit: String,
     pub tree: String,
-    /// `pass`, `product_failure`, `infra_failure`, `unknown` or `flaky`.
+    /// `pass`, `product_failure`, `infra_failure`, `unknown` or `flaky`; `unchecked` when every
+    /// judging policy declares `unchecked = true`, so no check ran (never a pass).
     pub verdict: String,
     /// The epoch the candidate was built under; only the current epoch may publish it.
     #[serde(default)]
