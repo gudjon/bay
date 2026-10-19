@@ -72,11 +72,27 @@ pub fn bay_ref(name: &str) -> Result<(), String> {
                 refuse("an intent claim is <32 hex>/<generation>")
             }
         }
-        ["queue" | "queue-done" | "landed-index", number] => {
+        ["landed-index", shard] => {
+            // Ruling R11: a shard is one byte, in decimal, 0 to 255.
+            if *shard == "0" || (decimal(shard) && shard.parse::<u16>().is_ok_and(|n| n < 256)) {
+                Ok(())
+            } else {
+                refuse("a shard is a decimal number from 0 to 255")
+            }
+        }
+        ["queue" | "queue-done", number] => {
             if decimal(number) {
                 Ok(())
             } else {
                 refuse("a queue place or shard is a decimal number")
+            }
+        }
+        ["talk", who, id] => {
+            operator_name(who).map_err(|why| format!("{name}: {why}"))?;
+            if crate::talk::is_talk_id(id) {
+                Ok(())
+            } else {
+                refuse("a talk id is 16 characters of lower-case base32")
             }
         }
         ["live" | "log", operator] => {
@@ -120,9 +136,16 @@ mod tests {
         assert!(bay_ref("refs/bay/changes/abcd2345/request").is_err());
         assert!(bay_ref("refs/bay/queue/07").is_err());
         assert!(bay_ref("refs/bay/intent/0123456789abcdef0123456789abcdef/1").is_ok());
+        assert!(bay_ref("refs/bay/landed-index/0").is_ok());
+        assert!(bay_ref("refs/bay/landed-index/255").is_ok());
+        assert!(bay_ref("refs/bay/landed-index/256").is_err());
+        assert!(bay_ref("refs/bay/landed-index/007").is_err());
         assert!(bay_ref("refs/bay/whatever").is_err());
         assert!(bay_ref("refs/notes/bay/evidence/ci/linux").is_err());
         assert!(bay_ref("refs/heads/main").is_ok());
+        assert!(bay_ref("refs/bay/talk/agent-b/abcdefghijklmnop").is_ok());
+        assert!(bay_ref("refs/bay/talk/agent-b/abcd2345").is_err());
+        assert!(bay_ref("refs/bay/talk/Agent/abcdefghijklmnop").is_err());
     }
 
     #[test]

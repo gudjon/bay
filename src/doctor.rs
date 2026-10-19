@@ -163,6 +163,12 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
         // what doctor outside a repository is run for (ruling: doctor outside a repository).
         report.red(Reason::RemoteUnreachable, Some("not in a git repository"));
     }
+    // Ruling R14, on every platform. The row comes after the outside-repository red, so that
+    // reason still comes first there; the choice it reads is the box's, in or out of a
+    // repository.
+    let keys = crate::signing::Keys::load(&git);
+    let runs_checks = keys.executor.is_some() || keys.producer.is_some();
+    sandbox_row(&crate::check::Sandbox::here(), runs_checks, &mut report);
 
     let ready = report.first_red.is_none();
     let line = status_line(
@@ -340,12 +346,33 @@ fn live_row(git: &Git, report: &mut Report) {
     }
 }
 
+/// The check sandbox (ruling R14): red with `SANDBOX_ABSENT` on a box in the executor or
+/// producer role (it has `bay.executorKey` or `bay.producerKey`) where no check would run for
+/// want of a sandbox. A box in the agent-view role runs no checks, so it is not red there.
+fn sandbox_row(sandbox: &crate::check::Sandbox, runs_checks: bool, report: &mut Report) {
+    let row = match (&sandbox.refusal, runs_checks) {
+        (None, _) if sandbox.kind == "none" => json!({"name": "sandbox", "kind": "none",
+            "required": runs_checks, "state": "green",
+            "note": "no check sandbox; this box chose to run checks without one (bay.executorSandbox = none)"}),
+        (None, _) => json!({"name": "sandbox", "kind": sandbox.kind, "required": runs_checks,
+            "state": "green"}),
+        (Some(_), false) => json!({"name": "sandbox", "kind": sandbox.kind, "required": false,
+            "state": "green", "note": "no check sandbox; this box runs no checks (agent-view role)"}),
+        (Some(why), true) => {
+            report.red(Reason::SandboxAbsent, Some("no check sandbox"));
+            json!({"name": "sandbox", "kind": sandbox.kind, "required": true, "state": "red",
+                "note": why, "recovery": "install the check sandbox, or choose to run checks without one: git config --global bay.executorSandbox none"})
+        }
+    };
+    report.rows.push(row);
+}
+
 /// The installed skill at `$HOME/.claude/skills/bay/` against the skill this bay version
 /// installs (§ 15.2, G49). A consumer repository's skills are never this copy. A mismatch is
 /// red on every box; a missing copy is red only where the Claude adapter is configured.
 fn skill_row(config: &Config, report: &mut Report) -> Result<(), String> {
     let home =
-        std::env::var_os("HOME").ok_or("HOME is not set; doctor cannot name the skill path")?;
+        crate::platform::home().ok_or("HOME is not set; doctor cannot name the skill path")?;
     let path = skill::installed_path(Path::new(&home));
     let required = config.claude_adapter();
     let mut row =
@@ -370,7 +397,7 @@ fn skill_row(config: &Config, report: &mut Report) -> Result<(), String> {
 }
 
 fn probe_claude() -> Result<Claude, String> {
-    let mut cmd = Command::new("claude");
+    let mut cmd = Command::new(crate::platform::program("claude"));
     cmd.arg("--version");
     match git::run_bounded(cmd, "claude --version") {
         Err(GitError::Spawn(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -425,4 +452,34 @@ fn status_line(
         "bay {} | {git_field} | {claude_field} | {doctor_field}",
         crate::version::BAY
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Report, sandbox_row};
+    use crate::check::Sandbox;
+    use crate::result::Reason;
+
+    fn row(sandbox: &Sandbox, runs_checks: bool) -> (serde_json::Value, Option<Reason>) {
+        let mut report = Report::default();
+        sandbox_row(sandbox, runs_checks, &mut report);
+        (report.rows.remove(0), report.first_red)
+    }
+
+    /// Ruling R14: with no sandbox and no choice by the box, the row is red only on a box in
+    /// the executor or producer role; an agent-view box runs no checks.
+    #[test]
+    fn the_sandbox_row_is_red_only_for_a_box_that_runs_checks() {
+        let none = Sandbox::judge("none", Ok(false));
+        let (red, reason) = row(&none, true);
+        assert_eq!(red["state"], "red");
+        assert!(matches!(reason, Some(Reason::SandboxAbsent)));
+        let (agent_view, reason) = row(&none, false);
+        assert_eq!(agent_view["state"], "green");
+        assert!(reason.is_none());
+        let (chose_none, reason) = row(&Sandbox::judge("none", Ok(true)), true);
+        assert_eq!(chose_none["state"], "green");
+        assert_eq!(chose_none["kind"], "none");
+        assert!(reason.is_none());
+    }
 }

@@ -4,6 +4,9 @@
 //! it, so the agent product does not run it; the hook returns the deny exit of a stale write
 //! (exit 2 for Claude Code). A normal push of `refs/bay/changes/<id>` still runs.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::io::Write;

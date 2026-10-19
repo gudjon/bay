@@ -6,6 +6,9 @@
 //! input; a check cannot write into another change's workspace; a view holds no links into
 //! another live checkout.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

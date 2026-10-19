@@ -7,7 +7,6 @@
 //! exit code alone is never evidence: anything short of a valid, matching result is `unknown`.
 
 use std::io::{Read, Write};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -65,8 +64,7 @@ pub fn changed_paths(git: &Git, base: &str, commit: &str) -> Result<Vec<String>,
     Ok(paths)
 }
 
-/// What bounds one run of the checks.
-#[derive(Default)]
+/// What bounds one run of the checks. No default: the sandbox is always chosen (ruling R14).
 pub struct Limits {
     /// The pre-publication execution budget.
     pub budget: Option<Duration>,
@@ -77,6 +75,8 @@ pub struct Limits {
     /// Directories the check may neither read nor write: the repository and every view in it.
     /// Its own scratch (the candidate and the adapter) is the only part of them it sees.
     pub hidden: Vec<PathBuf>,
+    /// The sandbox the checks run in, and why none runs when there is none (ruling R14).
+    pub sandbox: Sandbox,
 }
 
 /// What an adapter, a check's or an input provider's, may neither read nor write (§ 7): the
@@ -108,6 +108,85 @@ pub(crate) fn sandbox_kind() -> &'static str {
         "bwrap"
     } else {
         "none"
+    }
+}
+
+/// The box's choice to run checks with no sandbox (ruling R14): global Git config, never a
+/// repository's, as the update pin is the box's. Its one value is `none`.
+pub const UNSANDBOXED_KEY: &str = "bay.executorSandbox";
+
+/// Why a check does not run on a machine with no sandbox (ruling R14).
+pub const NO_SANDBOX: &str = "this machine has no check sandbox, so the check did not run; \
+     to run checks without one, the box chooses it with git config --global \
+     bay.executorSandbox none (each record then says sandbox \"none\")";
+
+/// The sandbox checks run in on this machine, and, where there is none and the box has not
+/// chosen `bay.executorSandbox = none`, why no check runs (ruling R14): a check never runs
+/// unconfined unless the box chose that.
+#[derive(Clone, Debug)]
+pub struct Sandbox {
+    /// `sandbox-exec`, `bwrap` or `none`: what each record names.
+    pub kind: &'static str,
+    /// Set when no check may run: each one is then `infra_failure` with this reason.
+    pub refusal: Option<String>,
+}
+
+impl Sandbox {
+    /// This machine's sandbox. Its global Git config is read only when there is none.
+    #[must_use]
+    pub fn here() -> Self {
+        let kind = sandbox_kind();
+        if kind == "none" {
+            Self::judge(kind, box_chose_unsandboxed())
+        } else {
+            Self::judge(kind, Ok(false))
+        }
+    }
+
+    /// The ruling itself, on every platform: with a sandbox the check runs in it; with none it
+    /// runs only when the box chose that (`chosen` is `Ok(true)`). An unreadable or unknown
+    /// choice is no choice.
+    #[must_use]
+    pub fn judge(kind: &'static str, chosen: Result<bool, String>) -> Self {
+        let refusal = if kind == "none" {
+            match chosen {
+                Ok(true) => None,
+                Ok(false) => Some(NO_SANDBOX.to_owned()),
+                Err(why) => Some(format!("{why}; {NO_SANDBOX}")),
+            }
+        } else {
+            None
+        };
+        Self { kind, refusal }
+    }
+}
+
+/// Whether this box chose to run checks with no sandbox: `bay.executorSandbox` in global Git
+/// config is `none`. Unset is `false`; any other value, or a Git that does not answer, is an
+/// error, so the caller refuses.
+///
+/// # Errors
+///
+/// A value other than `none`, or a `git config` that fails.
+pub fn box_chose_unsandboxed() -> Result<bool, String> {
+    let mut cmd = Command::new("git");
+    cmd.args(["config", "--global", "--get", UNSANDBOXED_KEY]);
+    let output = crate::git::run_bounded(cmd, "git config --global")
+        .map_err(|error| format!("{UNSANDBOXED_KEY} could not be read: {}", error.message()))?;
+    match output.status.code() {
+        // `git config --get` exits 1 for a key that is not set.
+        Some(1) => Ok(false),
+        Some(0) => match String::from_utf8_lossy(&output.stdout).trim() {
+            "none" => Ok(true),
+            other => Err(format!(
+                "{UNSANDBOXED_KEY} = \"{other}\" is not a choice bay knows; its one value is \
+                 \"none\""
+            )),
+        },
+        _ => Err(format!(
+            "{UNSANDBOXED_KEY} could not be read: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
     }
 }
 
@@ -260,7 +339,7 @@ pub fn run_all(
     hooks: &mut Hooks,
 ) -> Result<Vec<EvidenceRecord>, String> {
     let (budget, finished) = (limits.budget, limits.finished.as_slice());
-    let sandbox = sandbox_kind();
+    let sandbox = limits.sandbox.kind;
     // The execution budget runs on the monotonic clock from the start of the checks.
     let started = Instant::now();
     let mut records = Vec::new();
@@ -274,9 +353,12 @@ pub fn run_all(
         let _ = std::fs::remove_dir_all(&dir);
         let tree_dir = dir.join("candidate");
         let adapter_dir = dir.join("adapter");
-        materialize(git, candidate.commit, &[], &tree_dir)?;
-        materialize(git, candidate.base, &entry.adapter, &adapter_dir)?;
-        make_read_only(&adapter_dir);
+        // R14: with no sandbox and no choice by the box, nothing of the check runs.
+        if limits.sandbox.refusal.is_none() {
+            materialize(git, candidate.commit, &[], &tree_dir)?;
+            materialize(git, candidate.base, &entry.adapter, &adapter_dir)?;
+            make_read_only(&adapter_dir);
+        }
         let place = Place {
             tree: &tree_dir,
             adapter: &adapter_dir,
@@ -291,15 +373,18 @@ pub fn run_all(
             why,
             units,
             selection,
-        } = within_budget(
-            hooks.beat,
-            limits.heartbeat,
-            entry,
-            policy,
-            candidate,
-            &place,
-            remaining,
-        );
+        } = match &limits.sandbox.refusal {
+            Some(why) => Judged::without_units(Verdict::InfraFailure, Some(why.clone())),
+            None => within_budget(
+                hooks.beat,
+                limits.heartbeat,
+                entry,
+                policy,
+                candidate,
+                &place,
+                remaining,
+            ),
+        };
         let mut record = EvidenceRecord {
             schema: EVIDENCE_SCHEMA.to_owned(),
             id: format!("{producer}/{}-{}", candidate.id, index + 1),
@@ -310,6 +395,7 @@ pub fn run_all(
                 base_tree: candidate.base_tree.to_owned(),
                 unknown: serde_json::Map::new(),
             },
+            inputs: EvidenceRecord::inputs_for(&entry.fixtures),
             check: id,
             policy_revision: policy.revision,
             manifest_digest: policy.manifest_digest.clone(),
@@ -401,12 +487,17 @@ fn run_one(
     let (tree_dir, adapter_dir) = (place.tree, place.adapter);
     let mut words = entry.command.split_whitespace();
     let executable = adapter_dir.join(words.next().unwrap_or_default());
+    let mut requires = json!({"environment": entry.environment});
+    if !entry.fixtures.is_empty() {
+        // § 3: the fixtures the policy pins, by digest (ruling R18).
+        requires["fixtures"] = json!(entry.fixtures);
+    }
     let request = json!({
         "schema": "bay.check.request/1",
         "candidate": {"commit": candidate.commit, "tree": candidate.tree},
         "changed_paths": candidate.changed_paths,
         "plan": {"id": entry.id, "version": policy.revision.to_string()},
-        "requires": {"environment": entry.environment},
+        "requires": requires,
         "timeout_s": entry.timeout_s,
         "inputs": candidate.inputs,
     });
@@ -682,7 +773,9 @@ pub(crate) fn materialize(
     }
 }
 
+#[cfg(unix)]
 fn walk(dir: &Path, mode: u32, files_too: bool) {
+    use std::os::unix::fs::PermissionsExt as _;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -701,14 +794,185 @@ fn walk(dir: &Path, mode: u32, files_too: bool) {
     }
 }
 
+#[cfg(unix)]
 fn make_read_only(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
     walk(dir, 0o555, true);
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555));
 }
 
+#[cfg(unix)]
 fn make_writable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
     walk(dir, 0o755, false);
     let _ = std::fs::set_permissions(dir.join("adapter"), std::fs::Permissions::from_mode(0o755));
     walk(&dir.join("adapter"), 0o755, false);
+}
+
+/// Where there are no Unix modes, the adapter's files are read-only by the file attribute;
+/// a directory has no such attribute that stops writes into it.
+#[cfg(not(unix))]
+fn set_read_only(dir: &Path, read_only: bool) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            set_read_only(&path, read_only);
+        } else if let Ok(meta) = path.metadata() {
+            let mut permissions = meta.permissions();
+            permissions.set_readonly(read_only);
+            let _ = std::fs::set_permissions(&path, permissions);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn make_read_only(dir: &Path) {
+    set_read_only(dir, true);
+}
+
+#[cfg(not(unix))]
+fn make_writable(dir: &Path) {
+    set_read_only(dir, false);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NO_SANDBOX, Sandbox};
+
+    #[test]
+    fn no_sandbox_refuses_unless_the_box_chose_none() {
+        // R14 on every platform: no sandbox and no choice is refused.
+        let refused = Sandbox::judge("none", Ok(false));
+        assert_eq!(refused.kind, "none");
+        assert_eq!(refused.refusal.as_deref(), Some(NO_SANDBOX));
+        // An unreadable or unknown choice is no choice, and the refusal says why.
+        let unknown = Sandbox::judge("none", Err("bay.executorSandbox = \"off\"".to_owned()));
+        let why = unknown.refusal.unwrap();
+        assert!(why.contains("\"off\"") && why.contains(NO_SANDBOX), "{why}");
+        // The box's `bay.executorSandbox = none` runs the check, recorded as `none`.
+        assert!(Sandbox::judge("none", Ok(true)).refusal.is_none());
+        // With a sandbox the choice does not matter.
+        assert!(Sandbox::judge("bwrap", Ok(false)).refusal.is_none());
+        assert!(
+            Sandbox::judge("sandbox-exec", Err(String::new()))
+                .refusal
+                .is_none()
+        );
+    }
+
+    /// Ruling R14 on a real run: an adapter that passes, run where there is no sandbox and the
+    /// box did not choose `bay.executorSandbox = none`, is `infra_failure`, never a pass;
+    /// with that choice the same adapter passes and its record says `none`. The adapter is a
+    /// shell script, so this runs where a shell runs adapters (plan W5 brings `sh.exe`).
+    #[cfg(unix)]
+    #[test]
+    fn a_passing_adapter_with_no_sandbox_is_infra_failure() {
+        let chose_none = unix::run_under(Sandbox::judge("none", Ok(true)));
+        assert_eq!(
+            chose_none.verdict,
+            crate::evidence::Verdict::Pass,
+            "{:?}",
+            chose_none.why
+        );
+        assert_eq!(chose_none.sandbox.as_deref(), Some("none"));
+
+        let refused = unix::run_under(Sandbox::judge("none", Ok(false)));
+        assert_eq!(refused.verdict, crate::evidence::Verdict::InfraFailure);
+        assert_eq!(refused.why.as_deref(), Some(NO_SANDBOX));
+        assert_eq!(refused.sandbox.as_deref(), Some("none"));
+        assert_eq!(refused.units.len(), 0);
+    }
+
+    #[cfg(unix)]
+    mod unix {
+        use super::super::{Candidate, Hooks, Limits, Sandbox, run_all};
+        use crate::evidence::EvidenceRecord;
+        use crate::git::Git;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const POLICY: &str = "revision = 1\n\n[[check]]\nid = \"tests\"\nenvironment = \"local\"\n\
+            command = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\n\
+            expected_minimum = 1\ntimeout_s = 60\n";
+
+        const ADAPTER: &str = r#"#!/bin/sh
+req=$(cat)
+commit=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"}.*/\1/p')
+tree=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"}.*/\2/p')
+printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"plan":{"selected":1,"completed":1},"checks":[{"id":"t1","verdict":"pass"}]}' "$commit" "$tree"
+"#;
+
+        /// A repository whose one required check passes every candidate it is given.
+        fn passing_repo() -> (tempfile::TempDir, Git, String, String) {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            std::fs::create_dir_all(root.join(".bay")).unwrap();
+            std::fs::create_dir_all(root.join("scripts")).unwrap();
+            std::fs::write(root.join(".bay/policy.toml"), POLICY).unwrap();
+            let adapter = root.join("scripts/bay-check");
+            std::fs::write(&adapter, ADAPTER).unwrap();
+            std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let git = Git::new(root);
+            git.run(&["init", "-q"]).unwrap();
+            git.run(&["add", "-A"]).unwrap();
+            git.run(&[
+                "-c",
+                "user.name=bay",
+                "-c",
+                "user.email=bay@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "seed",
+            ])
+            .unwrap();
+            let commit = git.run(&["rev-parse", "HEAD"]).unwrap().trim().to_owned();
+            let tree = git.run(&["rev-parse", "HEAD^{tree}"]).unwrap();
+            (dir, git, commit, tree.trim().to_owned())
+        }
+
+        /// The one record of running the passing check under `sandbox`.
+        pub(super) fn run_under(sandbox: Sandbox) -> EvidenceRecord {
+            let (dir, git, commit, tree) = passing_repo();
+            let policy = crate::policy::load_at(&git, &commit).unwrap().unwrap();
+            let candidate = Candidate {
+                commit: &commit,
+                tree: &tree,
+                base: &commit,
+                base_tree: &tree,
+                changed_paths: &[],
+                id: "op.1",
+                policy_provenance: crate::policy::Provenance::Bay,
+                inputs: &[],
+            };
+            let limits = Limits {
+                budget: None,
+                finished: Vec::new(),
+                heartbeat: None,
+                hidden: Vec::new(),
+                sandbox,
+            };
+            let mut keep = |_: &mut EvidenceRecord| Ok(());
+            let mut records = run_all(
+                &git,
+                &dir.path().join("scratch"),
+                &policy,
+                &candidate,
+                "local",
+                &limits,
+                &mut Hooks {
+                    keep: &mut keep,
+                    beat: &mut || {},
+                },
+            )
+            .unwrap();
+            assert_eq!(records.len(), 1);
+            records.remove(0)
+        }
+    }
 }

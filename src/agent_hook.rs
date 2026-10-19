@@ -4,12 +4,13 @@
 //! the session work record of every probed event in a repository but pre-tool
 //! (`session::record`), the compact state at `session-start`, at `pre-tool` the shell deny list
 //! (G39) and the stale-write judgement of an edit tool against the coordination cache
-//! (`crate::coord`, G8, G23), and the stop refusal at `stop` (ruling R7). The adapter relies
-//! only on the payload shapes recorded in `tests/fixtures/claude-code-2.1.302`: an event with no
-//! recorded payload has no behaviour (ruling R16), and a field the recordings do not show is
-//! never read: an edit tool's target is `tool_input.file_path`, the field fixture 03 shows. A
-//! hook never blocks the session except by the deny exit, the stale-write refusal and the one
-//! stop refusal, so every other outcome exits 0.
+//! (`crate::coord`, G8, G23), the stop refusal at `stop` (ruling R7), and at `post-tool` and
+//! `user-prompt-submit` the notices of the session's change (`crate::notice`, R6). The adapter
+//! relies only on the payload shapes recorded in `tests/fixtures/claude-code-2.1.302`: an event
+//! with no recorded payload has no behaviour (ruling R16), and a field the recordings do not
+//! show is never read: an edit tool's target is `tool_input.file_path`, the field fixture 03
+//! shows. A hook never blocks the session except by the deny exit, the stale-write refusal and
+//! the one stop refusal, so every other outcome exits 0.
 
 use std::path::{Path, PathBuf};
 
@@ -168,20 +169,25 @@ pub struct Outcome {
 pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
     // `PreToolUse` is the blocking path (`onFailure: "block"`): § 11a gives it only the refusal,
     // and the same step's `PostToolBatch` records it.
-    let mut stop_refused = None;
+    let mut recorded = crate::session::Recorded::default();
+    let mut product_event = Event::Unprobed;
     if let Some(payload) = Payload::parse(event, input, dir)
         && !matches!(payload.event, Event::Unprobed | Event::PreToolUse)
     {
-        stop_refused = crate::session::record(&payload);
+        product_event = payload.event;
+        recorded = crate::session::record(&payload);
     }
     // Ruling R7: a stop over uncheckpointed edits is refused once; exit 2 keeps the session
     // going, with the reason as its next instruction.
-    if let Some(reason) = stop_refused {
+    if let Some(reason) = recorded.stop_refused {
         return Outcome {
             exit: 2,
             stdout: String::new(),
             stderr: reason,
         };
+    }
+    if !recorded.notice.is_empty() {
+        return notice(product_event, recorded.notice);
     }
     if event == "pre-tool"
         && let Some(outcome) = pre_tool_write(input, dir)
@@ -201,6 +207,29 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
             stderr: format!("{reason}\n"),
         },
         None => Outcome::default(),
+    }
+}
+
+/// The notices `post-tool` or `user-prompt-submit` gives the agent (`crate::notice`, ruling R6).
+/// § 11 names `additionalContext`, but the recorded payloads show only the hooks' input, so no
+/// probe has shown this event delivering that field on 2.1.302 (R16): the same text also goes
+/// on stderr at exit 0, the probed exit-0 path (ruling R-B3-6), and the session's row names
+/// each notice.
+fn notice(event: Event, text: String) -> Outcome {
+    let name = match event {
+        Event::UserPromptSubmit => "UserPromptSubmit",
+        _ => "PostToolBatch",
+    };
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": name,
+            "additionalContext": text,
+        },
+    });
+    Outcome {
+        exit: 0,
+        stdout: format!("{output}\n"),
+        stderr: text,
     }
 }
 

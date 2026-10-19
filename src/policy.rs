@@ -28,6 +28,9 @@ struct PolicyFile {
     /// The named inputs' providers (`DESIGN` § 8, ruling R3).
     #[serde(default)]
     input: Vec<InputEntry>,
+    /// The completion profiles (`DESIGN` § 7, ruling R12): `[profile.<name>] require = [...]`.
+    #[serde(default)]
+    profile: BTreeMap<String, crate::completion::ProfileEntry>,
 }
 
 /// One check set aside for a stated time (`DESIGN` § 7, ruling 8c): while the entry is in the
@@ -70,6 +73,15 @@ pub struct CheckEntry {
     /// with the same tree. Omitted from the definition digest when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,
+    /// The content-addressed fixtures the check reads, each `<name>@sha256:<64 hex>`
+    /// (ruling R18): their own key, so a changed fixture digest is a changed definition and
+    /// evidence made with the old one is never reused (G7). Omitted from the definition digest
+    /// when empty, like `inputs`, so a policy without it keeps its digest (the G26 vector).
+    /// The digest is the policy's claim: bay passes it to the adapter as `requires.fixtures`
+    /// and copies it into the record's `inputs`, but never reads the fixture, so the adapter
+    /// must read only that content (`INTERFACES` § 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fixtures: Vec<String>,
     /// Absolute directories: the check's `PATH` (ruling 8b). Absent, it takes its stated
     /// default, [`DEFAULT_PATH`], so the search path is always one the policy names. Always
     /// present in the definition digest.
@@ -101,11 +113,16 @@ impl Policy {
     /// Whether check `id` is keyed by subject commit.
     #[must_use]
     pub fn commit_keyed(&self, id: &crate::evidence::CheckId) -> bool {
-        self.checks.iter().any(|check| {
-            check.id == id.id
-                && check.environment == id.environment
-                && check.inputs.iter().any(|input| input == "commit")
-        })
+        self.check(id)
+            .is_some_and(|check| check.inputs.iter().any(|input| input == "commit"))
+    }
+
+    /// The `[[check]]` entry for `id`.
+    #[must_use]
+    pub fn check(&self, id: &crate::evidence::CheckId) -> Option<&CheckEntry> {
+        self.checks
+            .iter()
+            .find(|check| check.id == id.id && check.environment == id.environment)
     }
 }
 
@@ -314,6 +331,11 @@ pub struct Policy {
     pub inputs: Vec<InputEntry>,
     /// The required checks only.
     pub manifest: Vec<ManifestEntry>,
+    /// The `[profile.<name>]` tables: the completion dimensions each profile requires.
+    pub profiles: BTreeMap<String, Vec<crate::completion::Dimension>>,
+    /// The digest of the sorted manifest (`INTERFACES` § 7). A profile is not in it: a profile
+    /// says what a change needs, not what a check computes, so editing one leaves every check's
+    /// evidence current. It is a policy change all the same (`revision`, ruling R12).
     pub manifest_digest: String,
 }
 
@@ -341,8 +363,10 @@ impl From<LoadError> for String {
 /// [`LoadError::Invalid`] when the policy file is invalid: it does not parse, lacks
 /// `expected_minimum`, repeats an (`id`, `environment`) or an `[[input]]` name, names an
 /// executable outside its `adapter` list, names an adapter path absent at `commit`, has a
-/// relative `path` entry, names a baseline variable in `env`, has a `[[quarantine]]` that names
-/// no check or whose `end` is neither a date nor a `Change-Id`, or has no required check whose
+/// relative `path` entry, names a baseline variable in `env`, declares an input other than
+/// `commit` or a fixture that is not `<name>@sha256:<hex>`, has a `[[quarantine]]` that names
+/// no check or whose `end` is neither a date nor a `Change-Id`, has a `[profile.<name>]` that
+/// requires nothing, an unknown dimension or one twice, or has no required check whose
 /// `expected_minimum` is above zero. [`LoadError::Git`] on a git fault.
 pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
     let text = match git.run(&["cat-file", "blob", &format!("{commit}:{POLICY_PATH}")]) {
@@ -421,6 +445,7 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
                 BASELINE_VARIABLES.join(", ")
             )));
         }
+        validate_declared_inputs(entry).map_err(invalid)?;
         if !entry.adapter.iter().any(|path| covers(path, executable)) {
             return Err(invalid(format!(
                 "check {} runs {executable}, which is not in its adapter list",
@@ -441,6 +466,7 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
         }
     }
     validate_inputs(git, commit, &file.input).map_err(invalid)?;
+    let profiles = crate::completion::requirements(file.profile).map_err(invalid)?;
     let manifest_digest = manifest_digest(&mut manifest).map_err(LoadError::Git)?;
     Ok(Some(Policy {
         revision: file.revision,
@@ -448,8 +474,45 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
         quarantined: file.quarantine,
         inputs: file.input,
         manifest,
+        profiles,
         manifest_digest,
     }))
+}
+
+/// The one `inputs` value is `commit` (BACKLOG 28, `INTERFACES` § 7): any other is an input bay
+/// cannot identify, and an unknown input is never a pass, so it makes the policy invalid rather
+/// than keying the check's evidence by tree. Each `fixtures` entry is `<name>@sha256:<64 hex>`
+/// (ruling R18), each name once: a fixture without a digest is an input bay cannot identify.
+fn validate_declared_inputs(entry: &CheckEntry) -> Result<(), String> {
+    if let Some(other) = entry.inputs.iter().find(|input| *input != "commit") {
+        return Err(format!(
+            "check {} declares the input {other:?}; the one input bay can identify is \"commit\"",
+            entry.id
+        ));
+    }
+    let mut names = std::collections::HashSet::new();
+    for fixture in &entry.fixtures {
+        let Some(name) = fixture_name(fixture) else {
+            return Err(format!(
+                "check {} names the fixture {fixture:?}; a fixture is <name>@sha256:<64 lowercase hex>",
+                entry.id
+            ));
+        };
+        if !names.insert(name) {
+            return Err(format!("check {} names the fixture {name} twice", entry.id));
+        }
+    }
+    Ok(())
+}
+
+/// The name of fixture `text` when it is `<name>@sha256:<64 lowercase hex>` with a non-empty
+/// name, `None` otherwise.
+fn fixture_name(text: &str) -> Option<&str> {
+    let (name, digest) = text.split_once('@')?;
+    let hex = digest.strip_prefix("sha256:")?;
+    let plain = !name.is_empty() && !name.contains(char::is_whitespace);
+    let hex_ok = hex.len() == 64 && hex.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    (plain && hex_ok).then_some(name)
 }
 
 /// The validity rules of the `[[input]]` entries at `commit`: one entry per name, each valid.
@@ -553,6 +616,53 @@ mod tests {
         assert_ne!(plain, with_env);
         assert_ne!(with_path, digest_of("path = [\"/bin\"]\n"));
         assert_ne!(with_env, digest_of("env = [\"OTHER\"]\n"));
+    }
+
+    /// Ruling R18: `fixtures` is its own key inside the definition digest, so another fixture
+    /// digest is another definition (G7); an absent or empty list leaves the digest as it was.
+    #[test]
+    fn fixtures_enter_the_definition_digest() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let ids = BTreeMap::new();
+        let digest_of = |extra: &str| {
+            let entry: CheckEntry = toml::from_str(&format!("{text}{extra}")).unwrap();
+            manifest_entry(&entry, &ids).unwrap().definition_digest
+        };
+        let one = format!("fixtures = [\"data@sha256:{}\"]\n", "a".repeat(64));
+        let two = format!("fixtures = [\"data@sha256:{}\"]\n", "b".repeat(64));
+        assert_eq!(digest_of(""), digest_of("fixtures = []\n"));
+        assert_ne!(digest_of(""), digest_of(&one));
+        assert_ne!(digest_of(&one), digest_of(&two));
+    }
+
+    /// BACKLOG 28: `commit` is the one input bay identifies; R18: a fixture names its digest.
+    #[test]
+    fn an_input_or_fixture_bay_cannot_identify_is_invalid() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let check = |extra: &str| {
+            let entry: CheckEntry = toml::from_str(&format!("{text}{extra}")).unwrap();
+            super::validate_declared_inputs(&entry)
+        };
+        let hex = "0123456789abcdef".repeat(4);
+        assert!(check("inputs = [\"commit\"]\n").is_ok());
+        assert!(
+            check(&format!(
+                "fixtures = [\"data@sha256:{hex}\", \"more@sha256:{hex}\"]\n"
+            ))
+            .is_ok()
+        );
+        for bad in [
+            "inputs = [\"commits\"]\n".to_owned(),
+            "inputs = [\"commit\", \"network\"]\n".to_owned(),
+            "fixtures = [\"data\"]\n".to_owned(),
+            format!("fixtures = [\"@sha256:{hex}\"]\n"),
+            format!("fixtures = [\"data@sha1:{hex}\"]\n"),
+            format!("fixtures = [\"data@sha256:{}\"]\n", hex.to_uppercase()),
+            format!("fixtures = [\"data@sha256:{}\"]\n", &hex[1..]),
+            format!("fixtures = [\"data@sha256:{hex}\", \"data@sha256:{hex}\"]\n"),
+        ] {
+            assert!(check(&bad).is_err(), "{bad}");
+        }
     }
 
     /// The fixed test vector of G26: this policy and these adapter object ids give this

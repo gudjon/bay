@@ -14,6 +14,9 @@
 //! `#[ignore]`: how a box reports that it has no check capability (`CHECK_UNAVAILABLE`) is not
 //! decided yet.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

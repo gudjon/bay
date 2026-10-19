@@ -4,6 +4,9 @@
 //! rebuilt on the new trunk, and rechecked. The check request names exactly the paths the
 //! candidate changes against the trunk it was merged onto.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use support::{TestBox, check_files, passing_result, result_json};

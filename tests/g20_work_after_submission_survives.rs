@@ -2,6 +2,9 @@
 //!
 //! The agent edits after `land`; the candidate publishes; cleanup leaves the newer work intact.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use support::{TestBox, check_files, passing_result, result_json};

@@ -7,6 +7,10 @@
 //! while no candidate is validated under an observed one. Leftovers (G41) are a later item.
 //! `bay status` also fetches the remote's `refs/bay/live/*` and records that fetch, from which
 //! `--fleet` reads the fleet map ([`crate::fleet`], G23), failing closed without it (G49).
+//! Completion is reported per dimension, `running` and `effective` from counted runtime
+//! records ([`crate::runtime`]), with the selected profile's verdict ([`crate::completion`]).
+//! After a fetch it accepts and acks this actor's talks ([`crate::talk::receive`], § 11c), and
+//! says so in `detail.talk_accept`.
 
 use std::path::Path;
 
@@ -14,12 +18,14 @@ use serde_json::{Value, json};
 
 use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, ChangeState, change_ref};
 use crate::clock::now_rfc3339;
+use crate::completion::{self, Dimension};
 use crate::evidence::{self, EvidenceRecord};
 use crate::inputs::Probe;
 use crate::publish::scan;
 use crate::receipts::{self, Receipt};
 use crate::repo::Repo;
 use crate::result::{BayResult, Freshness, Reason};
+use crate::runtime::Confirmed;
 use crate::view;
 
 #[must_use]
@@ -105,6 +111,11 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     let _ = receipts::sync(&repo);
     let pending = receipts::pending(&repo);
     let (trunk, fetched_at) = synchronize(&repo)?;
+    // § 11c: a fetching command on the recipient's machine accepts and acks its talks.
+    let talk_accept = fetched_at
+        .is_some()
+        .then(|| crate::talk::receive(&repo))
+        .flatten();
     let ids: Vec<String> = match change.map(str::to_owned).or_else(|| repo.view_change(dir)) {
         Some(id) => vec![id],
         None => repo
@@ -166,7 +177,12 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
             })?;
         }
     }
-    let read = Read::Full(crate::registry::Registry::current(&repo.git)?);
+    // The runtime adapter is asked only for a change this read names: a listing of every
+    // change stays bounded however many have landed.
+    let read = Read::Full {
+        registry: crate::registry::Registry::current(&repo.git)?,
+        ask_runtime: ids.len() == 1 && (change.is_some() || repo.view_change(dir).is_some()),
+    };
     let mut changes = Vec::new();
     for id in &ids {
         let (_, record) = chain.read(id).map_err(|error| error.message())?;
@@ -185,6 +201,9 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         "quarantines": quarantines,
         "trunk": trunk,
     }));
+    if let (Some(detail), Some(accept)) = (result.detail.as_mut(), talk_accept) {
+        detail["talk_accept"] = accept;
+    }
     if let [only] = ids.as_slice() {
         result = result.with_change(only.clone());
     }
@@ -322,10 +341,14 @@ fn cost(records: &[EvidenceRecord]) -> Value {
 }
 
 /// How `describe` reads a change. The hook's path reads no evidence (its costs are `null`) and
-/// only the input cache; a full read counts evidence under the registry and runs providers.
+/// only the input cache; a full read counts evidence under the registry and runs providers,
+/// and asks the runtime adapter when `ask_runtime` (one named change).
 enum Read {
     Cached,
-    Full(Option<crate::registry::Registry>),
+    Full {
+        registry: Option<crate::registry::Registry>,
+        ask_runtime: bool,
+    },
 }
 
 /// The cost of the change's last operation, over every record its attempts produced
@@ -426,6 +449,146 @@ fn lease(
     )
 }
 
+/// § 7: the completion dimensions, each from its own evidence, and the verdict of the profile
+/// `[policy] profile` selects; never collapsed into "done". The hook's read reads no evidence,
+/// so it confirms no runtime dimension and judges no profile (`profile` is `null`).
+fn completion(
+    repo: &Repo,
+    record: &ChangeRecord,
+    trunk: &str,
+    landed: Option<&crate::publish::Found>,
+    read: &Read,
+) -> Result<Value, String> {
+    let checked = landed.is_some()
+        || record.operations.last().is_some_and(|op| {
+            op.attempts
+                .last()
+                .is_some_and(|attempt| attempt.verdict == "pass")
+        });
+    let Read::Full {
+        registry,
+        ask_runtime,
+    } = read
+    else {
+        return Ok(json!({
+            "published": landed.is_some(),
+            "checked": checked,
+            "running": "unconfirmed",
+            "effective": "unconfirmed",
+            "runtime": null,
+            "profile": null,
+        }));
+    };
+    let (name, require) = selected_profile(repo, trunk, landed);
+    // The adapter is asked only when its answer can change the verdict: the profile requires a
+    // runtime dimension and a registry exists, without which nothing it prints could count.
+    let needs_runtime = require.as_ref().is_ok_and(|require| {
+        require.contains(&Dimension::Running) || require.contains(&Dimension::Effective)
+    });
+    let ask = *ask_runtime && needs_runtime && registry.is_some();
+    let (confirmed, runtime) = match landed {
+        Some(found) => runtime(repo, record, found, registry.as_ref(), ask)?,
+        None => (Confirmed::default(), json!(null)),
+    };
+    let met: Vec<Dimension> = [
+        (Dimension::Published, landed.is_some()),
+        (Dimension::Checked, checked),
+        (Dimension::Running, !confirmed.running.is_empty()),
+        (Dimension::Effective, !confirmed.effective.is_empty()),
+    ]
+    .into_iter()
+    .filter_map(|(dimension, met)| met.then_some(dimension))
+    .collect();
+    let word = |ids: &[String]| {
+        if ids.is_empty() {
+            "unconfirmed"
+        } else {
+            "confirmed"
+        }
+    };
+    Ok(json!({
+        "published": landed.is_some(),
+        "checked": checked,
+        "running": word(&confirmed.running),
+        "effective": word(&confirmed.effective),
+        "runtime": runtime,
+        "profile": completion::verdict(&name, require, &met),
+    }))
+}
+
+/// The selected profile's name and requirement, both read where the change is judged: at the
+/// landing's accepted base once landed, else at trunk. Neither the work tree's config nor the
+/// landing itself selects or relaxes the profile it is judged by. A config or policy bay
+/// cannot read there makes the requirement unknown.
+fn selected_profile(
+    repo: &Repo,
+    trunk: &str,
+    landed: Option<&crate::publish::Found>,
+) -> (String, Result<Vec<Dimension>, String>) {
+    let at = landed.map_or_else(|| trunk.to_owned(), |found| format!("{}^1", found.commit));
+    let config = match crate::config::Config::at(&repo.git, &at) {
+        Ok(config) => config,
+        Err(why) => return (repo.config.profile().to_owned(), Err(why)),
+    };
+    let name = config.profile().to_owned();
+    let require = match crate::policy::load_at(&repo.git, &at) {
+        Ok(policy) => completion::requirement(
+            &name,
+            &policy.map(|policy| policy.profiles).unwrap_or_default(),
+        ),
+        Err(error) => Err(String::from(error)),
+    };
+    (name, require)
+}
+
+/// The counted runtime records on landed `found`'s tree. When `ask` and they do not confirm
+/// both runtime dimensions, the runtime adapter is asked too, and what it printed that counts
+/// is counted for this read; nothing is written. An adapter that fails confirms nothing and is
+/// named, never read as a pass.
+fn runtime(
+    repo: &Repo,
+    record: &ChangeRecord,
+    found: &crate::publish::Found,
+    registry: Option<&crate::registry::Registry>,
+    ask: bool,
+) -> Result<(Confirmed, Value), String> {
+    let tree = repo
+        .git
+        .run(&["rev-parse", &format!("{}^{{tree}}", found.commit)])
+        .map_err(|error| error.message())?;
+    let mut records = evidence::records_for(&repo.git, &tree)?;
+    let count = |records: &[EvidenceRecord]| {
+        crate::runtime::confirmed(&repo.git, records.to_vec(), registry, &found.commit)
+    };
+    let mut confirmed = count(&records)?;
+    let (mut adapter, mut error, mut refused) = ("not asked", None, Vec::new());
+    if ask && (confirmed.running.is_empty() || confirmed.effective.is_empty()) {
+        match crate::runtime::observe(repo, &record.id, &found.commit, &tree, registry) {
+            Ok(None) => adapter = "unconfigured",
+            Ok(Some(observed)) => {
+                adapter = "ran";
+                refused = observed.refused;
+                records.extend(observed.kept);
+                confirmed = count(&records)?;
+            }
+            Err(why) => {
+                adapter = "failed";
+                error = Some(why);
+            }
+        }
+    }
+    Ok((
+        confirmed.clone(),
+        json!({
+            "running": confirmed.running,
+            "effective": confirmed.effective,
+            "adapter": adapter,
+            "error": error,
+            "refused": refused,
+        }),
+    ))
+}
+
 fn describe(
     repo: &Repo,
     record: &ChangeRecord,
@@ -436,7 +599,9 @@ fn describe(
     let found = scan(&repo.git, &record.base_first, trunk, &record.id)?;
     let landed = found.publications.first();
     let ((op_cost, landing_cost), probe) = match read {
-        Read::Full(registry) => (costs(repo, record, landed, registry.as_ref())?, Probe::Run),
+        Read::Full { registry, .. } => {
+            (costs(repo, record, landed, registry.as_ref())?, Probe::Run)
+        }
         Read::Cached => ((json!(null), json!(null)), Probe::Cached),
     };
     let judged = live_inputs(repo, record, landed.is_some(), trunk, probe)?;
@@ -500,13 +665,7 @@ fn describe(
             "commit": anomaly.commit,
             "why": "carries the Change-Id but is not a verified publication",
         })).collect::<Vec<_>>(),
-        // § 7: the completion dimensions are reported apart, never collapsed into "done".
-        "completion": {
-            "published": landed.is_some(),
-            "checked": landed.is_some() || record.operations.last().is_some_and(|op| op.attempts.last().is_some_and(|attempt| attempt.verdict == "pass")),
-            "running": "unconfirmed",
-            "effective": "unconfirmed",
-        },
+        "completion": completion(repo, record, trunk, landed, read)?,
         "retention_cut": record.retention_cut,
         "terminal": crate::log::records_for(&repo.git, &record.id)?,
         "receipts": record.receipts.iter().filter(|receipt| {

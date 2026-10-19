@@ -4,6 +4,9 @@
 //! against is reported unverifiable and never counts as evidence; a `pass` evidence note
 //! signed with an agent key (not a producer key) is refused as evidence.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::Path;

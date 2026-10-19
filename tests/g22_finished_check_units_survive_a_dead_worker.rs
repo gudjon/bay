@@ -4,6 +4,9 @@
 //! `unknown`, the aggregate is incomplete and publication stays blocked; resume runs only
 //! the sixth.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use support::{TestBox, passing_result, result_json};

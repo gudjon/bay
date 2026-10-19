@@ -22,6 +22,9 @@
 //! a cross-actor adopt is accepted only past the takeover window, judged by the host's reflog,
 //! and only the change actor's own heartbeat delays it (ruling R1).
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::{Path, PathBuf};
@@ -304,6 +307,36 @@ fn the_hook_refuses_what_a_key_class_may_not_write() {
             "{why}"
         );
     }
+    // The producer's own signed record about one tree, copied onto another tree's note: a
+    // pass for one tree never stands for another (G7).
+    let mut copied: bay::evidence::EvidenceRecord = serde_json::from_value(serde_json::json!({
+        "schema": "bay.evidence/1", "id": format!("{PRODUCER}/copied"), "kind": "check",
+        "subject": {"tree": tree, "commit": trunk, "base_tree": tree},
+        "check": {"id": "tests", "environment": "local"}, "policy_revision": 1,
+        "manifest_digest": "sha256:x", "producer": {"name": PRODUCER, "version": "1"},
+        "verdict": "pass", "at": "now"}))
+    .unwrap();
+    copied.sign(&keys.producer).unwrap();
+    let notes = format!("refs/notes/bay/evidence/{PRODUCER}");
+    // From the remote's notes, without the forgeries above.
+    test_box.git_ok(
+        &repo,
+        &["fetch", "-q", "origin", &format!("+{notes}:{notes}")],
+    );
+    test_box.git_ok(
+        &repo,
+        &[
+            "notes",
+            &format!("--ref={notes}"),
+            "add",
+            "-f",
+            "-m",
+            &serde_json::to_string(&vec![copied]).unwrap(),
+            &request_tree,
+        ],
+    );
+    let why = refused(&test_box, &repo, &[&format!("+{notes}:{notes}")]);
+    assert!(why.contains("not the"), "{why}");
 
     // Only the registry key advances the registry; a registry with one key in two files is refused.
     let agent_line = std::fs::read_to_string(keys.agent.with_extension("pub")).unwrap();

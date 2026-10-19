@@ -4,6 +4,9 @@
 //! reaches `status`. If the machine dies before the receipt is synchronized, `status` shows
 //! the record as missing, never as success.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::os::unix::fs::PermissionsExt;

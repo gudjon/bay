@@ -49,9 +49,18 @@ run() {
 
 run fmt cargo fmt --check
 run clippy sh -c 'test -z "$(cargo clippy -q --all-targets 2>&1 | grep -E "^(warning|error)")"'
+# The Windows target keeps compiling. Where that target is not installed the check does not
+# run, and nothing is recorded for it.
+windows=
+if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-msvc; then
+    run check-windows cargo check -q --target x86_64-pc-windows-msvc --all-targets
+    windows=check-windows
+else
+    echo "gate: check-windows skipped, not recorded: the x86_64-pc-windows-msvc target is not installed (rustup target add x86_64-pc-windows-msvc)" >&2
+fi
 run test-sha1-files env BAY_TEST_FORMATS=sha1/files cargo test -q
 run test-sha256-reftable env BAY_TEST_FORMATS=sha256/reftable cargo test -q
-evidence verify "$allowed" HEAD $checks
+evidence verify "$allowed" HEAD $checks $windows
 
 if [ "${1:-}" != "--no-push" ]; then
     git push -q origin "$notes:$notes"

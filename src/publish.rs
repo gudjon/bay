@@ -119,14 +119,16 @@ fn observe_land(
     }
     let op_id = submitted.op_id.clone().unwrap_or_default();
     let bay = std::env::current_exe().map_err(|error| error.to_string())?;
-    std::process::Command::new(bay)
-        .arg("-C")
+    let mut run = std::process::Command::new(bay);
+    run.arg("-C")
         .arg(dir)
         .args(["land", "--wait", "--change", id])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::null());
+    // On Windows the run is a detached process, so it outlives a caller that closes its console.
+    crate::platform::detach_windows(&mut run);
+    run.spawn()
         .map_err(|error| format!("the run could not be started: {error}"))?;
     let started = Instant::now();
     let chain = Chain::new(&repo.git);
@@ -876,13 +878,9 @@ fn after_refused_push(
         return Ok(Some(existing(result)));
     }
     // Another change landed this generation of the intent: never a retry (§ 6).
+    // The ref or its shard index record (§ 10a); an unread remote is an error, never "absent".
     if let Some(claim) = &ctx.record.claim
-        && !ctx
-            .repo
-            .git
-            .run(&["ls-remote", ctx.repo.remote(), &claim.landed_ref()])
-            .unwrap_or_default()
-            .is_empty()
+        && crate::compact::remote_marker(ctx.repo, &claim.landed_ref())?.is_some()
     {
         return Ok(Some(
             BayResult::blocked(Reason::ChangeAlreadyLanded)
@@ -1656,11 +1654,7 @@ fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<Ba
     let landed = !scan(&repo.git, &ctx.record.base_first, &trunk, id)?
         .publications
         .is_empty()
-        || !repo
-            .git
-            .run(&["ls-remote", repo.remote(), &format!("refs/bay/landed/{id}")])
-            .unwrap_or_default()
-            .is_empty();
+        || crate::compact::remote_marker(repo, &format!("refs/bay/landed/{id}"))?.is_some();
     if landed {
         return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded).with_change(id));
     }
@@ -2230,7 +2224,18 @@ fn run_policy(
     } else {
         policy::Provenance::Bay
     };
-    let finished = finished_checks(ctx, op_id, policy, tree, commit)?;
+    let (finished, reused) = finished_checks(
+        ctx,
+        op_id,
+        policy,
+        &Judged {
+            tree,
+            commit,
+            base_tree: &base_tree,
+            provenance: policy_provenance,
+            inputs,
+        },
+    )?;
     let mut keep = |record: &mut evidence::EvidenceRecord| -> Result<(), String> {
         // The producer signs outside the check's sandbox, after reading its output (§ 7).
         if let Some(signer) = &producer_signer {
@@ -2258,6 +2263,7 @@ fn run_policy(
             finished,
             heartbeat: Some(ctx.repo.config.heartbeat()),
             hidden: hidden_paths(ctx),
+            sandbox: check::Sandbox::here(),
         },
         &mut check::Hooks {
             keep: &mut keep,
@@ -2270,38 +2276,11 @@ fn run_policy(
         evidence::records_for(git, tree)?,
         ctx.registry.as_ref(),
     )?;
-    // G30: coverage is judged against the frozen manifest, never against counts.
-    let gaps: Vec<(String, Combined)> = evidence::aggregate(
-        &all,
-        &policy.manifest,
-        &policy.manifest_digest,
-        &|id| policy.commit_keyed(id),
-        commit,
-    )
-    .into_iter()
-    .map(|(id, combined)| (id.id, combined))
-    .collect();
-    let Some((_, worst)) = gaps
-        .iter()
-        .find(|(_, combined)| *combined == Combined::Flaky)
-        .or_else(|| {
-            gaps.iter()
-                .find(|(_, combined)| *combined == Combined::ProductFailure)
-        })
-        .or_else(|| gaps.first())
-    else {
+    // What to repair: this run's records and the ones reused in place of a run (§ 8).
+    let named: Vec<&evidence::EvidenceRecord> = records.iter().chain(&reused).collect();
+    let Some((code, word, why)) = verdict(policy, &all, &named, commit) else {
         return Ok(("pass", None));
     };
-    let (code, word) = match worst {
-        Combined::Flaky => (Reason::CheckFlaky, "flaky"),
-        Combined::ProductFailure => (Reason::CheckFailed, "product_failure"),
-        Combined::Unknown | Combined::Pass => (Reason::CheckUnknown, "unknown"),
-    };
-    let why: Vec<_> = records
-        .iter()
-        .filter(|record| gaps.iter().any(|(id, _)| *id == record.check.id))
-        .map(|record| json!({"check": record.check.id, "verdict": record.verdict, "why": record.why}))
-        .collect();
     Ok((
         word,
         Some(
@@ -2313,6 +2292,47 @@ fn run_policy(
                 ),
         ),
     ))
+}
+
+/// The verdict of `policy` over every counted record on the tree (`all`): `None` for a pass,
+/// else its refusal code and word, and what `named` say about each gap.
+fn verdict(
+    policy: &policy::Policy,
+    all: &[evidence::EvidenceRecord],
+    named: &[&evidence::EvidenceRecord],
+    commit: &str,
+) -> Option<(Reason, &'static str, Vec<serde_json::Value>)> {
+    // G30: coverage is judged against the frozen manifest, never against counts.
+    let gaps: Vec<(String, Combined)> = evidence::aggregate(
+        all,
+        &policy.manifest,
+        &policy.manifest_digest,
+        &|id| policy.commit_keyed(id),
+        commit,
+    )
+    .into_iter()
+    .map(|(id, combined)| (id.id, combined))
+    .collect();
+    // No gap is a pass.
+    let (_, worst) = gaps
+        .iter()
+        .find(|(_, combined)| *combined == Combined::Flaky)
+        .or_else(|| {
+            gaps.iter()
+                .find(|(_, combined)| *combined == Combined::ProductFailure)
+        })
+        .or_else(|| gaps.first())?;
+    let (code, word) = match worst {
+        Combined::Flaky => (Reason::CheckFlaky, "flaky"),
+        Combined::ProductFailure => (Reason::CheckFailed, "product_failure"),
+        Combined::Unknown | Combined::Pass => (Reason::CheckUnknown, "unknown"),
+    };
+    let why = named
+        .iter()
+        .filter(|record| gaps.iter().any(|(id, _)| *id == record.check.id))
+        .map(|record| json!({"check": record.check.id, "verdict": record.verdict, "why": record.why}))
+        .collect();
+    Some((code, word, why))
 }
 
 /// How the policy at `trunk` reached trunk (`DESIGN` § 10a, `INTERFACES` § 6). Each edit
@@ -2388,14 +2408,15 @@ fn is_publication(
 }
 
 /// The remote's landed markers: `Change-Id` to the commit its `refs/bay/landed/<Change-Id>`
-/// names, in one `ls-remote`. A remote that cannot be read is an error, never "no marker":
+/// names, in one `ls-remote`, and those the shard indexes record (§ 10a, one fetch of them).
+/// A remote that cannot be read is an error, never "no marker":
 /// an unread provenance is never taken for either answer.
 fn landed_markers(repo: &Repo) -> Result<std::collections::HashMap<String, String>, String> {
     let listed = repo
         .git
         .run(&["ls-remote", repo.remote(), "refs/bay/landed/*"])
         .map_err(|error| error.message())?;
-    Ok(listed
+    let mut markers: std::collections::HashMap<String, String> = listed
         .lines()
         .filter_map(|line| {
             let (oid, name) = line.split_once('\t')?;
@@ -2404,7 +2425,15 @@ fn landed_markers(repo: &Repo) -> Result<std::collections::HashMap<String, Strin
                 oid.to_owned(),
             ))
         })
-        .collect())
+        .collect();
+    // § 10a: a compacted marker's shard index record stands in for the ref.
+    crate::compact::fetch(repo)?;
+    for (name, target) in crate::compact::entries(&repo.git, "refs/bay/landed/")? {
+        if let Some(id) = name.strip_prefix("refs/bay/landed/") {
+            markers.entry(id.to_owned()).or_insert(target);
+        }
+    }
+    Ok(markers)
 }
 
 /// Renews the executor's lease while a check runs (§ 9a): one heartbeat commit on the chain,
@@ -2474,56 +2503,105 @@ fn hidden_paths(ctx: &Ctx) -> Vec<std::path::PathBuf> {
     check::hidden_for(ctx.repo, &ctx.keys)
 }
 
+/// What a policy's checks judge: the candidate, its base and the request's named inputs.
+struct Judged<'a> {
+    tree: &'a str,
+    commit: &'a str,
+    base_tree: &'a str,
+    provenance: policy::Provenance,
+    /// The request's `inputs` (`INTERFACES` § 3).
+    inputs: &'a [String],
+}
+
 /// Checks that already finished on `tree` under the policy's manifest: a resume after a dead
 /// worker runs only what did not finish (§ 7, G22). A check whose inputs include the commit
 /// finished only for `commit` itself, so a re-signed C runs it again (ruling 9a, G33). Only
 /// records that verify against the current registry count, so a revoked producer key's
-/// results are rechecked.
+/// results are rechecked. With `[policy] evidence_reuse = "exact-inputs"`, a check also
+/// finished when another operation's records on the same inputs answer it (G7); those records
+/// are returned beside the checks, so a refusal can name what they say.
 fn finished_checks(
     ctx: &Ctx,
     op_id: &str,
     policy: &policy::Policy,
-    tree: &str,
-    commit: &str,
-) -> Result<Vec<evidence::CheckId>, String> {
+    judged: &Judged,
+) -> Result<(Vec<evidence::CheckId>, Vec<evidence::EvidenceRecord>), String> {
     let git = &ctx.repo.git;
+    let reuse = reuses(ctx, judged);
     // An attempt under another epoch may have run on another executor (a takeover); this
-    // epoch's own attempts wrote only this producer's local records.
-    if ctx
-        .op(op_id)
-        .attempts
-        .iter()
-        .any(|attempt| attempt.epoch != ctx.my_epoch)
+    // epoch's own attempts wrote only this producer's local records. Reuse reads every
+    // producer's records on the tree.
+    if reuse
+        || ctx
+            .op(op_id)
+            .attempts
+            .iter()
+            .any(|attempt| attempt.epoch != ctx.my_epoch)
     {
         ctx.repo.fetch_evidence(&ctx.keys.producer_name);
     }
-    // Only this operation's own records: a resume, not evidence reuse (reuse is off in
-    // increment 1, so another operation on the same tree is rechecked, G29).
+    // This operation's own records are a resume; another operation's are reuse, and with
+    // reuse off another operation on the same tree is rechecked (G29).
     let mine = format!("/{op_id}.");
-    let earlier: Vec<evidence::EvidenceRecord> = evidence::counted(
+    let (resumed, others): (Vec<_>, Vec<_>) = evidence::counted(
         git,
-        evidence::records_for(git, tree)?,
+        evidence::records_for(git, judged.tree)?,
         ctx.registry.as_ref(),
     )?
     .into_iter()
-    .filter(|record| record.id.contains(&mine))
-    .collect();
-    Ok(policy
-        .manifest
-        .iter()
-        .map(|entry| evidence::CheckId::new(&entry.id, &entry.environment))
-        .filter(|id| {
-            matches!(
-                evidence::combine(
-                    &earlier,
-                    id,
-                    &policy.manifest_digest,
-                    policy.commit_keyed(id).then_some(commit)
-                ),
-                Combined::Pass | Combined::ProductFailure | Combined::Flaky
-            )
-        })
-        .collect())
+    .partition(|record| record.id.contains(&mine));
+    let digest = &policy.manifest_digest;
+    let mut finished = Vec::new();
+    let mut reused = Vec::new();
+    for entry in &policy.manifest {
+        let id = evidence::CheckId::new(&entry.id, &entry.environment);
+        let subject = policy.commit_keyed(&id).then_some(judged.commit);
+        if answered(&resumed, &id, digest, subject) {
+            finished.push(id);
+            continue;
+        }
+        let Some(check) = policy.check(&id).filter(|_| reuse) else {
+            continue;
+        };
+        let candidates = evidence::reusable(
+            &others,
+            &evidence::ReuseKey {
+                tree: judged.tree,
+                base_tree: judged.base_tree,
+                policy_revision: policy.revision,
+                policy_provenance: judged.provenance.as_str(),
+                fixtures: &check.fixtures,
+            },
+        );
+        if answered(&candidates, &id, digest, subject) {
+            reused.extend(candidates.into_iter().filter(|record| record.check == id));
+            finished.push(id);
+        }
+    }
+    Ok((finished, reused))
+}
+
+/// Whether evidence reuse applies to this judgement (G7): `[policy] evidence_reuse =
+/// "exact-inputs"`, a producer registry, so that only producer-signed records stand for a run
+/// (`DESIGN` § 7: an unsigned record never counts as evidence), and a request without named
+/// inputs. A record does not hold the request's input versions, so it cannot show they
+/// matched: a change with named inputs is always rechecked.
+fn reuses(ctx: &Ctx, judged: &Judged) -> bool {
+    ctx.repo.config.evidence_reuse() && ctx.registry.is_some() && judged.inputs.is_empty()
+}
+
+/// Whether `records` answer check `id` under `digest` (for `subject`, when commit-keyed):
+/// they combine to a verdict, never `unknown`.
+fn answered(
+    records: &[evidence::EvidenceRecord],
+    id: &evidence::CheckId,
+    digest: &str,
+    subject: Option<&str>,
+) -> bool {
+    matches!(
+        evidence::combine(records, id, digest, subject),
+        Combined::Pass | Combined::ProductFailure | Combined::Flaky
+    )
 }
 
 /// Step 3: the candidate commit, signed by the publishing executor when signing is on.

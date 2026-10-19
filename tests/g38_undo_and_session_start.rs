@@ -16,6 +16,9 @@
 //! session of the same actor is told of its open refusals wherever it starts; the hook reads the
 //! local cache only.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::io::Write;

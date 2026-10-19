@@ -12,7 +12,12 @@
 //! read from local data only. The `pre-tool` hook refuses a write that a stale input covers,
 //! from the coordination cache a fetching command left (rulings R4, R5): a claim never refuses
 //! a write, an old cache allows with `COVERAGE_UNKNOWN`, and with the hooks removed land still
-//! refuses the same change (G23's hook clauses).
+//! refuses the same change (G23's hook clauses). A notice (`bay watch`, a hook event) changes
+//! none of a change's versions, and a read in a view whose base is behind trunk never counts as
+//! observing: only `start --resume` writes `observed_versions` (ruling R3).
+
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
 
 mod support;
 
@@ -517,6 +522,42 @@ fn a_provider_runs_in_the_check_sandbox() {
     assert_eq!(shown["inputs"][0]["observed"], "v17", "{shown}");
 }
 
+/// Ruling R14: on a machine with no check sandbox a provider runs only by the box's own choice,
+/// `git config --global bay.executorSandbox none`. The sandbox is hidden by a failing `bwrap`
+/// on `PATH`, so this runs on Linux.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_provider_never_runs_unconfined_unless_the_box_chose_it() {
+    let provider = |root: &Path| {
+        format!(
+            "#!/bin/sh\ntouch '{}'\n{}",
+            root.join("provider-ran").display(),
+            PROVIDER.trim_start_matches("#!/bin/sh\n")
+        )
+    };
+    let (test_box, repo, _remote) = trunk_with(None, provider, &check_script());
+    let ran = test_box.path().join("provider-ran");
+    test_box.no_sandbox();
+    test_box.choose_unsandboxed(false);
+    let _ = std::fs::remove_file(&ran);
+    let (id, _view) = start(&test_box, &repo, "CARD-1", &["src/"]);
+    assert!(
+        !ran.exists(),
+        "a provider ran with no sandbox and no choice"
+    );
+    let shown = change_status(&test_box, &repo, &id);
+    assert_ne!(shown["inputs"][0]["observed"], "v17", "{shown}");
+
+    test_box.choose_unsandboxed(true);
+    let (id, _view) = start(&test_box, &repo, "CARD-2", &["src/"]);
+    assert!(
+        ran.exists(),
+        "the box chose no sandbox, yet the provider did not run"
+    );
+    let shown = change_status(&test_box, &repo, &id);
+    assert_eq!(shown["inputs"][0]["observed"], "v17", "{shown}");
+}
+
 #[test]
 fn a_provider_that_leaves_a_child_behind_is_still_bounded() {
     // The provider answers, but a background child keeps its output open far past its timeout.
@@ -980,4 +1021,187 @@ fn with_the_hooks_removed_land_refuses_the_same_stale_change() {
     let (code, refused) = land(&test_box, &view);
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "INPUT_UNOBSERVED", "{refused}");
+}
+
+/// The change record of `id` as this repository holds it.
+fn change_record(test_box: &TestBox, repo: &Path, id: &str) -> serde_json::Value {
+    let record = test_box.git_ok(
+        repo,
+        &[
+            "cat-file",
+            "blob",
+            &format!("refs/bay/changes/{id}:change.json"),
+        ],
+    );
+    serde_json::from_str(&record).unwrap()
+}
+
+/// A probed payload `name`, its session and cwd rewritten to `session` and `cwd`.
+fn payload(name: &str, session: &str, cwd: &Path) -> serde_json::Value {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude-code-2.1.302")
+        .join(name);
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
+    payload["session_id"] = session.into();
+    payload["cwd"] = cwd.display().to_string().into();
+    payload
+}
+
+/// `bay hook <event>` with `payload` on stdin; returns its exit.
+fn hook_event(test_box: &TestBox, cwd: &Path, event: &str, payload: &serde_json::Value) -> i32 {
+    use std::io::Write as _;
+    let mut child = test_box
+        .bay_process(cwd)
+        .args(["hook", event])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    out.status.code().unwrap_or(-1)
+}
+
+/// A change's versions: its recorded `observed_versions` and `validated_candidate`, and the
+/// required versions `bay status` derives (its judged inputs and invalidations).
+fn versions(test_box: &TestBox, repo: &Path, id: &str) -> serde_json::Value {
+    let record = change_record(test_box, repo, id);
+    let shown = change_status(test_box, repo, id);
+    serde_json::json!({
+        "observed_versions": record["observed_versions"],
+        "validated_candidate": record["validated_candidate"],
+        "shown_validated_candidate": shown["validated_candidate"],
+        "inputs": shown["inputs"],
+        "invalidations": shown["invalidations"],
+    })
+}
+
+#[test]
+fn a_notice_changes_none_of_the_versions() {
+    let (test_box, repo, _remote) = trunk(None);
+    let (y, view_y) = start(&test_box, &repo, "CARD-Y", &["src/"]);
+    std::fs::write(view_y.join("src/feature.rs"), "fn feature() {}\n").unwrap();
+    // X moves the contract, migrates its consumer, and lands through bay.
+    let started = test_box.bay_ok(
+        &repo,
+        &["start", "CARD-X", "--paths", "api/", "src/client.rs"],
+    );
+    let x = started["change"].as_str().unwrap().to_owned();
+    let view_x = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    std::fs::write(view_x.join("api/version"), "v18\n").unwrap();
+    std::fs::write(view_x.join("src/client.rs"), "uses v18\n").unwrap();
+    let (code, landed) = land(&test_box, &view_x);
+    assert_eq!(code, 0, "{landed}");
+
+    let before = versions(&test_box, &repo, &y);
+    assert_eq!(before["observed_versions"][INPUT], "v17", "{before}");
+    assert_eq!(
+        before["invalidations"][0]["reason"], "INPUT_UNOBSERVED",
+        "{before}"
+    );
+    assert_eq!(before["invalidations"][0]["required"], "v18", "{before}");
+
+    // The notice in Y's view: `bay watch` names X's landing and Y's invalidation.
+    let watched = test_box.bay_ok(&view_y, &["watch"]);
+    let landings = watched["detail"]["landings"].as_array().unwrap();
+    assert!(
+        landings
+            .iter()
+            .any(|landing| landing["change"] == x.as_str()),
+        "{watched}"
+    );
+    assert_eq!(
+        watched["detail"]["invalidations"][0]["reason"], "INPUT_UNOBSERVED",
+        "{watched}"
+    );
+    assert_eq!(versions(&test_box, &repo, &y), before, "after bay watch");
+
+    // The same notice reaching Y's session through its hooks.
+    for (event, name) in [
+        ("user-prompt-submit", "02-UserPromptSubmit.json"),
+        ("post-tool", "08-PostToolBatch.json"),
+        ("post-tool", "04-PostToolUse.json"),
+    ] {
+        let code = hook_event(&test_box, &view_y, event, &payload(name, "s-y", &view_y));
+        assert_eq!(code, 0, "{event} {name}");
+        assert_eq!(
+            versions(&test_box, &repo, &y),
+            before,
+            "after {event} {name}"
+        );
+    }
+    let (code, refused) = land(&test_box, &view_y);
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "INPUT_UNOBSERVED", "{refused}");
+
+    // Only `start --resume` moves what Y observed.
+    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &y]);
+    assert_eq!(resumed["detail"]["observed_versions"][INPUT], "v18");
+    let after = versions(&test_box, &repo, &y);
+    assert_eq!(after["observed_versions"][INPUT], "v18", "{after}");
+}
+
+#[test]
+fn a_read_from_a_stale_view_never_counts_as_observed() {
+    let (test_box, repo, _remote) = trunk(None);
+    let (id, view) = start(&test_box, &repo, "CARD-1", &["src/"]);
+    std::fs::write(view.join("src/feature.rs"), "fn feature() {}\n").unwrap();
+    move_trunk(&test_box, &repo, &[("api/version", "v18\n")]);
+    test_box.bay_ok(&repo, &["status", &id]);
+    let before = versions(&test_box, &repo, &id);
+    assert_eq!(before["observed_versions"][INPUT], "v17", "{before}");
+
+    // The session in the view, whose base is behind trunk, reads the provider's file there: it
+    // sees the old version, and nothing read there is what trunk requires.
+    let target = view.join("api/version");
+    let mut pre = payload("03-PreToolUse.json", "s-r", &view);
+    pre["tool_name"] = "Read".into();
+    pre["tool_input"] = serde_json::json!({ "file_path": target });
+    let mut post = payload("04-PostToolUse.json", "s-r", &view);
+    post["tool_name"] = "Read".into();
+    post["tool_input"] = serde_json::json!({ "file_path": target });
+    post["tool_response"] = serde_json::json!({
+        "type": "text",
+        "file": {"filePath": target, "content": "v17\n"},
+    });
+    let mut batch = payload("08-PostToolBatch.json", "s-r", &view);
+    batch["tool_calls"] = serde_json::json!([{
+        "tool_name": "Read",
+        "tool_input": {"file_path": target},
+        "tool_use_id": "toolu_read",
+        "tool_response": "v17\n",
+    }]);
+    for (event, payload) in [
+        ("pre-tool", &pre),
+        ("post-tool", &post),
+        ("post-tool", &batch),
+    ] {
+        assert_eq!(hook_event(&test_box, &view, event, payload), 0, "{event}");
+        assert_eq!(versions(&test_box, &repo, &id), before, "after {event}");
+    }
+    // The reads bay itself serves in that view observe nothing either.
+    test_box.bay_ok(&view, &["status"]);
+    test_box.bay_ok(&view, &["watch"]);
+    assert_eq!(
+        versions(&test_box, &repo, &id),
+        before,
+        "after status and watch"
+    );
+
+    let (code, refused) = land(&test_box, &view);
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "INPUT_UNOBSERVED", "{refused}");
+    assert_eq!(refused["detail"]["observed"], "v17", "{refused}");
+    // `start --resume` moves the view to trunk, and only then is v18 observed.
+    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    assert_eq!(resumed["detail"]["observed_versions"][INPUT], "v18");
+    let (_, after) = land(&test_box, &view);
+    assert_ne!(after["reason"], "INPUT_UNOBSERVED", "{after}");
 }

@@ -5,6 +5,9 @@
 //! a subagent (the parent's `session_id` with its own `agent_id`) and for a teammate session
 //! (its own `session_id`, no `SubagentStart`) writing into the lead's view.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::io::Write;

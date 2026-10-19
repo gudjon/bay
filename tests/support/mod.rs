@@ -1,5 +1,6 @@
-//! Test boxes: a temp HOME, an empty global Git config, and a `PATH` whose `git` and
-//! `claude` the test controls. Every other git operation runs the real git.
+//! Test boxes: a temp HOME, a global Git config that holds only the box's choice of no check
+//! sandbox (ruling R14), and a `PATH` whose `git` and `claude` the test controls. Every other
+//! git operation runs the real git.
 
 #![allow(dead_code)]
 
@@ -9,6 +10,11 @@ use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
 use tempfile::TempDir;
+
+pub mod talk;
+
+/// What a new test box's global Git config holds: the box's choice of no check sandbox.
+pub const UNSANDBOXED_CHOICE: &str = "[bay]\n\texecutorSandbox = none\n";
 
 pub struct TestBox {
     root: TempDir,
@@ -27,7 +33,9 @@ impl TestBox {
         std::fs::create_dir_all(&fakebin).unwrap();
         std::fs::create_dir_all(&home).unwrap();
         let global_config = root.path().join("global.gitconfig");
-        std::fs::write(&global_config, "").unwrap();
+        // The box's choice to run checks with no sandbox where it has none (ruling R14), so
+        // the suite runs on a machine without one; a sandbox case clears it.
+        std::fs::write(&global_config, UNSANDBOXED_CHOICE).unwrap();
         let out = StdCommand::new("sh")
             .args(["-c", "command -v git"])
             .output()
@@ -47,6 +55,28 @@ impl TestBox {
     #[must_use]
     pub fn path(&self) -> &Path {
         self.root.path()
+    }
+
+    /// Hides this machine's check sandbox from bay: a `bwrap` on `PATH` that fails its probe,
+    /// so a check finds no sandbox (ruling R14). On Linux only; macOS's `sandbox-exec` is at a
+    /// fixed path.
+    pub fn no_sandbox(&self) {
+        write_executable(&self.fakebin.join("bwrap"), "#!/bin/sh\nexit 1\n");
+    }
+
+    /// Sets or clears this box's choice to run checks with no sandbox, the global Git config
+    /// `bay.executorSandbox = none` (ruling R14). A new test box has made that choice, so a
+    /// machine without a sandbox still runs the suite's checks.
+    pub fn choose_unsandboxed(&self, chosen: bool) {
+        let mut cmd = self.git(self.path());
+        cmd.args(["config", "--global"]);
+        if chosen {
+            cmd.args(["bay.executorSandbox", "none"]);
+        } else {
+            cmd.args(["--unset-all", "bay.executorSandbox"]);
+        }
+        let out = cmd.output().unwrap();
+        assert!(out.status.success() || !chosen, "{out:?}");
     }
 
     /// `git --version` answers `version`; every other call runs the real git.

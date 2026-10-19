@@ -8,18 +8,23 @@
 //! Judged here: bay ref names (the fixed alphabet), trunk publications, the landed marker,
 //! change chains (agent, executor and registry signatures; adoption; no deletion; the
 //! retention cut), requests, evidence notes, executor logs, the registry, queue reservations
-//! and releases, intent claims, the landed intent, and live summary refs.
+//! and releases, intent claims, the landed intent, live summary refs, talks (`crate::talk`), and
+//! marker compaction into the shard indexes (`crate::compact`): a compacted name is never created
+//! again, a marker is deleted only by its compaction, and a shard index only appends.
 //!
 //! An adopt of another actor's open change is judged by the host's own clock (ruling R1): the
 //! chain head's age is the age of its newest entry in the host reflog, and the last heartbeat
 //! of the change's actor is the newest entry of a live ref's host reflog with a fresh row of the
 //! change; both must be at least the takeover window (`[executor] takeover_s` on trunk) old.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use serde_json::Value;
 
 use crate::change::{Chain, OpState, RECORD_FILE};
+use crate::compact;
 use crate::evidence;
 use crate::git::{Git, GitError};
 use crate::policy;
@@ -91,17 +96,52 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
         git.run(&["config", "--get", "bay.trunk"])
             .unwrap_or_else(|_| "main".to_owned())
     );
+    // § 10a: one push's compaction is bounded, so its judgement stays cheap.
+    let compactions = updates
+        .iter()
+        .filter(|update| {
+            compact::compactable(&update.name) && is_zero(&update.new) && !is_zero(&update.old)
+        })
+        .count();
+    if compactions > compact::PUSH_MAX {
+        return Err(format!(
+            "a push moves at most {} markers into the shard indexes; this one moves {compactions}",
+            compact::PUSH_MAX
+        ));
+    }
+    // The talks this push creates, read once for every talk ref it judges (`crate::talk`).
+    let talk_creates: Vec<(String, String)> = updates
+        .iter()
+        .filter(|update| {
+            update.name.starts_with(crate::talk::TALK_PREFIX)
+                && is_zero(&update.old)
+                && !is_zero(&update.new)
+        })
+        .map(|update| (update.name.clone(), update.new.clone()))
+        .collect();
     let judge = Judge {
         git,
         registry: &registry,
         updates: &updates,
+        by_name: updates
+            .iter()
+            .map(|update| (update.name.as_str(), update))
+            .collect(),
+        appended: RefCell::new(HashMap::new()),
+        talk_creates: crate::talk::read_created(git, &talk_creates),
     };
     for update in &updates {
         let name = update.name.as_str();
         // § 10a: every bay ref name is validated first: ids from the fixed alphabet, operator
         // names short and lower-case, so no bay ref can be a directory of another.
         crate::names::bay_ref(name)?;
-        let verdict = if name == trunk {
+        let verdict = if let Err(why) = judge.not_compacted(update) {
+            Err(why)
+        } else if compact::compactable(name) && is_zero(&update.new) && !is_zero(&update.old) {
+            judge.compacted_delete(update)
+        } else if name.starts_with(compact::INDEX_PREFIX) {
+            judge.landed_index(update)
+        } else if name == trunk {
             judge.trunk(update)
         } else if let Some(id) = name.strip_prefix("refs/bay/landed/") {
             judge.landed(update, id, &trunk)
@@ -121,10 +161,12 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             judge.queue_release(update, seq)
         } else if let Some(claim) = name.strip_prefix("refs/bay/intent/") {
             judge.intent(update, claim)
-        } else if name.starts_with("refs/bay/landed-intent/") {
-            judge.landed_intent(update, &trunk)
+        } else if let Some(claim) = name.strip_prefix("refs/bay/landed-intent/") {
+            judge.landed_intent(update, claim, &trunk)
         } else if let Some(machine) = name.strip_prefix(crate::live::LIVE_PREFIX) {
             judge.live(update, machine)
+        } else if let Some(talk) = name.strip_prefix(crate::talk::TALK_PREFIX) {
+            judge.talk(update, talk)
         } else {
             Ok(())
         };
@@ -133,19 +175,251 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `record`'s change holds the intent claim `claim` (`<hash>/<generation>`).
+fn holds_claim(record: &crate::change::ChangeRecord, claim: &str) -> bool {
+    record
+        .claim
+        .as_ref()
+        .is_some_and(|held| format!("{}/{}", held.hash, held.generation) == claim)
+}
+
+/// The records one shard index update adds: compacted name to the target it records.
+type Appended = Rc<HashMap<String, String>>;
+
 struct Judge<'a> {
     git: &'a Git,
     registry: &'a Registry,
     updates: &'a [Update],
+    /// The push's updates by ref name.
+    by_name: HashMap<&'a str, &'a Update>,
+    /// Each shard index update's added records, read once per push.
+    appended: RefCell<HashMap<String, Result<Appended, String>>>,
+    talk_creates: Vec<crate::talk::Talk>,
 }
 
 impl Judge<'_> {
     /// A ref's value after this push: its new value if the push moves it, else its current one.
     fn after(&self, name: &str) -> Result<Option<String>, String> {
-        if let Some(update) = self.updates.iter().find(|update| update.name == name) {
+        if let Some(update) = self.by_name.get(name) {
             return Ok((!is_zero(&update.new)).then(|| update.new.clone()));
         }
         self.git.ref_target(name).map_err(|error| message(&error))
+    }
+
+    /// What the shard index records for `name` after this push (§ 10a, ruling R11).
+    fn recorded(&self, name: &str) -> Result<Option<String>, String> {
+        match self.after(&compact::index_ref(name))? {
+            Some(index) => compact::recorded_at(self.git, &index, name),
+            None => Ok(None),
+        }
+    }
+
+    /// A marker after this push: its ref, or the shard index record that stands in for it.
+    fn marker(&self, name: &str) -> Result<Option<String>, String> {
+        match self.after(name)? {
+            Some(target) => Ok(Some(target)),
+            None => self.recorded(name),
+        }
+    }
+
+    /// § 10a: create-only holds after compaction. A create of a name the shard index records
+    /// is refused, whatever else the push carries.
+    fn not_compacted(&self, update: &Update) -> Result<(), String> {
+        if !compact::compactable(&update.name) || !is_zero(&update.old) || is_zero(&update.new) {
+            return Ok(());
+        }
+        if self.recorded(&update.name)?.is_some() {
+            return Err(format!(
+                "is compacted: {} records it, and a compacted name is never created again",
+                compact::index_ref(&update.name)
+            ));
+        }
+        Ok(())
+    }
+
+    /// A marker is deleted only by its compaction: the same push appends its shard index with
+    /// a record of the marker's target. Only a landed change that retention cut gives up its
+    /// markers (§ 10a). A claim and a landed claim go only when the landed claim's publication
+    /// is the landing of a change that held that claim, so the landed claim still names it.
+    fn compacted_delete(&self, update: &Update) -> Result<(), String> {
+        let index = compact::index_ref(&update.name);
+        let records = match self.by_name.get(index.as_str()) {
+            Some(append) if !is_zero(&append.new) => self.appended(append)?,
+            _ => Appended::default(),
+        };
+        if records.get(&update.name) != Some(&update.old) {
+            return Err(format!(
+                "a marker is never deleted, except by its compaction into {index} in the same push"
+            ));
+        }
+        if let Some(id) = update.name.strip_prefix("refs/bay/landed/") {
+            return self.cut_landing(id, None);
+        }
+        let (claim, publication) = if let Some(claim) = update.name.strip_prefix("refs/bay/intent/")
+        {
+            let publication = self
+                .marker(&format!("refs/bay/landed-intent/{claim}"))?
+                .ok_or("a claim is compacted only once its generation landed")?;
+            (claim, publication)
+        } else if let Some(claim) = update.name.strip_prefix("refs/bay/landed-intent/") {
+            (claim, update.old.clone())
+        } else {
+            return Err("is not a compacted marker".to_owned());
+        };
+        let change = self.trailer(&publication, "Change-Id")?;
+        self.cut_landing(&change, Some(claim))
+    }
+
+    /// § 10a: change `id` landed and retention cut its chain, so its markers may be compacted.
+    /// With `claim` (`<hash>/<generation>`), the change also held that claim.
+    fn cut_landing(&self, id: &str, claim: Option<&str>) -> Result<(), String> {
+        let refused = || format!("change {id} has not landed with its chain cut by retention");
+        let chain = format!("refs/bay/changes/{id}");
+        crate::names::bay_ref(&chain).map_err(|_| refused())?;
+        if self.marker(&format!("refs/bay/landed/{id}"))?.is_none() {
+            return Err(refused());
+        }
+        let head = self.after(&chain)?.ok_or_else(refused)?;
+        let record = Chain::new(self.git)
+            .record_at(&head)
+            .map_err(|error| error.message())?;
+        if !record.retention_cut || record.state != crate::change::ChangeState::Landed {
+            return Err(refused());
+        }
+        if let Some(claim) = claim
+            && !holds_claim(&record, claim)
+        {
+            return Err(format!("change {id} never held the claim {claim}"));
+        }
+        Ok(())
+    }
+
+    /// The records the shard index update `update` adds, read once per push.
+    fn appended(&self, update: &Update) -> Result<Appended, String> {
+        if let Some(known) = self.appended.borrow().get(&update.name) {
+            return known.clone();
+        }
+        let read = self.read_appended(update);
+        self.appended
+            .borrow_mut()
+            .insert(update.name.clone(), read.clone());
+        read
+    }
+
+    /// Each record a shard index update adds: a name of that shard in a compacted namespace,
+    /// at its one path, at most [`compact::PUSH_MAX`] of them.
+    fn read_appended(&self, update: &Update) -> Result<Appended, String> {
+        let shard = update
+            .name
+            .strip_prefix(compact::INDEX_PREFIX)
+            .ok_or("is not a shard index")?;
+        let added = self.index_additions(update)?;
+        if added.len() > compact::PUSH_MAX {
+            return Err(format!(
+                "a shard index takes at most {} records per push",
+                compact::PUSH_MAX
+            ));
+        }
+        let blobs: Vec<String> = added.iter().map(|(_, blob)| blob.clone()).collect();
+        let targets = compact::read_blobs(self.git, &blobs)?;
+        let mut records = HashMap::new();
+        for (path, blob) in &added {
+            let name = compact::name_of(path);
+            crate::names::bay_ref(&name)?;
+            if !compact::compactable(&name)
+                || compact::path(&name) != *path
+                || compact::shard(&name).to_string() != shard
+            {
+                return Err(format!("{path} is not a compacted name of shard {shard}"));
+            }
+            let target = targets
+                .get(blob)
+                .ok_or_else(|| format!("the record of {name} cannot be read"))?;
+            records.insert(name, target.clone());
+        }
+        Ok(Rc::new(records))
+    }
+
+    /// A shard index (ruling R11): never deleted, fast-forward only, executor-signed, and its
+    /// new tree only adds records (`read_appended`), each of a ref the same push deletes from
+    /// the target it records.
+    fn landed_index(&self, update: &Update) -> Result<(), String> {
+        if is_zero(&update.new) {
+            return Err("a shard index is never deleted".to_owned());
+        }
+        if !is_zero(&update.old)
+            && self
+                .git
+                .run(&["merge-base", "--is-ancestor", &update.old, &update.new])
+                .is_err()
+        {
+            return Err("a shard index takes only a fast-forward".to_owned());
+        }
+        if !matches!(
+            self.signer(&update.new, &[KeyClass::Executor])?,
+            Some((KeyClass::Executor, _))
+        ) {
+            return Err("a shard index commit is signed by an executor key".to_owned());
+        }
+        for (name, target) in self.appended(update)?.iter() {
+            let deletes = self
+                .by_name
+                .get(name.as_str())
+                .is_some_and(|other| is_zero(&other.new) && other.old == *target);
+            if !deletes {
+                return Err(format!(
+                    "records {name}, which this push does not delete from the target it records"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The (path, blob) records a shard index update adds. Any other change to its tree, or an
+    /// entry that is not a plain file at the top, is refused.
+    fn index_additions(&self, update: &Update) -> Result<Vec<(String, String)>, String> {
+        let not_append = || "a shard index only appends records".to_owned();
+        let mut added = Vec::new();
+        if is_zero(&update.old) {
+            let listed = self
+                .git
+                .run(&["ls-tree", &update.new])
+                .map_err(|error| message(&error))?;
+            for line in listed.lines() {
+                let (entry, path) = line.split_once('\t').ok_or_else(not_append)?;
+                let fields: Vec<&str> = entry.split_whitespace().collect();
+                let ["100644", "blob", blob] = fields.as_slice() else {
+                    return Err(not_append());
+                };
+                added.push((path.to_owned(), (*blob).to_owned()));
+            }
+            return Ok(added);
+        }
+        let changed = self
+            .git
+            .run(&[
+                "diff-tree",
+                "-r",
+                "--no-commit-id",
+                "--no-renames",
+                "--raw",
+                "--full-index",
+                &update.old,
+                &update.new,
+            ])
+            .map_err(|error| message(&error))?;
+        for line in changed.lines() {
+            let (entry, path) = line.split_once('\t').ok_or_else(not_append)?;
+            let fields: Vec<&str> = entry.split_whitespace().collect();
+            let [_, "100644", _, blob, "A"] = fields.as_slice() else {
+                return Err(not_append());
+            };
+            if path.contains('/') {
+                return Err(not_append());
+            }
+            added.push((path.to_owned(), (*blob).to_owned()));
+        }
+        Ok(added)
     }
 
     /// The class and principal a commit verifies as, trying `classes` in order.
@@ -302,6 +576,7 @@ impl Judge<'_> {
             .ref_target(&marker)
             .map_err(|error| message(&error))?
             .is_some()
+            || self.recorded(&marker)?.is_some()
         {
             return Err(format!("change {change} already landed"));
         }
@@ -497,7 +772,7 @@ impl Judge<'_> {
                 .and_then(|parent| chain.record_at(parent).ok())
                 .filter(|before| before.actor.name != record.actor.name);
             if let Some(before) = &before {
-                if self.after(&format!("refs/bay/landed/{id}"))?.is_some() {
+                if self.marker(&format!("refs/bay/landed/{id}"))?.is_some() {
                     return Err(format!("{commit} adopts a change that already landed"));
                 }
                 if !matches!(
@@ -508,7 +783,7 @@ impl Judge<'_> {
                 }
             }
             if record.state == crate::change::ChangeState::Abandoned
-                && self.after(&format!("refs/bay/landed/{id}"))?.is_some()
+                && self.marker(&format!("refs/bay/landed/{id}"))?.is_some()
             {
                 return Err(format!("{commit} abandons a change that already landed"));
             }
@@ -740,6 +1015,23 @@ impl Judge<'_> {
         Ok(())
     }
 
+    /// A talk chain (`crate::talk::judge`).
+    fn talk(&self, update: &Update, talk: &str) -> Result<(), String> {
+        let (who, id) = talk
+            .split_once('/')
+            .ok_or_else(|| "a talk ref is refs/bay/talk/<who>/<id>".to_owned())?;
+        let after = |name: &str| self.after(name);
+        let push = crate::talk::Push {
+            git: self.git,
+            registry: self.registry,
+            after: &after,
+            creates: &self.talk_creates,
+        };
+        let old = (!is_zero(&update.old)).then_some(update.old.as_str());
+        let new = (!is_zero(&update.new)).then_some(update.new.as_str());
+        crate::talk::judge(&push, old, new, who, id)
+    }
+
     /// The one non-fast-forward update of a chain: an executor-signed cut of a landed change
     /// that keeps the latest land request (§ 5, § 10a).
     fn retention_cut(&self, update: &Update, id: &str) -> Result<(), String> {
@@ -756,7 +1048,7 @@ impl Judge<'_> {
             return Err("a retention cut is signed by an executor key".to_owned());
         }
         // § 10a: only a landed change, or one whose chain (before the cut) is abandoned.
-        let landed = self.after(&format!("refs/bay/landed/{id}"))?.is_some();
+        let landed = self.marker(&format!("refs/bay/landed/{id}"))?.is_some();
         let abandoned = !landed
             && Chain::new(self.git)
                 .record_at(&update.old)
@@ -845,6 +1137,9 @@ impl Judge<'_> {
                 .map_err(|error| message(&error))?;
             let records: Vec<evidence::EvidenceRecord> =
                 serde_json::from_str(&text).map_err(|error| format!("{path}: {error}"))?;
+            // A note's path is the object it annotates, in fan-out form: a record sits only on
+            // the note of the tree it is about, never copied onto another's.
+            let annotated: String = path.chars().filter(|c| *c != '/').collect();
             let mut ids = HashSet::new();
             for record in &records {
                 if !ids.insert(record.id.clone()) {
@@ -857,6 +1152,12 @@ impl Judge<'_> {
                     || !record.id.starts_with(&format!("{producer}/"))
                 {
                     return Err(format!("record {} is not producer {producer}'s", record.id));
+                }
+                if record.subject.tree != annotated {
+                    return Err(format!(
+                        "record {} is about tree {}, not the {annotated} its note is on",
+                        record.id, record.subject.tree
+                    ));
                 }
                 if !record.verifies(&producers) {
                     return Err(format!(
@@ -1020,37 +1321,68 @@ impl Judge<'_> {
                     .to_owned(),
             );
         }
-        if generation > 1 {
-            let previous = self
-                .after(&format!("refs/bay/intent/{hash}/{}", generation - 1))?
-                .ok_or("the previous generation has no claim")?;
-            let before = Chain::new(self.git)
-                .record_at(&previous)
-                .map_err(|error| error.message())?;
-            if self
-                .after(&format!("refs/bay/landed/{}", before.id))?
-                .is_none()
-            {
-                return Err(format!(
-                    "generation {generation} needs generation {} landed",
-                    generation - 1
-                ));
-            }
+        if generation > 1 && !self.generation_landed(hash, generation - 1)? {
+            return Err(format!(
+                "generation {generation} needs generation {} landed",
+                generation - 1
+            ));
         }
         Ok(())
     }
 
-    /// A landed-intent marker: created once, with the trunk update that lands its generation.
-    fn landed_intent(&self, update: &Update, trunk: &str) -> Result<(), String> {
+    /// Whether generation `generation` of the intent `hash` landed. A compacted claim was
+    /// compacted only with its landed claim (`compacted_delete`), so its landed claim's
+    /// publication names the change, which carries its landed marker (§ 10a).
+    fn generation_landed(&self, hash: &str, generation: u64) -> Result<bool, String> {
+        let claim = format!("refs/bay/intent/{hash}/{generation}");
+        if let Some(previous) = self.after(&claim)? {
+            let before = Chain::new(self.git)
+                .record_at(&previous)
+                .map_err(|error| error.message())?;
+            return Ok(self
+                .marker(&format!("refs/bay/landed/{}", before.id))?
+                .is_some());
+        }
+        if self.recorded(&claim)?.is_none() {
+            return Err("the previous generation has no claim".to_owned());
+        }
+        let Some(publication) =
+            self.marker(&format!("refs/bay/landed-intent/{hash}/{generation}"))?
+        else {
+            return Ok(false);
+        };
+        let change = self.trailer(&publication, "Change-Id")?;
+        if crate::names::bay_ref(&format!("refs/bay/landed/{change}")).is_err() {
+            return Ok(false);
+        }
+        Ok(self.marker(&format!("refs/bay/landed/{change}"))?.is_some())
+    }
+
+    /// A landed-intent marker: created once, with the trunk update that lands its generation,
+    /// whose change held that claim (§ 6: two changes may hold one generation; the one that
+    /// lands names it).
+    fn landed_intent(&self, update: &Update, claim: &str, trunk: &str) -> Result<(), String> {
         if !is_zero(&update.old) {
             return Err("this generation of the intent already landed".to_owned());
         }
         let with_trunk = self
-            .updates
-            .iter()
-            .any(|other| other.name == trunk && other.new == update.new);
+            .by_name
+            .get(trunk)
+            .is_some_and(|other| other.new == update.new);
         if !with_trunk {
             return Err("is created only together with the trunk update that lands it".to_owned());
+        }
+        let change = self.trailer(&update.new, "Change-Id")?;
+        let chain = format!("refs/bay/changes/{change}");
+        let names_holder =
+            || format!("is created only by the landing of a change that holds {claim}");
+        crate::names::bay_ref(&chain).map_err(|_| names_holder())?;
+        let head = self.after(&chain)?.ok_or_else(names_holder)?;
+        let record = Chain::new(self.git)
+            .record_at(&head)
+            .map_err(|error| error.message())?;
+        if !holds_claim(&record, claim) {
+            return Err(names_holder());
         }
         Ok(())
     }

@@ -11,6 +11,9 @@
 //! makes it `POLICY_CHANGED` and rechecked, and releases a queue head without counting toward any
 //! limit. Fewer tests than `expected_minimum` is G3.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

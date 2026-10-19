@@ -3,6 +3,9 @@
 //! Two executors receive the same operation concurrently: exactly one publishes; the other
 //! records `superseded` or reports the existing publication.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use support::{TestBox, check_files, passing_result, result_json};

@@ -4,6 +4,9 @@
 //! the wall time bay measured around the adapter run; `bay status` sums both per operation and
 //! per landing. A record written before those fields existed still verifies and still counts.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use bay::evidence::{self, EvidenceRecord};

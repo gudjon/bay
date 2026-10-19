@@ -4,6 +4,9 @@
 //! keeps every live draft. `bay share` pushes a change with its evidence to a remote, or
 //! writes a bundle, and another actor opens the exact snapshot and its evidence from it.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::Path;

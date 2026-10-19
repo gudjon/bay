@@ -1,10 +1,11 @@
 //! `.bay/config.toml` in the repository (`INTERFACES` § 7).
 //!
 //! Every key § 7 lists is parsed and typed, so a mistyped one is a config error. Keys whose
-//! feature is not built yet (`[check] command`, `[policy]`) are
-//! held and read by nothing. `[executor]` and `[retention]` are read by built features but are
+//! feature is not built yet (`[check] command`) are
+//! held and read by nothing. `[runtime] command` (the runtime adapter, `INTERFACES` § 4) is
+//! not in § 7's list yet. `[executor]` and `[retention]` are read by built features but are
 //! not in § 7's list yet (BACKLOG 18). A key or table bay does not know is a config error that
-//! names it, as is `evidence_reuse` set to anything but `"off"`: a misspelled or unbuilt
+//! names it, as is `evidence_reuse` set to anything but `"off"` or `"exact-inputs"`: a misspelled
 //! setting never loads as a silent default. A config written for a later bay is refused by
 //! this one, and the recovery is `bay update`.
 
@@ -13,6 +14,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 pub const CONFIG_PATH: &str = ".bay/config.toml";
+
+/// The values of `[policy] evidence_reuse` (`INTERFACES` § 7).
+const EVIDENCE_REUSE: [&str; 2] = ["off", "exact-inputs"];
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +29,7 @@ pub struct Config {
     pub retention: Option<Retention>,
     pub check: Option<Check>,
     pub notify: Option<Notify>,
+    pub runtime: Option<Runtime>,
     pub policy: Option<PolicyProfile>,
     pub hooks: Option<Hooks>,
     /// `[update]` is accepted and ignored: the update pin, channel and switch are the box's
@@ -50,8 +55,17 @@ pub struct Notify {
     pub command: Option<String>,
 }
 
-/// `[policy]`: the completion profile and evidence reuse. Not read: reuse stays off until G7
-/// passes, and one profile is built.
+/// `[runtime] command`: the runtime adapter (`INTERFACES` § 4), asked by `bay status` for
+/// `running` and `effective` records about a landed commit (`crate::runtime`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Runtime {
+    pub command: Option<String>,
+}
+
+/// `[policy]`: the completion profile and evidence reuse ([`Config::evidence_reuse`]).
+/// `profile` names the `[profile.<name>]` of `.bay/policy.toml` that `bay status` judges
+/// completion by (`crate::completion`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyProfile {
@@ -60,18 +74,22 @@ pub struct PolicyProfile {
 }
 
 /// `[hooks] cache_max_age_s` (`DESIGN` § 11): the coordination cache's maximum age for
-/// `pre-tool` (`crate::coord`). Default 30 (`INTERFACES` § 7).
+/// `pre-tool` (`crate::coord`). Default 30 (`INTERFACES` § 7). `[hooks] notice_budget_bytes`
+/// (ruling R6): the bytes of notices a session is told per hour (`crate::notice`). Default 2048.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hooks {
     pub cache_max_age_s: Option<u64>,
+    pub notice_budget_bytes: Option<u64>,
 }
 
-/// How long a closed change keeps its drafts before the retention cut (§ 5).
+/// How long a closed change keeps its drafts before the retention cut (§ 5), and the bay ref
+/// count past which an executor compacts markers (§ 10a ref-growth budget, `crate::compact`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Retention {
     pub window_s: Option<u64>,
+    pub ref_budget: Option<u64>,
 }
 
 /// An external executor implementing the contract of `INTERFACES` § 3a.
@@ -93,6 +111,9 @@ pub struct Executor {
     pub takeover_s: Option<u64>,
     /// The publish window added to the execution budget for a queue head's progress deadline.
     pub publish_window_s: Option<u64>,
+    /// Never a repository's setting (ruling R14): whether checks run with no sandbox is the
+    /// box's choice, global Git config `bay.executorSandbox = none`. Read only to refuse it.
+    pub sandbox: Option<toml::Value>,
 }
 
 /// The configurable trailer keys. `Change-Id`, `Revision-Id`, `Request-Id`, `Candidate-Id`,
@@ -142,6 +163,30 @@ impl Config {
         }
     }
 
+    /// The config committed at `commit`; the default when that commit has none.
+    ///
+    /// # Errors
+    ///
+    /// The committed config does not parse, or git cannot say whether it exists.
+    pub fn at(git: &crate::git::Git, commit: &str) -> Result<Self, String> {
+        let path = format!("{commit}:{CONFIG_PATH}");
+        let exists = git
+            .run(&["cat-file", "-e", &path])
+            .map(|_| true)
+            .or_else(|_| {
+                git.run(&["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
+                    .map(|_| false)
+                    .map_err(|error| error.message())
+            })?;
+        if !exists {
+            return Ok(Self::default());
+        }
+        let text = git
+            .run(&["cat-file", "blob", &path])
+            .map_err(|error| error.message())?;
+        Self::parse(&text).map_err(|error| format!("{path}: {error}"))
+    }
+
     /// Parses a config text. A key bay does not know, a value of the wrong type, and a value
     /// this bay does not build are each an error that names it, never a silent default.
     ///
@@ -154,12 +199,26 @@ impl Config {
             .policy
             .as_ref()
             .and_then(|policy| policy.evidence_reuse.as_deref())
-            && reuse != "off"
+            && !EVIDENCE_REUSE.contains(&reuse)
         {
             return Err(format!(
-                "[policy] evidence_reuse = \"{reuse}\": this bay builds only \"off\" (evidence \
-                 reuse waits for G7)"
+                "[policy] evidence_reuse = \"{reuse}\": the values are \"off\" and \
+                 \"exact-inputs\""
             ));
+        }
+        // R14: a repository never chooses to run checks unconfined, so a committed config
+        // cannot lower the isolation of every later check.
+        if config
+            .executor
+            .as_ref()
+            .is_some_and(|executor| executor.sandbox.is_some())
+        {
+            return Err(
+                "[executor] sandbox is not a repository setting (ruling R14): running \
+                 checks with no sandbox is the box's choice, git config --global \
+                 bay.executorSandbox none"
+                    .to_owned(),
+            );
         }
         // § 4: the takeover window is longer than the executor lease.
         if config.takeover() <= config.lease() {
@@ -173,6 +232,19 @@ impl Config {
         Ok(config)
     }
 
+    /// Whether `[policy] evidence_reuse = "exact-inputs"`: a producer-signed record whose tree,
+    /// base tree, commit (for a commit-keyed check), check, environment, manifest, revision,
+    /// provenance and fixtures all match stands for a new run (`DESIGN` § 7, G7). Off by
+    /// default; without a producer registry, or for a change with named inputs, nothing is
+    /// reused.
+    #[must_use]
+    pub fn evidence_reuse(&self) -> bool {
+        self.policy
+            .as_ref()
+            .and_then(|policy| policy.evidence_reuse.as_deref())
+            == Some("exact-inputs")
+    }
+
     /// The coordination cache's maximum age for `pre-tool`: older, a write to a declared input
     /// gets `COVERAGE_UNKNOWN` (`DESIGN` § 11).
     #[must_use]
@@ -183,6 +255,25 @@ impl Config {
                 .and_then(|hooks| hooks.cache_max_age_s)
                 .unwrap_or(30),
         )
+    }
+
+    /// The completion profile `[policy] profile` selects; `default` unless configured.
+    #[must_use]
+    pub fn profile(&self) -> &str {
+        self.policy
+            .as_ref()
+            .and_then(|policy| policy.profile.as_deref())
+            .unwrap_or(crate::completion::DEFAULT_PROFILE)
+    }
+
+    /// The bytes of notices one session is told per hour (ruling R6); past it, a notice is
+    /// counted, not emitted.
+    #[must_use]
+    pub fn notice_budget(&self) -> u64 {
+        self.hooks
+            .as_ref()
+            .and_then(|hooks| hooks.notice_budget_bytes)
+            .unwrap_or(2048)
     }
 
     #[must_use]
@@ -220,6 +311,15 @@ impl Config {
                 .and_then(|retention| retention.window_s)
                 .unwrap_or(7 * 24 * 3600),
         )
+    }
+
+    /// The ref-growth budget (§ 10a): bay refs on the remote past which markers are compacted.
+    #[must_use]
+    pub fn ref_budget(&self) -> u64 {
+        self.retention
+            .as_ref()
+            .and_then(|retention| retention.ref_budget)
+            .unwrap_or(crate::compact::DEFAULT_BUDGET)
     }
 
     #[must_use]
@@ -342,6 +442,15 @@ product = "claude"                 # leave this table out when the box does not 
         // A key bay reads is typed; a mistyped one is a config error, never a silent default.
         assert!(toml::from_str::<Config>("[hooks]\ncache_max_age_s = \"30\"\n").is_err());
         assert!(toml::from_str::<Config>("[notify]\ncommand = 1\n").is_err());
+        assert!(Config::parse("[hooks]\nnotice_budget_bytes = -1\n").is_err());
+    }
+
+    #[test]
+    fn the_notice_budget_is_2048_bytes_unless_configured() {
+        // Ruling R6.
+        assert_eq!(Config::default().notice_budget(), 2048);
+        let config = Config::parse("[hooks]\nnotice_budget_bytes = 512\n").unwrap();
+        assert_eq!(config.notice_budget(), 512);
     }
 
     #[test]
@@ -355,10 +464,21 @@ product = "claude"                 # leave this table out when the box does not 
     }
 
     #[test]
-    fn evidence_reuse_is_off_until_g7() {
-        assert!(Config::parse("[policy]\nevidence_reuse = \"off\"\n").is_ok());
-        let error = Config::parse("[policy]\nevidence_reuse = \"exact-inputs\"\n").unwrap_err();
-        assert!(error.contains("exact-inputs"), "{error}");
+    fn evidence_reuse_is_off_or_exact_inputs() {
+        assert!(!Config::parse("").unwrap().evidence_reuse());
+        assert!(
+            !Config::parse("[policy]\nevidence_reuse = \"off\"\n")
+                .unwrap()
+                .evidence_reuse()
+        );
+        assert!(
+            Config::parse("[policy]\nevidence_reuse = \"exact-inputs\"\n")
+                .unwrap()
+                .evidence_reuse()
+        );
+        // A misspelled value never loads as a silent default, on or off.
+        let error = Config::parse("[policy]\nevidence_reuse = \"exact\"\n").unwrap_err();
+        assert!(error.contains("\"exact\""), "{error}");
     }
 
     #[test]
@@ -376,12 +496,27 @@ product = "claude"                 # leave this table out when the box does not 
     }
 
     #[test]
+    fn a_repository_never_chooses_no_sandbox() {
+        assert!(Config::parse("[executor]\nlease_s = 5\n").is_ok());
+        for value in ["\"none\"", "\"bwrap\"", "\"\"", "true"] {
+            let refused = Config::parse(&format!("[executor]\nsandbox = {value}\n")).unwrap_err();
+            assert!(
+                refused.contains("bay.executorSandbox"),
+                "{value}: {refused}"
+            );
+        }
+    }
+
+    #[test]
     fn the_executor_and_retention_keys_built_features_use_are_read() {
-        let config: Config =
-            toml::from_str("[executor]\nlease_s = 5\nheartbeat_s = 2\n[retention]\nwindow_s = 0\n")
-                .unwrap();
+        let config: Config = toml::from_str(
+            "[executor]\nlease_s = 5\nheartbeat_s = 2\n[retention]\nwindow_s = 0\nref_budget = 7\n",
+        )
+        .unwrap();
         assert_eq!(config.lease().as_secs(), 5);
         assert_eq!(config.heartbeat().as_secs(), 2);
         assert_eq!(config.retention_window().as_secs(), 0);
+        assert_eq!(config.ref_budget(), 7);
+        assert_eq!(Config::default().ref_budget(), 100_000);
     }
 }

@@ -108,11 +108,20 @@ reasons! {
     RemoteUnreachable => "REMOTE_UNREACHABLE", ["read"], "remote_answers_with_box_key", false;
     HooksMissing => "HOOKS_MISSING", ["read"], "install_wrote_hook_entries", false;
     SkillMismatch => "SKILL_MISMATCH", ["read"], "install_copied_skill_for_this_version", false;
+    SandboxAbsent => "SANDBOX_ABSENT", ["read"], "sandbox_present_or_executor_sandbox_none", false;
     // INTERFACES § 2 (`bay update`, the binary's lifecycle in `DESIGN`)
     UpdateUnavailable => "UPDATE_UNAVAILABLE", ["read"], "release_reachable", false;
     UpdateUnverified => "UPDATE_UNVERIFIED", ["read"], "release_republished", false;
     UpdatePinned => "UPDATE_PINNED", ["read"], "pin_moved", false;
     UpdateInUse => "UPDATE_IN_USE", ["wait"], "operation_finished", false;
+    // `DESIGN` § 11c and rulings R9, T1, T7 and T10 (`bay talk`); not yet in INTERFACES § 2
+    TalkInvalid => "TALK_INVALID", ["repair"], "talk_corrected", false;
+    TalkBodyConflict => "TALK_BODY_CONFLICT", ["read", "repair"], "ask_changed_or_superseded", false;
+    TalkClosed => "TALK_CLOSED", ["read", "repair"], "follow_up_changed_or_superseded", false;
+    TalkSupersedeRefused => "TALK_SUPERSEDE_REFUSED", ["read"], "sender_or_decides_supersedes", false;
+    TalkAnswerConflict => "TALK_ANSWER_CONFLICT", ["read"], "answer_supersedes_the_standing_answer", false;
+    TalkSenderNotActor => "TALK_SENDER_NOT_ACTOR", ["read"], "sent_with_the_senders_agent_key", false;
+    TalkBacklog => "TALK_BACKLOG", ["read"], "an_open_talk_closed_or_superseded", false;
 }
 
 impl Reason {
@@ -363,7 +372,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 34);
+        assert_eq!(Reason::ALL.len(), 42);
     }
 
     #[test]

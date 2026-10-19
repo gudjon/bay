@@ -5,6 +5,9 @@
 //! clock; finished check units keep their receipts; a one-off `status` reports a suspected
 //! lease expiry and never claims.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::time::{Duration, Instant};

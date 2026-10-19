@@ -10,6 +10,9 @@
 //! the same revision attaches to its operation (G10, G13). An observer that reboots waits a full
 //! takeover window again; adopting a chain retention already cut re-roots it and lands once.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

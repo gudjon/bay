@@ -476,11 +476,7 @@ pub fn after_event(dir: &Path, input: &str) {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        cmd.process_group(0);
-    }
+    crate::platform::detach(&mut cmd);
     let _ = cmd.spawn();
 }
 

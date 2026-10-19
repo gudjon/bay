@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.2
+Pre-release.
+
+Linux builds only (x86_64 and aarch64, musl). macOS builds come in a later release.
+
+- Added `bay status --fleet`: every session on every machine, from signed live summaries, with its change, state and age.
+- Added `bay watch [--since <cursor>]`: landings, events and invalidations since a cursor, so a missed notice never hides one.
+- Added `bay talk`: a structured ask to another actor, acked by the recipient's own key, with supersede and answers.
+- Added named inputs: `bay start --input <kind>:<name>`, and land refuses work whose inputs moved until it is repaired.
+- Added the stale-write refusal: the Claude Code hook refuses a write that a stale input covers, from local data only.
+- Added the Stop refusal: a session is asked once to checkpoint before it stops with unsaved edits in its view.
+- Added hook notices: a refusal or failed check reaches the session once, as one line, within a byte budget.
+- Added evidence reuse with `evidence_reuse = "exact-inputs"`: a check on identical inputs is not run again.
+- Added runtime evidence and completion profiles, so status never calls a change done while a required part is missing.
+- Added `BAY_UPDATE_VERSION` and `BAY_UPDATE_CHANNEL`, which pin one process's updates on a shared login.
+- Added a session work record per agent that lists the files each step wrote.
+- Changed checks to fail as `infra_failure` on a box with no sandbox, unless the box sets `bay.executorSandbox none`.
+- Changed bay to compile for Windows; Windows builds come in a later release.
+- Fixed the release script: a new MINOR or MAJOR needs the owner's approval through `BAY_RELEASE_APPROVED`.
+
 ## 0.1.1
 Pre-release.
 

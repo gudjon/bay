@@ -5,6 +5,9 @@
 //! never "landed"; an unsigned commit that quotes the `Change-Id` trailer is an anomaly, not
 //! a landing.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use support::{TestBox, check_files, passing_result, result_json};

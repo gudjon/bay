@@ -60,6 +60,7 @@ fn record(
             base_tree,
             unknown: serde_json::Map::new(),
         },
+        inputs: None,
         check: CheckId::new(check, environment),
         // bay's own repository has no acceptance policy; the gate is its policy.
         policy_revision: 0,

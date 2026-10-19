@@ -4,6 +4,9 @@
 //! The newest release comes only from the last recorded check; doctor makes no network call
 //! for it.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use support::{TestBox, result_json, row};
@@ -34,6 +37,8 @@ fn the_bay_row_names_version_channel_newest_and_pin() {
     assert_eq!(bay["channel"], default, "{bay}");
     assert!(bay.get("newest").is_none(), "nothing checked yet: {bay}");
     assert_eq!(bay["pin"], serde_json::Value::Null, "{bay}");
+    assert_eq!(bay["pin_source"], serde_json::Value::Null, "{bay}");
+    assert_eq!(bay["channel_source"], "default", "{bay}");
     assert_eq!(bay["state"], "green", "{bay}");
 
     // The channel and the pin are the box's (global Git config), never the repository's.
@@ -65,7 +70,37 @@ fn the_bay_row_names_version_channel_newest_and_pin() {
     let (_, result) = result_json(test_box.bay(&repo).arg("doctor"));
     let bay = row(&result, "bay");
     assert_eq!(bay["pin"], "9.0.0", "{bay}");
+    assert_eq!(bay["pin_source"], "git config", "{bay}");
+    assert_eq!(bay["channel_source"], "git config", "{bay}");
     assert_eq!(bay["update_available"], false, "{bay}");
+
+    // A process's environment wins over the box's config, and the row says so.
+    let (_, result) = result_json(
+        test_box
+            .bay(&repo)
+            .env("BAY_UPDATE_VERSION", "9.1.0")
+            .env("BAY_UPDATE_CHANNEL", "stable")
+            .arg("doctor"),
+    );
+    let bay = row(&result, "bay");
+    assert_eq!(bay["pin"], "9.1.0", "{bay}");
+    assert_eq!(bay["pin_source"], "env", "{bay}");
+    assert_eq!(bay["channel"], "stable", "{bay}");
+    assert_eq!(bay["channel_source"], "env", "{bay}");
+
+    // An invalid value is named, never ignored.
+    let (_, result) = result_json(
+        test_box
+            .bay(&repo)
+            .env("BAY_UPDATE_VERSION", "nine")
+            .arg("doctor"),
+    );
+    let bay = row(&result, "bay");
+    assert_eq!(bay["state"], "red", "{bay}");
+    assert!(
+        bay["why"].as_str().unwrap().contains("BAY_UPDATE_VERSION"),
+        "{bay}"
+    );
 
     // A check of another channel says nothing about this one.
     record(&test_box, "stable", "9.1.0");

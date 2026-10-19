@@ -131,15 +131,66 @@ fn remote_claims(
         let record = chain.record_at(commit).map_err(|error| error.message())?;
         claims.insert(generation, record.id);
     }
+    compacted_claims(repo, hash, &mut claims)?;
     Ok(claims)
 }
 
+/// Whether the remote holds the marker `name`: as a ref, or compacted into its shard index
+/// (§ 10a), where the record stands in for the ref.
 fn remote_has(repo: &Repo, name: &str) -> Result<bool, String> {
-    Ok(!repo
-        .git
-        .run(&["ls-remote", repo.remote(), name])
-        .map_err(|error| error.message())?
-        .is_empty())
+    Ok(crate::compact::remote_marker(repo, name)?.is_some())
+}
+
+/// The claims on `hash` the shard indexes record, beyond `claims` (§ 10a): generations run
+/// from 1 without a gap, so each missing one is looked up until one is recorded nowhere. A
+/// claim was compacted only with its landed claim, whose publication names the change.
+fn compacted_claims(
+    repo: &Repo,
+    hash: &str,
+    claims: &mut std::collections::BTreeMap<u64, String>,
+) -> Result<(), String> {
+    crate::compact::fetch(repo)?;
+    for generation in 1.. {
+        if claims.contains_key(&generation) {
+            continue;
+        }
+        let claim = IntentClaim {
+            hash: hash.to_owned(),
+            generation,
+        };
+        if crate::compact::recorded(&repo.git, &claim.intent_ref())?.is_none() {
+            return Ok(());
+        }
+        // The shards are fetched: a compacted landed claim needs no further remote read.
+        let landed = match crate::compact::recorded(&repo.git, &claim.landed_ref())? {
+            Some(landed) => Some(landed),
+            None => crate::compact::remote_marker(repo, &claim.landed_ref())?,
+        }
+        .ok_or_else(|| {
+            format!(
+                "{} is compacted without its landed claim",
+                claim.intent_ref()
+            )
+        })?;
+        let change = repo
+            .git
+            .run(&[
+                "log",
+                "-1",
+                "--format=%(trailers:key=Change-Id,valueonly,separator=%x2c)",
+                &landed,
+            ])
+            .map_err(|error| error.message())?;
+        let change = change.trim();
+        if !is_change_id(change) {
+            return Err(format!(
+                "the publication {landed} of {} names no one change",
+                claim.landed_ref()
+            ));
+        }
+        claims.insert(generation, change.to_owned());
+    }
+    Ok(())
 }
 
 /// Creates the change and its claim in one atomic push (§ 4), so a crash never leaves a claim

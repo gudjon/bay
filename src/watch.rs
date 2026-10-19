@@ -16,6 +16,8 @@
 //! cursor then stops where the listing stopped. With no cursor, a change's
 //! view gets its current state first: the landings since its base, its events, and every
 //! invalidation it has now. Watch reads; it never writes the change record or sends a notice.
+//! Like `bay status`, after a fetch it accepts and acks this actor's talks (`DESIGN` § 11c,
+//! [`crate::talk::receive`]): the ack is the recipient's arrival record, not a notice.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -99,6 +101,11 @@ fn run(dir: &Path, since: Option<&Cursor>) -> Result<BayResult, String> {
     // `freshness` says so.
     let fetched_at = repo.fetch_trunk().ok().map(|_| now_rfc3339());
     crate::log::fetch(&repo);
+    // § 11c: a fetching command on the recipient's machine accepts and acks its talks.
+    let talk_accept = fetched_at
+        .is_some()
+        .then(|| crate::talk::receive(&repo))
+        .flatten();
     let trunk = repo
         .git
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
@@ -107,6 +114,9 @@ fn run(dir: &Path, since: Option<&Cursor>) -> Result<BayResult, String> {
     // does (ruling R-A3-3); a hook that reads watch passes `Probe::Cached`.
     let detail = collect(&repo, change.as_deref(), since, &trunk, Probe::Run)?;
     let mut result = BayResult::ok(detail);
+    if let (Some(detail), Some(accept)) = (result.detail.as_mut(), talk_accept) {
+        detail["talk_accept"] = accept;
+    }
     if let Some(id) = change {
         result = result.with_change(id);
     }

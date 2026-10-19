@@ -7,6 +7,9 @@
 //! pid (one it may not signal counts as live), and a stale file is ignored. Between operations the executor exits when its binary changed, so its
 //! supervisor restarts it on the new one.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod release_fixture;
 mod support;
 

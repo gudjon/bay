@@ -34,7 +34,7 @@ pub fn install(dir: &Path, machine: bool) -> BayResult {
 
 fn run(dir: &Path, machine: bool) -> Result<BayResult, String> {
     let home = PathBuf::from(
-        std::env::var_os("HOME").ok_or("HOME is not set; install cannot name its path")?,
+        crate::platform::home().ok_or("HOME is not set; install cannot name its path")?,
     );
     let bin_dir = home.join(".local").join("bin");
     if !on_path(&bin_dir) {

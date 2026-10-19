@@ -5,6 +5,9 @@
 //! (`BAY_TEST_RELEASE_KEY`). The bay under test is a copy, so the swap replaces the copy and
 //! never the build. The real release key is never used.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod release_fixture;
 
 use std::process::Command;

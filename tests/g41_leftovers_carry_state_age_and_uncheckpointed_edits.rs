@@ -3,6 +3,9 @@
 //! `bay status` lists each leftover with `state`, `age`, and `uncheckpointed`. The result has
 //! no pull-request state and no chat activity.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::PathBuf;

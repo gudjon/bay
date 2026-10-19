@@ -50,10 +50,26 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
     commands
 }
 
+/// Whether `word` runs Git: its base name, after the last `/` or `\`, is `git`, or `git` with
+/// an extension a Windows shell runs (`.exe`, `.cmd`, `.bat`, `.com`), in any case. A
+/// case-insensitive file system runs `GIT` as `git`; denying more is the fail-closed side.
+fn is_git(word: &str) -> bool {
+    let base = word.rsplit(['/', '\\']).next().unwrap_or(word);
+    let stem = match base.rsplit_once('.') {
+        Some((stem, extension))
+            if ["exe", "cmd", "bat", "com"]
+                .iter()
+                .any(|known| extension.eq_ignore_ascii_case(known)) =>
+        {
+            stem
+        }
+        _ => base,
+    };
+    stem.eq_ignore_ascii_case("git")
+}
+
 fn denied_simple(words: &[String], trunk: &str, current: Option<&str>) -> Option<String> {
-    let git = words
-        .iter()
-        .position(|word| word == "git" || word.ends_with("/git"))?;
+    let git = words.iter().position(|word| is_git(word))?;
     // Skip git's own options (`-C <dir>`, `-c key=value`, `--git-dir=…`) to the subcommand.
     let mut rest = words[git + 1..].iter().peekable();
     let mut subcommand = None;
@@ -207,5 +223,38 @@ mod tests {
     fn a_bare_push_from_trunk_is_a_push_of_trunk() {
         assert!(denied("git push", "main", Some("main")).is_some());
         assert!(denied("git push", "main", Some("topic")).is_none());
+    }
+
+    /// Plan W1: a Windows shell runs Git as `git`, `git.exe` or `git.cmd`, by any case and by a
+    /// path with either separator. Each is the same Git, so each shape is denied as `git` is.
+    #[test]
+    fn git_exe_is_git() {
+        for command in [
+            "git.exe reset --hard",
+            "GIT.EXE push --force origin topic",
+            "\"C:\\Program Files\\Git\\cmd\\git.exe\" clean -f",
+            "C:/tools/Git.exe push origin main",
+            "/c/tools/git.exe -C .. branch -D old",
+            "C:\\Git\\cmd\\git reset --hard",
+            "GIT reset --hard",
+            "Git.Cmd push --force origin topic",
+            "C:\\Git\\cmd\\git.bat clean -f",
+        ] {
+            assert!(
+                denied(command, "main", Some("topic")).is_some(),
+                "{command}"
+            );
+        }
+        for command in [
+            "git.exe status",
+            "notgit.exe reset --hard",
+            "git.exe.bak reset --hard",
+            "gitk reset --hard",
+        ] {
+            assert!(
+                denied(command, "main", Some("topic")).is_none(),
+                "{command}"
+            );
+        }
     }
 }

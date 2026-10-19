@@ -288,6 +288,23 @@ fn pass(repo: &Repo, binary: &Binary) -> Result<Vec<Value>, String> {
             }));
         }
     }
+    ran.extend(compaction(repo, &chain, &ids));
     ran.extend(recovered.take());
     Ok(ran)
+}
+
+/// The pass's marker compaction (§ 10a ref-growth budget, `crate::compact`), over the chains as
+/// this pass left them, so a change it just cut is compacted in the same pass. `None` when
+/// nothing moved; a failure is reported and the next pass tries again.
+fn compaction(repo: &Repo, chain: &Chain, ids: &[&str]) -> Option<Value> {
+    let records: Vec<ChangeRecord> = ids
+        .iter()
+        .filter_map(|id| chain.read(id).ok().map(|(_, record)| record))
+        .collect();
+    let signer = Keys::load(&repo.git).executor;
+    match crate::compact::run(repo, signer.as_ref(), &records) {
+        Ok(moved) if moved.is_empty() => None,
+        Ok(moved) => Some(json!({"compacted": moved})),
+        Err(error) => Some(json!({"compacted": null, "error": error})),
+    }
 }

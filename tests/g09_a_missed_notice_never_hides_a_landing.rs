@@ -9,6 +9,9 @@
 //! through the named inputs), and a watch from the cursor it returns shows nothing new.
 //! Neither the notice nor the watch changes what the change observed.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

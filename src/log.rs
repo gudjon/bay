@@ -214,9 +214,11 @@ pub struct Events {
 
 /// The `bay.event/1` records appended to the logs at `tips` after the tips in `since`, oldest
 /// first per log, at most `limit` in all; a log `since` does not name, or names by a commit
-/// this repository lacks, is read from its start. Only event commits are read, found by their
-/// subjects in one `git log` per log. A log the limit stopped has, in the result's tips, the
-/// last event read from it (or where it was read from), so the next read goes on from there.
+/// this repository lacks, is read from its start. A log whose tip is its tip in `since` costs no
+/// git call. Only event commits are read, found by their subjects in one `git log` per log that
+/// moved, and their records in one `cat-file --batch`. A log the limit stopped has, in the
+/// result's tips, the last event read from it (or where it was read from), so the next read goes
+/// on from there.
 ///
 /// # Errors
 ///
@@ -229,6 +231,10 @@ pub fn events_since(
 ) -> Result<Events, String> {
     let mut out = Events::default();
     for (executor, tip) in tips {
+        if since.get(executor) == Some(tip) {
+            out.tips.insert(executor.clone(), tip.clone());
+            continue;
+        }
         let from = since.get(executor).filter(|from| {
             git.run(&["cat-file", "-e", &format!("{from}^{{commit}}")])
                 .is_ok()
@@ -244,21 +250,16 @@ pub fn events_since(
         }
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let commits = git.run(&args).map_err(|error| error.message())?;
-        let mut read_to = from.cloned();
-        let mut stopped = false;
-        for (commit, _) in commits
+        let events: Vec<&str> = commits
             .lines()
             .filter_map(|line| line.split_once(' '))
             .filter(|(_, subject)| subject.starts_with("event "))
-        {
-            if out.events.len() >= limit {
-                stopped = true;
-                break;
-            }
-            read_to = Some(commit.to_owned());
-            let Ok(text) = git.run(&["cat-file", "blob", &format!("{commit}:record.json")]) else {
-                continue;
-            };
+            .map(|(commit, _)| commit)
+            .collect();
+        let room = limit.saturating_sub(out.events.len());
+        let stopped = events.len() > room;
+        let taken = &events[..events.len().min(room)];
+        for text in records(git, taken)?.into_iter().flatten() {
             if let Ok(record) = serde_json::from_str::<Value>(&text)
                 && record["schema"] == EVENT_SCHEMA
             {
@@ -266,10 +267,60 @@ pub fn events_since(
             }
         }
         out.more |= stopped;
-        let reached = if stopped { read_to } else { Some(tip.clone()) };
+        let reached = if stopped {
+            taken
+                .last()
+                .map(|commit| (*commit).to_owned())
+                .or_else(|| from.cloned())
+        } else {
+            Some(tip.clone())
+        };
         if let Some(reached) = reached {
             out.tips.insert(executor.clone(), reached);
         }
+    }
+    Ok(out)
+}
+
+/// The `record.json` of each of `commits`, read in one `cat-file --batch`: `None` for a commit
+/// with no such blob, or one that is not UTF-8.
+fn records(git: &Git, commits: &[&str]) -> Result<Vec<Option<String>>, String> {
+    if commits.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input: String = commits
+        .iter()
+        .map(|commit| [commit, ":record.json\n"].concat())
+        .collect();
+    let bytes = git
+        .run_bytes(&["cat-file", "--batch"], &[], Some(input.as_bytes()))
+        .map_err(|error| error.message())?;
+    let short = || "cat-file --batch: a short answer".to_owned();
+    let mut rest = bytes.as_slice();
+    let mut out = Vec::with_capacity(commits.len());
+    for _ in commits {
+        let end = rest
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .ok_or_else(short)?;
+        let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+        rest = &rest[end + 1..];
+        // `<oid> <type> <size>`, or `<name> missing` for an object the commit lacks.
+        let fields: Vec<&str> = header.split(' ').collect();
+        let [_, kind, size] = fields[..] else {
+            out.push(None);
+            continue;
+        };
+        let size: usize = size
+            .parse()
+            .map_err(|_| format!("cat-file --batch: {header}"))?;
+        let body = rest.get(..size).ok_or_else(short)?;
+        rest = rest.get(size + 1..).ok_or_else(short)?;
+        out.push(
+            (kind == "blob")
+                .then(|| String::from_utf8(body.to_vec()).ok())
+                .flatten(),
+        );
     }
     Ok(out)
 }
@@ -378,5 +429,16 @@ mod tests {
         let held: Vec<String> = held_events(&git).unwrap().into_iter().collect();
         assert_eq!(held, ["evt_1", "evt_2", "evt_3"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_log_that_did_not_move_costs_no_git_call() {
+        // A hook reads the logs at every step: one whose tip is where the read stopped is not
+        // asked again. A repository that is not there answers no git call.
+        let git = Git::new(std::env::temp_dir().join("bay-log-no-such-repository"));
+        let tips: BTreeMap<String, String> = [("a".to_owned(), "1".repeat(40))].into();
+        let read = events_since(&git, &tips, &tips, 100).unwrap();
+        assert!(read.events.is_empty() && !read.more);
+        assert_eq!(read.tips, tips);
     }
 }

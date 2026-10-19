@@ -3,6 +3,9 @@
 //! A run under another actor's key is refused. A landing names its actor in the actor
 //! trailer and its session in `Bay-Session`: one actor, split across two trailers.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::{Path, PathBuf};

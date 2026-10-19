@@ -10,7 +10,8 @@
 //! sessions that start together never race; the trunk line says it is the local cache, and
 //! `bay status` is what synchronizes (`DESIGN` § 11). Overlapping changes are a later item.
 //! Every probed hook event in a repository but pre-tool also appends to the session's work
-//! record (`record`), with the files each step wrote in a view.
+//! record (`record`), with the files each step wrote in a view, and gives the session's agent
+//! the notices of its change it was not yet told (`crate::notice`).
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -103,16 +104,33 @@ fn bind_env(state_dir: &Path, session: &SessionId) {
 /// edits is allowed, and the session is idle with its uncheckpointed edits. A stop with
 /// `stop_hook_active` true or absent, and edits that cannot be read (`uncheckpointed_unknown`),
 /// are never refused.
+///
+/// At `session-start` the session's delivered-notice cursor begins, and at `post-tool` and
+/// `user-prompt-submit` the session's own agent is given the notices of its view's change and
+/// of its actor's other changes it was not yet told (`crate::notice`, ruling R6); the line names them.
 #[must_use]
-pub fn record(payload: &Payload) -> Option<String> {
+pub fn record(payload: &Payload) -> Recorded {
     record_with(payload, &serde_json::Map::new())
+}
+
+/// What recording one hook event gives the hook to return.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Recorded {
+    /// Ruling R7's reason, when the event is a stop it refuses.
+    pub stop_refused: Option<String>,
+    /// The notice lines for the agent, each ending in a newline; empty for none.
+    pub notice: String,
 }
 
 /// [`record`], with `extra` fields on the line: a `pre-tool` refusal's `blocked(<reason>)`
 /// state, or the `COVERAGE_UNKNOWN` notice it allowed a write with (ruling R5). The silent
-/// `pre-tool` path appends nothing. It returns the stop refusal's reason, as [`record`] does.
+/// `pre-tool` path appends nothing. It returns what [`record`] does.
 #[must_use]
-pub fn record_with(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Option<String> {
+pub fn record_with(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Recorded {
+    record_line(payload, extra).unwrap_or_default()
+}
+
+fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Option<Recorded> {
     let session = payload.session.as_ref()?;
     let cwd = &payload.cwd;
     let repo = Repo::open(cwd).ok()?;
@@ -151,6 +169,7 @@ pub fn record_with(payload: &Payload, extra: &serde_json::Map<String, Value>) ->
     let event = payload.event;
     if event == Event::SessionStart && payload.agent.is_none() {
         bind_env(&state_dir, session);
+        crate::notice::begin(&repo, &state_dir);
     }
     let actor_link = if state_dir.join("link").is_file() {
         "bound"
@@ -178,8 +197,10 @@ pub fn record_with(payload: &Payload, extra: &serde_json::Map<String, Value>) ->
     for (key, value) in extra {
         line[key] = value.clone();
     }
+    let scope = crate::notice::Scope::new(change.as_deref(), &actor.name);
+    let notice = notices(&repo, scope, payload, &state_dir, &mut line);
     let state = crate::writes::state_path(&state_dir, payload.agent.as_deref());
-    let refusal = match (&view, event.writes(), &state, &change) {
+    let stop_refused = match (&view, event.writes(), &state, &change) {
         (Some(view), Some(step), Some(state), Some(id)) => step_fields(
             &mut line,
             payload,
@@ -190,12 +211,16 @@ pub fn record_with(payload: &Payload, extra: &serde_json::Map<String, Value>) ->
         ),
         _ => None,
     };
+    let recorded = Recorded {
+        stop_refused,
+        notice,
+    };
     let Ok(mut text) = serde_json::to_string(&line) else {
-        return refusal;
+        return Some(recorded);
     };
     text.push('\n');
     if std::fs::create_dir_all(&dir).is_err() {
-        return refusal;
+        return Some(recorded);
     }
     // One write of one whole line to a file opened for append: concurrent hooks never
     // interleave within a line.
@@ -211,7 +236,32 @@ pub fn record_with(payload: &Payload, extra: &serde_json::Map<String, Value>) ->
     if event == Event::SessionEnd {
         let _ = std::fs::remove_dir_all(&state_dir);
     }
-    refusal
+    Some(recorded)
+}
+
+/// The notices of `scope` (the view's change and the session's actor) for this event's line and
+/// agent: at `post-tool` and `user-prompt-submit`, to the session's own agent only
+/// (`crate::notice`).
+fn notices(
+    repo: &Repo,
+    scope: crate::notice::Scope<'_>,
+    payload: &Payload,
+    state_dir: &Path,
+    line: &mut Value,
+) -> String {
+    if payload.agent.is_some()
+        || !matches!(
+            payload.event,
+            Event::PostToolBatch | Event::UserPromptSubmit
+        )
+    {
+        return String::new();
+    }
+    let delivery = crate::notice::deliver(repo, scope, state_dir);
+    for (key, value) in delivery.fields() {
+        line[key] = value;
+    }
+    delivery.text
 }
 
 /// The session's own stop in a view: the change's state commit and whether it is a retention

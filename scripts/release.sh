@@ -36,6 +36,20 @@ check_version() {
     esac
     grep -qx "## $1" CHANGELOG.md ||
         { echo "release: CHANGELOG.md has no '## $1' section" >&2; exit 1; }
+    check_bump "$1"
+}
+
+# A new MINOR or MAJOR over the newest released tag needs the owner's approval (BACKLOG 16e): the owner
+# sets BAY_RELEASE_APPROVED=<version>. A PATCH, or the same MAJOR.MINOR, needs none.
+check_bump() {
+    last=$(git tag -l 'v[0-9]*' --sort=-v:refname | head -1 | sed 's/^v//')
+    [ -n "$last" ] || return 0
+    new_mm=$(printf '%s' "$1" | cut -d- -f1 | cut -d. -f1,2)
+    last_mm=$(printf '%s' "$last" | cut -d- -f1 | cut -d. -f1,2)
+    [ "$new_mm" = "$last_mm" ] && return 0
+    [ "${BAY_RELEASE_APPROVED:-}" = "$1" ] && return 0
+    echo "release: $1 is a new MINOR or MAJOR over v$last; it needs the owner's approval: BAY_RELEASE_APPROVED=$1 (BACKLOG 16e)" >&2
+    exit 1
 }
 
 # The CHANGELOG.md section of version $1, without its heading.

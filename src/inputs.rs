@@ -361,13 +361,13 @@ fn run_provider(
     // § 7: a provider is adapter code and runs where a check runs. The repository, every view
     // and this machine's keys are hidden; its own scratch is all of them it sees.
     let hidden = crate::check::hidden_for(repo, &crate::signing::Keys::load(git));
-    let mut cmd = crate::check::sandboxed(
-        crate::check::sandbox_kind(),
-        &program,
-        &args,
-        &hidden,
-        scratch,
-    );
+    // Ruling R14: where this machine has no sandbox, a provider runs only by the box's own
+    // choice, global `bay.executorSandbox = none`.
+    let sandbox = crate::check::Sandbox::here();
+    if let Some(why) = sandbox.refusal {
+        return Err(format!("the provider for {}: {why}", entry.name));
+    }
+    let mut cmd = crate::check::sandboxed(sandbox.kind, &program, &args, &hidden, scratch);
     // The same fixed baseline as a check (`INTERFACES` § 7): nothing from the caller's
     // environment, so an answer depends on the entry and the tree alone.
     cmd.current_dir(&tree_dir)
@@ -412,7 +412,7 @@ fn run_provider(
 /// stdout and stderr, all within `timeout`. A child the provider leaves running belongs to the
 /// provider: once the provider exits, its group is killed, so no child holds its output open,
 /// and the output is waited for no longer than the timeout.
-fn run_bounded(
+pub(crate) fn run_bounded(
     mut cmd: Command,
     input: &[u8],
     timeout: Duration,

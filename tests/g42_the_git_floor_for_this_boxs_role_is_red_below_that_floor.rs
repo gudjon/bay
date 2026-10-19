@@ -2,6 +2,9 @@
 //!
 //! `ROADMAP` § 1; `DESIGN` § 15.2.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use support::{TestBox, result_json, row};

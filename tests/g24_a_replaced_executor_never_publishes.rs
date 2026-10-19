@@ -4,6 +4,9 @@
 //! lands the change; A resumes and does not push: it reports the change already landed. The
 //! change's `Change-Id` appears on trunk once.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::time::{Duration, Instant};

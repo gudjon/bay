@@ -11,6 +11,9 @@ use crate::git::{Git, GitError};
 
 pub const EVIDENCE_PREFIX: &str = "refs/notes/bay/evidence/";
 pub const EVIDENCE_SCHEMA: &str = "bay.evidence/1";
+/// The kind of a check record: the only kind a check's verdict is combined from. A runtime
+/// record (`running`, `effective`; [`crate::runtime`]) or a review never stands for a check.
+pub const KIND_CHECK: &str = "check";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -94,6 +97,12 @@ pub struct EvidenceRecord {
     pub id: String,
     pub kind: String,
     pub subject: Subject,
+    /// What the check read besides the subject (`INTERFACES` § 6): `{"fixtures": [...]}`.
+    /// Absent when it named none, and on records written before the field existed. Kept as
+    /// read, whatever its shape: it is signed, and a shape this version cannot read makes
+    /// only this record unreusable ([`EvidenceRecord::fixtures`]), never the note unreadable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inputs: Option<serde_json::Value>,
     /// The policy check this record answers.
     pub check: CheckId,
     pub policy_revision: u64,
@@ -132,6 +141,57 @@ pub struct EvidenceRecord {
 }
 
 impl EvidenceRecord {
+    /// The `inputs` of a check that read `fixtures`: none when it read none.
+    #[must_use]
+    pub fn inputs_for(fixtures: &[String]) -> Option<serde_json::Value> {
+        (!fixtures.is_empty()).then(|| serde_json::json!({ "fixtures": fixtures }))
+    }
+
+    /// The fixtures the record says its check read: empty on a record without `inputs`.
+    /// `None` when bay cannot identify them: `inputs` is not an object, holds a key other than
+    /// `fixtures` (an input this version cannot compare), or `fixtures` is not a list of
+    /// strings. Such a record is never reused (G7): an unknown input never matches.
+    #[must_use]
+    pub fn fixtures(&self) -> Option<Vec<String>> {
+        let Some(inputs) = &self.inputs else {
+            return Some(Vec::new());
+        };
+        let inputs = inputs.as_object()?;
+        if inputs.keys().any(|key| key != "fixtures") {
+            return None;
+        }
+        let Some(fixtures) = inputs.get("fixtures") else {
+            return Some(Vec::new());
+        };
+        fixtures
+            .as_array()?
+            .iter()
+            .map(|fixture| fixture.as_str().map(str::to_owned))
+            .collect()
+    }
+
+    /// The artifact digests the record names (`INTERFACES` § 6 `artifacts`), each a string
+    /// `sha256:<64 hex>` or an object whose `digest` is one (the § 3 shape). `artifacts` stays
+    /// in `unknown` as written, so it signs over the bytes its producer wrote. `None` when the
+    /// field is absent or empty, or when any entry is not a digest: a list bay cannot read whole
+    /// names nothing.
+    #[must_use]
+    pub fn artifact_digests(&self) -> Option<Vec<&str>> {
+        let digests: Vec<&str> = self
+            .unknown
+            .get("artifacts")?
+            .as_array()?
+            .iter()
+            .map(|entry| {
+                entry
+                    .as_str()
+                    .or_else(|| entry.get("digest").and_then(serde_json::Value::as_str))
+                    .filter(|digest| is_sha256_digest(digest))
+            })
+            .collect::<Option<_>>()?;
+        (!digests.is_empty()).then_some(digests)
+    }
+
     /// The bytes a producer signs: the canonical JSON of the record without its signature.
     ///
     /// # Errors
@@ -175,6 +235,16 @@ impl EvidenceRecord {
             signature,
         )
     }
+}
+
+/// Whether `text` is `sha256:` and 64 lowercase hex digits.
+fn is_sha256_digest(text: &str) -> bool {
+    text.strip_prefix("sha256:").is_some_and(|hex| {
+        hex.len() == 64
+            && hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
 }
 
 #[must_use]
@@ -251,13 +321,16 @@ pub fn records_for(git: &Git, tree: &str) -> Result<Vec<EvidenceRecord>, String>
     let mut all = Vec::new();
     for name in refs.lines() {
         let producer = name.trim_start_matches(EVIDENCE_PREFIX);
-        // A record counts only from its own producer's ref, under its own namespaced id.
+        // A record counts only from its own producer's ref, under its own namespaced id, and
+        // only on the note of the tree it is about: a record copied onto another tree's note
+        // says nothing about that tree.
         all.extend(
             without_conflicts(producer_records(git, producer, tree)?)
                 .into_iter()
                 .filter(|record| {
                     record.producer.name == producer
                         && record.id.starts_with(&format!("{producer}/"))
+                        && record.subject.tree == tree
                 }),
         );
     }
@@ -285,6 +358,42 @@ pub fn counted(
         .collect())
 }
 
+/// What a record made by another operation must match to stand for a new run of a check
+/// (`DESIGN` § 7 Reuse, G7). The manifest digest, the check and, for a commit-keyed check, the
+/// commit are matched by [`combine`].
+pub struct ReuseKey<'a> {
+    /// The candidate's tree.
+    pub tree: &'a str,
+    /// The tree of the trunk commit the candidate was merged onto. The adapter is given the
+    /// paths the candidate changes against it (`changed_paths`, `INTERFACES` § 3) and may judge
+    /// by them, so a verdict made on another base is never reused.
+    pub base_tree: &'a str,
+    pub policy_revision: u64,
+    /// `bay` or `outside_bay` (`INTERFACES` § 6): a pass under an `outside_bay` policy is never
+    /// read as one under a policy bay checked.
+    pub policy_provenance: &'a str,
+    /// The fixtures the check's policy entry names.
+    pub fixtures: &'a [String],
+}
+
+/// The `records` that may stand for a new run under `key`: about the same tree on the same
+/// base, under the same policy revision and provenance, with the same fixtures. A record whose
+/// inputs bay cannot identify matches nothing.
+#[must_use]
+pub fn reusable(records: &[EvidenceRecord], key: &ReuseKey) -> Vec<EvidenceRecord> {
+    records
+        .iter()
+        .filter(|record| {
+            record.subject.tree == key.tree
+                && record.subject.base_tree == key.base_tree
+                && record.policy_revision == key.policy_revision
+                && record.policy_provenance.as_deref() == Some(key.policy_provenance)
+                && record.fixtures().as_deref() == Some(key.fixtures)
+        })
+        .cloned()
+        .collect()
+}
+
 /// The combined verdict for one check on one tree under one manifest.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Combined {
@@ -298,7 +407,8 @@ pub enum Combined {
 /// `pass` and no `product_failure`; a `product_failure` beside a `pass` is flaky; `unknown`
 /// and `infra_failure` never cancel a `pass`. Records made under another manifest do not count.
 /// A check keyed by commit (`subject_commit`) counts only records for that commit, so a
-/// failure on one commit is never charged to another that shares its tree.
+/// failure on one commit is never charged to another that shares its tree. Only records of
+/// kind `check` combine: a runtime or review record that names the check is never its pass.
 #[must_use]
 pub fn combine(
     records: &[EvidenceRecord],
@@ -307,7 +417,8 @@ pub fn combine(
     subject_commit: Option<&str>,
 ) -> Combined {
     let relevant = records.iter().filter(|record| {
-        &record.check == check
+        record.kind == KIND_CHECK
+            && &record.check == check
             && record.manifest_digest == manifest_digest
             && subject_commit.is_none_or(|commit| record.subject.commit == commit)
     });
@@ -386,6 +497,7 @@ mod tests {
                 base_tree: "b".to_owned(),
                 unknown: serde_json::Map::new(),
             },
+            inputs: None,
             check: CheckId::new("tests", environment),
             policy_revision: 1,
             manifest_digest: "m".to_owned(),
@@ -499,6 +611,38 @@ mod tests {
         assert_eq!(read.signing_payload().unwrap(), expected);
     }
 
+    /// `artifacts` in any shape another producer writes, an empty list or a list of objects,
+    /// is read and signs over the bytes it was written with.
+    #[test]
+    fn artifacts_in_any_shape_stay_in_the_signed_payload() {
+        for artifacts in [
+            serde_json::json!([]),
+            serde_json::json!([{"name": "app", "digest": "sha256:00"}]),
+        ] {
+            let mut written =
+                serde_json::to_value(record("ci/1", "x", "c", Verdict::Pass)).unwrap();
+            written["artifacts"] = artifacts.clone();
+            let expected = crate::canonical::canonical(&written).unwrap().into_bytes();
+            let read: EvidenceRecord = serde_json::from_value(written).unwrap();
+            assert_eq!(read.signing_payload().unwrap(), expected, "{artifacts}");
+        }
+    }
+
+    /// A runtime record that names a check's id and environment, under its manifest, with a
+    /// `pass`, is an observation of a deployment, never that check's pass.
+    #[test]
+    fn a_runtime_record_never_combines_as_a_check() {
+        for kind in ["running", "effective", "review"] {
+            let mut other = record("ci/1", "x", "c", Verdict::Pass);
+            other.kind = kind.to_owned();
+            assert_eq!(
+                combine(&[other], &tests_on("x"), "m", None),
+                Combined::Unknown,
+                "{kind}"
+            );
+        }
+    }
+
     #[test]
     fn two_records_under_one_id_are_both_refused() {
         let records = vec![
@@ -521,6 +665,7 @@ mod tests {
         value["subject"]["future"] = serde_json::json!(true);
         value["check"]["future"] = serde_json::json!("c");
         value["producer"]["future"] = serde_json::json!(null);
+        value["inputs"] = serde_json::json!({"fixtures": ["data@sha256:ab"], "plan": "default@3"});
         value["units"] =
             serde_json::json!([{"id": "t1", "verdict": "pass", "seconds": 1.0, "future": [1.5]}]);
         let signed = crate::canonical::canonical(&value).unwrap();
@@ -528,5 +673,107 @@ mod tests {
         let read: EvidenceRecord = serde_json::from_value(value).unwrap();
         let payload = String::from_utf8(read.signing_payload().unwrap()).unwrap();
         assert_eq!(payload, signed);
+    }
+
+    /// G7: a record stands for a new run only when every recorded input matches the key; each
+    /// field alone, changed, stops the reuse.
+    #[test]
+    fn a_record_is_reusable_only_when_every_recorded_input_matches() {
+        type Change = fn(&mut EvidenceRecord);
+        let fixtures = vec!["data@sha256:aa".to_owned()];
+        let mut base = record("ci/1", "x", "c", Verdict::Pass);
+        base.policy_provenance = Some("bay".to_owned());
+        base.inputs = EvidenceRecord::inputs_for(&fixtures);
+        let key = super::ReuseKey {
+            tree: "t",
+            base_tree: "b",
+            policy_revision: 1,
+            policy_provenance: "bay",
+            fixtures: &fixtures,
+        };
+        assert_eq!(super::reusable(std::slice::from_ref(&base), &key).len(), 1);
+        let changes: [(&str, Change); 8] = [
+            ("another tree", |r| r.subject.tree = "u".to_owned()),
+            ("another base", |r| r.subject.base_tree = "a".to_owned()),
+            ("another revision", |r| r.policy_revision = 2),
+            ("outside_bay", |r| {
+                r.policy_provenance = Some("outside_bay".to_owned());
+            }),
+            ("no provenance", |r| r.policy_provenance = None),
+            ("no fixtures", |r| r.inputs = None),
+            ("another fixture", |r| {
+                r.inputs = Some(serde_json::json!({"fixtures": ["data@sha256:bb"]}));
+            }),
+            ("an input bay cannot compare", |r| {
+                r.inputs = Some(serde_json::json!({"fixtures": ["data@sha256:aa"], "net": 1}));
+            }),
+        ];
+        for (what, change) in changes {
+            let mut other = base.clone();
+            change(&mut other);
+            assert!(super::reusable(&[other], &key).is_empty(), "{what}");
+        }
+    }
+
+    /// A record whose `inputs` has a shape this version cannot read still parses (the note
+    /// stays readable) and keeps its signed bytes, but its fixtures are unknown.
+    #[test]
+    fn inputs_of_another_shape_leave_the_note_readable_and_the_fixtures_unknown() {
+        let mut value = serde_json::to_value(record("ci/1", "x", "c", Verdict::Pass)).unwrap();
+        for inputs in [
+            serde_json::json!({"fixtures": [{"name": "data", "digest": "sha256:aa"}]}),
+            serde_json::json!({"fixtures": "data@sha256:aa"}),
+            serde_json::json!(["data@sha256:aa"]),
+        ] {
+            value["inputs"] = inputs.clone();
+            let read: Vec<EvidenceRecord> =
+                serde_json::from_value(serde_json::json!([value])).unwrap();
+            assert_eq!(read[0].inputs.as_ref(), Some(&inputs));
+            assert_eq!(read[0].fixtures(), None, "{inputs}");
+        }
+        let plain = record("ci/1", "x", "c", Verdict::Pass);
+        assert_eq!(plain.fixtures(), Some(Vec::new()));
+    }
+
+    /// A record is about the tree its subject names: copied onto another tree's note, it does
+    /// not count there, so a pass for one tree never answers for another (G7, G29).
+    #[test]
+    fn a_record_copied_onto_another_trees_note_does_not_count_there() {
+        use crate::change::RECORD_IDENTITY;
+        let dir = tempfile::TempDir::new().unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let git = crate::git::Git::new(dir.path());
+        let blob = git
+            .run_with(&["hash-object", "-w", "--stdin"], &[], Some(b"x\n"))
+            .unwrap();
+        let entry = format!("100644 blob {}\tx\n", blob.trim());
+        let one = git.run_with(&["mktree"], &[], Some(b"")).unwrap();
+        let two = git
+            .run_with(&["mktree"], &[], Some(entry.as_bytes()))
+            .unwrap();
+        let (one, two) = (one.trim(), two.trim());
+        let mut passed = record("ci/1", "x", "c", Verdict::Pass);
+        passed.subject.tree = one.to_owned();
+        super::append(&git, "ci", &passed).unwrap();
+        git.run_with(
+            &[
+                "notes",
+                "--ref=refs/notes/bay/evidence/ci",
+                "copy",
+                one,
+                two,
+            ],
+            RECORD_IDENTITY,
+            None,
+        )
+        .unwrap();
+        assert_eq!(super::producer_records(&git, "ci", two).unwrap().len(), 1);
+        assert_eq!(super::records_for(&git, one).unwrap(), vec![passed]);
+        assert_eq!(super::records_for(&git, two).unwrap(), Vec::new());
     }
 }

@@ -3,6 +3,9 @@
 //! A required check is missing, crashes, times out or collects nothing: land stays blocked
 //! with `CHECK_UNKNOWN`, and trunk does not move.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use support::{TestBox, check_files, passing_result, result_json};

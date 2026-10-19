@@ -1,3 +1,6 @@
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use predicates::str::contains;
@@ -150,4 +153,42 @@ fn doctor_human_rendering_is_one_status_line() {
     assert_eq!(text.lines().count(), 1, "{text}");
     assert!(text.starts_with("bay "), "{text}");
     assert!(text.trim_end().ends_with("| doctor ready"), "{text}");
+}
+
+/// Ruling T12: `bay talk --help` prints talk's own flags.
+#[test]
+fn talk_help_names_flags() {
+    let test_box = TestBox::new();
+    let out = test_box
+        .bay(test_box.path())
+        .args(["talk", "--help"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    for flag in [
+        "--kind",
+        "--change",
+        "--artifact",
+        "--decision",
+        "--check",
+        "--follow-up",
+        "--decides",
+        "--context",
+        "--evidence",
+        "--supersedes",
+        "--expires",
+        "--urgent",
+        "--dry-run",
+        "--answer",
+        "--target",
+        "--forecast",
+        "--commitment",
+        "--owns",
+        "--promises",
+        "--needs",
+        "--promise-evidence",
+    ] {
+        assert!(text.contains(flag), "{flag}: {text}");
+    }
 }

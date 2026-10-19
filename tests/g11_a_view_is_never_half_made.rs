@@ -2,6 +2,9 @@
 //!
 //! Kill `start` mid-creation: no candidate can be built from the view; `--resume` completes it.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::PathBuf;

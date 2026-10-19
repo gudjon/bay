@@ -2,8 +2,10 @@
 //!
 //! The pin, the channel and the auto switch are the box's, never a repository's: global Git
 //! config `bay.updateVersion`, `bay.updateChannel` and `bay.updateAuto` (owner ruling
-//! 2026-10-18), or `--version` and `--channel` for one run. A cloned repository never moves the
-//! box.
+//! 2026-10-18), or `--version` and `--channel` for one run. A process's `BAY_UPDATE_VERSION` and
+//! `BAY_UPDATE_CHANNEL` override the first two for that process, so one seat on a shared login
+//! can choose its own (flags, then the environment, then global config, then defaults). A cloned
+//! repository never moves the box.
 //!
 //! Resolves a target (an exact pin wins, then `--version`, then the channel's newest release),
 //! downloads the release beside the installed binary (`$HOME/.local/bin/bay`, bay's one install
@@ -118,18 +120,36 @@ pub fn update(request: &Request) -> BayResult {
     run(request).unwrap_or_else(|refusal| *refusal)
 }
 
-/// This box's update settings, from global Git config.
+/// Where a box setting came from: a process's environment wins over global Git config.
+pub const FROM_ENV: &str = "env";
+pub const FROM_GIT_CONFIG: &str = "git config";
+
+/// The environment variables that set the pin and the channel for one process (and its
+/// children), over global Git config: on a shared login every seat shares that config, so a
+/// seat's supervisor sets its choice here.
+pub const VERSION_VAR: &str = "BAY_UPDATE_VERSION";
+pub const CHANNEL_VAR: &str = "BAY_UPDATE_CHANNEL";
+
+/// This box's update settings: the process's `BAY_UPDATE_VERSION` and `BAY_UPDATE_CHANNEL`,
+/// else global Git config. A repository's config is never read.
 #[derive(Debug, Default)]
 pub struct BoxSettings {
     pub channel: Option<String>,
     pub version: Option<String>,
     /// `bay.updateAuto`; unset is on.
     pub auto: bool,
+    /// Where `channel` came from ([`FROM_ENV`] or [`FROM_GIT_CONFIG`]), when set.
+    pub channel_from: Option<&'static str>,
+    /// Where `version` came from, when set.
+    pub version_from: Option<&'static str>,
 }
 
 impl BoxSettings {
-    #[must_use]
-    pub fn load() -> Self {
+    /// # Errors
+    ///
+    /// An environment value that is not a version or a channel, naming the variable: a set
+    /// variable is never silently ignored.
+    pub fn load() -> Result<Self, String> {
         let get = |args: &[&str]| {
             let mut cmd = Command::new("git");
             cmd.args(["config", "--global"]).args(args);
@@ -139,10 +159,55 @@ impl BoxSettings {
                 .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
                 .filter(|value| !value.is_empty())
         };
-        Self {
-            channel: get(&["--get", "bay.updateChannel"]),
-            version: get(&["--get", "bay.updateVersion"]),
+        let env = |name: &str| match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid UTF-8")),
+        };
+        let env_version = env(VERSION_VAR)?;
+        if let Some(version) = &env_version
+            && !valid(version)
+        {
+            return Err(format!(
+                "{VERSION_VAR} must be an exact version (X.Y.Z or X.Y.Z-suffix), not {version:?}"
+            ));
+        }
+        let env_channel = env(CHANNEL_VAR)?;
+        if let Some(channel) = &env_channel
+            && channel != "stable"
+            && channel != "latest"
+        {
+            return Err(format!(
+                "{CHANNEL_VAR} must be stable or latest, not {channel:?}"
+            ));
+        }
+        let pick = |env: Option<String>, key: &str| {
+            env.map_or_else(
+                || {
+                    let value = get(&["--get", key]);
+                    let from = value.as_ref().map(|_| FROM_GIT_CONFIG);
+                    (value, from)
+                },
+                |value| (Some(value), Some(FROM_ENV)),
+            )
+        };
+        let (channel, channel_from) = pick(env_channel, "bay.updateChannel");
+        let (version, version_from) = pick(env_version, "bay.updateVersion");
+        Ok(Self {
+            channel,
+            version,
             auto: get(&["--type=bool", "--get", "bay.updateAuto"]).is_none_or(|on| on != "false"),
+            channel_from,
+            version_from,
+        })
+    }
+
+    /// How the pin is named in a refusal: the variable or the config key it came from.
+    fn pin_name(&self) -> &'static str {
+        if self.version_from == Some(FROM_ENV) {
+            VERSION_VAR
+        } else {
+            "git config --global bay.updateVersion"
         }
     }
 }
@@ -183,7 +248,8 @@ impl Plan {
 }
 
 fn run(request: &Request) -> Result<BayResult, Refusal> {
-    let settings = BoxSettings::load();
+    let settings = BoxSettings::load().map_err(failed)?;
+    let pin_name = settings.pin_name();
     let pin = settings.version;
     let channel = request.channel.clone().or(settings.channel);
     if let Some(channel) = &channel
@@ -210,7 +276,7 @@ fn run(request: &Request) -> Result<BayResult, Refusal> {
         return Err(plan.refuse(
             Decision::Blocked,
             Reason::UpdatePinned,
-            "this box is pinned; only its pin (git config --global bay.updateVersion) moves it",
+            format!("this box is pinned to {pin}; only its pin ({pin_name}) moves it"),
         ));
     }
     match compare(&plan.target, BAY) {
@@ -353,7 +419,7 @@ fn release_list(
 /// bay's one install path, `$HOME/.local/bin/bay` (`DESIGN` § 15.1). An update writes only
 /// this path, whichever copy of bay runs it.
 fn installed_path() -> Result<PathBuf, String> {
-    let home = std::env::var_os("HOME").ok_or("HOME is not set; update cannot name its path")?;
+    let home = crate::platform::home().ok_or("HOME is not set; update cannot name its path")?;
     Ok(PathBuf::from(home).join(".local").join("bin").join("bay"))
 }
 
@@ -553,9 +619,7 @@ pub fn state_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state"))
-        })?;
+        .or_else(|| crate::platform::home().map(|home| PathBuf::from(home).join(".local/state")))?;
     Some(base.join("bay"))
 }
 
@@ -587,7 +651,10 @@ pub fn auto() {
     if state.checked_at <= now && now - state.checked_at < DAY_S {
         return;
     }
-    let settings = BoxSettings::load();
+    // An invalid environment value starts no check; the next `bay update` names it.
+    let Ok(settings) = BoxSettings::load() else {
+        return;
+    };
     if !settings.auto || settings.version.is_some() {
         return;
     }
@@ -614,11 +681,7 @@ pub fn auto() {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        cmd.process_group(0);
-    }
+    crate::platform::detach(&mut cmd);
     let _ = cmd.spawn();
 }
 
@@ -627,14 +690,22 @@ pub fn auto() {
 /// call. A pinned box has no update available: only its pin moves it.
 #[must_use]
 pub fn doctor_row() -> Value {
-    let settings = BoxSettings::load();
+    let settings = match BoxSettings::load() {
+        Ok(settings) => settings,
+        Err(why) => {
+            return json!({"name": "bay", "version": BAY, "state": "red", "why": why,
+                "recovery": format!("set {VERSION_VAR} and {CHANNEL_VAR} to valid values, or unset them")});
+        }
+    };
     let state = State::read();
+    let channel_from = settings.channel_from.unwrap_or("default");
     let channel = settings
         .channel
         .unwrap_or_else(|| default_channel(false).to_owned());
     let pin = settings.version;
-    let mut row =
-        json!({"name": "bay", "version": BAY, "channel": channel, "pin": pin, "state": "green"});
+    let mut row = json!({"name": "bay", "version": BAY, "channel": channel,
+        "channel_source": channel_from, "pin": pin, "pin_source": settings.version_from,
+        "state": "green"});
     if let Some(newest) = state
         .filter(|state| state.channel.as_deref() == Some(channel.as_str()))
         .and_then(|state| state.newest)
@@ -672,9 +743,15 @@ fn set_executable(path: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Without Unix modes a file runs by its name, so there is no bit to set; the file must still
+/// be a file, as the Unix call would require.
 #[cfg(not(unix))]
-fn set_executable(_: &Path) -> Result<(), String> {
-    Ok(())
+fn set_executable(path: &Path) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(()),
+        Ok(_) => Err(format!("{} is not a file", path.display())),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 /// `X.Y.Z` or `X.Y.Z-suffix`, as `scripts/release.sh` accepts.

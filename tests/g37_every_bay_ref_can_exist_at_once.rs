@@ -1,11 +1,14 @@
 //! G37. Every bay ref can exist at once.
 //!
 //! On a reftable repository the full ref set of a change (change, request, landed, intent and
-//! landed-intent generations, a queue pair, live, log, registry, evidence notes), for two
+//! landed-intent generations, a queue pair, live, log, talk, registry, evidence notes), for two
 //! changes side by side, is created in one transaction; the validator rejects a proposed name
 //! that is a prefix of another; the hook refuses an id outside the fixed alphabet, an operator
 //! name with `/` or an upper-case letter (so producers `ci` and `ci/linux` cannot coexist), and
 //! a name longer than 32 characters.
+
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
 
 mod support;
 
@@ -48,6 +51,7 @@ fn the_full_ref_set_of_two_changes_exists_at_once_on_reftable() {
             "refs/bay/queue/2",
             "refs/bay/live/build-box-1",
             "refs/bay/log/exec-1",
+            "refs/bay/talk/agent-b/abcdefghijklmnop",
             "refs/bay/registry",
             "refs/bay/landed-index/1",
             "refs/notes/bay/evidence/ci",

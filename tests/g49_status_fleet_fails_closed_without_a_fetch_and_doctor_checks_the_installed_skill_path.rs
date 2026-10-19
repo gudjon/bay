@@ -3,11 +3,14 @@
 //!
 //! `ROADMAP` § 1; `DESIGN` § 11a, § 15.2, § 15.3, § 15.4.
 
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::{Path, PathBuf};
 
-use support::{TestBox, result_json, row};
+use support::{TestBox, UNSANDBOXED_CHOICE, result_json, row};
 
 const CLAUDE_ADAPTER: &str = "[agent]\nproduct = \"claude\"\n";
 
@@ -129,7 +132,7 @@ fn a_missing_copy_is_red_only_with_the_claude_adapter() {
     assert!(!test_box.home.join(".claude/settings.json").exists());
     assert_eq!(
         std::fs::read_to_string(&test_box.global_config).unwrap(),
-        ""
+        UNSANDBOXED_CHOICE
     );
 }
 

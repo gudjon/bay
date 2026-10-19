@@ -2,8 +2,11 @@
 //!
 //! `DESIGN` (the binary's lifecycle, auto-update). The check never changes the command's
 //! result or exit code; `BAY_DISABLE_AUTOUPDATE=1`, the box's `bay.updateAuto = false` and a
-//! box pin each keep it from running, and a repository's `[update]` keys never do; the hook
+//! box pin (global config or the process's `BAY_UPDATE_VERSION`) each keep it from running, and a repository's `[update]` keys never do; the hook
 //! never runs it. The fixture release is the one of G50.
+
+// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
+#![cfg(unix)]
 
 mod release_fixture;
 
@@ -124,6 +127,27 @@ fn the_switches_and_a_pin_keep_the_check_from_running() {
         let _ = doctor(&fixture, &repo, false);
         let _ = fixture.bay(&repo).arg("status").output_busy();
         assert_eq!(checked_at(&fixture), Some(due), "{key}");
+        fixture.assert_untouched();
+    }
+
+    // A pin in the process's environment holds the box still too, and an invalid one starts
+    // no check.
+    for value in [NEWER, "not-a-version"] {
+        let fixture = Fixture::new();
+        fixture.release(NEWER, NEWER, None);
+        fixture.list(&[(NEWER, false)]);
+        let repo = fixture.repo("");
+        let due = fixture.checked_ago(2 * DAY_S);
+        let _ = fixture
+            .bay(&repo)
+            .env("BAY_UPDATE_VERSION", value)
+            .arg("status")
+            .output_busy();
+        assert_eq!(
+            checked_at(&fixture),
+            Some(due),
+            "BAY_UPDATE_VERSION={value}"
+        );
         fixture.assert_untouched();
     }
     fixture.assert_untouched();

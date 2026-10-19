@@ -160,6 +160,45 @@ impl Registry {
         Ok(path)
     }
 
+    /// The lines of class file `class` whose principal is `principal` itself, written next to
+    /// [`Self::class_file`]: what `ssh-keygen -Y verify -I <principal>` checks a signature
+    /// against when only a key enrolled under that very name may have made it. A principal is
+    /// matched as a pattern by ssh-keygen, so the whole class file would let a line under another
+    /// name whose pattern matches this one verify too.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be written.
+    pub fn principal_file(
+        &self,
+        git: &Git,
+        class: KeyClass,
+        principal: &str,
+    ) -> Result<PathBuf, String> {
+        let class_path = self.class_file(git, class)?;
+        let mut lines = String::new();
+        for line in self.files[&class]
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.split_whitespace().next() == Some(principal))
+        {
+            lines.push_str(line);
+            lines.push('\n');
+        }
+        let name = format!(
+            "{}.{}",
+            class.file(),
+            crate::agent_settings::hex(principal.as_bytes())
+        );
+        let path = class_path.with_file_name(&name);
+        if !path.exists() {
+            let tmp = class_path.with_file_name(format!(".{name}.tmp"));
+            std::fs::write(&tmp, lines).map_err(|error| error.to_string())?;
+            std::fs::rename(&tmp, &path).map_err(|error| error.to_string())?;
+        }
+        Ok(path)
+    }
+
     /// The registry version `named`, when it is on this registry's chain: this version or one of
     /// its ancestors (§ 10a). `None` for any other id, a commit this repository lacks, or one
     /// off the chain, so a forged registry commit is never a version anything is judged under.
@@ -191,6 +230,15 @@ impl Registry {
             1 => Ok(None),
             _ => Err(format!("merge-base --is-ancestor: {stderr}")),
         }
+    }
+
+    /// Whether `class`'s file enrols `principal` under any key: a registry actor of that class.
+    #[must_use]
+    pub fn enrols(&self, class: KeyClass, principal: &str) -> bool {
+        self.files[&class].lines().any(|line| {
+            let line = line.trim();
+            !line.starts_with('#') && line.split_whitespace().next() == Some(principal)
+        })
     }
 
     /// Whether `class`'s file enrols `principal` with this public key. Keys are compared by
