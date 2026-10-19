@@ -16,7 +16,8 @@ Use the verb in bay design § 4.
 
 | When | Run |
 | --- | --- |
-| Open one change | `bay start <intent> --paths <paths>` |
+| Open one change | `bay start <intent> --paths <paths> [--input <kind>:<name>]` |
+| Read what trunk now requires (after `INPUT_UNOBSERVED`) | `bay start --resume <change>` |
 | Publish the checked result | `bay land` |
 | Give the change up, so another actor may adopt it | `bay land --abandon` |
 | Read state | `bay status` |

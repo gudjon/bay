@@ -15,6 +15,7 @@ use crate::change::{
 };
 use crate::git::Git;
 use crate::ids::{is_change_id, new_change_id};
+use crate::inputs::{self, DeclaredInput, InputName};
 use crate::merge::{Merge, merge_onto};
 use crate::registry::Registry;
 use crate::repo::Repo;
@@ -28,6 +29,8 @@ pub struct StartRequest {
     pub new: bool,
     pub intent_revision: String,
     pub paths: Vec<String>,
+    /// The named inputs given to `--input` (`DESIGN` § 3.1, ruling R3).
+    pub inputs: Vec<InputName>,
     pub resume: Option<String>,
     /// The landed change this one undoes (`bay undo`); it becomes the `Reverts:` trailer.
     pub reverts: Option<String>,
@@ -152,7 +155,20 @@ fn create(
 ) -> Result<Option<BayResult>, String> {
     let id = new_change_id().map_err(|error| error.to_string())?;
     let intent_ref = claim.intent_ref();
-    let record = ChangeRecord {
+    let declared_inputs = request
+        .paths
+        .iter()
+        .cloned()
+        .map(DeclaredInput::Path)
+        .chain(
+            request
+                .inputs
+                .iter()
+                .cloned()
+                .map(|input| DeclaredInput::Named { input }),
+        )
+        .collect();
+    let mut record = ChangeRecord {
         schema: RECORD_SCHEMA.to_owned(),
         id: id.clone(),
         intent: Intent {
@@ -163,8 +179,10 @@ fn create(
         base_first: base.to_owned(),
         base: base.to_owned(),
         observed_remote: base.to_owned(),
-        declared_inputs: request.paths.clone(),
+        declared_inputs,
         observed_inputs: Vec::new(),
+        observed_versions: std::collections::BTreeMap::new(),
+        validated_candidate: None,
         state: ChangeState::Open,
         superseded_by: None,
         claim: Some(claim),
@@ -175,6 +193,8 @@ fn create(
         retention_cut: false,
         receipts: Vec::new(),
     };
+    // § 8: the view is of `base`, so what the actor reads there is what it observed.
+    record.observed_versions = inputs::observe(repo, &record, base);
     let mut chain = Chain::new(&repo.git);
     chain.sign_with(agent_signer(repo, &me.name)?);
     let head = chain
@@ -205,6 +225,8 @@ fn create(
             "view": view.display().to_string(),
             "base": base,
             "paths": request.paths,
+            "inputs": request.inputs,
+            "observed_versions": record.observed_versions,
             "intent": intent_ref,
             "pushed": true,
         }))
@@ -239,31 +261,10 @@ fn adopt_or_refuse(
             ChangeState::Abandoned | ChangeState::Superseded
         );
     if !free {
-        // Watch the chain for the takeover window: any change means its actor is working.
-        let window = repo.config.takeover();
-        let seen = std::time::Instant::now();
-        let first = head.clone();
-        while seen.elapsed() < window {
-            std::thread::sleep(std::time::Duration::from_millis(200).min(window));
-            let _ = repo.git.run(&[
-                "fetch",
-                "-q",
-                "--no-tags",
-                repo.remote(),
-                &format!("+{name}:{name}"),
-            ]);
-            if chain
-                .head(change)
-                .map_err(|error| error.message())?
-                .as_deref()
-                != Some(first.as_str())
-            {
-                return Ok(BayResult::blocked(Reason::ChangeSuperseded)
-                    .with_change(change)
-                    .with_detail(
-                        json!({"held_by": record.actor, "why": "its actor is working on it"}),
-                    ));
-            }
+        if let Some(why) = holder_works(repo, &chain, change, &head, &record.actor.name)? {
+            return Ok(BayResult::blocked(Reason::ChangeSuperseded)
+                .with_change(change)
+                .with_detail(json!({"held_by": record.actor, "why": why})));
         }
         (head, record) = chain.read(change).map_err(|error| error.message())?;
     }
@@ -283,6 +284,7 @@ fn adopt_or_refuse(
         record.retention_cut = false;
         chain.sign_with(agent_signer(repo, &me.name)?);
         let draft = chain.drafts(change).map_err(|error| error.message())?[0].clone();
+        let first_head = head.clone();
         head = chain
             .append(
                 &head,
@@ -291,16 +293,32 @@ fn adopt_or_refuse(
                 &format!("adopt {change} by {}", me.name),
             )
             .map_err(|error| error.message())?;
-        repo.git
+        if let Err(error) = repo
+            .git
             .run(&["push", "-q", repo.remote(), &format!("{name}:{name}")])
-            .map_err(|error| format!("the adoption could not be pushed: {}", error.message()))?;
+        {
+            let _ = repo.git.run(&["update-ref", &name, &first_head, &head]);
+            let why = error.message();
+            // The host judged the takeover window on its own clock and found the holder active.
+            if why.contains("CHANGE_SUPERSEDED") {
+                return Ok(BayResult::blocked(Reason::ChangeSuperseded)
+                    .with_change(change)
+                    .with_detail(json!({"held_by": previous, "why": why})));
+            }
+            return Err(format!("the adoption could not be pushed: {why}"));
+        }
     }
     let _ = head;
     let path = repo.view_path(change);
     if !view::exists(&path) {
         let draft = chain.drafts(change).map_err(|error| error.message())?[0].clone();
-        view::create(repo, change, &draft, &record.declared_inputs)
-            .map_err(|error| error.message())?;
+        view::create(
+            repo,
+            change,
+            &draft,
+            &inputs::paths(&record.declared_inputs),
+        )
+        .map_err(|error| error.message())?;
     }
     Ok(BayResult::ok(json!({
         "view": path.display().to_string(),
@@ -309,6 +327,68 @@ fn adopt_or_refuse(
         "paths": request.paths,
     }))
     .with_change(change))
+}
+
+/// Watches the chain and the live refs for the takeover window (§ 4): a chain that moves, or a
+/// new heartbeat naming the change signed by `actor`, its current actor, means that actor is
+/// working, and the answer says why. A heartbeat signed by anyone else is not that actor's
+/// activity, so no session keeps a dead peer's change un-adoptable.
+fn holder_works(
+    repo: &Repo,
+    chain: &Chain,
+    change: &str,
+    head: &str,
+    actor: &str,
+) -> Result<Option<String>, String> {
+    let name = change_ref(change);
+    let window = repo.config.takeover();
+    let live = format!("+{p}*:{p}*", p = crate::live::LIVE_PREFIX);
+    let fetch = || {
+        let _ = repo.git.run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            repo.remote(),
+            &format!("+{name}:{name}"),
+            &live,
+        ]);
+    };
+    fetch();
+    repo.fetch_registry();
+    let agents = crate::live::agents_file(&repo.git)?;
+    let mut tips = crate::live::tips(&repo.git)?;
+    let seen = std::time::Instant::now();
+    while seen.elapsed() < window {
+        std::thread::sleep(std::time::Duration::from_millis(200).min(window));
+        fetch();
+        if chain
+            .head(change)
+            .map_err(|error| error.message())?
+            .as_deref()
+            != Some(head)
+        {
+            return Ok(Some("its actor is working on it".to_owned()));
+        }
+        let now = crate::live::tips(&repo.git)?;
+        for (live_ref, tip) in &now {
+            if tips.get(live_ref) != Some(tip)
+                && crate::live::heartbeat_of(
+                    &repo.git,
+                    tip,
+                    change,
+                    actor,
+                    agents.as_deref(),
+                    window.as_secs(),
+                )?
+            {
+                return Ok(Some(format!(
+                    "its actor's heartbeat on {live_ref} names it"
+                )));
+            }
+        }
+        tips = now;
+    }
+    Ok(None)
 }
 
 fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
@@ -343,7 +423,7 @@ fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
         view::discard(repo, id).map_err(|error| error.message())?;
     }
     if view::exists(&view_path) {
-        let declared = record.declared_inputs.clone();
+        let declared = inputs::paths(&record.declared_inputs);
         view::record_observed(&view_path, &declared, &mut record.observed_inputs)
             .map_err(|error| error.message())?;
         let view_git = Git::new(&view_path);
@@ -358,7 +438,7 @@ fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
             view::set_journal(repo, id, view::Journal::Checkpointed)?;
         }
     } else {
-        view::create(repo, id, &latest, &record.declared_inputs)
+        view::create(repo, id, &latest, &inputs::paths(&record.declared_inputs))
             .map_err(|error| error.message())?;
     }
 
@@ -372,6 +452,21 @@ fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
         }
     };
 
+    // § 8: the view now holds `base`, so its versions are what the actor observed. A view left
+    // on the old base (a conflict above) never counts as observing the new one.
+    let observed = inputs::observe(repo, &record, &record.base);
+    if observed != record.observed_versions {
+        record.observed_versions = observed;
+        let head = chain
+            .head(id)
+            .map_err(|error| error.message())?
+            .ok_or("the change chain vanished")?;
+        let draft = chain.drafts(id).map_err(|error| error.message())?[0].clone();
+        chain
+            .append(&head, &record, &draft, "observe inputs")
+            .map_err(|error| error.message())?;
+    }
+
     let pushed = push_change(repo, id);
     // § 6: every resume scans base_first..trunk, so it says when the change already landed.
     let landed = crate::publish::scan(&repo.git, &record.base_first, &trunk, id)?
@@ -384,6 +479,7 @@ fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
         "trunk_moved": trunk != old_base,
         "moved_paths": moved_paths,
         "checkpointed": checkpointed,
+        "observed_versions": record.observed_versions,
         "pushed": pushed,
         "landed": landed,
     }))
@@ -402,7 +498,8 @@ fn bring_in_trunk(
 ) -> Result<Result<Vec<String>, BayResult>, String> {
     let old_base = record.base.clone();
     let mut args = vec!["diff", "--name-only", old_base.as_str(), trunk, "--"];
-    args.extend(record.declared_inputs.iter().map(String::as_str));
+    let declared = inputs::paths(&record.declared_inputs);
+    args.extend(declared.iter().map(String::as_str));
     let changed = repo.git.run(&args).map_err(|error| error.message())?;
     let changed: Vec<String> = changed.lines().map(str::to_owned).collect();
     match merge_onto(&repo.git, trunk, draft).map_err(|error| error.message())? {

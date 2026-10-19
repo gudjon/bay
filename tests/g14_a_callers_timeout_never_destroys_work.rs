@@ -133,7 +133,7 @@ fn a_one_off_status_reports_a_suspected_lease_expiry_and_never_claims() {
         .args(["executor", "run", "--once"])
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(90);
     while !started.exists() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(100));

@@ -142,6 +142,9 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
         remote_row(&git, &config, info.bare, &mut report)?;
         hooks_row(&git, &config, info, &mut report)?;
         quarantine_row(&git, &config, info.bare, &mut report);
+        if !info.bare {
+            live_row(&git, &mut report);
+        }
     } else {
         let note = "not in a git repository";
         report
@@ -314,6 +317,27 @@ fn quarantine_row(git: &Git, config: &Config, bare: bool, report: &mut Report) {
         "state": if overdue { "overdue" } else { "green" },
         "quarantines": open,
     }));
+}
+
+/// The last live summary push of this repository (§ 11a), present only when it failed: the
+/// pusher runs detached from the agent hook, so its refusal (a live ref bound to another key,
+/// for one) is shown here instead of being lost. Never red: no reason code names it.
+fn live_row(git: &Git, report: &mut Report) {
+    let Ok(common) = git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"]) else {
+        return;
+    };
+    let Some(last) = crate::live::last_push(Path::new(&common)) else {
+        return;
+    };
+    if last["ok"] == false {
+        report.rows.push(json!({
+            "name": "live",
+            "required": false,
+            "state": "failed",
+            "at": last["at"],
+            "why": last["why"],
+        }));
+    }
 }
 
 /// The installed skill at `$HOME/.claude/skills/bay/` against the skill this bay version

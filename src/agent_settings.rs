@@ -9,21 +9,22 @@ use std::path::{Path, PathBuf};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
-/// Claude Code events bay hooks (§ 11a), with the `bay hook` event name each one calls.
+/// Claude Code events bay hooks (§ 11a), with the `bay hook` event name each one calls. Only
+/// probed events (ruling R16): an installed hook can itself be behaviour (a `WorktreeCreate`
+/// hook replaces the product's own worktree creation), so `CwdChanged`, `WorktreeCreate`,
+/// `WorktreeRemove` and `StopFailure` wait for their probe.
 pub const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session-start"),
     ("UserPromptSubmit", "user-prompt-submit"),
     ("PreToolUse", "pre-tool"),
     ("PostToolBatch", "post-tool"),
     ("FileChanged", "file-changed"),
-    ("CwdChanged", "cwd-changed"),
-    ("WorktreeCreate", "worktree-create"),
-    ("WorktreeRemove", "worktree-remove"),
     ("Notification", "notification"),
     ("Stop", "stop"),
     ("SubagentStart", "subagent-start"),
     ("SubagentStop", "subagent-stop"),
-    ("StopFailure", "stop-failure"),
+    // A teammate session's idle (probed, round 2): recorded as idle.
+    ("TeammateIdle", "teammate-idle"),
     ("SessionEnd", "session-end"),
     ("PreCompact", "pre-compact"),
 ];
@@ -124,7 +125,9 @@ pub fn unrelated_digest(settings: &Map<String, Value>) -> String {
     hex(&Sha256::digest(&bytes))
 }
 
-/// Replaces bay's groups for every Claude event and leaves every other entry where it was.
+/// Replaces bay's groups for every Claude event and leaves every other entry where it was. A
+/// bay group under an event bay no longer hooks is taken out, and the event with it when
+/// nothing else is left there.
 pub fn add_claude_entries(settings: &mut Map<String, Value>) {
     let hooks = settings
         .entry("hooks")
@@ -135,6 +138,17 @@ pub fn add_claude_entries(settings: &mut Map<String, Value>) {
     let Some(hooks) = hooks.as_object_mut() else {
         return;
     };
+    hooks.retain(|event, groups| {
+        if CLAUDE_EVENTS.iter().any(|(hooked, _)| hooked == event) {
+            return true;
+        }
+        let Some(list) = groups.as_array_mut() else {
+            return true;
+        };
+        let before = list.len();
+        list.retain(|group| !is_bay_group(group));
+        !(list.is_empty() && before > 0)
+    });
     for (event, bay_event) in CLAUDE_EVENTS {
         let groups = hooks
             .entry(*event)
@@ -173,4 +187,34 @@ pub fn hex(bytes: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
         out
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Map, Value, json};
+
+    use super::add_claude_entries;
+
+    #[test]
+    fn an_unprobed_event_loses_bays_entry_and_keeps_every_other() {
+        // Ruling R16: an installed `WorktreeCreate` hook is behaviour (it replaces the product's
+        // own worktree creation), so bay installs none until it is probed, and `install` takes
+        // back an entry an earlier bay wrote. Another tool's entry stays byte for byte.
+        let other = json!({"hooks": [{"type": "command", "command": "other-tool make-worktree"}]});
+        let mut settings: Map<String, Value> = serde_json::from_value(json!({"hooks": {
+            "WorktreeCreate": [
+                {"hooks": [{"type": "command", "command": "bay hook worktree-create"}]},
+                other.clone(),
+            ],
+            "CwdChanged": [{"hooks": [{"type": "command", "command": "bay hook cwd-changed"}]}],
+        }}))
+        .unwrap();
+        add_claude_entries(&mut settings);
+        let hooks = &settings["hooks"];
+        assert_eq!(hooks["WorktreeCreate"], json!([other]));
+        assert!(hooks.get("CwdChanged").is_none(), "{hooks}");
+        assert!(hooks.get("WorktreeRemove").is_none(), "{hooks}");
+        assert!(hooks.get("StopFailure").is_none(), "{hooks}");
+        assert!(hooks.get("TeammateIdle").is_some(), "{hooks}");
+    }
 }

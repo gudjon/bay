@@ -15,6 +15,32 @@ use crate::signing::Signer;
 pub const CHANGES_PREFIX: &str = "refs/bay/changes/";
 pub const RECORD_FILE: &str = "change.json";
 pub const RECORD_SCHEMA: &str = "bay.change/1";
+/// The schema of a record that declares a named input (`INTERFACES`: a consumer refuses a
+/// major version it does not know). A bay that cannot read `{"input": …}` entries refuses such
+/// a record, instead of rewriting it without its `observed_versions` and `validated_candidate`.
+pub const RECORD_SCHEMA_INPUTS: &str = "bay.change/2";
+
+/// The schema `record` is written under: [`RECORD_SCHEMA_INPUTS`] when it declares a named
+/// input, else [`RECORD_SCHEMA`], so a record without one stays readable by every bay.
+#[must_use]
+pub fn schema_for(record: &ChangeRecord) -> &'static str {
+    if crate::inputs::names(&record.declared_inputs).is_empty() {
+        RECORD_SCHEMA
+    } else {
+        RECORD_SCHEMA_INPUTS
+    }
+}
+
+/// `record` as the pretty JSON a state commit holds, under [`schema_for`].
+fn record_text(record: &ChangeRecord) -> Result<String, ChainError> {
+    let mut value =
+        serde_json::to_value(record).map_err(|error| ChainError::BadRecord(error.to_string()))?;
+    value["schema"] = serde_json::Value::String(schema_for(record).to_owned());
+    let mut json = serde_json::to_string_pretty(&value)
+        .map_err(|error| ChainError::BadRecord(error.to_string()))?;
+    json.push('\n');
+    Ok(json)
+}
 
 /// The identity bay commits its own records under. They are unsigned until signing lands
 /// (kickstart item 11); `--no-gpg-sign` keeps a user's `commit.gpgSign` from deciding that.
@@ -107,6 +133,7 @@ pub enum ChangeState {
 }
 
 /// The change record of § 3.1. Fields of later increments are added when they are built.
+/// `required_versions` and `coverage` are derived on read (`crate::inputs::judge`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeRecord {
     pub schema: String,
@@ -118,10 +145,18 @@ pub struct ChangeRecord {
     /// The trunk commit the current revision builds on.
     pub base: String,
     pub observed_remote: String,
-    pub declared_inputs: Vec<String>,
+    /// The declared paths, and the named inputs given to `start --input` (§ 3.1).
+    pub declared_inputs: Vec<crate::inputs::DeclaredInput>,
     /// Paths the view fetched beyond its declared inputs, recorded at checkpoint and freeze (§ 10).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub observed_inputs: Vec<String>,
+    /// The version of each named input the actor read, written by `start` and `start --resume`
+    /// at the change's base (§ 3.1, § 8). `required_versions` are derived on read, never stored.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub observed_versions: std::collections::BTreeMap<String, String>,
+    /// The attempt last checked under the required versions (§ 3.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validated_candidate: Option<crate::inputs::Validated>,
     pub state: ChangeState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
@@ -402,8 +437,16 @@ impl<'a> Chain<'a> {
             .run(&["cat-file", "blob", &format!("{state}:{RECORD_FILE}")])?;
         let record: ChangeRecord = serde_json::from_str(&text)
             .map_err(|error| ChainError::BadRecord(error.to_string()))?;
-        if record.schema != RECORD_SCHEMA {
-            return Err(ChainError::BadRecord(format!("schema {}", record.schema)));
+        if record.schema != schema_for(&record) {
+            return Err(ChainError::BadRecord(format!(
+                "schema {} for a record {} named inputs",
+                record.schema,
+                if schema_for(&record) == RECORD_SCHEMA {
+                    "without"
+                } else {
+                    "with"
+                }
+            )));
         }
         Ok(record)
     }
@@ -488,9 +531,7 @@ impl<'a> Chain<'a> {
         links: &[&str],
         message: &str,
     ) -> Result<String, ChainError> {
-        let mut json = serde_json::to_string_pretty(record)
-            .map_err(|error| ChainError::BadRecord(error.to_string()))?;
-        json.push('\n');
+        let json = record_text(record)?;
         let blob = self.git.run_with(
             &["hash-object", "-w", "--stdin"],
             &[],
@@ -567,9 +608,7 @@ impl<'a> Chain<'a> {
         candidate: Option<&str>,
         message: &str,
     ) -> Result<String, ChainError> {
-        let mut json = serde_json::to_string_pretty(record)
-            .map_err(|error| ChainError::BadRecord(error.to_string()))?;
-        json.push('\n');
+        let json = record_text(record)?;
         let blob = self.git.run_with(
             &["hash-object", "-w", "--stdin"],
             &[],

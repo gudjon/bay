@@ -2,16 +2,19 @@
 //!
 //! "Landed" comes from trunk, never from the chain alone: a change whose publication is on
 //! trunk is landed even when its chain was not updated before a crash. Built here: one change
-//! or every local change, with freshness. Leftovers (G41) and the fleet map are later items;
+//! or every local change, with freshness, and each change's named inputs judged at trunk
+//! (`DESIGN` § 8): `invalidated` while trunk requires a version it has not observed, `repairing`
+//! while no candidate is validated under an observed one. Leftovers (G41) and the fleet map are later items;
 //! `--fleet` builds only its fail-closed path (G49).
 
 use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, change_ref};
+use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, ChangeState, change_ref};
 use crate::clock::now_rfc3339;
 use crate::evidence::{self, EvidenceRecord};
+use crate::inputs::Probe;
 use crate::publish::scan;
 use crate::receipts::{self, Receipt};
 use crate::repo::Repo;
@@ -136,7 +139,7 @@ pub fn cached(
             .map(|(_, receipt)| receipt)
             .filter(|receipt| receipt.change == id)
             .collect();
-        changes.push(describe(repo, &record, &trunk, &unsynced, &Costs::Skip)?);
+        changes.push(describe(repo, &record, &trunk, &unsynced, &Read::Cached)?);
     }
     let mut result = BayResult::ok(json!({"changes": changes, "trunk": trunk}));
     result.freshness = Some(Freshness {
@@ -220,7 +223,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
             })?;
         }
     }
-    let under = Costs::Under(crate::registry::Registry::current(&repo.git)?);
+    let read = Read::Full(crate::registry::Registry::current(&repo.git)?);
     let mut changes = Vec::new();
     for id in &ids {
         let (_, record) = chain.read(id).map_err(|error| error.message())?;
@@ -229,7 +232,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
             .map(|(_, receipt)| receipt)
             .filter(|receipt| receipt.change == *id)
             .collect();
-        changes.push(describe(&repo, &record, &trunk, &unsynced, &under)?);
+        changes.push(describe(&repo, &record, &trunk, &unsynced, &read)?);
     }
     let leftovers = leftovers(&repo, &trunk)?;
     let _ = &leftovers;
@@ -376,11 +379,11 @@ fn cost(records: &[EvidenceRecord]) -> Value {
     })
 }
 
-/// Whether `describe` reads the evidence behind the costs, and the registry it counts it under.
-enum Costs {
-    /// The hook's path reads no evidence: its costs are `null`.
-    Skip,
-    Under(Option<crate::registry::Registry>),
+/// How `describe` reads a change. The hook's path reads no evidence (its costs are `null`) and
+/// only the input cache; a full read counts evidence under the registry and runs providers.
+enum Read {
+    Cached,
+    Full(Option<crate::registry::Registry>),
 }
 
 /// The cost of the change's last operation, over every record its attempts produced
@@ -419,23 +422,86 @@ fn costs(
     Ok((cost(&op_records), landing))
 }
 
+/// § 8: required versions are derived on read at trunk. Only a live change has live inputs: a
+/// landed, superseded or abandoned one keeps its state, and no provider runs for it. A ready
+/// change is live: a moved input takes back the readiness it claims.
+fn live_inputs(
+    repo: &Repo,
+    record: &ChangeRecord,
+    landed: bool,
+    trunk: &str,
+    probe: Probe,
+) -> Result<Vec<crate::inputs::Judgement>, String> {
+    let live = matches!(
+        record.state,
+        ChangeState::Open | ChangeState::Invalidated | ChangeState::Repairing | ChangeState::Ready
+    );
+    if landed || !live {
+        return Ok(Vec::new());
+    }
+    crate::inputs::judge(repo, record, trunk, probe)
+}
+
+/// A one-off status cannot watch a lease; it reports a suspected expiry from the age of the
+/// chain head and never claims (§ 9a).
+fn lease(
+    repo: &Repo,
+    record: &ChangeRecord,
+    op: &crate::change::Operation,
+    published: bool,
+) -> Value {
+    if op.owner.is_none()
+        || !matches!(
+            op.state,
+            crate::change::OpState::Running | crate::change::OpState::Checked
+        )
+        || published
+    {
+        return json!(null);
+    }
+    let age = repo
+        .git
+        .run(&[
+            "log",
+            "-1",
+            "--format=%ct",
+            &crate::change::change_ref(&record.id),
+        ])
+        .ok()
+        .and_then(|time| time.trim().parse::<u64>().ok())
+        .map(|time| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |now| now.as_secs())
+                .saturating_sub(time)
+        });
+    json!(
+        if age.is_some_and(|age| age >= repo.config.lease().as_secs()) {
+            "suspected expired"
+        } else {
+            "held"
+        }
+    )
+}
+
 fn describe(
     repo: &Repo,
     record: &ChangeRecord,
     trunk: &str,
     unsynced: &[&Receipt],
-    with_costs: &Costs,
+    read: &Read,
 ) -> Result<Value, String> {
     let found = scan(&repo.git, &record.base_first, trunk, &record.id)?;
     let landed = found.publications.first();
-    let (op_cost, landing_cost) = match with_costs {
-        Costs::Under(registry) => costs(repo, record, landed, registry.as_ref())?,
-        Costs::Skip => (json!(null), json!(null)),
+    let ((op_cost, landing_cost), probe) = match read {
+        Read::Full(registry) => (costs(repo, record, landed, registry.as_ref())?, Probe::Run),
+        Read::Cached => ((json!(null), json!(null)), Probe::Cached),
     };
+    let judged = live_inputs(repo, record, landed.is_some(), trunk, probe)?;
     let state = if landed.is_some() {
         "landed".to_owned()
     } else {
-        serde_json::to_value(record.state)
+        serde_json::to_value(crate::inputs::derived_state(&judged).unwrap_or(record.state))
             .ok()
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_default()
@@ -458,27 +524,7 @@ fn describe(
             (None, false, None) => json!("missing"),
         };
         let reason = op.outcome.as_deref().and_then(Reason::from_code);
-        // A one-off status cannot watch a lease; it reports a suspected expiry from the age of
-        // the chain head and never claims (§ 9a).
-        let lease = if op.owner.is_some()
-            && matches!(op.state, crate::change::OpState::Running | crate::change::OpState::Checked)
-            && !published
-        {
-            let age = repo
-                .git
-                .run(&["log", "-1", "--format=%ct", &crate::change::change_ref(&record.id)])
-                .ok()
-                .and_then(|time| time.trim().parse::<u64>().ok())
-                .map(|time| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |now| now.as_secs())
-                        .saturating_sub(time)
-                });
-            json!(if age.is_some_and(|age| age >= repo.config.lease().as_secs()) { "suspected expired" } else { "held" })
-        } else {
-            json!(null)
-        };
+        let lease = lease(repo, record, op, published);
         json!({
             "lease": lease,
             "owner": op.owner,
@@ -504,6 +550,9 @@ fn describe(
         "recorded_state": record.state,
         "landed": landed.map(|found| &found.commit),
         "landing_cost": landing_cost,
+        "inputs": crate::inputs::to_json(judged.iter()),
+        "invalidations": crate::inputs::to_json(judged.iter().filter(|judgement| judgement.is_stale())),
+        "validated_candidate": record.validated_candidate,
         "operation": operation,
         "anomalies": found.anomalies.iter().map(|anomaly| json!({
             "commit": anomaly.commit,

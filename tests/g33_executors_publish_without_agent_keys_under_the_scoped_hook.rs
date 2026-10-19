@@ -18,7 +18,9 @@
 //! answers `REGISTRY_CHANGED` only when the revocation is the one reason for its refusal, and it
 //! refuses a publication or a request that names a registry commit off the registry chain. An
 //! executor that cannot read the newer registry yet leaves the operation waiting, never failed.
-//! Adoption and live heartbeats need item 19e; that case leaves `#[ignore]`.
+//! A live summary ref is bound to its first signer, so another actor's update of it is refused;
+//! a cross-actor adopt is accepted only past the takeover window, judged by the host's reflog,
+//! and only the change actor's own heartbeat delays it (ruling R1).
 
 mod support;
 
@@ -1167,8 +1169,477 @@ struct Held {
     release: PathBuf,
 }
 
+/// The takeover window of the live case; the seed adds a 2 s lease and a 1 s heartbeat.
+const TAKEOVER_S: u64 = 3;
+const LIVE_INTENT: &str = "CARD-LIVE";
+
+fn live_tip(test_box: &TestBox, host: &Path, machine: &str) -> Option<String> {
+    let out = test_box
+        .git(test_box.path())
+        .args([
+            &format!("--git-dir={}", host.display()),
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("refs/bay/live/{machine}"),
+        ])
+        .output()
+        .unwrap();
+    out.status
+        .success()
+        .then(|| String::from_utf8(out.stdout).unwrap().trim().to_owned())
+}
+
+/// One agent-hook event of session `session` running in `cwd` (the payload shape of Claude
+/// Code 2.1.302).
+fn a_hook_event_of(test_box: &TestBox, cwd: &Path, session: &str) {
+    let payload = serde_json::json!({"session_id": session, "cwd": cwd.display().to_string(),
+        "hook_event_name": "PostToolBatch", "tool_calls": []});
+    let out = test_box
+        .bay(cwd)
+        .args(["hook", "post-tool"])
+        .write_stdin(payload.to_string())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+}
+
+/// One agent-hook event of A's session in its view.
+fn a_hook_event(test_box: &TestBox, view: &Path) {
+    a_hook_event_of(test_box, view, "s-a");
+}
+
+/// A's session heartbeats through the agent hook (one pusher runs at a time, so it fires again
+/// until a new summary lands); waits until the host holds a new summary.
+fn a_heartbeat(test_box: &TestBox, host: &Path, view: &Path) -> String {
+    let before = live_tip(test_box, host, "box-a");
+    let asked = Instant::now();
+    loop {
+        a_hook_event(test_box, view);
+        std::thread::sleep(Duration::from_millis(300));
+        if let Some(now) = live_tip(test_box, host, "box-a")
+            && before.as_ref() != Some(&now)
+        {
+            return now;
+        }
+        assert!(
+            asked.elapsed() < Duration::from_secs(90),
+            "the live summary of box-a never reached the host"
+        );
+    }
+}
+
+/// The fingerprint of the key at `key`, as `ssh-keygen -l` prints it.
+fn fingerprint(key: &Path) -> String {
+    let out = std::process::Command::new("ssh-keygen")
+        .args(["-l", "-E", "sha256", "-f"])
+        .arg(key)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .to_owned()
+}
+
+/// The current UTC time as bay's records write it.
+fn now_rfc3339() -> String {
+    let out = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+/// A `bay.live/1` summary for `machine` naming `key`, with one fresh row of change `id` by
+/// `name`.
+fn live_summary(key: &Path, name: &str, machine: &str, id: &str) -> serde_json::Value {
+    static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let at = now_rfc3339();
+    serde_json::json!({"schema": "bay.live/1", "machine": machine, "at": at,
+        "key": fingerprint(key), "signer": name, "sessions": [{"session": format!("s-{n}"),
+        "actor": {"name": name, "session": "s"}, "change": id, "state": "working", "at": at}]})
+}
+
+/// A [`live_summary`] commit signed by `key` as `name`.
+fn live_commit(
+    test_box: &TestBox,
+    repo: &Path,
+    key: &Path,
+    name: &str,
+    machine: &str,
+    id: &str,
+) -> String {
+    let summary = live_summary(key, name, machine, id);
+    let tree = blob_tree(test_box, repo, "live.json", &summary.to_string());
+    signed_commit(test_box, repo, key, name, &tree, &[], "live")
+}
+
+/// B's own adopt of change `id`, built on the head B fetched and signed with B's agent key.
+fn adopt_commit(test_box: &TestBox, b: &Path, key: &Path, id: &str) -> String {
+    let name = format!("refs/bay/changes/{id}");
+    test_box.git_ok(b, &["fetch", "-q", "origin", &format!("+{name}:{name}")]);
+    let head = test_box.git_ok(b, &["rev-parse", &name]);
+    let mut record: serde_json::Value =
+        serde_json::from_str(&test_box.git_ok(b, &["show", &format!("{head}:change.json")]))
+            .unwrap();
+    let previous = record["actor"].take();
+    record["adopted_from"] = serde_json::json!([previous]);
+    record["actor"] = serde_json::json!({"name": "agent-b", "session": "s-b"});
+    let tree = blob_tree(
+        test_box,
+        b,
+        "change.json",
+        &format!("{}\n", serde_json::to_string_pretty(&record).unwrap()),
+    );
+    let parents = test_box.git_ok(b, &["rev-list", "--parents", "-n", "1", &head]);
+    let draft = parents.split_whitespace().last().unwrap().to_owned();
+    signed_commit(
+        test_box,
+        b,
+        key,
+        "agent-b",
+        &tree,
+        &[&head, &draft],
+        "adopt",
+    )
+}
+
+fn b_start(test_box: &TestBox, b: &Path) -> (i32, serde_json::Value) {
+    result_json(test_box.bay(b).env("BAY_ACTOR", "agent-b").args([
+        "start",
+        LIVE_INTENT,
+        "--paths",
+        "src/",
+    ]))
+}
+
+/// Runs `beat` about every 300 ms on another thread while `body` runs.
+fn while_beating<T>(beat: impl Fn() + Sync, body: impl FnOnce() -> T) -> T {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                beat();
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+        let out = body();
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        out
+    })
+}
+
+/// A hosted trunk whose config sets [`TAKEOVER_S`], agent B enrolled, A's clone named box-a,
+/// and B's clone (made before any change exists) named box-b.
+fn live_case() -> (TestBox, PathBuf, PathBuf, PathBuf, PathBuf) {
+    live_case_with(TAKEOVER_S)
+}
+
+/// [`live_case`] with its own takeover window. A row older than the window is reaped from the
+/// summary, so a case that only needs a row to arrive uses a long window: on a starved box the
+/// detached pusher may build the summary seconds after the event.
+fn live_case_with(takeover_s: u64) -> (TestBox, PathBuf, PathBuf, PathBuf, PathBuf) {
+    let (test_box, host, repo, keys) = hosted_with(|_| {
+        let mut files = check_files("true", &passing_result(1), 1, 60);
+        files.push((
+            ".bay/config.toml".to_owned(),
+            format!("[executor]\ntakeover_s = {takeover_s}\n"),
+        ));
+        files
+    });
+    let b_key = fresh_key(&test_box, "agent-b");
+    test_box.enroll_with(&repo, &keys, &keys.executor, &[("agent-b", &b_key)]);
+    test_box.git_ok(&repo, &["config", "bay.machine", "box-a"]);
+    let b = test_box.clone_of(&host, "b");
+    test_box.git_ok(&b, &["config", "bay.agentKey", b_key.to_str().unwrap()]);
+    test_box.git_ok(&b, &["config", "bay.machine", "box-b"]);
+    (test_box, host, repo, b, b_key)
+}
+
 #[test]
-#[ignore = "item 19e"]
 fn adoption_and_live_heartbeats_are_scoped_to_their_actor() {
-    panic!("G33: adoption and live heartbeats are not implemented");
+    let (test_box, host, repo, b, b_key) = live_case();
+    let started = test_box.bay_ok(&repo, &["start", LIVE_INTENT, "--paths", "src/"]);
+    let started_at = Instant::now();
+    let id = started["change"].as_str().unwrap().to_owned();
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+
+    // An adopt inside the takeover window is refused at the hook, by the host's reflog. It is
+    // pushed first, well inside the window, so a loaded box cannot age the chain past it.
+    let adopt = adopt_commit(&test_box, &b, &b_key, &id);
+    let change_ref = format!("refs/bay/changes/{id}");
+    let why = refused(&test_box, &b, &[&format!("{adopt}:{change_ref}")]);
+    assert!(
+        why.contains("CHANGE_SUPERSEDED") && why.contains("its chain head moved"),
+        "{why}"
+    );
+
+    // A's session heartbeats through the agent hook: an agent-signed summary naming its change,
+    // with no local path in it.
+    let tip = a_heartbeat(&test_box, &host, &view);
+    let summary: serde_json::Value =
+        serde_json::from_str(&test_box.git_bare(&host, &["show", &format!("{tip}:live.json")]))
+            .unwrap();
+    assert_eq!(summary["schema"], "bay.live/1", "{summary}");
+    assert_eq!(summary["machine"], "box-a", "{summary}");
+    assert!(
+        summary["key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("SHA256:")),
+        "{summary}"
+    );
+    let row = &summary["sessions"][0];
+    assert_eq!(row["change"], id.as_str(), "{summary}");
+    assert!(
+        row.get("view").is_none() && row.get("repo").is_none(),
+        "{summary}"
+    );
+
+    // A live update signed by actor B for A's machine ref is refused; B's own ref is B's.
+    let forged = live_commit(&test_box, &b, &b_key, "agent-b", "box-a", &id);
+    let why = refused(&test_box, &b, &[&format!("+{forged}:refs/bay/live/box-a")]);
+    assert!(
+        why.contains("refs/bay/live/box-a: is bound to agent agent"),
+        "{why}"
+    );
+    assert_ne!(live_tip(&test_box, &host, "box-a"), Some(forged));
+    let own = live_commit(&test_box, &b, &b_key, "agent-b", "box-b", &id);
+    test_box.git_ok(
+        &b,
+        &[
+            "push",
+            "-q",
+            "origin",
+            &format!("+{own}:refs/bay/live/box-b"),
+        ],
+    );
+
+    // A's own heartbeat delays adoption: B's start is refused while A's session beats, and so
+    // is B's adopt past the chain's window while A's heartbeat is recent.
+    let beat_a = || a_hook_event(&test_box, &view);
+    let (code, refusal) = while_beating(beat_a, || b_start(&test_box, &b));
+    assert_eq!(code, 10, "{refusal}");
+    assert_eq!(refusal["reason"], "CHANGE_SUPERSEDED", "{refusal}");
+    assert!(
+        refusal["detail"]["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("heartbeat on refs/bay/live/box-a names it")),
+        "{refusal}"
+    );
+    // The chain head is past the window from here on, whatever the box's load was.
+    let past = Duration::from_secs(TAKEOVER_S + 1);
+    std::thread::sleep(past.saturating_sub(started_at.elapsed()));
+    a_heartbeat(&test_box, &host, &view);
+    let why = refused(&test_box, &b, &[&format!("{adopt}:{change_ref}")]);
+    assert!(
+        why.contains("its heartbeat on refs/bay/live/box-a"),
+        "{why}"
+    );
+
+    // A's session dies without SessionEnd while a sibling session on box-a keeps firing: the
+    // dead session's row ages out on its own heartbeat, so box-a's fresh summaries do not keep
+    // the change un-adoptable. B's heartbeat naming A's change does not delay adoption either:
+    // once A's last heartbeat is older than the window, B adopts while both beat.
+    std::thread::sleep(Duration::from_secs(TAKEOVER_S + 1));
+    let beat = || {
+        a_hook_event_of(&test_box, &repo, "s-sibling");
+        let commit = live_commit(&test_box, &b, &b_key, "agent-b", "box-b", &id);
+        let _ = test_box
+            .git(&b)
+            .args([
+                "push",
+                "-q",
+                "origin",
+                &format!("+{commit}:refs/bay/live/box-b"),
+            ])
+            .output();
+    };
+    let sibling_before = live_tip(&test_box, &host, "box-a");
+    let asked = Instant::now();
+    let (code, adopted) = while_beating(beat, || b_start(&test_box, &b));
+    assert_eq!(code, 0, "{adopted}");
+    assert_eq!(adopted["change"], id.as_str());
+    assert_eq!(adopted["detail"]["adopted"], true, "{adopted}");
+    assert!(
+        asked.elapsed() < Duration::from_secs(TAKEOVER_S * 4),
+        "a heartbeat other than A's delayed the adoption: {:?}",
+        asked.elapsed()
+    );
+    assert_ne!(
+        live_tip(&test_box, &host, "box-a"),
+        sibling_before,
+        "the sibling session on box-a never published"
+    );
+    let record = test_box.git_bare(&host, &["show", &format!("{change_ref}:change.json")]);
+    assert!(record.contains("\"agent-b\""), "{record}");
+}
+
+#[test]
+fn a_live_ref_holds_one_small_summary_of_its_own_machine_and_key() {
+    let (test_box, host, _repo, b, b_key) = live_case();
+    let id = "0000000000000000";
+    let push = |commit: &str, machine: &str| {
+        refused(
+            &test_box,
+            &b,
+            &[&format!("+{commit}:refs/bay/live/{machine}")],
+        )
+    };
+    let summary = live_summary(&b_key, "agent-b", "box-b", id);
+    let sign = |tree: &str, parents: &[&str]| {
+        signed_commit(&test_box, &b, &b_key, "agent-b", tree, parents, "live")
+    };
+    let tree = blob_tree(&test_box, &b, "live.json", &summary.to_string());
+
+    // Unsigned.
+    let unsigned = test_box.git_ok(&b, &["commit-tree", "--no-gpg-sign", &tree, "-m", "live"]);
+    assert!(
+        push(&unsigned, "box-b").contains("is not signed by an agent key"),
+        "unsigned"
+    );
+    // With a parent: a live ref is one commit, not a history.
+    let first = sign(&tree, &[]);
+    let child = sign(&tree, &[&first]);
+    let why = push(&child, "box-b");
+    assert!(why.contains("is not a parentless live commit"), "{why}");
+    // Another file beside live.json, or a summary past the size bound.
+    let two = files_tree(
+        &test_box,
+        &b,
+        &[("live.json", &summary.to_string()), ("payload", "x")],
+    );
+    let why = push(&sign(&two, &[]), "box-b");
+    assert!(why.contains("must hold live.json alone"), "{why}");
+    let mut big = summary.clone();
+    big["padding"] = serde_json::json!("x".repeat(40 * 1024));
+    let why = push(
+        &sign(
+            &blob_tree(&test_box, &b, "live.json", &big.to_string()),
+            &[],
+        ),
+        "box-b",
+    );
+    assert!(why.contains("must hold live.json alone"), "{why}");
+    // Another machine's summary, or one naming another key or another agent.
+    let why = push(&first, "box-c");
+    assert!(why.contains("summarises another machine"), "{why}");
+    for (field, value) in [("key", "SHA256:not-this-key"), ("signer", "agent")] {
+        let mut other = summary.clone();
+        other[field] = serde_json::json!(value);
+        let why = push(
+            &sign(
+                &blob_tree(&test_box, &b, "live.json", &other.to_string()),
+                &[],
+            ),
+            "box-b",
+        );
+        assert!(
+            why.contains("does not name the key and agent that signed it"),
+            "{field}: {why}"
+        );
+    }
+
+    // The good summary is accepted; the ref is never deleted, and B's key holds no second one.
+    test_box.git_ok(
+        &b,
+        &[
+            "push",
+            "-q",
+            "origin",
+            &format!("+{first}:refs/bay/live/box-b"),
+        ],
+    );
+    assert_eq!(live_tip(&test_box, &host, "box-b"), Some(first));
+    let why = push("", "box-b");
+    assert!(why.contains("a live ref is never deleted"), "{why}");
+    let second = live_commit(&test_box, &b, &b_key, "agent-b", "box-c", id);
+    let why = push(&second, "box-c");
+    assert!(why.contains("already holds refs/bay/live/box-b"), "{why}");
+    assert_eq!(live_tip(&test_box, &host, "box-c"), None);
+}
+
+/// The sessions `machine`'s summary on the host names.
+fn sessions_on(test_box: &TestBox, host: &Path, machine: &str) -> Vec<String> {
+    live_tip(test_box, host, machine).map_or_else(Vec::new, |tip| {
+        let summary: serde_json::Value =
+            serde_json::from_str(&test_box.git_bare(host, &["show", &format!("{tip}:live.json")]))
+                .unwrap();
+        summary["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|row| row["session"].as_str().map(str::to_owned))
+            .collect()
+    })
+}
+
+#[test]
+fn a_burst_of_hook_events_ends_published_and_a_refused_live_push_shows_in_doctor() {
+    let (test_box, host, repo, b, b_key) = live_case_with(120);
+    // Two events back to back: the second comes while the first one's pusher runs, and no event
+    // follows it, yet the host ends up with its state.
+    a_hook_event_of(&test_box, &repo, "s-first");
+    a_hook_event_of(&test_box, &repo, "s-second");
+    let asked = Instant::now();
+    while !sessions_on(&test_box, &host, "box-a").contains(&"s-second".to_owned()) {
+        assert!(
+            asked.elapsed() < Duration::from_secs(90),
+            "the last event of a burst was never published: {:?}",
+            sessions_on(&test_box, &host, "box-a")
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // A box whose machine name another key already holds is refused at the host; the detached
+    // pusher's refusal is shown by doctor, not lost.
+    let own = live_commit(
+        &test_box,
+        &b,
+        &b_key,
+        "agent-b",
+        "box-b",
+        "0000000000000000",
+    );
+    test_box.git_ok(
+        &b,
+        &[
+            "push",
+            "-q",
+            "origin",
+            &format!("+{own}:refs/bay/live/box-b"),
+        ],
+    );
+    test_box.git_ok(&repo, &["config", "bay.machine", "box-b"]);
+    let asked = Instant::now();
+    loop {
+        a_hook_event_of(&test_box, &repo, "s-third");
+        let (_, doctor) = result_json(test_box.bay(&repo).arg("doctor"));
+        let row = doctor["detail"]["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["name"] == "live")
+            .cloned();
+        if let Some(row) = row {
+            assert_eq!(row["state"], "failed", "{row}");
+            assert!(
+                row["why"]
+                    .as_str()
+                    .is_some_and(|why| why.contains("is bound to agent agent-b")),
+                "{row}"
+            );
+            break;
+        }
+        assert!(
+            asked.elapsed() < Duration::from_secs(90),
+            "doctor never showed the refused live push: {doctor}"
+        );
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    assert_eq!(live_tip(&test_box, &host, "box-b"), Some(own));
 }

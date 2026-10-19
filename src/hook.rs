@@ -8,7 +8,12 @@
 //! Judged here: bay ref names (the fixed alphabet), trunk publications, the landed marker,
 //! change chains (agent, executor and registry signatures; adoption; no deletion; the
 //! retention cut), requests, evidence notes, executor logs, the registry, queue reservations
-//! and releases, intent claims and the landed intent.
+//! and releases, intent claims, the landed intent, and live summary refs.
+//!
+//! An adopt of another actor's open change is judged by the host's own clock (ruling R1): the
+//! chain head's age is the age of its newest entry in the host reflog, and the last heartbeat
+//! of the change's actor is the newest entry of a live ref's host reflog with a fresh row of the
+//! change; both must be at least the takeover window (`[executor] takeover_s` on trunk) old.
 
 use std::collections::HashSet;
 
@@ -29,6 +34,32 @@ struct Update {
 
 fn is_zero(oid: &str) -> bool {
     !oid.is_empty() && oid.bytes().all(|byte| byte == b'0')
+}
+
+/// The most live refs a host holds and an adopt check reads (§ 10a: the hook's work is bounded).
+const LIVE_REFS_MAX: usize = 256;
+/// The most host reflog entries of one live ref an adopt check reads. An honest machine pushes
+/// at most one summary per heartbeat, so this covers a takeover window of 64 heartbeats.
+const LIVE_REFLOG_MAX: usize = 64;
+
+/// Whether `git ls-tree -l` of a live commit lists `live.json` alone, a blob of at most
+/// [`crate::live::LIVE_MAX_BYTES`].
+fn live_tree_is_small(tree: &str) -> bool {
+    let mut lines = tree.lines();
+    let (Some(line), None) = (lines.next(), lines.next()) else {
+        return false;
+    };
+    let Some((entry, path)) = line.split_once('\t') else {
+        return false;
+    };
+    let fields: Vec<&str> = entry.split_whitespace().collect();
+    path == crate::live::LIVE_FILE
+        && fields.len() == 4
+        && fields[0] == "100644"
+        && fields[1] == "blob"
+        && fields[3]
+            .parse::<u64>()
+            .is_ok_and(|size| size <= crate::live::LIVE_MAX_BYTES)
 }
 
 fn message(error: &GitError) -> String {
@@ -92,6 +123,8 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             judge.intent(update, claim)
         } else if name.starts_with("refs/bay/landed-intent/") {
             judge.landed_intent(update, &trunk)
+        } else if let Some(machine) = name.strip_prefix(crate::live::LIVE_PREFIX) {
+            judge.live(update, machine)
         } else {
             Ok(())
         };
@@ -453,16 +486,26 @@ impl Judge<'_> {
             if record.id != id {
                 return Err(format!("{commit} carries the record of another change"));
             }
-            // An adoption (the actor changes) is accepted only while the change has not landed.
+            // An adoption (the actor changes) is accepted only while the change has not landed,
+            // and, for an open change, only past its takeover window.
             let parent = self
                 .git
                 .run(&["rev-parse", "--verify", "-q", &format!("{commit}^1")])
                 .ok();
-            let adopted = parent
-                .and_then(|parent| chain.record_at(&parent).ok())
-                .is_some_and(|before| before.actor.name != record.actor.name);
-            if adopted && self.after(&format!("refs/bay/landed/{id}"))?.is_some() {
-                return Err(format!("{commit} adopts a change that already landed"));
+            let before = parent
+                .as_deref()
+                .and_then(|parent| chain.record_at(parent).ok())
+                .filter(|before| before.actor.name != record.actor.name);
+            if let Some(before) = &before {
+                if self.after(&format!("refs/bay/landed/{id}"))?.is_some() {
+                    return Err(format!("{commit} adopts a change that already landed"));
+                }
+                if !matches!(
+                    before.state,
+                    crate::change::ChangeState::Abandoned | crate::change::ChangeState::Superseded
+                ) {
+                    self.takeover_window(update, id, parent.as_deref(), &before.actor.name)?;
+                }
             }
             if record.state == crate::change::ChangeState::Abandoned
                 && self.after(&format!("refs/bay/landed/{id}"))?.is_some()
@@ -491,6 +534,208 @@ impl Judge<'_> {
                     ));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// § 4: another actor adopts an open change only when its chain head has not moved for the
+    /// takeover window, and no heartbeat of its current actor naming it is newer than that
+    /// window. Both ages are read from this host's reflog, on this host's clock.
+    ///
+    /// The work is bounded (§ 10a): the chain's reflog gives one entry; each live ref gives at
+    /// most [`LIVE_REFLOG_MAX`] entries, their summaries are read by one batch, and only its
+    /// newest entry with a fresh row of the change by that actor is verified (a live ref is
+    /// bound to one key, so an older entry is signed by the same key or by one no longer
+    /// enrolled). A host holding more than [`LIVE_REFS_MAX`] live refs refuses the adopt.
+    fn takeover_window(
+        &self,
+        update: &Update,
+        id: &str,
+        adopted_head: Option<&str>,
+        actor: &str,
+    ) -> Result<(), String> {
+        let config = crate::config::Config::load_or_committed(self.git.dir(), self.git)?;
+        let window = config.takeover().as_secs();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        let refuse = |why: String| {
+            Err(format!(
+                "CHANGE_SUPERSEDED: change {id} is held by {actor}: {why}; the takeover window is {window} s"
+            ))
+        };
+        if is_zero(&update.old) || adopted_head != Some(update.old.as_str()) {
+            return refuse("the adopted head is not the head this host holds".to_owned());
+        }
+        let name = format!("refs/bay/changes/{id}");
+        let Some((tip, set_at)) = self.reflog(&name, 1)?.into_iter().next() else {
+            return refuse(format!("this host has no reflog of {name}"));
+        };
+        if tip != update.old {
+            return refuse(format!(
+                "this host's reflog of {name} does not end at its head"
+            ));
+        }
+        let age = now.saturating_sub(set_at);
+        if age < window {
+            return refuse(format!("its chain head moved {age} s ago"));
+        }
+        let lives = crate::live::tips(self.git)?;
+        if lives.len() > LIVE_REFS_MAX {
+            return refuse(format!(
+                "this host holds {} live refs, more than the {LIVE_REFS_MAX} it reads",
+                lives.len()
+            ));
+        }
+        let agents = self.registry.class_file(self.git, KeyClass::Agent)?;
+        // Only a live ref whose tip this hook accepted from the actor holds its heartbeats: the
+        // ref is bound to one key, and an older entry by a key since revoked no longer verifies.
+        // So the reflogs read are those of the actor's own refs, read from one batch of tips.
+        let (names, tips): (Vec<String>, Vec<String>) = lives.into_iter().unzip();
+        let own: Vec<&String> = names
+            .iter()
+            .zip(crate::live::summaries_at(self.git, &tips)?)
+            .filter(|(_, summary)| {
+                summary
+                    .as_ref()
+                    .is_some_and(|summary| summary["signer"] == actor)
+            })
+            .map(|(name, _)| name)
+            .collect();
+        for live in own {
+            let entries: Vec<(String, u64)> = self
+                .reflog(live, LIVE_REFLOG_MAX)?
+                .into_iter()
+                .take_while(|(_, at)| now.saturating_sub(*at) < window)
+                .collect();
+            let commits: Vec<String> = entries.iter().map(|(commit, _)| commit.clone()).collect();
+            let summaries = crate::live::summaries_at(self.git, &commits)?;
+            let newest = entries.iter().zip(&summaries).find(|(_, summary)| {
+                summary
+                    .as_ref()
+                    .is_some_and(|summary| crate::live::names_change(summary, id, actor, window))
+            });
+            if let Some(((commit, at), _)) = newest
+                && crate::live::heartbeat_of(self.git, commit, id, actor, Some(&agents), window)?
+            {
+                return refuse(format!(
+                    "its heartbeat on {live} is {} s old",
+                    now.saturating_sub(*at)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The newest `limit` entries of the host reflog of `name`, newest first: each entry's new
+    /// value and the Unix time it was set.
+    fn reflog(&self, name: &str, limit: usize) -> Result<Vec<(String, u64)>, String> {
+        let limit = format!("-n{limit}");
+        let (code, out, _) = self
+            .git
+            .run_status(&[
+                "log",
+                "-g",
+                &limit,
+                "--date=unix",
+                "--format=%H %gd",
+                name,
+                "--",
+            ])
+            .map_err(|error| message(&error))?;
+        if code != 0 {
+            return Ok(Vec::new());
+        }
+        Ok(out
+            .lines()
+            .filter_map(|line| {
+                let (commit, selector) = line.split_once(' ')?;
+                let at = selector
+                    .rsplit_once("@{")?
+                    .1
+                    .strip_suffix('}')?
+                    .parse()
+                    .ok()?;
+                Some((commit.to_owned(), at))
+            })
+            .collect())
+    }
+
+    /// A live summary ref (§ 10a, ruling R1): never deleted; one parentless, agent-signed
+    /// commit whose tree is `live.json` alone, at most [`crate::live::LIVE_MAX_BYTES`], a
+    /// `bay.live/1` summary of this machine naming the fingerprint of the key that signed it.
+    /// The ref is bound to its first key: an update is accepted only from the key of the tip
+    /// it replaces (or, when that tip no longer verifies because its key left the registry,
+    /// from any agent key). One key holds one live ref: a create by a key that another live
+    /// ref's summary names is refused, so no agent claims a second machine's name.
+    fn live(&self, update: &Update, machine: &str) -> Result<(), String> {
+        if is_zero(&update.new) {
+            return Err("a live ref is never deleted".to_owned());
+        }
+        let file = self.registry.class_file(self.git, KeyClass::Agent)?;
+        let Some((signer, key)) = signing::verify_commit_key(self.git, &update.new, &file)
+            .map_err(|error| message(&error))?
+        else {
+            return Err(format!("{} is not signed by an agent key", update.new));
+        };
+        let parents = self
+            .git
+            .run(&["show", "-s", "--format=%P", &update.new])
+            .map_err(|error| message(&error))?;
+        if !parents.trim().is_empty() {
+            return Err(format!("{} is not a parentless live commit", update.new));
+        }
+        let tree = self
+            .git
+            .run(&["ls-tree", "-l", &update.new])
+            .map_err(|error| message(&error))?;
+        if !live_tree_is_small(&tree) {
+            return Err(format!(
+                "{} must hold {} alone, at most {} bytes",
+                update.new,
+                crate::live::LIVE_FILE,
+                crate::live::LIVE_MAX_BYTES
+            ));
+        }
+        let summary = crate::live::summary_at(self.git, &update.new)
+            .filter(|summary| summary["schema"] == crate::live::LIVE_SCHEMA)
+            .ok_or_else(|| format!("{} holds no {}", update.new, crate::live::LIVE_SCHEMA))?;
+        if summary["machine"] != machine {
+            return Err(format!("{} summarises another machine", update.new));
+        }
+        if summary["key"] != key.as_str() || summary["signer"] != signer.as_str() {
+            return Err(format!(
+                "{} does not name the key and agent that signed it ({key}, {signer})",
+                update.new
+            ));
+        }
+        if is_zero(&update.old) {
+            let lives = crate::live::tips(self.git)?;
+            if lives.len() >= LIVE_REFS_MAX {
+                return Err(format!("this host already holds {LIVE_REFS_MAX} live refs"));
+            }
+            let (names, tips): (Vec<String>, Vec<String>) = lives
+                .into_iter()
+                .filter(|(name, _)| *name != update.name)
+                .unzip();
+            let summaries = crate::live::summaries_at(self.git, &tips)?;
+            if let Some((other, _)) = names.iter().zip(&summaries).find(|(_, summary)| {
+                summary
+                    .as_ref()
+                    .is_some_and(|summary| summary["key"] == key.as_str())
+            }) {
+                return Err(format!(
+                    "agent {signer}'s key already holds {other}; one key publishes one machine's live ref"
+                ));
+            }
+        } else if let Some((bound, bound_key)) =
+            signing::verify_commit_key(self.git, &update.old, &file)
+                .map_err(|error| message(&error))?
+            && bound_key != key
+        {
+            return Err(format!(
+                "is bound to agent {bound}; agent {signer} may update only its own machine's live ref"
+            ));
         }
         Ok(())
     }

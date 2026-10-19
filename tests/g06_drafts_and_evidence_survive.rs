@@ -11,6 +11,7 @@ use std::path::Path;
 use bay::change::{Actor, Chain, ChangeRecord, ChangeState, Intent, RECORD_SCHEMA, freeze_draft};
 use bay::git::Git;
 use bay::ids::new_change_id;
+use bay::inputs::DeclaredInput;
 use support::TestBox;
 
 fn record(id: &str, base: &str) -> ChangeRecord {
@@ -28,8 +29,10 @@ fn record(id: &str, base: &str) -> ChangeRecord {
         base_first: base.to_owned(),
         base: base.to_owned(),
         observed_remote: base.to_owned(),
-        declared_inputs: vec!["src/".to_owned()],
+        declared_inputs: vec![DeclaredInput::Path("src/".to_owned())],
         observed_inputs: Vec::new(),
+        observed_versions: std::collections::BTreeMap::new(),
+        validated_candidate: None,
         state: ChangeState::Open,
         superseded_by: None,
         claim: None,

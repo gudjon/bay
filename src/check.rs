@@ -33,6 +33,9 @@ pub struct Candidate<'a> {
     pub id: &'a str,
     /// How the judging policy reached trunk (`INTERFACES` § 6).
     pub policy_provenance: crate::policy::Provenance,
+    /// The version of each named input the candidate is checked under, `<kind>:<name>@<version>`
+    /// (`INTERFACES` § 3): the request's `inputs`.
+    pub inputs: &'a [String],
 }
 
 /// The paths `commit`'s tree adds, modifies or deletes against `base`'s, sorted. Renames are
@@ -76,9 +79,24 @@ pub struct Limits {
     pub hidden: Vec<PathBuf>,
 }
 
+/// What an adapter, a check's or an input provider's, may neither read nor write (§ 7): the
+/// repository with every view in it, and every key this machine holds, so code under test can
+/// never read a producer key or write a signed record.
+#[must_use]
+pub fn hidden_for(repo: &crate::repo::Repo, keys: &crate::signing::Keys) -> Vec<PathBuf> {
+    let mut hidden = vec![repo.work_root.clone(), repo.common_dir.clone()];
+    let keys = [
+        keys.agent.clone(),
+        keys.executor.as_ref().map(|signer| signer.key.clone()),
+        keys.producer.as_ref().map(|signer| signer.key.clone()),
+    ];
+    hidden.extend(keys.into_iter().flatten());
+    hidden
+}
+
 /// The sandbox a check ran in: `sandbox-exec` on macOS, `bwrap` on Linux, or none when this
 /// machine has neither (the evidence record says so).
-fn sandbox_kind() -> &'static str {
+pub(crate) fn sandbox_kind() -> &'static str {
     if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists() {
         "sandbox-exec"
     } else if cfg!(target_os = "linux")
@@ -110,7 +128,7 @@ fn real(path: &Path) -> PathBuf {
 
 /// The command that runs `executable` inside the sandbox: `hidden` unreadable and unwritable,
 /// except `scratch`, which holds this check's candidate and adapter.
-fn sandboxed(
+pub(crate) fn sandboxed(
     kind: &str,
     executable: &Path,
     args: &[&str],
@@ -390,7 +408,7 @@ fn run_one(
         "plan": {"id": entry.id, "version": policy.revision.to_string()},
         "requires": {"environment": entry.environment},
         "timeout_s": entry.timeout_s,
-        "inputs": [],
+        "inputs": candidate.inputs,
     });
     let args: Vec<&str> = words.collect();
     // Ruling 8b: a named variable the executor does not set is an infrastructure failure;
@@ -634,7 +652,12 @@ fn run_with_timeout(
 }
 
 /// Writes `commit`'s tree (or just `paths` of it) into `dir`, with no `.git`.
-fn materialize(git: &Git, commit: &str, paths: &[String], dir: &Path) -> Result<(), String> {
+pub(crate) fn materialize(
+    git: &Git,
+    commit: &str,
+    paths: &[String],
+    dir: &Path,
+) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|error| format!("{}: {error}", dir.display()))?;
     let tar: PathBuf = dir.with_extension("tar");
     let tar_text = tar.display().to_string();

@@ -23,6 +23,7 @@ use crate::change::{
 use crate::check::{self, Candidate};
 use crate::evidence::{self, Combined};
 use crate::git::{Git, GitError};
+use crate::inputs;
 use crate::merge::{Merge, merge_onto};
 use crate::policy;
 use crate::receipts;
@@ -517,6 +518,14 @@ fn submit_land(
     };
     if ctx.op(&op_id).state == OpState::Blocked
         && let Some(refusal) = retry_blocked(&mut ctx, &op_id, &revision, &trunk)?
+    {
+        return Ok(refusal);
+    }
+    // § 8 at admit: a change that has not observed what trunk requires is refused now, with
+    // the outcome on its operation, never queued for a refusal no one is there to read. An
+    // operation an executor already took is the executor's to judge.
+    if ctx.op(&op_id).state == OpState::Submitted
+        && let Err(refusal) = input_gate(&mut ctx, &op_id, &revision, &trunk)?
     {
         return Ok(refusal);
     }
@@ -1210,9 +1219,17 @@ fn superseded(id: &str, op_id: &str, epoch: u64, owner: Option<&String>) -> BayR
     result.with_detail(json!({"superseded": true, "epoch": epoch, "owner": owner}))
 }
 
-/// The condition an operation was blocked on: the revision, the trunk, and the evidence on the
-/// candidate tree. A retry under the same condition can only reach the same outcome.
-fn condition(git: &Git, revision: &str, trunk: &str, tree: Option<&str>) -> Result<String, String> {
+/// The condition an operation was blocked on: the revision, the trunk, the evidence on the
+/// candidate tree, and the versions the change observed of its named inputs (§ 8: reading the
+/// required version is what retries an `INPUT_UNOBSERVED`). A retry under the same condition
+/// can only reach the same outcome.
+fn condition(
+    git: &Git,
+    revision: &str,
+    trunk: &str,
+    tree: Option<&str>,
+    observed: &std::collections::BTreeMap<String, String>,
+) -> Result<String, String> {
     let mut evidence: Vec<String> = match tree {
         Some(tree) => evidence::records_for(git, tree)?
             .into_iter()
@@ -1221,7 +1238,12 @@ fn condition(git: &Git, revision: &str, trunk: &str, tree: Option<&str>) -> Resu
         None => Vec::new(),
     };
     evidence.sort();
-    digest(&json!({"revision": revision, "trunk": trunk, "evidence": evidence}))
+    let mut condition = json!({"revision": revision, "trunk": trunk, "evidence": evidence});
+    // A change with no named input keeps the condition it always had.
+    if !observed.is_empty() {
+        condition["observed_versions"] = json!(observed);
+    }
+    digest(&condition)
 }
 
 /// A blocked operation retried (§ 2 of the interfaces): an unchanged condition is refused with
@@ -1236,7 +1258,13 @@ fn retry_blocked(
     let reason = op.outcome.as_deref().and_then(Reason::from_code);
     let tree = op.attempts.last().map(|attempt| attempt.tree.clone());
     let then = op.blocked_on.clone();
-    let now = condition(&ctx.repo.git, revision, trunk, tree.as_deref())?;
+    let now = condition(
+        &ctx.repo.git,
+        revision,
+        trunk,
+        tree.as_deref(),
+        &ctx.record.observed_versions,
+    )?;
     if let Some(reason) = reason
         && !reason.transient()
         && then.as_deref() == Some(now.as_str())
@@ -1382,7 +1410,7 @@ fn freeze(ctx: &Ctx) -> Result<Result<String, BayResult>, String> {
 /// Records the view's undeclared paths as observed inputs before the request is written.
 fn observe_inputs(ctx: &mut Ctx) -> Result<(), String> {
     let path = ctx.repo.view_path(&ctx.id);
-    let declared = ctx.record.declared_inputs.clone();
+    let declared = inputs::paths(&ctx.record.declared_inputs);
     view::record_observed(&path, &declared, &mut ctx.record.observed_inputs)
         .map(|_| ())
         .map_err(|error| error.message())
@@ -1600,12 +1628,16 @@ fn build_and_check(
     revision: &str,
     trunk: &str,
 ) -> Result<Result<Attempt, BayResult>, String> {
+    let judged = match input_gate(ctx, op_id, revision, trunk)? {
+        Ok(judged) => judged,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
     let git = &ctx.repo.git;
     ctx.step.set("merge");
     let tree = match merge_onto(git, trunk, revision).map_err(|error| error.message())? {
         Merge::Clean(tree) => tree,
         Merge::Conflict(paths, _) => {
-            let condition = condition(git, revision, trunk, None)?;
+            let condition = condition(git, revision, trunk, None, &ctx.record.observed_versions)?;
             let op = ctx.op_mut(op_id);
             op.state = OpState::Blocked;
             op.outcome = Some(Reason::MergeConflict.code().to_owned());
@@ -1631,8 +1663,16 @@ fn build_and_check(
 
     // Step 4: check the exact candidate under the policy at its base.
     ctx.step.set("check");
-    let (has_policy, verdict, refusal) =
-        check_candidate(ctx, op_id, &candidate_id, &commit, &tree, trunk)?;
+    let (has_policy, verdict, refusal) = check_candidate(
+        ctx,
+        op_id,
+        &candidate_id,
+        &commit,
+        &tree,
+        trunk,
+        &inputs::request_inputs(&judged),
+    )?;
+    let refusal = judged_outcome(ctx, op_id, &candidate_id, refusal, &judged);
     // Heartbeats moved the chain while the check ran; continue from the last one pushed.
     if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
         ctx.head.clone_from(&beat);
@@ -1656,6 +1696,7 @@ fn build_and_check(
             revision,
             trunk,
             Some(&attempt.tree),
+            &ctx.record.observed_versions,
         )?)
     } else {
         None
@@ -1688,6 +1729,149 @@ fn build_and_check(
     Ok(Ok(attempt))
 }
 
+/// § 8: a failing candidate of a change whose input moved is a repair still owed on that
+/// input (`INPUT_CHANGED`); a passing one is the candidate validated under the required
+/// versions. Returns the refusal the attempt ends with.
+fn judged_outcome(
+    ctx: &mut Ctx,
+    op_id: &str,
+    candidate_id: &str,
+    refusal: Option<BayResult>,
+    judged: &[inputs::Judgement],
+) -> Option<BayResult> {
+    match refusal {
+        Some(refusal) if refusal.reason == Some(Reason::CheckFailed) => {
+            match judged
+                .iter()
+                .find(|judgement| judgement.state == inputs::InputState::Changed)
+            {
+                Some(changed) => Some(input_refusal(ctx, op_id, changed, judged, Some(&refusal))),
+                None => Some(refusal),
+            }
+        }
+        None if !judged.is_empty() => {
+            ctx.record.validated_candidate = Some(inputs::Validated {
+                candidate: candidate_id.to_owned(),
+                versions: inputs::required_versions(judged),
+            });
+            None
+        }
+        refusal => refusal,
+    }
+}
+
+/// § 8: a change that has not observed what trunk now requires of its inputs is refused
+/// before any candidate is built. Returns every named input judged at `trunk`.
+fn input_gate(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Result<Vec<inputs::Judgement>, BayResult>, String> {
+    ctx.step.set("inputs");
+    // The gate runs every provider fresh: a cached answer is a plain file, never a derivation.
+    let judged = inputs::judge(ctx.repo, &ctx.record, trunk, inputs::Probe::Fresh)?;
+    if let Some(stale) = judged
+        .iter()
+        .find(|judgement| judgement.state == inputs::InputState::Unobserved)
+    {
+        let condition = condition(
+            &ctx.repo.git,
+            revision,
+            trunk,
+            None,
+            &ctx.record.observed_versions,
+        )?;
+        let op = ctx.op_mut(op_id);
+        op.state = OpState::Blocked;
+        op.outcome = Some(Reason::InputUnobserved.code().to_owned());
+        op.blocked_on = Some(condition);
+        ctx.save(
+            revision,
+            None,
+            &format!("blocked: input {} unobserved", stale.input),
+        )?;
+        ctx.push_chain();
+        return Ok(Err(input_refusal(ctx, op_id, stale, &judged, None)));
+    }
+    // G8 fails closed: trunk names a provider for the input and it gave no version, so nothing
+    // shows the change observed what trunk requires. The block records no condition: the
+    // provider's answer is outside it, so a retry always asks the provider again.
+    if let Some(unknown) = judged
+        .iter()
+        .find(|judgement| judgement.named && judgement.state == inputs::InputState::Unknown)
+    {
+        let op = ctx.op_mut(op_id);
+        op.state = OpState::Blocked;
+        op.outcome = Some(Reason::CoverageUnknown.code().to_owned());
+        op.blocked_on = None;
+        ctx.save(
+            revision,
+            None,
+            &format!("blocked: input {} has no known version", unknown.input),
+        )?;
+        ctx.push_chain();
+        return Ok(Err(BayResult::blocked(Reason::CoverageUnknown)
+            .with_change(ctx.id.clone())
+            .with_op(op_id)
+            .with_detail(json!({
+                "input": unknown.input,
+                "why": unknown.why,
+                "repair": format!("make trunk's provider for {} answer", unknown.input),
+                "inputs": inputs::to_json(judged.iter()),
+            }))));
+    }
+    Ok(Ok(judged))
+}
+
+/// The refusal on a stale input (§ 8): what changed, which assumption it invalidated, and
+/// which repair remains, with every named input's coverage. `check` is the failed check a
+/// changed input's candidate was refused by.
+fn input_refusal(
+    ctx: &Ctx,
+    op_id: &str,
+    stale: &inputs::Judgement,
+    judged: &[inputs::Judgement],
+    check: Option<&BayResult>,
+) -> BayResult {
+    let reason = stale.reason().unwrap_or(Reason::InputChanged);
+    let repair = if reason == Reason::InputUnobserved {
+        format!("read the required version: bay start --resume {}", ctx.id)
+    } else {
+        format!(
+            "repair the change for {} {}",
+            stale.input,
+            stale.required.as_deref().unwrap_or_default()
+        )
+    };
+    let mut detail = json!({
+        "input": stale.input,
+        "observed": stale.observed,
+        "required": stale.required,
+        "phase": stale.phase,
+        "consumer": stale.consumer,
+        "repair": repair,
+        "inputs": inputs::to_json(judged.iter()),
+    });
+    if let Some(check) = check {
+        detail["check"] = json!(check.reason);
+        detail["candidate"] = check
+            .detail
+            .as_ref()
+            .map_or(serde_json::Value::Null, |detail| {
+                detail["candidate"].clone()
+            });
+        detail["checks"] = check
+            .detail
+            .as_ref()
+            .map_or(serde_json::Value::Null, |detail| detail["checks"].clone());
+    }
+    BayResult::blocked(reason)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(detail)
+}
+
 /// Step 4: runs the base policy's checks on the candidate and combines the evidence on its
 /// tree. Returns whether a policy exists, the attempt's verdict word, and the refusal when
 /// any required check is not `pass`.
@@ -1698,6 +1882,7 @@ fn check_candidate(
     commit: &str,
     tree: &str,
     trunk: &str,
+    inputs: &[String],
 ) -> Result<(bool, &'static str, Option<BayResult>), String> {
     let git = &ctx.repo.git;
     let refuse = |why: String| {
@@ -1723,6 +1908,10 @@ fn check_candidate(
         }
         Err(policy::LoadError::Git(why)) => return refuse(why),
     };
+    // Runs `policy`'s checks with the adapter from `from`, under check id prefix `id`.
+    let run = |id: &str, policy: &policy::Policy, from: &str| {
+        run_policy(ctx, op_id, id, commit, tree, trunk, policy, from, inputs)
+    };
     let changed = policy_changed(git, trunk, commit, base_policy.as_ref())?;
     if !changed {
         if ctx.repair.is_some() {
@@ -1731,8 +1920,7 @@ fn check_candidate(
         let Some(policy) = &base_policy else {
             return Ok((false, "pass", None));
         };
-        let (verdict, refusal) =
-            run_policy(ctx, op_id, candidate_id, commit, tree, trunk, policy, trunk)?;
+        let (verdict, refusal) = run(candidate_id, policy, trunk)?;
         return Ok((true, verdict, refusal));
     }
 
@@ -1773,36 +1961,17 @@ fn check_candidate(
             ));
         }
         let own_id = format!("{candidate_id}-own");
-        let (verdict, refusal) = run_policy(
-            ctx,
-            op_id,
-            &own_id,
-            commit,
-            tree,
-            trunk,
-            &own_policy,
-            commit,
-        )?;
+        let (verdict, refusal) = run(&own_id, &own_policy, commit)?;
         return Ok((true, verdict, refusal));
     }
     if let Some(policy) = &base_policy {
-        let (verdict, refusal) =
-            run_policy(ctx, op_id, candidate_id, commit, tree, trunk, policy, trunk)?;
+        let (verdict, refusal) = run(candidate_id, policy, trunk)?;
         if refusal.is_some() {
             return Ok((true, verdict, refusal));
         }
     }
     let own_id = format!("{candidate_id}-own");
-    let (verdict, refusal) = run_policy(
-        ctx,
-        op_id,
-        &own_id,
-        commit,
-        tree,
-        trunk,
-        &own_policy,
-        commit,
-    )?;
+    let (verdict, refusal) = run(&own_id, &own_policy, commit)?;
     Ok((true, verdict, refusal))
 }
 
@@ -1827,7 +1996,8 @@ fn policy_invalid(
     )
 }
 
-/// Whether the candidate changes `.bay/policy.toml` or any adapter path of the base policy.
+/// Whether the candidate changes `.bay/policy.toml` or any adapter path of the base policy,
+/// a check's or an input provider's.
 fn policy_changed(
     git: &Git,
     trunk: &str,
@@ -1836,11 +2006,7 @@ fn policy_changed(
 ) -> Result<bool, String> {
     let mut paths = vec![policy::POLICY_PATH.to_owned()];
     if let Some(base) = base {
-        paths.extend(
-            base.checks
-                .iter()
-                .flat_map(|check| check.adapter.iter().cloned()),
-        );
+        paths.extend(base.adapter_paths());
     }
     let mut args = vec!["diff", "--name-only", trunk, commit, "--"];
     args.extend(paths.iter().map(String::as_str));
@@ -1859,12 +2025,7 @@ fn only_policy_paths(
     let adapters: Vec<String> = base
         .into_iter()
         .chain(std::iter::once(own))
-        .flat_map(|policy| {
-            policy
-                .checks
-                .iter()
-                .flat_map(|check| check.adapter.iter().cloned())
-        })
+        .flat_map(policy::Policy::adapter_paths)
         .collect();
     let changed = git
         .run(&["diff", "--name-only", trunk, commit])
@@ -1893,6 +2054,7 @@ fn run_policy(
     trunk: &str,
     policy: &policy::Policy,
     adapter_from: &str,
+    inputs: &[String],
 ) -> Result<(&'static str, Option<BayResult>), String> {
     let git = &ctx.repo.git;
     let base_tree = tree_of(git, trunk)?;
@@ -1930,6 +2092,7 @@ fn run_policy(
             changed_paths: &check::changed_paths(git, trunk, commit)?,
             id: candidate_id,
             policy_provenance,
+            inputs,
         },
         &producer,
         &check::Limits {
@@ -2153,18 +2316,9 @@ fn lease_expired(ctx: &mut Ctx) -> bool {
     true
 }
 
-/// What a check may neither read nor write (§ 7): the repository with every view in it, and
-/// every key this machine holds, so code under test can never read a producer key or write a
-/// signed record.
+/// What a check may neither read nor write (§ 7): [`check::hidden_for`].
 fn hidden_paths(ctx: &Ctx) -> Vec<std::path::PathBuf> {
-    let mut hidden = vec![ctx.repo.work_root.clone(), ctx.repo.common_dir.clone()];
-    let keys = [
-        ctx.keys.agent.clone(),
-        ctx.keys.executor.as_ref().map(|signer| signer.key.clone()),
-        ctx.keys.producer.as_ref().map(|signer| signer.key.clone()),
-    ];
-    hidden.extend(keys.into_iter().flatten());
-    hidden
+    check::hidden_for(ctx.repo, &ctx.keys)
 }
 
 /// Checks that already finished on `tree` under the policy's manifest: a resume after a dead
@@ -2408,20 +2562,36 @@ fn derive_landed(
     ctx.push_chain();
     write_terminal(ctx, op_id, "published", Some(commit))?;
     let mut result = landed_result(&ctx.id, Some(op_id), commit, revision);
-    // The change is published: a fault while reading its gaps never turns the landing into
-    // an error. The result says the gaps could not be read, so none is hidden.
+    // The change is published: a fault while reading its gaps or its inputs never turns the
+    // landing into an error. The result says what could not be read, so none is hidden.
     let gaps = match coverage_gaps(ctx, op_id) {
         Ok(gaps) if gaps.is_empty() => None,
         Ok(gaps) => Some(("coverage_gaps", serde_json::Value::Array(gaps))),
         Err(why) => Some(("coverage_gaps_unread", serde_json::Value::String(why))),
     };
-    if let Some((key, value)) = gaps
-        && let Some(detail) = result
-            .detail
-            .as_mut()
-            .and_then(|detail| detail.as_object_mut())
+    // § 8: every answer carries its coverage; a landing of a change with named inputs lists
+    // them as judged at the trunk it landed on.
+    let base = ctx
+        .op(op_id)
+        .attempts
+        .last()
+        .map(|attempt| attempt.base.clone());
+    let judged = match base {
+        Some(base) => match inputs::judge(ctx.repo, &ctx.record, &base, inputs::Probe::Run) {
+            Ok(judged) if judged.is_empty() => None,
+            Ok(judged) => Some(("inputs", inputs::to_json(judged.iter()))),
+            Err(why) => Some(("inputs_unread", serde_json::Value::String(why))),
+        },
+        None => None,
+    };
+    if let Some(detail) = result
+        .detail
+        .as_mut()
+        .and_then(|detail| detail.as_object_mut())
     {
-        detail.insert(key.to_owned(), value);
+        for (key, value) in gaps.into_iter().chain(judged) {
+            detail.insert(key.to_owned(), value);
+        }
     }
     Ok(result)
 }

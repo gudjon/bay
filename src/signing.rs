@@ -99,6 +99,19 @@ impl Keys {
 ///
 /// A git fault other than a failed verification.
 pub fn verify_commit(git: &Git, commit: &str, allowed: &Path) -> Result<Option<String>, GitError> {
+    Ok(verify_commit_key(git, commit, allowed)?.map(|(principal, _)| principal))
+}
+
+/// [`verify_commit`], with the signing key's fingerprint (`SHA256:…`) next to the principal.
+///
+/// # Errors
+///
+/// A git fault other than a failed verification.
+pub fn verify_commit_key(
+    git: &Git,
+    commit: &str,
+    allowed: &Path,
+) -> Result<Option<(String, String)>, GitError> {
     let setting = format!("gpg.ssh.allowedSignersFile={}", allowed.display());
     let (code, stdout, stderr) =
         git.run_status(&["-c", &setting, "verify-commit", "--raw", commit])?;
@@ -108,8 +121,32 @@ pub fn verify_commit(git: &Git, commit: &str, allowed: &Path) -> Result<Option<S
     let text = format!("{stdout}\n{stderr}");
     Ok(text.lines().find_map(|line| {
         let rest = line.split(" signature for ").nth(1)?;
-        rest.split(" with ").next().map(str::to_owned)
+        let (principal, key) = rest.split_once(" with ")?;
+        let fingerprint = key.rsplit(' ').next().unwrap_or_default();
+        Some((principal.to_owned(), fingerprint.to_owned()))
     }))
+}
+
+/// The fingerprint (`SHA256:…`) of the key at `key`, as `ssh-keygen -l` prints it.
+///
+/// # Errors
+///
+/// ssh-keygen cannot read the key.
+pub fn fingerprint(key: &Path) -> Result<String, String> {
+    let mut cmd = Command::new("ssh-keygen");
+    cmd.args(["-l", "-E", "sha256", "-f"]).arg(key);
+    let output = git::run_bounded(cmd, "ssh-keygen -l").map_err(|error| error.message())?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    match (output.status.success(), text.split_whitespace().nth(1)) {
+        (true, Some(fingerprint)) if fingerprint.starts_with("SHA256:") => {
+            Ok(fingerprint.to_owned())
+        }
+        _ => Err(format!(
+            "ssh-keygen could not read {}: {}",
+            key.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
 }
 
 /// The public half of the private key at `key`: its key type and key blob.

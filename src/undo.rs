@@ -75,6 +75,7 @@ fn run(dir: &Path, change: &str, wait: bool) -> Result<BayResult, String> {
         intent: Some(intent),
         intent_revision: UNDO_REVISION.to_owned(),
         paths,
+        inputs: Vec::new(),
         resume: None,
         reverts: Some(change.to_owned()),
     };

@@ -6,7 +6,8 @@
 //!
 //! With a key registry, it also writes the repository-local signing identity (§ 15.3 item 3):
 //! `gpg.format=ssh` and `gpg.ssh.allowedSignersFile` set to the class file of the key this box
-//! uses. Keys and the registry themselves are enrolment, never install's job.
+//! uses. Keys and the registry themselves are enrolment, never install's job. In a repository it
+//! writes `bay.machine` when it is unset: the folded host name (`live.rs`).
 
 use std::path::{Path, PathBuf};
 
@@ -73,6 +74,8 @@ fn run(dir: &Path, machine: bool) -> Result<BayResult, String> {
             detail["hooks"] = json!(path.display().to_string());
             detail["unrelated_hooks_unchanged"] = json!(before == after);
         }
+        // § 11a, ruling R1: the name this machine's live summary ref carries.
+        detail["machine"] = json!(crate::live::ensure_machine(&git)?);
         if let Some(allowed) = signing_identity(&git)? {
             detail["allowed_signers"] = json!(allowed);
         }

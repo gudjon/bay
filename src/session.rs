@@ -8,14 +8,16 @@
 //! blocks the session, so it always exits 0. It reads the local cache only (`status::cached`):
 //! no fetch, no receipt push, no journal write, so a slow remote never delays a session and
 //! sessions that start together never race; the trunk line says it is the local cache, and
-//! `bay status` is what synchronizes (`DESIGN` § 11). Overlapping changes and `watchPaths` are later
-//! items. Every hook event in a view also appends to the session's work record (`record`).
+//! `bay status` is what synchronizes (`DESIGN` § 11). Overlapping changes are a later item.
+//! Every probed hook event in a repository but pre-tool also appends to the session's work
+//! record (`record`), with the files each step wrote in a view.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::agent_hook::{Event, Payload};
 use crate::change::{ChangeRecord, ChangeState, OpState};
 use crate::repo::Repo;
 use crate::result::Reason;
@@ -28,43 +30,55 @@ pub fn hook_cwd(payload: &Value, dir: &Path) -> PathBuf {
         .map_or_else(|| dir.to_path_buf(), PathBuf::from)
 }
 
-/// The session's state after `event`, where § 11a's wiring names one.
-fn state_after(event: &str) -> Option<&'static str> {
-    match event {
-        "user_prompt_submit" | "post_tool_batch" => Some("working"),
-        "notification" => Some("waiting"),
-        "stop" => Some("idle"),
-        "session_end" => Some("ended"),
-        _ => None,
-    }
-}
-
-/// `PostToolBatch` → `post_tool_batch`.
-fn snake_case(name: &str) -> String {
-    let mut out = String::new();
-    for (index, c) in name.chars().enumerate() {
-        if c.is_ascii_uppercase() {
-            if index > 0 {
-                out.push('_');
-            }
-            out.push(c.to_ascii_lowercase());
-        } else if c == '-' {
-            out.push('_');
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// A session id that names a file in the sessions directory and nothing else.
-fn file_safe(session: &str) -> bool {
-    !session.is_empty()
-        && session.len() <= 128
-        && !session.starts_with('.')
-        && session
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SessionId(String);
+
+impl SessionId {
+    #[must_use]
+    pub fn parse(session: &str) -> Option<Self> {
+        let safe = !session.is_empty()
+            && session.len() <= 128
+            && !session.starts_with('.')
+            && session
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'));
+        safe.then(|| Self(session.to_owned()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Ruling R2: where the product hands `SessionStart` a `CLAUDE_ENV_FILE` (Claude Code sources it
+/// before each shell command of the session), bay appends `BAY_SESSION` and `BAY_ACTOR` to it,
+/// so the session's own bay commands act as this session, and marks the link `bound` in the
+/// session's state. Without one the link is `unbound`: never guessed. An actor name with a
+/// control character is not written.
+fn bind_env(state_dir: &Path, session: &SessionId) {
+    let Some(file) = std::env::var_os("CLAUDE_ENV_FILE").filter(|file| !file.is_empty()) else {
+        return;
+    };
+    let actor = crate::change::actor_name();
+    if actor.is_empty() || actor.chars().any(char::is_control) {
+        return;
+    }
+    let quote = |value: &str| format!("'{}'", value.replace('\'', r"'\''"));
+    let text = format!(
+        "export BAY_SESSION={}\nexport BAY_ACTOR={}\n",
+        quote(session.as_str()),
+        quote(&actor)
+    );
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+        .and_then(|mut file| std::io::Write::write_all(&mut file, text.as_bytes()));
+    if appended.is_ok() && std::fs::create_dir_all(state_dir).is_ok() {
+        let _ = std::fs::write(state_dir.join("link"), "CLAUDE_ENV_FILE\n");
+    }
 }
 
 /// Appends one `bay.session/1` line for this hook event to
@@ -74,68 +88,85 @@ fn file_safe(session: &str) -> bool {
 ///
 /// A view belongs to one change (ruling 10): every session whose hook fires in the view works on
 /// that view's change and is recorded by its own session id under the change's actor, a
-/// subagent with its `agent_id`, a teammate with its own `session_id`. The record is a
-/// disposable work record; a hook never fails on it. Files read and written (the view's Git
-/// status diff) and the machine's summary ref are later items.
-pub fn record(dir: &Path, event: &str, input: &str) {
-    if event == "pre-tool" {
-        return;
-    }
-    let Ok(payload) = serde_json::from_str::<Value>(input) else {
-        return;
-    };
-    let Some(session) = payload["session_id"].as_str().filter(|id| file_safe(id)) else {
+/// subagent with its `agent_id`, a teammate with its own `session_id`. At the post-tool and stop
+/// events in a view the line lists the files the step wrote (`wrote`), or why they are unknown
+/// (`wrote_unknown`), from the view's own Git status (§ 11a, `crate::writes`). The record is a
+/// disposable work record; a hook never fails on it. Files read and the machine's summary ref
+/// are later items.
+pub fn record(payload: &Payload) {
+    let Some(session) = &payload.session else {
         return;
     };
-    let cwd = hook_cwd(&payload, dir);
-    let Ok(repo) = Repo::open(&cwd) else {
+    let cwd = &payload.cwd;
+    let Ok(repo) = Repo::open(cwd) else {
         return;
     };
     // In a view, the session works on the view's change, under the change's actor. Elsewhere in
     // the repository it is still a tracked session (§ 11a reserves "untracked" for hooks
     // disabled): no change, no view, and the actor's own name with this session.
-    let (actor, change, view) = match repo.view_change(&cwd) {
+    let (actor, change, view) = match repo.view_change(cwd) {
         Some(id) => {
             let Ok((_, change)) = crate::change::Chain::new(&repo.git).read(&id) else {
                 return;
             };
-            let view = repo.view_path(&id).display().to_string();
-            (change.actor, Value::from(id), Value::from(view))
+            let view = repo.view_path(&id);
+            (change.actor, Some(id), Some(view))
         }
         None => (
             crate::change::Actor {
                 name: crate::change::actor_name(),
-                session: session.to_owned(),
+                session: session.as_str().to_owned(),
             },
-            Value::Null,
-            Value::Null,
+            None,
+            None,
         ),
     };
-    let event = payload["hook_event_name"]
-        .as_str()
-        .map_or_else(|| snake_case(event), snake_case);
+    let dir = repo.common_dir.join("bay").join("sessions");
+    let path = dir.join(format!("{}.jsonl", session.as_str()));
+    let state_dir = repo
+        .common_dir
+        .join("bay")
+        .join("session-state")
+        .join(session.as_str());
+    let event = payload.event;
+    if event == Event::SessionStart && payload.agent.is_none() {
+        bind_env(&state_dir, session);
+    }
+    let actor_link = if state_dir.join("link").is_file() {
+        "bound"
+    } else {
+        "unbound"
+    };
     let mut line = serde_json::json!({
         "schema": "bay.session/1",
         "at": crate::clock::now_rfc3339(),
-        "session": session,
+        "session": session.as_str(),
         "actor": actor,
+        "actor_link": actor_link,
         "repo": repo.work_root.display().to_string(),
         "change": change,
-        "view": view,
-        "event": event,
+        "view": view.as_ref().map(|view| view.display().to_string()),
+        "event": event.record_name(),
         "heartbeat": true,
     });
-    if let Some(agent) = payload["agent_id"].as_str() {
-        line["agent"] = Value::from(agent);
+    if let Some(agent) = &payload.agent {
+        line["agent"] = Value::from(agent.as_str());
     }
-    if let Some(state) = state_after(&event) {
+    if let Some(state) = event.state_after() {
         line["state"] = Value::from(state);
+    }
+    let state = crate::writes::state_path(&state_dir, payload.agent.as_deref());
+    if let (Some(view), Some(step), Some(state)) = (&view, event.writes(), &state) {
+        match crate::writes::step(view, state, step) {
+            Some(crate::writes::Wrote::Paths(paths)) => line["wrote"] = serde_json::json!(paths),
+            Some(crate::writes::Wrote::Unknown(why)) => line["wrote_unknown"] = Value::from(why),
+            None => {}
+        }
     }
     let Ok(mut text) = serde_json::to_string(&line) else {
         return;
     };
     text.push('\n');
-    let dir = repo.common_dir.join("bay").join("sessions");
     if std::fs::create_dir_all(&dir).is_err() {
         return;
     }
@@ -144,9 +175,14 @@ pub fn record(dir: &Path, event: &str, input: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join(format!("{session}.jsonl")))
+        .open(&path)
     {
         let _ = std::io::Write::write_all(&mut file, text.as_bytes());
+    }
+    // The session is over: its kept ids and its link go, so this state never outgrows the live
+    // sessions. A resumed session starts a new baseline.
+    if event == Event::SessionEnd {
+        let _ = std::fs::remove_dir_all(&state_dir);
     }
 }
 

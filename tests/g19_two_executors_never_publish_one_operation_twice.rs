@@ -61,12 +61,17 @@ fn run(test_box: &TestBox, round: usize) {
     for result in &results {
         let landed_existing = result["decision"] == "landed";
         let superseded = result["detail"]["superseded"] == true;
+        // Under load the second executor can arrive while the first still holds the lease: it
+        // reports the holder and does not run, a stated answer that publishes nothing.
+        let held_by_other = result["detail"]["lease"] == "held"
+            && result["detail"]["owner"].is_string()
+            && result["decision"] != "landed";
         let log = test_box.git_bare(
             &remote,
             &["log", "--format=%s", &format!("refs/bay/changes/{id}")],
         );
         assert!(
-            landed_existing || superseded,
+            landed_existing || superseded || held_by_other,
             "{result}\nall: {outputs:?}\nchain:\n{log}"
         );
     }

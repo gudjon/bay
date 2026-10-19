@@ -160,6 +160,15 @@ impl Config {
                  reuse waits for G7)"
             ));
         }
+        // § 4: the takeover window is longer than the executor lease.
+        if config.takeover() <= config.lease() {
+            return Err(format!(
+                "[executor] takeover_s = {}: the takeover window must be longer than the lease \
+                 (lease_s = {})",
+                config.takeover().as_secs(),
+                config.lease().as_secs()
+            ));
+        }
         Ok(config)
     }
 
@@ -337,6 +346,20 @@ product = "claude"                 # leave this table out when the box does not 
         assert!(Config::parse("[policy]\nevidence_reuse = \"off\"\n").is_ok());
         let error = Config::parse("[policy]\nevidence_reuse = \"exact-inputs\"\n").unwrap_err();
         assert!(error.contains("exact-inputs"), "{error}");
+    }
+
+    #[test]
+    fn the_takeover_window_is_longer_than_the_lease() {
+        assert!(Config::parse("[executor]\nlease_s = 5\ntakeover_s = 6\n").is_ok());
+        assert!(Config::parse("[executor]\nlease_s = 5\n").is_ok());
+        for text in [
+            "[executor]\nlease_s = 5\ntakeover_s = 5\n",
+            "[executor]\ntakeover_s = 0\n",
+            "[executor]\ntakeover_s = 30\n",
+        ] {
+            let error = Config::parse(text).unwrap_err();
+            assert!(error.contains("takeover_s"), "{text}: {error}");
+        }
     }
 
     #[test]

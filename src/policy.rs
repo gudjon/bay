@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 use crate::canonical::digest;
 use crate::git::{Git, GitError};
+use crate::inputs::InputEntry;
 
 pub const POLICY_PATH: &str = ".bay/policy.toml";
 const DEFAULT_TIMEOUT_S: u64 = 1800;
@@ -24,6 +25,9 @@ struct PolicyFile {
     check: Vec<CheckEntry>,
     #[serde(default)]
     quarantine: Vec<Quarantine>,
+    /// The named inputs' providers (`DESIGN` § 8, ruling R3).
+    #[serde(default)]
+    input: Vec<InputEntry>,
 }
 
 /// One check set aside for a stated time (`DESIGN` § 7, ruling 8c): while the entry is in the
@@ -78,6 +82,16 @@ pub struct CheckEntry {
 }
 
 impl Policy {
+    /// The adapter paths of every `[[check]]` and `[[input]]` entry: a provider is policy, so a
+    /// change to it is a policy change (ruling R3).
+    pub fn adapter_paths(&self) -> impl Iterator<Item = String> + '_ {
+        self.checks
+            .iter()
+            .flat_map(|check| check.adapter.iter())
+            .chain(self.inputs.iter().flat_map(|input| input.adapter.iter()))
+            .cloned()
+    }
+
     /// Whether check `entry` is set aside by a `[[quarantine]]` entry (ruling 8c).
     #[must_use]
     pub fn is_quarantined(&self, entry: &CheckEntry) -> bool {
@@ -96,15 +110,12 @@ impl Policy {
 }
 
 impl Policy {
-    /// Every path this policy is made of: the policy file and each adapter path, sorted.
+    /// Every path this policy is made of: the policy file and each adapter path of its checks
+    /// and its input providers, sorted.
     #[must_use]
     pub fn paths(&self) -> Vec<String> {
         let mut paths: Vec<String> = std::iter::once(POLICY_PATH.to_owned())
-            .chain(
-                self.checks
-                    .iter()
-                    .flat_map(|check| check.adapter.iter().cloned()),
-            )
+            .chain(self.adapter_paths())
             .collect();
         paths.sort();
         paths.dedup();
@@ -299,6 +310,8 @@ pub struct Policy {
     pub checks: Vec<CheckEntry>,
     /// The `[[quarantine]]` entries: their checks are not required.
     pub quarantined: Vec<Quarantine>,
+    /// The `[[input]]` entries: each named input's provider.
+    pub inputs: Vec<InputEntry>,
     /// The required checks only.
     pub manifest: Vec<ManifestEntry>,
     pub manifest_digest: String,
@@ -326,10 +339,10 @@ impl From<LoadError> for String {
 /// # Errors
 ///
 /// [`LoadError::Invalid`] when the policy file is invalid: it does not parse, lacks
-/// `expected_minimum`, repeats an (`id`, `environment`), names an executable outside its
-/// `adapter` list, names an adapter path absent at `commit`, has a relative `path` entry,
-/// names a baseline variable in `env`, has a `[[quarantine]]` that names no check or whose
-/// `end` is neither a date nor a `Change-Id`, or has no required check whose
+/// `expected_minimum`, repeats an (`id`, `environment`) or an `[[input]]` name, names an
+/// executable outside its `adapter` list, names an adapter path absent at `commit`, has a
+/// relative `path` entry, names a baseline variable in `env`, has a `[[quarantine]]` that names
+/// no check or whose `end` is neither a date nor a `Change-Id`, or has no required check whose
 /// `expected_minimum` is above zero. [`LoadError::Git`] on a git fault.
 pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
     let text = match git.run(&["cat-file", "blob", &format!("{commit}:{POLICY_PATH}")]) {
@@ -427,14 +440,28 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
             manifest.push(manifest_entry(entry, &adapter_ids).map_err(LoadError::Git)?);
         }
     }
+    validate_inputs(git, commit, &file.input).map_err(invalid)?;
     let manifest_digest = manifest_digest(&mut manifest).map_err(LoadError::Git)?;
     Ok(Some(Policy {
         revision: file.revision,
         checks: file.check,
         quarantined: file.quarantine,
+        inputs: file.input,
         manifest,
         manifest_digest,
     }))
+}
+
+/// The validity rules of the `[[input]]` entries at `commit`: one entry per name, each valid.
+fn validate_inputs(git: &Git, commit: &str, inputs: &[InputEntry]) -> Result<(), String> {
+    let mut names = std::collections::HashSet::new();
+    for entry in inputs {
+        if !names.insert(entry.name.clone()) {
+            return Err(format!("two [[input]] entries for {}", entry.name));
+        }
+        entry.validate(git, commit)?;
+    }
+    Ok(())
 }
 
 /// One manifest entry: the definition digest is the sha256 of the RFC 8785 canonical JSON of
@@ -467,8 +494,17 @@ pub fn manifest_digest(manifest: &mut [ManifestEntry]) -> Result<String, String>
     digest(&serde_json::to_value(&*manifest).map_err(|error| error.to_string())?)
 }
 
-/// Whether adapter entry `path` (a file, or a directory ending in `/`) covers `file`.
-fn covers(path: &str, file: &str) -> bool {
+/// Whether adapter entry `path` (a file, or a directory ending in `/`) covers `file`. A file
+/// named by an absolute path or with a `.`, `..` or empty component is covered by no entry: a
+/// command `scripts/../../bin/sh` lies outside `scripts/` whatever its prefix says.
+pub(crate) fn covers(path: &str, file: &str) -> bool {
+    let plain = !file.is_empty()
+        && file
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    if !plain {
+        return false;
+    }
     if path.ends_with('/') {
         file.starts_with(path)
     } else {
@@ -482,7 +518,23 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{CheckEntry, manifest_digest, manifest_entry};
+    use super::{CheckEntry, covers, manifest_digest, manifest_entry};
+
+    /// An executable that climbs out of its adapter directory is not in it.
+    #[test]
+    fn a_path_that_climbs_out_is_covered_by_no_adapter_entry() {
+        assert!(covers("scripts/", "scripts/bay-check"));
+        assert!(covers("scripts/bay-check", "scripts/bay-check"));
+        for file in [
+            "scripts/../../bin/sh",
+            "scripts/./bay-check",
+            "scripts//bay-check",
+            "/scripts/bay-check",
+            "",
+        ] {
+            assert!(!covers("scripts/", file), "{file}");
+        }
+    }
 
     /// Ruling 8b: the check's `path` and the names in its `env` are fields of the entry, so
     /// changing either changes its definition digest (`INTERFACES` § 7).

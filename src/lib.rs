@@ -2,6 +2,7 @@
 //!
 //! The design is `DESIGN`; the contracts are `INTERFACES`.
 
+pub mod agent_hook;
 pub mod agent_settings;
 pub mod canonical;
 pub mod change;
@@ -16,7 +17,9 @@ pub mod git;
 pub mod hook;
 pub mod host;
 pub mod ids;
+pub mod inputs;
 pub mod install;
+pub mod live;
 pub mod log;
 pub mod merge;
 pub mod names;
@@ -37,3 +40,4 @@ pub mod undo;
 pub mod update;
 pub mod version;
 pub mod view;
+pub mod writes;

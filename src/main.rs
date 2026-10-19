@@ -34,6 +34,9 @@ enum Command {
         /// The paths this change reads and writes (its declared inputs)
         #[arg(long, num_args = 1..)]
         paths: Vec<String>,
+        /// A named input this change depends on, `<kind>:<name>` (repeatable)
+        #[arg(long = "input", value_name = "KIND:NAME", value_parser = bay::inputs::InputName::parse)]
+        inputs: Vec<bay::inputs::InputName>,
         /// Restore an existing change: checkpoint its draft, bring in newer trunk
         #[arg(long, value_name = "CHANGE", conflicts_with = "intent")]
         resume: Option<String>,
@@ -90,6 +93,12 @@ enum Command {
         #[command(subcommand)]
         action: ExecutorAction,
     },
+    /// This machine's live summary ref (started by the agent hook once per heartbeat)
+    #[command(hide = true)]
+    Live {
+        #[command(subcommand)]
+        action: LiveAction,
+    },
     /// Admin: push a change and its evidence to a remote, or write them to a bundle
     Share {
         change: String,
@@ -135,6 +144,12 @@ enum HostAction {
 }
 
 #[derive(Subcommand)]
+enum LiveAction {
+    /// Write this machine's summary of its sessions and push refs/bay/live/<machine>
+    Push,
+}
+
+#[derive(Subcommand)]
 enum ExecutorAction {
     /// Drive queued operations to an outcome on this machine
     Run {
@@ -154,6 +169,7 @@ fn main() -> ExitCode {
             intent,
             intent_revision,
             paths,
+            inputs,
             resume,
             new,
         } => bay::start::start(
@@ -163,6 +179,7 @@ fn main() -> ExitCode {
                 new,
                 intent_revision,
                 paths,
+                inputs,
                 resume,
                 reverts: None,
             },
@@ -199,6 +216,9 @@ fn main() -> ExitCode {
         Command::Executor {
             action: ExecutorAction::Run { once, interval_s },
         } => bay::executor::run(&cli.dir, once, std::time::Duration::from_secs(interval_s)),
+        Command::Live {
+            action: LiveAction::Push,
+        } => bay::live::push(&cli.dir),
         Command::Status { fleet: true, .. } => bay::status::fleet(&cli.dir),
         Command::Status { change, .. } => {
             let result = bay::status::status(&cli.dir, change.as_deref());
@@ -222,24 +242,14 @@ fn main() -> ExitCode {
         }),
         Command::Hook { event } => {
             // The agent hook follows the agent product's exit protocol (INTERFACES § 1): for
-            // Claude Code, exit 2 denies. Built: the session work record of every event in a
-            // repository but pre-tool, the blocking path (ruling 10, § 11a), the shell deny list
-            // (G39) and session-start's state (ruling 8a); every other event is allowed and
-            // silent until the hook adapter (increment 2).
+            // Claude Code, exit 2 denies. The payload adapter decides (agent_hook.rs).
             let mut input = String::new();
             let _ = std::io::stdin().read_to_string(&mut input);
-            bay::session::record(&cli.dir, &event, &input);
-            if event == "session-start" {
-                print!("{}", bay::session::session_start(&cli.dir, &input));
-                return ExitCode::SUCCESS;
-            }
-            return match bay::deny::judge_hook(&event, &input, &cli.dir) {
-                Some(reason) => {
-                    eprintln!("{reason}");
-                    ExitCode::from(2)
-                }
-                None => ExitCode::SUCCESS,
-            };
+            let outcome = bay::agent_hook::dispatch(&event, &input, &cli.dir);
+            bay::live::after_event(&cli.dir, &input);
+            print!("{}", outcome.stdout);
+            eprint!("{}", outcome.stderr);
+            return ExitCode::from(outcome.exit);
         }
     };
     render(&result, cli.json)
