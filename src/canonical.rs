@@ -1,5 +1,7 @@
-//! RFC 8785 JSON Canonicalization Scheme for the values bay hashes: objects, arrays,
-//! strings, integers, booleans and null. Keys sort by UTF-16 code units; no whitespace.
+//! RFC 8785 JSON Canonicalization Scheme for the values bay hashes and signs: objects, arrays,
+//! strings, numbers, booleans and null. Keys sort by UTF-16 code units; no whitespace. A
+//! fraction (an evidence record's `seconds`) is written as ECMAScript writes a number
+//! (RFC 8785 § 3.2.2.3).
 
 use std::fmt::Write;
 
@@ -10,7 +12,7 @@ use sha2::{Digest, Sha256};
 ///
 /// # Errors
 ///
-/// A number that is not an integer (bay's hashed documents carry none).
+/// A number that is not finite.
 pub fn canonical(value: &Value) -> Result<String, String> {
     let mut out = String::new();
     write_value(value, &mut out)?;
@@ -40,7 +42,7 @@ fn write_value(value: &Value, out: &mut String) -> Result<(), String> {
             } else if let Some(int) = number.as_u64() {
                 let _ = write!(out, "{int}");
             } else {
-                return Err(format!("non-integer number {number} in a hashed document"));
+                write_fraction(number.as_f64().unwrap_or(f64::NAN), out)?;
             }
         }
         Value::String(text) => write_string(text, out),
@@ -68,6 +70,56 @@ fn write_value(value: &Value, out: &mut String) -> Result<(), String> {
             }
             out.push('}');
         }
+    }
+    Ok(())
+}
+
+/// `value` as ECMAScript `Number.prototype.toString` writes it: the shortest digits that
+/// read back as `value`, in positional form for a decimal exponent from -6 to 20, else in
+/// exponent form.
+fn write_fraction(value: f64, out: &mut String) -> Result<(), String> {
+    if !value.is_finite() {
+        return Err(format!("non-finite number {value} in a canonical document"));
+    }
+    if value == 0.0 {
+        out.push('0');
+        return Ok(());
+    }
+    if value < 0.0 {
+        out.push('-');
+    }
+    // Rust's `{:e}` writes the shortest round-trip digits: `d[.ddd]e<exp>`.
+    let scientific = format!("{:e}", value.abs());
+    let (mantissa, exponent) = scientific
+        .split_once('e')
+        .ok_or_else(|| format!("unexpected float text {scientific}"))?;
+    let digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+    let exponent: i32 = exponent
+        .parse()
+        .map_err(|_| format!("unexpected float text {scientific}"))?;
+    let k = i32::try_from(digits.len()).map_err(|error| error.to_string())?;
+    // ECMAScript's n: the value is 0.<digits> times ten to the n.
+    let n = exponent + 1;
+    let zeros = |count: i32| "0".repeat(usize::try_from(count).unwrap_or(0));
+    if k <= n && n <= 21 {
+        out.push_str(&digits);
+        out.push_str(&zeros(n - k));
+    } else if 0 < n && n <= 21 {
+        let point = usize::try_from(n).unwrap_or(0);
+        out.push_str(&digits[..point]);
+        out.push('.');
+        out.push_str(&digits[point..]);
+    } else if -6 < n && n <= 0 {
+        out.push_str("0.");
+        out.push_str(&zeros(-n));
+        out.push_str(&digits);
+    } else {
+        out.push_str(&digits[..1]);
+        if k > 1 {
+            out.push('.');
+            out.push_str(&digits[1..]);
+        }
+        let _ = write!(out, "e{}{}", if n > 0 { "+" } else { "-" }, (n - 1).abs());
     }
     Ok(())
 }
@@ -118,7 +170,22 @@ mod tests {
     }
 
     #[test]
-    fn refuses_fractions() {
-        assert!(canonical(&json!({"x": 1.5})).is_err());
+    fn writes_fractions_as_ecmascript_does() {
+        // RFC 8785 Appendix B's number cases, and the check-cost values bay records.
+        for (value, text) in [
+            (4.1, "4.1"),
+            (4.0, "4"),
+            (-0.0, "0"),
+            (0.000_001, "0.000001"),
+            (1e-7, "1e-7"),
+            (1e21, "1e+21"),
+            (123_456_789_012_345_680_000.0, "123456789012345680000"),
+            (-1.5, "-1.5"),
+            (5e-324, "5e-324"),
+            (1.797_693_134_862_315_7e308, "1.7976931348623157e+308"),
+            (333_333_333.333_333_3, "333333333.3333333"),
+        ] {
+            assert_eq!(canonical(&json!(value)).unwrap(), text, "{value:e}");
+        }
     }
 }

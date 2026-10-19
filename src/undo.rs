@@ -1,0 +1,152 @@
+//! `bay undo <change>`: a compensating change, checked against current trunk like any other;
+//! never a rewrite (`DESIGN` § 4, `INTERFACES` § 1, ruling R10).
+//!
+//! The undo is a new change opened through `start` on the intent `undo of <Change-Id>`, so it
+//! uses intent generations like any start: a second undo of one change claims the next
+//! generation, and only once the previous undo landed. Its tree is
+//! `git merge-tree --write-tree --merge-base=C <trunk> C^`, written into its view, and it lands
+//! through the normal publication with a `Reverts: <Change-Id>` trailer. It never claims a
+//! generation of the undone change's intent. When the revert tree is trunk's own tree (the effect
+//! is already gone), no change is opened. A remote that cannot be read is a failure, never
+//! `CHANGE_NOT_LANDED`.
+
+use std::path::Path;
+
+use serde_json::json;
+
+use crate::change::{Chain, change_ref};
+use crate::git::Git;
+use crate::ids::is_change_id;
+use crate::merge::{Merge, revert_onto};
+use crate::publish;
+use crate::repo::Repo;
+use crate::result::{BayResult, Decision, Reason};
+use crate::start::{self, StartRequest};
+
+/// The revision of every undo intent: the undone change is its whole reference.
+const UNDO_REVISION: &str = "1";
+
+#[must_use]
+pub fn undo(dir: &Path, change: &str, wait: bool) -> BayResult {
+    run(dir, change, wait).unwrap_or_else(BayResult::failed)
+}
+
+fn run(dir: &Path, change: &str, wait: bool) -> Result<BayResult, String> {
+    if !is_change_id(change) {
+        return Err(format!("{change} is not a change id"));
+    }
+    let repo = Repo::open(dir)?;
+    let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
+    let Some(commit) = landed_commit(&repo, change, &trunk)? else {
+        return Ok(BayResult::blocked(Reason::ChangeNotLanded)
+            .with_change(change)
+            .with_detail(json!({"trunk": trunk})));
+    };
+    let paths: Vec<String> = repo
+        .git
+        .run(&[
+            "diff-tree",
+            "-r",
+            "--no-commit-id",
+            "--name-only",
+            &format!("{commit}^"),
+            &commit,
+        ])
+        .map_err(|error| error.message())?
+        .lines()
+        .map(str::to_owned)
+        .collect();
+
+    // The effect is already gone from trunk: open no change, never land an empty one.
+    if let Merge::Clean(tree) =
+        revert_onto(&repo.git, &trunk, &commit).map_err(|error| error.message())?
+        && tree == tree_of(&repo.git, &trunk)?
+    {
+        return Ok(BayResult::ok(json!({
+            "undo": "nothing to undo",
+            "reverts": change,
+            "trunk": trunk,
+        })));
+    }
+
+    let intent = format!("undo of {change}");
+    let request = StartRequest {
+        new: start::claimed(&repo, &intent, UNDO_REVISION)?,
+        intent: Some(intent),
+        intent_revision: UNDO_REVISION.to_owned(),
+        paths,
+        resume: None,
+        reverts: Some(change.to_owned()),
+    };
+    let started = start::start(dir, &request);
+    if started.decision != Decision::Ok {
+        return Ok(started);
+    }
+    let id = started.change.clone().ok_or("start returned no change")?;
+    let detail = started.detail.clone().unwrap_or_default();
+    let (Some(view), Some(base)) = (detail["view"].as_str(), detail["base"].as_str()) else {
+        return Err(format!("start of {id} returned no view and base"));
+    };
+    let view = Path::new(view);
+
+    let (tree, conflicts) =
+        match revert_onto(&repo.git, base, &commit).map_err(|error| error.message())? {
+            Merge::Clean(tree) => (tree, None),
+            Merge::Conflict(paths, tree) => (tree, Some(paths)),
+        };
+    Git::new(view)
+        .run(&["read-tree", "-u", "--reset", &tree])
+        .map_err(|error| error.message())?;
+    if let Some(conflicts) = conflicts {
+        // The view holds the revert with conflict markers, open for repair; `bay land` in it
+        // lands the repaired undo (INTERFACES § 2 MERGE_CONFLICT).
+        let refused = BayResult::blocked(Reason::MergeConflict)
+            .with_change(id.clone())
+            .with_detail(json!({
+                "conflicts": conflicts,
+                "view": view.display().to_string(),
+                "reverts": change,
+                "trunk": base,
+            }));
+        return Ok(publish::with_receipt(&repo, &id, "undo", refused));
+    }
+    Ok(publish::land(view, Some(&id), wait, None, false))
+}
+
+fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
+    git.run(&["rev-parse", &format!("{commit}^{{tree}}")])
+        .map_err(|error| error.message())
+}
+
+/// The trunk commit that published `change`: the remote's `refs/bay/landed/<change>` names it
+/// and the trunk scan from the change's `base_first` finds it (§ 6). `None` when the change is
+/// not on trunk.
+fn landed_commit(repo: &Repo, change: &str, trunk: &str) -> Result<Option<String>, String> {
+    // Only a marker the remote answered without is "not landed": a remote that cannot be read
+    // is a fault, never CHANGE_NOT_LANDED, whose retry is never.
+    let unreadable = |error: crate::git::GitError| {
+        format!(
+            "the remote could not be read, so whether {change} landed is unknown: {}",
+            error.message()
+        )
+    };
+    let marker = format!("refs/bay/landed/{change}");
+    let listed = repo
+        .git
+        .run(&["ls-remote", repo.remote(), &marker])
+        .map_err(unreadable)?;
+    let Some(landed) = listed.split_whitespace().next().map(str::to_owned) else {
+        return Ok(None);
+    };
+    repo.fetch_refs(&[marker, change_ref(change)])
+        .map_err(unreadable)?;
+    let (_, record) = Chain::new(&repo.git)
+        .read(change)
+        .map_err(|error| error.message())?;
+    let scan = publish::scan(&repo.git, &record.base_first, trunk, change)?;
+    Ok(scan
+        .publications
+        .into_iter()
+        .any(|found| found.commit == landed)
+        .then_some(landed))
+}

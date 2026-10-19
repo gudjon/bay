@@ -56,6 +56,14 @@ enum Command {
         #[arg(long, conflicts_with_all = ["wait", "observe"])]
         abandon: bool,
     },
+    /// A new change that undoes one landing, checked and landed like any other; never a rewrite
+    Undo {
+        /// The landed change to undo
+        change: String,
+        /// Run the publication here and return its outcome, instead of returning at once
+        #[arg(long)]
+        wait: bool,
+    },
     /// Current state, derived on read from trunk and refs
     Status {
         /// One change (default: the view's change, else every local change)
@@ -156,8 +164,10 @@ fn main() -> ExitCode {
                 intent_revision,
                 paths,
                 resume,
+                reverts: None,
             },
         ),
+        Command::Undo { change, wait } => bay::undo::undo(&cli.dir, &change, wait),
         Command::Share {
             change,
             bundle,

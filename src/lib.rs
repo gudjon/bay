@@ -33,6 +33,7 @@ pub mod signing;
 pub mod skill;
 pub mod start;
 pub mod status;
+pub mod undo;
 pub mod update;
 pub mod version;
 pub mod view;

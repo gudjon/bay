@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 
 use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, change_ref};
 use crate::clock::now_rfc3339;
+use crate::evidence::{self, EvidenceRecord};
 use crate::publish::scan;
 use crate::receipts::{self, Receipt};
 use crate::repo::Repo;
@@ -135,7 +136,7 @@ pub fn cached(
             .map(|(_, receipt)| receipt)
             .filter(|receipt| receipt.change == id)
             .collect();
-        changes.push(describe(repo, &record, &trunk, &unsynced)?);
+        changes.push(describe(repo, &record, &trunk, &unsynced, &Costs::Skip)?);
     }
     let mut result = BayResult::ok(json!({"changes": changes, "trunk": trunk}));
     result.freshness = Some(Freshness {
@@ -219,6 +220,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
             })?;
         }
     }
+    let under = Costs::Under(crate::registry::Registry::current(&repo.git)?);
     let mut changes = Vec::new();
     for id in &ids {
         let (_, record) = chain.read(id).map_err(|error| error.message())?;
@@ -227,7 +229,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
             .map(|(_, receipt)| receipt)
             .filter(|receipt| receipt.change == *id)
             .collect();
-        changes.push(describe(&repo, &record, &trunk, &unsynced)?);
+        changes.push(describe(&repo, &record, &trunk, &unsynced, &under)?);
     }
     let leftovers = leftovers(&repo, &trunk)?;
     let _ = &leftovers;
@@ -336,14 +338,100 @@ fn leftovers(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+/// The counted records on `tree` whose id begins, after the producer, with `prefix`.
+fn records_named(
+    repo: &Repo,
+    registry: Option<&crate::registry::Registry>,
+    tree: &str,
+    prefix: &str,
+) -> Result<Vec<EvidenceRecord>, String> {
+    let all = evidence::counted(&repo.git, evidence::records_for(&repo.git, tree)?, registry)?;
+    Ok(all
+        .into_iter()
+        .filter(|record| {
+            record
+                .id
+                .split_once('/')
+                .is_some_and(|(_, rest)| rest.starts_with(prefix))
+        })
+        .collect())
+}
+
+/// Worker time on `records` (`ROADMAP` § 3): the wall time bay measured around each adapter
+/// run and the time the adapter reported for its units, each summed. A record that carries no
+/// time still counts, as `untimed`.
+fn cost(records: &[EvidenceRecord]) -> Value {
+    let round = |sum: f64| (sum * 1000.0).round() / 1000.0;
+    json!({
+        "records": records.len(),
+        "untimed": records.iter().filter(|record| record.seconds.is_none()).count(),
+        "worker_seconds": round(records.iter().filter_map(|record| record.seconds).sum()),
+        "unit_seconds": round(
+            records
+                .iter()
+                .flat_map(|record| &record.units)
+                .filter_map(|unit| unit.seconds)
+                .sum()
+        ),
+    })
+}
+
+/// Whether `describe` reads the evidence behind the costs, and the registry it counts it under.
+enum Costs {
+    /// The hook's path reads no evidence: its costs are `null`.
+    Skip,
+    Under(Option<crate::registry::Registry>),
+}
+
+/// The cost of the change's last operation, over every record its attempts produced
+/// (discarded attempts included), and of its landing, over the records on the landed tree that
+/// the publishing operation made (`null` when not landed).
+fn costs(
+    repo: &Repo,
+    record: &ChangeRecord,
+    landed: Option<&crate::publish::Found>,
+    registry: Option<&crate::registry::Registry>,
+) -> Result<(Value, Value), String> {
+    let mut op_records = Vec::new();
+    for attempt in record.operations.last().map_or(&[][..], |op| &op.attempts) {
+        let prefix = format!("{}-", attempt.candidate_id);
+        op_records.extend(records_named(repo, registry, &attempt.tree, &prefix)?);
+    }
+    let publishing = landed.and_then(|found| {
+        record
+            .operations
+            .iter()
+            .rev()
+            .find(|op| op.revision == found.revision)
+            .map(|op| (found, op))
+    });
+    let landing = match publishing {
+        Some((found, op)) => {
+            let tree = repo
+                .git
+                .run(&["rev-parse", &format!("{}^{{tree}}", found.commit)])
+                .map_err(|error| error.message())?;
+            let prefix = format!("{}.", op.op_id);
+            cost(&records_named(repo, registry, &tree, &prefix)?)
+        }
+        None => json!(null),
+    };
+    Ok((cost(&op_records), landing))
+}
+
 fn describe(
     repo: &Repo,
     record: &ChangeRecord,
     trunk: &str,
     unsynced: &[&Receipt],
+    with_costs: &Costs,
 ) -> Result<Value, String> {
     let found = scan(&repo.git, &record.base_first, trunk, &record.id)?;
     let landed = found.publications.first();
+    let (op_cost, landing_cost) = match with_costs {
+        Costs::Under(registry) => costs(repo, record, landed, registry.as_ref())?,
+        Costs::Skip => (json!(null), json!(null)),
+    };
     let state = if landed.is_some() {
         "landed".to_owned()
     } else {
@@ -406,6 +494,7 @@ fn describe(
             "publish_retries": op.publish_retries,
             "candidate": op.attempts.last().map(|attempt| &attempt.candidate_id),
             "published": landed.is_some_and(|found| found.revision == op.revision),
+            "cost": op_cost,
         })
     });
     Ok(json!({
@@ -414,6 +503,7 @@ fn describe(
         "state": state,
         "recorded_state": record.state,
         "landed": landed.map(|found| &found.commit),
+        "landing_cost": landing_cost,
         "operation": operation,
         "anomalies": found.anomalies.iter().map(|anomaly| json!({
             "commit": anomaly.commit,

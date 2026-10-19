@@ -20,8 +20,9 @@ Use the verb in bay design § 4.
 | Publish the checked result | `bay land` |
 | Give the change up, so another actor may adopt it | `bay land --abandon` |
 | Read state | `bay status` |
+| Undo a landed change with a new change | `bay undo <change>` |
 
-This version has no `watch`, `talk`, `undo` or `status --fleet`. Do not run them. Run `bay --help` for the commands this binary has.
+This version has no `watch`, `talk` or `status --fleet`. Do not run them. Run `bay --help` for the commands this binary has.
 
 Do not grant a key. Do not move trunk. Do not widen policy. Do not run `install` to land work (bay design § 15).
 

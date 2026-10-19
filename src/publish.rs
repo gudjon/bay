@@ -1604,7 +1604,7 @@ fn build_and_check(
     ctx.step.set("merge");
     let tree = match merge_onto(git, trunk, revision).map_err(|error| error.message())? {
         Merge::Clean(tree) => tree,
-        Merge::Conflict(paths) => {
+        Merge::Conflict(paths, _) => {
             let condition = condition(git, revision, trunk, None)?;
             let op = ctx.op_mut(op_id);
             op.state = OpState::Blocked;
@@ -2204,10 +2204,7 @@ fn finished_checks(
     Ok(policy
         .manifest
         .iter()
-        .map(|entry| evidence::CheckId {
-            id: entry.id.clone(),
-            environment: entry.environment.clone(),
-        })
+        .map(|entry| evidence::CheckId::new(&entry.id, &entry.environment))
         .filter(|id| {
             matches!(
                 evidence::combine(
@@ -2268,7 +2265,7 @@ fn candidate_message(
     let config = &ctx.repo.config;
     let record = &ctx.record;
     format!(
-        "{reference}: change {id}\n\nChange-Id: {id}\nRevision-Id: {revision}\nRequest-Id: {request_id}\nCandidate-Id: {candidate_id}\nRegistry-Id: {registry_id}\nBay-Epoch: {epoch}\n{intent_key}: {reference}@{intent_revision}\n{actor_key}: {actor}\nBay-Session: {session}\n{supersedes}",
+        "{reference}: change {id}\n\nChange-Id: {id}\nRevision-Id: {revision}\nRequest-Id: {request_id}\nCandidate-Id: {candidate_id}\nRegistry-Id: {registry_id}\nBay-Epoch: {epoch}\n{intent_key}: {reference}@{intent_revision}\n{actor_key}: {actor}\nBay-Session: {session}\n{supersedes}{reverts}",
         reference = record.intent.reference,
         id = ctx.id,
         intent_key = config.intent_trailer(),
@@ -2279,6 +2276,10 @@ fn candidate_message(
             .supersedes
             .as_ref()
             .map_or_else(String::new, |landed| format!("Supersedes: {landed}\n")),
+        reverts = record
+            .reverts
+            .as_ref()
+            .map_or_else(String::new, |undone| format!("Reverts: {undone}\n")),
         actor = record.actor.name,
         session = record.actor.session,
     )

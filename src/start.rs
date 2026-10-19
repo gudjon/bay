@@ -29,6 +29,8 @@ pub struct StartRequest {
     pub intent_revision: String,
     pub paths: Vec<String>,
     pub resume: Option<String>,
+    /// The landed change this one undoes (`bay undo`); it becomes the `Reverts:` trailer.
+    pub reverts: Option<String>,
 }
 
 #[must_use]
@@ -82,6 +84,16 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         }
     }
     Err(format!("the claim on {intent} kept moving; try again"))
+}
+
+/// Whether the remote holds a claim on the intent, so a further start claims its next
+/// generation (`bay undo`, § 4).
+///
+/// # Errors
+///
+/// A git fault.
+pub fn claimed(repo: &Repo, intent: &str, revision: &str) -> Result<bool, String> {
+    Ok(!remote_claims(repo, &intent_hash(intent, revision))?.is_empty())
 }
 
 /// The claims on an intent the remote holds: generation → change id.
@@ -157,6 +169,7 @@ fn create(
         superseded_by: None,
         claim: Some(claim),
         supersedes,
+        reverts: request.reverts.clone(),
         adopted_from: Vec::new(),
         operations: Vec::new(),
         retention_cut: false,
@@ -393,7 +406,7 @@ fn bring_in_trunk(
     let changed = repo.git.run(&args).map_err(|error| error.message())?;
     let changed: Vec<String> = changed.lines().map(str::to_owned).collect();
     match merge_onto(&repo.git, trunk, draft).map_err(|error| error.message())? {
-        Merge::Conflict(paths) => Ok(Err(BayResult::blocked(Reason::MergeConflict)
+        Merge::Conflict(paths, _) => Ok(Err(BayResult::blocked(Reason::MergeConflict)
             .with_change(record.id.clone())
             .with_detail(json!({"conflicts": paths, "trunk": trunk, "base": old_base})))),
         Merge::Clean(tree) => {

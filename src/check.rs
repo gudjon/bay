@@ -220,6 +220,8 @@ impl Judged {
 struct ResultUnit {
     id: String,
     verdict: Verdict,
+    #[serde(default)]
+    seconds: Option<f64>,
 }
 
 /// Runs every required check of `policy` on `candidate` that is not in `finished`, hands each
@@ -245,10 +247,7 @@ pub fn run_all(
     let started = Instant::now();
     let mut records = Vec::new();
     for (index, entry) in policy.checks.iter().enumerate() {
-        let id = CheckId {
-            id: entry.id.clone(),
-            environment: entry.environment.clone(),
-        };
+        let id = CheckId::new(&entry.id, &entry.environment);
         // A quarantined check is not required (ruling 8c): it does not run.
         if finished.contains(&id) || policy.is_quarantined(entry) {
             continue;
@@ -268,6 +267,7 @@ pub fn run_all(
             sandbox,
         };
         let remaining = budget.map(|budget| budget.saturating_sub(started.elapsed()));
+        let ran = Instant::now();
         let Judged {
             verdict,
             why,
@@ -290,6 +290,7 @@ pub fn run_all(
                 tree: candidate.tree.to_owned(),
                 commit: candidate.commit.to_owned(),
                 base_tree: candidate.base_tree.to_owned(),
+                unknown: serde_json::Map::new(),
             },
             check: id,
             policy_revision: policy.revision,
@@ -298,6 +299,7 @@ pub fn run_all(
             producer: Producer {
                 name: producer.to_owned(),
                 version: crate::version::BAY.to_owned(),
+                unknown: serde_json::Map::new(),
             },
             verdict,
             at: now_rfc3339(),
@@ -305,6 +307,7 @@ pub fn run_all(
             units,
             selection,
             sandbox: Some(sandbox.to_owned()),
+            seconds: Some((ran.elapsed().as_secs_f64() * 1000.0).round() / 1000.0),
             signature: None,
             unknown: serde_json::Map::new(),
         };
@@ -478,6 +481,10 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
         .map(|unit| Unit {
             id: unit.id.clone(),
             verdict: unit.verdict,
+            seconds: unit
+                .seconds
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0),
+            unknown: serde_json::Map::new(),
         })
         .collect();
     let with = |verdict: Verdict, why: Option<String>, units: Vec<Unit>| Judged {

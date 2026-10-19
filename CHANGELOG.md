@@ -5,6 +5,8 @@ Pre-release.
 
 Linux builds only (x86_64 and aarch64, musl). macOS builds come in a later release.
 
+- Added `bay undo <change>`: it lands a new, checked change that reverses one landing; history stays.
+- Added check cost: each evidence record keeps the check's seconds, and `bay status` sums them per operation and landing.
 - Added `bay update`: it replaces bay with a signed, verified release and never with an unverified download.
 - Added a daily background update check from `bay status` and `bay doctor`, off with `BAY_DISABLE_AUTOUPDATE=1`.
 - Added box-level update settings in global Git config: `bay.updateVersion`, `bay.updateChannel` and `bay.updateAuto`.
@@ -27,6 +29,7 @@ Linux builds only (x86_64 and aarch64, musl). macOS builds come in a later relea
 - Fixed `bay host init` on Git below 2.54: it refuses with `GIT_BELOW_FLOOR` and creates nothing.
 - Fixed a cancel or newer revision that races a landing: the losing operation says it was superseded.
 - Fixed a request signed under a registry version that is not on the registry chain: it is refused.
+- Changed evidence reading: fields a later version adds are kept and signed over, so newer records still verify.
 - Fixed release archives: they carry no extended attributes, so Linux tar unpacks them without warnings.
 
 ## 0.1.0-pilot.1

@@ -34,6 +34,7 @@ fn record(id: &str, base: &str) -> ChangeRecord {
         superseded_by: None,
         claim: None,
         supersedes: None,
+        reverts: None,
         adopted_from: Vec::new(),
         operations: Vec::new(),
         retention_cut: false,

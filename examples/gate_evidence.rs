@@ -58,11 +58,9 @@ fn record(
             tree,
             commit,
             base_tree,
+            unknown: serde_json::Map::new(),
         },
-        check: CheckId {
-            id: check.to_owned(),
-            environment: environment.to_owned(),
-        },
+        check: CheckId::new(check, environment),
         // bay's own repository has no acceptance policy; the gate is its policy.
         policy_revision: 0,
         manifest_digest: "gate".to_owned(),
@@ -70,6 +68,7 @@ fn record(
         producer: Producer {
             name: producer.to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            unknown: serde_json::Map::new(),
         },
         verdict: Verdict::Pass,
         at: now_rfc3339(git)?,
@@ -77,6 +76,7 @@ fn record(
         units: Vec::new(),
         selection: None,
         sandbox: None,
+        seconds: None,
         signature: None,
         unknown: serde_json::Map::new(),
     };

@@ -131,6 +131,9 @@ pub struct ChangeRecord {
     /// The landed change of the intent's previous generation, for `start --new` (§ 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
+    /// The landed change this change undoes, for `bay undo` (§ 4): its `Reverts:` trailer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reverts: Option<String>,
     /// Actors this change was adopted from, oldest first (§ 4).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adopted_from: Vec<Actor>,

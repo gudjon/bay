@@ -26,27 +26,68 @@ pub struct Subject {
     pub tree: String,
     pub commit: String,
     pub base_tree: String,
+    /// Fields this version does not know, kept as read: they are signed, so a record a later
+    /// version wrote still verifies here.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// A (check id, environment) pair. Two are the same check when id and environment match;
+/// fields a later version added do not make it another check.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CheckId {
     pub id: String,
     pub environment: String,
+    /// Fields this version does not know, kept as read: they are signed, so a record a later
+    /// version wrote still verifies here.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
+
+impl CheckId {
+    #[must_use]
+    pub fn new(id: &str, environment: &str) -> Self {
+        Self {
+            id: id.to_owned(),
+            environment: environment.to_owned(),
+            unknown: serde_json::Map::new(),
+        }
+    }
+}
+
+impl PartialEq for CheckId {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.environment == other.environment
+    }
+}
+
+impl Eq for CheckId {}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Producer {
     pub name: String,
     pub version: String,
+    /// Fields this version does not know, kept as read: they are signed, so a record a later
+    /// version wrote still verifies here.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Unit {
     pub id: String,
     pub verdict: Verdict,
+    /// The unit's own time as the adapter reported it (`INTERFACES` § 3). Absent when the
+    /// adapter sent none, and on records written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
+    /// Fields this version does not know, kept as read: they are signed, so a record a later
+    /// version wrote still verifies here.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceRecord {
     pub schema: String,
     /// `<producer>/<id>`.
@@ -76,6 +117,10 @@ pub struct EvidenceRecord {
     /// The sandbox the check ran in: `sandbox-exec`, `bwrap`, or `none`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<String>,
+    /// Worker wall time of this check in seconds, measured by bay around the adapter run
+    /// (`ROADMAP` § 3). Absent on records written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<f64>,
     /// The producer key's SSH signature over the canonical JSON of the record without this
     /// field (`ssh-keygen -Y sign -n bay-producer`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -295,10 +340,7 @@ pub fn aggregate(
 ) -> Vec<(CheckId, Combined)> {
     manifest
         .iter()
-        .map(|entry| CheckId {
-            id: entry.id.clone(),
-            environment: entry.environment.clone(),
-        })
+        .map(|entry| CheckId::new(&entry.id, &entry.environment))
         .map(|id| {
             let subject = commit_keyed(&id).then_some(candidate_commit);
             let combined = combine(records, &id, manifest_digest, subject);
@@ -342,17 +384,16 @@ mod tests {
                 tree: "t".to_owned(),
                 commit: commit.to_owned(),
                 base_tree: "b".to_owned(),
+                unknown: serde_json::Map::new(),
             },
-            check: CheckId {
-                id: "tests".to_owned(),
-                environment: environment.to_owned(),
-            },
+            check: CheckId::new("tests", environment),
             policy_revision: 1,
             manifest_digest: "m".to_owned(),
             policy_provenance: None,
             producer: Producer {
                 name: "ci".to_owned(),
                 version: "1".to_owned(),
+                unknown: serde_json::Map::new(),
             },
             verdict,
             at: "now".to_owned(),
@@ -360,16 +401,14 @@ mod tests {
             units: Vec::new(),
             selection: None,
             sandbox: None,
+            seconds: None,
             signature: None,
             unknown: serde_json::Map::new(),
         }
     }
 
     fn tests_on(environment: &str) -> CheckId {
-        CheckId {
-            id: "tests".to_owned(),
-            environment: environment.to_owned(),
-        }
+        CheckId::new("tests", environment)
     }
 
     #[test]
@@ -470,5 +509,24 @@ mod tests {
         let kept = without_conflicts(records);
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, "ci/2");
+    }
+
+    #[test]
+    fn fields_this_version_does_not_know_are_kept_in_the_signed_payload() {
+        let mut timed = record("ci/1", "x", "c", Verdict::Pass);
+        timed.seconds = Some(0.041);
+        timed.sandbox = Some("none".to_owned());
+        let mut value = serde_json::to_value(timed).unwrap();
+        value["future"] = serde_json::json!(1);
+        value["subject"]["future"] = serde_json::json!(true);
+        value["check"]["future"] = serde_json::json!("c");
+        value["producer"]["future"] = serde_json::json!(null);
+        value["units"] =
+            serde_json::json!([{"id": "t1", "verdict": "pass", "seconds": 1.0, "future": [1.5]}]);
+        let signed = crate::canonical::canonical(&value).unwrap();
+        value["signature"] = serde_json::json!("sig");
+        let read: EvidenceRecord = serde_json::from_value(value).unwrap();
+        let payload = String::from_utf8(read.signing_payload().unwrap()).unwrap();
+        assert_eq!(payload, signed);
     }
 }
