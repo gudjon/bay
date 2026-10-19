@@ -13,8 +13,8 @@ Builds for Linux (x86_64 and aarch64, musl) and macOS. Apple silicon is tested; 
 - Added `paths` and `materialize_timeout_s` to `[[check]]`; a materialization that runs over is `infra_failure`.
 - Added the bay skill under `CLAUDE_CONFIG_DIR` when it is set, and doctor checks it there.
 - Changed `bay talk --help` to say agent, not actor.
-- Changed `bay update` to take the newest release that has a build for this machine; releases are no longer split into stable and latest.
-- Fixed the bay skill: it lists watch, talk, status --fleet and land --wait, which 0.1.2 already had but its skill told agents not to run.
+- Changed `bay update` to take the newest release that has a build for this machine. Releases are no longer split into stable and latest.
+- Fixed the bay skill: it now lists watch, talk, status --fleet and land --wait. 0.1.2 had them, but its skill told agents not to run them.
 - Removed update channels: `--channel`, `BAY_UPDATE_CHANNEL` and `bay.updateChannel` are no longer read, and doctor names one that is still set.
 
 ## 0.1.2
