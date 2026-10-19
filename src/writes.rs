@@ -17,7 +17,8 @@
 //! size, times and inode did not move since it was hashed is not hashed again; at most
 //! [`MAX_HASH_BYTES`] hashed per event. Past a bound, or when the status cannot be read, the
 //! step's writes are unknown (`wrote_unknown`), never a guess, and the kept ids stay as they were,
-//! so the next step that can be read lists them.
+//! so the next step that can be read lists them. The session's stop adds two bounded calls
+//! ([`stop`], each stopped at [`CALL_TIMEOUT`]): whether the view holds edits no draft records.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// The most changed paths one event reads.
 pub const MAX_PATHS: usize = 2048;
@@ -87,25 +89,188 @@ pub fn state_path(state_dir: &Path, agent: Option<&str>) -> Option<PathBuf> {
 pub fn step(view: &Path, state: &Path, step: Step) -> Option<Wrote> {
     if step == Step::Baseline {
         if !state.exists()
-            && let Ok(now) = read_view(view, &Ids::new())
+            && let Ok(now) = read_view(view, &Ids::new()).map(|read| read.ids)
         {
             store(state, &now);
         }
         return None;
     }
+    Some(match diff(view, state, step) {
+        Ok((wrote, _)) => Wrote::Paths(wrote),
+        Err(reason) => Wrote::Unknown(reason),
+    })
+}
+
+/// What the view holds against its change's latest draft at the session's stop.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Edits {
+    /// Every edit in the view is in the latest draft.
+    Checkpointed,
+    /// The view holds edits that no checkpoint records; a digest of the draft and of the view's
+    /// read, the same for the same edits.
+    Uncheckpointed(String),
+    /// The edits could not be read; the reason.
+    Unknown(&'static str),
+}
+
+/// The session's stop (ruling R7): [`Step::Diff`], and whether the view holds edits that its
+/// change's latest draft does not record (uncheckpointed edits, `DESIGN` § 4). `head` is the
+/// change's state commit and `cut` whether it is a retention cut.
+///
+/// A checkpoint stages every file through the view's own index and writes that index as the
+/// draft (`crate::change::freeze_draft`), so the draft records the view's edits when the index
+/// holds the draft's entries and the working tree matches the index. The status the step
+/// already read says both, as Git compares them (a link by its target, a file as its clean
+/// filter stores it), and two more bounded calls give the draft and the paths it changed from
+/// the view's `HEAD` (`git diff-tree`, objects only). A path no status lists holds `HEAD`'s
+/// entry in the index and the working tree. A sparse view's absent files are not listed, so
+/// they are not edits; an untracked file, a nested repository or a conflict always is.
+#[must_use]
+pub fn stop(view: &Path, state: &Path, head: &str, cut: bool) -> (Wrote, Edits) {
+    match diff(view, state, Step::Diff) {
+        Ok((wrote, now)) => {
+            let edits = match uncheckpointed(view, head, cut, &now) {
+                Ok(None) => Edits::Checkpointed,
+                Ok(Some(digest)) => Edits::Uncheckpointed(digest),
+                Err(reason) => Edits::Unknown(reason),
+            };
+            (Wrote::Paths(wrote), edits)
+        }
+        Err(reason) => (Wrote::Unknown(reason), Edits::Unknown(reason)),
+    }
+}
+
+/// A diffing step: the paths written since the agent's kept ids, and the view's read.
+fn diff(view: &Path, state: &Path, step: Step) -> Result<(Vec<String>, Read), &'static str> {
     // No kept ids (the agent's start was not recorded): every changed path counts as its write.
     let before = load(state);
-    let now = match read_view(view, &before) {
-        Ok(now) => now,
-        Err(reason) => return Some(Wrote::Unknown(reason)),
-    };
-    let wrote = written(&before, &now);
+    let now = read_view(view, &before)?;
+    let wrote = written(&before, &now.ids);
     if step == Step::DiffAndForget {
         let _ = std::fs::remove_file(state);
     } else {
-        store(state, &now);
+        store(state, &now.ids);
     }
-    Some(Wrote::Paths(wrote))
+    Ok((wrote, now))
+}
+
+/// A tree entry: its mode and object id.
+type TreeEntry = (String, String);
+
+/// One status entry, as far as a checkpoint is concerned.
+#[derive(Debug, PartialEq, Eq)]
+enum Listed {
+    /// `?`: in no index, so in no checkpoint.
+    Untracked,
+    /// `u`: the view is mid-conflict.
+    Unmerged,
+    /// `1` or `2`: `HEAD`'s and the index's entries (`None` where absent), and whether the
+    /// working tree matches the index.
+    Staged {
+        head: Option<TreeEntry>,
+        index: Option<TreeEntry>,
+        clean: bool,
+    },
+}
+
+/// One read of the view: the listed paths' working-tree ids, and each status entry.
+#[derive(Debug)]
+struct Read {
+    ids: Ids,
+    listed: Vec<(String, Listed)>,
+}
+
+/// `None` when the latest draft records every edit in the view, else a digest of the draft
+/// and the read.
+fn uncheckpointed(
+    view: &Path,
+    head: &str,
+    cut: bool,
+    now: &Read,
+) -> Result<Option<String>, &'static str> {
+    let draft = latest_draft(view, head, cut)?;
+    let out = git(
+        view,
+        &["diff-tree", "-r", "-z", "--no-renames", "HEAD", &draft],
+        None,
+    )
+    .ok_or("draft_unreadable")?;
+    let drafted = draft_entries(&out)?;
+    if !edits_in(&now.listed, &drafted) {
+        return Ok(None);
+    }
+    // The ids, not the stats they were hashed at: a file that only settles past the racy window,
+    // or is touched, holds the same edits.
+    let ids: Vec<(&String, &String)> = now
+        .ids
+        .iter()
+        .map(|(path, entry)| (path, &entry.id))
+        .collect();
+    let read = format!("{draft}\0{:?}\0{ids:?}", now.listed);
+    Ok(Some(crate::agent_settings::hex(&Sha256::digest(
+        read.as_bytes(),
+    ))))
+}
+
+/// The latest draft of the chain whose head is the state commit `head`, as
+/// [`crate::change::Chain::drafts`] reads it, from one call bounded like the hook's others.
+fn latest_draft(view: &Path, head: &str, cut: bool) -> Result<String, &'static str> {
+    let out =
+        git(view, &["rev-list", "--parents", "-n", "1", head], None).ok_or("draft_unreadable")?;
+    let text = String::from_utf8(out).map_err(|_| "draft_unreadable")?;
+    let parents: Vec<&str> = text.split_whitespace().skip(1).collect();
+    match parents.as_slice() {
+        // A cut head is a root: its first parent is the landed revision.
+        [revision, ..] if cut => Ok((*revision).to_owned()),
+        [draft] | [_, draft] | [_, draft, _] => Ok((*draft).to_owned()),
+        _ => Err("draft_unreadable"),
+    }
+}
+
+/// Whether the status entries `listed` hold an edit the draft, which changed `drafted` from
+/// `HEAD`, does not record.
+fn edits_in(listed: &[(String, Listed)], drafted: &Drafted) -> bool {
+    // A path the draft changed that the status does not list holds `HEAD`'s entry.
+    let names: std::collections::BTreeSet<&str> =
+        listed.iter().map(|(path, _)| path.as_str()).collect();
+    if drafted.keys().any(|path| !names.contains(path.as_str())) {
+        return true;
+    }
+    listed.iter().any(|(path, entry)| match entry {
+        Listed::Untracked | Listed::Unmerged => true,
+        Listed::Staged { head, index, clean } => {
+            // What the draft holds here: its own entry where it changed the path, else `HEAD`'s.
+            let want = drafted.get(path).unwrap_or(head);
+            !clean || index != want
+        }
+    })
+}
+
+/// The entries of `git diff-tree -r -z` raw output (`:mode mode id id status\0path\0`): each
+/// path with the draft's mode and id, `None` where the draft deleted it.
+type Drafted = BTreeMap<String, Option<(String, String)>>;
+
+fn draft_entries(out: &[u8]) -> Result<Drafted, &'static str> {
+    let mut drafted = Drafted::new();
+    let mut fields = out.split(|byte| *byte == 0);
+    while let Some(head) = fields.next() {
+        if head.is_empty() {
+            continue;
+        }
+        let head = std::str::from_utf8(head).map_err(|_| "draft_unreadable")?;
+        let path = fields.next().ok_or("draft_unreadable")?;
+        let parts: Vec<&str> = head.trim_start_matches(':').split(' ').collect();
+        let [_, mode, _, id, _] = parts.as_slice() else {
+            return Err("draft_unreadable");
+        };
+        if drafted.len() == MAX_PATHS {
+            return Err("too_many_paths");
+        }
+        let entry =
+            (!id.bytes().all(|byte| byte == b'0')).then(|| ((*mode).to_owned(), (*id).to_owned()));
+        drafted.insert(String::from_utf8_lossy(path).into_owned(), entry);
+    }
+    Ok(drafted)
 }
 
 fn load(state: &Path) -> Ids {
@@ -137,7 +302,7 @@ fn store(state: &Path, ids: &Ids) {
 }
 
 /// The view's changed paths and their ids, reusing an id from `before` whose stat matches.
-fn read_view(view: &Path, before: &Ids) -> Result<Ids, &'static str> {
+fn read_view(view: &Path, before: &Ids) -> Result<Read, &'static str> {
     let started = SystemTime::now();
     let status = git(
         view,
@@ -158,8 +323,10 @@ fn read_view(view: &Path, before: &Ids) -> Result<Ids, &'static str> {
     let mut now = Ids::new();
     let mut to_hash = Vec::new();
     let mut bytes = 0u64;
-    for raw in paths {
+    let mut listed = Vec::new();
+    for (raw, base) in paths {
         let key = String::from_utf8_lossy(raw).into_owned();
+        listed.push((key.clone(), base));
         let full = view.join(path_of(raw)?);
         let meta = match std::fs::symlink_metadata(&full) {
             Ok(meta) => meta,
@@ -209,7 +376,7 @@ fn read_view(view: &Path, before: &Ids) -> Result<Ids, &'static str> {
         return Err("too_many_bytes");
     }
     if to_hash.is_empty() {
-        return Ok(now);
+        return Ok(Read { ids: now, listed });
     }
     let mut input = Vec::new();
     for (_, raw, _) in &to_hash {
@@ -238,32 +405,53 @@ fn read_view(view: &Path, before: &Ids) -> Result<Ids, &'static str> {
             },
         );
     }
-    Ok(now)
+    Ok(Read { ids: now, listed })
 }
 
 /// The paths of `git status --porcelain=v2 -z` entries: `1 XY sub mH mI mW hH hI path`,
 /// `u XY sub m1 m2 m3 mW h1 h2 h3 path`, `? path`, and `2 … path` followed by its original path
-/// (not printed under `--no-renames`, skipped all the same).
-fn changed_paths(status: &[u8]) -> Vec<&[u8]> {
+/// (not printed under `--no-renames`, skipped all the same). Each with its entry.
+fn changed_paths(status: &[u8]) -> Vec<(&[u8], Listed)> {
     let mut paths = Vec::new();
     let mut entries = status.split(|byte| *byte == 0);
     while let Some(entry) = entries.next() {
         let field = |count: usize| entry.splitn(count, |byte| *byte == b' ').nth(count - 1);
         let path = match entry.first() {
-            Some(b'1') => field(9),
-            Some(b'u') => field(11),
-            Some(b'?') => entry.get(2..),
+            Some(b'1') => field(9).map(|path| (path, staged(entry))),
+            Some(b'u') => field(11).map(|path| (path, Listed::Unmerged)),
+            Some(b'?') => entry.get(2..).map(|path| (path, Listed::Untracked)),
             Some(b'2') => {
                 let _ = entries.next();
-                field(10)
+                field(10).map(|path| (path, staged(entry)))
             }
             _ => None,
         };
-        if let Some(path) = path.filter(|path| !path.is_empty()) {
+        if let Some(path) = path.filter(|(path, _)| !path.is_empty()) {
             paths.push(path);
         }
     }
     paths
+}
+
+/// A `1` or `2` entry's `HEAD` and index sides: `XY`, `mH`, `mI`, `hH` and `hI` are its
+/// fields 1, 3, 4, 6 and 7. A zero mode is an absent side; `Y` is `.` when the working tree
+/// matches the index.
+fn staged(entry: &[u8]) -> Listed {
+    let fields: Vec<String> = entry
+        .split(|byte| *byte == b' ')
+        .take(8)
+        .map(|field| String::from_utf8_lossy(field).into_owned())
+        .collect();
+    let field = |index: usize| fields.get(index).map_or("", String::as_str);
+    let side = |mode: usize, id: usize| {
+        let mode = field(mode);
+        (!mode.bytes().all(|byte| byte == b'0')).then(|| (mode.to_owned(), field(id).to_owned()))
+    };
+    Listed::Staged {
+        head: side(3, 6),
+        index: side(4, 7),
+        clean: field(1).as_bytes().get(1) == Some(&b'.'),
+    }
 }
 
 #[cfg(unix)]
@@ -347,7 +535,7 @@ fn written(before: &Ids, after: &Ids) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::changed_paths;
+    use super::{Drafted, Listed, changed_paths, edits_in};
 
     #[test]
     fn every_status_entry_kind_names_its_path() {
@@ -359,7 +547,7 @@ mod tests {
             ? notes.txt\0";
         let paths: Vec<String> = changed_paths(status)
             .into_iter()
-            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .map(|(path, _)| String::from_utf8_lossy(path).into_owned())
             .collect();
         assert_eq!(
             paths,
@@ -371,6 +559,82 @@ mod tests {
                 "src/nested/",
                 "notes.txt"
             ]
+        );
+    }
+
+    fn staged(head: &str, index: &str, clean: bool) -> Listed {
+        let side = |id: &str| (!id.is_empty()).then(|| ("100644".to_owned(), id.to_owned()));
+        Listed::Staged {
+            head: side(head),
+            index: side(index),
+            clean,
+        }
+    }
+
+    fn checkpointed() -> Vec<(String, Listed)> {
+        vec![
+            ("a".to_owned(), staged("h1", "d1", true)),
+            ("gone".to_owned(), staged("h2", "", true)),
+            ("same".to_owned(), staged("h3", "h3", true)),
+        ]
+    }
+
+    #[test]
+    fn a_checkpoint_records_only_what_the_index_and_working_tree_hold() {
+        let mut drafted = Drafted::new();
+        drafted.insert("a".to_owned(), Some(("100644".to_owned(), "d1".to_owned())));
+        drafted.insert("gone".to_owned(), None);
+        assert!(!edits_in(&checkpointed(), &drafted));
+
+        // Each of these is an edit no checkpoint records.
+        let executable = Listed::Staged {
+            head: Some(("100644".to_owned(), "h1".to_owned())),
+            index: Some(("100755".to_owned(), "d1".to_owned())),
+            clean: true,
+        };
+        let changes = [
+            (0, staged("h1", "d1", false)),
+            (0, staged("h1", "h1", true)),
+            (0, Listed::Unmerged),
+            (0, executable),
+            (1, staged("h2", "h2", true)),
+            (2, staged("h3", "x", true)),
+            (2, Listed::Untracked),
+        ];
+        for (index, entry) in changes {
+            let mut entries = checkpointed();
+            entries[index].1 = entry;
+            let text = format!("{entries:?}");
+            assert!(edits_in(&entries, &drafted), "{text}");
+        }
+        let mut unlisted = checkpointed();
+        unlisted.remove(1);
+        assert!(edits_in(&unlisted, &drafted));
+        let mut extra = checkpointed();
+        extra.push(("new".to_owned(), Listed::Untracked));
+        assert!(edits_in(&extra, &drafted));
+    }
+
+    #[test]
+    fn a_status_entry_gives_its_head_and_index_sides() {
+        let status = b"1 AM N... 000000 100755 100644 0000 bb src/new.sh\0\
+            1 D. N... 100644 000000 000000 aa 0000 src/gone.rs\0";
+        let entries = changed_paths(status);
+        assert_eq!(
+            entries[0].1,
+            Listed::Staged {
+                head: None,
+                index: Some(("100755".to_owned(), "bb".to_owned())),
+                clean: false,
+            }
+        );
+        assert_eq!(
+            entries[1].1,
+            Listed::Staged {
+                head: Some(("100644".to_owned(), "aa".to_owned())),
+                index: None,
+                clean: true,
+            }
         );
     }
 }

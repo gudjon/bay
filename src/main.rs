@@ -71,9 +71,16 @@ enum Command {
     Status {
         /// One change (default: the view's change, else every local change)
         change: Option<String>,
-        /// The fleet map from the local cache; fails closed when the remote was never fetched
+        /// The fleet map from the local cache `bay status` fetches; fails closed without that fetch
         #[arg(long, conflicts_with = "change")]
         fleet: bool,
+    },
+    /// What happened after a cursor: trunk landings, log events, new invalidations of the
+    /// view's change
+    Watch {
+        /// The cursor a previous watch returned (`detail.cursor`)
+        #[arg(long, value_name = "CURSOR", value_parser = bay::watch::Cursor::parse)]
+        since: Option<bay::watch::Cursor>,
     },
     /// Admin: probe this box (git and Claude Code floors, remote, hook entries, installed skill)
     Doctor,
@@ -219,12 +226,13 @@ fn main() -> ExitCode {
         Command::Live {
             action: LiveAction::Push,
         } => bay::live::push(&cli.dir),
-        Command::Status { fleet: true, .. } => bay::status::fleet(&cli.dir),
+        Command::Status { fleet: true, .. } => bay::fleet::fleet(&cli.dir),
         Command::Status { change, .. } => {
             let result = bay::status::status(&cli.dir, change.as_deref());
             bay::update::auto();
             result
         }
+        Command::Watch { since } => bay::watch::watch(&cli.dir, since.as_ref()),
         Command::Doctor => {
             let result = bay::doctor::doctor(&cli.dir);
             bay::update::auto();
@@ -252,6 +260,9 @@ fn main() -> ExitCode {
             return ExitCode::from(outcome.exit);
         }
     };
+    // A command that fetched trunk leaves the coordination cache the `pre-tool` hook reads
+    // (`DESIGN` § 11); a hook never writes it.
+    bay::coord::after_command();
     render(&result, cli.json)
 }
 

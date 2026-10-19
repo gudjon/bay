@@ -2,12 +2,14 @@
 //!
 //! One entry, [`dispatch`], maps a hook's stdin to bay's events and runs what bay does there:
 //! the session work record of every probed event in a repository but pre-tool
-//! (`session::record`), the compact state at `session-start`, and the shell deny list at
-//! `pre-tool` (G39). The adapter relies only
-//! on the payload shapes recorded in `tests/fixtures/claude-code-2.1.302`: an event with no
+//! (`session::record`), the compact state at `session-start`, at `pre-tool` the shell deny list
+//! (G39) and the stale-write judgement of an edit tool against the coordination cache
+//! (`crate::coord`, G8, G23), and the stop refusal at `stop` (ruling R7). The adapter relies
+//! only on the payload shapes recorded in `tests/fixtures/claude-code-2.1.302`: an event with no
 //! recorded payload has no behaviour (ruling R16), and a field the recordings do not show is
-//! never read. A hook never blocks the session except by the deny exit, so every other outcome
-//! exits 0.
+//! never read: an edit tool's target is `tool_input.file_path`, the field fixture 03 shows. A
+//! hook never blocks the session except by the deny exit, the stale-write refusal and the one
+//! stop refusal, so every other outcome exits 0.
 
 use std::path::{Path, PathBuf};
 
@@ -118,6 +120,9 @@ pub struct Payload {
     pub agent: Option<String>,
     /// The payload's `cwd`, else the directory bay runs in.
     pub cwd: PathBuf,
+    /// A `Stop` payload's `stop_hook_active`: the product already continued the session once
+    /// for a stop hook.
+    pub stop_hook_active: Option<bool>,
 }
 
 impl Payload {
@@ -144,6 +149,7 @@ impl Payload {
             session: value["session_id"].as_str().and_then(SessionId::parse),
             agent: value["agent_id"].as_str().map(str::to_owned),
             cwd: crate::session::hook_cwd(&value, dir),
+            stop_hook_active: value["stop_hook_active"].as_bool(),
         })
     }
 }
@@ -162,10 +168,25 @@ pub struct Outcome {
 pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
     // `PreToolUse` is the blocking path (`onFailure: "block"`): § 11a gives it only the refusal,
     // and the same step's `PostToolBatch` records it.
+    let mut stop_refused = None;
     if let Some(payload) = Payload::parse(event, input, dir)
         && !matches!(payload.event, Event::Unprobed | Event::PreToolUse)
     {
-        crate::session::record(&payload);
+        stop_refused = crate::session::record(&payload);
+    }
+    // Ruling R7: a stop over uncheckpointed edits is refused once; exit 2 keeps the session
+    // going, with the reason as its next instruction.
+    if let Some(reason) = stop_refused {
+        return Outcome {
+            exit: 2,
+            stdout: String::new(),
+            stderr: reason,
+        };
+    }
+    if event == "pre-tool"
+        && let Some(outcome) = pre_tool_write(input, dir)
+    {
+        return outcome;
     }
     if event == "session-start" {
         return Outcome {
@@ -181,6 +202,68 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
         },
         None => Outcome::default(),
     }
+}
+
+/// The edit tools whose target `pre-tool` judges (§ 11a's `PreToolUse` row).
+const EDIT_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
+
+/// `pre-tool` on an edit tool: the write judged against the coordination cache. `None` when the
+/// payload is not an edit tool's, so the deny list judges it. The target is
+/// `tool_input.file_path`, the field probed payload 03 shows; a payload without it (a
+/// `NotebookEdit` names its target in a field no probe recorded, R16) is an edit to an unknown
+/// path. A refusal exits 2, the deny exit of the shell deny list (G39); a `COVERAGE_UNKNOWN`
+/// notice allows the write with `additionalContext` (ruling R5) and the same line on stderr,
+/// since no probe has yet shown `PreToolUse` delivering that field. Both are recorded in the
+/// session's row.
+fn pre_tool_write(input: &str, dir: &Path) -> Option<Outcome> {
+    let value: Value = serde_json::from_str(input).ok()?;
+    let tool = value["tool_name"].as_str()?;
+    if !EDIT_TOOLS.contains(&tool) {
+        return None;
+    }
+    let file = value["tool_input"]["file_path"].as_str().map(PathBuf::from);
+    let cwd = crate::session::hook_cwd(&value, dir);
+    let verdict = crate::coord::judge(&cwd, file.as_deref(), std::time::SystemTime::now());
+    let record = |extra: Value| {
+        if let (Some(payload), Value::Object(extra)) =
+            (Payload::parse("pre-tool", input, dir), extra)
+        {
+            // A pre-tool line is never a stop, so it carries no stop refusal.
+            let _ = crate::session::record_with(&payload, &extra);
+        }
+    };
+    Some(match verdict {
+        crate::coord::Verdict::Allow => Outcome::default(),
+        crate::coord::Verdict::Refuse {
+            reason,
+            line,
+            detail,
+        } => {
+            record(serde_json::json!({
+                "state": format!("blocked({})", reason.code()),
+                "refused": detail,
+            }));
+            Outcome {
+                exit: 2,
+                stdout: String::new(),
+                stderr: format!("{line}\n"),
+            }
+        }
+        crate::coord::Verdict::Notice { text, detail } => {
+            record(serde_json::json!({ "notice": detail }));
+            let output = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "additionalContext": text,
+                },
+            });
+            Outcome {
+                exit: 0,
+                stdout: format!("{output}\n"),
+                stderr: format!("{text}\n"),
+            }
+        }
+    })
 }
 
 #[cfg(test)]

@@ -493,7 +493,7 @@ fn run_bounded(
 }
 
 /// Kills process group `group`, with a bounded `kill`.
-fn kill_group(group: u32) {
+pub(crate) fn kill_group(group: u32) {
     let mut kill = Command::new("kill");
     kill.args(["-KILL", "--", &format!("-{group}")]);
     let _ = crate::git::run_bounded_for(kill, "kill", None, Duration::from_secs(5));
@@ -524,7 +524,7 @@ pub fn observe(repo: &Repo, record: &ChangeRecord, base: &str) -> BTreeMap<Strin
 }
 
 /// Where one named input stands for a change (`DESIGN` § 8).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputState {
     /// No conflict found in what was checked.
@@ -549,6 +549,9 @@ pub struct Judgement {
     pub phase: Option<Phase>,
     /// How the change's declared paths consume the input, when the provider lists them.
     pub consumer: Option<ConsumerKind>,
+    /// The consumers the provider listed at trunk (empty when it listed none or gave no
+    /// version): which writes a stale input covers (ruling R4).
+    pub consumers: Vec<Consumer>,
     /// Why the coverage is unknown.
     pub why: Option<String>,
     /// Whether trunk's policy names a provider for the input. An input it names whose version
@@ -630,6 +633,7 @@ pub fn judge(
                 validated,
                 phase: None,
                 consumer: None,
+                consumers: Vec::new(),
                 why: None,
                 named: false,
             };
@@ -652,6 +656,7 @@ pub fn judge(
             match version_at(repo, trunk, entry, trunk, probe) {
                 Ok(required) => {
                     judgement.consumer = consumer_kind(&required.consumers, &declared);
+                    judgement.consumers.clone_from(&required.consumers);
                     judgement.required = Some(required.version);
                     (judgement.state, judgement.why) =
                         state(repo, record, trunk, entry, &judgement, probe);
@@ -714,7 +719,8 @@ fn consumer_kind(consumers: &[Consumer], declared: &[String]) -> Option<Consumer
 }
 
 /// Whether `inner` lies in `outer` (a file, or a directory with or without its `/`).
-fn within(outer: &str, inner: &str) -> bool {
+#[must_use]
+pub fn within(outer: &str, inner: &str) -> bool {
     let outer = outer.trim_end_matches('/');
     inner.trim_end_matches('/') == outer || inner.starts_with(&format!("{outer}/"))
 }
@@ -766,9 +772,9 @@ pub fn request_inputs(judged: &[Judgement]) -> Vec<String> {
 }
 
 /// The stale inputs of `record` against the local cache of trunk, from local data only: no
-/// fetch, no network, and no provider run, only answers already cached (for `bay watch` and
-/// the `pre-tool` refusal, which must stay cheap). `Unknown` inputs are not stale; [`judge`]
-/// reports them.
+/// fetch, no network, and no provider run, only answers already cached (for the `pre-tool`
+/// refusal and any hook notice, which must stay cheap). `Unknown` inputs are not stale;
+/// [`judge`] reports them. `bay watch`, a read the caller asked for, uses [`stale_at`].
 ///
 /// # Errors
 ///
@@ -778,7 +784,22 @@ pub fn stale_inputs(repo: &Repo, record: &ChangeRecord) -> Result<Vec<Judgement>
         .git
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
         .map_err(|error| format!("the local cache holds no trunk: {}", error.message()))?;
-    Ok(judge(repo, record, &trunk, Probe::Cached)?
+    stale_at(repo, record, &trunk, Probe::Cached)
+}
+
+/// The stale inputs of `record` judged at trunk commit `trunk`, got as `probe` says. `Unknown`
+/// inputs are not stale; [`judge`] reports them.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn stale_at(
+    repo: &Repo,
+    record: &ChangeRecord,
+    trunk: &str,
+    probe: Probe,
+) -> Result<Vec<Judgement>, String> {
+    Ok(judge(repo, record, trunk, probe)?
         .into_iter()
         .filter(Judgement::is_stale)
         .collect())

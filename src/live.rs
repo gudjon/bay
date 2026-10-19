@@ -5,10 +5,11 @@
 //! holds one parentless commit whose tree is `live.json` alone (schema `bay.live/1`): the
 //! machine's name, the time it was written, the fingerprint of the agent key that signs it, and
 //! one row per live session. A row is a projection of the session's latest work record line
-//! (`INTERFACES` § 5a): session, actor, change, state, event, agent, context use and time. Local
-//! paths (repository, view, files) stay in the local record. A row whose time is older than the
-//! takeover window is reaped: a session that died without `SessionEnd` stops counting once its
-//! own heartbeat is that old, however often a sibling session on the machine fires. Each write
+//! (`INTERFACES` § 5a): session, actor, change, state, event, agent, context use, whether its view
+//! holds uncheckpointed edits (ruling R7) and time. Local paths (repository, view, files) stay in
+//! the local record. A row whose time is older than the takeover window is reaped: a session
+//! that died without `SessionEnd` stops counting once its own heartbeat is that old, however
+//! often a sibling session on the machine fires. Each write
 //! replaces the ref with a new parentless commit; the host's reflog keeps its history. With a
 //! key registry the commit is signed by this box's agent key; the host hook binds the ref to
 //! its first key, and one key to one live ref.
@@ -50,8 +51,17 @@ pub const LIVE_MAX_BYTES: u64 = 32 * 1024;
 /// The most rows a summary carries: the newest ones.
 const LIVE_MAX_ROWS: usize = 64;
 /// The fields of a work record line a row keeps.
-const ROW_FIELDS: [&str; 8] = [
-    "session", "actor", "change", "state", "event", "agent", "context", "at",
+const ROW_FIELDS: [&str; 10] = [
+    "session",
+    "actor",
+    "change",
+    "state",
+    "event",
+    "agent",
+    "context",
+    "uncheckpointed",
+    "uncheckpointed_unknown",
+    "at",
 ];
 /// The most of a session record's tail read for its latest line.
 const TAIL_BYTES: u64 = 64 * 1024;
@@ -150,13 +160,60 @@ fn last_line(path: &Path) -> Option<Value> {
         .find_map(|line| serde_json::from_str::<Value>(line).ok())
 }
 
-fn unix_now() -> u64 {
+/// The files `session` last wrote on this machine, from the tail of its local record: the
+/// latest line whose `wrote` lists any file, as `{"wrote": [...], "wrote_at": ...}`; an empty
+/// list when the tail names none; `null` fields when there is no record. A session id that is
+/// not a plain file name is never read.
+#[must_use]
+pub fn last_wrote(repo: &Repo, session: &str) -> Value {
+    let plain = !session.is_empty()
+        && session != "."
+        && session != ".."
+        && session
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    let unknown = json!({"wrote": null, "wrote_at": null});
+    if !plain {
+        return unknown;
+    }
+    let path = sessions_dir(repo).join(format!("{session}.jsonl"));
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return unknown;
+    };
+    let len = file.metadata().map_or(0, |meta| meta.len());
+    let mut text = String::new();
+    if file
+        .seek(std::io::SeekFrom::Start(len.saturating_sub(TAIL_BYTES)))
+        .and_then(|_| file.read_to_string(&mut text))
+        .is_err()
+    {
+        return unknown;
+    }
+    text.lines()
+        .rev()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| {
+            line["wrote"]
+                .as_array()
+                .is_some_and(|wrote| !wrote.is_empty())
+        })
+        .map_or_else(
+            || json!({"wrote": [], "wrote_at": null}),
+            |line| json!({"wrote": line["wrote"], "wrote_at": line["at"]}),
+        )
+}
+
+/// The Unix time now.
+#[must_use]
+pub fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-fn unix_at(value: &Value) -> Option<u64> {
+/// The Unix time of a summary's or row's `at`.
+#[must_use]
+pub fn unix_at(value: &Value) -> Option<u64> {
     value["at"].as_str().and_then(crate::clock::unix_of)
 }
 
@@ -191,8 +248,10 @@ pub fn rows_of(lines: Vec<Value>, now: u64, window: u64) -> Vec<Value> {
     rows
 }
 
-/// The latest line of every session this repository records on this machine.
-fn lines(repo: &Repo) -> Option<Vec<Value>> {
+/// The latest line of every session this repository records on this machine; `None` when it
+/// records none.
+#[must_use]
+pub fn lines(repo: &Repo) -> Option<Vec<Value>> {
     let entries = std::fs::read_dir(sessions_dir(repo)).ok()?;
     Some(
         entries
@@ -282,8 +341,10 @@ fn push_once(repo: &Repo) -> Result<Value, String> {
     let Some((name, commit)) = write(repo)? else {
         return Ok(json!({"pushed": false, "why": "no sessions"}));
     };
+    // The commit just written, never the local ref's name: a fetch of the remote's live refs
+    // (`bay start`'s takeover watch) may move or prune that ref between the write and the push.
     repo.git
-        .run(&["push", "-q", repo.remote(), &format!("+{name}:{name}")])
+        .run(&["push", "-q", repo.remote(), &format!("+{commit}:{name}")])
         .map_err(|error| format!("{name} could not be pushed: {}", error.message()))?;
     Ok(json!({"ref": name, "commit": commit, "pushed": true}))
 }
@@ -475,8 +536,10 @@ pub fn summary_at(git: &Git, commit: &str) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
-/// The `live.json` of each commit, read by one `git cat-file --batch`; `None` where a commit
-/// holds none, or one larger than [`LIVE_MAX_BYTES`].
+/// The `live.json` of each commit; `None` where a commit holds none, one larger than
+/// [`LIVE_MAX_BYTES`], or one that is not JSON. Two `git cat-file` calls whatever the count:
+/// `--batch-check` sizes every file first, and `--batch` reads only the blobs within the
+/// bound, as bytes, so a large or non-UTF-8 blob is never read and spoils no other summary.
 ///
 /// # Errors
 ///
@@ -492,12 +555,62 @@ pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<Option<Value>>,
         input.push_str(LIVE_FILE);
         input.push('\n');
     }
-    let out = git
-        .run_with(&["cat-file", "--batch"], &[], Some(input.as_bytes()))
+    let checked = git
+        .run_with(
+            &[
+                "cat-file",
+                "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+            ],
+            &[],
+            Some(input.as_bytes()),
+        )
         .map_err(|error| error.message())?;
-    let mut rest = out.as_bytes();
-    let mut summaries = Vec::with_capacity(commits.len());
-    for _ in commits {
+    // Per commit, the blob to read: a blob within the bound.
+    let wanted: Vec<Option<String>> = checked.lines().map(small_blob).collect();
+    if wanted.len() != commits.len() {
+        return Err(format!(
+            "git cat-file --batch-check answered {} lines for {} commits",
+            wanted.len(),
+            commits.len()
+        ));
+    }
+    let mut blobs = String::new();
+    for oid in wanted.iter().flatten() {
+        blobs.push_str(oid);
+        blobs.push('\n');
+    }
+    let bodies = if blobs.is_empty() {
+        std::collections::BTreeMap::new()
+    } else {
+        let out = git
+            .run_bytes(&["cat-file", "--batch"], &[], Some(blobs.as_bytes()))
+            .map_err(|error| error.message())?;
+        batch_bodies(&out)
+    };
+    Ok(wanted
+        .into_iter()
+        .map(|oid| oid.and_then(|oid| bodies.get(&oid).cloned().flatten()))
+        .collect())
+}
+
+/// The object id of a `--batch-check` line naming a blob of at most [`LIVE_MAX_BYTES`].
+fn small_blob(line: &str) -> Option<String> {
+    let mut words = line.split(' ');
+    let (Some(oid), Some("blob"), Some(size), None) =
+        (words.next(), words.next(), words.next(), words.next())
+    else {
+        return None;
+    };
+    size.parse::<u64>()
+        .is_ok_and(|size| size <= LIVE_MAX_BYTES)
+        .then(|| oid.to_owned())
+}
+
+/// Each object of a `cat-file --batch` output by id, parsed as JSON (`None` when it is not).
+fn batch_bodies(out: &[u8]) -> std::collections::BTreeMap<String, Option<Value>> {
+    let mut bodies = std::collections::BTreeMap::new();
+    let mut rest = out;
+    while !rest.is_empty() {
         let end = rest
             .iter()
             .position(|byte| *byte == b'\n')
@@ -505,24 +618,18 @@ pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<Option<Value>>,
         let header = String::from_utf8_lossy(&rest[..end]).into_owned();
         rest = rest.get(end + 1..).unwrap_or_default();
         let mut words = header.split(' ');
-        let (Some(_), Some(kind), Some(size)) = (words.next(), words.next(), words.next()) else {
-            summaries.push(None);
-            continue;
-        };
-        let Ok(size) = size.parse::<usize>() else {
-            summaries.push(None);
+        let (Some(oid), Some(_), Some(Ok(size))) = (
+            words.next(),
+            words.next(),
+            words.next().map(str::parse::<usize>),
+        ) else {
             continue;
         };
         let body = rest.get(..size).unwrap_or(rest);
         rest = rest.get(size + 1..).unwrap_or_default();
-        let small = u64::try_from(size).is_ok_and(|size| size <= LIVE_MAX_BYTES);
-        summaries.push(
-            (kind == "blob" && small)
-                .then(|| serde_json::from_slice(body).ok())
-                .flatten(),
-        );
+        bodies.insert(oid.to_owned(), serde_json::from_slice::<Value>(body).ok());
     }
-    Ok(summaries)
+    bodies
 }
 
 /// The agent class file of the registry this repository holds, or `None` without one.
@@ -597,6 +704,25 @@ mod tests {
         assert!(rows[0].get("repo").is_none() && rows[0].get("view").is_none());
         assert!(rows[0].get("schema").is_none(), "{rows:?}");
         assert_eq!(rows[0]["change"], "c1");
+    }
+
+    #[test]
+    fn an_idle_row_says_whether_its_view_holds_uncheckpointed_edits() {
+        // Ruling R7: the row of a session that stopped over edits no checkpoint records says
+        // so, and a stop that could not be judged says why.
+        let base = crate::clock::unix_of("2026-10-19T00:00:00Z").unwrap();
+        let mut idle = line("s-idle", base + 50, "idle");
+        idle["uncheckpointed"] = json!(true);
+        let mut unknown = line("s-unknown", base + 50, "idle");
+        unknown["uncheckpointed"] = json!(null);
+        unknown["uncheckpointed_unknown"] = json!("too_many_paths");
+        let rows = rows_of(vec![idle, unknown], base + 55, 30);
+        assert_eq!(rows[0]["uncheckpointed"], true, "{rows:?}");
+        assert!(rows[1].get("uncheckpointed").is_none(), "{rows:?}");
+        assert_eq!(
+            rows[1]["uncheckpointed_unknown"], "too_many_paths",
+            "{rows:?}"
+        );
     }
 
     #[test]

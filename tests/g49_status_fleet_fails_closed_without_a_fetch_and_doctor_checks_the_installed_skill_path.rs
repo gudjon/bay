@@ -257,11 +257,10 @@ fn status_fleet_fails_closed_after_a_push_or_a_trunk_fetch() {
     assert_eq!(result["reason"], "REMOTE_NOT_FETCHED");
 }
 
-/// The record a fetch of the remote's `refs/bay/live/*` writes (increment 2 writes it; this
+/// The record a fetch of the remote's `refs/bay/live/*` writes (`bay status` writes it; this
 /// test stands in for that fetch). A record of another URL is a fetch of another remote, so
-/// the cache is still not the fleet. A record of this remote passes the guard; the map itself
-/// is increment 2, so this version answers with an operation fault that says so, never an
-/// empty map presented as the fleet.
+/// the cache is still not the fleet. A record of this remote passes the guard: the map of a
+/// remote with no live refs lists no machines, and says the day-old fetch is behind.
 #[test]
 fn status_fleet_passes_the_guard_only_for_a_fetch_of_this_remote() {
     let test_box = TestBox::new();
@@ -280,12 +279,33 @@ fn status_fleet_passes_the_guard_only_for_a_fetch_of_this_remote() {
     let text = serde_json::json!({"remote": "origin", "url": url, "at": at}).to_string();
     std::fs::write(&record, text).unwrap();
     let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
-    assert_eq!(code, 20, "{result}");
-    assert_eq!(result["decision"], "failed");
-    assert!(
-        result.get("reason").is_none_or(serde_json::Value::is_null),
+    assert_eq!(code, 0, "{result}");
+    assert_eq!(result["decision"], "ok");
+    assert_eq!(
+        result["detail"]["machines"],
+        serde_json::json!([]),
         "{result}"
     );
-    let detail = result["detail"].as_str().unwrap_or_default();
-    assert!(detail.contains("does not build the fleet map"), "{result}");
+    assert_eq!(result["detail"]["fetched_at"], at, "{result}");
+    assert_eq!(result["detail"]["behind"], true, "{result}");
+}
+
+/// `bay status` is the fetch of the fleet refs: after it, `--fleet` no longer fails closed.
+#[test]
+fn bay_status_records_the_fetch_of_the_fleet_refs() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.seed_trunk(&repo, &[("README", "trunk\n")]);
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    assert_eq!(code, 10, "{result}");
+    test_box.bay_ok(&repo, &["status"]);
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    assert_eq!(code, 0, "{result}");
+    // Whether the remote moved since is unknown to a read that never asks it: never `false`.
+    assert!(result["detail"]["behind"].is_null(), "{result}");
+    assert_eq!(
+        result["detail"]["sessions"],
+        serde_json::json!([]),
+        "{result}"
+    );
 }

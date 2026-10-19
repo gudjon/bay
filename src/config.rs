@@ -1,7 +1,7 @@
 //! `.bay/config.toml` in the repository (`INTERFACES` § 7).
 //!
 //! Every key § 7 lists is parsed and typed, so a mistyped one is a config error. Keys whose
-//! feature is not built yet (`[check] command`, `[notify] command`, `[policy]`, `[hooks]`) are
+//! feature is not built yet (`[check] command`, `[policy]`) are
 //! held and read by nothing. `[executor]` and `[retention]` are read by built features but are
 //! not in § 7's list yet (BACKLOG 18). A key or table bay does not know is a config error that
 //! names it, as is `evidence_reuse` set to anything but `"off"`: a misspelled or unbuilt
@@ -42,7 +42,8 @@ pub struct Check {
     pub command: Option<String>,
 }
 
-/// `[notify] command`: the notify adapter (`INTERFACES` § 4). Not read until events are built.
+/// `[notify] command`: the notify adapter (`INTERFACES` § 4), called once after each event is
+/// written (`crate::notify`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Notify {
@@ -59,7 +60,7 @@ pub struct PolicyProfile {
 }
 
 /// `[hooks] cache_max_age_s` (`DESIGN` § 11): the coordination cache's maximum age for
-/// `pre-tool`. Not read until `pre-tool` judges writes against that cache.
+/// `pre-tool` (`crate::coord`). Default 30 (`INTERFACES` § 7).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hooks {
@@ -170,6 +171,18 @@ impl Config {
             ));
         }
         Ok(config)
+    }
+
+    /// The coordination cache's maximum age for `pre-tool`: older, a write to a declared input
+    /// gets `COVERAGE_UNKNOWN` (`DESIGN` § 11).
+    #[must_use]
+    pub fn cache_max_age(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.hooks
+                .as_ref()
+                .and_then(|hooks| hooks.cache_max_age_s)
+                .unwrap_or(30),
+        )
     }
 
     #[must_use]

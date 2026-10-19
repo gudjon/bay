@@ -9,7 +9,10 @@
 //! `expand` a change built on the old shape stays valid; only `contract` invalidates. A
 //! historical consumer never blocks. A change cannot supply its own provider. A provider that
 //! gives no version is a coverage gap, never a clear answer. The stale inputs of a change are
-//! read from local data only. The hook's refusal of a stale write is a later item (B3).
+//! read from local data only. The `pre-tool` hook refuses a write that a stale input covers,
+//! from the coordination cache a fetching command left (rulings R4, R5): a claim never refuses
+//! a write, an old cache allows with `COVERAGE_UNKNOWN`, and with the hooks removed land still
+//! refuses the same change (G23's hook clauses).
 
 mod support;
 
@@ -610,4 +613,371 @@ fn a_provider_outside_its_adapter_list_makes_the_policy_invalid() {
     let (code, refused) = land(&test_box, &view);
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
+}
+
+/// `bay hook pre-tool` with probed payload 03 (a `Write`), its tool, target and session
+/// rewritten; returns (exit, stdout, stderr).
+fn pre_tool(
+    test_box: &TestBox,
+    cwd: &Path,
+    tool: &str,
+    file: &Path,
+    session: &str,
+) -> (Option<i32>, String, String) {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude-code-2.1.302/03-PreToolUse.json");
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
+    payload["session_id"] = session.into();
+    payload["cwd"] = cwd.display().to_string().into();
+    payload["tool_name"] = tool.into();
+    payload["tool_input"]["file_path"] = file.display().to_string().into();
+    hook_run(test_box, cwd, &payload)
+}
+
+fn hook_run(
+    test_box: &TestBox,
+    cwd: &Path,
+    payload: &serde_json::Value,
+) -> (Option<i32>, String, String) {
+    use std::io::Write as _;
+    let mut child = test_box
+        .bay_process(cwd)
+        .args(["hook", "pre-tool"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn common_dir(test_box: &TestBox, repo: &Path) -> PathBuf {
+    let common = PathBuf::from(test_box.git_ok(repo, &["rev-parse", "--git-common-dir"]));
+    if common.is_absolute() {
+        common
+    } else {
+        repo.join(common)
+    }
+}
+
+/// The last line of a session's work record.
+fn last_row(test_box: &TestBox, repo: &Path, session: &str) -> serde_json::Value {
+    let path = common_dir(test_box, repo)
+        .join("bay/sessions")
+        .join(format!("{session}.jsonl"));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    serde_json::from_str(text.lines().last().unwrap()).unwrap()
+}
+
+/// Moves the coordination cache's fetch time `secs` into the past.
+fn age_cache(test_box: &TestBox, repo: &Path, secs: u64) {
+    let path = common_dir(test_box, repo).join("bay/coord.json");
+    let mut coord: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let at = coord["fetched_at_s"].as_u64().unwrap();
+    coord["fetched_at_s"] = (at - secs).into();
+    std::fs::write(&path, coord.to_string()).unwrap();
+}
+
+/// The committed `.bay/config.toml` with `[hooks] <hooks>` added, in the main work tree.
+fn hooks_config(test_box: &TestBox, repo: &Path, hooks: &str) {
+    let committed = test_box.git_ok(repo, &["show", "HEAD:.bay/config.toml"]);
+    TestBox::bay_config(repo, &format!("{committed}\n[hooks]\n{hooks}\n"));
+}
+
+/// A change on `src/` and `docs/archive/` that declares the input, and a trunk that moved its
+/// version past what the change observed, fetched by `bay status`. The cache stays fresh for
+/// 600 s, so a slow box cannot turn a refusal into a notice.
+fn stale_change() -> (TestBox, PathBuf, String, PathBuf) {
+    let (test_box, repo, _remote) = trunk(None);
+    let (id, view) = start(&test_box, &repo, "CARD-1", &["src/", "docs/archive/"]);
+    move_trunk(&test_box, &repo, &[("api/version", "v18\n")]);
+    hooks_config(&test_box, &repo, "cache_max_age_s = 600");
+    test_box.bay_ok(&repo, &["status"]);
+    (test_box, repo, id, view)
+}
+
+/// Writes `text` as the coordination cache.
+fn put_cache(test_box: &TestBox, repo: &Path, text: &str) {
+    std::fs::write(common_dir(test_box, repo).join("bay/coord.json"), text).unwrap();
+}
+
+/// The one `COVERAGE_UNKNOWN` notice a hook allowed a write with: on stdout as
+/// `additionalContext` and on stderr, at exit 0.
+fn assert_notice(found: &(Option<i32>, String, String), what: &str) -> String {
+    let (code, stdout, stderr) = found;
+    assert_eq!(*code, Some(0), "{what}: {stdout} {stderr}");
+    let output: serde_json::Value = serde_json::from_str(stdout)
+        .unwrap_or_else(|error| panic!("{what}: no notice ({error}): {stdout:?} {stderr}"));
+    let context = output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(context.contains("COVERAGE_UNKNOWN"), "{what}: {context}");
+    assert!(stderr.contains("COVERAGE_UNKNOWN"), "{what}: {stderr}");
+    context
+}
+
+#[test]
+fn the_hook_judges_the_target_where_it_lands_and_a_config_it_cannot_read_is_not_silent() {
+    let (test_box, repo, id, view) = stale_change();
+    let target = view.join("src/feature.rs");
+    // A session outside the repository writes into the view: the view that holds the target
+    // judges it (R-B3-3), not the session's directory.
+    let outside = test_box.path().join("elsewhere");
+    std::fs::create_dir_all(&outside).unwrap();
+    let (code, stdout, stderr) = pre_tool(&test_box, &outside, "Write", &target, "s-6");
+    assert_eq!(code, Some(2), "{stdout} {stderr}");
+    assert!(stderr.contains("INPUT_UNOBSERVED"), "{stderr}");
+    // A relative target, and one through a symbolic link and `..`, are resolved as the system
+    // resolves them: `<link>/..` is the view, not the link's directory.
+    let (code, _, stderr) = pre_tool(&test_box, &view, "Write", Path::new("src/x.rs"), "s-6");
+    assert_eq!(code, Some(2), "{stderr}");
+    std::os::unix::fs::symlink(view.join("src"), outside.join("link")).unwrap();
+    let through = outside.join("link/../src/feature.rs");
+    let (code, stdout, stderr) = pre_tool(&test_box, &outside, "Write", &through, "s-6");
+    assert_eq!(code, Some(2), "{through:?}: {stdout} {stderr}");
+    // A config bay cannot read cannot say how old a cache may be: a notice, never silent.
+    TestBox::bay_config(&repo, "[hooks]\ncache_max_age_s = \"soon\"\n");
+    let found = pre_tool(&test_box, &view, "Write", &target, "s-6");
+    let context = assert_notice(&found, "an unreadable config");
+    assert!(context.contains(&id), "{context}");
+    // A write in no view of that repository stays silent.
+    let (code, stdout, _) = pre_tool(&test_box, &repo, "Write", &repo.join("src/x.rs"), "s-6");
+    assert_eq!((code, stdout.as_str()), (Some(0), ""));
+}
+
+#[test]
+fn a_cache_that_cannot_say_gives_a_notice_only_where_an_input_could_cover() {
+    let (test_box, repo, _id, view) = stale_change();
+    let target = view.join("src/feature.rs");
+    let started = test_box.bay_ok(&repo, &["start", "CARD-2", "--paths", "src/"]);
+    let plain = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    // An edit tool whose payload names no `file_path` (`NotebookEdit` sends another field,
+    // which no probe recorded): bay cannot say what it writes, so it says so.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude-code-2.1.302/03-PreToolUse.json");
+    let mut payload: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(fixture).unwrap()).unwrap();
+    payload["session_id"] = "s-7".into();
+    payload["cwd"] = view.display().to_string().into();
+    payload["tool_name"] = "NotebookEdit".into();
+    payload["tool_input"] = serde_json::json!({"notebook_path": target, "new_source": "x"});
+    let context = assert_notice(&hook_run(&test_box, &view, &payload), "no file_path");
+    assert!(context.contains(INPUT), "{context}");
+    // A fetch time past what a clock can hold is a notice, not a crash.
+    let path = common_dir(&test_box, &repo).join("bay/coord.json");
+    let good = std::fs::read_to_string(&path).unwrap();
+    let mut far: serde_json::Value = serde_json::from_str(&good).unwrap();
+    far["fetched_at_s"] = u64::MAX.into();
+    put_cache(&test_box, &repo, &far.to_string());
+    let found = pre_tool(&test_box, &view, "Write", &target, "s-7");
+    assert_notice(&found, "a fetch time out of range");
+    // A cache that does not parse, or none at all: a notice for the change with an input,
+    // silence for the change that declares none.
+    for (what, text) in [("garbage", Some("{not json")), ("absent", None)] {
+        match text {
+            Some(text) => put_cache(&test_box, &repo, text),
+            None => std::fs::remove_file(&path).unwrap(),
+        }
+        assert_notice(&pre_tool(&test_box, &view, "Write", &target, "s-7"), what);
+        let (code, stdout, stderr) =
+            pre_tool(&test_box, &plain, "Write", &plain.join("src/a.rs"), "s-8");
+        assert_eq!((code, stdout.as_str()), (Some(0), ""), "{what}: {stderr}");
+    }
+}
+
+#[test]
+fn a_looping_executor_writes_the_cache_after_each_pass_that_fetched() {
+    let (test_box, repo, remote) = trunk(None);
+    let (id, view) = start(&test_box, &repo, "CARD-1", &["src/"]);
+    std::fs::write(view.join("src/feature.rs"), "fn feature() {}\n").unwrap();
+    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{queued}");
+    let clone = test_box.clone_of(&remote, "executor");
+    test_box.git_ok(&clone, &["config", "bay.executorName", "exec"]);
+    test_box.git_ok(&clone, &["config", "bay.producerName", "exec-checks"]);
+    let cache = clone.join(".git/bay/coord.json");
+    let mut executor = test_box
+        .bay_process(&clone)
+        .args(["executor", "run", "--interval-s", "1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    let (landed, written) = loop {
+        let landed = test_box.trunk_change_ids(&remote).contains(&id);
+        if (landed && cache.exists()) || std::time::Instant::now() > deadline {
+            break (landed, cache.exists());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    let still_running = executor.try_wait().unwrap().is_none();
+    executor.kill().unwrap();
+    let _ = executor.wait();
+    assert!(still_running, "the executor loops");
+    assert!(landed, "the executor's pass landed the change");
+    assert!(
+        written,
+        "a looping executor never wrote {}",
+        cache.display()
+    );
+}
+
+#[test]
+fn the_hook_refuses_a_write_its_stale_input_covers() {
+    let (test_box, repo, id, view) = stale_change();
+    for tool in ["Write", "Edit"] {
+        let (code, stdout, stderr) =
+            pre_tool(&test_box, &view, tool, &view.join("src/feature.rs"), "s-1");
+        assert_eq!(code, Some(2), "{tool}: {stdout} {stderr}");
+        assert_eq!(stderr.lines().count(), 1, "one line: {stderr}");
+        assert!(stderr.contains("INPUT_UNOBSERVED"), "{stderr}");
+        assert!(stderr.contains(INPUT), "{stderr}");
+        assert!(
+            stderr.contains(&format!("bay start --resume {id}")),
+            "{stderr}"
+        );
+    }
+    // The refusal is recorded in the session's row.
+    let row = last_row(&test_box, &repo, "s-1");
+    assert_eq!(row["state"], "blocked(INPUT_UNOBSERVED)", "{row}");
+    assert_eq!(row["refused"]["input"], INPUT, "{row}");
+    assert_eq!(row["change"], id.as_str(), "{row}");
+    // The refusal's exit is the shell deny list's (G39).
+    let deny = serde_json::json!({
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "git reset --hard"},
+        "cwd": view,
+    });
+    let (denied, _, _) = hook_run(&test_box, &view, &deny);
+    assert_eq!(denied, Some(2));
+    // Once the change observed the version, the repair is an edit: never a deadlock.
+    test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    let (code, stdout, stderr) = pre_tool(
+        &test_box,
+        &view,
+        "Write",
+        &view.join("src/client.rs"),
+        "s-1",
+    );
+    assert_eq!(code, Some(0), "{stdout} {stderr}");
+    assert_eq!(stdout, "", "a write after the repair is silent");
+}
+
+#[test]
+fn the_hook_allows_a_write_no_stale_input_covers_and_a_claim_never_refuses() {
+    let (test_box, repo, _id, view) = stale_change();
+    // A declared path that is no consumer of the input (a historical one): R4 judges by the
+    // provider's consumer paths, not by every declared path.
+    let (code, stdout, stderr) = pre_tool(
+        &test_box,
+        &view,
+        "Write",
+        &view.join("docs/archive/new.md"),
+        "s-2",
+    );
+    assert_eq!(code, Some(0), "{stdout} {stderr}");
+    assert_eq!(stdout, "", "{stdout}");
+    // A path in no view.
+    let (code, _, stderr) = pre_tool(&test_box, &repo, "Write", &repo.join("src/x.rs"), "s-2");
+    assert_eq!(code, Some(0), "{stderr}");
+    // Another change claims the same paths and declares no input: its writes are allowed.
+    let started = test_box.bay_ok(&repo, &["start", "CARD-2", "--paths", "src/"]);
+    let other_view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    let (code, stdout, stderr) = pre_tool(
+        &test_box,
+        &other_view,
+        "Edit",
+        &other_view.join("src/a.rs"),
+        "s-3",
+    );
+    assert_eq!(code, Some(0), "{stdout} {stderr}");
+    assert_eq!(stdout, "", "{stdout}");
+}
+
+#[test]
+fn an_old_cache_allows_the_write_with_a_coverage_unknown_notice() {
+    let (test_box, repo, id, view) = stale_change();
+    age_cache(&test_box, &repo, 3600);
+    let (code, stdout, stderr) = pre_tool(
+        &test_box,
+        &view,
+        "Write",
+        &view.join("src/feature.rs"),
+        "s-4",
+    );
+    assert_eq!(
+        code,
+        Some(0),
+        "R5: an old cache allows, with a notice: {stderr}"
+    );
+    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(output["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    let context = output["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("COVERAGE_UNKNOWN"), "{context}");
+    assert!(context.contains("cache_max_age_s = 600"), "{context}");
+    // The same notice on stderr at exit 0: PreToolUse's additionalContext is not probed.
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+    assert!(stderr.contains("COVERAGE_UNKNOWN"), "{stderr}");
+    let row = last_row(&test_box, &repo, "s-4");
+    assert_eq!(row["notice"]["reason"], "COVERAGE_UNKNOWN", "{row}");
+    let age = row["notice"]["cache_age_s"].as_u64().unwrap();
+    assert!(age >= 3600, "{row}");
+    assert!(context.contains(&format!("{age} s old")), "{context}");
+    assert_eq!(row["change"], id.as_str(), "{row}");
+    // A write no declared input covers is still silent.
+    let (code, stdout, _) = pre_tool(
+        &test_box,
+        &view,
+        "Write",
+        &view.join("docs/archive/new.md"),
+        "s-4",
+    );
+    assert_eq!((code, stdout.as_str()), (Some(0), ""));
+    // A longer [hooks] cache_max_age_s makes the same cache fresh: the write is refused.
+    hooks_config(&test_box, &repo, "cache_max_age_s = 7200");
+    let (code, _, stderr) = pre_tool(
+        &test_box,
+        &view,
+        "Write",
+        &view.join("src/feature.rs"),
+        "s-4",
+    );
+    assert_eq!(code, Some(2), "{stderr}");
+}
+
+#[test]
+fn with_the_hooks_removed_land_refuses_the_same_stale_change() {
+    let (test_box, _repo, _id, view) = stale_change();
+    // The hook refuses this write; made without the hooks, land refuses the change.
+    let (code, _, _) = pre_tool(
+        &test_box,
+        &view,
+        "Write",
+        &view.join("src/feature.rs"),
+        "s-5",
+    );
+    assert_eq!(code, Some(2));
+    std::fs::write(view.join("src/feature.rs"), "fn feature() {}\n").unwrap();
+    let (code, refused) = land(&test_box, &view);
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "INPUT_UNOBSERVED", "{refused}");
 }

@@ -284,6 +284,9 @@ struct Ctx<'a> {
     online: bool,
     /// The chain head the last heartbeat pushed, while a check runs (§ 9a).
     beat_pushed: std::cell::RefCell<Option<String>>,
+    /// Events this run wrote mid-operation, told to the notify adapter only once the operation
+    /// reached its outcome, so a slow adapter never holds an operation past its lease.
+    deferred: std::cell::RefCell<Vec<serde_json::Value>>,
 }
 
 impl<'a> Ctx<'a> {
@@ -306,7 +309,15 @@ impl<'a> Ctx<'a> {
             repair: None,
             online: true,
             beat_pushed: std::cell::RefCell::new(None),
+            deferred: std::cell::RefCell::new(Vec::new()),
         })
+    }
+
+    /// Tells the notify adapter, once each, of the events this run deferred (ruling R6).
+    fn tell_deferred(&self) {
+        for event in self.deferred.take() {
+            let _ = crate::notify::notify(self.repo, &event);
+        }
     }
 
     /// The agent's signer: its key under the change's actor name. Required with a registry.
@@ -532,7 +543,9 @@ fn submit_land(
     kill_point("after-freeze");
 
     if wait && online {
-        return execute_op(&mut ctx, &op_id, trunk);
+        let result = execute_op(&mut ctx, &op_id, trunk);
+        ctx.tell_deferred();
+        return result;
     }
     let op = ctx.op(&op_id);
     let mut result = BayResult::new(Decision::Queued)
@@ -577,7 +590,152 @@ pub fn execute(
     if let Some(result) = scanned(&mut ctx, &trunk, &revision)? {
         return Ok(existing(result));
     }
-    execute_op(&mut ctx, op_id, trunk)
+    let result = execute_op(&mut ctx, op_id, trunk);
+    ctx.tell_deferred();
+    let result = result?;
+    kill_point("before-outcome-event");
+    // A log that cannot take the event now leaves the blocked operation on the chain, and the
+    // next executor pass writes the event the logs lack (`recover_events`).
+    if let Ok(Some(event)) = outcome_event(&ctx, op_id, &result) {
+        // A lost notice is never retried: `bay watch` reads the event from the log.
+        let _ = crate::notify::notify(ctx.repo, &event);
+    }
+    Ok(result)
+}
+
+/// `INTERFACES` § 2, outcomes that arrive after the agent left: a blocked outcome the executor
+/// reached, which waits for the actor, is an event for the change's actor on this executor's
+/// log. Returns the event when it was new, for the caller to tell the notify adapter.
+fn outcome_event(
+    ctx: &Ctx,
+    op_id: &str,
+    result: &BayResult,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(reason) = result.reason else {
+        return Ok(None);
+    };
+    let waits = ctx
+        .record
+        .operations
+        .iter()
+        .find(|op| op.op_id == op_id)
+        .is_some_and(|op| op.state == OpState::Blocked || op.state.is_terminal());
+    if result.decision != Decision::Blocked || !waits {
+        return Ok(None);
+    }
+    let detail = result.detail.clone().unwrap_or(serde_json::Value::Null);
+    let event = blocked_event(&ctx.record, op_id, reason, &detail)?;
+    let executor = ctx.executor_name();
+    let signer = ctx.executor_signer().ok().flatten();
+    let new = crate::log::append_event(ctx.repo, &executor, signer.as_ref(), &event)?;
+    Ok(new.then_some(event))
+}
+
+/// The event of operation `op_id` of `record` blocked on `reason`: kind `check_failed`,
+/// `check_unknown`, else `refused`. Its id is a digest of the operation, the reason and the
+/// candidate, so one outcome is one event however often, and by whom, it is written.
+fn blocked_event(
+    record: &ChangeRecord,
+    op_id: &str,
+    reason: Reason,
+    detail: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let kind = match reason {
+        Reason::CheckFailed => "check_failed",
+        Reason::CheckUnknown => "check_unknown",
+        _ => "refused",
+    };
+    let candidate = record
+        .operations
+        .iter()
+        .find(|op| op.op_id == op_id)
+        .and_then(|op| op.attempts.last())
+        .map(|attempt| attempt.candidate_id.clone());
+    // The cause a reader counts recurrences by: the input, else the first failed check.
+    let cause = detail["input"]
+        .as_str()
+        .or_else(|| detail["check"].as_str())
+        .or_else(|| detail["checks"][0]["check"].as_str());
+    let recurrence_key = match cause {
+        Some(cause) => format!("{}/{}/{cause}", record.id, reason.code()),
+        None => format!("{}/{}", record.id, reason.code()),
+    };
+    let id = digest(&json!({"op_id": op_id, "reason": reason.code(), "candidate": candidate}))?;
+    let inputs: Vec<String> = detail["inputs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|input| {
+            Some(format!(
+                "{}@{}",
+                input["input"].as_str()?,
+                input["required"].as_str()?
+            ))
+        })
+        .collect();
+    Ok(json!({
+        "schema": crate::log::EVENT_SCHEMA,
+        "id": format!("evt_{}", &id.trim_start_matches("sha256:")[..20]),
+        "at": crate::clock::now_rfc3339(),
+        "kind": kind,
+        "change": record.id,
+        "op_id": op_id,
+        "candidate": candidate,
+        "reason": reason.code(),
+        "actor": record.actor,
+        "inputs": inputs,
+        "detail": detail,
+        "recurrence_key": recurrence_key,
+    }))
+}
+
+/// The executor's repair of a lost event (`INTERFACES` § 2): the chain's move to blocked and
+/// the log append are two writes, so an executor that dies or loses its log between them
+/// leaves a blocked operation with no event. For every blocked operation of `records` whose
+/// event no log holds, the event is written now from the chain (its `detail` is then null),
+/// and the notify adapter is told once. Returns how many were written. The cost is one
+/// `git log` over the executor logs, and one append per event written.
+///
+/// # Errors
+///
+/// A git fault, or a key registry with no executor key on this machine.
+pub fn recover_events(repo: &Repo, records: &[ChangeRecord]) -> Result<usize, String> {
+    let blocked: Vec<(&ChangeRecord, &str, Reason)> = records
+        .iter()
+        .flat_map(|record| {
+            record
+                .operations
+                .iter()
+                .filter(|op| op.state == OpState::Blocked)
+                .filter_map(move |op| {
+                    let reason = Reason::from_code(op.outcome.as_deref()?)?;
+                    Some((record, op.op_id.as_str(), reason))
+                })
+        })
+        .collect();
+    if blocked.is_empty() {
+        return Ok(0);
+    }
+    crate::log::fetch(repo);
+    let held = crate::log::held_events(&repo.git)?;
+    let keys = Keys::load(&repo.git);
+    let signer = match Registry::current(&repo.git)? {
+        None => None,
+        Some(_) => Some(keys.executor.clone().ok_or(
+            "the repository has a key registry and this machine has no executor key (git config bay.executorKey)",
+        )?),
+    };
+    let mut written = 0;
+    for (record, op_id, reason) in blocked {
+        let event = blocked_event(record, op_id, reason, &serde_json::Value::Null)?;
+        if held.contains(event["id"].as_str().unwrap_or_default()) {
+            continue;
+        }
+        crate::log::append(repo, &keys.executor_name, signer.as_ref(), &event)?;
+        let _ = crate::notify::notify(repo, &event);
+        written += 1;
+    }
+    Ok(written)
 }
 
 /// Steps 2–7 for one operation, rebuilding when trunk moves.
@@ -2161,7 +2319,8 @@ fn run_policy(
 /// outside bay that it still stands on is recorded as a `policy_changed_outside_bay` event
 /// (`INTERFACES` § 5) in this executor's log, unless a log already holds it. Two executors
 /// that land at once may both write it; its id (`evt_<commit>`) is the same in both, so a
-/// reader de-duplicates (`INTERFACES` § 4).
+/// reader de-duplicates (`INTERFACES` § 4). A new event is told to the notify adapter only once
+/// the operation reached its outcome (`Ctx::tell_deferred`), never while it holds its lease.
 fn provenance(
     ctx: &Ctx,
     trunk: &str,
@@ -2182,17 +2341,9 @@ fn provenance(
     if edits.is_empty() {
         return Ok(policy::Provenance::Bay);
     }
-    crate::log::fetch(ctx.repo);
-    let recorded = crate::log::events(&ctx.repo.git, OUTSIDE_EVENT)?;
     let executor = ctx.executor_name();
     let signer = ctx.executor_signer().ok().flatten();
     for edit in edits {
-        if recorded
-            .iter()
-            .any(|event| event["commit"] == edit.commit.as_str())
-        {
-            continue;
-        }
         let event = json!({
             "schema": crate::log::EVENT_SCHEMA,
             "id": format!("evt_{}", edit.commit),
@@ -2205,7 +2356,9 @@ fn provenance(
             "other_paths": edit.other_paths,
             "recurrence_key": format!("{OUTSIDE_EVENT}/{}", edit.commit),
         });
-        crate::log::append(ctx.repo, &executor, signer.as_ref(), &event)?;
+        if crate::log::append_event(ctx.repo, &executor, signer.as_ref(), &event)? {
+            ctx.deferred.borrow_mut().push(event);
+        }
     }
     Ok(policy::Provenance::OutsideBay)
 }

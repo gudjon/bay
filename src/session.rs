@@ -83,8 +83,9 @@ fn bind_env(state_dir: &Path, session: &SessionId) {
 
 /// Appends one `bay.session/1` line for this hook event to
 /// `<git-common-dir>/bay/sessions/<session-id>.jsonl` (§ 11a), when the session runs in a
-/// repository. `PreToolUse` appends nothing: it is the blocking path (`onFailure: "block"`),
-/// § 11a gives it only the refusal, and the same step's `PostToolBatch` records it.
+/// repository. A silent `PreToolUse` appends nothing: it is the blocking path
+/// (`onFailure: "block"`), § 11a gives it only the refusal, and the same step's
+/// `PostToolBatch` records it; a refusal or a notice it gives is recorded ([`record_with`]).
 ///
 /// A view belongs to one change (ruling 10): every session whose hook fires in the view works on
 /// that view's change and is recorded by its own session id under the change's actor, a
@@ -93,22 +94,41 @@ fn bind_env(state_dir: &Path, session: &SessionId) {
 /// (`wrote_unknown`), from the view's own Git status (§ 11a, `crate::writes`). The record is a
 /// disposable work record; a hook never fails on it. Files read and the machine's summary ref
 /// are later items.
-pub fn record(payload: &Payload) {
-    let Some(session) = &payload.session else {
-        return;
-    };
+///
+/// The session's `Stop` in a view also records whether the view holds uncheckpointed edits
+/// (`uncheckpointed`, `DESIGN` § 4), and ruling R7 refuses that stop once: with
+/// `stop_hook_active` false the line stays `working` with `stop_refused`, and the refusal's
+/// reason is returned for the hook to give the agent. Once is per set of edits, and bay keeps
+/// it itself (the recordings show `stop_hook_active` only as false): the next stop over the same
+/// edits is allowed, and the session is idle with its uncheckpointed edits. A stop with
+/// `stop_hook_active` true or absent, and edits that cannot be read (`uncheckpointed_unknown`),
+/// are never refused.
+#[must_use]
+pub fn record(payload: &Payload) -> Option<String> {
+    record_with(payload, &serde_json::Map::new())
+}
+
+/// [`record`], with `extra` fields on the line: a `pre-tool` refusal's `blocked(<reason>)`
+/// state, or the `COVERAGE_UNKNOWN` notice it allowed a write with (ruling R5). The silent
+/// `pre-tool` path appends nothing. It returns the stop refusal's reason, as [`record`] does.
+#[must_use]
+pub fn record_with(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Option<String> {
+    let session = payload.session.as_ref()?;
     let cwd = &payload.cwd;
-    let Ok(repo) = Repo::open(cwd) else {
-        return;
-    };
+    let repo = Repo::open(cwd).ok()?;
     // In a view, the session works on the view's change, under the change's actor. Elsewhere in
     // the repository it is still a tracked session (§ 11a reserves "untracked" for hooks
     // disabled): no change, no view, and the actor's own name with this session.
+    let mut at_stop = None;
     let (actor, change, view) = match repo.view_change(cwd) {
         Some(id) => {
-            let Ok((_, change)) = crate::change::Chain::new(&repo.git).read(&id) else {
-                return;
-            };
+            let (head, change) = crate::change::Chain::new(&repo.git).read(&id).ok()?;
+            if payload.event == Event::Stop && payload.agent.is_none() {
+                at_stop = Some(AtStop {
+                    head,
+                    cut: change.retention_cut,
+                });
+            }
             let view = repo.view_path(&id);
             (change.actor, Some(id), Some(view))
         }
@@ -155,20 +175,27 @@ pub fn record(payload: &Payload) {
     if let Some(state) = event.state_after() {
         line["state"] = Value::from(state);
     }
-    let state = crate::writes::state_path(&state_dir, payload.agent.as_deref());
-    if let (Some(view), Some(step), Some(state)) = (&view, event.writes(), &state) {
-        match crate::writes::step(view, state, step) {
-            Some(crate::writes::Wrote::Paths(paths)) => line["wrote"] = serde_json::json!(paths),
-            Some(crate::writes::Wrote::Unknown(why)) => line["wrote_unknown"] = Value::from(why),
-            None => {}
-        }
+    for (key, value) in extra {
+        line[key] = value.clone();
     }
+    let state = crate::writes::state_path(&state_dir, payload.agent.as_deref());
+    let refusal = match (&view, event.writes(), &state, &change) {
+        (Some(view), Some(step), Some(state), Some(id)) => step_fields(
+            &mut line,
+            payload,
+            (view, state, &state_dir),
+            step,
+            at_stop.as_ref(),
+            id,
+        ),
+        _ => None,
+    };
     let Ok(mut text) = serde_json::to_string(&line) else {
-        return;
+        return refusal;
     };
     text.push('\n');
     if std::fs::create_dir_all(&dir).is_err() {
-        return;
+        return refusal;
     }
     // One write of one whole line to a file opened for append: concurrent hooks never
     // interleave within a line.
@@ -184,6 +211,83 @@ pub fn record(payload: &Payload) {
     if event == Event::SessionEnd {
         let _ = std::fs::remove_dir_all(&state_dir);
     }
+    refusal
+}
+
+/// The session's own stop in a view: the change's state commit and whether it is a retention
+/// cut, as the record read them.
+struct AtStop {
+    head: String,
+    cut: bool,
+}
+
+/// The fields one step in the view of change `id` adds to its line: the files it wrote and, at
+/// the session's stop (`at_stop`), whether the view holds uncheckpointed edits. Ruling R7's
+/// refusal when the stop is refused.
+fn step_fields(
+    line: &mut Value,
+    payload: &Payload,
+    (view, state, state_dir): (&Path, &Path, &Path),
+    step: crate::writes::Step,
+    at_stop: Option<&AtStop>,
+    id: &str,
+) -> Option<String> {
+    use crate::writes::{Edits, Wrote};
+    let (wrote, edits) = match at_stop {
+        Some(at) => {
+            let (wrote, edits) = crate::writes::stop(view, state, &at.head, at.cut);
+            (Some(wrote), Some(edits))
+        }
+        None => (crate::writes::step(view, state, step), None),
+    };
+    match wrote {
+        Some(Wrote::Paths(paths)) => line["wrote"] = serde_json::json!(paths),
+        Some(Wrote::Unknown(why)) => line["wrote_unknown"] = Value::from(why),
+        None => {}
+    }
+    match edits? {
+        Edits::Checkpointed => line["uncheckpointed"] = Value::from(false),
+        Edits::Unknown(why) => {
+            line["uncheckpointed"] = Value::Null;
+            line["uncheckpointed_unknown"] = Value::from(why);
+        }
+        Edits::Uncheckpointed(digest) => {
+            line["uncheckpointed"] = Value::from(true);
+            if payload.stop_hook_active == Some(false) && refuse_once(state_dir, &digest) {
+                line["state"] = Value::from("working");
+                line["stop_refused"] = Value::from(true);
+                return Some(stop_refusal(id));
+            }
+        }
+    }
+    None
+}
+
+/// The file that holds the digest of the edits the session's last refused stop was over.
+const REFUSED_FILE: &str = "stop-refused";
+
+/// Whether to refuse a stop over the edits `digest`: not when the session's last refused stop
+/// was over the same edits, and not when bay cannot remember this refusal, so a session is
+/// refused once per set of edits and never loops, whatever the product sends next.
+fn refuse_once(state_dir: &Path, digest: &str) -> bool {
+    let marker = state_dir.join(REFUSED_FILE);
+    let mut last = String::new();
+    if let Ok(file) = std::fs::File::open(&marker) {
+        let _ = std::io::Read::read_to_string(&mut std::io::Read::take(file, 128), &mut last);
+    }
+    if last == digest {
+        return false;
+    }
+    std::fs::create_dir_all(state_dir).is_ok() && std::fs::write(&marker, digest).is_ok()
+}
+
+/// Ruling R7's reason for refusing a stop: the view's edits are in no checkpoint, and the two
+/// commands that put them in one.
+fn stop_refusal(id: &str) -> String {
+    format!(
+        "bay: change {id}: the view holds edits that no checkpoint records. Checkpoint them \
+         with `bay start --resume {id}`, or submit the change with `bay land`; then stop.\n"
+    )
 }
 
 /// The text `bay hook session-start` prints for `input` (the product's payload): the compact

@@ -612,11 +612,17 @@ impl TestBox {
 /// Writes `script` through a child `sh`, so this multithreaded test process never holds a write
 /// descriptor to a file that is later executed. A sibling test that forks while that descriptor is
 /// open would inherit it until its own exec, and on Linux any exec of the file in that window fails
-/// with `ETXTBSY`.
+/// with `ETXTBSY`. The script goes in beside the file and is renamed over it: a file another
+/// process is executing (a detached `bay` still running the git wrapper) cannot be opened for
+/// writing, also `ETXTBSY`.
 pub fn write_executable(path: &Path, script: &str) {
     use std::io::Write as _;
     let mut child = StdCommand::new("sh")
-        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .args([
+            "-c",
+            "cat > \"$1.new\" && chmod 755 \"$1.new\" && mv -f \"$1.new\" \"$1\"",
+            "sh",
+        ])
         .arg(path)
         .stdin(std::process::Stdio::piped())
         .spawn()

@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::change::{CHANGES_PREFIX, Chain, OpState};
+use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, OpState};
 use crate::publish;
 use crate::queue::Queue;
 use crate::receipts;
@@ -65,6 +65,9 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         if let Some(message) = &unreleased {
             eprintln!("bay executor: {message}");
         }
+        // A looping supervisor never reaches the end of `main`: a pass that fetched trunk
+        // leaves the coordination cache now (`crate::coord`).
+        crate::coord::after_command();
         std::thread::sleep(interval);
     }
 }
@@ -238,11 +241,21 @@ fn pass(repo: &Repo, binary: &Binary) -> Result<Vec<Value>, String> {
         .map(|name| name.trim_start_matches(CHANGES_PREFIX))
         .collect();
     ids.sort_by_key(|id| place(id));
+    let records: Vec<ChangeRecord> = ids
+        .iter()
+        .filter_map(|id| chain.read(id).ok().map(|(_, record)| record))
+        .collect();
     let mut ran = Vec::new();
-    for id in ids {
-        let Ok((_, record)) = chain.read(id) else {
-            continue;
-        };
+    // An event a past run lost between the chain and the log is written now (G9), and a log
+    // record whose push failed is pushed again.
+    let mut recovered = match publish::recover_events(repo, &records) {
+        Ok(0) => None,
+        Ok(written) => Some(json!({"events_recovered": written})),
+        Err(error) => Some(json!({"events_recovered": null, "error": error})),
+    };
+    crate::log::push(repo, &Keys::load(&repo.git).executor_name);
+    for record in &records {
+        let id = record.id.as_str();
         let queued: Vec<String> = record
             .operations
             .iter()
@@ -257,6 +270,7 @@ fn pass(repo: &Repo, binary: &Binary) -> Result<Vec<Value>, String> {
         }
         for op_id in queued {
             if binary.changed() {
+                ran.extend(recovered.take());
                 return Ok(ran);
             }
             let step = Cell::new("read");
@@ -274,5 +288,6 @@ fn pass(repo: &Repo, binary: &Binary) -> Result<Vec<Value>, String> {
             }));
         }
     }
+    ran.extend(recovered.take());
     Ok(ran)
 }

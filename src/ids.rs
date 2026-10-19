@@ -30,9 +30,60 @@ pub fn is_change_id(id: &str) -> bool {
     id.len() == CHANGE_ID_LEN && id.bytes().all(|byte| ALPHABET.contains(&byte))
 }
 
+/// `bytes` in RFC 4648 base32, lower case, without padding.
+#[must_use]
+pub fn base32(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    for &byte in bytes {
+        buffer = (buffer << 8) | u32::from(byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(char::from(ALPHABET[((buffer >> bits) & 31) as usize]));
+        }
+        buffer &= (1 << bits) - 1;
+    }
+    if bits > 0 {
+        out.push(char::from(ALPHABET[((buffer << (5 - bits)) & 31) as usize]));
+    }
+    out
+}
+
+/// The bytes of [`base32`] text, or `None` for a character outside the alphabet or trailing
+/// bits that are not zero (so each byte string has one spelling).
+#[must_use]
+pub fn from_base32(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() * 5 / 8);
+    let (mut buffer, mut bits) = (0u32, 0u32);
+    for byte in text.bytes() {
+        let value = ALPHABET.iter().position(|&letter| letter == byte)?;
+        buffer = (buffer << 5) | u32::try_from(value).ok()?;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(u8::try_from((buffer >> bits) & 0xff).ok()?);
+        }
+        buffer &= (1 << bits) - 1;
+    }
+    (bits < 5 && buffer == 0).then_some(out)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{is_change_id, new_change_id};
+    use super::{base32, from_base32, is_change_id, new_change_id};
+
+    #[test]
+    fn base32_round_trips_and_has_one_spelling() {
+        assert_eq!(base32(b""), "");
+        assert_eq!(base32(b"foobar"), "mzxw6ytboi");
+        for text in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar"] {
+            assert_eq!(from_base32(&base32(text)).as_deref(), Some(text));
+        }
+        assert_eq!(from_base32("mzxw6ytboj"), None, "trailing bits set");
+        assert_eq!(from_base32("MZXW"), None);
+        assert_eq!(from_base32("m"), None);
+    }
 
     #[test]
     fn generated_ids_use_the_alphabet() {

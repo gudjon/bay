@@ -4,8 +4,9 @@
 //! trunk is landed even when its chain was not updated before a crash. Built here: one change
 //! or every local change, with freshness, and each change's named inputs judged at trunk
 //! (`DESIGN` § 8): `invalidated` while trunk requires a version it has not observed, `repairing`
-//! while no candidate is validated under an observed one. Leftovers (G41) and the fleet map are later items;
-//! `--fleet` builds only its fail-closed path (G49).
+//! while no candidate is validated under an observed one. Leftovers (G41) are a later item.
+//! `bay status` also fetches the remote's `refs/bay/live/*` and records that fetch, from which
+//! `--fleet` reads the fleet map ([`crate::fleet`], G23), failing closed without it (G49).
 
 use std::path::Path;
 
@@ -24,75 +25,6 @@ use crate::view;
 #[must_use]
 pub fn status(dir: &Path, change: Option<&str>) -> BayResult {
     run(dir, change).unwrap_or_else(BayResult::failed)
-}
-
-/// `bay status --fleet`: the fleet map read from the local cache (`DESIGN` § 11a,
-/// `INTERFACES` § 5a). It fetches nothing, opens no SSH to find machines and starts no session.
-///
-/// Built here: the fail-closed path (G49). A cache with no fetch of the configured remote is
-/// not the fleet, so the result is `blocked` with `REMOTE_NOT_FETCHED`, and its detail lists
-/// no machines, actors, talks or sessions. The map itself reads `refs/bay/live/<machine>`,
-/// which increment 2 brings; until then a fetched cache is an operation fault that says so,
-/// never an empty map presented as the fleet.
-#[must_use]
-pub fn fleet(dir: &Path) -> BayResult {
-    run_fleet(dir).unwrap_or_else(BayResult::failed)
-}
-
-fn run_fleet(dir: &Path) -> Result<BayResult, String> {
-    let repo = Repo::open(dir)?;
-    let remote = repo.remote();
-    let url = repo
-        .git
-        .remote_url(remote)
-        .map_err(|error| error.message())?;
-    let configured = url.is_some();
-    let fetched = match &url {
-        Some(url) => fleet_fetch_recorded(&repo, remote, url)?,
-        None => false,
-    };
-    if !fetched {
-        return Ok(
-            BayResult::blocked(Reason::RemoteNotFetched).with_detail(json!({
-                "remote": remote,
-                "remote_configured": configured,
-                "fetched": false,
-                "note": "the local cache has no fetch of the configured remote, so it is not the fleet",
-            })),
-        );
-    }
-    Err(format!(
-        "bay status --fleet: the remote {remote} has been fetched, but this bay version does not \
-         build the fleet map (refs/bay/live, increment 2); only the fail-closed path is built"
-    ))
-}
-
-/// Where bay records a fetch of the remote's fleet refs (`refs/bay/live/*`): a local file
-/// beside the views, never pushed (ruling: what "fetched" means for `--fleet`).
-fn fleet_fetch_record(repo: &Repo) -> std::path::PathBuf {
-    repo.common_dir
-        .join("bay")
-        .join("fleet")
-        .join("fetched.json")
-}
-
-/// Whether this cache holds a fetch of `remote`'s fleet refs: the record a fetch of
-/// `refs/bay/live/*` writes, naming the remote and the URL it was fetched from. A trunk
-/// tracking ref is not that fetch: a plain push writes it, and bay's trunk fetch brings no
-/// `refs/bay/live`. A record for another URL is a fetch of another remote. No command in this
-/// version writes the record (the live refs are increment 2), so `--fleet` fails closed.
-fn fleet_fetch_recorded(repo: &Repo, remote: &str, url: &str) -> Result<bool, String> {
-    let path = fleet_fetch_record(repo);
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
-    };
-    // An unreadable record is no proof of a fetch: fail closed.
-    let Ok(record) = serde_json::from_str::<Value>(&text) else {
-        return Ok(false);
-    };
-    Ok(record["remote"] == remote && record["url"] == url && record["at"].is_string())
 }
 
 /// What a cached read says instead of a fetch time: it never synchronized.
@@ -149,19 +81,30 @@ pub fn cached(
     Ok(result)
 }
 
-fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
-    let repo = Repo::open(dir)?;
-    let _ = receipts::sync(&repo);
-    let pending = receipts::pending(&repo);
-    let (trunk, fetched_at) = match repo.fetch_trunk() {
-        Ok(trunk) => (trunk, Some(now_rfc3339())),
-        Err(_) => (
+/// Fetches the remote trunk and, after it, the fleet refs; returns trunk's tip and the time of
+/// the trunk fetch, taken before the fleet fetch so it never overstates trunk's freshness.
+/// Offline, the tracking ref is the trunk and there is no fetch time.
+fn synchronize(repo: &Repo) -> Result<(String, Option<String>), String> {
+    match repo.fetch_trunk() {
+        Ok(trunk) => {
+            let fetched_at = now_rfc3339();
+            crate::fleet::fetch(repo);
+            Ok((trunk, Some(fetched_at)))
+        }
+        Err(_) => Ok((
             repo.git
                 .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
                 .map_err(|error| error.message())?,
             None,
-        ),
-    };
+        )),
+    }
+}
+
+fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
+    let repo = Repo::open(dir)?;
+    let _ = receipts::sync(&repo);
+    let pending = receipts::pending(&repo);
+    let (trunk, fetched_at) = synchronize(&repo)?;
     let ids: Vec<String> = match change.map(str::to_owned).or_else(|| repo.view_change(dir)) {
         Some(id) => vec![id],
         None => repo
@@ -235,7 +178,6 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         changes.push(describe(&repo, &record, &trunk, &unsynced, &read)?);
     }
     let leftovers = leftovers(&repo, &trunk)?;
-    let _ = &leftovers;
     let quarantines = quarantines(&repo, &trunk);
     let mut result = BayResult::ok(json!({
         "changes": changes,

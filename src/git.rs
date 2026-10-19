@@ -87,6 +87,25 @@ impl Git {
         envs: &[(&str, &str)],
         input: Option<&[u8]>,
     ) -> Result<String, GitError> {
+        let stdout = self.run_bytes(args, envs, input)?;
+        let stdout = String::from_utf8(stdout).map_err(|_| GitError::NotUtf8 {
+            args: args.join(" "),
+        })?;
+        Ok(stdout.trim_end().to_owned())
+    }
+
+    /// [`Git::run_with`], returning stdout as bytes, untrimmed: for object contents, which
+    /// need not be text.
+    ///
+    /// # Errors
+    ///
+    /// See [`Git::run`].
+    pub fn run_bytes(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        input: Option<&[u8]>,
+    ) -> Result<Vec<u8>, GitError> {
         let args_display = args.join(" ");
         let mut cmd = Command::new("git");
         if self.bare_dir {
@@ -108,9 +127,7 @@ impl Git {
                 stderr: stderr.trim().to_owned(),
             });
         }
-        let stdout = String::from_utf8(output.stdout)
-            .map_err(|_| GitError::NotUtf8 { args: args_display })?;
-        Ok(stdout.trim_end().to_owned())
+        Ok(output.stdout)
     }
 
     /// Runs `git <args>` and returns the exit code with stdout and stderr, for commands

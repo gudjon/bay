@@ -6,9 +6,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// The current UTC time in RFC 3339 form, to the second.
 #[must_use]
 pub fn now_rfc3339() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs());
+    rfc3339_of(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs()),
+    )
+}
+
+/// The UTC time `secs` after the Unix epoch, in the form [`now_rfc3339`] writes.
+#[must_use]
+pub fn rfc3339_of(secs: u64) -> String {
     let days = i64::try_from(secs / 86_400).unwrap_or(0);
     let rem = secs % 86_400;
     let (year, month, day) = civil_from_days(days);

@@ -22,23 +22,36 @@ impl Repo {
     ///
     /// `dir` is not inside a work repository, or its config does not parse.
     pub fn open(dir: &Path) -> Result<Self, String> {
+        Self::open_known(dir).map_err(|(_, message)| message)
+    }
+
+    /// [`Repo::open`], whose error carries the common git directory when `dir` is in a
+    /// repository bay cannot open (a bare one, or a config that does not parse), and `None`
+    /// when no repository holds `dir`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Repo::open`].
+    pub fn open_known(dir: &Path) -> Result<Self, (Option<PathBuf>, String)> {
         let here = Git::new(dir);
         let common = here
             .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .map_err(|error| error.message())?;
+            .map_err(|error| (None, error.message()))?;
         let common_dir = PathBuf::from(common);
+        let known = |message: String| (Some(common_dir.clone()), message);
         let work_root = if common_dir.file_name().is_some_and(|name| name == ".git") {
             common_dir
                 .parent()
                 .map(Path::to_path_buf)
-                .ok_or("the git directory has no parent")?
+                .ok_or_else(|| known("the git directory has no parent".to_owned()))?
         } else {
-            return Err(format!(
+            return Err(known(format!(
                 "{} is a bare repository; run bay in a work repository",
                 common_dir.display()
-            ));
+            )));
         };
-        let config = Config::load_or_committed(&work_root, &Git::new(&common_dir))?;
+        let config =
+            Config::load_or_committed(&work_root, &Git::new(&common_dir)).map_err(known)?;
         Ok(Self {
             git: Git::new(&common_dir),
             common_dir,
@@ -73,7 +86,8 @@ impl Repo {
         format!("refs/remotes/{}/{}", self.remote(), self.trunk())
     }
 
-    /// Fetches the remote trunk and returns its tip.
+    /// Fetches the remote trunk and returns its tip. A fetch that succeeds is recorded for the
+    /// coordination cache (`crate::coord`), which the command writes when it finishes.
     ///
     /// # Errors
     ///
@@ -82,6 +96,7 @@ impl Repo {
         let refspec = format!("+refs/heads/{}:{}", self.trunk(), self.trunk_tracking_ref());
         self.git
             .run(&["fetch", "-q", "--no-tags", self.remote(), &refspec])?;
+        crate::coord::fetched(&self.work_root);
         self.git
             .run(&["rev-parse", "--verify", &self.trunk_tracking_ref()])
     }
