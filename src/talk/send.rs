@@ -131,6 +131,31 @@ pub(crate) fn agent_key(git: &Git, registry: &Registry, name: &str) -> Result<Pa
     }
 }
 
+/// This machine's reviewer key (`bay.reviewerKey`), when the registry enrols it for `name`
+/// (G149): the key a reviewer's delivery talk is signed with.
+fn reviewer_key(git: &Git, registry: &Registry, name: &str) -> Result<PathBuf, Refusal> {
+    let not_actor = |why: String| Refusal::new(Reason::TalkSenderNotActor, why);
+    let key = git
+        .run(&["config", "--get", "bay.reviewerKey"])
+        .ok()
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            not_actor(
+                "this machine has no reviewer key (git config bay.reviewerKey): a reviewer's talk is signed by it"
+                    .to_owned(),
+            )
+        })?;
+    let (key_type, blob) = signing::public_key(&key).map_err(not_actor)?;
+    if registry.holds(KeyClass::Reviewer, name, &key_type, &blob) {
+        Ok(key)
+    } else {
+        Err(not_actor(format!(
+            "bay.reviewerKey is not {name}'s reviewer key in the registry"
+        )))
+    }
+}
+
 /// The body of `ask` from `from`, sent at `sent`. The field rules are [`check_body`]'s; this
 /// refuses only what it cannot write: a missing field, or a field given twice.
 fn build(ask: &Ask, from: &Actor, sent: u64) -> Result<Value, Refusal> {
@@ -267,7 +292,14 @@ fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Resul
     let body = build(ask, sender, crate::live::unix_now())?;
     check_body(&body)?;
     check_actors(registry, &body)?;
-    let key = agent_key(&repo.git, registry, &sender.name)?;
+    let key = if super::sender_class(registry, &body) == Some(KeyClass::Reviewer) {
+        // G149: a reviewer talks only about a landing it reviewed, under its reviewer key.
+        let _ = repo.fetch_trunk();
+        super::reviewed(&repo.git, registry, &repo.trunk_tracking_ref(), &body)?;
+        reviewer_key(&repo.git, registry, &sender.name)?
+    } else {
+        agent_key(&repo.git, registry, &sender.name)?
+    };
     let id = body["id"].as_str().unwrap_or_default().to_owned();
     let who = body["who"].as_str().unwrap_or_default().to_owned();
     let name = talk_ref(&who, &id);

@@ -496,14 +496,93 @@ pub fn check_actors(registry: &Registry, body: &Value) -> Result<(), Refusal> {
         }
     }
     let from = body["from"]["name"].as_str().unwrap_or_default();
-    if registry.enrols(KeyClass::Agent, from) {
-        Ok(())
-    } else {
-        Err(Refusal::new(
+    match sender_class(registry, body) {
+        Some(_) => Ok(()),
+        None if registry.enrols(KeyClass::Reviewer, from) => Err(Refusal::new(
+            Reason::TalkSenderNotActor,
+            format!(
+                "the sender {from:?} is a reviewer: a reviewer sends only a delivery talk about a change (--kind delivery --change)"
+            ),
+        )),
+        None => Err(Refusal::new(
             Reason::TalkSenderNotActor,
             format!("the sender {from:?} is not a registry actor: only an agent sends a talk"),
-        ))
+        )),
     }
+}
+
+/// The key class that signs a talk with `body` (G149): an agent's, or, for a `delivery`
+/// talk about a change only, a reviewer's. `None` when the sender is neither.
+#[must_use]
+pub fn sender_class(registry: &Registry, body: &Value) -> Option<KeyClass> {
+    let from = body["from"]["name"].as_str().unwrap_or_default();
+    if registry.enrols(KeyClass::Agent, from) {
+        Some(KeyClass::Agent)
+    } else if registry.enrols(KeyClass::Reviewer, from)
+        && body["kind"] == "delivery"
+        && body["change"].is_string()
+    {
+        Some(KeyClass::Reviewer)
+    } else {
+        None
+    }
+}
+
+/// G149: a reviewer's talk about a change stands on the reviewer's own record: its notes ref
+/// holds a `review` record, signed by its reviewer key, about the change's landing on `trunk`
+/// (a verified bay publication carrying the change's `Change-Id`). A finding then reaches the
+/// author with no agent key, and a reviewer can talk only about what it reviewed.
+///
+/// # Errors
+///
+/// No such record, as `TALK_SENDER_NOT_ACTOR`; a git fault as a refusal too.
+pub fn reviewed(git: &Git, registry: &Registry, trunk: &str, body: &Value) -> Result<(), Refusal> {
+    let from = body["from"]["name"].as_str().unwrap_or_default();
+    let change = body["change"].as_str().unwrap_or_default();
+    let refuse = |why: String| Refusal::new(Reason::TalkSenderNotActor, why);
+    let fault = |error: String| refuse(error);
+    let commits = git
+        .run(&[
+            "log",
+            "--format=%H%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%cn",
+            "--fixed-strings",
+            &format!("--grep=Change-Id: {change}"),
+            trunk,
+        ])
+        .map_err(|error| fault(error.message()))?;
+    let landing = commits.lines().find_map(|line| {
+        let fields: Vec<&str> = line.split('\u{1f}').map(str::trim).collect();
+        match fields.as_slice() {
+            [commit, id, registry_id, committer]
+                if *id == change
+                    && crate::publish::verify_publication(git, commit, registry_id, committer) =>
+            {
+                Some((*commit).to_owned())
+            }
+            _ => None,
+        }
+    });
+    let Some(landing) = landing else {
+        return Err(refuse(format!(
+            "change {change} has no bay landing on trunk: a reviewer talks only about a landing it reviewed"
+        )));
+    };
+    let tree = git
+        .run(&["rev-parse", &format!("{landing}^{{tree}}")])
+        .map_err(|error| fault(error.message()))?;
+    let records = crate::evidence::producer_records(git, from, &tree).map_err(fault)?;
+    for record in records {
+        if record.kind == crate::evidence::KIND_REVIEW
+            && record.producer.name == from
+            && record.subject.commit == landing
+            && record.verifies_in(git, registry).map_err(fault)?
+        {
+            return Ok(());
+        }
+    }
+    Err(refuse(format!(
+        "reviewer {from} holds no review record of its own on {landing}, change {change}'s landing: a reviewer talks only about a landing it reviewed (bay evidence record --kind review)"
+    )))
 }
 
 /// The structural rules of one entry of kind `kind` on talk `id`.

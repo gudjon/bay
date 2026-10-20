@@ -583,6 +583,19 @@ fn sender_key(push: &Push, new: &str, from: &str) -> Result<(), String> {
     }
 }
 
+/// G149: a reviewer's delivery talk is signed by the sender's reviewer key, and stands on its
+/// own review record of the change's landing on this host's trunk (`HEAD` of a bay host).
+fn reviewer_sender(push: &Push, new: &str, from: &str, body: &Value) -> Result<(), String> {
+    let file = push.registry.class_file(push.git, KeyClass::Reviewer)?;
+    let signer = signing::verify_commit(push.git, new, &file).map_err(|error| error.message())?;
+    if signer.as_deref() != Some(from) {
+        return Err(format!(
+            "TALK_SENDER_NOT_ACTOR: {new} is not signed by reviewer {from}'s key"
+        ));
+    }
+    super::reviewed(push.git, push.registry, "HEAD", body).map_err(|refusal| refusal.text())
+}
+
 fn create(push: &Push, new: &str, who: &str, id: &str) -> Result<(), String> {
     let git = push.git;
     let parents = git
@@ -607,7 +620,11 @@ fn create(push: &Push, new: &str, who: &str, id: &str) -> Result<(), String> {
     }
     check_actors(push.registry, &body).map_err(|refusal| refusal.text())?;
     let from = body["from"]["name"].as_str().unwrap_or_default();
-    sender_key(push, new, from)?;
+    if super::sender_class(push.registry, &body) == Some(KeyClass::Reviewer) {
+        reviewer_sender(push, new, from, &body)?;
+    } else {
+        sender_key(push, new, from)?;
+    }
     let sent = body["sent"].as_str().and_then(unix_of);
     if commit_time(git, new)? != sent {
         return Err("TALK_INVALID: `sent` is not the talk's commit time".to_owned());

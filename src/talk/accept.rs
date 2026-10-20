@@ -187,16 +187,28 @@ fn verify(repo: &Repo, registry: &Registry, talk: &Talk, me: &str) -> Result<(),
     if !matches!(root_files.as_slice(), [file] if file.oid == talk.body_blob) {
         return Err(format!("{root} does not hold the talk's body alone"));
     }
-    let agents = registry.class_file(git, KeyClass::Agent)?;
     let from = talk.from_name();
-    if signing::verify_commit(git, root, &agents)
+    // G149: a reviewer's delivery talk is signed by its reviewer key and stands on its review
+    // record of the change's landing; every other talk by the sender's agent key.
+    let class = super::sender_class(registry, &talk.body).unwrap_or(KeyClass::Agent);
+    let signers = registry.class_file(git, class)?;
+    if signing::verify_commit(git, root, &signers)
         .map_err(|error| error.message())?
         .as_deref()
         != Some(from)
     {
         return Err(format!(
-            "{root} is not signed by its sender {from}'s agent key"
+            "{root} is not signed by its sender {from}'s {} key",
+            class.file()
         ));
+    }
+    if class == KeyClass::Reviewer {
+        // The reviewer's record is on its own notes ref, which this box may not hold yet. A
+        // reviewer's name is never a producer's or an agent's (Q12), so this is never this
+        // box's own ref.
+        let _ = repo.fetch_refs(&[crate::evidence::notes_ref(from)]);
+        super::reviewed(git, registry, &repo.trunk_tracking_ref(), &talk.body)
+            .map_err(|refusal| refusal.text())?;
     }
     let time = git
         .run(&["show", "-s", "--format=%ct", root])
