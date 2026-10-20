@@ -30,7 +30,7 @@ use crate::repo::{Bootstrap, DEFAULT_REMOTE, Fetch, OpenError, Repo};
 use crate::result::{BayResult, Freshness, Reason};
 
 /// Where `bay status` keeps its copy of the remote's live refs, one ref per machine.
-pub const FLEET_PREFIX: &str = "refs/bay/fleet/";
+pub const FLEET_PREFIX: &str = crate::names::FLEET;
 /// The most live summaries the map reads; the host refuses more (`crate::hook`).
 const FLEET_MAX_MACHINES: usize = 256;
 
@@ -241,13 +241,33 @@ impl Map {
         }
     }
 
-    fn session(&mut self, machine: &str, row: &Value, age: u64, wrote: &Value) {
+    /// How many trunk commits the base of `change` is behind trunk (G166): the commits of the
+    /// trunk tracking ref not in the base its view holds, counted in this cache alone. `null`
+    /// where [`Self::behind`] is.
+    fn behind_commits(&self, repo: &Git, change: &Value) -> Value {
+        let (Some(record), Some(trunk)) = (
+            change.as_str().and_then(|id| self.records.get(id)),
+            &self.trunk,
+        ) else {
+            return Value::Null;
+        };
+        repo.run(&["rev-list", "--count", &format!("{}..{trunk}", record.base)])
+            .ok()
+            .and_then(|count| count.trim().parse::<u64>().ok())
+            .map_or(Value::Null, Value::from)
+    }
+
+    fn session(&mut self, repo: &Git, machine: &str, row: &Value, age: u64, wrote: &Value) {
         self.actor(row["actor"]["name"].as_str(), age, machine);
         let behind = self.behind(&row["change"]);
+        let behind_commits = self.behind_commits(repo, &row["change"]);
+        let session_age = session_age(row, age);
         self.sessions.push(json!({
             "machine": machine,
             "session": row["session"],
             "actor": row["actor"],
+            "actor_source": row["actor_source"],
+            "permission_mode": row["permission_mode"],
             "agent": row["agent"],
             "change": row["change"],
             "state": row["state"],
@@ -258,13 +278,16 @@ impl Map {
             "wrote": wrote["wrote"],
             "wrote_at": wrote["wrote_at"],
             "behind": behind,
+            "behind_commits": behind_commits,
+            "started": row["started"],
+            "session_age_s": session_age,
             "tracked": true,
         }));
     }
 
     /// Another machine's summary, fetched at `since`: its fresh rows are sessions, and every
     /// row's actor and its signer are actors this cache knows.
-    fn summary(&mut self, machine: &str, summary: &Value, since: u64) -> usize {
+    fn summary(&mut self, repo: &Git, machine: &str, summary: &Value, since: u64) -> usize {
         let summary_age = self.now.saturating_sub(since);
         self.actor(summary["signer"].as_str(), summary_age, machine);
         // Without the summary's own time no row's age can be judged: none is fresh.
@@ -284,6 +307,7 @@ impl Map {
             }
             fresh += 1;
             self.session(
+                repo,
                 machine,
                 &row,
                 age,
@@ -291,6 +315,19 @@ impl Map {
             );
         }
         fresh
+    }
+}
+
+/// The session's age (G166): the row's age `age`, plus how long before the row's time the
+/// session started, both times the publishing machine's, so the age never compares two
+/// machines' clocks. `null` for a row that does not say when its session started.
+fn session_age(row: &Value, age: u64) -> Value {
+    match (
+        live::unix_at(row),
+        row["started"].as_str().and_then(unix_of),
+    ) {
+        (Some(at), Some(started)) => json!(age + at.saturating_sub(started)),
+        _ => Value::Null,
     }
 }
 
@@ -348,7 +385,7 @@ fn remote(
         let age = map.now.saturating_sub(*since);
         let row = match checked {
             Ok((summary, signer)) => {
-                let fresh = map.summary(machine, &summary, *since);
+                let fresh = map.summary(git, machine, &summary, *since);
                 json!({"machine": machine, "commit": commit, "readable": true,
                     "signer": signer, "at": summary["at"], "age_s": age, "sessions": fresh})
             }
@@ -381,7 +418,7 @@ fn local(repo: &Repo, here: &str, fetched: &Fetched, lines: Option<&[Value]>, ma
             || json!({"wrote": null, "wrote_at": null}),
             |session| live::last_wrote(repo, session),
         );
-        map.session(here, row, age, &wrote);
+        map.session(&repo.git, here, row, age, &wrote);
     }
     map.machines.insert(here.to_owned(), machine(rows.len()));
 }
@@ -453,6 +490,7 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
             "machine": null,
             "session": null,
             "actor": record.actor,
+            "actor_source": record.actor_source,
             "change": id,
             "state": state,
             "why": why,
@@ -460,6 +498,9 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
             "wrote": null,
             "wrote_at": null,
             "behind": map.behind(&json!(id)),
+            "behind_commits": map.behind_commits(&repo.git, &json!(id)),
+            "started": null,
+            "session_age_s": null,
             "tracked": tracked,
         }));
     }
@@ -467,9 +508,11 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
 }
 
 /// The fleet map from the recorded fetch (`DESIGN` § 11a, `INTERFACES` § 5a): one entry per
-/// fresh session row, this machine's from its records; an entry per held change no session
+/// fresh session row, this machine's from its records, each with how many commits its view's
+/// base is behind trunk (`behind_commits`) and the session's age (`session_age_s`, G166); an entry per held change no session
 /// names ([`unheld`]); every machine and actor the cache knows, each with `age_s`; talks `[]`
-/// until talk is built.
+/// until talk is built; and `default_actor_sessions`, the fresh sessions whose actor's name came
+/// from a default rather than `BAY_ACTOR` (G152).
 ///
 /// `detail.behind` is never a known `false`: whether the remote moved since the fetch cannot
 /// be known without the network, which the map never touches. It is `true` once the fetch is a
@@ -498,6 +541,18 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     if let Some(here) = &here {
         local(repo, here, fetched, lines.as_deref(), &mut map);
     }
+    // G152: the fresh sessions whose actor was named by a default, not `BAY_ACTOR`; on a shared
+    // account every one of them is the same actor. A row that does not say is not counted.
+    let default_actor = map
+        .sessions
+        .iter()
+        .filter(|row| {
+            matches!(
+                row["actor_source"].as_str(),
+                Some("user-default" | "default")
+            )
+        })
+        .count();
     let unheld = unheld(repo, &map, lines.as_deref().unwrap_or_default())?;
     map.sessions.extend(unheld);
 
@@ -521,6 +576,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
             "actor": actor, "machines": on, "age_s": age,
         })).collect::<Vec<_>>(),
         "talks": [],
+        "default_actor_sessions": default_actor,
         "sessions": map.sessions,
     }));
     if let Some(trunk) = map.trunk {
@@ -530,4 +586,20 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         });
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    #[test]
+    fn a_sessions_age_is_its_rows_age_plus_its_run_on_the_publishers_clock() {
+        // G166: both times are the publishing machine's.
+        let row = json!({"at": "2026-10-19T10:00:30Z", "started": "2026-10-19T10:00:00Z"});
+        assert_eq!(super::session_age(&row, 5), json!(35));
+        assert_eq!(
+            super::session_age(&json!({"at": "2026-10-19T10:00:30Z"}), 5),
+            serde_json::Value::Null
+        );
+    }
 }

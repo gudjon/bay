@@ -48,6 +48,8 @@ pub struct Ask {
     pub promise_evidence: Option<String>,
     pub urgent: bool,
     pub dry_run: bool,
+    /// A change id or a trunk commit whose lander is the recipient (G77), in place of `who`.
+    pub to_change: Option<String>,
 }
 
 /// An answer to a discovery talk: its id, the decision value, and the standing answer's commit
@@ -100,9 +102,10 @@ fn open(dir: &Path) -> Result<(Repo, Registry, Actor), Stop> {
     let repo = Repo::open(dir)?;
     repo.fetch_registry();
     let registry = Registry::current(&repo.git)?.ok_or_else(|| {
-        Refusal::invalid(
-            "a talk needs the repository's key registry (refs/bay/registry): the sender and `who` are registry actors",
-        )
+        Refusal::invalid(format!(
+            "a talk needs the repository's key registry ({}): the sender and `who` are registry actors",
+            crate::names::REGISTRY
+        ))
     })?;
     let actor = crate::change::current_actor()?;
     Ok((repo, registry, actor))
@@ -238,21 +241,44 @@ fn ask_of(body: &Value) -> Value {
 
 fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
     let (repo, registry, sender) = open(dir)?;
-    let body = build(ask, &sender, crate::live::unix_now())?;
+    let Some(to_change) = &ask.to_change else {
+        return deliver(&repo, &registry, &sender, ask);
+    };
+    if ask.who.is_some() {
+        return Err(Refusal::invalid(
+            "`--to-change` names the recipient (the actor that landed the change): give the action alone, not a recipient beside it",
+        )
+        .into());
+    }
+    let lander = super::lander::resolve(&repo, to_change)??;
+    let addressed = Ask {
+        who: Some(lander.who.clone()),
+        ..ask.clone()
+    };
+    let mut result = deliver(&repo, &registry, &sender, &addressed)?;
+    if let Some(detail) = result.detail.as_mut() {
+        detail["to_change"] = lander.to_json();
+    }
+    Ok(result)
+}
+
+/// Sends `ask` from `sender`: every refusal first, then the commit and its push.
+fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Result<BayResult, Stop> {
+    let body = build(ask, sender, crate::live::unix_now())?;
     check_body(&body)?;
-    check_actors(&registry, &body)?;
-    let key = agent_key(&repo.git, &registry, &sender.name)?;
+    check_actors(registry, &body)?;
+    let key = agent_key(&repo.git, registry, &sender.name)?;
     let id = body["id"].as_str().unwrap_or_default().to_owned();
     let who = body["who"].as_str().unwrap_or_default().to_owned();
     let name = talk_ref(&who, &id);
-    fetch_matching(&repo, &format!("{TALK_PREFIX}{who}/*"));
+    fetch_matching(repo, &format!("{TALK_PREFIX}{who}/*"));
     if let Some(tip) = repo
         .git
         .ref_target(&name)
         .map_err(|error| error.message())?
     {
         return resend(
-            &repo,
+            repo,
             &body,
             &Talk::read(&repo.git, &name, &tip)?,
             ask.dry_run,
@@ -260,7 +286,7 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
     }
     let supersedes = body["supersedes"].as_str();
     if let Some(old) = supersedes {
-        may_supersede(&repo, old, &sender.name, &name)?;
+        may_supersede(repo, old, &sender.name, &name)?;
     }
     let talks = talks_where(&repo.git, &format!("{TALK_PREFIX}{who}/"), |talk| {
         talk.from_name() == sender.name || talk.supersedes().is_some()
@@ -290,8 +316,8 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
         .map_err(|error| error.message())?;
     let detail = json!({"talk": id, "short": &id[..8], "ref": name, "who": who,
         "kind": body["kind"]});
-    let refspecs = with_predecessor(&repo, &body, format!("{commit}:{name}"))?;
-    match push(&repo, &refspecs) {
+    let refspecs = with_predecessor(repo, &body, format!("{commit}:{name}"))?;
+    match push(repo, &refspecs) {
         Pushed::Yes => Ok(sent_result(detail, "sent", None)),
         Pushed::Refused(reason, why) => {
             // The host's refusal is the answer: the talk does not exist, here either.

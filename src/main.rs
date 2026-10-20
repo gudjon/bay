@@ -43,6 +43,9 @@ enum Command {
         /// A follow-up after the intent's change landed: claim its next generation
         #[arg(long)]
         new: bool,
+        /// The landed change this one fixes; its landing carries a Fixes: trailer
+        #[arg(long, value_name = "CHANGE", conflicts_with = "resume")]
+        fixes: Option<String>,
     },
     /// Freeze the draft, build the candidate, check it, publish it
     Land {
@@ -74,6 +77,15 @@ enum Command {
         /// The fleet map from the local cache `bay status` fetches; fails closed without that fetch
         #[arg(long, conflicts_with = "change")]
         fleet: bool,
+        /// Local branches no remote-tracking ref holds, and worktree records whose folder is
+        /// gone; local refs only, never a fetch, a prune or a delete
+        #[arg(long, conflicts_with_all = ["change", "fleet"])]
+        stranded: bool,
+        /// The Reverts:, Supersedes: and Fixes: pairs of a first-parent range (default: trunk);
+        /// local refs only, never a fetch
+        #[arg(long, value_name = "RANGE", num_args = 0..=1, default_missing_value = "",
+            conflicts_with_all = ["change", "fleet", "stranded"])]
+        lineage: Option<String>,
     },
     /// What happened after a cursor: trunk landings, log events, new invalidations of the
     /// view's change
@@ -81,12 +93,20 @@ enum Command {
         /// The cursor a previous watch returned (`detail.cursor`)
         #[arg(long, value_name = "CURSOR", value_parser = bay::watch::Cursor::parse)]
         since: Option<bay::watch::Cursor>,
+        /// Only the landings: each with its base, committer time and whether it landed outside
+        /// bay, and the count of commits off the first-parent line
+        #[arg(long)]
+        landed: bool,
     },
     /// Send one talk to one agent: one action, one target, the time the reply is owed. Arrival is
     /// the recipient's ack, written when its bay fetches
     Talk(Box<TalkArgs>),
     /// Admin: probe this box (git and Claude Code floors, remote, hook entries, installed skill)
-    Doctor,
+    Doctor {
+        /// Judge this box in this role instead of the one doctor infers
+        #[arg(long, value_parser = ["executor"])]
+        role: Option<String>,
+    },
     /// Admin: place bay at $HOME/.local/bin/bay, its skill and its project hook entries
     Install(InstallArgs),
     /// Admin: a bay-hosted trunk
@@ -114,6 +134,11 @@ enum Command {
         /// The remote to push to (default: the configured remote)
         #[arg(long)]
         remote: Option<String>,
+    },
+    /// Admin: queries over evidence records for an outside producer
+    Evidence {
+        #[command(subcommand)]
+        action: EvidenceAction,
     },
     /// Admin: replace this binary with a verified release (the box's pin wins)
     Update {
@@ -154,6 +179,10 @@ struct TalkArgs {
     /// The agent who owes the reply (a person's name works too)
     #[arg(value_name = "AGENT")]
     actor: Option<String>,
+    /// Send to the agent that landed this change (a change id or its trunk commit), read from
+    /// bay's publication record; then the one argument is the action
+    #[arg(long, value_name = "CHANGE")]
+    to_change: Option<String>,
     /// The action: the decision, the question or the change asked for
     what: Option<String>,
     /// delivery (one change or artifact), discovery (one decision) or reliability (one check)
@@ -217,7 +246,7 @@ struct TalkArgs {
     #[arg(long)]
     dry_run: bool,
     /// Answer the discovery talk with this id instead of sending one
-    #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "kind", "change",
+    #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "to_change", "kind", "change",
         "artifact", "decision", "check", "follow_up", "decides", "context", "evidence",
         "expires", "target", "forecast", "commitment", "owns", "promises", "needs",
         "promise_evidence", "urgent", "dry_run"])]
@@ -246,6 +275,26 @@ enum HostAction {
 enum LiveAction {
     /// Write this machine's summary of its sessions and push refs/bay/live/<machine>
     Push,
+    /// Checkpoint a change's view and push its chain (started by the agent hook at a session's
+    /// end and on its idle timer)
+    Checkpoint { change: String },
+}
+
+#[derive(Subcommand)]
+enum EvidenceAction {
+    /// Trunk's first-parent commits with no record of the kind from the producer about that
+    /// commit (by commit, or by base tree and tree; never by tree alone)
+    Missing {
+        /// The record kind, for example `check` or `review`
+        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        kind: String,
+        /// The producer whose records count
+        #[arg(long, value_parser = bay::coverage::producer_name)]
+        producer: String,
+        /// List only the commits after this rev
+        #[arg(long, value_name = "REV")]
+        since: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -266,11 +315,13 @@ enum ExecutorAction {
 /// rows, install, update and the agent hook do not.
 fn config_refusal(cli: &Cli) -> Option<BayResult> {
     // `status --fleet` never fetches (G49): it reads the config without a fetch itself.
+    // `status --stranded` reads local refs only, and needs no config (G156).
     let needs_config = !matches!(
         cli.command,
         Command::Status { fleet: true, .. }
+            | Command::Status { stranded: true, .. }
             | Command::Host { .. }
-            | Command::Doctor
+            | Command::Doctor { .. }
             | Command::Install(_)
             | Command::Update { .. }
             | Command::Hook { .. }
@@ -301,6 +352,7 @@ fn main() -> ExitCode {
             inputs,
             resume,
             new,
+            fixes,
         } => bay::start::start(
             &cli.dir,
             &bay::start::StartRequest {
@@ -311,6 +363,7 @@ fn main() -> ExitCode {
                 inputs,
                 resume,
                 reverts: None,
+                fixes,
             },
         ),
         Command::Undo { change, wait } => bay::undo::undo(&cli.dir, &change, wait),
@@ -345,19 +398,25 @@ fn main() -> ExitCode {
         Command::Executor {
             action: ExecutorAction::Run { once, interval_s },
         } => bay::executor::run(&cli.dir, once, std::time::Duration::from_secs(interval_s)),
-        Command::Live {
-            action: LiveAction::Push,
-        } => bay::live::push(&cli.dir),
-        Command::Status { fleet: true, .. } => bay::fleet::fleet(&cli.dir),
-        Command::Status { change, .. } => {
-            let result = bay::status::status(&cli.dir, change.as_deref());
-            bay::update::auto();
-            result
-        }
-        Command::Watch { since } => bay::watch::watch(&cli.dir, since.as_ref()),
+        Command::Live { action } => live(&cli.dir, action),
+        Command::Status {
+            change,
+            fleet,
+            stranded,
+            lineage,
+        } => status(
+            &cli.dir,
+            change.as_deref(),
+            fleet,
+            stranded,
+            lineage.as_deref(),
+        ),
+        Command::Watch { since, landed } if landed => bay::watch::landed(&cli.dir, since.as_ref()),
+        Command::Watch { since, .. } => bay::watch::watch(&cli.dir, since.as_ref()),
         Command::Talk(args) => talk(&cli.dir, *args),
-        Command::Doctor => {
-            let result = bay::doctor::doctor(&cli.dir);
+        Command::Evidence { action } => evidence(&cli.dir, action),
+        Command::Doctor { role } => {
+            let result = bay::doctor::doctor_as(&cli.dir, role.as_deref() == Some("executor"));
             bay::update::auto();
             result
         }
@@ -385,6 +444,55 @@ fn main() -> ExitCode {
     render(&result, cli.json)
 }
 
+/// `bay evidence <action>`.
+/// The hidden `bay live` commands a hook starts: push the live summary, or checkpoint a draft.
+fn live(dir: &std::path::Path, action: LiveAction) -> BayResult {
+    match action {
+        LiveAction::Push => bay::live::push(dir),
+        LiveAction::Checkpoint { change } => bay::start::checkpoint(dir, &change),
+    }
+}
+
+/// `bay status` and its read-only views: the fleet map, stranded work, lineage pairs, or one
+/// change's state (which alone may start the daily update check).
+fn status(
+    dir: &std::path::Path,
+    change: Option<&str>,
+    fleet: bool,
+    stranded: bool,
+    lineage: Option<&str>,
+) -> BayResult {
+    if fleet {
+        return bay::fleet::fleet(dir);
+    }
+    if stranded {
+        return bay::stranded::stranded(dir);
+    }
+    if let Some(range) = lineage {
+        return bay::lineage::lineage(dir, Some(range));
+    }
+    let result = bay::status::status(dir, change);
+    bay::update::auto();
+    result
+}
+
+fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
+    match action {
+        EvidenceAction::Missing {
+            kind,
+            producer,
+            since,
+        } => bay::coverage::missing(
+            dir,
+            &bay::coverage::Missing {
+                kind,
+                producer,
+                since,
+            },
+        ),
+    }
+}
+
 /// `bay talk`: an answer with `--answer`, else one ask.
 fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
     if let Some(talk) = args.answer {
@@ -397,11 +505,16 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
             },
         );
     }
+    // With --to-change the recipient is resolved, so a single argument is the action.
+    let (who, what) = match (&args.to_change, args.what) {
+        (Some(_), None) => (None, args.actor),
+        (_, what) => (args.actor, what),
+    };
     bay::talk::talk(
         dir,
         &bay::talk::Ask {
-            who: args.actor,
-            what: args.what,
+            who,
+            what,
             kind: args.kind,
             change: args.change,
             artifact: args.artifact,
@@ -422,6 +535,7 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
             promise_evidence: args.promise_evidence,
             urgent: args.urgent,
             dry_run: args.dry_run,
+            to_change: args.to_change,
         },
     )
 }

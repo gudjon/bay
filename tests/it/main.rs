@@ -1,0 +1,122 @@
+//! bay's integration tests, built as one binary. Each file in this directory is the module of
+//! one test file, named as before, so a G-test is still found by its file
+//! (`tests/it/g35_publication_never_livelocks.rs` is G35) and its tests run as
+//! `g35_publication_never_livelocks::<name>`. One binary links once instead of once per file,
+//! and its tests share one pool of test threads.
+//!
+//! Every test runs in its own [`support::TestBox`] (a temp HOME, Git config and `PATH`, passed
+//! to each child process), so no test depends on running in a process of its own: none sets an
+//! environment variable or the current directory of the test process.
+
+// Each test runs shell scripts or relies on Unix process semantics, so these run on Unix only.
+#![cfg(unix)]
+
+mod release_fixture;
+mod support;
+
+mod a_check_never_runs_unconfined_unless_the_box_chose_it;
+mod a_landing_needs_a_policy_at_its_base;
+mod check_cost_is_reported;
+mod cli;
+mod demo_9a_the_agent_submits_and_leaves;
+mod doctor_names_drift_from_trunk;
+mod doctor_names_how_each_agent_products_hooks_fail;
+mod doctor_names_key_custody;
+mod doctor_names_settings_that_weaken_bays_hooks;
+mod doctor_reports_the_bay_version_and_pin;
+mod g01_what_lands_is_exactly_what_was_checked;
+mod g02_trunk_is_append_only;
+mod g03_unknown_is_never_pass;
+mod g04_a_retry_never_publishes_twice;
+mod g05_crash_recovery_is_exact;
+mod g06_drafts_and_evidence_survive;
+mod g07_evidence_is_reused_only_on_matching_sufficient_inputs;
+mod g08_invalidation_stops_stale_work_and_permits_repair;
+mod g09_a_missed_notice_never_hides_a_landing;
+mod g101_a_live_claim_in_the_same_tree_denies_a_held_path;
+mod g103_each_fact_has_one_definition;
+mod g10_every_refusal_says_what_to_do_next;
+mod g11_a_view_is_never_half_made;
+mod g12_failures_record_themselves;
+mod g138_a_box_serves_only_the_environments_it_declares;
+mod g13_a_submission_outlives_its_session;
+mod g140_a_reviewer_key_signs_only_review_records;
+mod g141_the_check_command_lives_only_in_the_policy;
+mod g146_a_check_runs_only_when_its_paths_change;
+mod g147_a_talk_for_the_sessions_actor_is_one_notice_delivered_once;
+mod g148_a_talk_about_a_change_closes_when_its_fix_lands;
+mod g14_a_callers_timeout_never_destroys_work;
+mod g151_a_release_signed_by_any_listed_key_verifies;
+mod g151_a_release_signed_by_any_trusted_key_verifies;
+mod g152_an_unnamed_actor_is_visible_and_refusable;
+mod g153_the_session_row_records_the_agent_products_permission_mode;
+mod g155_stale_instructions_are_named_at_session_start;
+mod g156_status_names_work_that_exists_only_on_this_disk;
+mod g158_a_hung_hook_denies_within_its_timeout;
+mod g159_an_evidence_record_is_never_withdrawn;
+mod g15_a_bay_hosted_trunk_is_append_only_without_a_forge;
+mod g160_unsigned_evidence_is_named_wherever_it_is_read;
+mod g161_a_fix_names_the_landing_it_fixes;
+mod g163_a_check_may_name_the_producers_that_answer_it;
+mod g165_a_killed_session_loses_at_most_one_interval;
+mod g166_the_fleet_map_shows_how_far_behind_and_how_old_a_session_is;
+mod g167_a_policy_refuses_a_key_it_does_not_know;
+mod g169_a_hook_entry_never_denies_on_a_box_without_bay;
+mod g16_identity_is_verifiable;
+mod g170_a_check_materializes_with_one_batched_fetch;
+mod g173_maintenance_never_prunes_a_candidate_in_flight;
+mod g17_offline_submission_publishes_once;
+mod g18_a_view_costs_what_the_task_reads;
+mod g19_two_executors_never_publish_one_operation_twice;
+mod g20_work_after_submission_survives;
+mod g21_a_terminal_outcome_outlives_its_drafts;
+mod g22_finished_check_units_survive_a_dead_worker;
+mod g23_the_fleet_map_is_true;
+mod g24_a_replaced_executor_never_publishes;
+mod g25_an_operation_acts_only_as_its_actor;
+mod g26_a_candidate_cannot_weaken_its_own_criteria;
+mod g27_sparse_absence_is_never_a_deletion;
+mod g28_a_reused_op_id_with_a_different_request_is_refused;
+mod g29_evidence_is_judged_by_record_never_latest_wins;
+mod g30_coverage_is_judged_against_the_frozen_manifest;
+mod g31_a_dead_executor_is_replaced;
+mod g32_a_change_lands_at_most_once;
+mod g33_executors_publish_without_agent_keys_under_the_scoped_hook;
+mod g34_a_moved_base_never_hides_an_earlier_landing;
+mod g35_publication_never_livelocks;
+mod g36_one_intent_one_revision_one_landing;
+mod g37_every_bay_ref_can_exist_at_once;
+mod g38_undo_and_session_start;
+mod g39_a_blocked_shell_command_does_not_run;
+mod g40_the_holder_can_abandon_and_another_actor_can_adopt;
+mod g41_leftovers_carry_state_age_and_uncheckpointed_edits;
+mod g42_the_git_floor_for_this_boxs_role_is_red_below_that_floor;
+mod g43_claude_code_older_than_the_hook_minimum_is_red;
+mod g44_no_claude_adapter_and_no_claude_code_is_green_on_that_row;
+mod g45_doctor_reports_an_unreachable_remote_and_the_hook_entries;
+mod g46_a_talk_crosses_a_firewall_by_the_remote_and_arrival_is_an_ack;
+mod g48_a_talk_refuses_a_bad_ask_and_the_words_stay_distinct;
+mod g49_status_fleet_fails_closed_without_a_fetch_and_doctor_checks_the_installed_skill_path;
+mod g50_a_corrupt_or_unsigned_download_never_replaces_the_binary;
+mod g51_a_talk_is_superseded_only_by_its_sender_and_answers_do_not_conflict_silently;
+mod g57_only_agents_send_talks_and_open_talks_are_capped;
+mod g59_a_pre_tool_hook_that_cannot_read_its_payload_denies;
+mod g60_a_hook_judgement_is_recorded_as_an_agent_hooks_verdict;
+mod g62_a_check_reads_nothing_outside_its_adapter_paths_and_its_candidate_tree;
+mod g63_doctor_states_whether_this_box_can_execute;
+mod g65_the_skill_lands_where_the_agent_product_reads_it;
+mod g68_an_executor_below_its_floor_does_not_run;
+mod g72_a_view_holds_the_agent_products_hook_settings_file;
+mod g73_watch_lists_landings_after_a_cursor;
+mod g74_evidence_missing_names_unreviewed_landings;
+mod g76_lineage_pairs_name_reverts_supersedes_and_fixes;
+mod g77_a_talk_addressed_by_change_reaches_its_lander;
+mod g91_post_publication_checks_stay_pending;
+mod release_script_takes_an_external_signature;
+mod runtime_evidence_and_completion_profiles;
+mod session_record;
+mod the_config_is_the_one_committed_at_trunk;
+mod update_auto_checks_at_most_once_a_day;
+mod update_env_overrides_the_box_settings;
+mod update_takes_the_newest_release_with_a_build;
+mod update_waits_for_a_busy_executor;

@@ -18,7 +18,11 @@ use crate::inputs::InputEntry;
 pub const POLICY_PATH: &str = ".bay/policy.toml";
 const DEFAULT_TIMEOUT_S: u64 = 1800;
 
+/// Every table of the policy refuses a key it does not know (G167): a typo, or a key a newer bay
+/// reads, would otherwise be a criterion nobody applies. `[[input]]` and `[profile.<name>]`
+/// refuse theirs in their own types.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PolicyFile {
     revision: u64,
     /// The repository declares that a change lands with no check (the missing-policy ruling):
@@ -35,12 +39,25 @@ struct PolicyFile {
     /// The completion profiles (`DESIGN` § 7, ruling R12): `[profile.<name>] require = [...]`.
     #[serde(default)]
     profile: BTreeMap<String, crate::completion::ProfileEntry>,
+    /// What the policy asks of the acting agent (G152).
+    #[serde(default)]
+    agent: AgentPolicy,
+}
+
+/// The `[agent]` table: `require_actor = true` makes `bay start` refuse `ACTOR_UNNAMED` while
+/// the actor's name comes from a default (G152).
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentPolicy {
+    #[serde(default)]
+    pub require_actor: bool,
 }
 
 /// One check set aside for a stated time (`DESIGN` § 7, ruling 8c): while the entry is in the
 /// policy at the base, the check is not in the frozen manifest and is reported as a coverage
 /// gap. An end never changes a judgement by itself: the fixing change removes the entry.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Quarantine {
     pub id: String,
     pub environment: String,
@@ -63,6 +80,7 @@ impl Quarantine {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CheckEntry {
     pub id: String,
     pub environment: String,
@@ -109,6 +127,70 @@ pub struct CheckEntry {
     /// keeps its digest; any other value enters the definition digest.
     #[serde(default, skip_serializing_if = "MaterializeTimeout::is_default")]
     pub materialize_timeout_s: MaterializeTimeout,
+    /// Whether the check may use the network (G62). Denied by default: the check runs in a
+    /// network namespace of its own. A field of the entry, so it is judged at the base and a
+    /// candidate cannot grant itself the network; `true` enters the definition digest, and the
+    /// default is left out of the canonical entry, so a policy without it keeps its digest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub network: bool,
+    /// When the check runs (G91): `pre`, the default, before publication and required for it;
+    /// `post`, after publication, never blocking it and shown pending for the landed commit
+    /// until a record for its tree arrives. Judged at the base; `post` enters the definition
+    /// digest, and the default is left out of the canonical entry (the G26 vector).
+    #[serde(default, skip_serializing_if = "Stage::is_pre")]
+    pub stage: Stage,
+    /// Globs over the candidate's changed paths (G146): the check is required only when the
+    /// candidate's own diff against its base changes a path one of them matches, never by the
+    /// paths the change declared. Judged at the base and in the definition digest, so a
+    /// candidate cannot narrow it for itself; left out of the canonical entry when absent. An
+    /// empty list makes the policy invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_paths: Option<Vec<String>>,
+    /// The producers whose records answer this check (G163, owner ruling Q3): a record from any
+    /// other producer is reported `unlisted_producer` and does not count for it. Absent, any
+    /// producer answers. Judged at the base and in the definition digest, so a candidate that
+    /// edits the list is a policy change checked twice and never widens it for itself (G26);
+    /// left out of the canonical entry when absent. An empty list makes the policy invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producers: Option<Vec<String>>,
+}
+
+/// A check's `stage` (G91).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    #[default]
+    Pre,
+    Post,
+}
+
+impl Stage {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_pre(&self) -> bool {
+        *self == Self::Pre
+    }
+}
+
+impl CheckEntry {
+    /// Whether `changed`, the paths the candidate's diff against its base changes, wakes this
+    /// check (G146): always without `when_paths`, else when a glob matches one of them.
+    #[must_use]
+    pub fn wakes(&self, changed: &[String]) -> bool {
+        self.when_paths.as_ref().is_none_or(|globs| {
+            changed
+                .iter()
+                .any(|path| globs.iter().any(|glob| glob_matches(glob, path)))
+        })
+    }
+}
+
+/// A required check that a candidate's diff did not wake (G146): recorded, never silently
+/// skipped.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NotRequired {
+    pub check: String,
+    pub environment: String,
+    pub reason: String,
 }
 
 /// The `materialize_timeout_s` of a `[[check]]` entry that states none.
@@ -156,12 +238,85 @@ impl Policy {
             .is_some_and(|check| check.inputs.iter().any(|input| input == "commit"))
     }
 
+    /// Whether check `entry` is required of a candidate whose diff against its base changes
+    /// `changed`: it is in the manifest (pre-publication, not quarantined) and the diff wakes
+    /// it ([`Policy::unwoken`]).
+    #[must_use]
+    pub fn requires(&self, entry: &CheckEntry, changed: &[String]) -> bool {
+        self.manifest
+            .iter()
+            .any(|m| m.id == entry.id && m.environment == entry.environment)
+            && self.unwoken(entry, changed).is_none()
+    }
+
+    /// The manifest entries required of a candidate whose diff against its base changes
+    /// `changed` (G146), and the ones its diff did not wake, each with the reason.
+    #[must_use]
+    pub fn required(&self, changed: &[String]) -> (Vec<ManifestEntry>, Vec<NotRequired>) {
+        let mut required = Vec::new();
+        let mut not_required = Vec::new();
+        for entry in &self.manifest {
+            let id = crate::evidence::CheckId::new(&entry.id, &entry.environment);
+            match self
+                .check(&id)
+                .and_then(|check| self.unwoken(check, changed))
+            {
+                Some(skipped) => not_required.push(skipped),
+                None => required.push(entry.clone()),
+            }
+        }
+        (required, not_required)
+    }
+
+    /// Why check `entry` is not required of a candidate whose diff against its base changes
+    /// `changed` (G146), or `None` when the diff wakes it: it has `when_paths` and no changed
+    /// path matches one. A change to the policy file or an adapter path wakes every check: a
+    /// policy change is checked twice, and a check that never ran would check nothing.
+    #[must_use]
+    pub fn unwoken(&self, entry: &CheckEntry, changed: &[String]) -> Option<NotRequired> {
+        let paths = self.paths();
+        let policy_change = changed
+            .iter()
+            .any(|file| paths.iter().any(|path| covers(path, file)));
+        (!policy_change && !entry.wakes(changed)).then(|| NotRequired {
+            check: entry.id.clone(),
+            environment: entry.environment.clone(),
+            reason: format!(
+                "no path the candidate changes against its base matches when_paths {}",
+                serde_json::to_string(entry.when_paths.as_deref().unwrap_or_default())
+                    .unwrap_or_default()
+            ),
+        })
+    }
+
     /// The `[[check]]` entry for `id`.
     #[must_use]
     pub fn check(&self, id: &crate::evidence::CheckId) -> Option<&CheckEntry> {
         self.checks
             .iter()
             .find(|check| check.id == id.id && check.environment == id.environment)
+    }
+
+    /// Whether `record`'s producer may answer the check it names (G163): the check has no
+    /// `producers` list, or the list names it. Applied to a check's records before they
+    /// combine, under each policy that judges, so the base's list binds a candidate.
+    #[must_use]
+    pub fn listed(&self, record: &crate::evidence::EvidenceRecord) -> bool {
+        self.check(&record.check)
+            .and_then(|check| check.producers.as_ref())
+            .is_none_or(|names| names.contains(&record.producer.name))
+    }
+
+    /// `records` without those whose producer the check's `producers` list leaves out.
+    #[must_use]
+    pub fn answering(
+        &self,
+        records: Vec<crate::evidence::EvidenceRecord>,
+    ) -> Vec<crate::evidence::EvidenceRecord> {
+        records
+            .into_iter()
+            .filter(|record| self.listed(record))
+            .collect()
     }
 }
 
@@ -371,14 +526,21 @@ pub struct Policy {
     pub quarantined: Vec<Quarantine>,
     /// The `[[input]]` entries: each named input's provider.
     pub inputs: Vec<InputEntry>,
-    /// The required checks only.
+    /// The required checks only: pre-publication and not quarantined.
     pub manifest: Vec<ManifestEntry>,
-    /// The `[profile.<name>]` tables: the completion dimensions each profile requires.
-    pub profiles: BTreeMap<String, Vec<crate::completion::Dimension>>,
-    /// The digest of the sorted manifest (`INTERFACES` § 7). A profile is not in it: a profile
+    /// The post-publication checks that are not quarantined (G91): never required for a
+    /// landing, shown pending for the landed commit until a record for its tree arrives.
+    pub post: Vec<ManifestEntry>,
+    /// The `[profile.<name>]` tables: the completion dimensions each profile requires, and
+    /// whether it counts only signed evidence.
+    pub profiles: BTreeMap<String, crate::completion::Profile>,
+    /// The digest of the sorted manifest (`INTERFACES` § 7), its post-publication entries with
+    /// it: a record of a post check is judged under the same digest. A profile is not in it: a profile
     /// says what a change needs, not what a check computes, so editing one leaves every check's
     /// evidence current. It is a policy change all the same (`revision`, ruling R12).
     pub manifest_digest: String,
+    /// The `[agent]` table (G152).
+    pub agent: AgentPolicy,
 }
 
 /// Why a policy could not be loaded.
@@ -411,8 +573,10 @@ impl From<LoadError> for String {
 /// `commit` or a fixture that is not `<name>@sha256:<hex>`, has a `[[quarantine]]` that names
 /// no check or whose `end` is neither a date nor a `Change-Id`, has a `[profile.<name>]` that
 /// requires nothing, an unknown dimension or one twice, declares `unchecked = true` beside a
-/// `[[check]]`, or, not unchecked, has no required check whose `expected_minimum` is above
-/// zero. [`LoadError::Git`] on a git fault.
+/// `[[check]]`, puts one check id in both stages, has a bad `when_paths` or `producers` list,
+/// or, not unchecked, has no required pre-publication check whose `expected_minimum` is above
+/// zero.
+/// [`LoadError::Git`] on a git fault.
 pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
     let text = match git.run(&["cat-file", "blob", &format!("{commit}:{POLICY_PATH}")]) {
         Ok(text) => text,
@@ -420,12 +584,14 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
         Err(error) => return Err(LoadError::Git(error.message())),
     };
     let invalid = |why: String| LoadError::Invalid(format!("{POLICY_PATH} is invalid: {why}"));
-    let file: PolicyFile = toml::from_str(&text).map_err(|error| invalid(error.to_string()))?;
+    let file: PolicyFile =
+        toml::from_str(&text).map_err(|error| invalid(parse_error(&text, &error)))?;
     validate_shape(&file).map_err(invalid)?;
     let quarantined = |entry: &CheckEntry| file.quarantine.iter().any(|q| q.sets_aside(entry));
 
     let mut seen = std::collections::HashSet::new();
     let mut manifest = Vec::new();
+    let mut post = Vec::new();
     for entry in &file.check {
         if !seen.insert((entry.id.clone(), entry.environment.clone())) {
             return Err(invalid(format!(
@@ -437,6 +603,8 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
         validate_environment(entry)
             .and_then(|()| validate_declared_inputs(entry))
             .and_then(|()| validate_materialization(entry))
+            .and_then(|()| validate_when_paths(entry))
+            .and_then(|()| validate_producers(entry))
             .map_err(invalid)?;
         if !entry.adapter.iter().any(|path| covers(path, executable)) {
             return Err(invalid(format!(
@@ -452,14 +620,23 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
                 .map_err(|_| invalid(format!("adapter path {path} is absent")))?;
             adapter_ids.insert(path.clone(), Value::String(oid));
         }
-        // Ruling 8c: an open quarantine takes its check out of the frozen manifest.
+        // Ruling 8c: an open quarantine takes its check out of the frozen manifest. G91: a
+        // post-publication check is never in it, so it never blocks a landing.
         if !quarantined(entry) {
-            manifest.push(manifest_entry(entry, &adapter_ids).map_err(LoadError::Git)?);
+            let made = manifest_entry(entry, &adapter_ids).map_err(LoadError::Git)?;
+            if entry.stage == Stage::Pre {
+                manifest.push(made);
+            } else {
+                post.push(made);
+            }
         }
     }
     validate_inputs(git, commit, &file.input).map_err(invalid)?;
     let profiles = crate::completion::requirements(file.profile).map_err(invalid)?;
-    let manifest_digest = manifest_digest(&mut manifest).map_err(LoadError::Git)?;
+    let mut frozen: Vec<ManifestEntry> = manifest.iter().chain(&post).cloned().collect();
+    let manifest_digest = manifest_digest(&mut frozen).map_err(LoadError::Git)?;
+    sort_manifest(&mut manifest);
+    sort_manifest(&mut post);
     Ok(Some(Policy {
         revision: file.revision,
         unchecked: file.unchecked,
@@ -467,9 +644,72 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
         quarantined: file.quarantine,
         inputs: file.input,
         manifest,
+        post,
         profiles,
         manifest_digest,
+        agent: file.agent,
     }))
+}
+
+/// Whether the policy at `commit` requires a named actor (`[agent] require_actor`, G152),
+/// judged at the base like every other policy key. No policy requires none. An invalid policy
+/// still requires one when its text says so: a typo elsewhere never lifts the requirement.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn requires_actor_at(git: &Git, commit: &str) -> Result<bool, String> {
+    match load_at(git, commit) {
+        Ok(policy) => Ok(policy.is_some_and(|policy| policy.agent.require_actor)),
+        Err(LoadError::Git(why)) => Err(why),
+        Err(LoadError::Invalid(_)) => Ok(git
+            .run(&["cat-file", "blob", &format!("{commit}:{POLICY_PATH}")])
+            .ok()
+            .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+            .and_then(|table| table.get("agent")?.get("require_actor")?.as_bool())
+            .unwrap_or(false)),
+    }
+}
+
+/// Why the policy text does not parse. An unknown key (G167) is named with its table and line,
+/// in one line: a typo, or a key a newer bay reads, is never read as nothing.
+fn parse_error(text: &str, error: &toml::de::Error) -> String {
+    let key = error
+        .message()
+        .strip_prefix("unknown field `")
+        .and_then(|rest| rest.split_once('`'));
+    let (Some((key, rest)), Some(span)) = (key, error.span()) else {
+        return error.to_string();
+    };
+    let line = text.get(..span.start).unwrap_or(text).matches('\n').count();
+    let lines: Vec<&str> = text.lines().collect();
+    let header = |at: usize| {
+        let line = lines.get(at)?.split('#').next()?.trim();
+        line.starts_with('[').then(|| line.to_owned())
+    };
+    // On a header line the unknown key is the header's last name, in the table above it;
+    // elsewhere it is in the nearest header above, or at the top level.
+    let table = match header(line) {
+        Some(own) => {
+            let path = own.trim_matches(|c| c == '[' || c == ']').trim();
+            path.rsplit_once('.').map_or_else(
+                || "the top level".to_owned(),
+                |(parent, _)| match parent.trim() {
+                    table @ ("check" | "quarantine" | "input") => format!("[[{table}]]"),
+                    table => format!("[{table}]"),
+                },
+            )
+        }
+        None => (0..line)
+            .rev()
+            .find_map(header)
+            .unwrap_or_else(|| "the top level".to_owned()),
+    };
+    format!(
+        "{table} has the unknown key `{key}` (line {}); this bay does not read it, so it is a typo or a key of a newer bay, and unknown is never pass; {}",
+        line + 1,
+        rest.trim_start_matches(", ")
+    )
 }
 
 /// The rules on the file's shape: its quarantines, `unchecked` and the minimum of its checks.
@@ -500,11 +740,23 @@ fn validate_shape(file: &PolicyFile) -> Result<(), String> {
     }
     // § 7: a policy whose every required check may collect nothing could pass any candidate
     // untested. An unchecked policy says so instead of passing.
-    if !file.unchecked
-        && !file
-            .check
+    // G91: one check id runs before publication or after it, never both, so a record of it
+    // never answers for the other stage.
+    if let Some(entry) = file.check.iter().find(|entry| {
+        file.check
             .iter()
-            .any(|entry| entry.expected_minimum > 0 && !quarantined(entry))
+            .any(|other| other.id == entry.id && other.stage != entry.stage)
+    }) {
+        return Err(format!(
+            "check {} is in both stages, pre and post; give the post-publication check its own id",
+            entry.id
+        ));
+    }
+    // A post-publication check never judges a landing, so it never counts here.
+    if !file.unchecked
+        && !file.check.iter().any(|entry| {
+            entry.expected_minimum > 0 && !quarantined(entry) && entry.stage == Stage::Pre
+        })
     {
         return Err("no required check has an expected_minimum above zero".to_owned());
     }
@@ -607,6 +859,98 @@ fn validate_materialization(entry: &CheckEntry) -> Result<(), String> {
     Ok(())
 }
 
+/// The `when_paths` rules of one `[[check]]` (G146): when present, at least one glob, each a
+/// relative path pattern without `.`, `..` or empty parts (a trailing `/` names a directory),
+/// once. A list that could match nothing is a typo, never silent.
+fn validate_when_paths(entry: &CheckEntry) -> Result<(), String> {
+    let Some(globs) = &entry.when_paths else {
+        return Ok(());
+    };
+    if globs.is_empty() {
+        return Err(format!(
+            "check {} has an empty when_paths list; leave when_paths out to require it for every change",
+            entry.id
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for glob in globs {
+        let name = glob.strip_suffix('/').unwrap_or(glob);
+        if !covers(name, name) || glob.contains('\\') {
+            return Err(format!(
+                "check {} names the glob {glob:?} in when_paths; when_paths takes relative path globs, without '.', '..' or empty parts",
+                entry.id
+            ));
+        }
+        if !seen.insert(glob.as_str()) {
+            return Err(format!(
+                "check {} names {glob} twice in when_paths",
+                entry.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The `producers` list of one `[[check]]` (G163): when present, at least one producer name,
+/// each a valid operator name, once. An empty list would let no record answer the check, which
+/// is a typo, never silent.
+fn validate_producers(entry: &CheckEntry) -> Result<(), String> {
+    let Some(producers) = &entry.producers else {
+        return Ok(());
+    };
+    if producers.is_empty() {
+        return Err(format!(
+            "check {} has an empty producers list; leave producers out to let any producer answer it",
+            entry.id
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for name in producers {
+        crate::names::operator_name(name)
+            .map_err(|why| format!("check {} names a bad producer: {why}", entry.id))?;
+        if !seen.insert(name.as_str()) {
+            return Err(format!(
+                "check {} names producer {name} twice in producers",
+                entry.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `when_paths` glob `glob` matches changed path `path`: `*` matches within one path
+/// part, `?` one character other than `/`, a part `**` any number of parts, and a glob ending
+/// in `/` every path under that directory.
+#[must_use]
+pub fn glob_matches(glob: &str, path: &str) -> bool {
+    let glob: Vec<&str> = match glob.strip_suffix('/') {
+        // A directory holds at least one part below it: `studio/` never matches a file `studio`.
+        Some(dir) => dir.split('/').chain(["*", "**"]).collect(),
+        None => glob.split('/').collect(),
+    };
+    let path: Vec<&str> = path.split('/').collect();
+    parts_match(&glob, &path)
+}
+
+fn parts_match(glob: &[&str], path: &[&str]) -> bool {
+    match glob.split_first() {
+        None => path.is_empty(),
+        Some((&"**", rest)) => (0..=path.len()).any(|skip| parts_match(rest, &path[skip..])),
+        Some((part, rest)) => path.split_first().is_some_and(|(name, tail)| {
+            part_matches(part.as_bytes(), name.as_bytes()) && parts_match(rest, tail)
+        }),
+    }
+}
+
+fn part_matches(glob: &[u8], name: &[u8]) -> bool {
+    match glob.split_first() {
+        None => name.is_empty(),
+        Some((b'*', rest)) => (0..=name.len()).any(|skip| part_matches(rest, &name[skip..])),
+        Some((b'?', rest)) => !name.is_empty() && part_matches(rest, &name[1..]),
+        Some((byte, rest)) => name.first() == Some(byte) && part_matches(rest, &name[1..]),
+    }
+}
+
 /// The name of fixture `text` when it is `<name>@sha256:<64 lowercase hex>` with a non-empty
 /// name, `None` otherwise.
 fn fixture_name(text: &str) -> Option<&str> {
@@ -655,8 +999,12 @@ pub fn manifest_entry(
 ///
 /// The manifest does not serialize.
 pub fn manifest_digest(manifest: &mut [ManifestEntry]) -> Result<String, String> {
-    manifest.sort_by(|a, b| (&a.id, &a.environment).cmp(&(&b.id, &b.environment)));
+    sort_manifest(manifest);
     digest(&serde_json::to_value(&*manifest).map_err(|error| error.to_string())?)
+}
+
+fn sort_manifest(manifest: &mut [ManifestEntry]) {
+    manifest.sort_by(|a, b| (&a.id, &a.environment).cmp(&(&b.id, &b.environment)));
 }
 
 /// Whether adapter entry `path` (a file, or a directory ending in `/`) covers `file`. A file
@@ -754,6 +1102,91 @@ mod tests {
         assert_ne!(board, digest_of("paths = [\"board/\"]\n"));
         assert_eq!(plain, digest_of("materialize_timeout_s = 600\n"));
         assert_ne!(plain, digest_of("materialize_timeout_s = 60\n"));
+    }
+
+    /// G163: `producers` is a field of the entry, so listing or changing a check's producers
+    /// changes its definition digest; an absent list leaves the digest as it was. An empty list,
+    /// a bad name and a name twice are invalid.
+    #[test]
+    fn producers_enter_the_definition_digest() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let ids = BTreeMap::new();
+        let entry =
+            |extra: &str| -> CheckEntry { toml::from_str(&format!("{text}{extra}")).unwrap() };
+        let digest_of = |extra: &str| {
+            manifest_entry(&entry(extra), &ids)
+                .unwrap()
+                .definition_digest
+        };
+        let plain = digest_of("");
+        let one = digest_of("producers = [\"gate-1\"]\n");
+        assert_ne!(plain, one);
+        assert_ne!(one, digest_of("producers = [\"gate-1\", \"gate-2\"]\n"));
+        assert!(super::validate_producers(&entry("")).is_ok());
+        assert!(super::validate_producers(&entry("producers = [\"gate-1\"]\n")).is_ok());
+        for bad in ["[]", "[\"Gate/1\"]", "[\"gate-1\", \"gate-1\"]"] {
+            assert!(
+                super::validate_producers(&entry(&format!("producers = {bad}\n"))).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    /// G62: `network = true` is a field of the entry, so granting a check the network changes
+    /// its definition digest; `network = false` is the default and leaves the digest as it was.
+    #[test]
+    fn network_enters_the_definition_digest() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let ids = BTreeMap::new();
+        let digest_of = |extra: &str| {
+            let entry: CheckEntry = toml::from_str(&format!("{text}{extra}")).unwrap();
+            manifest_entry(&entry, &ids).unwrap().definition_digest
+        };
+        let plain = digest_of("");
+        assert_eq!(plain, digest_of("network = false\n"));
+        assert_ne!(plain, digest_of("network = true\n"));
+    }
+
+    /// G91, G146: `stage = "post"` and `when_paths` are fields of the entry, so either changes
+    /// its definition digest; the default stage and an absent `when_paths` leave the digest as
+    /// it was (the G26 vector).
+    #[test]
+    fn stage_and_when_paths_enter_the_definition_digest() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let ids = BTreeMap::new();
+        let digest_of = |extra: &str| {
+            let entry: CheckEntry = toml::from_str(&format!("{text}{extra}")).unwrap();
+            manifest_entry(&entry, &ids).unwrap().definition_digest
+        };
+        let plain = digest_of("");
+        assert_eq!(plain, digest_of("stage = \"pre\"\n"));
+        assert_ne!(plain, digest_of("stage = \"post\"\n"));
+        let studio = digest_of("when_paths = [\"studio/\"]\n");
+        assert_ne!(plain, studio);
+        assert_ne!(
+            studio,
+            digest_of("when_paths = [\"studio/\", \"shared/\"]\n")
+        );
+    }
+
+    /// G146: the `when_paths` globs.
+    #[test]
+    fn when_paths_globs_match_whole_paths() {
+        use super::glob_matches;
+        assert!(glob_matches("studio/", "studio/a.txt"));
+        assert!(glob_matches("studio/", "studio/deep/a.txt"));
+        assert!(!glob_matches("studio/", "studio"));
+        assert!(!glob_matches("studio/", "studios/a.txt"));
+        assert!(glob_matches("studio/**", "studio/deep/a.txt"));
+        assert!(glob_matches("**/*.rs", "a.rs"));
+        assert!(glob_matches("**/*.rs", "src/deep/a.rs"));
+        assert!(!glob_matches("**/*.rs", "src/a.rsx"));
+        assert!(glob_matches("shared/*.txt", "shared/lib.txt"));
+        assert!(!glob_matches("shared/*.txt", "shared/deep/lib.txt"));
+        assert!(glob_matches("Cargo.toml", "Cargo.toml"));
+        assert!(!glob_matches("Cargo.toml", "sub/Cargo.toml"));
+        assert!(glob_matches("src/?.rs", "src/a.rs"));
+        assert!(!glob_matches("src/?.rs", "src/ab.rs"));
     }
 
     /// A check that could see nothing, a path bay could never find in a tree, and a bound

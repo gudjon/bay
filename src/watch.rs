@@ -18,6 +18,13 @@
 //! invalidation it has now. Watch reads; it never writes the change record or sends a notice.
 //! Like `bay status`, after a fetch it accepts and acks this actor's talks (`DESIGN` § 11c,
 //! [`crate::talk::receive`]): the ack is the recipient's arrival record, not a notice.
+//!
+//! `bay watch --landed` (G73) is the landed stream alone, for a producer that reads every
+//! landing: the same landings and cursor, no events and no invalidations. Each landing names
+//! its base (the first parent) and its committer time, and one landed outside bay stays in
+//! the stream with `change: null` and `outside_bay: true`. `off_first_parent` counts the
+//! commits in the same range reached only through a merge's other parent: they are never
+//! listed, and the count says so.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -27,6 +34,7 @@ use serde_json::{Value, json};
 
 use crate::change::{Chain, ChangeRecord, ChangeState};
 use crate::clock::now_rfc3339;
+use crate::git::Git;
 use crate::inputs::{self, Probe};
 use crate::repo::Repo;
 use crate::result::{BayResult, Freshness};
@@ -91,10 +99,16 @@ impl Cursor {
 
 #[must_use]
 pub fn watch(dir: &Path, since: Option<&Cursor>) -> BayResult {
-    run(dir, since).unwrap_or_else(BayResult::failed)
+    run(dir, since, false).unwrap_or_else(BayResult::failed)
 }
 
-fn run(dir: &Path, since: Option<&Cursor>) -> Result<BayResult, String> {
+/// `bay watch --landed`: the landed stream of the module doc.
+#[must_use]
+pub fn landed(dir: &Path, since: Option<&Cursor>) -> BayResult {
+    run(dir, since, true).unwrap_or_else(BayResult::failed)
+}
+
+fn run(dir: &Path, since: Option<&Cursor>, landed_only: bool) -> Result<BayResult, String> {
     let repo = match Repo::open_fetched(dir) {
         Ok(repo) => repo,
         Err(error) => return Ok(error.into_result()),
@@ -115,7 +129,11 @@ fn run(dir: &Path, since: Option<&Cursor>) -> Result<BayResult, String> {
         .map_err(|error| format!("the local cache holds no trunk: {}", error.message()))?;
     // A watch the caller asked for may run a provider its cache has no answer for, as `status`
     // does (ruling R-A3-3); a hook that reads watch passes `Probe::Cached`.
-    let detail = collect(&repo, change.as_deref(), since, &trunk, Probe::Run)?;
+    let detail = if landed_only {
+        collect_landed(&repo, change.as_deref(), since, &trunk)?
+    } else {
+        collect(&repo, change.as_deref(), since, &trunk, Probe::Run)?
+    };
     let mut result = BayResult::ok(detail);
     if let (Some(detail), Some(accept)) = (result.detail.as_mut(), talk_accept) {
         detail["talk_accept"] = accept;
@@ -149,20 +167,7 @@ pub fn collect(
         Some(id) => Some(Chain::new(git).read(id).map_err(|error| error.message())?.1),
         None => None,
     };
-    let from = match (since, &record) {
-        (Some(cursor), _) => cursor.trunk.clone(),
-        (None, Some(record)) => Some(record.base.clone()),
-        (None, None) => Some(trunk.to_owned()),
-    };
-    if let Some(from) = &from
-        && git
-            .run(&["cat-file", "-e", &format!("{from}^{{commit}}")])
-            .is_err()
-    {
-        return Err(format!(
-            "the cursor's trunk {from} is not in this repository; watch without --since for the current state"
-        ));
-    }
+    let from = start(git, since, record.as_ref(), trunk)?;
     let (landings, stopped_at) = landings(repo, from.as_deref(), trunk)?;
 
     let tips = crate::log::tips(git)?;
@@ -203,6 +208,97 @@ pub fn collect(
     }))
 }
 
+/// `bay watch --landed` (G73): the landings of [`collect`] after `since`, the count of
+/// commits off the first-parent line in the range listed, and the cursor to watch from next.
+/// The cursor moves trunk only: its log tips are those a full watch from `since` would read
+/// from, so a full watch from it still lists every event.
+///
+/// # Errors
+///
+/// A git fault, or a cursor whose trunk this repository does not hold.
+pub fn collect_landed(
+    repo: &Repo,
+    change: Option<&str>,
+    since: Option<&Cursor>,
+    trunk: &str,
+) -> Result<Value, String> {
+    let git = &repo.git;
+    let record = match change {
+        Some(id) => Some(Chain::new(git).read(id).map_err(|error| error.message())?.1),
+        None => None,
+    };
+    let from = start(git, since, record.as_ref(), trunk)?;
+    let (landings, stopped_at) = landings(repo, from.as_deref(), trunk)?;
+    let reached = stopped_at.clone().unwrap_or_else(|| trunk.to_owned());
+    let logs = match (since, &record) {
+        (Some(cursor), _) => cursor.logs.clone(),
+        (None, Some(_)) => BTreeMap::new(),
+        (None, None) => crate::log::tips(git)?,
+    };
+    let next = Cursor {
+        trunk: Some(reached.clone()),
+        logs,
+        talks: since.map(|cursor| cursor.talks.clone()).unwrap_or_default(),
+    };
+    Ok(json!({
+        "trunk": trunk,
+        "since": since.map(Cursor::encode).transpose()?,
+        "landings": landings,
+        "off_first_parent": off_first_parent(git, from.as_deref(), &reached)?,
+        "more": stopped_at.is_some(),
+        "cursor": next.encode()?,
+    }))
+}
+
+/// Where the landings start: the cursor's trunk, else the change's base in a view, else the
+/// current trunk (nothing yet).
+fn start(
+    git: &Git,
+    since: Option<&Cursor>,
+    record: Option<&ChangeRecord>,
+    trunk: &str,
+) -> Result<Option<String>, String> {
+    let from = match (since, record) {
+        (Some(cursor), _) => cursor.trunk.clone(),
+        (None, Some(record)) => Some(record.base.clone()),
+        (None, None) => Some(trunk.to_owned()),
+    };
+    if let Some(from) = &from
+        && git
+            .run(&["cat-file", "-e", &format!("{from}^{{commit}}")])
+            .is_err()
+    {
+        return Err(format!(
+            "the cursor's trunk {from} is not in this repository; watch without --since for the current state"
+        ));
+    }
+    Ok(from)
+}
+
+/// The commits after `from` up to `to` (all of `to` when `from` is `None`) that are not on
+/// `to`'s first-parent line: those reached only through a merge's other parent. A query over
+/// the first-parent line states this count, so the commits it leaves out are never silent.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn off_first_parent(git: &Git, from: Option<&str>, to: &str) -> Result<u64, String> {
+    let exclude = from.map(|from| format!("^{from}"));
+    let count = |first_parent: bool| -> Result<u64, String> {
+        let mut args = vec!["rev-list", "--count"];
+        if first_parent {
+            args.push("--first-parent");
+        }
+        args.push(to);
+        args.extend(exclude.as_deref());
+        let text = git.run(&args).map_err(|error| error.message())?;
+        text.trim()
+            .parse()
+            .map_err(|_| format!("git rev-list --count printed {text:?}"))
+    };
+    Ok(count(false)?.saturating_sub(count(true)?))
+}
+
 /// The event kinds about the acceptance policy, which is an input of every change (ruling R3).
 const POLICY_KINDS: [&str; 2] = ["policy_changed_outside_bay", "policy_repair"];
 
@@ -225,17 +321,24 @@ fn touches(record: &ChangeRecord, event: &Value) -> bool {
 }
 
 /// Trunk's first-parent commits after `from` (all of trunk when `None`), oldest first, at most
-/// [`MAX_LANDINGS`], and the last one listed when more follow it. A landing outside bay has no
-/// `change`.
+/// [`MAX_LANDINGS`], and the last one listed when more follow it. Each names its base (the
+/// first parent; `null` for a root) and its committer time. A landing outside bay has no
+/// `change` and is `outside_bay`: it carries no `Change-Id`, or, with a registry, it does not
+/// verify as a publication (as [`crate::publish::scan`] judges one).
 fn landings(
     repo: &Repo,
     from: Option<&str>,
     trunk: &str,
 ) -> Result<(Vec<Value>, Option<String>), String> {
     let format = format!(
-        "--format=%H%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key={},valueonly,separator=%x2c)%x1f%s%x1e",
+        "--format=%H%x1f%P%x1f%ct%x1f%cn%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%(trailers:key={},valueonly,separator=%x2c)%x1f%s%x1e",
         repo.config.actor_trailer()
     );
+    let signatures = repo
+        .git
+        .ref_target(crate::registry::REGISTRY_REF)
+        .map_err(|error| error.message())?
+        .is_some();
     let mut args = vec![
         "log".to_owned(),
         "--first-parent".to_owned(),
@@ -251,7 +354,17 @@ fn landings(
     let mut out = Vec::new();
     for entry in log.split('\u{1e}') {
         let fields: Vec<&str> = entry.trim().split('\u{1f}').map(str::trim).collect();
-        let [commit, change, actor, subject] = fields.as_slice() else {
+        let [
+            commit,
+            parents,
+            time,
+            committer,
+            change,
+            registry_id,
+            actor,
+            subject,
+        ] = fields.as_slice()
+        else {
             continue;
         };
         if commit.is_empty() {
@@ -265,10 +378,16 @@ fn landings(
             return Ok((out, last));
         }
         let some = |text: &str| (!text.is_empty()).then(|| text.to_owned());
+        let outside_bay = change.is_empty()
+            || (signatures
+                && !crate::publish::verify_publication(&repo.git, commit, registry_id, committer));
         out.push(json!({
             "commit": commit,
-            "change": some(change),
+            "change": (!outside_bay).then(|| (*change).to_owned()),
+            "outside_bay": outside_bay,
+            "base": parents.split_whitespace().next(),
             "actor": some(actor),
+            "at": time.parse().ok().map(crate::clock::rfc3339_of),
             "subject": subject,
         }));
     }

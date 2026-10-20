@@ -5,7 +5,9 @@
 //! them a change needs; `[policy] profile` in `.bay/config.toml` selects one. `bay status`
 //! reports each dimension apart and a profile verdict that never collapses into "done": a
 //! required dimension that is missing is named ("published and checked; runtime confirmation
-//! missing"), and a profile bay cannot read is `unknown`, never `complete`.
+//! missing"), and a profile bay cannot read is `unknown`, never `complete`. A profile that sets
+//! `require_signed = true` never counts unsigned evidence (G160, owner ruling Q6): a required
+//! dimension that rests only on unsigned records is `unknown`, never satisfied.
 
 use std::collections::BTreeMap;
 
@@ -66,9 +68,20 @@ pub const DEFAULT_REQUIRE: [Dimension; 2] = [Dimension::Published, Dimension::Ch
 #[serde(deny_unknown_fields)]
 pub struct ProfileEntry {
     pub require: Vec<Dimension>,
+    /// Whether only signed evidence may establish a dimension (G160). Off by default: unsigned
+    /// records count, as unsigned check records do (owner ruling Q6).
+    #[serde(default)]
+    pub require_signed: bool,
 }
 
-/// What each `[profile.<name>]` table requires, once each is valid: a name, and a `require`
+/// What one profile asks: the dimensions it requires, and whether only signed evidence counts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Profile {
+    pub require: Vec<Dimension>,
+    pub require_signed: bool,
+}
+
+/// What each `[profile.<name>]` table asks, once each is valid: a name, and a `require`
 /// list that is not empty and names each dimension at most once. A dimension bay does not
 /// know fails to parse before this, so a typo is never a profile that requires less.
 ///
@@ -77,11 +90,17 @@ pub struct ProfileEntry {
 /// The first rule a profile breaks, naming it.
 pub fn requirements(
     profiles: BTreeMap<String, ProfileEntry>,
-) -> Result<BTreeMap<String, Vec<Dimension>>, String> {
+) -> Result<BTreeMap<String, Profile>, String> {
     validate(&profiles)?;
     Ok(profiles
         .into_iter()
-        .map(|(name, entry)| (name, entry.require))
+        .map(|(name, entry)| {
+            let profile = Profile {
+                require: entry.require,
+                require_signed: entry.require_signed,
+            };
+            (name, profile)
+        })
         .collect())
 }
 
@@ -112,13 +131,13 @@ fn validate(profiles: &BTreeMap<String, ProfileEntry>) -> Result<(), String> {
 /// # Errors
 ///
 /// The name is selected but no profile of that name exists: the verdict is `unknown`.
-pub fn requirement(
-    name: &str,
-    profiles: &BTreeMap<String, Vec<Dimension>>,
-) -> Result<Vec<Dimension>, String> {
+pub fn requirement(name: &str, profiles: &BTreeMap<String, Profile>) -> Result<Profile, String> {
     match profiles.get(name) {
-        Some(require) => Ok(require.clone()),
-        None if name == DEFAULT_PROFILE => Ok(DEFAULT_REQUIRE.to_vec()),
+        Some(profile) => Ok(profile.clone()),
+        None if name == DEFAULT_PROFILE => Ok(Profile {
+            require: DEFAULT_REQUIRE.to_vec(),
+            require_signed: false,
+        }),
         None => Err(format!(
             "[policy] profile = \"{name}\" names no [profile.{name}] in the policy"
         )),
@@ -128,39 +147,73 @@ pub fn requirement(
 /// The profile verdict as JSON: its name, what it requires, what is missing, `complete` or
 /// `incomplete` (or `unknown` when the profile cannot be read), and a summary that names every
 /// required dimension that is met and every one that is missing. `met` lists the dimensions
-/// the change's evidence establishes.
+/// the change's evidence establishes, and `unsigned` those of them that rest only on unsigned
+/// records (G160). The required ones among those are named in `unsigned`; under
+/// `require_signed` they are not met, and a verdict with nothing missing is then `unknown`.
 #[must_use]
-pub fn verdict(name: &str, require: Result<Vec<Dimension>, String>, met: &[Dimension]) -> Value {
-    let require = match require {
-        Ok(require) => require,
+pub fn verdict(
+    name: &str,
+    profile: Result<Profile, String>,
+    met: &[Dimension],
+    unsigned: &[Dimension],
+) -> Value {
+    let profile = match profile {
+        Ok(profile) => profile,
         Err(why) => {
             return json!({
                 "name": name,
                 "require": null,
+                "require_signed": null,
                 "missing": null,
+                "unsigned": null,
                 "verdict": "unknown",
                 "summary": format!("completion unknown: {why}"),
             });
         }
     };
+    let require = &profile.require;
     let (have, missing): (Vec<Dimension>, Vec<Dimension>) = Dimension::ALL
         .into_iter()
         .filter(|dimension| require.contains(dimension))
         .partition(|dimension| met.contains(dimension));
+    let resting: Vec<Dimension> = have
+        .iter()
+        .copied()
+        .filter(|dimension| unsigned.contains(dimension))
+        .collect();
+    // Under `require_signed`, a dimension on unsigned records alone is neither met nor missing.
+    let (have, unknown): (Vec<Dimension>, Vec<Dimension>) = have
+        .into_iter()
+        .partition(|dimension| !profile.require_signed || !resting.contains(dimension));
     let mut parts = Vec::new();
     if !have.is_empty() {
         parts.push(and_list(have.iter().map(|dimension| dimension.as_str())));
+    }
+    if !unknown.is_empty() {
+        parts.push(format!(
+            "{} unknown: only unsigned evidence, and [profile.{name}] sets require_signed",
+            and_list(unknown.iter().map(|dimension| dimension.as_str()))
+        ));
     }
     parts.extend(
         missing
             .iter()
             .map(|dimension| dimension.missing().to_owned()),
     );
+    let word = if !missing.is_empty() {
+        "incomplete"
+    } else if !unknown.is_empty() {
+        "unknown"
+    } else {
+        "complete"
+    };
     json!({
         "name": name,
         "require": require.iter().map(|dimension| dimension.as_str()).collect::<Vec<_>>(),
+        "require_signed": profile.require_signed,
         "missing": missing.iter().map(|dimension| dimension.as_str()).collect::<Vec<_>>(),
-        "verdict": if missing.is_empty() { "complete" } else { "incomplete" },
+        "unsigned": resting.iter().map(|dimension| dimension.as_str()).collect::<Vec<_>>(),
+        "verdict": word,
         "summary": parts.join("; "),
     })
 }
@@ -179,14 +232,17 @@ fn and_list<'a>(words: impl Iterator<Item = &'a str>) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{Dimension, ProfileEntry, requirement, validate, verdict};
+    use super::{Dimension, Profile, ProfileEntry, requirement, validate, verdict};
 
     const PUBLISHED_AND_CHECKED: [Dimension; 2] = [Dimension::Published, Dimension::Checked];
 
     #[test]
     fn a_missing_runtime_dimension_is_named_never_done() {
-        let all = Dimension::ALL.to_vec();
-        let out = verdict("deploy", Ok(all), &PUBLISHED_AND_CHECKED);
+        let all = Profile {
+            require: Dimension::ALL.to_vec(),
+            require_signed: false,
+        };
+        let out = verdict("deploy", Ok(all), &PUBLISHED_AND_CHECKED, &[]);
         assert_eq!(out["verdict"], "incomplete");
         assert_eq!(
             out["summary"],
@@ -199,8 +255,9 @@ mod tests {
     #[test]
     fn the_default_profile_requires_published_and_checked() {
         let require = requirement("default", &BTreeMap::new()).unwrap();
-        assert_eq!(require, [Dimension::Published, Dimension::Checked]);
-        let out = verdict("default", Ok(require), &PUBLISHED_AND_CHECKED);
+        assert_eq!(require.require, [Dimension::Published, Dimension::Checked]);
+        assert!(!require.require_signed);
+        let out = verdict("default", Ok(require), &PUBLISHED_AND_CHECKED, &[]);
         assert_eq!(out["verdict"], "complete");
         assert_eq!(out["summary"], "published and checked");
     }
@@ -208,7 +265,7 @@ mod tests {
     #[test]
     fn an_unknown_profile_is_unknown_never_complete() {
         let require = requirement("deploy", &BTreeMap::new());
-        let out = verdict("deploy", require, &[]);
+        let out = verdict("deploy", require, &[], &[]);
         assert_eq!(out["verdict"], "unknown");
     }
 

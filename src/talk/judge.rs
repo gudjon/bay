@@ -18,19 +18,22 @@
 //! after `sent`, any `status` is a status word, and a blocked one names a reason code and a new
 //! `follow_up`; an answer by `who` or `decides` on a discovery talk, where a different value from
 //! the standing answer names that answer's commit in `supersedes` (`TALK_ANSWER_CONFLICT`); a
-//! close as `superseded` by a talk under the same `who` that supersedes it. A closed talk takes
-//! nothing. A chain holds at most [`ENTRIES_MAX`] entries.
+//! close as `superseded` by a talk under the same `who` that supersedes it, or as `answered` by
+//! the landing of a change whose `Fixes:`, `Reverts:` or `Supersedes:` names the delivery talk's
+//! change (G148). A closed talk takes nothing. A chain holds at most [`ENTRIES_MAX`] entries.
 
 use serde_json::Value;
 
 use super::{
-    BAY_TALK_CLOCK_SKEW_S, BAY_TALK_MAX_BYTES, BAY_TALK_OPEN_MAX, ENTRIES_MAX, File, Known,
-    STATUS_WORDS, TALK_FILE, TALK_PREFIX, Talk, backlog, check_actors, check_body, check_entry,
-    entry_name, files, is_talk_id, talk_ref, talks_matching, talks_where,
+    ANSWERS, BAY_TALK_CLOCK_SKEW_S, BAY_TALK_MAX_BYTES, BAY_TALK_OPEN_MAX, ENTRIES_MAX, File,
+    Known, STATUS_WORDS, TALK_FILE, TALK_PREFIX, Talk, backlog, check_actors, check_body,
+    check_entry, entry_name, files, is_talk_id, talk_ref, talks_matching, talks_where,
+    trailer_values,
 };
 use crate::canonical::canonical;
 use crate::clock::unix_of;
 use crate::git::Git;
+use crate::ids::is_change_id;
 use crate::registry::{KeyClass, Registry};
 use crate::result::Reason;
 use crate::signing;
@@ -41,6 +44,9 @@ pub struct Push<'a> {
     pub registry: &'a Registry,
     /// A ref's value after this push.
     pub after: &'a dyn Fn(&str) -> Result<Option<String>, String>,
+    /// A marker's value after this push: its ref, or the shard index record that stands in for
+    /// it (§ 10a).
+    pub marker: &'a dyn Fn(&str) -> Result<Option<String>, String>,
     /// The talks this push creates, those that read as talks ([`super::read_created`]).
     pub creates: &'a [Talk],
 }
@@ -493,7 +499,12 @@ fn agent_signer(push: &Push, commit: &str) -> Result<Option<String>, String> {
 
 /// The class other than agent a commit verifies as, if any.
 fn other_class(push: &Push, commit: &str) -> Result<Option<&'static str>, String> {
-    for class in [KeyClass::Executor, KeyClass::Producer, KeyClass::Registry] {
+    for class in [
+        KeyClass::Executor,
+        KeyClass::Producer,
+        KeyClass::Reviewer,
+        KeyClass::Registry,
+    ] {
         let file = push.registry.class_file(push.git, class)?;
         if signing::verify_commit(push.git, commit, &file)
             .map_err(|error| error.message())?
@@ -809,6 +820,13 @@ fn close(push: &Push, talk: &Talk, actor: &str, entry: &Value) -> Result<(), Str
     if actor != talk.who {
         return Err(format!("only {} closes talk {}", talk.who, talk.id));
     }
+    if entry["state"] == "answered" {
+        return answered(push, talk, entry);
+    }
+    if entry.get("landing").is_some() || ANSWERS.iter().any(|(field, _)| entry.get(field).is_some())
+    {
+        return Err("only an answered close names a landing".to_owned());
+    }
     let by = entry["by"].as_str().filter(|by| is_talk_id(by));
     let (Some("superseded"), Some(by)) = (entry["state"].as_str(), by) else {
         return Err(
@@ -826,6 +844,45 @@ fn close(push: &Push, talk: &Talk, actor: &str, entry: &Value) -> Result<(), Str
     let successor = Talk::read(push.git, &name, &tip)?;
     if successor.supersedes() != Some(talk.id.as_str()) {
         return Err(format!("talk {by} does not supersede {}", talk.id));
+    }
+    Ok(())
+}
+
+/// G148: an `answered` close of a delivery talk about change X names one answering change, by
+/// its relation, and its `landing`: that change's publication (its landed marker), whose trailer
+/// for the relation names X.
+fn answered(push: &Push, talk: &Talk, entry: &Value) -> Result<(), String> {
+    let Some(change) = talk.about_change() else {
+        return Err(format!(
+            "talk {} asks about no change, so no landing answers it",
+            talk.id
+        ));
+    };
+    let named: Vec<(&str, &str, &str)> = ANSWERS
+        .iter()
+        .filter_map(|(field, trailer)| entry[field].as_str().map(|by| (*field, *trailer, by)))
+        .collect();
+    let ([(field, trailer, by)], Some(landing), None) =
+        (named.as_slice(), entry["landing"].as_str(), entry.get("by"))
+    else {
+        return Err(
+            "an answered close names one of fixed_by, undone_by or superseded_by, and its `landing`"
+                .to_owned(),
+        );
+    };
+    if !is_change_id(by) {
+        return Err(format!("`{field}` {by:?} is not a change id"));
+    }
+    if (push.marker)(&format!("{}{by}", crate::names::LANDED))?.as_deref() != Some(landing) {
+        return Err(format!("{landing} is not the landing of change {by}"));
+    }
+    if !trailer_values(push.git, landing, trailer)?
+        .iter()
+        .any(|value| value == change)
+    {
+        return Err(format!(
+            "the landing {landing} of {by} does not name change {change} in `{trailer}:`, so it is not `{field}`"
+        ));
     }
     Ok(())
 }

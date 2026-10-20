@@ -67,6 +67,42 @@ fn live_tree_is_small(tree: &str) -> bool {
             .is_ok_and(|size| size <= crate::live::LIVE_MAX_BYTES)
 }
 
+/// The deepest fan-out the hook looks for a note at: Git adds a level per 256-fold growth of a
+/// notes tree, so four levels cover far more notes than any producer ref holds.
+const NOTE_FANOUT_MAX: usize = 4;
+
+/// G159 (owner ruling Q1): an evidence record is never withdrawn. Every record of the old note
+/// on `tree` is in the new note (`None`: the note is removed) with the same JSON value, which is
+/// the same canonical bytes its signature covers. The order of a note is not its meaning (records
+/// combine by record, never latest-wins, § 7), so a reordering keeps every record. Only a
+/// registry-signed retention cut may remove one, and no retention cut of evidence notes exists
+/// yet: every removal is refused.
+fn kept(old: &str, new: Option<&str>, tree: &str) -> Result<(), String> {
+    let Ok(before) = serde_json::from_str::<Vec<Value>>(old) else {
+        // An old note that is not a list of records holds no record to keep.
+        return Ok(());
+    };
+    let after: Vec<Value> = match new {
+        Some(text) => serde_json::from_str(text).unwrap_or_default(),
+        None => Vec::new(),
+    };
+    for record in &before {
+        if after.contains(record) {
+            continue;
+        }
+        let id = record["id"].as_str().unwrap_or("(no id)");
+        let how = if after.iter().any(|other| other["id"] == record["id"]) {
+            "changed"
+        } else {
+            "withdrawn"
+        };
+        return Err(format!(
+            "EVIDENCE_WITHDRAWN: record `{id}` {how} on the note of {tree}; an evidence record is never withdrawn, and no retention cut of evidence notes exists yet"
+        ));
+    }
+    Ok(())
+}
+
 fn message(error: &GitError) -> String {
     error.message()
 }
@@ -143,11 +179,11 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             judge.landed_index(update)
         } else if name == trunk {
             judge.trunk(update)
-        } else if let Some(id) = name.strip_prefix("refs/bay/landed/") {
+        } else if let Some(id) = name.strip_prefix(crate::names::LANDED) {
             judge.landed(update, id, &trunk)
-        } else if let Some(id) = name.strip_prefix("refs/bay/changes/") {
+        } else if let Some(id) = name.strip_prefix(crate::names::CHANGES) {
             judge.chain(update, id)
-        } else if let Some(id) = name.strip_prefix("refs/bay/requests/") {
+        } else if let Some(id) = name.strip_prefix(crate::names::REQUESTS) {
             judge.request_ref(update, id)
         } else if let Some(producer) = name.strip_prefix(evidence::EVIDENCE_PREFIX) {
             judge.evidence(update, producer)
@@ -159,9 +195,9 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             judge.reservation(update, seq)
         } else if let Some(seq) = name.strip_prefix(crate::queue::DONE_PREFIX) {
             judge.queue_release(update, seq)
-        } else if let Some(claim) = name.strip_prefix("refs/bay/intent/") {
+        } else if let Some(claim) = name.strip_prefix(crate::names::INTENT) {
             judge.intent(update, claim)
-        } else if let Some(claim) = name.strip_prefix("refs/bay/landed-intent/") {
+        } else if let Some(claim) = name.strip_prefix(crate::names::LANDED_INTENT) {
             judge.landed_intent(update, claim, &trunk)
         } else if let Some(machine) = name.strip_prefix(crate::live::LIVE_PREFIX) {
             judge.live(update, machine)
@@ -252,20 +288,20 @@ impl Judge<'_> {
                 "a marker is never deleted, except by its compaction into {index} in the same push"
             ));
         }
-        if let Some(id) = update.name.strip_prefix("refs/bay/landed/") {
+        if let Some(id) = update.name.strip_prefix(crate::names::LANDED) {
             return self.cut_landing(id, None);
         }
-        let (claim, publication) = if let Some(claim) = update.name.strip_prefix("refs/bay/intent/")
-        {
-            let publication = self
-                .marker(&format!("refs/bay/landed-intent/{claim}"))?
-                .ok_or("a claim is compacted only once its generation landed")?;
-            (claim, publication)
-        } else if let Some(claim) = update.name.strip_prefix("refs/bay/landed-intent/") {
-            (claim, update.old.clone())
-        } else {
-            return Err("is not a compacted marker".to_owned());
-        };
+        let (claim, publication) =
+            if let Some(claim) = update.name.strip_prefix(crate::names::INTENT) {
+                let publication = self
+                    .marker(&format!("{}{claim}", crate::names::LANDED_INTENT))?
+                    .ok_or("a claim is compacted only once its generation landed")?;
+                (claim, publication)
+            } else if let Some(claim) = update.name.strip_prefix(crate::names::LANDED_INTENT) {
+                (claim, update.old.clone())
+            } else {
+                return Err("is not a compacted marker".to_owned());
+            };
         let change = self.trailer(&publication, "Change-Id")?;
         self.cut_landing(&change, Some(claim))
     }
@@ -274,9 +310,12 @@ impl Judge<'_> {
     /// With `claim` (`<hash>/<generation>`), the change also held that claim.
     fn cut_landing(&self, id: &str, claim: Option<&str>) -> Result<(), String> {
         let refused = || format!("change {id} has not landed with its chain cut by retention");
-        let chain = format!("refs/bay/changes/{id}");
+        let chain = format!("{}{id}", crate::names::CHANGES);
         crate::names::bay_ref(&chain).map_err(|_| refused())?;
-        if self.marker(&format!("refs/bay/landed/{id}"))?.is_none() {
+        if self
+            .marker(&format!("{}{id}", crate::names::LANDED))?
+            .is_none()
+        {
             return Err(refused());
         }
         let head = self.after(&chain)?.ok_or_else(refused)?;
@@ -537,7 +576,7 @@ impl Judge<'_> {
         }
         // No newer request of the change names another revision (§ 10a).
         let latest = self
-            .after(&format!("refs/bay/requests/{change}"))?
+            .after(&format!("{}{change}", crate::names::REQUESTS))?
             .ok_or_else(|| format!("change {change} has no requests ref"))?;
         let latest = self.request(&latest, &change)?;
         if latest.revision != revision {
@@ -546,7 +585,7 @@ impl Judge<'_> {
             ));
         }
         // The operation is not cancelled.
-        if let Some(head) = self.after(&format!("refs/bay/changes/{change}"))? {
+        if let Some(head) = self.after(&format!("{}{change}", crate::names::CHANGES))? {
             let record = Chain::new(self.git)
                 .record_at(&head)
                 .map_err(|error| error.message())?;
@@ -563,7 +602,7 @@ impl Judge<'_> {
             }
         }
         // The landed marker is created by this very push, and did not exist.
-        let marker = format!("refs/bay/landed/{change}");
+        let marker = format!("{}{change}", crate::names::LANDED);
         let creates = self
             .updates
             .iter()
@@ -628,14 +667,18 @@ impl Judge<'_> {
             .git
             .run(&["rev-parse", &format!("{commit}^{{tree}}")])
             .map_err(|error| message(&error))?;
-        let records = evidence::counted(
+        // G163: a record from a producer the check's list leaves out never answers it.
+        let records = policy.answering(evidence::counted(
             self.git,
             evidence::records_for(self.git, &tree)?,
             Some(registry),
-        )?;
+        )?);
+        // G146: the checks the commit's own diff against its parent requires, as land judged.
+        let changed = crate::check::changed_paths(self.git, &format!("{commit}^1"), commit)?;
+        let (required, _) = policy.required(&changed);
         let gaps = evidence::aggregate(
             &records,
-            &policy.manifest,
+            &required,
             &policy.manifest_digest,
             &|id| policy.commit_keyed(id),
             commit,
@@ -778,7 +821,10 @@ impl Judge<'_> {
                 .and_then(|parent| chain.record_at(parent).ok())
                 .filter(|before| before.actor.name != record.actor.name);
             if let Some(before) = &before {
-                if self.marker(&format!("refs/bay/landed/{id}"))?.is_some() {
+                if self
+                    .marker(&format!("{}{id}", crate::names::LANDED))?
+                    .is_some()
+                {
                     return Err(format!("{commit} adopts a change that already landed"));
                 }
                 if !matches!(
@@ -789,7 +835,9 @@ impl Judge<'_> {
                 }
             }
             if record.state == crate::change::ChangeState::Abandoned
-                && self.marker(&format!("refs/bay/landed/{id}"))?.is_some()
+                && self
+                    .marker(&format!("{}{id}", crate::names::LANDED))?
+                    .is_some()
             {
                 return Err(format!("{commit} abandons a change that already landed"));
             }
@@ -848,7 +896,7 @@ impl Judge<'_> {
         if is_zero(&update.old) || adopted_head != Some(update.old.as_str()) {
             return refuse("the adopted head is not the head this host holds".to_owned());
         }
-        let name = format!("refs/bay/changes/{id}");
+        let name = format!("{}{id}", crate::names::CHANGES);
         let Some((tip, set_at)) = self.reflog(&name, 1)?.into_iter().next() else {
             return refuse(format!("this host has no reflog of {name}"));
         };
@@ -1025,12 +1073,14 @@ impl Judge<'_> {
     fn talk(&self, update: &Update, talk: &str) -> Result<(), String> {
         let (who, id) = talk
             .split_once('/')
-            .ok_or_else(|| "a talk ref is refs/bay/talk/<who>/<id>".to_owned())?;
+            .ok_or_else(|| format!("a talk ref is {}<who>/<id>", crate::names::TALK))?;
         let after = |name: &str| self.after(name);
+        let marker = |name: &str| self.marker(name);
         let push = crate::talk::Push {
             git: self.git,
             registry: self.registry,
             after: &after,
+            marker: &marker,
             creates: &self.talk_creates,
         };
         let old = (!is_zero(&update.old)).then_some(update.old.as_str());
@@ -1054,7 +1104,9 @@ impl Judge<'_> {
             return Err("a retention cut is signed by an executor key".to_owned());
         }
         // § 10a: only a landed change, or one whose chain (before the cut) is abandoned.
-        let landed = self.marker(&format!("refs/bay/landed/{id}"))?.is_some();
+        let landed = self
+            .marker(&format!("{}{id}", crate::names::LANDED))?
+            .is_some();
         let abandoned = !landed
             && Chain::new(self.git)
                 .record_at(&update.old)
@@ -1066,7 +1118,7 @@ impl Judge<'_> {
             .git
             .run(&["rev-list", "--parents", "-n", "1", &update.new])
             .map_err(|error| message(&error))?;
-        let latest = self.after(&format!("refs/bay/requests/{id}"))?;
+        let latest = self.after(&format!("{}{id}", crate::names::REQUESTS))?;
         // A landed change always has a land request; an abandoned one may never have had one.
         let keeps_latest = latest.as_deref().is_some_and(|latest| {
             parents
@@ -1108,12 +1160,13 @@ impl Judge<'_> {
         }
     }
 
-    /// A producer's notes ref: every record it adds is signed by that producer, under its name.
+    /// A producer's or a reviewer's notes ref: every record it adds is signed by that name, with
+    /// a key of the class the record's kind needs (Q12), and every record it held stays (G159,
+    /// [`kept`]).
     fn evidence(&self, update: &Update, producer: &str) -> Result<(), String> {
         if is_zero(&update.new) {
             return Err("evidence is never deleted".to_owned());
         }
-        let producers = self.registry.class_file(self.git, KeyClass::Producer)?;
         let changed = if is_zero(&update.old) {
             self.git.run(&["ls-tree", "-r", "--name-only", &update.new])
         } else {
@@ -1128,24 +1181,27 @@ impl Judge<'_> {
         }
         .map_err(|error| message(&error))?;
         for path in changed.lines() {
-            let before: Vec<evidence::EvidenceRecord> = if is_zero(&update.old) {
-                Vec::new()
-            } else {
-                self.git
-                    .run(&["cat-file", "blob", &format!("{}:{path}", update.old)])
-                    .ok()
-                    .and_then(|text| serde_json::from_str(&text).ok())
-                    .unwrap_or_default()
-            };
-            let text = self
-                .git
-                .run(&["cat-file", "blob", &format!("{}:{path}", update.new)])
-                .map_err(|error| message(&error))?;
-            let records: Vec<evidence::EvidenceRecord> =
-                serde_json::from_str(&text).map_err(|error| format!("{path}: {error}"))?;
             // A note's path is the object it annotates, in fan-out form: a record sits only on
             // the note of the tree it is about, never copied onto another's.
             let annotated: String = path.chars().filter(|c| *c != '/').collect();
+            let old_text = if is_zero(&update.old) {
+                None
+            } else {
+                self.note(&update.old, &annotated)?
+            };
+            let before: Vec<evidence::EvidenceRecord> = old_text
+                .as_deref()
+                .and_then(|text| serde_json::from_str(text).ok())
+                .unwrap_or_default();
+            let new_text = self.note(&update.new, &annotated)?;
+            let Some(text) = new_text else {
+                if let Some(old_text) = &old_text {
+                    kept(old_text, None, &annotated)?;
+                }
+                return Err(format!("the note on {annotated} is removed"));
+            };
+            let records: Vec<evidence::EvidenceRecord> =
+                serde_json::from_str(&text).map_err(|error| format!("{path}: {error}"))?;
             let mut ids = HashSet::new();
             for record in &records {
                 if !ids.insert(record.id.clone()) {
@@ -1165,15 +1221,52 @@ impl Judge<'_> {
                         record.id, record.subject.tree
                     ));
                 }
-                if !record.verifies(&producers) {
+                // Q12: the record's kind names the one class file it verifies against, so a
+                // reviewer key writes only `review` records and a producer key never does.
+                if !record.verifies_in(self.git, self.registry)? {
+                    let class = evidence::signer_class(&record.kind).file();
                     return Err(format!(
-                        "record {} is not signed by producer {producer}'s key",
-                        record.id
+                        "record {} of kind {} is not signed by {class} {producer}'s key; a {class} key signs {}",
+                        record.id,
+                        record.kind,
+                        if class == "reviewer" {
+                            "only review records"
+                        } else {
+                            "every kind but review"
+                        }
                     ));
                 }
             }
+            // G159: every record of the old note stays in the new one, byte for byte. Judged
+            // after what the note adds, so a forged addition is named as such first.
+            if let Some(old_text) = &old_text {
+                kept(old_text, Some(&text), &annotated)?;
+            }
         }
         Ok(())
+    }
+
+    /// The note on `object` in notes commit `notes`, or `None` when it has none. Git moves a
+    /// note to a fan-out path (`ab/cdef…`) as a notes tree grows, so a note that only moved is
+    /// found at its new path and is never read as removed.
+    fn note(&self, notes: &str, object: &str) -> Result<Option<String>, String> {
+        let mut path = object.to_owned();
+        for depth in 0..=NOTE_FANOUT_MAX {
+            match self
+                .git
+                .run(&["cat-file", "blob", &format!("{notes}:{path}")])
+            {
+                Ok(text) => return Ok(Some(text)),
+                Err(GitError::Failed { .. }) => {}
+                Err(error) => return Err(message(&error)),
+            }
+            let split = 3 * depth + 2;
+            if split >= path.len() {
+                break;
+            }
+            path.insert(split, '/');
+        }
+        Ok(None)
     }
 
     fn log(&self, update: &Update, executor: &str) -> Result<(), String> {
@@ -1317,7 +1410,7 @@ impl Judge<'_> {
             .as_ref()
             .is_some_and(|held| held.hash == hash && held.generation == generation);
         let with_change = self.updates.iter().any(|other| {
-            other.name == format!("refs/bay/changes/{}", record.id)
+            other.name == format!("{}{}", crate::names::CHANGES, record.id)
                 && is_zero(&other.old)
                 && other.new == update.new
         });
@@ -1340,28 +1433,32 @@ impl Judge<'_> {
     /// compacted only with its landed claim (`compacted_delete`), so its landed claim's
     /// publication names the change, which carries its landed marker (§ 10a).
     fn generation_landed(&self, hash: &str, generation: u64) -> Result<bool, String> {
-        let claim = format!("refs/bay/intent/{hash}/{generation}");
+        let claim = format!("{}{hash}/{generation}", crate::names::INTENT);
         if let Some(previous) = self.after(&claim)? {
             let before = Chain::new(self.git)
                 .record_at(&previous)
                 .map_err(|error| error.message())?;
             return Ok(self
-                .marker(&format!("refs/bay/landed/{}", before.id))?
+                .marker(&format!("{}{}", crate::names::LANDED, before.id))?
                 .is_some());
         }
         if self.recorded(&claim)?.is_none() {
             return Err("the previous generation has no claim".to_owned());
         }
-        let Some(publication) =
-            self.marker(&format!("refs/bay/landed-intent/{hash}/{generation}"))?
+        let Some(publication) = self.marker(&format!(
+            "{}{hash}/{generation}",
+            crate::names::LANDED_INTENT
+        ))?
         else {
             return Ok(false);
         };
         let change = self.trailer(&publication, "Change-Id")?;
-        if crate::names::bay_ref(&format!("refs/bay/landed/{change}")).is_err() {
+        if crate::names::bay_ref(&format!("{}{change}", crate::names::LANDED)).is_err() {
             return Ok(false);
         }
-        Ok(self.marker(&format!("refs/bay/landed/{change}"))?.is_some())
+        Ok(self
+            .marker(&format!("{}{change}", crate::names::LANDED))?
+            .is_some())
     }
 
     /// A landed-intent marker: created once, with the trunk update that lands its generation,
@@ -1379,7 +1476,7 @@ impl Judge<'_> {
             return Err("is created only together with the trunk update that lands it".to_owned());
         }
         let change = self.trailer(&update.new, "Change-Id")?;
-        let chain = format!("refs/bay/changes/{change}");
+        let chain = format!("{}{change}", crate::names::CHANGES);
         let names_holder =
             || format!("is created only by the landing of a change that holds {claim}");
         crate::names::bay_ref(&chain).map_err(|_| names_holder())?;

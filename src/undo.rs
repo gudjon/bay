@@ -81,6 +81,7 @@ fn run(dir: &Path, change: &str, wait: bool) -> Result<BayResult, String> {
         inputs: Vec::new(),
         resume: None,
         reverts: Some(change.to_owned()),
+        fixes: None,
     };
     let started = start::start(dir, &request);
     if started.decision != Decision::Ok {
@@ -125,7 +126,11 @@ fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
 /// The trunk commit that published `change`: the remote's `refs/bay/landed/<change>`, or the
 /// shard index record that stands in for it (§ 10a), names it and the trunk scan from the
 /// change's `base_first` finds it (§ 6). `None` when the change is not on trunk.
-fn landed_commit(repo: &Repo, change: &str, trunk: &str) -> Result<Option<String>, String> {
+pub(crate) fn landed_commit(
+    repo: &Repo,
+    change: &str,
+    trunk: &str,
+) -> Result<Option<String>, String> {
     // Only a marker the remote answered without is "not landed": a remote that cannot be read
     // is a fault, never CHANGE_NOT_LANDED, whose retry is never.
     let unreadable = |error: crate::git::GitError| {
@@ -135,7 +140,7 @@ fn landed_commit(repo: &Repo, change: &str, trunk: &str) -> Result<Option<String
         )
     };
     // § 10a: a compacted marker's shard index record stands in for the ref.
-    let marker = format!("refs/bay/landed/{change}");
+    let marker = format!("{}{change}", crate::names::LANDED);
     let Some(landed) = crate::compact::remote_marker(repo, &marker).map_err(|error| {
         format!("the remote could not be read, so whether {change} landed is unknown: {error}")
     })?

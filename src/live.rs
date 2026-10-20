@@ -5,9 +5,9 @@
 //! holds one parentless commit whose tree is `live.json` alone (schema `bay.live/1`): the
 //! machine's name, the time it was written, the fingerprint of the agent key that signs it, and
 //! one row per live session. A row is a projection of the session's latest work record line
-//! (`INTERFACES` § 5a): session, actor, change, state, event, agent, context use, whether its view
-//! holds uncheckpointed edits (ruling R7) and time. Local paths (repository, view, files) stay in
-//! the local record. A row whose time is older than the takeover window is reaped: a session
+//! (`INTERFACES` § 5a): session, when it started (G166), actor, change, state, event, agent,
+//! context use, whether its view holds uncheckpointed edits (ruling R7) and time. Local paths
+//! (repository, view, files) stay in the local record. A row whose time is older than the takeover window is reaped: a session
 //! that died without `SessionEnd` stops counting once its own heartbeat is that old, however
 //! often a sibling session on the machine fires. Each write
 //! replaces the ref with a new parentless commit; the host's reflog keeps its history. With a
@@ -41,7 +41,7 @@ use crate::repo::Repo;
 use crate::result::BayResult;
 use crate::signing::{self, Keys};
 
-pub const LIVE_PREFIX: &str = "refs/bay/live/";
+pub const LIVE_PREFIX: &str = crate::names::LIVE;
 pub const LIVE_SCHEMA: &str = "bay.live/1";
 pub const LIVE_FILE: &str = "live.json";
 /// Repository-local Git config naming this machine.
@@ -51,9 +51,12 @@ pub const LIVE_MAX_BYTES: u64 = 32 * 1024;
 /// The most rows a summary carries: the newest ones.
 const LIVE_MAX_ROWS: usize = 64;
 /// The fields of a work record line a row keeps.
-const ROW_FIELDS: [&str; 10] = [
+const ROW_FIELDS: [&str; 13] = [
     "session",
+    "started",
     "actor",
+    "actor_source",
+    "permission_mode",
     "change",
     "state",
     "event",
@@ -516,11 +519,68 @@ pub fn heartbeat_of(
     {
         return Ok(false);
     }
-    let signer = match agents {
+    Ok(signer_of(git, commit, agents)?.as_deref() == Some(actor))
+}
+
+/// Who signed live commit `commit`: the actor whose key in `agents` verifies it (without a
+/// registry, the committer's name); `None` when it does not verify.
+fn signer_of(git: &Git, commit: &str, agents: Option<&Path>) -> Result<Option<String>, String> {
+    Ok(match agents {
         Some(file) => signing::verify_commit(git, commit, file).map_err(|error| error.message())?,
         None => git.run(&["log", "-1", "--format=%cn", commit]).ok(),
+    })
+}
+
+/// Another live session of `me`'s actor name that holds a change: its session id and the age of
+/// its heartbeat in seconds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LiveHolder {
+    pub session: String,
+    pub age_s: u64,
+}
+
+/// The other live session of `me`'s actor name whose heartbeat in live commit `commit` names
+/// `change` (rulings-open-questions.md Q8, `DESIGN` § 4): a row of the change by that actor name
+/// and of another session than `me`'s, not `ended`, whose own time is less than `window`
+/// before `now` on this observer's clock, in a commit signed by that actor ([`heartbeat_of`]'s
+/// signature rule). A heartbeat signed by anyone else holds nothing.
+///
+/// # Errors
+///
+/// A git fault other than a failed verification.
+pub fn other_session_of(
+    git: &Git,
+    commit: &str,
+    change: &str,
+    me: &crate::change::Actor,
+    agents: Option<&Path>,
+    now: u64,
+    window: u64,
+) -> Result<Option<LiveHolder>, String> {
+    let Some(summary) = summary_at(git, commit) else {
+        return Ok(None);
     };
-    Ok(signer.as_deref() == Some(actor))
+    let holder = summary["sessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|row| {
+            let session = row["session"].as_str()?;
+            let age_s = now.saturating_sub(unix_at(row)?);
+            (row["change"] == change
+                && row["actor"]["name"] == me.name.as_str()
+                && session != me.session
+                && row["state"] != "ended"
+                && age_s < window)
+                .then(|| LiveHolder {
+                    session: session.to_owned(),
+                    age_s,
+                })
+        });
+    let Some(holder) = holder else {
+        return Ok(None);
+    };
+    Ok((signer_of(git, commit, agents)?.as_deref() == Some(me.name.as_str())).then_some(holder))
 }
 
 /// The `live.json` a live commit carries.

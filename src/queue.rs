@@ -16,8 +16,13 @@ use crate::git::Git;
 use crate::repo::Repo;
 use crate::signing::Signer;
 
-pub const QUEUE_PREFIX: &str = "refs/bay/queue/";
-pub const DONE_PREFIX: &str = "refs/bay/queue-done/";
+pub const QUEUE_PREFIX: &str = crate::names::QUEUE;
+pub const DONE_PREFIX: &str = crate::names::QUEUE_DONE;
+
+/// The release reason of a head that could not start its check because no worker answered
+/// (`CHECK_UNAVAILABLE`, `DESIGN` § 6). It counts toward neither `QUEUE_DEADLINE_EXCEEDED`
+/// nor `PUBLISH_RETRY_EXHAUSTED`.
+pub const UNAVAILABLE: &str = "unavailable";
 
 /// One reservation's entry.
 #[derive(Clone, Debug)]
@@ -147,11 +152,11 @@ impl Queue {
     /// `mid_publish`: a release created while the head was publishing is a publish retry, not
     /// a deadline release that counts toward `QUEUE_DEADLINE_EXCEEDED` (`DESIGN` § 6).
     ///
-    /// This is narrower than § 6's rule. Only places whose refused push the head's own
-    /// executor saw and saved are left out; a head that crashed before saving it still counts
-    /// that place. A head released before its check started still counts too: the check-start
-    /// record § 6 names is not built, and § 6 ties that case to `CHECK_UNAVAILABLE`, whose
-    /// source is not decided (BACKLOG 12).
+    /// Only a release whose reason is `deadline` counts. A head that could not start its check
+    /// because no worker answered is released as [`UNAVAILABLE`], which never counts, so a
+    /// worker outage never turns queued work into `QUEUE_DEADLINE_EXCEEDED` (§ 6). Of the
+    /// places released mid-publish, only those whose refused push the head's own executor saw
+    /// and saved are left out; a head that crashed before saving it still counts that place.
     #[must_use]
     pub fn deadline_releases(&self, op_id: &str, mid_publish: &[u64]) -> usize {
         self.entries
@@ -163,6 +168,18 @@ impl Queue {
                     .is_some_and(|reason| reason == "deadline")
             })
             .count()
+    }
+
+    /// Whether a place of `op_id` was released with `reason`.
+    #[must_use]
+    pub fn released_as(&self, op_id: &str, reason: &str) -> bool {
+        self.entries.values().any(|entry| {
+            entry.op_id == op_id
+                && self
+                    .release_reasons
+                    .get(&entry.seq)
+                    .is_some_and(|released| released == reason)
+        })
     }
 }
 

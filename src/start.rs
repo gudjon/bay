@@ -10,8 +10,8 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::change::{
-    Actor, Chain, ChangeRecord, ChangeState, Intent, IntentClaim, RECORD_SCHEMA, change_ref,
-    commit_on, current_actor, freeze_draft, intent_hash,
+    Actor, Chain, ChangeRecord, ChangeState, Intent, IntentClaim, RECORD_SCHEMA, actor_source,
+    change_ref, commit_on, current_actor, freeze_draft, intent_hash,
 };
 use crate::git::Git;
 use crate::ids::{is_change_id, new_change_id};
@@ -34,6 +34,9 @@ pub struct StartRequest {
     pub resume: Option<String>,
     /// The landed change this one undoes (`bay undo`); it becomes the `Reverts:` trailer.
     pub reverts: Option<String>,
+    /// The landed change this one fixes (`start --fixes`, G161); it becomes the `Fixes:` trailer.
+    /// Unlike `--new`, it claims no generation of that change's intent.
+    pub fixes: Option<String>,
 }
 
 #[must_use]
@@ -56,6 +59,30 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         .ok_or("bay start needs an intent, or --resume <change>")?;
     let base = repo.fetch_trunk().map_err(|error| error.message())?;
     let me = current_actor()?;
+    let source = actor_source();
+    // G152: a policy at the base that requires a named actor refuses a name from a default,
+    // before any claim is written.
+    if source.is_default() && crate::policy::requires_actor_at(&repo.git, &base)? {
+        return Ok(BayResult::blocked(Reason::ActorUnnamed).with_detail(json!({
+            "actor": me.name,
+            "actor_source": source,
+            "policy": crate::policy::POLICY_PATH,
+            "base": base,
+            "recovery": "set BAY_ACTOR to this session's own actor name and start again",
+        })));
+    }
+    // G161: a fix names a change on trunk, or nothing is created.
+    if let Some(fixed) = &request.fixes {
+        if !is_change_id(fixed) {
+            return Err(format!("--fixes {fixed} is not a change id"));
+        }
+        if crate::undo::landed_commit(repo, fixed, &base)?.is_none() {
+            return Ok(BayResult::blocked(Reason::ChangeNotLanded)
+                .with_change(fixed.clone())
+                .with_detail(json!({"trunk": base, "fixes": fixed,
+                    "why": "a fix names a change that landed"})));
+        }
+    }
     let hash = intent_hash(&intent, &request.intent_revision);
     // § 4: one intent, one change, by claim. A lost race re-reads the claims.
     for _ in 0..5 {
@@ -63,7 +90,7 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         let (generation, supersedes) = match claims.last_key_value() {
             None => (1, None),
             Some((generation, change)) => {
-                let landed = remote_has(repo, &format!("refs/bay/landed/{change}"))?;
+                let landed = remote_has(repo, &format!("{}{change}", crate::names::LANDED))?;
                 match (landed, request.new) {
                     (true, true) => (generation + 1, Some(change.clone())),
                     (true, false) => {
@@ -108,7 +135,7 @@ fn remote_claims(
     repo: &Repo,
     hash: &str,
 ) -> Result<std::collections::BTreeMap<u64, String>, String> {
-    let prefix = format!("refs/bay/intent/{hash}/");
+    let prefix = format!("{}{hash}/", crate::names::INTENT);
     let _ = repo.git.run(&[
         "fetch",
         "-q",
@@ -231,6 +258,7 @@ fn create(
             revision: request.intent_revision.clone(),
         },
         actor: me.clone(),
+        actor_source: Some(actor_source()),
         base_first: base.to_owned(),
         base: base.to_owned(),
         observed_remote: base.to_owned(),
@@ -243,6 +271,7 @@ fn create(
         claim: Some(claim),
         supersedes,
         reverts: request.reverts.clone(),
+        fixes: request.fixes.clone(),
         adopted_from: Vec::new(),
         operations: Vec::new(),
         retention_cut: false,
@@ -283,15 +312,19 @@ fn create(
             "inputs": request.inputs,
             "observed_versions": record.observed_versions,
             "intent": intent_ref,
+            "actor": record.actor,
+            "actor_source": record.actor_source,
+            "fixes": record.fixes,
             "pushed": true,
         }))
         .with_change(id),
     ))
 }
 
-/// The intent already has a live change (§ 4): the same actor adopts it; anyone adopts it once
-/// it is abandoned, superseded without a landing, or idle past the takeover window on this
-/// observer's clock; otherwise `CHANGE_SUPERSEDED` names it.
+/// The intent already has a live change (§ 4): the same actor adopts it, unless another live
+/// session of that name holds it (`CHANGE_HELD`, [`live_holder`]); anyone adopts it once it is
+/// abandoned, superseded without a landing, or idle past the takeover window on this observer's
+/// clock; otherwise `CHANGE_SUPERSEDED` names it.
 fn adopt_or_refuse(
     repo: &Repo,
     request: &StartRequest,
@@ -319,17 +352,32 @@ fn adopt_or_refuse(
         if let Some(why) = holder_works(repo, &chain, change, &head, &record.actor.name)? {
             return Ok(BayResult::blocked(Reason::ChangeSuperseded)
                 .with_change(change)
-                .with_detail(json!({"held_by": record.actor, "why": why})));
+                .with_detail(json!({"held_by": record.actor,
+                    "held_by_source": record.actor_source, "why": why})));
         }
         (head, record) = chain.read(change).map_err(|error| error.message())?;
     }
-    if remote_has(repo, &format!("refs/bay/landed/{change}"))? {
+    if remote_has(repo, &format!("{}{change}", crate::names::LANDED))? {
         return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded).with_change(change));
     }
+    // Rulings-open-questions.md Q8: another live session of the same name holds the change.
+    if record.actor.name == me.name
+        && !matches!(
+            record.state,
+            ChangeState::Abandoned | ChangeState::Superseded
+        )
+        && let Some(held) = live_holder(repo, change, me)?
+    {
+        return Ok(BayResult::blocked(Reason::ChangeHeld)
+            .with_change(change)
+            .with_detail(held));
+    }
     let previous = record.actor.clone();
+    let previous_source = record.actor_source;
     if previous != *me {
         record.adopted_from.push(previous.clone());
         record.actor = me.clone();
+        record.actor_source = Some(actor_source());
         if record.state == ChangeState::Abandoned {
             record.state = ChangeState::Open;
         }
@@ -355,10 +403,11 @@ fn adopt_or_refuse(
             let _ = repo.git.run(&["update-ref", &name, &first_head, &head]);
             let why = error.message();
             // The host judged the takeover window on its own clock and found the holder active.
-            if why.contains("CHANGE_SUPERSEDED") {
+            if why.contains(Reason::ChangeSuperseded.code()) {
                 return Ok(BayResult::blocked(Reason::ChangeSuperseded)
                     .with_change(change)
-                    .with_detail(json!({"held_by": previous, "why": why})));
+                    .with_detail(json!({"held_by": previous,
+                        "held_by_source": previous_source, "why": why})));
             }
             return Err(format!("the adoption could not be pushed: {why}"));
         }
@@ -379,9 +428,51 @@ fn adopt_or_refuse(
         "view": path.display().to_string(),
         "adopted": previous != *me,
         "adopted_from": previous,
+        "actor": record.actor,
+        "actor_source": record.actor_source,
         "paths": request.paths,
     }))
     .with_change(change))
+}
+
+/// Another live session of `me`'s actor name that holds `change` (§ 4, rulings-open-questions.md
+/// Q8): a heartbeat in a live ref, signed by that actor, whose row of the change is another
+/// session's, not `ended`, and younger than the takeover window. `CHANGE_HELD`'s detail: the
+/// holder (actor and session), its machine and the heartbeat's age. The live refs are fetched
+/// first; offline, the ones this repository holds are read. `me`'s own session holds nothing
+/// against itself, so the holder's own `start` adopts its change.
+fn live_holder(repo: &Repo, change: &str, me: &Actor) -> Result<Option<serde_json::Value>, String> {
+    let live = format!("+{p}*:{p}*", p = crate::live::LIVE_PREFIX);
+    let _ = repo
+        .git
+        .run(&["fetch", "-q", "--no-tags", repo.remote(), &live]);
+    repo.fetch_registry();
+    let agents = crate::live::agents_file(&repo.git)?;
+    let window = repo.config.takeover().as_secs();
+    let now = crate::live::unix_now();
+    for (live_ref, tip) in crate::live::tips(&repo.git)? {
+        let Some(holder) = crate::live::other_session_of(
+            &repo.git,
+            &tip,
+            change,
+            me,
+            agents.as_deref(),
+            now,
+            window,
+        )?
+        else {
+            continue;
+        };
+        let machine = live_ref
+            .strip_prefix(crate::live::LIVE_PREFIX)
+            .unwrap_or(&live_ref);
+        return Ok(Some(json!({
+            "holder": {"actor": me.name, "session": holder.session},
+            "machine": machine,
+            "heartbeat_age_s": holder.age_s,
+        })));
+    }
+    Ok(None)
 }
 
 /// Watches the chain and the live refs for the takeover window (§ 4): a chain that moves, or a
@@ -478,19 +569,12 @@ fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
         view::discard(repo, id).map_err(|error| error.message())?;
     }
     if view::exists(&view_path) {
-        let declared = inputs::paths(&record.declared_inputs);
-        view::record_observed(&view_path, &declared, &mut record.observed_inputs)
-            .map_err(|error| error.message())?;
-        let view_git = Git::new(&view_path);
-        let frozen =
-            freeze_draft(&view_git, &record.base, "checkpoint").map_err(|error| error.message())?;
-        if tree_of(repo, &frozen)? != tree_of(repo, &latest)? {
-            head = chain
-                .append(&head, &record, &frozen, "checkpoint")
-                .map_err(|error| error.message())?;
+        if let Some((new_head, frozen)) =
+            checkpoint_view(repo, &chain, &head, &mut record, &latest)?
+        {
+            head = new_head;
             draft = frozen;
             checkpointed = true;
-            view::set_journal(repo, id, view::Journal::Checkpointed)?;
         }
     } else {
         view::create(repo, id, &latest, &inputs::paths(&record.declared_inputs))
@@ -506,6 +590,9 @@ fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
             Err(refusal) => return Ok(refusal),
         }
     };
+    // H7, G72: the view keeps the agent product's hook-settings file, at the commit it holds now.
+    view::keep_hook_settings(repo, id, &inputs::paths(&record.declared_inputs))
+        .map_err(|error| error.message())?;
 
     // § 8: the view now holds `base`, so its versions are what the actor observed. A view left
     // on the old base (a conflict above) never counts as observing the new one.
@@ -537,6 +624,77 @@ fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
         "observed_versions": record.observed_versions,
         "pushed": pushed,
         "landed": landed,
+    }))
+    .with_change(id))
+}
+
+/// The checkpoint of `record`'s view: what it observed, and its files frozen as a draft on its
+/// base, appended to the chain at `head` when its tree differs from the `latest` draft. The new
+/// head and draft, or `None` when the view holds nothing new.
+fn checkpoint_view(
+    repo: &Repo,
+    chain: &Chain,
+    head: &str,
+    record: &mut ChangeRecord,
+    latest: &str,
+) -> Result<Option<(String, String)>, String> {
+    let id = record.id.clone();
+    let view_path = repo.view_path(&id);
+    let declared = inputs::paths(&record.declared_inputs);
+    view::record_observed(repo, &view_path, &declared, &mut record.observed_inputs)
+        .map_err(|error| error.message())?;
+    let frozen = freeze_draft(&Git::new(&view_path), &record.base, "checkpoint")
+        .map_err(|error| error.message())?;
+    if tree_of(repo, &frozen)? == tree_of(repo, latest)? {
+        return Ok(None);
+    }
+    let head = chain
+        .append(head, record, &frozen, "checkpoint")
+        .map_err(|error| error.message())?;
+    view::set_journal(repo, &id, view::Journal::Checkpointed)?;
+    Ok(Some((head, frozen)))
+}
+
+/// The checkpoint the agent hook starts (G165: at the session's end, and on the idle timer
+/// `[hooks] checkpoint_idle_s`): `bay start --resume`'s checkpoint of the view of change `id`,
+/// pushed like any checkpoint, without its fetch of trunk, so the view the session works in
+/// never moves under it. A change with no complete view here has nothing to checkpoint.
+#[must_use]
+pub fn checkpoint(dir: &Path, id: &str) -> BayResult {
+    let repo = match Repo::open(dir) {
+        Ok(repo) => repo,
+        Err(why) => return BayResult::failed(why),
+    };
+    checkpoint_here(&repo, id).unwrap_or_else(BayResult::failed)
+}
+
+fn checkpoint_here(repo: &Repo, id: &str) -> Result<BayResult, String> {
+    if !is_change_id(id) {
+        return Err(format!("{id} is not a change id"));
+    }
+    let mut chain = Chain::new(&repo.git);
+    let (head, mut record) = chain.read(id).map_err(|error| error.message())?;
+    let view_path = repo.view_path(id);
+    let complete = view::journal(repo, id).is_some_and(view::Journal::is_complete);
+    if !view::exists(&view_path) || !complete {
+        return Ok(BayResult::ok(json!({"checkpointed": false,
+            "why": "the change has no complete view here"}))
+        .with_change(id));
+    }
+    chain.sign_with(agent_signer(repo, &record.actor.name)?);
+    let latest = chain
+        .drafts(id)
+        .map_err(|error| error.message())?
+        .first()
+        .cloned()
+        .ok_or("the change has no draft")?;
+    let made = checkpoint_view(repo, &chain, &head, &mut record, &latest)?;
+    let pushed = push_change(repo, id);
+    Ok(BayResult::ok(json!({
+        "view": view_path.display().to_string(),
+        "checkpointed": made.is_some(),
+        "draft": made.map_or(latest, |(_, draft)| draft),
+        "pushed": pushed,
     }))
     .with_change(id))
 }

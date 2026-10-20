@@ -8,7 +8,14 @@
 //! symbolic link is a link where the repository's `core.symlinks` says links are made (a file
 //! holding its target otherwise, as Git writes one). A path list keeps only the entries it
 //! covers; a deadline bounds the whole materialization.
+//!
+//! In a partial clone a blob the store lacks would be fetched on its own as `cat-file` reaches
+//! it, one round trip per file. So before streaming, the absent blobs are found without
+//! fetching any and fetched together, in one `git fetch --stdin` from the promisor remote per
+//! chunk, the form Git's own promisor code uses (G170). A blob still absent after that is a
+//! fault, never a partial tree.
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,6 +24,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::git::{Git, GitError};
+use crate::version::Version;
 
 /// Why a tree was not materialized.
 #[derive(Debug)]
@@ -33,6 +41,14 @@ pub enum Unmade {
 /// Replace refs never stand in for an object of the tree: what is written is exactly the
 /// tree's (`GIT_NO_REPLACE_OBJECTS`).
 const NO_REPLACE: (&str, &str) = ("GIT_NO_REPLACE_OBJECTS", "1");
+
+/// The Git that has `--no-lazy-fetch` and `GIT_NO_LAZY_FETCH` (2.45). Below it the absent
+/// blobs are found by a missing-object walk of the commit, which never fetches either.
+const NO_LAZY_FETCH_SINCE: &str = "2.45";
+
+/// The most blob ids one batched fetch asks for; a larger set takes several fetches, each
+/// within the deadline.
+const FETCH_CHUNK: usize = 10_000;
 
 /// Writes `commit`'s tree into `dir`, with no `.git`: only the entries `paths` covers (each a
 /// file, or a directory ending in `/`) when it is given, the whole tree when it is not. Gives
@@ -70,7 +86,157 @@ pub fn materialize(
     if blobs.is_empty() {
         return Ok(());
     }
+    prefetch(git, commit, &blobs, deadline)?;
+    tick();
     stream(git, &blobs, dir, deadline, links, tick)
+}
+
+/// In a partial clone, fetches every blob of `blobs` the store lacks in one batched fetch per
+/// [`FETCH_CHUNK`] from the promisor remote, instead of one lazy fetch per blob. A store with
+/// no promisor remote is asked nothing.
+///
+/// # Errors
+///
+/// [`Unmade::TimedOut`] at `deadline`; [`Unmade::Failed`], naming how many blobs are absent,
+/// when the fetch fails or leaves one absent.
+fn prefetch(git: &Git, commit: &str, blobs: &[Entry], deadline: Instant) -> Result<(), Unmade> {
+    let Some(remote) = promisor_remote(git)? else {
+        return Ok(());
+    };
+    let wanted: BTreeSet<&str> = blobs.iter().map(|blob| blob.oid.as_str()).collect();
+    let no_lazy = git
+        .version()
+        .ok()
+        .and_then(|text| Version::find(&text))
+        .is_some_and(|version| version >= Version::parse(NO_LAZY_FETCH_SINCE));
+    let missing = absent(git, commit, &wanted, no_lazy, deadline)?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    for chunk in missing.chunks(FETCH_CHUNK) {
+        git.run_bytes_for(
+            &[
+                "-c",
+                "fetch.negotiationAlgorithm=noop",
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--recurse-submodules=no",
+                "--filter=blob:none",
+                "--stdin",
+                &remote,
+            ],
+            &[NO_REPLACE],
+            Some(&lines(chunk.iter().map(String::as_str))),
+            remaining(deadline)?,
+        )
+        .map_err(|error| match error {
+            GitError::Timeout { .. } => Unmade::TimedOut,
+            other => Unmade::Failed(format!(
+                "{} blobs of the tree are absent from this partial clone, and fetching them from its promisor remote {remote} failed: {}",
+                missing.len(),
+                other.message()
+            )),
+        })?;
+    }
+    let fetched: BTreeSet<&str> = missing.iter().map(String::as_str).collect();
+    let left = absent(git, commit, &fetched, no_lazy, deadline)?;
+    if left.is_empty() {
+        Ok(())
+    } else {
+        Err(Unmade::Failed(format!(
+            "{} blobs of the tree are still absent from this partial clone after fetching them from its promisor remote {remote}",
+            left.len()
+        )))
+    }
+}
+
+/// One id per line, for a Git call that reads ids on stdin.
+fn lines<'a>(ids: impl Iterator<Item = &'a str>) -> Vec<u8> {
+    let mut out = Vec::new();
+    for oid in ids {
+        out.extend_from_slice(oid.as_bytes());
+        out.push(b'\n');
+    }
+    out
+}
+
+/// The remote a partial clone fetches its absent objects from: `extensions.partialClone`,
+/// else the first remote whose `remote.<name>.promisor` is true; `None` in a full clone.
+fn promisor_remote(git: &Git) -> Result<Option<String>, Unmade> {
+    let read = |args: &[&str]| -> Result<Option<String>, Unmade> {
+        match git.run_status(args).map_err(|error| from_git(&error))? {
+            (0, out, _) => Ok(Some(out)),
+            (1, _, _) => Ok(None),
+            (_, _, err) => Err(Unmade::Failed(format!(
+                "the promisor remote cannot be read: {err}"
+            ))),
+        }
+    };
+    let named = match read(&["config", "--get", "extensions.partialclone"])? {
+        Some(name) => Some(name),
+        None => read(&[
+            "config",
+            "--type=bool",
+            "--get-regexp",
+            r"^remote\..*\.promisor$",
+        ])?
+        .and_then(|out| {
+            out.lines().find_map(|line| {
+                let (key, value) = line.split_once(' ')?;
+                let name = key.strip_prefix("remote.")?.strip_suffix(".promisor")?;
+                (value == "true").then(|| name.to_owned())
+            })
+        }),
+    };
+    // A name Git would read as an option is left to the lazy fetch, which never parses it.
+    Ok(named.filter(|name| !name.is_empty() && !name.starts_with('-')))
+}
+
+/// Which of `wanted` the store lacks, found without fetching any: `cat-file --batch-check`
+/// under `--no-lazy-fetch` where Git has it, else a missing-object walk of `commit`.
+fn absent(
+    git: &Git,
+    commit: &str,
+    wanted: &BTreeSet<&str>,
+    no_lazy: bool,
+    deadline: Instant,
+) -> Result<Vec<String>, Unmade> {
+    type Marked = fn(&str) -> Option<&str>;
+    let (out, marked): (Vec<u8>, Marked) = if no_lazy {
+        let out = git
+            .run_bytes_for(
+                &["--no-lazy-fetch", "cat-file", "--batch-check"],
+                &[NO_REPLACE, ("GIT_NO_LAZY_FETCH", "1")],
+                Some(&lines(wanted.iter().copied())),
+                remaining(deadline)?,
+            )
+            .map_err(|error| from_git(&error))?;
+        (out, |line| line.strip_suffix(" missing"))
+    } else {
+        let out = git
+            .run_bytes_for(
+                &[
+                    "rev-list",
+                    "--objects",
+                    "--missing=print",
+                    "--no-walk",
+                    commit,
+                ],
+                &[NO_REPLACE],
+                None,
+                remaining(deadline)?,
+            )
+            .map_err(|error| from_git(&error))?;
+        (out, |line| line.strip_prefix('?'))
+    };
+    let found: BTreeSet<String> = String::from_utf8_lossy(&out)
+        .lines()
+        .filter_map(marked)
+        .filter(|oid| wanted.contains(oid))
+        .map(str::to_owned)
+        .collect();
+    Ok(found.into_iter().collect())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -653,6 +819,107 @@ mod tests {
             std::fs::read(out.join("a.txt")).unwrap(),
             b"the tree's bytes\n"
         );
+    }
+
+    /// A bare remote that serves filters, holding `count` files, and a blob-less clone of it
+    /// with no checkout: every blob of the tree is absent from the clone.
+    fn blobless(dir: &std::path::Path, count: usize) -> (Git, String, std::path::PathBuf) {
+        let git = repository(&dir.join("seed"));
+        for at in 0..count {
+            add(
+                &git,
+                &format!("d/f{at:03}"),
+                format!("{at}\n").as_bytes(),
+                "100644",
+            );
+        }
+        let commit = commit_all(&git);
+        let bare = dir.join("remote.git");
+        git.run(&["clone", "-q", "--bare", ".", bare.to_str().unwrap()])
+            .unwrap();
+        Git::new(&bare)
+            .run(&["config", "uploadpack.allowFilter", "true"])
+            .unwrap();
+        let clone = dir.join("clone");
+        Git::new(dir)
+            .run(&[
+                "clone",
+                "-q",
+                "--filter=blob:none",
+                "--no-checkout",
+                &format!("file://{}", bare.display()),
+                clone.to_str().unwrap(),
+            ])
+            .unwrap();
+        (Git::new(&clone), commit, bare)
+    }
+
+    /// The packs fetched from the promisor remote: each fetch from it, lazy or batched, keeps
+    /// one pack marked `.promisor`.
+    fn promisor_packs(clone: &Git) -> usize {
+        std::fs::read_dir(clone.dir().join(".git/objects/pack"))
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|ext| ext == "promisor")
+            })
+            .count()
+    }
+
+    /// G170: in a blob-less clone the tree's absent blobs arrive in one batched fetch, not one
+    /// fetch each, and every file still has the tree's blob id.
+    #[test]
+    fn a_blobless_tree_is_fetched_in_one_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (clone, commit, _) = blobless(dir.path(), 40);
+        let before = promisor_packs(&clone);
+        let out = dir.path().join("out");
+        materialize(&clone, &commit, None, &out, far(), &mut || {}).unwrap();
+        assert_eq!(promisor_packs(&clone) - before, 1, "one batched fetch");
+        for line in clone.run(&["ls-tree", "-r", &commit]).unwrap().lines() {
+            let (head, path) = line.split_once('\t').unwrap();
+            let file = out.join(path).display().to_string();
+            let written = clone.run(&["hash-object", "--no-filters", &file]).unwrap();
+            assert_eq!(written, head.rsplit(' ').next().unwrap(), "{path}");
+        }
+    }
+
+    /// Below Git 2.45 the absent blobs are found by a missing-object walk: it finds the same
+    /// ones as `--no-lazy-fetch`, and neither fetches.
+    #[test]
+    fn both_ways_of_finding_absent_blobs_agree_and_fetch_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (clone, commit, _) = blobless(dir.path(), 6);
+        let listing = clone.run(&["ls-tree", "-r", &commit]).unwrap();
+        let wanted: std::collections::BTreeSet<&str> = listing
+            .lines()
+            .map(|line| line.split_once('\t').unwrap().0.rsplit(' ').next().unwrap())
+            .collect();
+        let before = promisor_packs(&clone);
+        let walked = super::absent(&clone, &commit, &wanted, false, far()).unwrap();
+        let asked = super::absent(&clone, &commit, &wanted, true, far()).unwrap();
+        assert_eq!(walked.len(), 6);
+        assert_eq!(walked, asked);
+        assert_eq!(promisor_packs(&clone), before);
+    }
+
+    /// With the promisor remote gone, absent blobs are a fault that names how many are
+    /// absent, and no file of the tree is written.
+    #[test]
+    fn absent_blobs_with_no_remote_write_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (clone, commit, bare) = blobless(dir.path(), 5);
+        std::fs::remove_dir_all(&bare).unwrap();
+        let out = dir.path().join("out");
+        let made = materialize(&clone, &commit, None, &out, far(), &mut || {});
+        match made {
+            Err(super::Unmade::Failed(why)) => assert!(why.contains("5 blobs"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(!out.join("d").exists(), "no partial tree");
     }
 
     /// Windows holds no device name, reserved character or trailing dot or space as a plain

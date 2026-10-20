@@ -86,7 +86,8 @@ fn bind_env(state_dir: &Path, session: &SessionId) {
 /// `<git-common-dir>/bay/sessions/<session-id>.jsonl` (§ 11a), when the session runs in a
 /// repository. A silent `PreToolUse` appends nothing: it is the blocking path
 /// (`onFailure: "block"`), § 11a gives it only the refusal, and the same step's
-/// `PostToolBatch` records it; a refusal or a notice it gives is recorded ([`record_with`]).
+/// `PostToolBatch` records it; a refusal, a shell deny or a notice it gives is recorded
+/// ([`record_with`]).
 ///
 /// A view belongs to one change (ruling 10): every session whose hook fires in the view works on
 /// that view's change and is recorded by its own session id under the change's actor, a
@@ -108,6 +109,14 @@ fn bind_env(state_dir: &Path, session: &SessionId) {
 /// At `session-start` the session's delivered-notice cursor begins, and at `post-tool` and
 /// `user-prompt-submit` the session's own agent is given the notices of its view's change and
 /// of its actor's other changes it was not yet told (`crate::notice`, ruling R6); the line names them.
+///
+/// Every line names the product's permission mode (`permission_mode`, G153): the payload's, else
+/// the last one the session named, and when the session started (`started`, G166).
+///
+/// G165: a session killed without a stop loses at most one interval. In a view, the session's
+/// own `SessionEnd`, and any event `[hooks] checkpoint_idle_s` (default 600) after its last
+/// checkpoint, start one detached checkpoint of the view, pushed like any checkpoint
+/// (`crate::start::checkpoint`); the line names it (`checkpoint`).
 #[must_use]
 pub fn record(payload: &Payload) -> Recorded {
     record_with(payload, &serde_json::Map::new())
@@ -123,8 +132,10 @@ pub struct Recorded {
 }
 
 /// [`record`], with `extra` fields on the line: a `pre-tool` refusal's `blocked(<reason>)`
-/// state, or the `COVERAGE_UNKNOWN` notice it allowed a write with (ruling R5). The silent
-/// `pre-tool` path appends nothing. It returns what [`record`] does.
+/// state (a stale write, a shell command on the deny list by its shape, a payload bay cannot
+/// read), or the `COVERAGE_UNKNOWN` notice it allowed a write with (ruling R5), each with its
+/// AGENT-HOOKS-0.1 `verdict` (ruling R-H2). The silent `pre-tool` path appends nothing. It
+/// returns what [`record`] does.
 #[must_use]
 pub fn record_with(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Recorded {
     record_line(payload, extra).unwrap_or_default()
@@ -136,9 +147,10 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
     let repo = Repo::open(cwd).ok()?;
     // In a view, the session works on the view's change, under the change's actor. Elsewhere in
     // the repository it is still a tracked session (§ 11a reserves "untracked" for hooks
-    // disabled): no change, no view, and the actor's own name with this session.
+    // disabled): no change, no view, and the actor's own name with this session. The row says
+    // where the actor's name came from (G152): the change's record in a view, else this process.
     let mut at_stop = None;
-    let (actor, change, view) = match repo.view_change(cwd) {
+    let (actor, actor_source, change, view) = match repo.view_change(cwd) {
         Some(id) => {
             let (head, change) = crate::change::Chain::new(&repo.git).read(&id).ok()?;
             if payload.event == Event::Stop && payload.agent.is_none() {
@@ -148,39 +160,33 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
                 });
             }
             let view = repo.view_path(&id);
-            (change.actor, Some(id), Some(view))
+            (change.actor, change.actor_source, Some(id), Some(view))
         }
         None => (
             crate::change::Actor {
                 name: crate::change::actor_name(),
                 session: session.as_str().to_owned(),
             },
+            Some(crate::change::actor_source()),
             None,
             None,
         ),
     };
     let dir = repo.common_dir.join("bay").join("sessions");
     let path = dir.join(format!("{}.jsonl", session.as_str()));
-    let state_dir = repo
-        .common_dir
-        .join("bay")
-        .join("session-state")
-        .join(session.as_str());
+    let state_dir = state_dir(&repo, session);
     let event = payload.event;
     if event == Event::SessionStart && payload.agent.is_none() {
         bind_env(&state_dir, session);
         crate::notice::begin(&repo, &state_dir);
     }
-    let actor_link = if state_dir.join("link").is_file() {
-        "bound"
-    } else {
-        "unbound"
-    };
+    let actor_link = actor_link(&state_dir);
     let mut line = serde_json::json!({
         "schema": "bay.session/1",
         "at": crate::clock::now_rfc3339(),
         "session": session.as_str(),
         "actor": actor,
+        "actor_source": actor_source,
         "actor_link": actor_link,
         "repo": repo.work_root.display().to_string(),
         "change": change,
@@ -188,9 +194,7 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
         "event": event.record_name(),
         "heartbeat": true,
     });
-    if let Some(agent) = &payload.agent {
-        line["agent"] = Value::from(agent.as_str());
-    }
+    payload_fields(&mut line, payload, &state_dir);
     if let Some(state) = event.state_after() {
         line["state"] = Value::from(state);
     }
@@ -211,6 +215,14 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
         ),
         _ => None,
     };
+    settle(
+        &repo,
+        payload,
+        view.as_deref(),
+        &mut line,
+        &state_dir,
+        stop_refused.is_some(),
+    );
     let recorded = Recorded {
         stop_refused,
         notice,
@@ -239,9 +251,195 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
     Some(recorded)
 }
 
+/// The hook's own state of `session`: `<git-common-dir>/bay/session-state/<session>`.
+fn state_dir(repo: &Repo, session: &SessionId) -> PathBuf {
+    repo.common_dir
+        .join("bay")
+        .join("session-state")
+        .join(session.as_str())
+}
+
+/// The fields of the line that come from the payload: a subagent's `agent`, and the product's
+/// `permission_mode` (G153); and when the session started (`started`, G166).
+fn payload_fields(line: &mut Value, payload: &Payload, state_dir: &Path) {
+    if let Some(agent) = &payload.agent {
+        line["agent"] = Value::from(agent.as_str());
+    }
+    if let Some(mode) = permission_mode(state_dir, payload) {
+        line["permission_mode"] = Value::from(mode);
+    }
+    if let Some(started) = started(state_dir, &line["at"]) {
+        line["started"] = Value::from(started);
+    }
+}
+
+/// The file in a session's state directory that holds the time of its first recorded event.
+const STARTED_FILE: &str = "started";
+
+/// When the session started (G166): the time of the first event the hook recorded for it, kept
+/// in its state, so `bay status --fleet` shows each session's age. `at` is this line's time; it
+/// is kept when the session has none yet. A resumed session starts again, as its state does.
+fn started(state_dir: &Path, at: &Value) -> Option<String> {
+    let path = state_dir.join(STARTED_FILE);
+    let mut kept = String::new();
+    if let Ok(file) = std::fs::File::open(&path) {
+        let _ = std::io::Read::read_to_string(&mut std::io::Read::take(file, 64), &mut kept);
+        if crate::clock::unix_of(&kept).is_some() {
+            return Some(kept);
+        }
+    }
+    let at = at.as_str()?;
+    if std::fs::create_dir_all(state_dir).is_ok() {
+        let _ = std::fs::write(&path, at);
+    }
+    Some(at.to_owned())
+}
+
+/// The file in a session's state directory that holds the last permission mode it named.
+const MODE_FILE: &str = "permission-mode";
+
+/// The agent product's permission mode for this line (G153): the payload's, kept in the
+/// session's state, else the last one the session named, since not every payload names one
+/// (the recorded `SessionStart` does not) and the latest line is what the fleet map shows.
+fn permission_mode(state_dir: &Path, payload: &Payload) -> Option<String> {
+    let path = state_dir.join(MODE_FILE);
+    if let Some(mode) = &payload.permission_mode {
+        let known = std::fs::read_to_string(&path).is_ok_and(|kept| kept == *mode);
+        if !known && std::fs::create_dir_all(state_dir).is_ok() {
+            let _ = std::fs::write(&path, mode);
+        }
+        return Some(mode.clone());
+    }
+    let mut kept = String::new();
+    std::io::Read::read_to_string(
+        &mut std::io::Read::take(std::fs::File::open(&path).ok()?, 32),
+        &mut kept,
+    )
+    .ok()?;
+    (!kept.is_empty() && kept.bytes().all(|byte| byte.is_ascii_alphabetic())).then_some(kept)
+}
+
+/// Ruling R2's link of the session's bay commands to the session: `bound` once `SessionStart`
+/// wrote them into the product's environment file.
+fn actor_link(state_dir: &Path) -> &'static str {
+    if state_dir.join("link").is_file() {
+        "bound"
+    } else {
+        "unbound"
+    }
+}
+
+/// What the line's event settles beyond the line: the session's claims ([`claims`]) and, in a
+/// view, its checkpoint ([`checkpoint_due`]), which the line names (`checkpoint`).
+fn settle(
+    repo: &Repo,
+    payload: &Payload,
+    view: Option<&Path>,
+    line: &mut Value,
+    state_dir: &Path,
+    stop_refused: bool,
+) {
+    claims(repo, payload, view, line, state_dir, stop_refused);
+    let Some(id) = line["change"].as_str().map(str::to_owned) else {
+        return;
+    };
+    if let Some(why) = checkpoint_due(repo, payload, state_dir)
+        && start_checkpoint(&payload.cwd, &id)
+    {
+        line["checkpoint"] = Value::from(why);
+    }
+}
+
+/// The file in a session's state directory that holds the Unix time of its last checkpoint.
+const CHECKPOINT_FILE: &str = "checkpointed-at";
+
+/// Whether this event checkpoints the session's view (G165), and why: the session's own end
+/// (`session_end`), or an event `[hooks] checkpoint_idle_s` or more after the session's last
+/// checkpoint (`idle`), so a session killed without a stop loses at most one interval. Ruling
+/// R7's stop refusal covers only a clean stop. The interval runs from the session's first event,
+/// and a clock that went back restarts it.
+fn checkpoint_due(repo: &Repo, payload: &Payload, state_dir: &Path) -> Option<&'static str> {
+    if payload.event == Event::SessionEnd {
+        return payload.agent.is_none().then_some("session_end");
+    }
+    let path = state_dir.join(CHECKPOINT_FILE);
+    let now = crate::live::unix_now();
+    let last = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u64>().ok());
+    let due = last
+        .is_some_and(|last| now >= last && now - last >= repo.config.checkpoint_idle().as_secs());
+    if (due || last.is_none_or(|last| now < last)) && std::fs::create_dir_all(state_dir).is_ok() {
+        let _ = std::fs::write(&path, now.to_string());
+    }
+    due.then_some("idle")
+}
+
+/// Starts one detached `bay live checkpoint <id>` in `cwd` (`crate::start::checkpoint`): the
+/// hook never pushes and never waits. Whether it started.
+fn start_checkpoint(cwd: &Path, id: &str) -> bool {
+    let Ok(bay) = std::env::current_exe() else {
+        return false;
+    };
+    let mut cmd = std::process::Command::new(bay);
+    cmd.arg("-C")
+        .arg(cwd)
+        .args(["--json", "live", "checkpoint", id])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::platform::detach(&mut cmd);
+    cmd.spawn().is_ok()
+}
+
+/// The session's claims in its trees (`DESIGN` § 11c, G101; `crate::claims`). A post-tool step
+/// claims what it wrote: its edit-tool targets and, in a view, the files its line lists as
+/// written, for the takeover window from now; a subagent's step claims for its parent's session.
+/// The session's own stop releases its claims, unless ruling R7 refused that stop (the session
+/// goes on working), and so does its end.
+fn claims(
+    repo: &Repo,
+    payload: &Payload,
+    view: Option<&Path>,
+    line: &Value,
+    state_dir: &Path,
+    stop_refused: bool,
+) {
+    let Some(session) = payload.session.as_ref() else {
+        return;
+    };
+    match payload.event {
+        Event::PostToolUse | Event::PostToolBatch => {
+            let mut targets = payload.edited.clone();
+            if let (Some(view), Some(wrote)) = (view, line["wrote"].as_array()) {
+                targets.extend(
+                    wrote
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|path| view.join(path)),
+                );
+            }
+            crate::claims::claim(
+                &payload.cwd,
+                &targets,
+                session.as_str(),
+                crate::live::unix_now(),
+                repo.config.takeover().as_secs(),
+                state_dir,
+            );
+        }
+        Event::Stop if payload.agent.is_none() && !stop_refused => {
+            crate::claims::release(session.as_str(), state_dir);
+        }
+        Event::SessionEnd => crate::claims::release(session.as_str(), state_dir),
+        _ => {}
+    }
+}
+
 /// The notices of `scope` (the view's change and the session's actor) for this event's line and
 /// agent: at `post-tool` and `user-prompt-submit`, to the session's own agent only
-/// (`crate::notice`).
+/// (`crate::notice`). At the session's own `SessionStart`, the instruction files its tree is
+/// behind trunk on (G155, `crate::notice::instructions`).
 fn notices(
     repo: &Repo,
     scope: crate::notice::Scope<'_>,
@@ -249,6 +447,14 @@ fn notices(
     state_dir: &Path,
     line: &mut Value,
 ) -> String {
+    if payload.event == Event::SessionStart && payload.agent.is_none() {
+        let Some((text, behind)) = crate::notice::instructions(repo, &payload.cwd, state_dir)
+        else {
+            return String::new();
+        };
+        line["instructions_behind"] = behind;
+        return text;
+    }
     if payload.agent.is_some()
         || !matches!(
             payload.event,

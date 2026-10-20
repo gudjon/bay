@@ -18,7 +18,8 @@ use serde_json::json;
 
 use crate::canonical::digest;
 use crate::change::{
-    Attempt, Chain, ChangeRecord, ChangeState, OpState, Operation, change_ref, freeze_draft,
+    Attempt, Chain, ChangeRecord, ChangeState, OpState, Operation, Unavailable, change_ref,
+    freeze_draft,
 };
 use crate::check::{self, Candidate};
 use crate::evidence::{self, Combined};
@@ -46,22 +47,68 @@ const EXECUTOR_IDENTITY: &[(&str, &str)] = &[
     ("GIT_COMMITTER_EMAIL", "executor@bay.invalid"),
 ];
 
+/// Whether this build honours the publication test hooks: a build `scripts/release.sh` made
+/// (`BAY_RELEASE_VERSION` set at compile time) never does, so a release never pauses or ends
+/// itself because of its environment.
+const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+
+/// How long a paused process waits for its release when `BAY_TEST_PAUSE_TIMEOUT_S` does not
+/// say: far beyond any test, short enough that a forgotten pause ends.
+const PAUSE_TIMEOUT_S: u64 = 600;
+
 /// Ends the process at a named publication boundary when `BAY_TEST_KILL_AT` names it.
 /// Used only by the crash tests (G4, G5); a real kill leaves the same state.
 fn kill_point(name: &str) {
+    if !TEST_HOOKS {
+        return;
+    }
     if std::env::var("BAY_TEST_KILL_AT").is_ok_and(|at| at == name) {
         std::process::exit(137);
     }
     // `BAY_TEST_PAUSE_AT` holds the process at the boundary until `BAY_TEST_PAUSE_FILE` exists
-    // (it writes `<file>.paused` first), for the ownership tests (G24).
+    // (it writes `<file>.paused` first), for the ownership tests (G24). A pause nobody releases
+    // ends the process as a kill would: after `BAY_TEST_PAUSE_TIMEOUT_S`, or once the process
+    // that started it is gone, so a test that failed leaves no process behind.
     if std::env::var("BAY_TEST_PAUSE_AT").is_ok_and(|at| at == name)
         && let Ok(file) = std::env::var("BAY_TEST_PAUSE_FILE")
     {
+        // Bounded, so a test that dies first never leaves a process held for good.
         let _ = std::fs::write(format!("{file}.paused"), name);
-        while !Path::new(&file).exists() {
-            std::thread::sleep(Duration::from_millis(50));
+        let limit = std::env::var("BAY_TEST_PAUSE_TIMEOUT_S")
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(PAUSE_TIMEOUT_S);
+        if !released(Path::new(&file), Duration::from_secs(limit), parent_alive()) {
+            std::process::exit(137);
         }
     }
+}
+
+/// Whether the process that started this one is still there. On Unix an orphan is adopted by
+/// another process, so its parent id changes; elsewhere there is no such sign.
+fn parent_alive() -> impl FnMut() -> bool {
+    #[cfg(unix)]
+    {
+        let parent = std::os::unix::process::parent_id();
+        move || std::os::unix::process::parent_id() == parent
+    }
+    #[cfg(not(unix))]
+    {
+        || true
+    }
+}
+
+/// Waits until `release` exists: true then, false once `limit` passes or `alive` says the
+/// waiting has no one to release it.
+fn released(release: &Path, limit: Duration, mut alive: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + limit;
+    while !release.exists() {
+        if Instant::now() >= deadline || !alive() {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
 }
 
 #[must_use]
@@ -425,7 +472,7 @@ impl<'a> Ctx<'a> {
     /// (§ 10a). The requests ref always names the latest land request.
     fn push_chain_and_request(&mut self, request: &str) -> bool {
         let name = change_ref(&self.id);
-        let requests = format!("refs/bay/requests/{}", self.id);
+        let requests = format!("{}{}", crate::names::REQUESTS, self.id);
         let _ = self.repo.git.run(&["update-ref", &requests, request]);
         let lease = self
             .pushed_head
@@ -748,6 +795,9 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     if let Some(refusal) = verify_request(ctx, op_id)? {
         return Ok(refusal);
     }
+    if let Some(waiting) = waits_for_worker(ctx, op_id) {
+        return Ok(waiting);
+    }
     // § 6: while a queue is live only its head runs; anyone else holds a place and no check.
     let mut seq = match queue_gate(ctx, op_id)? {
         Gate::Wait(result) => return Ok(*result),
@@ -757,6 +807,9 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     if let Some(report) = claim(ctx, op_id, &revision, &trunk)? {
         return Ok(report);
     }
+    // G173: whatever the outcome, the operation's anchor goes with it.
+    let repo = ctx.repo;
+    let _anchored = Anchored::new(&repo.git, op_id)?;
     let outcome = run_attempts(ctx, op_id, &revision, trunk, &mut seq);
     // The head always releases: an outcome other than its own publication (which released in
     // the publishing push) passes the head on. Not an operation given up on `REGISTRY_CHANGED`:
@@ -778,7 +831,15 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
                         "failed".to_owned()
                     }
                 },
-                |reason| reason.code().to_lowercase(),
+                |reason| {
+                    // § 6: a head that could not start its check is released as `unavailable`,
+                    // which counts toward no limit.
+                    if reason == Reason::CheckUnavailable {
+                        crate::queue::UNAVAILABLE.to_owned()
+                    } else {
+                        reason.code().to_lowercase()
+                    }
+                },
             ),
             Err(_) => "failed".to_owned(),
         };
@@ -894,7 +955,7 @@ fn after_refused_push(
     if let Some(report) = still_owner(ctx, op_id, revision)? {
         return Ok(Some(report));
     }
-    if error.contains("REGISTRY_CHANGED") {
+    if error.contains(Reason::RegistryChanged.code()) {
         let registry = match registry_after_change(ctx, op_id, attempt)? {
             Ok(registry) => registry,
             Err(given_up) => return Ok(Some(given_up)),
@@ -906,7 +967,7 @@ fn after_refused_push(
         // refusal that counts (`TRUNK_MOVED`, § 6), and the rebuild signs under the current
         // registry.
     }
-    if error.contains("HOOK_TIMEOUT") {
+    if error.contains(Reason::HookTimeout.code()) {
         return hook_timed_out(ctx, op_id, revision);
     }
     // A release created while this head was publishing (its progress deadline), whether or not
@@ -952,7 +1013,7 @@ fn after_refused_push(
                 .with_op(op_id),
         ));
     }
-    let held = error.contains("QUEUE_HELD");
+    let held = error.contains(Reason::QueueHeld.code());
     *trunk = now;
     ctx.record.observed_remote.clone_from(trunk);
     let moved = Moved {
@@ -1222,6 +1283,15 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str) -> Result<Gate, String> {
         }
         queue = crate::queue::Queue::read(ctx.repo)?;
     }
+    // § 6: a head released because no worker answered rejoins at the back once it is served
+    // again, live queue or not, behind whatever queued meanwhile.
+    if ctx.op(op_id).unavailable.is_some()
+        && queue.of(op_id).is_none()
+        && queue.released_as(op_id, crate::queue::UNAVAILABLE)
+    {
+        crate::queue::join(ctx.repo, signer.as_ref(), op_id, &ctx.id)?;
+        queue = crate::queue::Queue::read(ctx.repo)?;
+    }
     let Some(head) = queue.head().cloned() else {
         return Ok(Gate::Free);
     };
@@ -1296,7 +1366,10 @@ fn claim(
     let id = ctx.id.clone();
     let held = {
         let op = ctx.op(op_id);
-        op.owner.is_some() && matches!(op.state, OpState::Running | OpState::Checked)
+        // An operation this executor left waiting for a worker holds no lease against it: it
+        // takes it back at once once its box serves it (§ 7).
+        let own_wait = op.unavailable.is_some() && op.owner.as_deref() == Some(name.as_str());
+        op.owner.is_some() && matches!(op.state, OpState::Running | OpState::Checked) && !own_wait
     };
     // Another process holds the operation: take it over only once its lease expired, on this
     // process's own clock. A restarted supervisor watches a full lease again. A holder whose
@@ -1309,6 +1382,7 @@ fn claim(
             json!({"lease": "held", "owner": op.owner, "epoch": op.epoch}),
         )));
     }
+    kill_point("before-claim");
     let op = ctx.op_mut(op_id);
     if op.state.is_terminal() {
         return Ok(Some(superseded(&id, op_id, op.epoch, op.owner.as_ref())));
@@ -1436,6 +1510,7 @@ fn retry_blocked(
     op.state = OpState::Submitted;
     op.outcome = None;
     op.blocked_on = None;
+    op.unavailable = None;
     op.trunk_moved = 0;
     ctx.save(revision, None, &format!("rearmed {op_id}"))?;
     ctx.push_chain();
@@ -1567,7 +1642,7 @@ fn freeze(ctx: &Ctx) -> Result<Result<String, BayResult>, String> {
 fn observe_inputs(ctx: &mut Ctx) -> Result<(), String> {
     let path = ctx.repo.view_path(&ctx.id);
     let declared = inputs::paths(&ctx.record.declared_inputs);
-    view::record_observed(&path, &declared, &mut ctx.record.observed_inputs)
+    view::record_observed(ctx.repo, &path, &declared, &mut ctx.record.observed_inputs)
         .map(|_| ())
         .map_err(|error| error.message())
 }
@@ -1605,6 +1680,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         policy_changed: 0,
         publish_retries: 0,
         mid_publish_releases: Vec::new(),
+        unavailable: None,
     });
     // The request: an agent-signed commit on the revision, linked into the chain. Appending it
     // allocates the op id by compare-and-swap; `refs/bay/requests/<id>` moves with it.
@@ -1649,12 +1725,13 @@ fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<Ba
     if me.name != ctx.record.actor.name {
         return Ok(BayResult::blocked(Reason::AbandonRefused)
             .with_change(id)
-            .with_detail(json!({"current_actor": ctx.record.actor})));
+            .with_detail(json!({"current_actor": ctx.record.actor,
+                "current_actor_source": ctx.record.actor_source})));
     }
     let landed = !scan(&repo.git, &ctx.record.base_first, &trunk, id)?
         .publications
         .is_empty()
-        || crate::compact::remote_marker(repo, &format!("refs/bay/landed/{id}"))?.is_some();
+        || crate::compact::remote_marker(repo, &format!("{}{id}", crate::names::LANDED))?.is_some();
     if landed {
         return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded).with_change(id));
     }
@@ -1802,6 +1879,7 @@ fn build_and_check(
                 .with_detail(json!({"conflicts": paths, "trunk": trunk}))));
         }
     };
+    anchor(git, op_id, &tree)?;
 
     let candidate_id = format!("{op_id}.{}", ctx.op(op_id).attempts.len() + 1);
     let request_id = ctx.op(op_id).request_id.clone().unwrap_or_default();
@@ -1811,6 +1889,7 @@ fn build_and_check(
         .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
     let message = candidate_message(ctx, revision, &request_id, &candidate_id, &registry_id);
     let commit = commit_candidate(ctx, &tree, trunk, &message)?;
+    anchor(&ctx.repo.git, op_id, &commit)?;
     kill_point("after-commit");
 
     // Step 4: check the exact candidate under the policy at its base.
@@ -1830,6 +1909,12 @@ fn build_and_check(
         ctx.head.clone_from(&beat);
         ctx.pushed_head = Some(beat);
     }
+    let refusal = match refusal {
+        Some(waiting) if waiting.reason == Some(Reason::CheckUnavailable) => {
+            return wait_for_worker(ctx, op_id, revision, waiting).map(Err);
+        }
+        refusal => refusal,
+    };
 
     ctx.step.set("persist");
     // Step 5: persist before publishing. The candidate is linked into the chain; the evidence
@@ -1855,6 +1940,7 @@ fn build_and_check(
     };
     let op = ctx.op_mut(op_id);
     op.attempts.push(attempt.clone());
+    op.unavailable = None;
     if let Some(refusal) = refusal {
         op.state = OpState::Blocked;
         op.outcome = refusal.reason.map(|reason| reason.code().to_owned());
@@ -2290,6 +2376,15 @@ fn run_policy(
             inputs,
         },
     )?;
+    // G146: what is required of the candidate follows its own diff against the base, never the
+    // paths the change declared: a write outside those is recorded, not refused.
+    let changed = check::changed_paths(git, trunk, commit)?;
+    // § 7: a required pair runs only on a box that declares its environment. A pair the box
+    // does not serve, with no evidence yet, runs nothing here: it waits for a worker.
+    let missing = check::unserved(policy, &changed, &finished, &check::Served::read(git));
+    if !missing.is_empty() {
+        return Ok(("unknown", Some(unavailable(ctx, op_id, &missing, None))));
+    }
     let mut keep = |record: &mut evidence::EvidenceRecord| -> Result<(), String> {
         // The producer signs outside the check's sandbox, after reading its output (§ 7).
         if let Some(signer) = &producer_signer {
@@ -2297,7 +2392,10 @@ fn run_policy(
         }
         evidence::append(git, &producer, record)
     };
-    let records = check::run_all(
+    let check::Ran {
+        records,
+        unavailable: outage,
+    } = check::run_all(
         git,
         &scratch,
         policy,
@@ -2306,7 +2404,7 @@ fn run_policy(
             tree,
             base: adapter_from,
             base_tree: &base_tree,
-            changed_paths: &check::changed_paths(git, trunk, commit)?,
+            changed_paths: &changed,
             id: candidate_id,
             policy_provenance,
             inputs,
@@ -2325,6 +2423,13 @@ fn run_policy(
         },
     )?;
     let _ = std::fs::remove_dir_all(&scratch);
+    // The adapter reached no worker for a check: nothing was observed, so it is no verdict.
+    if let Some((environment, reason)) = outage {
+        return Ok((
+            "unknown",
+            Some(unavailable(ctx, op_id, &[environment], Some(&reason))),
+        ));
+    }
     let all = evidence::counted(
         git,
         evidence::records_for(git, tree)?,
@@ -2332,7 +2437,8 @@ fn run_policy(
     )?;
     // What to repair: this run's records and the ones reused in place of a run (§ 8).
     let named: Vec<&evidence::EvidenceRecord> = records.iter().chain(&reused).collect();
-    let Some((code, word, why)) = verdict(policy, &all, &named, commit) else {
+    let (required, _) = policy.required(&changed);
+    let Some((code, word, why)) = verdict(policy, &required, &all, &named, commit) else {
         return Ok(("pass", None));
     };
     Ok((
@@ -2341,25 +2447,151 @@ fn run_policy(
             BayResult::blocked(code)
                 .with_change(ctx.id.clone())
                 .with_op(op_id)
-                .with_detail(
-                    json!({"candidate": candidate_id, "adapter_from": adapter_from, "checks": why}),
-                ),
+                .with_detail(json!({
+                    "candidate": candidate_id,
+                    "adapter_from": adapter_from,
+                    "checks": why,
+                    "trust": evidence::trust(ctx.registry.as_ref()),
+                })),
         ),
     ))
 }
 
+/// `CHECK_UNAVAILABLE` (§ 7): no worker answered for `environments`. With `adapter`, the check
+/// adapter's reason; without, this box does not declare them (`bay.checkEnvironment`).
+fn unavailable(
+    ctx: &Ctx,
+    op_id: &str,
+    environments: &[String],
+    adapter: Option<&str>,
+) -> BayResult {
+    let mut detail = json!({"environments": environments});
+    match adapter {
+        Some(reason) => detail["unavailable"] = json!(reason),
+        None => {
+            detail["recovery"] = json!(format!(
+                "an executor whose box serves them claims this operation; a box declares each with git config --global --add {} <environment>",
+                check::ENVIRONMENT_KEY
+            ));
+        }
+    }
+    let mut result = BayResult::refused(Decision::Queued, Reason::CheckUnavailable)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(detail);
+    result.published = Some(false);
+    result.waiting_for = Some("worker".to_owned());
+    result
+}
+
+/// The current time in Unix milliseconds.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// The gap before an operation released after an adapter's `unavailable` answer rejoins
+/// (§ 6): one lease, doubled with each repeated answer, at most ten leases.
+fn rejoin_gap(lease: Duration, repeats: u32) -> Duration {
+    lease * 2u32.saturating_pow(repeats).min(10)
+}
+
+/// `CHECK_UNAVAILABLE` reached (§ 7): nothing was observed, so no attempt is recorded and no
+/// evidence is pushed. The operation stays this executor's and records what it waits for, and
+/// the executor stops renewing its lease, so an executor whose box serves it claims it after
+/// the lease (§ 9a). This executor passes over it until its own box serves it
+/// ([`waits_for_worker`]).
+fn wait_for_worker(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    waiting: BayResult,
+) -> Result<BayResult, String> {
+    let detail = waiting.detail.clone().unwrap_or_default();
+    let environments: Vec<String> = detail["environments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|environment| environment.as_str().map(str::to_owned))
+        .collect();
+    let adapter = detail["unavailable"].as_str().map(str::to_owned);
+    let op = ctx.op_mut(op_id);
+    // The gap doubles only while the adapter's answer repeats.
+    let repeats = match (&op.unavailable, &adapter) {
+        (Some(before), Some(_)) if before.adapter.is_some() => before.repeats.saturating_add(1),
+        _ => 0,
+    };
+    op.outcome = Some(Reason::CheckUnavailable.code().to_owned());
+    op.unavailable = Some(Unavailable {
+        environments: environments.clone(),
+        adapter,
+        at_ms: now_ms(),
+        repeats,
+    });
+    ctx.save(
+        revision,
+        None,
+        &format!(
+            "unavailable {op_id}: no worker for {}",
+            environments.join(", ")
+        ),
+    )?;
+    ctx.push_chain();
+    Ok(waiting)
+}
+
+/// An operation waiting for a worker (§ 6, § 7) is passed over with nothing written while this
+/// box does not serve what it waits for, and, after an adapter's `unavailable` answer, until
+/// its rejoin gap has passed ([`rejoin_gap`]). Writing nothing is what lets the lease of the
+/// executor that recorded the wait lapse, so an executor that serves it takes it over (§ 9a).
+fn waits_for_worker(ctx: &Ctx, op_id: &str) -> Option<BayResult> {
+    let op = ctx.op(op_id);
+    let waiting = op.unavailable.as_ref()?;
+    if op.state.is_terminal() || op.state == OpState::Blocked {
+        return None;
+    }
+    let served = check::Served::read(&ctx.repo.git);
+    let unserved = waiting
+        .environments
+        .iter()
+        .any(|environment| !served.serves(environment));
+    let early = waiting.adapter.is_some() && {
+        let gap = rejoin_gap(ctx.repo.config.lease(), waiting.repeats);
+        now_ms()
+            < waiting
+                .at_ms
+                .saturating_add(u64::try_from(gap.as_millis()).unwrap_or(u64::MAX))
+    };
+    if !unserved && !early {
+        return None;
+    }
+    Some(unavailable(
+        ctx,
+        op_id,
+        &waiting.environments,
+        waiting.adapter.as_deref(),
+    ))
+}
+
 /// The verdict of `policy` over every counted record on the tree (`all`): `None` for a pass,
-/// else its refusal code and word, and what `named` say about each gap.
+/// else its refusal code and word, and what `named` say about each gap. `required` is the part
+/// of its manifest the candidate's diff requires (G146).
 fn verdict(
     policy: &policy::Policy,
+    required: &[policy::ManifestEntry],
     all: &[evidence::EvidenceRecord],
     named: &[&evidence::EvidenceRecord],
     commit: &str,
 ) -> Option<(Reason, &'static str, Vec<serde_json::Value>)> {
+    // G163: a record from a producer the check's list leaves out never answers it.
+    let listed: Vec<evidence::EvidenceRecord> = policy.answering(all.to_vec());
     // G30: coverage is judged against the frozen manifest, never against counts.
     let gaps: Vec<(String, Combined)> = evidence::aggregate(
-        all,
-        &policy.manifest,
+        &listed,
+        required,
         &policy.manifest_digest,
         &|id| policy.commit_keyed(id),
         commit,
@@ -2381,11 +2613,27 @@ fn verdict(
         Combined::ProductFailure => (Reason::CheckFailed, "product_failure"),
         Combined::Unknown | Combined::Pass => (Reason::CheckUnknown, "unknown"),
     };
-    let why = named
+    let in_gap =
+        |record: &evidence::EvidenceRecord| gaps.iter().any(|(id, _)| *id == record.check.id);
+    let mut why: Vec<serde_json::Value> = named
         .iter()
-        .filter(|record| gaps.iter().any(|(id, _)| *id == record.check.id))
+        .filter(|record| in_gap(record) && policy.listed(record))
         .map(|record| json!({"check": record.check.id, "verdict": record.verdict, "why": record.why}))
         .collect();
+    // G163: each record that would have answered a gap but for the check's producers list.
+    why.extend(
+        all.iter()
+            .filter(|record| {
+                record.kind == evidence::KIND_CHECK
+                    && record.manifest_digest == policy.manifest_digest
+                    && in_gap(record)
+                    && !policy.listed(record)
+            })
+            .map(|record| {
+                json!({"check": record.check.id, "producer": record.producer.name,
+                    "verdict": record.verdict, "why": "unlisted_producer"})
+            }),
+    );
     Some((code, word, why))
 }
 
@@ -2468,22 +2716,26 @@ fn is_publication(
 fn landed_markers(repo: &Repo) -> Result<std::collections::HashMap<String, String>, String> {
     let listed = repo
         .git
-        .run(&["ls-remote", repo.remote(), "refs/bay/landed/*"])
+        .run(&[
+            "ls-remote",
+            repo.remote(),
+            &format!("{}*", crate::names::LANDED),
+        ])
         .map_err(|error| error.message())?;
     let mut markers: std::collections::HashMap<String, String> = listed
         .lines()
         .filter_map(|line| {
             let (oid, name) = line.split_once('\t')?;
             Some((
-                name.strip_prefix("refs/bay/landed/")?.to_owned(),
+                name.strip_prefix(crate::names::LANDED)?.to_owned(),
                 oid.to_owned(),
             ))
         })
         .collect();
     // § 10a: a compacted marker's shard index record stands in for the ref.
     crate::compact::fetch(repo)?;
-    for (name, target) in crate::compact::entries(&repo.git, "refs/bay/landed/")? {
-        if let Some(id) = name.strip_prefix("refs/bay/landed/") {
+    for (name, target) in crate::compact::entries(&repo.git, crate::names::LANDED)? {
+        if let Some(id) = name.strip_prefix(crate::names::LANDED) {
             markers.entry(id.to_owned()).or_insert(target);
         }
     }
@@ -2597,13 +2849,15 @@ fn finished_checks(
     // This operation's own records are a resume; another operation's are reuse, and with
     // reuse off another operation on the same tree is rechecked (G29).
     let mine = format!("/{op_id}.");
-    let (resumed, others): (Vec<_>, Vec<_>) = evidence::counted(
-        git,
-        evidence::records_for(git, judged.tree)?,
-        ctx.registry.as_ref(),
-    )?
-    .into_iter()
-    .partition(|record| record.id.contains(&mine));
+    // G163: a record from a producer the check's list leaves out answers nothing here either.
+    let (resumed, others): (Vec<_>, Vec<_>) = policy
+        .answering(evidence::counted(
+            git,
+            evidence::records_for(git, judged.tree)?,
+            ctx.registry.as_ref(),
+        )?)
+        .into_iter()
+        .partition(|record| record.id.contains(&mine));
     let digest = &policy.manifest_digest;
     let mut finished = Vec::new();
     let mut reused = Vec::new();
@@ -2694,6 +2948,40 @@ fn commit_candidate(ctx: &Ctx, tree: &str, trunk: &str, message: &str) -> Result
         .map_err(|error| error.message())
 }
 
+/// Holds `oid` (the merged tree, then the candidate commit) under the operation's in-flight
+/// ref, `refs/bay/inflight/<op id>`, local to this store and never pushed (G173). Until the
+/// change chain links the candidate (step 5), no other ref holds it, and a
+/// `git gc --prune=now` or a maintenance run with a short prune window would remove it
+/// between `merge-tree` and the push.
+fn anchor(git: &Git, op_id: &str, oid: &str) -> Result<(), String> {
+    let name = crate::names::inflight_ref(op_id)?;
+    git.run(&["update-ref", &name, oid])
+        .map(drop)
+        .map_err(|error| format!("the candidate cannot be anchored: {}", error.message()))
+}
+
+/// An operation's in-flight ref for as long as it runs: deleted when the operation reaches
+/// its outcome, whatever it is (landed, blocked, failed, superseded or given up). An executor
+/// killed mid-run leaves it; the operation's next run, which recovery makes, deletes it, and
+/// `bay status` lists one whose operation ended as a leftover.
+struct Anchored<'a> {
+    git: &'a Git,
+    name: String,
+}
+
+impl<'a> Anchored<'a> {
+    fn new(git: &'a Git, op_id: &str) -> Result<Self, String> {
+        let name = crate::names::inflight_ref(op_id)?;
+        Ok(Self { git, name })
+    }
+}
+
+impl Drop for Anchored<'_> {
+    fn drop(&mut self) {
+        let _ = self.git.run(&["update-ref", "-d", &self.name]);
+    }
+}
+
 fn candidate_message(
     ctx: &Ctx,
     revision: &str,
@@ -2704,7 +2992,7 @@ fn candidate_message(
     let config = &ctx.repo.config;
     let record = &ctx.record;
     format!(
-        "{reference}: change {id}\n\nChange-Id: {id}\nRevision-Id: {revision}\nRequest-Id: {request_id}\nCandidate-Id: {candidate_id}\nRegistry-Id: {registry_id}\nBay-Epoch: {epoch}\n{intent_key}: {reference}@{intent_revision}\n{actor_key}: {actor}\nBay-Session: {session}\n{supersedes}{reverts}",
+        "{reference}: change {id}\n\nChange-Id: {id}\nRevision-Id: {revision}\nRequest-Id: {request_id}\nCandidate-Id: {candidate_id}\nRegistry-Id: {registry_id}\nBay-Epoch: {epoch}\n{intent_key}: {reference}@{intent_revision}\n{actor_key}: {actor}\nBay-Session: {session}\n{supersedes}{reverts}{fixes}",
         reference = record.intent.reference,
         id = ctx.id,
         intent_key = config.intent_trailer(),
@@ -2719,6 +3007,10 @@ fn candidate_message(
             .reverts
             .as_ref()
             .map_or_else(String::new, |undone| format!("Reverts: {undone}\n")),
+        fixes = record
+            .fixes
+            .as_ref()
+            .map_or_else(String::new, |fixed| format!("Fixes: {fixed}\n")),
         actor = record.actor.name,
         session = record.actor.session,
     )
@@ -2771,14 +3063,14 @@ fn publish_push(
     claim: Option<&crate::change::IntentClaim>,
 ) -> Result<(), String> {
     let trunk = format!("{commit}:refs/heads/{}", repo.trunk());
-    let landed = format!("{commit}:refs/bay/landed/{id}");
+    let landed = format!("{commit}:{}{id}", crate::names::LANDED);
     let done =
         release.map(|(seq, release)| format!("{release}:{}{seq}", crate::queue::DONE_PREFIX));
     // § 6: each generation of an intent lands once, even if two changes were opened for it.
     let landed_intent = claim.map(|claim| format!("{commit}:{}", claim.landed_ref()));
     // The markers are create-only: a lease that expects no ref refuses one that exists, even
     // when the new value fast-forwards it (a later publication descends from an earlier one).
-    let landed_lease = format!("--force-with-lease=refs/bay/landed/{id}:");
+    let landed_lease = format!("--force-with-lease={}{id}:", crate::names::LANDED);
     let intent_lease = claim.map(|claim| format!("--force-with-lease={}:", claim.landed_ref()));
     let mut args = vec!["push", "-q", "--atomic", landed_lease.as_str()];
     if let Some(lease) = &intent_lease {
@@ -2818,7 +3110,7 @@ fn scanned(ctx: &mut Ctx, trunk: &str, revision: &str) -> Result<Option<BayResul
         }
         // No operation of this revision in the chain, so no attempt shows a check passed:
         // judged at its base, fail closed.
-        let mut result = landed_result(&ctx.id, None, &commit, revision);
+        let mut result = landed_result(&ctx.id, None, &commit, revision, ctx.registry.as_ref());
         let unchecked = unchecked_reason(&ctx.repo.git, None, &commit);
         if let (Some(detail), Some(why)) = (result.detail.as_mut(), unchecked) {
             detail["unchecked"] = json!(why);
@@ -2853,7 +3145,13 @@ fn derive_landed(
     }
     ctx.push_chain();
     write_terminal(ctx, op_id, "published", Some(commit))?;
-    let mut result = landed_result(&ctx.id, Some(op_id), commit, revision);
+    let mut result = landed_result(
+        &ctx.id,
+        Some(op_id),
+        commit,
+        revision,
+        ctx.registry.as_ref(),
+    );
     let unchecked = unchecked_landing(ctx, op_id, commit);
     if let (Some(detail), Some(why)) = (result.detail.as_mut(), unchecked) {
         detail["unchecked"] = json!(why);
@@ -2864,6 +3162,19 @@ fn derive_landed(
         Ok(gaps) if gaps.is_empty() => None,
         Ok(gaps) => Some(("coverage_gaps", serde_json::Value::Array(gaps))),
         Err(why) => Some(("coverage_gaps_unread", serde_json::Value::String(why))),
+    };
+    // G146: a check the landing's diff did not require is named, never silently skipped.
+    let skipped = match not_required(ctx, op_id) {
+        Ok(skipped) if skipped.is_empty() => None,
+        Ok(skipped) => Some(("not_required", json!(skipped))),
+        Err(why) => Some(("not_required_unread", serde_json::Value::String(why))),
+    };
+    // G91: the post-publication checks, pending for the landed commit until their records
+    // arrive.
+    let post = match post_checks(&ctx.repo.git, commit, ctx.registry.as_ref()) {
+        Ok(post) if post.is_empty() => None,
+        Ok(post) => Some(("post_checks", serde_json::Value::Array(post))),
+        Err(why) => Some(("post_checks_unread", serde_json::Value::String(why))),
     };
     // § 8: every answer carries its coverage; a landing of a change with named inputs lists
     // them as judged at the trunk it landed on.
@@ -2885,7 +3196,7 @@ fn derive_landed(
         .as_mut()
         .and_then(|detail| detail.as_object_mut())
     {
-        for (key, value) in gaps.into_iter().chain(judged) {
+        for (key, value) in gaps.into_iter().chain(skipped).chain(post).chain(judged) {
             detail.insert(key.to_owned(), value);
         }
     }
@@ -2932,7 +3243,8 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
     for policy in &judged {
         for entry in &policy.manifest {
             let empty_pass = records.iter().any(|record| {
-                record.check.id == entry.id
+                policy.listed(record)
+                    && record.check.id == entry.id
                     && record.check.environment == entry.environment
                     && record.manifest_digest == policy.manifest_digest
                     && record.verdict == evidence::Verdict::Pass
@@ -2965,6 +3277,102 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
         }
     }
     Ok(gaps)
+}
+
+/// G146: the checks that no policy judging the landing required, because the landing's diff
+/// against its base changed no path their `when_paths` match, each with the reason. Read from
+/// the base and the candidate like [`coverage_gaps`], so a replay gives the same answer.
+fn not_required(ctx: &Ctx, op_id: &str) -> Result<Vec<policy::NotRequired>, String> {
+    let Some(attempt) = ctx.op(op_id).attempts.last() else {
+        return Ok(Vec::new());
+    };
+    let git = &ctx.repo.git;
+    let changed = check::changed_paths(git, &attempt.base, &attempt.commit)?;
+    let mut required: Vec<policy::ManifestEntry> = Vec::new();
+    let mut skipped: Vec<policy::NotRequired> = Vec::new();
+    for at in [&attempt.base, &attempt.commit] {
+        match policy::load_at(git, at) {
+            Ok(Some(policy)) => {
+                let (by, not_by) = policy.required(&changed);
+                required.extend(by);
+                for entry in not_by {
+                    if !skipped.contains(&entry) {
+                        skipped.push(entry);
+                    }
+                }
+            }
+            Ok(None) | Err(policy::LoadError::Invalid(_)) => {}
+            Err(policy::LoadError::Git(why)) => return Err(why),
+        }
+    }
+    skipped.retain(|entry| {
+        !required
+            .iter()
+            .any(|by| by.id == entry.check && by.environment == entry.environment)
+    });
+    Ok(skipped)
+}
+
+/// G91: the post-publication checks of landed `commit`, judged in the policy at its base
+/// (`commit^1`), each with its state on the commit's tree: `pending` until a counted record of
+/// it arrives under that policy's manifest, then the records' combined verdict; `not_required`,
+/// with the reason, when the landing's diff changed no path its `when_paths` match (G146). None
+/// when the base has no valid policy: then nothing was judged there.
+///
+/// # Errors
+///
+/// A git fault, or an unreadable note.
+pub fn post_checks(
+    git: &Git,
+    commit: &str,
+    registry: Option<&crate::registry::Registry>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let base = format!("{commit}^1");
+    let policy = match policy::load_at(git, &base) {
+        Ok(Some(policy)) if !policy.post.is_empty() => policy,
+        Ok(_) | Err(policy::LoadError::Invalid(_)) => return Ok(Vec::new()),
+        Err(policy::LoadError::Git(why)) => return Err(why),
+    };
+    let changed = check::changed_paths(git, &base, commit)?;
+    // G163: only records from the producers a check lists answer it.
+    let records = policy.answering(evidence::counted(
+        git,
+        evidence::records_for(git, &tree_of(git, commit)?)?,
+        registry,
+    )?);
+    let mut out = Vec::new();
+    for entry in &policy.post {
+        let id = evidence::CheckId::new(&entry.id, &entry.environment);
+        let mut row = json!({"check": entry.id, "environment": entry.environment});
+        if let Some(skipped) = policy
+            .check(&id)
+            .and_then(|check| policy.unwoken(check, &changed))
+        {
+            row["state"] = json!("not_required");
+            row["reason"] = json!(skipped.reason);
+            out.push(row);
+            continue;
+        }
+        let subject = policy.commit_keyed(&id).then_some(commit);
+        let state = match evidence::combine(&records, &id, &policy.manifest_digest, subject) {
+            Combined::Pass => "pass",
+            Combined::ProductFailure => "product_failure",
+            Combined::Flaky => "flaky",
+            // Only an `unknown` or `infra_failure` record, or none: nothing has answered it.
+            Combined::Unknown => {
+                let recorded = records.iter().any(|record| {
+                    record.kind == evidence::KIND_CHECK
+                        && record.check == id
+                        && record.manifest_digest == policy.manifest_digest
+                        && subject.is_none_or(|commit| record.subject.commit == commit)
+                });
+                if recorded { "unknown" } else { "pending" }
+            }
+        };
+        row["state"] = json!(state);
+        out.push(row);
+    }
+    Ok(out)
 }
 
 /// The compact terminal record that outlives the drafts (§ 9a). Written once per operation.
@@ -3005,6 +3413,14 @@ fn write_terminal(
     {
         // Executor-signed with the record, so status never shows this landing as checked.
         record["unchecked"] = json!(why);
+    }
+    if outcome == "published" {
+        // G146: what the landing did not require, and why, outlives its drafts.
+        match not_required(ctx, op_id) {
+            Ok(skipped) if skipped.is_empty() => {}
+            Ok(skipped) => record["not_required"] = json!(skipped),
+            Err(why) => record["not_required_unread"] = json!(why),
+        }
     }
     let signer = ctx.executor_signer().ok().flatten();
     crate::log::append(ctx.repo, &executor, signer.as_ref(), &record).map(|_| ())
@@ -3053,10 +3469,21 @@ fn unchecked_landing(ctx: &Ctx, op_id: &str, commit: &str) -> Option<&'static st
     unchecked_reason(&ctx.repo.git, verdict, commit)
 }
 
-fn landed_result(id: &str, op_id: Option<&str>, commit: &str, revision: &str) -> BayResult {
+/// A landing, with the `trust` its evidence was judged under (G160).
+fn landed_result(
+    id: &str,
+    op_id: Option<&str>,
+    commit: &str,
+    revision: &str,
+    registry: Option<&Registry>,
+) -> BayResult {
     let mut result = BayResult::new(Decision::Landed)
         .with_change(id)
-        .with_detail(json!({"commit": commit, "revision": revision}));
+        .with_detail(json!({
+            "commit": commit,
+            "revision": revision,
+            "trust": evidence::trust(registry),
+        }));
     result.published = Some(true);
     if let Some(op_id) = op_id {
         result = result.with_op(op_id);
@@ -3148,7 +3575,7 @@ fn abandoned_keeps(ctx: &Ctx) -> Result<Option<Kept>, String> {
         .map(str::to_owned)
         .collect();
     if let Some(request) = git
-        .ref_target(&format!("refs/bay/requests/{}", ctx.id))
+        .ref_target(&format!("{}{}", crate::names::REQUESTS, ctx.id))
         .map_err(|error| error.message())?
         && !links.contains(&request)
     {
@@ -3221,6 +3648,38 @@ mod tests {
 
     use super::{UNCHECKED, UNCHECKED_BY_POLICY, unchecked_reason};
     use crate::git::Git;
+
+    /// A test pause ends: at its release, at its time limit, or once its parent is gone.
+    #[test]
+    fn a_test_pause_never_waits_forever() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::TempDir::new().unwrap();
+        let release = dir.path().join("release");
+        let started = Instant::now();
+        assert!(!super::released(
+            &release,
+            Duration::from_millis(200),
+            || true
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(200));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the limit ends it"
+        );
+        let started = Instant::now();
+        assert!(!super::released(&release, Duration::from_secs(600), || {
+            false
+        }));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "a gone parent ends it"
+        );
+        std::fs::write(&release, "").unwrap();
+        assert!(super::released(&release, Duration::from_secs(600), || {
+            false
+        }));
+        assert!(super::parent_alive()(), "this test's own parent is there");
+    }
 
     const CHECKED: &str = "revision = 1\n\n[[check]]\nid = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
     const UNCHECKED_POLICY: &str = "revision = 1\nunchecked = true\n";

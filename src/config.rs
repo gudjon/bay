@@ -1,8 +1,8 @@
 //! `.bay/config.toml` in the repository (`INTERFACES` § 7).
 //!
-//! Every key § 7 lists is parsed and typed, so a mistyped one is a config error. Keys whose
-//! feature is not built yet (`[check] command`) are
-//! held and read by nothing. `[runtime] command` (the runtime adapter, `INTERFACES` § 4) is
+//! Every key § 7 lists is parsed and typed, so a mistyped one is a config error. Retired keys
+//! (`[check] command`, `[update]`) are accepted and ignored, and doctor names them
+//! ([`Config::ignored`]). `[runtime] command` (the runtime adapter, `INTERFACES` § 4) is
 //! not in § 7's list yet. `[executor]` and `[retention]` are read by built features but are
 //! not in § 7's list yet (BACKLOG 18). A key or table bay does not know is a config error that
 //! names it, as is `evidence_reuse` set to anything but `"off"` or `"exact-inputs"`: a misspelled
@@ -27,7 +27,11 @@ pub struct Config {
     pub trailers: Option<Trailers>,
     pub executor: Option<Executor>,
     pub retention: Option<Retention>,
-    pub check: Option<Check>,
+    /// `[check]` is retired (ruling Q14): checks are declared in `.bay/policy.toml`, whose
+    /// `[[check]]` entries name their own commands, so the command a check runs has one
+    /// definition, inside the policy's revision and digest (G141). An older config that still
+    /// carries the table keeps loading; nothing reads it but [`Config::ignored`].
+    check: Option<toml::Table>,
     pub notify: Option<Notify>,
     pub runtime: Option<Runtime>,
     pub policy: Option<PolicyProfile>,
@@ -35,16 +39,7 @@ pub struct Config {
     /// `[update]` is accepted and ignored: the update pin and switch are the box's
     /// (`git config --global bay.update*`, `DESIGN` § 15.6), never a repository's, and an older
     /// config that still carries the table must keep loading.
-    #[allow(dead_code)]
     update: Option<toml::Table>,
-}
-
-/// `[check] command`: the check adapter. Not read: checks are declared in `.bay/policy.toml`
-/// (§ 7), whose `[[check]]` entries name their own commands.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Check {
-    pub command: Option<String>,
 }
 
 /// `[notify] command`: the notify adapter (`INTERFACES` § 4), called once after each event is
@@ -76,11 +71,14 @@ pub struct PolicyProfile {
 /// `[hooks] cache_max_age_s` (`DESIGN` § 11): the coordination cache's maximum age for
 /// `pre-tool` (`crate::coord`). Default 30 (`INTERFACES` § 7). `[hooks] notice_budget_bytes`
 /// (ruling R6): the bytes of notices a session is told per hour (`crate::notice`). Default 2048.
+/// `[hooks] checkpoint_idle_s` (G165): how long after its last checkpoint a session's next hook
+/// event checkpoints its view (`crate::session`). Default 600.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Hooks {
     pub cache_max_age_s: Option<u64>,
     pub notice_budget_bytes: Option<u64>,
+    pub checkpoint_idle_s: Option<u64>,
 }
 
 /// How long a closed change keeps its drafts before the retention cut (§ 5), and the bay ref
@@ -130,7 +128,13 @@ pub struct Trailers {
 #[serde(deny_unknown_fields)]
 pub struct Agent {
     pub product: String,
+    /// The instruction files a session's tree is checked against trunk for at `SessionStart`
+    /// (G155); default [`DEFAULT_INSTRUCTIONS`].
+    pub instructions: Option<Vec<String>>,
 }
+
+/// The instruction files of `[agent] instructions` when the config names none (G155).
+pub const DEFAULT_INSTRUCTIONS: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
 impl Config {
     /// Reads `<root>/.bay/config.toml`. A missing file is the default config.
@@ -276,6 +280,27 @@ impl Config {
             .unwrap_or(2048)
     }
 
+    /// How long after a session's last checkpoint its next hook event checkpoints its view
+    /// (G165): a killed session loses at most this much work.
+    #[must_use]
+    pub fn checkpoint_idle(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.hooks
+                .as_ref()
+                .and_then(|hooks| hooks.checkpoint_idle_s)
+                .unwrap_or(600),
+        )
+    }
+
+    /// The instruction files (`[agent] instructions`, G155), paths relative to the top level.
+    #[must_use]
+    pub fn instructions(&self) -> Vec<String> {
+        self.agent
+            .as_ref()
+            .and_then(|agent| agent.instructions.clone())
+            .unwrap_or_else(|| DEFAULT_INSTRUCTIONS.map(str::to_owned).to_vec())
+    }
+
     #[must_use]
     pub fn trunk(&self) -> &str {
         self.trunk.as_deref().unwrap_or("main")
@@ -390,6 +415,25 @@ impl Config {
             .as_ref()
             .is_some_and(|agent| agent.product == "claude")
     }
+
+    /// The retired keys this config carries, which bay accepts and never reads, as doctor
+    /// names them: `[check] command` (ruling Q14) and the `[update]` keys.
+    #[must_use]
+    pub fn ignored(&self) -> Vec<String> {
+        [("check", &self.check), ("update", &self.update)]
+            .into_iter()
+            .filter_map(|(table, keys)| Some((table, keys.as_ref()?)))
+            .flat_map(|(table, keys)| {
+                let named: Vec<String> =
+                    keys.keys().map(|key| format!("[{table}] {key}")).collect();
+                if named.is_empty() {
+                    vec![format!("[{table}]")]
+                } else {
+                    named
+                }
+            })
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -405,8 +449,6 @@ remote = "origin"
                       # Bay-Epoch are fixed names
 intent = "Intent"
 actor = "Actor"
-[check]
-command = "scripts/bay-check"      # the check adapter
 [notify]
 command = "scripts/bay-notify"
 [policy]
@@ -426,8 +468,6 @@ product = "claude"                 # leave this table out when the box does not 
         assert_eq!(config.intent_trailer(), "Intent");
         assert_eq!(config.actor_trailer(), "Actor");
         assert!(config.claude_adapter());
-        let check = config.check.as_ref().unwrap();
-        assert_eq!(check.command.as_deref(), Some("scripts/bay-check"));
         let notify = config.notify.as_ref().unwrap();
         assert_eq!(notify.command.as_deref(), Some("scripts/bay-notify"));
         let policy = config.policy.as_ref().unwrap();
@@ -454,6 +494,14 @@ product = "claude"                 # leave this table out when the box does not 
     }
 
     #[test]
+    fn the_idle_checkpoint_is_600_seconds_unless_configured() {
+        // G165.
+        assert_eq!(Config::default().checkpoint_idle().as_secs(), 600);
+        let config = Config::parse("[hooks]\ncheckpoint_idle_s = 5\n").unwrap();
+        assert_eq!(config.checkpoint_idle().as_secs(), 5);
+    }
+
+    #[test]
     fn a_key_bay_does_not_know_does_not_load() {
         // A misspelled key is an error that names it, never a silent default.
         let error = Config::parse("[hooks]\ncache_max_age = 30\n").unwrap_err();
@@ -461,6 +509,16 @@ product = "claude"                 # leave this table out when the box does not 
         assert!(Config::parse("trnk = \"main\"\n").is_err());
         assert!(Config::parse("[hook]\ncache_max_age_s = 30\n").is_err());
         assert!(Config::parse("[executor]\nlease = 5\n").is_err());
+    }
+
+    #[test]
+    fn a_retired_key_loads_and_is_named_as_ignored() {
+        // Ruling Q14: an older config's `[check] command` loads, and is read by nothing.
+        assert_eq!(Config::parse("").unwrap().ignored(), Vec::<String>::new());
+        let config = Config::parse("[check]\ncommand = \"scripts/bay-check\"\n").unwrap();
+        assert_eq!(config.ignored(), ["[check] command"]);
+        let config = Config::parse("[check]\n[update]\nauto = false\n").unwrap();
+        assert_eq!(config.ignored(), ["[check]", "[update] auto"]);
     }
 
     #[test]

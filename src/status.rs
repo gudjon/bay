@@ -150,7 +150,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
             // replaces the local chain. The remote chain is fetched into a ref of its own, never
             // read from FETCH_HEAD: a fetch that fails can leave FETCH_HEAD holding another
             // change's chain.
-            let fetched_ref = format!("refs/bay/fetch/{id}");
+            let fetched_ref = format!("{}{id}", crate::names::FETCH);
             if repo
                 .git
                 .run(&[
@@ -300,6 +300,46 @@ fn leftovers(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
             "uncheckpointed": uncheckpointed,
             "newer_work": newer_work,
             "journal": view::journal(repo, &id),
+        }));
+    }
+    out.extend(stale_inflight(repo, &chain)?);
+    Ok(out)
+}
+
+/// The in-flight refs this store still holds whose operation ended or is gone (G173): an
+/// executor that was killed mid-run left them. Each names its ref, its operation and the
+/// object it holds; deleting the ref is the cleanup. A ref of an operation still running is
+/// that operation's, and is not listed.
+fn stale_inflight(repo: &Repo, chain: &Chain) -> Result<Vec<Value>, String> {
+    let listed = repo
+        .git
+        .run(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            crate::names::INFLIGHT_PREFIX,
+        ])
+        .map_err(|error| error.message())?;
+    let mut out = Vec::new();
+    for line in listed.lines() {
+        let Some((name, object)) = line.split_once(' ') else {
+            continue;
+        };
+        let op_id = name.trim_start_matches(crate::names::INFLIGHT_PREFIX);
+        let change = op_id.split_once('.').map_or(op_id, |(change, _)| change);
+        let op = chain
+            .read(change)
+            .ok()
+            .and_then(|(_, record)| record.operations.into_iter().find(|op| op.op_id == op_id));
+        if op.as_ref().is_some_and(|op| !op.state.is_terminal()) {
+            continue;
+        }
+        out.push(json!({
+            "kind": "inflight",
+            "ref": name,
+            "change": change,
+            "op_id": op_id,
+            "object": object,
+            "op_state": op.map(|op| op.state),
         }));
     }
     Ok(out)
@@ -511,14 +551,16 @@ fn completion_dimensions(
             "running": "unconfirmed",
             "effective": "unconfirmed",
             "runtime": null,
+            "trust": null,
             "profile": null,
         }));
     };
     let (name, require) = selected_profile(repo, trunk, landed);
     // The adapter is asked only when its answer can change the verdict: the profile requires a
     // runtime dimension and a registry exists, without which nothing it prints could count.
-    let needs_runtime = require.as_ref().is_ok_and(|require| {
-        require.contains(&Dimension::Running) || require.contains(&Dimension::Effective)
+    let needs_runtime = require.as_ref().is_ok_and(|profile| {
+        profile.require.contains(&Dimension::Running)
+            || profile.require.contains(&Dimension::Effective)
     });
     let ask = *ask_runtime && needs_runtime && registry.is_some();
     let (confirmed, runtime) = match landed {
@@ -534,6 +576,13 @@ fn completion_dimensions(
     .into_iter()
     .filter_map(|(dimension, met)| met.then_some(dimension))
     .collect();
+    // G160: without a registry, `checked` rests on unsigned records alone. A runtime dimension
+    // never counts an unsigned record ([`crate::runtime`]), and `published` is trunk's own fact.
+    let unsigned: &[Dimension] = if registry.is_none() && checked {
+        &[Dimension::Checked]
+    } else {
+        &[]
+    };
     let word = |ids: &[String]| {
         if ids.is_empty() {
             "unconfirmed"
@@ -547,7 +596,53 @@ fn completion_dimensions(
         "running": word(&confirmed.running),
         "effective": word(&confirmed.effective),
         "runtime": runtime,
-        "profile": completion::verdict(&name, require, &met),
+        "trust": evidence::trust(registry.as_ref()),
+        "profile": completion::verdict(&name, require, &met, unsigned),
+    }))
+}
+
+/// G160: the evidence on the landed tree, or else on the last attempt's tree, each record named
+/// `verified`, `unverifiable` or `unsigned`, under the result's `trust`. The hook's read reads
+/// no evidence (`null`).
+fn evidence_read(
+    repo: &Repo,
+    record: &ChangeRecord,
+    landed: Option<&crate::publish::Found>,
+    read: &Read,
+) -> Result<Value, String> {
+    let Read::Full { registry, .. } = read else {
+        return Ok(json!(null));
+    };
+    let tree = match landed {
+        Some(found) => Some(
+            repo.git
+                .run(&["rev-parse", &format!("{}^{{tree}}", found.commit)])
+                .map_err(|error| error.message())?,
+        ),
+        None => record
+            .operations
+            .last()
+            .and_then(|op| op.attempts.last())
+            .map(|attempt| attempt.tree.clone()),
+    };
+    let Some(tree) = tree else {
+        return Ok(json!(null));
+    };
+    let records = evidence::tagged(
+        &repo.git,
+        evidence::records_for(&repo.git, &tree)?,
+        registry.as_ref(),
+    )?;
+    Ok(json!({
+        "tree": tree,
+        "trust": evidence::trust(registry.as_ref()),
+        "records": records.iter().map(|(record, verified)| json!({
+            "id": record.id,
+            "kind": record.kind,
+            "check": record.check.id,
+            "verdict": record.verdict,
+            "verified": verified,
+        })).collect::<Vec<_>>(),
     }))
 }
 
@@ -559,7 +654,7 @@ fn selected_profile(
     repo: &Repo,
     trunk: &str,
     landed: Option<&crate::publish::Found>,
-) -> (String, Result<Vec<Dimension>, String>) {
+) -> (String, Result<completion::Profile, String>) {
     let at = landed.map_or_else(|| trunk.to_owned(), |found| format!("{}^1", found.commit));
     let config = match crate::config::Config::at(&repo.git, &at) {
         Ok(config) => config,
@@ -624,6 +719,26 @@ fn runtime(
     ))
 }
 
+/// G91: the post-publication checks of landed `landed`, each pending until a record for its
+/// tree arrives ([`crate::publish::post_checks`]); `null` when not landed, or on the hook's
+/// read, which reads no evidence. A record arrives from a runner elsewhere, so while one is
+/// pending the other producers' evidence is fetched first. A fault is named, never hidden.
+fn post_checks(repo: &Repo, landed: Option<&crate::publish::Found>, read: &Read) -> Value {
+    let (Some(found), Read::Full { registry, .. }) = (landed, read) else {
+        return json!(null);
+    };
+    let judge = || crate::publish::post_checks(&repo.git, &found.commit, registry.as_ref());
+    let pending = |rows: &[Value]| rows.iter().any(|row| row["state"] == "pending");
+    let rows = match judge() {
+        Ok(rows) if pending(&rows) => {
+            repo.fetch_evidence(&crate::signing::Keys::load(&repo.git).producer_name);
+            judge()
+        }
+        other => other,
+    };
+    rows.map_or_else(|why| json!({"unread": why}), Value::from)
+}
+
 fn describe(
     repo: &Repo,
     record: &ChangeRecord,
@@ -667,7 +782,7 @@ fn describe(
         };
         let reason = op.outcome.as_deref().and_then(Reason::from_code);
         let lease = lease(repo, record, op, published);
-        json!({
+        let mut operation = json!({
             "lease": lease,
             "owner": op.owner,
             "receipt": record_state,
@@ -683,7 +798,15 @@ fn describe(
             "candidate": op.attempts.last().map(|attempt| &attempt.candidate_id),
             "published": landed.is_some_and(|found| found.revision == op.revision),
             "cost": op_cost,
-        })
+        });
+        // § 7: an operation no worker answered for waits for one, and names what it needs.
+        if let Some(waiting) = op.unavailable.as_ref().filter(|_| {
+            !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked
+        }) {
+            operation["waiting_for"] = json!("worker");
+            operation["environments"] = json!(waiting.environments);
+        }
+        operation
     });
     Ok(json!({
         "change": record.id,
@@ -701,6 +824,8 @@ fn describe(
             "why": "carries the Change-Id but is not a verified publication",
         })).collect::<Vec<_>>(),
         "completion": completion(repo, record, trunk, landed, read)?,
+        "evidence": evidence_read(repo, record, landed, read)?,
+        "post_checks": post_checks(repo, landed, read),
         "retention_cut": record.retention_cut,
         "terminal": crate::log::records_for(&repo.git, &record.id)?,
         "receipts": record.receipts.iter().filter(|receipt| {

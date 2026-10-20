@@ -6,7 +6,9 @@
 //! registry actors, the root commit signed by the sender's agent key at `sent`), and writes the ack
 //! on the same chain, signed by the recipient's key and naming its session. A talk that fails
 //! accept is listed as refused and gets no ack. An accepted talk that supersedes another of this
-//! recipient's talks closes that one as `superseded`, naming its successor (ruling T1). Then every
+//! recipient's talks closes that one as `superseded`, naming its successor (ruling T1). An acked
+//! delivery talk about a change closes as `answered` once a landing on trunk names that change in
+//! `Fixes:`, `Reverts:` or `Supersedes:`, naming the landing (G148). Then every
 //! chain this machine moved is pushed. A push the host refuses (another session acked first)
 //! takes the host's chain instead; one the remote cannot take now stays for the next accept.
 //!
@@ -19,16 +21,18 @@
 //! others.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
 use serde_json::{Value, json};
 
 use super::send::{Pushed, agent_key, fetch_matching, push};
 use super::{
-    TALK_PREFIX, TALK_SCHEMA, Talk, check_actors, check_body, entry_commit, files, talks_matching,
-    talks_where,
+    ANSWERS, TALK_PREFIX, TALK_SCHEMA, Talk, check_actors, check_body, entry_commit, files,
+    split_values, talks_matching, talks_where,
 };
-use crate::change::Actor;
+use crate::change::{Actor, Chain, change_ref};
 use crate::clock::{now_rfc3339, unix_of};
+use crate::ids::is_change_id;
 use crate::registry::{KeyClass, Registry};
 use crate::repo::Repo;
 use crate::signing;
@@ -142,6 +146,7 @@ fn accept(repo: &Repo, registry: &Registry) -> Result<Outcome, String> {
         }
     }
     close_superseded(repo, &prefix, &key, &me, &mut outcome)?;
+    close_answered(repo, &prefix, &key, &me, &mut outcome)?;
     outcome.pushed = push_moved(repo, &prefix, &remote)?;
     Ok(outcome)
 }
@@ -236,6 +241,131 @@ fn close_superseded(
         }
     }
     Ok(())
+}
+
+/// G148: closes each acked, open delivery talk of this recipient about a change that a landing on
+/// trunk names (`Fixes:`, `Reverts:` or `Supersedes:`), as `answered`, naming the first such
+/// landing and its relation. Only the trunk this command already fetched is read; a talk whose
+/// change chain cannot be read here waits for a later accept.
+fn close_answered(
+    repo: &Repo,
+    prefix: &str,
+    key: &std::path::Path,
+    me: &Actor,
+    outcome: &mut Outcome,
+) -> Result<(), String> {
+    let talks = talks_matching(&repo.git, prefix)?;
+    let open: Vec<(&Talk, &str)> = talks
+        .iter()
+        .filter(|talk| talk.has("ack") && !talk.closed())
+        .filter_map(|talk| {
+            talk.about_change()
+                .filter(|change| is_change_id(change))
+                .map(|change| (talk, change))
+        })
+        .collect();
+    if open.is_empty() {
+        return Ok(());
+    }
+    let Ok(trunk) = repo
+        .git
+        .run(&["rev-parse", "--verify", "-q", &repo.trunk_tracking_ref()])
+    else {
+        return Ok(());
+    };
+    let mut answers: BTreeMap<&str, Option<Answer>> = BTreeMap::new();
+    for (talk, change) in open {
+        if !answers.contains_key(change) {
+            let found = answering_landing(repo, change, &trunk)?;
+            answers.insert(change, found);
+        }
+        let Some(Some(answer)) = answers.get(change) else {
+            continue;
+        };
+        let mut close = json!({"schema": TALK_SCHEMA, "entry": "close", "talk": talk.id,
+            "actor": {"name": me.name, "session": me.session}, "state": "answered",
+            "landing": answer.landing, "at": now_rfc3339()});
+        close[answer.relation] = json!(answer.by);
+        match append(repo, talk, &close, key, &me.name) {
+            Ok(()) => {
+                let mut closed = json!({"talk": talk.id, "state": "answered",
+                    "landing": answer.landing});
+                closed[answer.relation] = json!(answer.by);
+                outcome.closed.push(closed);
+            }
+            Err(why) => outcome.failed.push(json!({"talk": talk.id, "why": why})),
+        }
+    }
+    Ok(())
+}
+
+/// A landing that answers a change (G148).
+struct Answer {
+    /// The close field: `fixed_by`, `undone_by` or `superseded_by`.
+    relation: &'static str,
+    /// The answering change.
+    by: String,
+    /// Its publication commit.
+    landing: String,
+}
+
+/// The first executor-verified publication in `base_first..trunk` (first parent, oldest first)
+/// whose `Fixes:`, `Reverts:` or `Supersedes:` names `change`. The walk starts at the change's
+/// own `base_first`, since anything that names it landed after it did. `None` when none does, or
+/// when the change's chain cannot be read here.
+fn answering_landing(repo: &Repo, change: &str, trunk: &str) -> Result<Option<Answer>, String> {
+    let name = change_ref(change);
+    if repo.git.ref_target(&name).ok().flatten().is_none()
+        && repo.fetch_refs(std::slice::from_ref(&name)).is_err()
+    {
+        return Ok(None);
+    }
+    let Ok((_, record)) = Chain::new(&repo.git).read(change) else {
+        return Ok(None);
+    };
+    let mut shape = "--format=%H%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%cn".to_owned();
+    for (_, trailer) in ANSWERS {
+        let _ = write!(
+            shape,
+            "%x1f%(trailers:key={trailer},valueonly,separator=%x2c)"
+        );
+    }
+    shape.push_str("%x1e");
+    let log = repo
+        .git
+        .run(&[
+            "log",
+            "--first-parent",
+            "--reverse",
+            &shape,
+            &format!("{}..{trunk}", record.base_first),
+        ])
+        .map_err(|error| error.message())?;
+    for entry in log.split('\u{1e}') {
+        let fields: Vec<&str> = entry.trim().split('\u{1f}').map(str::trim).collect();
+        let [commit, by, registry_id, committer, named @ ..] = fields.as_slice() else {
+            continue;
+        };
+        let Some((relation, _)) = ANSWERS
+            .iter()
+            .zip(named)
+            .find(|(_, values)| split_values(values).iter().any(|value| value == change))
+            .map(|(answer, _)| *answer)
+        else {
+            continue;
+        };
+        if !is_change_id(by)
+            || !crate::publish::verify_publication(&repo.git, commit, registry_id, committer)
+        {
+            continue;
+        }
+        return Ok(Some(Answer {
+            relation,
+            by: (*by).to_owned(),
+            landing: (*commit).to_owned(),
+        }));
+    }
+    Ok(None)
 }
 
 /// Pushes every chain under `prefix` whose local tip is not the remote's. Whether all went.

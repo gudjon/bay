@@ -3,11 +3,41 @@
 //! The host hook sees a push; it does not see a local shell command. `bay hook pre-tool` judges
 //! a shell command an agent is about to run and denies only the shapes on this list. A normal
 //! push of `refs/bay/*` stays allowed: offline submission and the change ref need it.
+//!
+//! A shape is found behind the words that run another command (`env [VAR=x …]`, `xargs`,
+//! `sudo`, `command`, `exec`): Git is judged wherever it is a word of a simple command. It is
+//! also found in the script of a shell's `-c` (`bash -c '…'`, `sh -lc "…"`), read with the same
+//! tokenizer, and in a shell wrapper inside that one. bay never evaluates a shell: no
+//! expansion, no aliases, no `eval`. A script nested deeper than [`MAX_DEPTH`] is not read, and
+//! is denied when it mentions Git (fail closed).
 
-/// The reason a shell command is denied, or `None` when it may run. `trunk` is the trunk branch
+/// One denial: the deny-list shape the command matched, the shell wrapper it was found in, and
+/// the line the agent is told. `shape` and `wrapped` come from fixed lists, never from the
+/// command, so a record of them never holds the command text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Denial {
+    pub shape: &'static str,
+    pub wrapped: Option<&'static str>,
+    pub reason: String,
+}
+
+/// How many shell `-c` scripts deep bay reads: a wrapper and one wrapper inside it
+/// (`bash -c "sh -c '…'"`).
+pub const MAX_DEPTH: usize = 2;
+
+/// The shells whose `-c` script bay reads, each with the wrapper's name in a record.
+const SHELLS: [(&str, &str); 5] = [
+    ("bash", "bash -c"),
+    ("sh", "sh -c"),
+    ("zsh", "zsh -c"),
+    ("dash", "dash -c"),
+    ("ksh", "ksh -c"),
+];
+
+/// Why a shell command is denied, or `None` when it may run. `trunk` is the trunk branch
 /// name; `current` is the branch checked out where the command runs, if any.
 #[must_use]
-pub fn denied(command: &str, trunk: &str, current: Option<&str>) -> Option<String> {
+pub fn denied(command: &str, trunk: &str, current: Option<&str>) -> Option<Denial> {
     denied_with(command, Trunk::Named(trunk), current)
 }
 
@@ -20,10 +50,104 @@ enum Trunk<'a> {
     Unknown,
 }
 
-fn denied_with(command: &str, trunk: Trunk<'_>, current: Option<&str>) -> Option<String> {
+fn denied_with(command: &str, trunk: Trunk<'_>, current: Option<&str>) -> Option<Denial> {
+    denied_in(command, trunk, current, 0)
+}
+
+/// [`denied_with`] for a command `depth` shell scripts deep.
+fn denied_in(
+    command: &str,
+    trunk: Trunk<'_>,
+    current: Option<&str>,
+    depth: usize,
+) -> Option<Denial> {
     simple_commands(command)
         .into_iter()
-        .find_map(|words| denied_simple(&words, trunk, current))
+        .find_map(|words| denied_simple(&words, trunk, current, depth))
+}
+
+/// One simple command: its Git, then each shell `-c` script among its words. A denial found in
+/// a script names the outermost wrapper.
+fn denied_simple(
+    words: &[String],
+    trunk: Trunk<'_>,
+    current: Option<&str>,
+    depth: usize,
+) -> Option<Denial> {
+    if let Some(denial) = denied_git(words, trunk, current) {
+        return Some(denial);
+    }
+    shell_scripts(words).into_iter().find_map(|(wrapper, script)| {
+        let denial = if depth < MAX_DEPTH {
+            denied_in(script, trunk, current, depth + 1)?
+        } else if script.to_ascii_lowercase().contains("git") {
+            Denial {
+                shape: "nested too deep",
+                wrapped: None,
+                reason: format!(
+                    "bay denies Git inside shell wrappers nested more than {MAX_DEPTH} deep in an agent shell; run it with fewer"
+                ),
+            }
+        } else {
+            return None;
+        };
+        Some(Denial {
+            wrapped: Some(wrapper),
+            ..denial
+        })
+    })
+}
+
+/// Every word of a shell `command`, read with the deny list's tokenizer: the words of each simple
+/// command and of each shell `-c` script among them, [`MAX_DEPTH`] scripts deep (plan H2). The
+/// claims judgement (`crate::claims`, G101) looks for a path among them.
+#[must_use]
+pub fn words(command: &str) -> Vec<String> {
+    let mut all = Vec::new();
+    words_in(command, 0, &mut all);
+    all
+}
+
+fn words_in(command: &str, depth: usize, all: &mut Vec<String>) {
+    for words in simple_commands(command) {
+        if depth < MAX_DEPTH {
+            for (_, script) in shell_scripts(&words) {
+                words_in(script, depth + 1, all);
+            }
+        }
+        all.extend(words);
+    }
+}
+
+/// The `-c` scripts of the shells among `words`, each with its wrapper's name: `bash -c '…'`,
+/// `sh -lc "…"`, `bash --norc -c '…'`, also after `env`, `xargs` or `sudo`. The script is the
+/// first word after the shell's options when one of them holds `c`.
+fn shell_scripts(words: &[String]) -> Vec<(&'static str, &str)> {
+    let mut scripts = Vec::new();
+    for (at, word) in words.iter().enumerate() {
+        let stem = command_stem(word);
+        let Some((_, wrapper)) = SHELLS
+            .iter()
+            .find(|(shell, _)| stem.eq_ignore_ascii_case(shell))
+        else {
+            continue;
+        };
+        let mut script_follows = false;
+        for next in &words[at + 1..] {
+            if next.starts_with("--") {
+                continue;
+            }
+            if let Some(flags) = next.strip_prefix('-') {
+                script_follows |= flags.contains('c');
+                continue;
+            }
+            if script_follows {
+                scripts.push((*wrapper, next.as_str()));
+            }
+            break;
+        }
+    }
+    scripts
 }
 
 /// Splits a command line at `&&`, `||`, `;`, `|` and newlines into words, honouring simple
@@ -63,12 +187,11 @@ fn simple_commands(command: &str) -> Vec<Vec<String>> {
     commands
 }
 
-/// Whether `word` runs Git: its base name, after the last `/` or `\`, is `git`, or `git` with
-/// an extension a Windows shell runs (`.exe`, `.cmd`, `.bat`, `.com`), in any case. A
-/// case-insensitive file system runs `GIT` as `git`; denying more is the fail-closed side.
-fn is_git(word: &str) -> bool {
+/// The command a word runs: its base name, after the last `/` or `\`, without an extension a
+/// Windows shell runs (`.exe`, `.cmd`, `.bat`, `.com`, in any case).
+fn command_stem(word: &str) -> &str {
     let base = word.rsplit(['/', '\\']).next().unwrap_or(word);
-    let stem = match base.rsplit_once('.') {
+    match base.rsplit_once('.') {
         Some((stem, extension))
             if ["exe", "cmd", "bat", "com"]
                 .iter()
@@ -77,11 +200,16 @@ fn is_git(word: &str) -> bool {
             stem
         }
         _ => base,
-    };
-    stem.eq_ignore_ascii_case("git")
+    }
 }
 
-fn denied_simple(words: &[String], trunk: Trunk<'_>, current: Option<&str>) -> Option<String> {
+/// Whether `word` runs Git: its command stem is `git`, in any case. A case-insensitive file
+/// system runs `GIT` as `git`; denying more is the fail-closed side.
+fn is_git(word: &str) -> bool {
+    command_stem(word).eq_ignore_ascii_case("git")
+}
+
+fn denied_git(words: &[String], trunk: Trunk<'_>, current: Option<&str>) -> Option<Denial> {
     let git = words.iter().position(|word| is_git(word))?;
     // Skip git's own options (`-C <dir>`, `-c key=value`, `--git-dir=…`) to the subcommand.
     let mut rest = words[git + 1..].iter().peekable();
@@ -96,10 +224,12 @@ fn denied_simple(words: &[String], trunk: Trunk<'_>, current: Option<&str>) -> O
     }
     let args: Vec<&str> = rest.map(String::as_str).collect();
     let has = |flag: &str| args.contains(&flag);
-    let deny = |shape: &str| {
-        Some(format!(
-            "bay denies `{shape}` in an agent shell (DESIGN § 11)"
-        ))
+    let deny = |shape: &'static str| {
+        Some(Denial {
+            shape,
+            wrapped: None,
+            reason: format!("bay denies `{shape}` in an agent shell (DESIGN § 11)"),
+        })
     };
     match subcommand? {
         "reset" if has("--hard") => deny("git reset --hard"),
@@ -119,7 +249,14 @@ fn denied_simple(words: &[String], trunk: Trunk<'_>, current: Option<&str>) -> O
     }
 }
 
-fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option<String> {
+fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option<Denial> {
+    let denial = |shape: &'static str, reason: String| {
+        Some(Denial {
+            shape,
+            wrapped: None,
+            reason,
+        })
+    };
     let force = args.iter().any(|arg| {
         *arg == "-f"
             || *arg == "--force"
@@ -129,10 +266,14 @@ fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option
         .iter()
         .any(|arg| !arg.starts_with('-') && arg.starts_with('+'));
     if force {
-        return Some("bay denies a force-push from an agent shell (DESIGN § 11)".to_owned());
+        return denial(
+            "git push --force",
+            "bay denies a force-push from an agent shell (DESIGN § 11)".to_owned(),
+        );
     }
     if args.iter().any(|arg| *arg == "--all" || *arg == "--mirror") {
-        return Some(
+        return denial(
+            "git push --all",
             "bay denies pushing every branch, trunk with them, from an agent shell".to_owned(),
         );
     }
@@ -150,11 +291,15 @@ fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option
                     refspec
                         .rsplit(':')
                         .next()
-                        .is_some_and(|destination| destination.starts_with("refs/bay/"))
+                        .is_some_and(|destination| destination.starts_with(crate::names::BAY))
                 });
-            return (!only_bay).then(|| {
-                "bay cannot tell this repository's trunk (CONFIG_MISSING: no git config bay.trunk and no remote default branch), so it denies a push that could be of trunk from an agent shell".to_owned()
-            });
+            if only_bay {
+                return None;
+            }
+            return denial(
+                "git push, trunk unknown",
+                "bay cannot tell this repository's trunk (CONFIG_MISSING: no git config bay.trunk and no remote default branch), so it denies a push that could be of trunk from an agent shell".to_owned(),
+            );
         }
     };
     let pushes_trunk = |refspec: &str| {
@@ -168,15 +313,20 @@ fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option
     } else {
         refspecs.iter().any(|refspec| pushes_trunk(refspec))
     };
-    trunk_push.then(|| {
-        format!("bay denies a push of trunk ({trunk}) from an agent shell; bay publishes trunk")
-    })
+    if !trunk_push {
+        return None;
+    }
+    denial(
+        "git push of trunk",
+        format!("bay denies a push of trunk ({trunk}) from an agent shell; bay publishes trunk"),
+    )
 }
 
 /// `bay hook <event>` for the shell deny list: a `pre-tool` event on Claude Code's `Bash` tool.
-/// Returns the deny reason, or `None` to allow.
+/// Returns the denial, or `None` to allow. The payload was read by the caller (G59): one this
+/// cannot read is never judged here.
 #[must_use]
-pub fn judge_hook(event: &str, input: &str, dir: &std::path::Path) -> Option<String> {
+pub fn judge_hook(event: &str, input: &str, dir: &std::path::Path) -> Option<Denial> {
     if event != "pre-tool" {
         return None;
     }
@@ -256,6 +406,98 @@ mod tests {
     fn a_bare_push_from_trunk_is_a_push_of_trunk() {
         assert!(denied("git push", "main", Some("main")).is_some());
         assert!(denied("git push", "main", Some("topic")).is_none());
+    }
+
+    /// Plan H2: each wrapper of a shape is the same shape, named with the outermost shell
+    /// wrapper; the words that run another command are not wrappers in the record.
+    #[test]
+    fn a_wrapped_shape_is_the_same_shape() {
+        for (command, shape, wrapped) in [
+            (
+                "bash -c 'git reset --hard'",
+                "git reset --hard",
+                Some("bash -c"),
+            ),
+            ("sh -c \"git push -f\"", "git push --force", Some("sh -c")),
+            (
+                "/usr/bin/bash -lc 'git clean -f'",
+                "git clean -f",
+                Some("bash -c"),
+            ),
+            (
+                "BASH.EXE -c 'git branch -D x'",
+                "git branch -D",
+                Some("bash -c"),
+            ),
+            (
+                "zsh --no-rcs -c 'git restore .'",
+                "git restore .",
+                Some("zsh -c"),
+            ),
+            (
+                "env A=1 B=2 git push origin main",
+                "git push of trunk",
+                None,
+            ),
+            ("xargs -0 git checkout .", "git checkout .", None),
+            ("sudo -E git reset --hard", "git reset --hard", None),
+            ("command git push --all", "git push --all", None),
+            ("exec git push --mirror", "git push --all", None),
+            (
+                "bash -c \"env git push origin main\"",
+                "git push of trunk",
+                Some("bash -c"),
+            ),
+            (
+                "sudo sh -c 'xargs git clean -fd'",
+                "git clean -f",
+                Some("sh -c"),
+            ),
+            (
+                "bash -c \"sh -c 'git reset --hard'\"",
+                "git reset --hard",
+                Some("bash -c"),
+            ),
+            (
+                "ls; bash -c 'cd x || git push -f'",
+                "git push --force",
+                Some("bash -c"),
+            ),
+        ] {
+            let denial = denied(command, "main", Some("topic"))
+                .unwrap_or_else(|| panic!("{command} was allowed"));
+            assert_eq!(denial.shape, shape, "{command}");
+            assert_eq!(denial.wrapped, wrapped, "{command}");
+        }
+    }
+
+    #[test]
+    fn a_wrapped_ordinary_command_runs() {
+        for command in [
+            "bash -c 'git status'",
+            "sh -c 'echo done > notes.txt' && true",
+            "bash -c \"git push origin refs/bay/changes/abcd2345\"",
+            "env GIT_TRACE=1 git log",
+            "xargs git add",
+            "bash script.sh -c",
+            "bash -c",
+            "sh -c 'sh -c \"ls\"'",
+        ] {
+            assert!(
+                denied(command, "main", Some("topic")).is_none(),
+                "{command}"
+            );
+        }
+    }
+
+    /// Past [`super::MAX_DEPTH`] scripts bay does not read on: a mention of Git is denied.
+    #[test]
+    fn a_wrapper_nested_too_deep_is_denied_when_it_mentions_git() {
+        let deep = "bash -c \"sh -c 'bash -c git-status'\"";
+        let denial = denied(deep, "main", Some("topic")).unwrap();
+        assert_eq!(denial.shape, "nested too deep");
+        assert_eq!(denial.wrapped, Some("bash -c"));
+        assert!(denied("bash -c \"sh -c 'bash -c ls'\"", "main", Some("topic")).is_none());
     }
 
     /// Plan W1: a Windows shell runs Git as `git`, `git.exe` or `git.cmd`, by any case and by a

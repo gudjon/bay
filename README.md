@@ -91,7 +91,7 @@ machine that hosts a trunk with `bay host init`. `bay doctor` names any floor a 
 | **A retry never lands twice** | Every operation has an id. A lost reply is reconciled, never sent again as a second landing. |
 | **Stale work is stopped, and repair stays open** | When something your work depends on lands, bay tells you what changed. This covers the declared and observed inputs, and bay states its coverage. You can still edit; you cannot land until you check again. |
 | **Every refusal says what to do next** | A stable reason, what you can still do, and when to retry. |
-| **A view costs what the task reads** | Only the files you named, over one shared cache per machine. This holds for a warm cache; build outputs, fixtures and broad searches can still cost more. |
+| **A view costs what the task reads** | Only the files you named. Views share the objects of one blob-less clone per machine, which you create (`git clone --filter=blob:none`). This holds for a warm cache; build outputs, fixtures and broad searches can still cost more. |
 | **Git stays the only store** | Changes, evidence and events are Git commits, notes and refs. You can read and recover them with ordinary Git. |
 
 Each promise has a failure test that must pass before bay calls it done.

@@ -17,7 +17,9 @@
 //! only `who` acks, backbriefs and closes; only `who` or `decides` answers a discovery talk, and a
 //! second, different answer names the standing one in `supersedes` or is `TALK_ANSWER_CONFLICT`;
 //! only the sender (or `decides`) supersedes a talk, and the recipient's accept closes the
-//! superseded one as `superseded`, naming its successor. One sender holds at most
+//! superseded one as `superseded`, naming its successor. A delivery talk about a change closes as
+//! `answered` once a landing that names the change (`Fixes:`, `Reverts:` or `Supersedes:`) is on
+//! trunk, naming that landing (G148). One sender holds at most
 //! [`BAY_TALK_OPEN_MAX`] open talks to one recipient.
 //!
 //! Delivery is the recipient's fetch and accept ([`receive`]), which any fetching bay command on
@@ -27,6 +29,7 @@
 
 mod accept;
 mod judge;
+mod lander;
 mod send;
 
 pub use accept::receive;
@@ -46,7 +49,7 @@ use crate::registry::{KeyClass, REGISTRY_REF, Registry};
 use crate::result::{BayResult, Reason};
 use crate::signing::Signer;
 
-pub const TALK_PREFIX: &str = "refs/bay/talk/";
+pub const TALK_PREFIX: &str = crate::names::TALK;
 pub const TALK_SCHEMA: &str = "bay.talk/1";
 pub const TALK_FILE: &str = "talk.json";
 pub const ENTRIES_DIR: &str = "entries";
@@ -139,7 +142,24 @@ const ENTRY_FIELDS: [(&str, &[&str]); 4] = [
         ],
     ),
     ("answer", &["value", "supersedes"]),
-    ("close", &["state", "by"]),
+    (
+        "close",
+        &[
+            "state",
+            "by",
+            "fixed_by",
+            "undone_by",
+            "superseded_by",
+            "landing",
+        ],
+    ),
+];
+/// How a landing answers a delivery talk about a change (G148): each close field and the
+/// publication trailer that names the change.
+pub(crate) const ANSWERS: [(&str, &str); 3] = [
+    ("fixed_by", "Fixes"),
+    ("undone_by", "Reverts"),
+    ("superseded_by", "Supersedes"),
 ];
 const ENTRY_COMMON: [&str; 5] = ["schema", "entry", "talk", "actor", "at"];
 
@@ -650,6 +670,14 @@ impl Talk {
         self.body["supersedes"].as_str()
     }
 
+    /// The change a delivery talk asks about, if it names one (G148).
+    #[must_use]
+    pub fn about_change(&self) -> Option<&str> {
+        (self.body["kind"] == "delivery")
+            .then(|| self.body["change"].as_str())
+            .flatten()
+    }
+
     /// The `follow_up` the talk owes now: the latest backbrief's, or the body's.
     ///
     /// # Errors
@@ -722,6 +750,28 @@ impl Talk {
             .map_err(|error| error.message())?;
         Ok(Some((commit, value)))
     }
+}
+
+/// The values of trailer `key` on `commit`.
+pub(crate) fn trailer_values(git: &Git, commit: &str, key: &str) -> Result<Vec<String>, String> {
+    let text = git
+        .run(&[
+            "log",
+            "-1",
+            &format!("--format=%(trailers:key={key},valueonly,separator=%x2c)"),
+            commit,
+        ])
+        .map_err(|error| error.message())?;
+    Ok(split_values(&text))
+}
+
+/// A `separator=%x2c` trailer list, one value each.
+pub(crate) fn split_values(text: &str) -> Vec<String> {
+    text.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// The talks whose refs match `pattern` (a `for-each-ref` pattern).

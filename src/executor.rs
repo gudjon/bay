@@ -37,6 +37,9 @@ use crate::signing::Keys;
 
 #[must_use]
 pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
+    if let Some(refusal) = below_floor(dir) {
+        return refusal;
+    }
     // The supervisor's own sightings of queue heads, on its monotonic clock (§ 6).
     let mut heads: HashMap<u64, Instant> = HashMap::new();
     let binary = Binary::now();
@@ -72,6 +75,23 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         crate::coord::after_command();
         std::thread::sleep(interval);
     }
+}
+
+/// The executor's Git floor (`GIT-FEATURES` § 1, G68): below it the executor refuses with
+/// `GIT_BELOW_FLOOR` before it fetches or claims anything. A Git that cannot report its version
+/// is left to the first Git call, which fails with its own message.
+fn below_floor(dir: &Path) -> Option<BayResult> {
+    use crate::version::{GIT_FLOOR_EXECUTOR, Version};
+    let line = crate::git::Git::new(dir).version().ok()?;
+    let version = Version::parse(&line);
+    (version < Version::parse(GIT_FLOOR_EXECUTOR)).then(|| {
+        BayResult::blocked(crate::result::Reason::GitBelowFloor).with_detail(json!({
+            "role": "executor",
+            "version": version.to_string(),
+            "floor": GIT_FLOOR_EXECUTOR,
+            "recovery": "upgrade git",
+        }))
+    })
 }
 
 /// The running binary as it was at start: its path and what identifies the file there.

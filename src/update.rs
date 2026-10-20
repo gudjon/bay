@@ -14,11 +14,12 @@
 //! A miss anywhere leaves the old binary byte-identical (G50).
 //!
 //! A release is `bay-<target>.tar.gz` per platform, `VERSION`, `SHA256SUMS` over both, and
-//! `SHA256SUMS.sig`: an SSH signature by the release key, principal and namespace
+//! `SHA256SUMS.sig`: an SSH signature by one of the release keys, principal and namespace
 //! `bay-release`. The signed sums cover `VERSION`, so an older signed release cannot stand in
 //! for the target.
 
 use std::cmp::Ordering;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -31,9 +32,17 @@ use crate::git;
 use crate::result::{BayResult, Decision, Reason};
 use crate::version::BAY;
 
-/// The public half of the bay release key. `SHA256SUMS.sig` must verify against it.
-pub const RELEASE_KEY: &str =
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPnvMnsFVUR3lBcKXj2PkjHH3mIDFHKl2/Ov/lgVHMM7";
+/// The public halves of the bay release keys. `SHA256SUMS.sig` must verify against one of them
+/// (G151): a rollover lists the old and the new key for a stated transition, and a later
+/// release drops the old one. A key may be a hardware key (`sk-ssh-ed25519@openssh.com`, or
+/// `sk-ecdsa-sha2-nistp256@openssh.com` for one held in a secure enclave).
+/// `scripts/release/allowed_signers` lists the same keys.
+pub const RELEASE_KEYS: &[&str] = &[
+    // The release key 0.1.1-0.1.4 are signed with; dropped by a later release.
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPnvMnsFVUR3lBcKXj2PkjHH3mIDFHKl2/Ov/lgVHMM7",
+    // The hardware-held release key (SHA256:esVZKU2sltI199RAoWUorTk/Bw6t02pPUfHnNy3OFj0).
+    "sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNhLXNoYTItbmlzdHAyNTZAb3BlbnNzaC5jb20AAAAIbmlzdHAyNTYAAABBBKhWxaQcv6q6F/FeEpLS8mDAnee+kArl4ZD9eoNC96RnbV+BxgA+VPEaaTgnguJTxEc5gta4F4h4v3h/sfrT00UAAAAEc3NoOg==",
+];
 const PRINCIPAL: &str = "bay-release";
 const RELEASES: &str = "https://github.com/gudjon/bay/releases";
 const RELEASE_LIST: &str = "https://api.github.com/repos/gudjon/bay/releases?per_page=100&page=";
@@ -48,36 +57,39 @@ pub struct Request {
     pub check: bool,
 }
 
-/// Where releases come from, and the key they must verify against.
+/// Where releases come from, and the keys they must verify against.
 struct Source {
     /// The list's URL up to its page number, and what follows the number.
     list: (String, String),
     download: String,
-    key: String,
+    keys: Vec<String>,
     https_only: bool,
 }
 
 impl Source {
     /// The public releases. A build that `scripts/release.sh` did not make (`BAY_RELEASE_VERSION`
-    /// unset) also honours `BAY_TEST_RELEASE_URL` and `BAY_TEST_RELEASE_KEY`, for G50's fixture;
-    /// a release build never does.
+    /// unset) also honours `BAY_TEST_RELEASE_URL` and `BAY_TEST_RELEASE_KEY` (one key per line),
+    /// for G50's fixture; a release build never does.
     fn current() -> Self {
         let test = option_env!("BAY_RELEASE_VERSION").is_none();
-        let key = std::env::var("BAY_TEST_RELEASE_KEY")
+        let keys = std::env::var("BAY_TEST_RELEASE_KEY")
             .ok()
             .filter(|_| test)
-            .unwrap_or_else(|| RELEASE_KEY.to_owned());
+            .map_or_else(
+                || RELEASE_KEYS.iter().map(|key| (*key).to_owned()).collect(),
+                |keys| key_lines(&keys),
+            );
         match std::env::var("BAY_TEST_RELEASE_URL").ok().filter(|_| test) {
             Some(base) => Self {
                 list: (format!("{base}/releases-"), ".json".to_owned()),
                 download: format!("{base}/download"),
-                key,
+                keys,
                 https_only: false,
             },
             None => Self {
                 list: (RELEASE_LIST.to_owned(), String::new()),
                 download: format!("{RELEASES}/download"),
-                key,
+                keys,
                 https_only: true,
             },
         }
@@ -101,6 +113,25 @@ impl Source {
             ))
         }
     }
+}
+
+/// The keys of a test key list, one per line; blank lines are skipped.
+fn key_lines(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The allowed-signers file for `keys`: one line per key, each under the principal
+/// `bay-release`, so a release signed by any listed key verifies (G151).
+#[must_use]
+pub fn allowed_signers(keys: &[String]) -> String {
+    keys.iter().fold(String::new(), |mut file, key| {
+        let _ = writeln!(file, "{PRINCIPAL} {key}");
+        file
+    })
 }
 
 /// This platform's release target, as `scripts/release.sh` names its archives.
@@ -415,11 +446,11 @@ fn download_verified(source: &Source, plan: &Plan, tmp: &Path) -> Result<Vec<u8>
     let signature = read(&get("SHA256SUMS.sig").map_err(|why| plan.unverified(why))?)?;
     let version = read(&get("VERSION").map_err(|why| plan.unverified(why))?)?;
     let allowed = tmp.join("allowed_signers");
-    std::fs::write(&allowed, format!("{PRINCIPAL} {}\n", source.key))
+    std::fs::write(&allowed, allowed_signers(&source.keys))
         .map_err(|error| failed(error.to_string()))?;
     let signature = String::from_utf8_lossy(&signature);
     if !crate::signing::verify_data(&allowed, PRINCIPAL, PRINCIPAL, &sums, &signature) {
-        return Err(plan.unverified("SHA256SUMS does not verify against the bay release key"));
+        return Err(plan.unverified("SHA256SUMS does not verify against a bay release key"));
     }
     let sums = String::from_utf8_lossy(&sums);
     if sum_of(&sums, "VERSION") != Some(sha256(&version)) {
@@ -803,8 +834,92 @@ impl Drop for TempDir {
 
 #[cfg(test)]
 mod tests {
-    use super::{compare, sum_of, valid};
+    use super::{RELEASE_KEYS, TempDir, allowed_signers, compare, key_lines, sum_of, valid};
     use std::cmp::Ordering;
+    use std::process::Command;
+
+    /// A hardware key held in a secure enclave, as OpenSSH writes its public line
+    /// (`sk-ecdsa-sha2-nistp256@openssh.com`): a well-formed fixture with no device behind it.
+    const SK_ECDSA: &str = "sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNhLXNoYTItbmlzdHAyNTZAb3BlbnNzaC5jb20AAAAIbmlzdHAyNTYAAABBBGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfUAAAAEc3NoOg==";
+
+    #[test]
+    fn the_pinned_list_and_the_release_scripts_allowed_signers_agree() {
+        // scripts/release.sh verifies against this file; bay update against RELEASE_KEYS.
+        let file = include_str!("../scripts/release/allowed_signers");
+        let listed: Vec<String> = file
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let words: Vec<&str> = line.split_whitespace().collect();
+                assert_eq!(words[0], "bay-release", "{line}");
+                words[words.len() - 2..].join(" ")
+            })
+            .collect();
+        assert_eq!(listed, RELEASE_KEYS);
+    }
+
+    #[test]
+    fn ssh_keygen_takes_an_sk_ecdsa_allowed_signers_line() {
+        let keys = key_lines(&format!("{SK_ECDSA}\n"));
+        assert_eq!(keys, [SK_ECDSA]);
+        assert_eq!(allowed_signers(&keys), format!("bay-release {SK_ECDSA}\n"));
+
+        // A file key B signs; the list is [the enclave key, B]. ssh-keygen skips a line it
+        // cannot parse with "invalid key" and goes on, so a clean stderr is the format check.
+        let dir = TempDir::new(&std::env::temp_dir()).unwrap();
+        let key = dir.0.join("b");
+        let run = |cmd: &mut Command| {
+            let out = cmd.output().unwrap();
+            assert!(out.status.success(), "{cmd:?}: {out:?}");
+            out
+        };
+        run(Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+            .arg(&key));
+        let data = dir.0.join("data");
+        std::fs::write(&data, "sums\n").unwrap();
+        run(Command::new("ssh-keygen")
+            .args(["-Y", "sign", "-q", "-n", "bay-release", "-f"])
+            .arg(&key)
+            .arg(&data));
+        let public = std::fs::read_to_string(key.with_extension("pub")).unwrap();
+        let b: String = public
+            .split_whitespace()
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(" ");
+        let allowed = dir.0.join("allowed_signers");
+        std::fs::write(&allowed, allowed_signers(&[SK_ECDSA.to_owned(), b])).unwrap();
+        let out = run(Command::new("ssh-keygen")
+            .args([
+                "-Y",
+                "verify",
+                "-n",
+                "bay-release",
+                "-I",
+                "bay-release",
+                "-f",
+            ])
+            .arg(&allowed)
+            .arg("-s")
+            .arg(dir.0.join("data.sig"))
+            .stdin(std::fs::File::open(&data).unwrap()));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("invalid key"), "{stderr}");
+    }
+
+    #[test]
+    fn every_listed_key_gets_its_own_allowed_signers_line() {
+        // A hardware key's public line, as `ssh-keygen -t ed25519-sk` writes one; no device is
+        // needed to list it.
+        let sk = "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDgOPZsmzgIilFlX+FEXSGHrntiIAzexLc6I0f+I9/4qAAAAD3NzaDpiYXktcmVsZWFzZQ==";
+        let keys = key_lines(&format!("{}\n\n  {sk}  \n", RELEASE_KEYS[0]));
+        assert_eq!(keys, [RELEASE_KEYS[0], sk]);
+        assert_eq!(
+            allowed_signers(&keys),
+            format!("bay-release {}\nbay-release {sk}\n", RELEASE_KEYS[0])
+        );
+    }
 
     #[test]
     fn versions_order_like_semver() {

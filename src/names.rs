@@ -5,6 +5,44 @@
 //! characters, never `/`. So no bay ref is a directory of another (Git refuses a ref that is
 //! also a directory of another, on both backends), and `<producer>/<id>` parses at its one `/`.
 
+// Every bay ref namespace is spelled here and nowhere else (G103): other modules build their
+// names from these constants.
+
+/// Every bay ref but the evidence notes.
+pub const BAY: &str = "refs/bay/";
+/// bay's notes refs.
+pub const NOTES: &str = "refs/notes/bay/";
+/// `refs/notes/bay/evidence/<producer>`: evidence records, one notes ref per producer.
+pub const EVIDENCE: &str = "refs/notes/bay/evidence/";
+/// `refs/bay/changes/<Change-Id>`: a change chain.
+pub const CHANGES: &str = "refs/bay/changes/";
+/// `refs/bay/requests/<Change-Id>`: the agent-signed requests of a change.
+pub const REQUESTS: &str = "refs/bay/requests/";
+/// `refs/bay/landed/<Change-Id>`: a change's landing marker.
+pub const LANDED: &str = "refs/bay/landed/";
+/// `refs/bay/intent/<hash>/<generation>`: an intent claim.
+pub const INTENT: &str = "refs/bay/intent/";
+/// `refs/bay/landed-intent/<hash>/<generation>`: a landed intent claim.
+pub const LANDED_INTENT: &str = "refs/bay/landed-intent/";
+/// `refs/bay/landed-index/<shard>`: compacted landing markers (ruling R11).
+pub const LANDED_INDEX: &str = "refs/bay/landed-index/";
+/// `refs/bay/queue/<n>`: the publication queue.
+pub const QUEUE: &str = "refs/bay/queue/";
+/// `refs/bay/queue-done/<shard>`: finished queue places.
+pub const QUEUE_DONE: &str = "refs/bay/queue-done/";
+/// `refs/bay/live/<machine>`: a machine's live summary.
+pub const LIVE: &str = "refs/bay/live/";
+/// `refs/bay/log/<name>`: an event log.
+pub const LOG: &str = "refs/bay/log/";
+/// `refs/bay/talk/<agent>/<id>`: talks.
+pub const TALK: &str = "refs/bay/talk/";
+/// `refs/bay/fleet/<machine>`: `bay status`'s copy of the remote's live refs.
+pub const FLEET: &str = "refs/bay/fleet/";
+/// `refs/bay/fetch/<Change-Id>`: a fetched remote chain, local only.
+pub const FETCH: &str = "refs/bay/fetch/";
+/// The enrolment registry.
+pub const REGISTRY: &str = "refs/bay/registry";
+
 /// Validates a producer, executor or machine name.
 ///
 /// # Errors
@@ -102,6 +140,29 @@ pub fn bay_ref(name: &str) -> Result<(), String> {
     }
 }
 
+/// Where an executor holds an operation's in-flight objects (G173). Local to the executor's
+/// store and never pushed: [`bay_ref`] does not know the namespace, so the host hook refuses
+/// it as an unknown one, and no ref of it is a directory of a pushable bay ref.
+pub const INFLIGHT_PREFIX: &str = "refs/bay/inflight/";
+
+/// The in-flight ref of the operation `op_id` (`<change id>.<n>`).
+///
+/// # Errors
+///
+/// `op_id` is not a change id, a `.` and an operation number.
+pub fn inflight_ref(op_id: &str) -> Result<String, String> {
+    let plain = op_id
+        .split_once('.')
+        .is_some_and(|(change, n)| crate::ids::is_change_id(change) && decimal(n));
+    if plain {
+        Ok(format!("{INFLIGHT_PREFIX}{op_id}"))
+    } else {
+        Err(format!(
+            "the operation id {op_id:?} is not <change id>.<operation number>"
+        ))
+    }
+}
+
 /// Whether some name in `names` is a directory prefix of another (`refs/x/a` and
 /// `refs/x/a/b`): such a set cannot exist at once.
 #[must_use]
@@ -146,6 +207,21 @@ mod tests {
         assert!(bay_ref("refs/bay/talk/agent-b/abcdefghijklmnop").is_ok());
         assert!(bay_ref("refs/bay/talk/agent-b/abcd2345").is_err());
         assert!(bay_ref("refs/bay/talk/Agent/abcdefghijklmnop").is_err());
+        // An in-flight ref is local only: as a pushed name it is an unknown namespace.
+        assert!(bay_ref("refs/bay/inflight/abcd2345.1").is_err());
+    }
+
+    #[test]
+    fn an_inflight_ref_is_named_by_its_op_id() {
+        use super::inflight_ref;
+        assert_eq!(
+            inflight_ref("abcd2345.1").unwrap(),
+            "refs/bay/inflight/abcd2345.1"
+        );
+        assert!(inflight_ref("abcd2345.01").is_err());
+        assert!(inflight_ref("abcd2345").is_err());
+        assert!(inflight_ref("abcd2345.1/x").is_err());
+        assert!(inflight_ref("ABCD2345.1").is_err());
     }
 
     #[test]

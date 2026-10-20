@@ -385,7 +385,8 @@ fn run_provider(
     if let Some(why) = sandbox.refusal {
         return Err(format!("the provider for {}: {why}", entry.name));
     }
-    let mut cmd = crate::check::sandboxed(sandbox.kind, &program, &args, &hidden, scratch);
+    // A provider has no network (G62): it answers from the tree alone.
+    let mut cmd = crate::check::sandboxed(sandbox.kind, &program, &args, &hidden, scratch, false);
     // The same fixed baseline as a check (`INTERFACES` § 7): nothing from the caller's
     // environment, so an answer depends on the entry and the tree alone.
     cmd.current_dir(&tree_dir)

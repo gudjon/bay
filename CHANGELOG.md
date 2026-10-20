@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.1.4
+Pre-release.
+
+Builds for Linux (x86_64 and aarch64, musl) and macOS. Apple silicon is tested; Intel (x86_64) is built but not yet run on an Intel Mac.
+
+Before you upgrade an executor: checks now run in an allow-list sandbox with no network. A check that reads outside its candidate and adapter now fails as `infra_failure`. List extra files in `[[check]] paths`. Set `network = true` in the base policy for a check that needs the network.
+
+Release keys
+- Added a second trusted release key, held in hardware, beside the current one. This release is signed by the current key.
+- Changed `bay update` to trust a list of release keys, so a key can roll over. A later release drops the old key.
+- Added a doctor `key-custody` row and `KEY_EXPOSED`. It flags a signing key that agent sessions on this account can read.
+- Added a `reviewer` key class. A `review` record verifies only against the reviewer file, and a reviewer key never signs a check.
+- Changed the registry read to refuse a reviewer name that is also a producer or an agent.
+
+Checks
+- Changed the check sandbox to an allow-list. A check sees its candidate, its adapter and system files, never `HOME` or `.git`.
+- Changed checks and input providers to run with no network unless `[[check]] network = true` says so at the base.
+- Added `stage = "post"` to `[[check]]`. A post-publication check never blocks a landing, and status shows it `pending` until its record arrives.
+- Added `when_paths` to `[[check]]`. The check runs only when the candidate's own diff touches a matching path.
+- Changed a policy or adapter change to require every check, whatever its `when_paths`. A skipped check is listed under `not_required`.
+- Added `producers` to `[[check]]`. A record from a producer the list leaves out does not count.
+- Added `bay.checkEnvironment`, the environments a box serves. An operation no box can serve waits with `CHECK_UNAVAILABLE`.
+- Added the adapter's `unavailable` answer. It writes no evidence and never counts toward a queue deadline.
+- Changed materialization in a blob-less clone to fetch all absent blobs in one batch, not one fetch per file.
+- Added `refs/bay/inflight/<op id>`, a local ref that keeps a candidate safe from maintenance until its operation ends. It is never pushed.
+
+Landing and history
+- Added `bay start <intent> --fixes <change>`. The landing carries a `Fixes:` trailer, and an unlanded target is `CHANGE_NOT_LANDED`.
+- Added `CHANGE_HELD`. A same-name `bay start` waits while another live session holds the change, instead of adopting it.
+- Added `EVIDENCE_WITHDRAWN`. A bay-hosted trunk refuses a notes push that drops or changes an earlier record.
+- Added `trust` (`unsigned` or `signed`) to the land result, check refusals and `bay status`.
+- Added `require_signed = true` to a completion profile. Then a dimension that rests only on unsigned records is `unknown`.
+
+Hooks and sessions
+- Added `HOOK_INPUT_INVALID`. The pre-tool hook denies a payload it cannot read.
+- Changed the shell deny list to catch denied Git commands inside `bash -c`, `sh -c`, `env`, `xargs`, `sudo` and `exec`.
+- Added `SHELL_DENIED` and Agent Hooks verdicts to session rows. A denied command is recorded by its shape, never its text.
+- Added `PATH_HELD`. Two sessions in one tree cannot overwrite each other's claimed paths; other views are never refused.
+- Changed `bay install` to write a 30-second timeout on the pre-tool hook, so a hung hook denies quickly.
+- Changed the installed hook command to exit 0 on a box without bay. Where bay is installed, its deny still blocks.
+- Changed views to hold `.claude/settings.json`, so a session started in a view runs bay's hooks.
+- Added draft checkpoints at `SessionEnd` and after an idle interval (`[hooks] checkpoint_idle_s`). A killed session loses at most one interval.
+- Added a `SessionStart` notice when the tree is behind trunk on its instruction files (`AGENTS.md`, `CLAUDE.md` by default).
+- Added a notice, given once, when a talk to the session's actor arrives.
+- Added `permission_mode` to session rows and the fleet map. bay's deny still holds under `bypassPermissions`.
+- Added `actor_source` to results and session rows, and `[agent] require_actor = true`, which refuses `ACTOR_UNNAMED`.
+
+Status, watch, talk and evidence
+- Added `bay status --stranded`: local branches and worktrees whose commits no remote holds. It reads only.
+- Added `bay status --lineage [<range>]`: the `Reverts:`, `Supersedes:` and `Fixes:` pairs on a trunk range.
+- Added `behind_commits` and `session_age_s` to each session in `bay status --fleet`.
+- Added `bay watch --landed`: landings after a cursor, each with its base, actor and time. Commits outside bay are marked.
+- Added `bay evidence missing --kind <k> --producer <p>`: trunk commits no record of that kind and producer covers.
+- Added `bay talk --to-change <change>`. It reaches the change's lander from bay's record, and refuses an `UNATTRIBUTED_LANDING`.
+- Added the `answered` talk close. A delivery talk closes when a fix, revert or supersede of its change lands.
+
+Doctor
+- Added `bay doctor --role executor`. It judges the box as an executor and exits 10 when a row is red.
+- Added doctor rows `agent-hooks`, `hook-overrides`, `repository`, `environments` and `config`.
+- Changed `bay executor run` to refuse with `GIT_BELOW_FLOOR` below Git 2.50.
+
+Configuration
+- Changed `.bay/policy.toml` to refuse an unknown key with `POLICY_INVALID`, naming the key, its table and its line.
+- Retired `[check] command` in `.bay/config.toml`. The policy names each check's command, and doctor lists the old key as ignored.
+
 ## 0.1.3
 Pre-release.
 

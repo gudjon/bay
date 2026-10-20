@@ -138,7 +138,7 @@ pub fn judge_update(
             "for-each-ref",
             "--count=1",
             "--format=%(refname)",
-            "refs/bay/landed/",
+            crate::names::LANDED,
             crate::compact::INDEX_PREFIX,
         ])?;
         if !landed.is_empty() {

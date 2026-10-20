@@ -4,9 +4,13 @@
 //! whose records verify (`AGENTS.md`).
 //!
 //! ```text
-//! gate_evidence record <producer> <key> <check> <environment>   a pass of <check> on HEAD's tree
+//! gate_evidence record <producer> <key> <check> <environment> [<sandbox>]
+//!                                         a pass of <check> on HEAD's tree, run under <sandbox>
 //! gate_evidence verify <allowed-signers> [<commit>] <check>...   every <check> has a verified pass
 //! ```
+//!
+//! `<sandbox>` is `bwrap` or `sandbox-exec`: the check sandbox the tests ran their sandbox
+//! cases in (the gate requires it where `bwrap` is present), named in the record.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -18,9 +22,13 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let git = Git::new(Path::new("."));
     let result = match args.first().map(String::as_str) {
-        Some("record") if args.len() == 5 => record(&git, &args[1], &args[2], &args[3], &args[4]),
+        Some("record") if args.len() == 5 || args.len() == 6 => record(
+            &git,
+            [&args[1], &args[2], &args[3], &args[4]],
+            args.get(5).map(String::as_str),
+        ),
         Some("verify") if args.len() >= 3 => verify(&git, &args[1], &args[2..]),
-        _ => Err("usage: gate_evidence record <producer> <key> <check> <environment> | verify <allowed-signers> [<commit>] <check>...".to_owned()),
+        _ => Err("usage: gate_evidence record <producer> <key> <check> <environment> [<sandbox>] | verify <allowed-signers> [<commit>] <check>...".to_owned()),
     };
     match result {
         Ok(text) => {
@@ -41,12 +49,15 @@ fn rev(git: &Git, name: &str) -> Result<String, String> {
 
 fn record(
     git: &Git,
-    producer: &str,
-    key: &str,
-    check: &str,
-    environment: &str,
+    [producer, key, check, environment]: [&str; 4],
+    sandbox: Option<&str>,
 ) -> Result<String, String> {
     bay::names::operator_name(producer)?;
+    if let Some(other) = sandbox.filter(|name| !matches!(*name, "bwrap" | "sandbox-exec")) {
+        return Err(format!(
+            "sandbox {other} is not one bay runs checks in (bwrap or sandbox-exec)"
+        ));
+    }
     let commit = rev(git, "HEAD")?;
     let tree = rev(git, "HEAD^{tree}")?;
     let base_tree = rev(git, "HEAD^^{tree}").unwrap_or_default();
@@ -76,7 +87,7 @@ fn record(
         why: None,
         units: Vec::new(),
         selection: None,
-        sandbox: None,
+        sandbox: sandbox.map(str::to_owned),
         seconds: None,
         signature: None,
         unknown: serde_json::Map::new(),

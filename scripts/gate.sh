@@ -40,11 +40,26 @@ test -z "$(git ls-files --others --exclude-standard -- '*.rs' Cargo.toml Cargo.l
 environment="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)-git$(git --version | awk '{print $3}')"
 notes="refs/notes/bay/evidence/$producer"
 
+# The check sandbox (G18, G62). On Linux with bwrap on PATH the gate exports
+# BAY_REQUIRE_SANDBOX=1, so every sandbox case runs: a bwrap that cannot run bay's sandbox fails
+# those cases instead of skipping them. The test records then name the sandbox they ran in.
+# On macOS the tests always run under sandbox-exec. Elsewhere the records name no sandbox.
+sandbox=
+if [ "$(uname -s)" = Linux ] && command -v bwrap >/dev/null 2>&1; then
+    export BAY_REQUIRE_SANDBOX=1
+    sandbox=bwrap
+elif [ "$(uname -s)" = Darwin ] && [ -x /usr/bin/sandbox-exec ]; then
+    sandbox=sandbox-exec
+fi
+
 run() {
     name=$1; shift
     echo "gate: $name" >&2
     "$@"
-    evidence record "$producer" "$key" "$name" "$environment" >/dev/null
+    case $name in
+        test-*) evidence record "$producer" "$key" "$name" "$environment" ${sandbox:+"$sandbox"} >/dev/null ;;
+        *) evidence record "$producer" "$key" "$name" "$environment" >/dev/null ;;
+    esac
 }
 
 run fmt cargo fmt --check

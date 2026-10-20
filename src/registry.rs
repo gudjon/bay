@@ -1,29 +1,40 @@
 //! The key registry (`DESIGN` § 10a, Registry encoding).
 //!
 //! `refs/bay/registry` is an append-only chain whose tree holds one OpenSSH `allowed_signers`
-//! file per key class: `agent`, `executor`, `producer`, `registry`. The class is the file:
-//! a verification names the file of the class it requires, so a key only in the agent file
-//! never verifies as an executor. A public key appears in exactly one file, each line has
-//! exactly one principal, and options or `cert-authority` lines are refused. Enrolment is
-//! plain Git: whoever runs the repository commits the files with a registry key and pushes.
+//! file per key class: `agent`, `executor`, `producer`, `reviewer`, `registry`. The class is
+//! the file: a verification names the file of the class it requires, so a key only in the
+//! agent file never verifies as an executor, and a `review` record verifies only against the
+//! reviewer file (ruled 2026-10-19, rulings-open-questions.md Q12). A public key appears in
+//! exactly one file, each line has exactly one principal, and options or `cert-authority`
+//! lines are refused. A reviewer name is neither a producer name (both write
+//! `refs/notes/bay/evidence/<name>`) nor an agent name (an author never reviews its own
+//! landing under one name, Q7). Enrolment is plain Git: whoever runs the repository commits
+//! the files with a registry key and pushes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::git::{Git, GitError};
 
-pub const REGISTRY_REF: &str = "refs/bay/registry";
+pub const REGISTRY_REF: &str = crate::names::REGISTRY;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyClass {
     Agent,
     Executor,
     Producer,
+    Reviewer,
     Registry,
 }
 
 impl KeyClass {
-    pub const ALL: [Self; 4] = [Self::Agent, Self::Executor, Self::Producer, Self::Registry];
+    pub const ALL: [Self; 5] = [
+        Self::Agent,
+        Self::Executor,
+        Self::Producer,
+        Self::Reviewer,
+        Self::Registry,
+    ];
 
     #[must_use]
     pub const fn file(self) -> &'static str {
@@ -31,6 +42,7 @@ impl KeyClass {
             Self::Agent => "agent",
             Self::Executor => "executor",
             Self::Producer => "producer",
+            Self::Reviewer => "reviewer",
             Self::Registry => "registry",
         }
     }
@@ -42,6 +54,7 @@ impl KeyClass {
             Self::Agent => "bay-agent",
             Self::Executor => "bay-executor",
             Self::Producer => "bay-producer",
+            Self::Reviewer => "bay-reviewer",
             Self::Registry => "bay-registry",
         }
     }
@@ -69,7 +82,8 @@ impl Registry {
     ///
     /// # Errors
     ///
-    /// A git fault, or a registry that breaks a line rule or puts one key in two places.
+    /// A git fault, or a registry that breaks a line rule, puts one key in two places, or
+    /// enrols a reviewer name as a producer or an agent too.
     pub fn load_at(git: &Git, commit: &str) -> Result<Self, String> {
         let mut files = HashMap::new();
         for class in KeyClass::ALL {
@@ -132,6 +146,18 @@ impl Registry {
                     ));
                 }
                 seen.insert(key, (class, (*principal).to_owned()));
+                // Q12 rule 4: a reviewer and a producer share the evidence-ref namespace. Q7: one
+                // name as author and reviewer could review its own landing.
+                if class == KeyClass::Reviewer {
+                    for other in [KeyClass::Producer, KeyClass::Agent] {
+                        if self.enrols(other, principal) {
+                            return Err(format!(
+                                "{where_}: reviewer {principal} is also enrolled in {}; a reviewer name is never a producer or an agent name",
+                                other.file()
+                            ));
+                        }
+                    }
+                }
             }
         }
         Ok(())

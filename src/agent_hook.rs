@@ -2,20 +2,24 @@
 //!
 //! One entry, [`dispatch`], maps a hook's stdin to bay's events and runs what bay does there:
 //! the session work record of every probed event in a repository but pre-tool
-//! (`session::record`), the compact state at `session-start`, at `pre-tool` the shell deny list
-//! (G39) and the stale-write judgement of an edit tool against the coordination cache
-//! (`crate::coord`, G8, G23), the stop refusal at `stop` (ruling R7), and at `post-tool` and
+//! (`session::record`), the compact state at `session-start`, at `pre-tool` the claims of other
+//! sessions in the same tree (`crate::claims`, G101), the shell deny list (G39) and the
+//! stale-write judgement of an edit tool against the coordination cache (`crate::coord`, G8,
+//! G23), the stop refusal at `stop` (ruling R7), and at `post-tool` and
 //! `user-prompt-submit` the notices of the session's change (`crate::notice`, R6). The adapter
 //! relies only on the payload shapes recorded in `tests/fixtures/claude-code-2.1.302`: an event
 //! with no recorded payload has no behaviour (ruling R16), and a field the recordings do not
 //! show is never read: an edit tool's target is `tool_input.file_path`, the field fixture 03
-//! shows. A hook never blocks the session except by the deny exit, the stale-write refusal and
-//! the one stop refusal, so every other outcome exits 0.
+//! shows. A hook never blocks the session except by the deny exit, a held path's deny, the
+//! stale-write refusal, the
+//! one stop refusal and a `pre-tool` payload it cannot read (`HOOK_INPUT_INVALID`, ruling R-H1,
+//! G59), so every other outcome exits 0: the events that only record allow an unreadable one.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use crate::result::Reason;
 use crate::session::SessionId;
 
 /// A Claude Code hook event, by the payload's `hook_event_name`.
@@ -124,6 +128,13 @@ pub struct Payload {
     /// A `Stop` payload's `stop_hook_active`: the product already continued the session once
     /// for a stop hook.
     pub stop_hook_active: Option<bool>,
+    /// The targets of the step's edit-tool calls (`tool_input.file_path`): of a `PostToolBatch`'s
+    /// `tool_calls` (fixture 08), or of a `PostToolUse`'s own call (fixture 04). As the payload
+    /// gives them: absolute, or relative to `cwd`.
+    pub edited: Vec<PathBuf>,
+    /// The product's `permission_mode` (fixtures 02-15, e.g. `bypassPermissions`), when it is
+    /// one plain word: the value reaches the fleet map, so any other text is dropped (G153).
+    pub permission_mode: Option<String>,
 }
 
 impl Payload {
@@ -151,8 +162,38 @@ impl Payload {
             agent: value["agent_id"].as_str().map(str::to_owned),
             cwd: crate::session::hook_cwd(&value, dir),
             stop_hook_active: value["stop_hook_active"].as_bool(),
+            edited: edited(event, &value),
+            permission_mode: value["permission_mode"]
+                .as_str()
+                .filter(|mode| {
+                    (1..=32).contains(&mode.len()) && mode.bytes().all(|b| b.is_ascii_alphabetic())
+                })
+                .map(str::to_owned),
         })
     }
+}
+
+/// The edit-tool targets a post-tool payload names; none for another event.
+fn edited(event: Event, value: &Value) -> Vec<PathBuf> {
+    let calls: Vec<&Value> = match event {
+        Event::PostToolBatch => value["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .collect(),
+        Event::PostToolUse => vec![value],
+        _ => Vec::new(),
+    };
+    calls
+        .into_iter()
+        .filter(|call| {
+            call["tool_name"]
+                .as_str()
+                .is_some_and(|tool| EDIT_TOOLS.contains(&tool))
+        })
+        .filter_map(|call| call["tool_input"]["file_path"].as_str())
+        .map(PathBuf::from)
+        .collect()
 }
 
 /// What `bay hook` returns to the product: its exit code and what it prints.
@@ -186,27 +227,144 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
             stderr: reason,
         };
     }
+    // `SessionStart`'s stdout is the session's context: the compact state, then the notice
+    // its line recorded (G155).
+    if event == "session-start" {
+        let mut stdout = crate::session::session_start(dir, input);
+        stdout.push_str(&recorded.notice);
+        return Outcome {
+            stdout,
+            ..Outcome::default()
+        };
+    }
     if !recorded.notice.is_empty() {
         return notice(product_event, recorded.notice);
     }
     if event == "pre-tool"
-        && let Some(outcome) = pre_tool_write(input, dir)
+        && let Err(why) = pre_tool_payload(input)
     {
-        return outcome;
+        return invalid_payload(input, dir, why);
     }
-    if event == "session-start" {
-        return Outcome {
-            stdout: crate::session::session_start(dir, input),
-            ..Outcome::default()
-        };
+    if event != "pre-tool" {
+        return shell_deny(event, input, dir);
     }
-    match crate::deny::judge_hook(event, input, dir) {
-        Some(reason) => Outcome {
-            exit: 2,
-            stdout: String::new(),
-            stderr: format!("{reason}\n"),
-        },
-        None => Outcome::default(),
+    let unknown = match pre_tool_claim(input, dir) {
+        Ok(unknown) => unknown,
+        Err(denied) => return denied,
+    };
+    let outcome = pre_tool_write(input, dir).unwrap_or_else(|| shell_deny(event, input, dir));
+    match unknown {
+        Some(unreadable) if outcome.exit == 0 => claims_unknown(input, dir, &unreadable, &outcome),
+        _ => outcome,
+    }
+}
+
+/// The shell deny list's judgement of `event` (G39): exit 2 with the reason, recorded by the
+/// command's shape; else the default outcome.
+fn shell_deny(event: &str, input: &str, dir: &Path) -> Outcome {
+    let Some(denial) = crate::deny::judge_hook(event, input, dir) else {
+        return Outcome::default();
+    };
+    // The row names the deny-list shape and its wrapper, never the command (R-H2, H3): a
+    // command line can carry a secret, and the record is payload-free.
+    let reason = Reason::ShellDenied;
+    let mut refused = serde_json::json!({ "reason": reason.code(), "shape": denial.shape });
+    if let Some(wrapped) = denial.wrapped {
+        refused["wrapped"] = Value::from(wrapped);
+    }
+    record_pre_tool(
+        input,
+        dir,
+        serde_json::json!({
+            "state": format!("blocked({})", reason.code()),
+            "refused": refused,
+            "verdict": deny_verdict(reason),
+        }),
+    );
+    Outcome {
+        exit: 2,
+        stdout: String::new(),
+        stderr: format!("{}\n", denial.reason),
+    }
+}
+
+/// An AGENT-HOOKS-0.1 `deny` verdict (§ 5) for a judging `pre-tool` row of the work record
+/// (ruling R-H2, G60). `reason` is a bay reason code, never a `host_error:*` one; the verdict
+/// fields bay has no facts for (`transform`, `approval`, `evidence`, `result_labels`) are left
+/// out. `bay.result/1` keeps its own words.
+fn deny_verdict(reason: Reason) -> Value {
+    serde_json::json!({ "decision": "deny", "reason": reason.code() })
+}
+
+/// An AGENT-HOOKS-0.1 `allow` verdict with a warning, AH's words for bay's notice (§ 5.1: there
+/// is no `warn` decision): the write is allowed, and `reason` says why it was not judged.
+fn allow_verdict_with_warning(reason: Reason) -> Value {
+    serde_json::json!({
+        "decision": "allow",
+        "reason": reason.code(),
+        "warnings": [{ "reason": reason.code() }],
+    })
+}
+
+/// Appends a `pre-tool` row with `extra` to the session's work record, when the payload names a
+/// session (`session::record_with`). A pre-tool line is never a stop, so it carries no stop
+/// refusal.
+fn record_pre_tool(input: &str, dir: &Path, extra: Value) {
+    if let (Some(payload), Value::Object(extra)) = (Payload::parse("pre-tool", input, dir), extra) {
+        let _ = crate::session::record_with(&payload, &extra);
+    }
+}
+
+/// Whether bay can judge a `pre-tool` payload (ruling R-H1, G59): a JSON object with a string
+/// `tool_name`, and for `Bash` a string `tool_input.command`. Else why not. An empty stdin and
+/// one that is not UTF-8 (read as empty) are not JSON.
+fn pre_tool_payload(input: &str) -> Result<(), &'static str> {
+    let Ok(value) = serde_json::from_str::<Value>(input) else {
+        return Err(if input.trim().is_empty() {
+            "is missing"
+        } else {
+            "is not JSON"
+        });
+    };
+    if !value.is_object() {
+        return Err("is not a JSON object");
+    }
+    let Some(tool) = value["tool_name"].as_str() else {
+        return Err("has no string tool_name");
+    };
+    if tool == "Bash" && !value["tool_input"]["command"].is_string() {
+        return Err("is a Bash call with no string tool_input.command");
+    }
+    Ok(())
+}
+
+/// A `pre-tool` payload bay cannot read is denied (ruling R-H1, AGENT-HOOKS-0.1 § 6.3), never
+/// allowed: a product release that renames a field would otherwise turn the deny list and the
+/// stale-write refusal off without a word. Exit 2 with one line on stderr, the deny exit of the
+/// product's protocol; stdout holds the `bay.result/1` of the refusal, for a caller that reads
+/// one (Claude Code reads stderr at exit 2). A JSON object that names a session is recorded as
+/// a deny in its work record, with `why` and none of the payload.
+fn invalid_payload(input: &str, dir: &Path, why: &str) -> Outcome {
+    let reason = Reason::HookInputInvalid;
+    record_pre_tool(
+        input,
+        dir,
+        serde_json::json!({
+            "state": format!("blocked({})", reason.code()),
+            "refused": { "reason": reason.code(), "why": why },
+            "verdict": deny_verdict(reason),
+        }),
+    );
+    let result = crate::result::BayResult::blocked(reason)
+        .with_detail(serde_json::json!({ "event": "pre-tool", "why": why }));
+    Outcome {
+        exit: 2,
+        stdout: result.to_json().unwrap_or_default(),
+        stderr: format!(
+            "bay: refused {}: the pre-tool payload {why}, so bay denies the tool call; \
+             `bay doctor` checks the hook entries and `bay update` installs a newer bay\n",
+            reason.code()
+        ),
     }
 }
 
@@ -233,6 +391,124 @@ fn notice(event: Event, text: String) -> Outcome {
     }
 }
 
+/// `pre-tool` on an edit tool, or on Bash when the command names a path: denied when another
+/// live session of the target's tree holds that path (`DESIGN` § 11c, G101; `crate::claims`).
+/// `None` passes it to the next judgement. The deny exits 2 with one line naming the reason
+/// code, the holder and the path, and its row in the denied session's work record is a G60
+/// verdict. A payload with no session id is not the holder's. `Ok(None)` passes it to the next
+/// judgement; `Ok(Some(_))` does too, but a claims file could not be read, so the write was not
+/// judged here ([`claims_unknown`]).
+fn pre_tool_claim(input: &str, dir: &Path) -> Result<Option<crate::claims::Unreadable>, Outcome> {
+    let Ok(value) = serde_json::from_str::<Value>(input) else {
+        return Ok(None);
+    };
+    let Some(tool) = value["tool_name"].as_str() else {
+        return Ok(None);
+    };
+    let cwd = crate::session::hook_cwd(&value, dir);
+    let session = value["session_id"].as_str().and_then(SessionId::parse);
+    let session = session.as_ref().map(SessionId::as_str);
+    let now = crate::live::unix_now();
+    let judged = if EDIT_TOOLS.contains(&tool) {
+        let Some(file) = value["tool_input"]["file_path"].as_str() else {
+            return Ok(None);
+        };
+        crate::claims::held(&cwd, Path::new(file), session, now)
+    } else if tool == "Bash" {
+        let Some(command) = value["tool_input"]["command"].as_str() else {
+            return Ok(None);
+        };
+        crate::claims::held_by_command(&cwd, command, session, now)
+    } else {
+        Ok(None)
+    };
+    let held = match judged {
+        Ok(Some(held)) => held,
+        Ok(None) => return Ok(None),
+        Err(unreadable) => return Ok(Some(unreadable)),
+    };
+    let reason = Reason::PathHeld;
+    let until = crate::clock::rfc3339_of(held.deadline_s);
+    record_pre_tool(
+        input,
+        dir,
+        serde_json::json!({
+            "state": format!("blocked({})", reason.code()),
+            "refused": {
+                "reason": reason.code(),
+                "holder": held.holder,
+                "path": held.path,
+                "deadline": until,
+            },
+            "verdict": deny_verdict(reason),
+        }),
+    );
+    Err(Outcome {
+        exit: 2,
+        stdout: String::new(),
+        stderr: format!(
+            "bay: refused {}: {} is held by session {} in this tree until {until}; write \
+             another path, or wait until that session stops\n",
+            reason.code(),
+            held.path,
+            held.holder,
+        ),
+    })
+}
+
+/// A `pre-tool` call the later judgements allowed (`outcome`, exit 0) whose claims file could
+/// not be read: allowed with a `COVERAGE_UNKNOWN` notice (ruling R5, G101), never silently. The
+/// notice goes in `additionalContext`, beside any notice the write already had, and on stderr;
+/// the session's row records it with its G60 verdict.
+fn claims_unknown(
+    input: &str,
+    dir: &Path,
+    unreadable: &crate::claims::Unreadable,
+    outcome: &Outcome,
+) -> Outcome {
+    let reason = Reason::CoverageUnknown;
+    let file = unreadable.file.display().to_string();
+    record_pre_tool(
+        input,
+        dir,
+        serde_json::json!({
+            "notice": {
+                "reason": reason.code(),
+                "path": unreadable.path,
+                "claims_file": file,
+                "why": unreadable.why,
+            },
+            "verdict": allow_verdict_with_warning(reason),
+        }),
+    );
+    let what = unreadable
+        .path
+        .as_deref()
+        .map_or_else(|| "this command".to_owned(), str::to_owned);
+    let line = format!(
+        "bay: {} for {what}: the claims file {file} {}, so bay cannot tell whether another \
+         session in this tree holds what it writes; the write is allowed unchecked, and the \
+         next claim replaces that file\n",
+        reason.code(),
+        unreadable.why,
+    );
+    let earlier: Value = serde_json::from_str(&outcome.stdout).unwrap_or(Value::Null);
+    let context = earlier["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .map_or_else(|| line.clone(), |text| format!("{line}{text}"));
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": context,
+        },
+    });
+    Outcome {
+        exit: 0,
+        stdout: format!("{output}\n"),
+        stderr: format!("{line}{}", outcome.stderr),
+    }
+}
+
 /// The edit tools whose target `pre-tool` judges (§ 11a's `PreToolUse` row).
 const EDIT_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
 
@@ -253,14 +529,7 @@ fn pre_tool_write(input: &str, dir: &Path) -> Option<Outcome> {
     let file = value["tool_input"]["file_path"].as_str().map(PathBuf::from);
     let cwd = crate::session::hook_cwd(&value, dir);
     let verdict = crate::coord::judge(&cwd, file.as_deref(), std::time::SystemTime::now());
-    let record = |extra: Value| {
-        if let (Some(payload), Value::Object(extra)) =
-            (Payload::parse("pre-tool", input, dir), extra)
-        {
-            // A pre-tool line is never a stop, so it carries no stop refusal.
-            let _ = crate::session::record_with(&payload, &extra);
-        }
-    };
+    let record = |extra: Value| record_pre_tool(input, dir, extra);
     Some(match verdict {
         crate::coord::Verdict::Allow => Outcome::default(),
         crate::coord::Verdict::Refuse {
@@ -271,6 +540,7 @@ fn pre_tool_write(input: &str, dir: &Path) -> Option<Outcome> {
             record(serde_json::json!({
                 "state": format!("blocked({})", reason.code()),
                 "refused": detail,
+                "verdict": deny_verdict(reason),
             }));
             Outcome {
                 exit: 2,
@@ -279,7 +549,10 @@ fn pre_tool_write(input: &str, dir: &Path) -> Option<Outcome> {
             }
         }
         crate::coord::Verdict::Notice { text, detail } => {
-            record(serde_json::json!({ "notice": detail }));
+            record(serde_json::json!({
+                "notice": detail,
+                "verdict": allow_verdict_with_warning(Reason::CoverageUnknown),
+            }));
             let output = serde_json::json!({
                 "hookSpecificOutput": {
                     "hookEventName": "PreToolUse",

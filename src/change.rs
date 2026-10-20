@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::git::{Git, GitError};
 use crate::signing::Signer;
 
-pub const CHANGES_PREFIX: &str = "refs/bay/changes/";
+pub const CHANGES_PREFIX: &str = crate::names::CHANGES;
 pub const RECORD_FILE: &str = "change.json";
 pub const RECORD_SCHEMA: &str = "bay.change/1";
 /// The schema of a record that declares a named input (`INTERFACES`: a consumer refuses a
@@ -74,12 +74,17 @@ pub struct IntentClaim {
 impl IntentClaim {
     #[must_use]
     pub fn intent_ref(&self) -> String {
-        format!("refs/bay/intent/{}/{}", self.hash, self.generation)
+        format!("{}{}/{}", crate::names::INTENT, self.hash, self.generation)
     }
 
     #[must_use]
     pub fn landed_ref(&self) -> String {
-        format!("refs/bay/landed-intent/{}/{}", self.hash, self.generation)
+        format!(
+            "{}{}/{}",
+            crate::names::LANDED_INTENT,
+            self.hash,
+            self.generation
+        )
     }
 }
 
@@ -90,6 +95,34 @@ pub fn intent_hash(reference: &str, revision: &str) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(format!("{reference}@{revision}").as_bytes());
     crate::agent_settings::hex(&digest)[..32].to_owned()
+}
+
+/// Where an actor's name came from (G152): `BAY_ACTOR` (`env`), the user name in its place
+/// (`user-default`), or neither (`default`). On an account many sessions share, a default
+/// names every session the same actor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ActorSource {
+    Env,
+    UserDefault,
+    Default,
+}
+
+impl ActorSource {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Env => "env",
+            Self::UserDefault => "user-default",
+            Self::Default => "default",
+        }
+    }
+
+    /// Whether the name came from a default rather than from `BAY_ACTOR`.
+    #[must_use]
+    pub const fn is_default(self) -> bool {
+        !matches!(self, Self::Env)
+    }
 }
 
 /// The acting identity: a stable name and one session (`DESIGN` § 3.1).
@@ -115,9 +148,25 @@ pub fn current_actor() -> Result<Actor, String> {
 /// session of the same actor has this name and a session of its own.
 #[must_use]
 pub fn actor_name() -> String {
-    std::env::var("BAY_ACTOR")
-        .or_else(|_| std::env::var("USER"))
-        .unwrap_or_else(|_| "agent".to_owned())
+    named_actor().0
+}
+
+/// Where [`actor_name`] takes the name from (G152).
+#[must_use]
+pub fn actor_source() -> ActorSource {
+    named_actor().1
+}
+
+/// The actor's name and its source. An empty variable names no one.
+fn named_actor() -> (String, ActorSource) {
+    let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    if let Some(name) = var("BAY_ACTOR") {
+        (name, ActorSource::Env)
+    } else if let Some(name) = var("USER") {
+        (name, ActorSource::UserDefault)
+    } else {
+        ("agent".to_owned(), ActorSource::Default)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,6 +189,10 @@ pub struct ChangeRecord {
     pub id: String,
     pub intent: Intent,
     pub actor: Actor,
+    /// Where the actor's name came from when it took the change (G152); absent in a record
+    /// written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_source: Option<ActorSource>,
     /// The trunk commit at `start`. Written once, never moved.
     pub base_first: String,
     /// The trunk commit the current revision builds on.
@@ -169,6 +222,9 @@ pub struct ChangeRecord {
     /// The landed change this change undoes, for `bay undo` (§ 4): its `Reverts:` trailer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverts: Option<String>,
+    /// The landed change this change fixes, for `start --fixes` (G161): its `Fixes:` trailer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fixes: Option<String>,
     /// Actors this change was adopted from, oldest first (§ 4).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adopted_from: Vec<Actor>,
@@ -252,6 +308,27 @@ pub struct Operation {
     /// release ref is create-only and cannot say so itself, so the chain records it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mid_publish_releases: Vec<u64>,
+    /// Set while the operation waits for a worker (`CHECK_UNAVAILABLE`, `DESIGN` § 6, § 7):
+    /// what no worker answered for. Cleared once a check of it runs to an answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<Unavailable>,
+}
+
+/// Why an operation waits for a worker, and since when (`DESIGN` § 6, § 7).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Unavailable {
+    /// The required environments no worker answered for, sorted.
+    pub environments: Vec<String>,
+    /// The check adapter's reason, when it answered `unavailable`; absent when the box that
+    /// ran the operation does not serve those environments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// When it was recorded, in Unix milliseconds: the clock of the rejoin gap after an
+    /// adapter's answer.
+    pub at_ms: u64,
+    /// How many adapter answers in a row before this one: the gap doubles with each.
+    #[serde(default)]
+    pub repeats: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

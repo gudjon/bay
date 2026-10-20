@@ -513,7 +513,7 @@ fn parse(text: &str) -> Result<Coord, String> {
 /// `file` as the system resolves it, though it need not exist: its longest existing prefix is
 /// canonicalized (so a symbolic link, and `..` after one, resolve as the system resolves them),
 /// and the rest, which holds no link, is folded. `None` past [`MAX_DEPTH`] components.
-fn resolve(file: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve(file: &Path) -> Option<PathBuf> {
     let parts: Vec<Component> = file.components().collect();
     if parts.len() > MAX_DEPTH {
         return None;

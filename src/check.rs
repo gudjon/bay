@@ -109,8 +109,11 @@ pub(crate) fn sandbox_kind() -> &'static str {
     if cfg!(target_os = "macos") && Path::new("/usr/bin/sandbox-exec").exists() {
         "sandbox-exec"
     } else if cfg!(target_os = "linux")
+        // The probe is the sandbox a check gets, so a `bwrap` that cannot unshare the network
+        // or mount a private `/proc` is no sandbox here.
         && Command::new("bwrap")
-            .args(["--dev-bind", "/", "/", "true"])
+            .args(sandbox::bwrap_system_args(false))
+            .arg("true")
             .output()
             .is_ok_and(|out| out.status.success())
     {
@@ -199,6 +202,93 @@ pub fn box_chose_unsandboxed() -> Result<bool, String> {
     }
 }
 
+/// The box's declaration of the policy environments its executor serves (`DESIGN` § 7,
+/// `INTERFACES` § 7): Git config, one value per environment, global or for one clone, read in
+/// the clone that runs the operation. A repository never declares one.
+pub const ENVIRONMENT_KEY: &str = "bay.checkEnvironment";
+
+/// The environments this box serves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Served {
+    /// The box declares nothing: it serves every environment, as every box did before the
+    /// declaration existed, so an upgrade stops no executor from running the checks it ran.
+    Every,
+    /// The box declares these environments and serves exactly them. Empty values are left
+    /// out, so a box under maintenance withdraws every environment with one empty value; a
+    /// declaration Git cannot read serves nothing.
+    Declared(Vec<String>),
+}
+
+impl Served {
+    /// `bay.checkEnvironment` as `git config --get-all` reads it in `git`'s clone.
+    #[must_use]
+    pub fn read(git: &Git) -> Self {
+        match git.run_status(&["config", "--get-all", ENVIRONMENT_KEY]) {
+            // `git config --get-all` exits 1 for a key that is not set.
+            Ok((1, _, _)) => Self::Every,
+            Ok((0, values, _)) => Self::Declared(
+                values
+                    .lines()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            _ => Self::Declared(Vec::new()),
+        }
+    }
+
+    /// Whether the box serves `environment`, by its exact name.
+    #[must_use]
+    pub fn serves(&self, environment: &str) -> bool {
+        match self {
+            Self::Every => true,
+            Self::Declared(declared) => declared.iter().any(|value| value == environment),
+        }
+    }
+
+    /// `declared`, or `default` when the box declares nothing.
+    #[must_use]
+    pub const fn source(&self) -> &'static str {
+        match self {
+            Self::Every => "default",
+            Self::Declared(_) => "declared",
+        }
+    }
+
+    /// The declared values; none for a box that declares nothing.
+    #[must_use]
+    pub fn declared(&self) -> &[String] {
+        match self {
+            Self::Every => &[],
+            Self::Declared(declared) => declared,
+        }
+    }
+}
+
+/// The environments of `policy`'s checks required of a candidate that changes `changed`, outside
+/// `finished`, that `served` does not serve: sorted, each once. A pair with evidence already (a
+/// resume, or reuse) needs no worker.
+#[must_use]
+pub fn unserved(
+    policy: &Policy,
+    changed: &[String],
+    finished: &[CheckId],
+    served: &Served,
+) -> Vec<String> {
+    let mut missing: Vec<String> = policy
+        .checks
+        .iter()
+        .filter(|entry| policy.requires(entry, changed))
+        .filter(|entry| !finished.contains(&CheckId::new(&entry.id, &entry.environment)))
+        .filter(|entry| !served.serves(&entry.environment))
+        .map(|entry| entry.environment.clone())
+        .collect();
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
 /// `program` as found on this process's `PATH`, or the bare name when it is not there.
 fn on_path(program: &str) -> PathBuf {
     std::env::var_os("PATH")
@@ -214,55 +304,32 @@ fn real(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The command that runs `executable` inside the sandbox: `hidden` unreadable and unwritable,
-/// except `scratch`, which holds this check's candidate and adapter.
+/// The command that runs `executable` inside the sandbox, an allow-list (G62): it sees its
+/// `scratch` (the candidate and the adapter) read-write, the system files of
+/// [`sandbox::SYSTEM_DIRS`] and [`sandbox::SYSTEM_ETC`] read-only, and nothing else; any of
+/// `hidden` inside those is hidden on top. The network is denied unless `network` (a check's
+/// `network = true`, judged at the base).
 pub(crate) fn sandboxed(
     kind: &str,
     executable: &Path,
     args: &[&str],
     hidden: &[PathBuf],
     scratch: &Path,
+    network: bool,
 ) -> Command {
     match kind {
         "sandbox-exec" => {
-            let quote = |path: &Path| {
-                format!(
-                    "\"{}\"",
-                    real(path).display().to_string().replace('"', "\\\"")
-                )
-            };
-            let denied: Vec<String> = hidden
-                .iter()
-                .map(|path| {
-                    if path.is_file() {
-                        format!("(literal {})", quote(path))
-                    } else {
-                        format!("(subpath {})", quote(path))
-                    }
-                })
-                .collect();
-            let profile = format!(
-                "(version 1)(allow default)(deny file-read* file-write* {})(allow file-read* file-write* (subpath {}))",
-                denied.join(" "),
-                quote(scratch)
-            );
             let mut cmd = Command::new("/usr/bin/sandbox-exec");
-            cmd.arg("-p").arg(profile).arg(executable).args(args);
+            cmd.arg("-p")
+                .arg(sandbox::macos_profile(hidden, scratch, network))
+                .arg(executable)
+                .args(args);
             cmd
         }
         "bwrap" => {
             // Found on the executor's own `PATH`: the check's cleared environment may not have it.
             let mut cmd = Command::new(on_path("bwrap"));
-            cmd.args(["--dev-bind", "/", "/"]);
-            for path in hidden {
-                if path.is_file() {
-                    cmd.arg("--ro-bind").arg("/dev/null").arg(real(path));
-                } else {
-                    cmd.arg("--tmpfs").arg(real(path));
-                }
-            }
-            let scratch = real(scratch);
-            cmd.arg("--bind").arg(&scratch).arg(&scratch);
+            cmd.args(sandbox::bwrap_args(hidden, scratch, network));
             cmd.arg("--").arg(executable).args(args);
             cmd
         }
@@ -303,12 +370,14 @@ struct Plan {
 pub const DECLARED_EMPTY: &str = "declared_empty";
 
 /// What one check's run returns: its verdict, why it is not `pass`, its units, and its
-/// `selection` when the selection was declared empty.
+/// `selection` when the selection was declared empty; or, set in `unavailable`, the adapter's
+/// answer that no worker could run it, which observed nothing and is no verdict.
 struct Judged {
     verdict: Verdict,
     why: Option<String>,
     units: Vec<Unit>,
     selection: Option<String>,
+    unavailable: Option<String>,
 }
 
 impl Judged {
@@ -318,8 +387,31 @@ impl Judged {
             why,
             units: Vec::new(),
             selection: None,
+            unavailable: None,
         }
     }
+}
+
+/// What a run of the checks returns: the record of each check it ran, and, when the adapter
+/// answered that no worker could run a check, that check's environment and the adapter's
+/// reason. The run stops there and writes no record for that check (`INTERFACES` § 3).
+pub struct Ran {
+    pub records: Vec<EvidenceRecord>,
+    pub unavailable: Option<(String, String)>,
+}
+
+/// The adapter's answer that it could not reach a worker for the check (`INTERFACES` § 3):
+/// `{"schema": "bay.check.result/1", "unavailable": "<reason>"}` with no `checks`. Any other
+/// result without `checks` is no such answer, and is judged as a result.
+fn unavailable_answer(output: &[u8]) -> Option<String> {
+    let answer: serde_json::Value = serde_json::from_slice(output).ok()?;
+    if answer["schema"] != "bay.check.result/1" || answer.get("checks").is_some() {
+        return None;
+    }
+    answer["unavailable"]
+        .as_str()
+        .filter(|reason| !reason.is_empty())
+        .map(str::to_owned)
 }
 
 #[derive(Debug, Deserialize)]
@@ -332,7 +424,8 @@ struct ResultUnit {
 
 /// Runs every required check of `policy` on `candidate` that is not in `finished`, hands each
 /// record to `keep` as soon as its check ends (so a finished unit survives a worker that dies
-/// in a later one, § 7), and returns the records of this run.
+/// in a later one, § 7), and returns the records of this run. A check the adapter answers
+/// `unavailable` for gets no record, and the run stops there: no worker answers for it.
 ///
 /// # Errors
 ///
@@ -346,7 +439,7 @@ pub fn run_all(
     producer: &str,
     limits: &Limits,
     hooks: &mut Hooks,
-) -> Result<Vec<EvidenceRecord>, String> {
+) -> Result<Ran, String> {
     let (budget, finished) = (limits.budget, limits.finished.as_slice());
     let sandbox = limits.sandbox.kind;
     // The execution budget runs on the monotonic clock from the start of the checks.
@@ -354,8 +447,10 @@ pub fn run_all(
     let mut records = Vec::new();
     for (index, entry) in policy.checks.iter().enumerate() {
         let id = CheckId::new(&entry.id, &entry.environment);
-        // A quarantined check is not required (ruling 8c): it does not run.
-        if finished.contains(&id) || policy.is_quarantined(entry) {
+        // A quarantined check is not required (ruling 8c), a post-publication one runs after
+        // publication (G91), and one whose paths the candidate does not change is not required
+        // of it (G146): none of them runs here.
+        if finished.contains(&id) || !policy.requires(entry, candidate.changed_paths) {
             continue;
         }
         let dir = work_dir.join(format!("check-{index}"));
@@ -386,12 +481,7 @@ pub fn run_all(
         };
         let remaining = budget.map(|budget| budget.saturating_sub(started.elapsed()));
         let ran = Instant::now();
-        let Judged {
-            verdict,
-            why,
-            units,
-            selection,
-        } = match not_run {
+        let judged = match not_run {
             Some(judged) => judged,
             None => within_budget(
                 hooks.beat,
@@ -403,6 +493,14 @@ pub fn run_all(
                 remaining,
             ),
         };
+        make_writable(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Some(reason) = judged.unavailable {
+            return Ok(Ran {
+                records,
+                unavailable: Some((entry.environment.clone(), reason)),
+            });
+        }
         let mut record = EvidenceRecord {
             schema: EVIDENCE_SCHEMA.to_owned(),
             id: format!("{producer}/{}-{}", candidate.id, index + 1),
@@ -423,18 +521,16 @@ pub fn run_all(
                 version: crate::version::BAY.to_owned(),
                 unknown: serde_json::Map::new(),
             },
-            verdict,
+            verdict: judged.verdict,
             at: now_rfc3339(),
-            why,
-            units,
-            selection,
+            why: judged.why,
+            units: judged.units,
+            selection: judged.selection,
             sandbox: Some(sandbox.to_owned()),
             seconds: Some((ran.elapsed().as_secs_f64() * 1000.0).round() / 1000.0),
             signature: None,
             unknown: serde_json::Map::new(),
         };
-        make_writable(&dir);
-        let _ = std::fs::remove_dir_all(&dir);
         (hooks.keep)(&mut record)?;
         records.push(record);
         if std::env::var("BAY_TEST_KILL_AT")
@@ -443,7 +539,10 @@ pub fn run_all(
             std::process::exit(137);
         }
     }
-    Ok(records)
+    Ok(Ran {
+        records,
+        unavailable: None,
+    })
 }
 
 /// What a run calls back into: `keep` takes each record as soon as its check ends; `beat`
@@ -544,6 +643,7 @@ fn run_one(
         &args,
         place.hidden,
         place.scratch,
+        entry.network,
     );
     // `INTERFACES` § 7: the check starts from a fixed baseline and nothing else, so evidence
     // names everything it could read: `PATH` from the policy, `HOME` and `TMPDIR` inside the
@@ -567,8 +667,8 @@ fn run_one(
     // § 7, G26: a check that reached outside its adapter and candidate is an infrastructure
     // failure, never a pass.
     let reached_out = place.hidden.iter().any(|hidden| {
-        stderr.contains(&hidden.display().to_string())
-            || stderr.contains(&real(hidden).display().to_string())
+        names_path(&stderr, &hidden.display().to_string())
+            || names_path(&stderr, &real(hidden).display().to_string())
     });
     let outside = || {
         Judged::without_units(
@@ -576,6 +676,12 @@ fn run_one(
             Some("the check read or wrote outside its adapter and candidate".to_owned()),
         )
     };
+    if !reached_out && let Some(reason) = unavailable_answer(&output) {
+        return Judged {
+            unavailable: Some(reason),
+            ..Judged::without_units(Verdict::Unknown, None)
+        };
+    }
     let result: CheckResult = match serde_json::from_slice(&output) {
         Ok(result) => result,
         Err(_) if reached_out => return outside(),
@@ -590,6 +696,36 @@ fn run_one(
         return outside();
     }
     judge(&result, entry, candidate)
+}
+
+/// Whether `text` names `path` or a path inside it: an occurrence of `path` that starts and
+/// ends on a path boundary, so `/box/repo` is named by `/box/repo` and `/box/repo/x` but not by
+/// its sibling `/box/repo-remote.git` or by `/other/box/repo`.
+fn names_path(text: &str, path: &str) -> bool {
+    // What may stand next to a path in a message: whitespace, quotes and punctuation.
+    let delimiter = |c: char| c.is_whitespace() || "'\"`:,;()[]<>=".contains(c);
+    if path.is_empty() {
+        return false;
+    }
+    let mut from = 0;
+    while let Some(found) = text[from..].find(path) {
+        let start = from + found;
+        let end = start + path.len();
+        let before = text[..start].chars().next_back();
+        let mut after = text[end..].chars();
+        let opens = before.is_none_or(delimiter);
+        let closes = match after.next() {
+            None | Some('/') => true,
+            // A full stop ends a sentence, never a name such as `repo.git`.
+            Some('.') => after.next().is_none_or(delimiter),
+            Some(c) => delimiter(c),
+        };
+        if opens && closes {
+            return true;
+        }
+        from = start + text[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
 }
 
 fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Judged {
@@ -619,6 +755,7 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
         why,
         units,
         selection: None,
+        unavailable: None,
     };
     if units
         .iter()
@@ -695,6 +832,7 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
         why: None,
         units,
         selection: empty.then(|| DECLARED_EMPTY.to_owned()),
+        unavailable: None,
     }
 }
 
@@ -935,6 +1073,37 @@ mod tests {
             const { std::cell::Cell::new(false) };
     }
 
+    /// § 7, G26: a hidden path is named by whole components only. A sibling that shares its
+    /// prefix (`repo` and `repo-remote.git`) is not the hidden path.
+    #[test]
+    fn a_hidden_path_is_named_by_whole_components_only() {
+        let hidden = "/box/repo";
+        for named in [
+            "cat: /box/repo: Permission denied",
+            "cat: '/box/repo/secret.txt': No such file or directory",
+            "fatal: not a git repository: /box/repo.",
+            "/box/repo",
+            "open(\"/box/repo/.git\")",
+        ] {
+            assert!(super::names_path(named, hidden), "{named}");
+        }
+        for other in [
+            "To /box/repo-remote.git",
+            "fatal: '/box/repo-remote.git' does not appear to be a git repository",
+            "/box/repo.git",
+            "/box/repository",
+            "/other/box/repo",
+            "/box/repo2/x /box/repos",
+        ] {
+            assert!(!super::names_path(other, hidden), "{other}");
+        }
+        // The first occurrence is a sibling and a later one is the path itself.
+        assert!(super::names_path(
+            "/box/repo-remote.git and /box/repo/x",
+            hidden
+        ));
+    }
+
     #[test]
     fn no_sandbox_refuses_unless_the_box_chose_none() {
         // R14 on every platform: no sandbox and no choice is refused.
@@ -1062,7 +1231,8 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
                     beat: &mut || {},
                 },
             )
-            .unwrap();
+            .unwrap()
+            .records;
             assert_eq!(records.len(), 1);
             records.remove(0)
         }
@@ -1072,3 +1242,5 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
 /// Materialization through a whole run: `paths`, `materialize_timeout_s`, a large tree.
 #[cfg(all(test, unix))]
 mod materializing;
+
+pub mod sandbox;

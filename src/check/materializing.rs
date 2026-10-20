@@ -149,7 +149,8 @@ fn run_with(
             beat,
         },
     )
-    .unwrap();
+    .unwrap()
+    .records;
     assert_eq!(records.len(), 1);
     records.remove(0)
 }

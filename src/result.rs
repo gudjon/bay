@@ -100,8 +100,23 @@ reasons! {
     PublishOutcomeUnknown => "PUBLISH_OUTCOME_UNKNOWN", [], "trunk_read_again", false;
     ChangeAlreadyLanded => "CHANGE_ALREADY_LANDED", ["read"], "never", false;
     ChangeSuperseded => "CHANGE_SUPERSEDED", ["read"], "existing_change_landed_abandoned_or_past_takeover", false;
+    // Ruled 2026-10-19 (rulings-open-questions.md Q8): another live session of the same actor
+    // name holds the change.
+    ChangeHeld => "CHANGE_HELD", ["read", "wait"], "holder_session_ended_or_heartbeat_past_takeover_window", false;
     AbandonRefused => "ABANDON_REFUSED", ["read"], "current_actor_abandons_or_adopt_rules_apply", false;
+    // G152; not yet in INTERFACES § 2: the policy at the base sets `[agent] require_actor` and
+    // the actor's name came from a default, not `BAY_ACTOR`.
+    ActorUnnamed => "ACTOR_UNNAMED", ["read"], "bay_actor_set", false;
     CoverageUnknown => "COVERAGE_UNKNOWN", ["edit_locally"], "coordination_data_reachable", false;
+    // Ruling R-H1 (AGENT-HOOKS-0.1 § 6.3, `context_invalid`); not yet in INTERFACES § 2: a
+    // `pre-tool` payload bay cannot read is denied.
+    HookInputInvalid => "HOOK_INPUT_INVALID", ["read"], "hook_payload_readable_by_this_bay", false;
+    // Ruling R-H2 widened (H3, G60); not yet in INTERFACES § 2: a shell command on the deny list
+    // (G39), as its `pre-tool` row's verdict reason. The same command is never allowed.
+    ShellDenied => "SHELL_DENIED", ["read"], "never", false;
+    // `DESIGN` § 11c, "Two sessions in one tree" (G101); not yet in INTERFACES § 2: a write of a
+    // path another live session of the same tree holds, as its `pre-tool` deny.
+    PathHeld => "PATH_HELD", ["read", "wait"], "holder_session_stopped_or_claim_past_deadline", false;
     RemoteNotFetched => "REMOTE_NOT_FETCHED", ["read"], "remote_fetched", false;
     // Ruling: config location (a repository with no `.bay/config.toml` anywhere bay looks);
     // not yet in INTERFACES § 2
@@ -114,6 +129,12 @@ reasons! {
     HooksMissing => "HOOKS_MISSING", ["read"], "install_wrote_hook_entries", false;
     SkillMismatch => "SKILL_MISMATCH", ["read"], "install_copied_skill_for_this_version", false;
     SandboxAbsent => "SANDBOX_ABSENT", ["read"], "sandbox_present_or_executor_sandbox_none", false;
+    // `bay doctor --role executor` (G63); not yet in INTERFACES § 8
+    CheckEnvUnset => "CHECK_ENV_UNSET", ["read"], "executor_sets_the_named_variables", false;
+    ExecutorKeyMissing => "EXECUTOR_KEY_MISSING", ["read"], "executor_and_producer_keys_set_and_enrolled", false;
+    // G145; not yet in INTERFACES § 8: a file-based release, producer, executor or registry key,
+    // or a token beside it, that the account running agent sessions can read.
+    KeyExposed => "KEY_EXPOSED", ["read"], "keys_on_hardware_or_outside_the_session_account", false;
     // INTERFACES § 2 (`bay update`, the binary's lifecycle in `DESIGN`)
     UpdateUnavailable => "UPDATE_UNAVAILABLE", ["read"], "release_reachable", false;
     UpdateUnverified => "UPDATE_UNVERIFIED", ["read"], "release_republished", false;
@@ -127,6 +148,12 @@ reasons! {
     TalkAnswerConflict => "TALK_ANSWER_CONFLICT", ["read"], "answer_supersedes_the_standing_answer", false;
     TalkSenderNotActor => "TALK_SENDER_NOT_ACTOR", ["read"], "sent_with_the_senders_agent_key", false;
     TalkBacklog => "TALK_BACKLOG", ["read"], "an_open_talk_closed_or_superseded", false;
+    // G77 (the review dossier's K6); not yet in INTERFACES § 2: `bay talk --to-change` names a
+    // trunk commit that is no executor-signed bay publication, so no lander can be read from it.
+    UnattributedLanding => "UNATTRIBUTED_LANDING", ["read"], "never", false;
+    // G159 (owner ruling Q1); not yet in INTERFACES § 2: the host hook refuses a push of an
+    // evidence notes ref whose note drops or changes a record the old note held.
+    EvidenceWithdrawn => "EVIDENCE_WITHDRAWN", ["read"], "never", false;
 }
 
 impl Reason {
@@ -377,7 +404,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 44);
+        assert_eq!(Reason::ALL.len(), 54);
     }
 
     #[test]

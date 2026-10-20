@@ -201,12 +201,48 @@ pub fn create(repo: &Repo, id: &str, commit: &str, paths: &[String]) -> Result<P
             "--no-cone".to_owned(),
         ];
         args.extend(paths.iter().map(|path| sparse_pattern(path)));
+        args.extend(hook_settings(repo, commit).map(sparse_pattern));
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         view.run(&args)?;
     }
     view.run(&["checkout", "-q", "--detach", commit])?;
     set_journal(repo, id, Journal::Ready).map_err(journal_error)?;
     Ok(path)
+}
+
+/// The agent product's hook-settings file when the adapter names one and `commit` holds it
+/// (H7, G72). A sparse view holds it beside the declared paths: the view is its own Git top
+/// level, so without it a session started there runs without bay's project hooks.
+fn hook_settings(repo: &Repo, commit: &str) -> Option<&'static str> {
+    let file = crate::agent_settings::hook_settings_file(&repo.config)?;
+    repo.git
+        .run(&["cat-file", "-e", &format!("{commit}:{file}")])
+        .ok()
+        .map(|_| file)
+}
+
+/// Puts the hook-settings file back into the sparse view of change `id` when its pattern is
+/// missing and the view's commit holds the file: `--resume` keeps it in the view, whether the
+/// view predates it or its sparse set was changed by hand. A full view already holds it.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn keep_hook_settings(repo: &Repo, id: &str, declared: &[String]) -> Result<(), GitError> {
+    if declared.is_empty() {
+        return Ok(());
+    }
+    let view = Git::new(repo.view_path(id));
+    let head = view.run(&["rev-parse", "HEAD"])?;
+    let Some(file) = hook_settings(repo, &head) else {
+        return Ok(());
+    };
+    let pattern = sparse_pattern(file);
+    let list = view.run(&["sparse-checkout", "list"])?;
+    if list.lines().any(|line| line.trim() == pattern) {
+        return Ok(());
+    }
+    view.run(&["sparse-checkout", "add", &pattern]).map(|_| ())
 }
 
 /// Whether the view at `path` exists as a worktree directory.
@@ -216,18 +252,28 @@ pub fn exists(path: &Path) -> bool {
 }
 
 /// The paths a sparse view holds beyond `declared`: patterns added after `start` (for example
-/// with `git sparse-checkout add`). A full view has none.
+/// with `git sparse-checkout add`). A full view has none. `bay_file`, the hook-settings file
+/// bay adds, is never an input the change read.
 ///
 /// # Errors
 ///
 /// A git fault.
-pub fn undeclared_paths(view: &Path, declared: &[String]) -> Result<Vec<String>, GitError> {
+pub fn undeclared_paths(
+    view: &Path,
+    declared: &[String],
+    bay_file: Option<&str>,
+) -> Result<Vec<String>, GitError> {
     let git = Git::new(view);
     let (code, list, _) = git.run_status(&["sparse-checkout", "list"])?;
     if code != 0 {
         return Ok(Vec::new());
     }
-    let declared: Vec<String> = declared.iter().map(|path| sparse_pattern(path)).collect();
+    let declared: Vec<String> = declared
+        .iter()
+        .map(String::as_str)
+        .chain(bay_file)
+        .map(sparse_pattern)
+        .collect();
     Ok(list
         .lines()
         .map(str::trim)
@@ -243,12 +289,14 @@ pub fn undeclared_paths(view: &Path, declared: &[String]) -> Result<Vec<String>,
 ///
 /// A git fault.
 pub fn record_observed(
+    repo: &Repo,
     view: &Path,
     declared: &[String],
     observed: &mut Vec<String>,
 ) -> Result<bool, GitError> {
     let mut added = false;
-    for path in undeclared_paths(view, declared)? {
+    let bay_file = crate::agent_settings::hook_settings_file(&repo.config);
+    for path in undeclared_paths(view, declared, bay_file)? {
         if !observed.contains(&path) {
             observed.push(path);
             added = true;

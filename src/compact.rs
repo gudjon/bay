@@ -20,16 +20,16 @@ use crate::git::Git;
 use crate::repo::Repo;
 use crate::signing::Signer;
 
-pub const INDEX_PREFIX: &str = "refs/bay/landed-index/";
+pub const INDEX_PREFIX: &str = crate::names::LANDED_INDEX;
 /// The default ref-growth budget (§ 10a).
 pub const DEFAULT_BUDGET: u64 = 100_000;
 /// The most names one compaction push moves, so the host's judgement of it stays bounded.
 pub const PUSH_MAX: usize = 4096;
 /// The namespaces whose markers are compacted.
 const NAMESPACES: [&str; 3] = [
-    "refs/bay/landed/",
-    "refs/bay/intent/",
-    "refs/bay/landed-intent/",
+    crate::names::LANDED,
+    crate::names::INTENT,
+    crate::names::LANDED_INTENT,
 ];
 
 /// Whether `name` is in a compacted namespace.
@@ -241,7 +241,7 @@ fn markers_of(record: &ChangeRecord, remote: &HashMap<String, String>) -> Vec<(S
     if !record.retention_cut || record.state != ChangeState::Landed {
         return Vec::new();
     }
-    let mut names = vec![format!("refs/bay/landed/{}", record.id)];
+    let mut names = vec![format!("{}{}", crate::names::LANDED, record.id)];
     if let Some(claim) = &record.claim
         && remote.contains_key(&claim.landed_ref())
     {
@@ -259,13 +259,18 @@ fn markers_of(record: &ChangeRecord, remote: &HashMap<String, String>) -> Vec<(S
 fn remote_bay_refs(repo: &Repo) -> Result<HashMap<String, String>, String> {
     let listed = repo
         .git
-        .run(&["ls-remote", repo.remote(), "refs/bay/*", "refs/notes/bay/*"])
+        .run(&[
+            "ls-remote",
+            repo.remote(),
+            &format!("{}*", crate::names::BAY),
+            &format!("{}*", crate::names::NOTES),
+        ])
         .map_err(|error| error.message())?;
     Ok(listed
         .lines()
         .filter_map(|line| {
             let (oid, name) = line.split_once('\t')?;
-            (name.starts_with("refs/bay/") || name.starts_with("refs/notes/bay/"))
+            (name.starts_with(crate::names::BAY) || name.starts_with(crate::names::NOTES))
                 .then(|| (name.to_owned(), oid.to_owned()))
         })
         .collect())
@@ -297,7 +302,7 @@ pub fn run(
     if moved.len() == PUSH_MAX
         && moved
             .last()
-            .is_some_and(|(name, _)| name.starts_with("refs/bay/intent/"))
+            .is_some_and(|(name, _)| name.starts_with(crate::names::INTENT))
     {
         moved.pop();
     }

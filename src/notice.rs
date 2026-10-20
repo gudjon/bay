@@ -16,10 +16,19 @@
 //! cursor that cannot be written tells nothing (`notice_cursor: "unwritable"`): a notice it
 //! told could not be marked told, and would repeat at every step past any budget.
 //!
+//! G147: a talk that arrives for the session's actor (a `refs/bay/talk/<actor>/<id>` this
+//! repository holds, acked here, so its recipient's accept judged it) is one notice too, given
+//! once like a `check_failed` one, at the same events and within the same budget. The cursor
+//! keeps the talk ids it passed (`talks`). A talk already closed when it arrives, or one the actor
+//! sent itself, is passed and not told. A talk with no ack yet is read again at the next hook:
+//! the ack is what makes it arrived.
+//!
 //! A log entry is data, not text for the agent: any process on the box can write a ref under
 //! `refs/bay/log/`, and nothing here verifies its signer. A notice line is bay's own words; from
 //! the event it takes only the kind (one of three), a reason code bay knows, and an operation id
-//! of the form `<change>.<n>`. Anything else is a fixed word.
+//! of the form `<change>.<n>`. Anything else is a fixed word. A talk's notice likewise takes
+//! only its id (one bay could have computed), its kind (one of three) and the session's own actor
+//! name, never its prose.
 //!
 //! Each session has a budget of `[hooks] notice_budget_bytes` (default 2048) per hour, the hour
 //! starting at the first notice after the last one ended. A notice that does not fit is counted
@@ -80,6 +89,8 @@ struct Cursor {
     over_budget_told: bool,
     /// Every notice this session counted over its budget.
     over_budget: u64,
+    /// The ids of the talks to the session's actor already told or passed, newest last (G147).
+    talks: Vec<String>,
 }
 
 /// Whose notices a hook gives: the view's change, if the session is in a view, and the
@@ -104,7 +115,9 @@ pub struct Delivery {
     pub text: String,
     /// The ids of the events told.
     pub told: Vec<String>,
-    /// The ids of the events counted over the budget.
+    /// The ids of the talks told (G147).
+    pub talks: Vec<String>,
+    /// The ids of the events and talks counted over the budget.
     pub over_budget: Vec<String>,
     /// Why the cursor started at this hook rather than at session start, or why it could not be
     /// kept, when it did either.
@@ -118,6 +131,9 @@ impl Delivery {
         let mut fields = serde_json::Map::new();
         if !self.told.is_empty() {
             fields.insert("notices".to_owned(), serde_json::json!(self.told));
+        }
+        if !self.talks.is_empty() {
+            fields.insert("talk_notices".to_owned(), serde_json::json!(self.talks));
         }
         if !self.over_budget.is_empty() {
             fields.insert(
@@ -184,8 +200,9 @@ pub fn begin(repo: &Repo, state_dir: &Path) {
 }
 
 /// The notices for `scope` since the session's cursor in `state_dir`, from the executor logs
-/// this repository holds, within the session's budget; the cursor moves past every event read.
-/// When nothing moved, the cost is one `for-each-ref`.
+/// and the talks to the scope's actor this repository holds, within the session's budget; the
+/// cursor moves past every event and talk read. When nothing moved, the cost is two
+/// `for-each-ref`.
 #[must_use]
 pub fn deliver(repo: &Repo, scope: Scope<'_>, state_dir: &Path) -> Delivery {
     let mut cursor = match read(state_dir) {
@@ -198,30 +215,38 @@ pub fn deliver(repo: &Repo, scope: Scope<'_>, state_dir: &Path) -> Delivery {
             };
         }
     };
-    let Ok(tips) = crate::log::tips(&repo.git) else {
-        return Delivery::default();
-    };
-    if tips == cursor.logs {
-        return Delivery::default();
+    let (budget, now) = (repo.config.notice_budget(), now_s());
+    let mut delivery = Delivery::default();
+    let mut moved = false;
+    if let Ok(tips) = crate::log::tips(&repo.git)
+        && tips != cursor.logs
+        && let Ok(read) = crate::log::events_since(&repo.git, &cursor.logs, &tips, MAX_READ)
+    {
+        cursor.logs = read.tips;
+        let chain = crate::change::Chain::new(&repo.git);
+        let owns = |id: &str| {
+            chain
+                .read(id)
+                .is_ok_and(|(_, change)| change.actor.name == scope.actor)
+        };
+        delivery = tell(&mut cursor, scope, &owns, &read.events, budget, now);
+        moved = true;
     }
-    let Ok(read) = crate::log::events_since(&repo.git, &cursor.logs, &tips, MAX_READ) else {
-        return Delivery::default();
-    };
-    cursor.logs = read.tips;
-    let chain = crate::change::Chain::new(&repo.git);
-    let owns = |id: &str| {
-        chain
-            .read(id)
-            .is_ok_and(|(_, change)| change.actor.name == scope.actor)
-    };
-    let delivery = tell(
-        &mut cursor,
-        scope,
-        &owns,
-        &read.events,
-        repo.config.notice_budget(),
-        now_s(),
-    );
+    let arrived = arrived(repo, scope.actor, &cursor);
+    if !arrived.is_empty() {
+        tell_talks(
+            &mut cursor,
+            scope.actor,
+            &arrived,
+            budget,
+            now,
+            &mut delivery,
+        );
+        moved = true;
+    }
+    if !moved {
+        return delivery;
+    }
     if write(state_dir, &cursor).is_err() {
         return Delivery {
             cursor: Some("unwritable"),
@@ -256,6 +281,136 @@ fn open_window(cursor: &mut Cursor, now: u64) {
     }
 }
 
+/// Offers `line` (the notice `id`) to the window: told when it fits in `budget` bytes, counted
+/// over the budget otherwise. Whether it was told.
+fn offer(
+    cursor: &mut Cursor,
+    delivery: &mut Delivery,
+    (id, line): (&str, &str),
+    budget: u64,
+    now: u64,
+) -> bool {
+    open_window(cursor, now);
+    let bytes = line.len() as u64;
+    if cursor.bytes.saturating_add(bytes) <= budget {
+        cursor.bytes += bytes;
+        delivery.text.push_str(line);
+        return true;
+    }
+    cursor.over_budget += 1;
+    delivery.over_budget.push(id.to_owned());
+    false
+}
+
+/// The fixed over-budget line, once per window, when a notice was `withheld`.
+fn over_budget_line(cursor: &mut Cursor, delivery: &mut Delivery, withheld: bool) {
+    if withheld && !cursor.over_budget_told {
+        cursor.over_budget_told = true;
+        delivery.text.push_str(OVER_BUDGET);
+    }
+}
+
+/// One talk to the session's actor, acked on this repository (G147): its id, its kind when it
+/// is one of the three, and whether it is told (open, and sent by another actor) or only passed.
+#[derive(Debug)]
+struct Arrived {
+    id: String,
+    kind: Option<&'static str>,
+    tell: bool,
+}
+
+/// The talks to `actor` this repository holds that `cursor` has not passed, read at most
+/// [`MAX_READ`] at a time; those with no ack yet are left for a later hook.
+fn arrived(repo: &Repo, actor: &str, cursor: &Cursor) -> Vec<Arrived> {
+    if crate::names::operator_name(actor).is_err() {
+        return Vec::new();
+    }
+    let prefix = format!("{}{actor}/", crate::talk::TALK_PREFIX);
+    let Ok(listed) = repo
+        .git
+        .run(&["for-each-ref", "--format=%(refname) %(objectname)", &prefix])
+    else {
+        return Vec::new();
+    };
+    let new: Vec<(String, String)> = listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, _)| {
+            name.strip_prefix(&prefix).is_some_and(|id| {
+                crate::talk::is_talk_id(id) && !cursor.talks.iter().any(|told| told == id)
+            })
+        })
+        .take(MAX_READ)
+        .map(|(name, tip)| (name.to_owned(), tip.to_owned()))
+        .collect();
+    if new.is_empty() {
+        return Vec::new();
+    }
+    crate::talk::read_created(&repo.git, &new)
+        .into_iter()
+        .filter(|talk| talk.has("ack"))
+        .map(|talk| Arrived {
+            kind: TALK_KINDS
+                .iter()
+                .copied()
+                .find(|kind| talk.body["kind"] == *kind),
+            tell: !talk.closed() && talk.from_name() != actor,
+            id: talk.id,
+        })
+        .collect()
+}
+
+/// The talk kinds a notice names; any other is a fixed word.
+const TALK_KINDS: [&str; 3] = ["delivery", "discovery", "reliability"];
+
+/// Moves `cursor` past `arrived`: each talk not passed yet is told once, within the budget
+/// (G147), or only passed when it is not to be told.
+fn tell_talks(
+    cursor: &mut Cursor,
+    actor: &str,
+    arrived: &[Arrived],
+    budget: u64,
+    now: u64,
+    delivery: &mut Delivery,
+) {
+    let mut withheld = false;
+    for talk in arrived {
+        if cursor.talks.contains(&talk.id) {
+            continue;
+        }
+        cursor.talks.push(talk.id.clone());
+        if !talk.tell {
+            continue;
+        }
+        let line = talk_line(actor, talk);
+        if offer(cursor, delivery, (&talk.id, &line), budget, now) {
+            delivery.talks.push(talk.id.clone());
+        } else {
+            withheld = true;
+        }
+    }
+    over_budget_line(cursor, delivery, withheld);
+    let excess = cursor.talks.len().saturating_sub(MAX_TOLD);
+    cursor.talks.drain(..excess);
+}
+
+/// The one line for a talk to `actor`: its id and kind, and where to read it.
+fn talk_line(actor: &str, talk: &Arrived) -> String {
+    let mut out: String = format!(
+        "bay: talk {id} ({kind}) arrived for {actor}: read it with `git show {}{actor}/{id}:{}`",
+        crate::talk::TALK_PREFIX,
+        crate::talk::TALK_FILE,
+        id = talk.id,
+        kind = talk.kind.unwrap_or("a talk"),
+    )
+    .chars()
+    .filter(|char| !char.is_control())
+    .take(MAX_LINE)
+    .collect();
+    out.push('\n');
+    out
+}
+
 /// Moves `cursor` over `events`: each new one in `scope` of a kind the session is told of is
 /// told while it fits in `budget` bytes for the window, and counted otherwise.
 fn tell(
@@ -282,26 +437,78 @@ fn tell(
             continue;
         };
         cursor.told.push(id.to_owned());
-        open_window(cursor, now);
         let line = line(&change, kind, event);
-        let bytes = line.len() as u64;
-        if cursor.bytes.saturating_add(bytes) <= budget {
-            cursor.bytes += bytes;
-            delivery.text.push_str(&line);
+        if offer(cursor, &mut delivery, (id, &line), budget, now) {
             delivery.told.push(id.to_owned());
         } else {
-            cursor.over_budget += 1;
-            delivery.over_budget.push(id.to_owned());
             withheld = true;
         }
     }
-    if withheld && !cursor.over_budget_told {
-        cursor.over_budget_told = true;
-        delivery.text.push_str(OVER_BUDGET);
-    }
+    over_budget_line(cursor, &mut delivery, withheld);
     let excess = cursor.told.len().saturating_sub(MAX_TOLD);
     cursor.told.drain(..excess);
     delivery
+}
+
+/// The file in a session's state that holds the trunk commit its instructions notice was for.
+const INSTRUCTIONS_FILE: &str = "instructions-told";
+
+/// What `SessionStart` tells a session whose tree is behind trunk on its instruction files
+/// (G155, `[agent] instructions`): the notice line, and the `instructions_behind` field of the
+/// session's line, `{trunk, files: {path: commits}}`. A file counts the trunk commits not in
+/// the tree's HEAD (in `tree`, the session's directory) that change it. Local refs only: the
+/// trunk tracking ref as the last fetch left it. Once per session for one trunk commit: a
+/// resumed or compacted session on the same trunk is not told again. `None` when nothing is
+/// behind, or there is no trunk tracking ref or HEAD to compare.
+#[must_use]
+pub fn instructions(repo: &Repo, tree: &Path, state_dir: &Path) -> Option<(String, Value)> {
+    let git = crate::git::Git::new(tree);
+    let trunk_ref = repo.trunk_tracking_ref();
+    let trunk = git
+        .run(&[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{trunk_ref}^{{commit}}"),
+        ])
+        .ok()?;
+    let marker = state_dir.join(INSTRUCTIONS_FILE);
+    if std::fs::read_to_string(&marker).is_ok_and(|told| told == trunk) {
+        return None;
+    }
+    let head = git
+        .run(&["rev-parse", "--verify", "-q", "HEAD^{commit}"])
+        .ok()?;
+    let range = format!("{head}..{trunk}");
+    let mut files = serde_json::Map::new();
+    let mut named = Vec::new();
+    for file in repo.config.instructions() {
+        if file.chars().any(char::is_control) || file.starts_with('-') {
+            continue;
+        }
+        let count = git
+            .run(&["rev-list", "--count", &range, "--", &file])
+            .ok()
+            .and_then(|count| count.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        if count > 0 {
+            let plural = if count == 1 { "" } else { "s" };
+            named.push(format!("{file} ({count} trunk commit{plural})"));
+            files.insert(file, Value::from(count));
+        }
+    }
+    if files.is_empty() {
+        return None;
+    }
+    if std::fs::create_dir_all(state_dir).is_ok() {
+        let _ = std::fs::write(&marker, &trunk);
+    }
+    let text = format!(
+        "bay: this tree is behind trunk on its instruction files: {} since its HEAD; read \
+         them at trunk (`git show {trunk_ref}:<file>`) before you follow them\n",
+        named.join(", ")
+    );
+    Some((text, serde_json::json!({"trunk": trunk, "files": files})))
 }
 
 /// The operation id of `event` when it has the form bay gives one, `<change>.<n>`.
@@ -562,6 +769,29 @@ mod tests {
         let told = tell(&mut Cursor::default(), scope, &nobody, &[event], 4096, 0);
         assert_eq!(told.text.chars().count(), MAX_LINE + 1, "{told:?}");
         assert!(told.text.ends_with('\n'));
+    }
+
+    #[test]
+    fn a_talk_is_told_once_and_a_closed_or_own_one_is_passed() {
+        // G147.
+        let talk = |id: &str, tell: bool| super::Arrived {
+            id: id.to_owned(),
+            kind: Some("delivery"),
+            tell,
+        };
+        let mut cursor = Cursor::default();
+        let mut delivery = super::Delivery::default();
+        let arrived = [talk("t1", true), talk("t2", false), talk("t1", true)];
+        super::tell_talks(&mut cursor, "a", &arrived, 2048, 0, &mut delivery);
+        assert_eq!(delivery.talks, ["t1"]);
+        assert_eq!(
+            delivery.text,
+            "bay: talk t1 (delivery) arrived for a: read it with `git show refs/bay/talk/a/t1:talk.json`\n"
+        );
+        assert_eq!(cursor.talks, ["t1", "t2"]);
+        let mut again = super::Delivery::default();
+        super::tell_talks(&mut cursor, "a", &arrived, 2048, 1, &mut again);
+        assert_eq!(again, super::Delivery::default());
     }
 
     #[test]

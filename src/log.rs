@@ -14,7 +14,7 @@ use crate::git::Git;
 use crate::repo::Repo;
 use crate::signing::Signer;
 
-pub const LOG_PREFIX: &str = "refs/bay/log/";
+pub const LOG_PREFIX: &str = crate::names::LOG;
 /// An event trunk cannot derive (`INTERFACES` § 5), kept in the same log.
 pub const EVENT_SCHEMA: &str = "bay.event/1";
 

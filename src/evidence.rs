@@ -8,12 +8,28 @@ use serde::{Deserialize, Serialize};
 
 use crate::change::RECORD_IDENTITY;
 use crate::git::{Git, GitError};
+use crate::registry::{KeyClass, Registry};
 
-pub const EVIDENCE_PREFIX: &str = "refs/notes/bay/evidence/";
+pub const EVIDENCE_PREFIX: &str = crate::names::EVIDENCE;
 pub const EVIDENCE_SCHEMA: &str = "bay.evidence/1";
 /// The kind of a check record: the only kind a check's verdict is combined from. A runtime
 /// record (`running`, `effective`; [`crate::runtime`]) or a review never stands for a check.
 pub const KIND_CHECK: &str = "check";
+/// The kind of an outside review record. It verifies only against the reviewer class file, and
+/// it never combines into a verdict (ruled 2026-10-19, rulings-open-questions.md Q12).
+pub const KIND_REVIEW: &str = "review";
+
+/// The key class a record of `kind` must be signed by (Q12): the reviewer class for a `review`
+/// record, the producer class for every other kind. A reviewer key therefore never signs a
+/// record that counts toward a check, and a producer key's `review` is unverifiable.
+#[must_use]
+pub fn signer_class(kind: &str) -> KeyClass {
+    if kind == KIND_REVIEW {
+        KeyClass::Reviewer
+    } else {
+        KeyClass::Producer
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -205,7 +221,8 @@ impl EvidenceRecord {
         Ok(crate::canonical::canonical(&value)?.into_bytes())
     }
 
-    /// Signs the record with the producer's key.
+    /// Signs the record with `key`, under the namespace of the class its kind needs
+    /// ([`signer_class`]): `bay-reviewer` for a `review`, `bay-producer` otherwise.
     ///
     /// # Errors
     ///
@@ -215,25 +232,38 @@ impl EvidenceRecord {
         let payload = self.signing_payload()?;
         self.signature = Some(crate::signing::sign_data(
             key,
-            crate::registry::KeyClass::Producer.namespace(),
+            signer_class(&self.kind).namespace(),
             &payload,
         )?);
         Ok(())
     }
 
-    /// Whether the record is signed by a key in the producer file under its producer's name.
+    /// Whether the record is signed by a key in `class_file` under its producer's name, in the
+    /// namespace of the class its kind needs. The caller names the file of that class
+    /// ([`EvidenceRecord::verifies_in`]).
     #[must_use]
-    pub fn verifies(&self, producer_file: &std::path::Path) -> bool {
+    pub fn verifies(&self, class_file: &std::path::Path) -> bool {
         let (Some(signature), Ok(payload)) = (&self.signature, self.signing_payload()) else {
             return false;
         };
         crate::signing::verify_data(
-            producer_file,
+            class_file,
             &self.producer.name,
-            crate::registry::KeyClass::Producer.namespace(),
+            signer_class(&self.kind).namespace(),
             &payload,
             signature,
         )
+    }
+
+    /// Whether the record verifies under `registry` against the one class file its kind names
+    /// (Q12): a `review` against the reviewer file, every other kind against the producer file.
+    ///
+    /// # Errors
+    ///
+    /// The class file cannot be written.
+    pub fn verifies_in(&self, git: &Git, registry: &Registry) -> Result<bool, String> {
+        let file = registry.class_file(git, signer_class(&self.kind))?;
+        Ok(self.verifies(&file))
     }
 }
 
@@ -337,25 +367,77 @@ pub fn records_for(git: &Git, tree: &str) -> Result<Vec<EvidenceRecord>, String>
     Ok(all)
 }
 
-/// The records that count: with a registry, only those signed by a producer key under their
-/// producer's name (§ 7); without one, bay runs unsigned and every record counts.
+/// The records that count: with a registry, only those signed under their producer's name by a
+/// key of the class their kind needs (§ 7, Q12); without one, bay runs unsigned and every
+/// record counts.
 ///
 /// # Errors
 ///
-/// The producer class file cannot be written.
+/// A class file cannot be written.
 pub fn counted(
     git: &Git,
     records: Vec<EvidenceRecord>,
-    registry: Option<&crate::registry::Registry>,
+    registry: Option<&Registry>,
 ) -> Result<Vec<EvidenceRecord>, String> {
-    let Some(registry) = registry else {
-        return Ok(records);
-    };
-    let producers = registry.class_file(git, crate::registry::KeyClass::Producer)?;
-    Ok(records
+    Ok(tagged(git, records, registry)?
         .into_iter()
-        .filter(|record| record.verifies(&producers))
+        .filter(|(_, verified)| *verified != Verified::Unverifiable)
+        .map(|(record, _)| record)
         .collect())
+}
+
+/// How one record stands against the registry, as every reader names it (G160).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Verified {
+    /// There is no registry: nothing can verify the record, and it counts unsigned.
+    Unsigned,
+    /// Signed under its producer's name by a key of the class its kind needs.
+    Verified,
+    /// A registry exists and the record does not verify under it: it never counts.
+    Unverifiable,
+}
+
+/// The trust a result names for the evidence it reports (G160): `unsigned` without a registry,
+/// where every record counts unattested, and `signed` with one, where only verified records
+/// count.
+#[must_use]
+pub const fn trust(registry: Option<&Registry>) -> &'static str {
+    if registry.is_some() {
+        "signed"
+    } else {
+        "unsigned"
+    }
+}
+
+/// Each record with how it stands: with a registry, verified or unverifiable against the class
+/// file its kind names (§ 7, Q12); without one, every record is unsigned.
+///
+/// # Errors
+///
+/// A class file cannot be written.
+pub fn tagged(
+    git: &Git,
+    records: Vec<EvidenceRecord>,
+    registry: Option<&Registry>,
+) -> Result<Vec<(EvidenceRecord, Verified)>, String> {
+    let Some(registry) = registry else {
+        return Ok(records
+            .into_iter()
+            .map(|record| (record, Verified::Unsigned))
+            .collect());
+    };
+    records
+        .into_iter()
+        .map(|record| {
+            let verified = if record.verifies_in(git, registry)? {
+                Verified::Verified
+            } else {
+                Verified::Unverifiable
+            };
+            Ok((record, verified))
+        })
+        .collect()
 }
 
 /// What a record made by another operation must match to stand for a new run of a check

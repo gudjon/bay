@@ -16,8 +16,8 @@ use crate::repo::{Bootstrap, Fetch, OpenError, Repo};
 use crate::result::{BayResult, Decision, Reason};
 use crate::skill;
 use crate::version::{
-    CLAUDE_HOOK_MINIMUM, GIT_FLOOR_AGENT_VIEW, GIT_FLOOR_ANY, GIT_FLOOR_HOSTED_TRUNK,
-    GIT_RECOMMENDED, GIT_SHARED_CACHE, Version,
+    CLAUDE_HOOK_MINIMUM, GIT_FLOOR_AGENT_VIEW, GIT_FLOOR_ANY, GIT_FLOOR_EXECUTOR,
+    GIT_FLOOR_HOSTED_TRUNK, GIT_RECOMMENDED, GIT_SHARED_CACHE, Version,
 };
 
 /// Where `bay install` records the digest of the hook entries that are not bay's.
@@ -50,7 +50,15 @@ impl Report {
 
 #[must_use]
 pub fn doctor(dir: &Path) -> BayResult {
-    match probe(dir) {
+    doctor_as(dir, false)
+}
+
+/// `bay doctor`, or with `executor` `bay doctor --role executor`: the box is judged as an
+/// executor box whatever role doctor would infer (G63). The role is the operator's statement;
+/// an unsigned executor box holds no key doctor could infer it from.
+#[must_use]
+pub fn doctor_as(dir: &Path, executor: bool) -> BayResult {
+    match probe(dir, executor) {
         Ok(result) => result,
         Err(message) => BayResult::failed(message),
     }
@@ -63,6 +71,8 @@ enum Role {
     AgentView,
     /// The bare repository `bay host init` creates (§ 10a).
     HostedTrunk,
+    /// A box that runs `bay executor run`, as `--role executor` states (G63).
+    Executor,
     /// Doctor runs outside every repository: only the machine rows apply, at the floor of any
     /// machine running bay.
     NoRepository,
@@ -74,6 +84,7 @@ impl Role {
         match self {
             Self::AgentView => Some("agent-view"),
             Self::HostedTrunk => Some("bay-hosted-trunk"),
+            Self::Executor => Some("executor"),
             Self::NoRepository => None,
         }
     }
@@ -82,12 +93,13 @@ impl Role {
         match self {
             Self::AgentView => GIT_FLOOR_AGENT_VIEW,
             Self::HostedTrunk => GIT_FLOOR_HOSTED_TRUNK,
+            Self::Executor => GIT_FLOOR_EXECUTOR,
             Self::NoRepository => GIT_FLOOR_ANY,
         }
     }
 }
 
-fn probe(dir: &Path) -> Result<BayResult, String> {
+fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     let git = Git::new(dir);
     let git_line = git.version().map_err(|error| error.message())?;
     let git_version = Version::parse(&git_line);
@@ -108,6 +120,7 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     report.rows.push(crate::update::doctor_row());
 
     let role = match &info {
+        _ if executor => Role::Executor,
         None => Role::NoRepository,
         Some(info) if info.bare => Role::HostedTrunk,
         Some(_) => Role::AgentView,
@@ -115,6 +128,10 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     let floor = role.floor();
     let git_green = git_rows(&git_version, role, &mut report);
     let role = role.name();
+    // Whether the role was stated with `--role` or inferred from the repository and keys: an
+    // unsigned executor box is inferred as an agent view, and says so (G63).
+    let role_source = role.map(|_| if executor { "stated" } else { "inferred" });
+    let keys = crate::signing::Keys::load(&git);
 
     let claude = if config.claude_adapter() {
         probe_claude()?
@@ -122,24 +139,7 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
         Claude::NotConfigured
     };
     let minimum = Version::parse(CLAUDE_HOOK_MINIMUM);
-    let claude_row = match &claude {
-        Claude::NotConfigured => {
-            json!({"name": "claude", "state": "green", "note": "Claude adapter not configured"})
-        }
-        Claude::Absent => {
-            report.red(Reason::ClaudeAbsent, None);
-            json!({"name": "claude", "state": "red", "floor": CLAUDE_HOOK_MINIMUM,
-                "note": "claude is absent", "recovery": CLAUDE_RECOVERY})
-        }
-        Claude::Found(version) if *version < minimum => {
-            report.red(Reason::ClaudeBelowFloor, None);
-            json!({"name": "claude", "version": version.to_string(), "floor": CLAUDE_HOOK_MINIMUM,
-                "state": "red", "recovery": CLAUDE_RECOVERY})
-        }
-        Claude::Found(version) => json!({"name": "claude", "version": version.to_string(),
-            "floor": CLAUDE_HOOK_MINIMUM, "state": "green"}),
-    };
-    report.rows.push(claude_row);
+    claude_row(&claude, &minimum, &mut report);
 
     if let Some(info) = &info {
         report.rows.extend(config_row);
@@ -147,7 +147,13 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
         hooks_row(&git, &config, info, &mut report)?;
         quarantine_row(&git, &config, info.bare, &mut report);
         if !info.bare {
+            repository_row(&git, &config, &mut report);
             live_row(&git, &mut report);
+            environments_row(&git, &config, executor, &mut report);
+        }
+        if executor && !info.bare {
+            check_env_row(&git, &config, &mut report);
+            executor_keys_row(&git, &keys, &mut report);
         }
     } else {
         let note = "not in a git repository";
@@ -161,6 +167,7 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     }
 
     skill_row(&config, &mut report)?;
+    custody_row(&git, info.as_ref(), &mut report);
     if info.is_none() {
         // § 15.2: with no configured remote the box is not ready, and outside a repository no
         // remote is configured. A red machine row names the reason first, since those rows are
@@ -170,8 +177,7 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     // Ruling R14, on every platform. The row comes after the outside-repository red, so that
     // reason still comes first there; the choice it reads is the box's, in or out of a
     // repository.
-    let keys = crate::signing::Keys::load(&git);
-    let runs_checks = keys.executor.is_some() || keys.producer.is_some();
+    let runs_checks = executor || keys.executor.is_some() || keys.producer.is_some();
     sandbox_row(&crate::check::Sandbox::here(), runs_checks, &mut report);
 
     let ready = report.first_red.is_none();
@@ -192,6 +198,7 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
         "ref format": info.as_ref().map(|info| &info.ref_format),
         "branch": info.as_ref().and_then(|info| info.branch.as_ref()),
         "role": role,
+        "role_source": role_source,
         "rows": report.rows,
     });
     let mut result = match report.first_red {
@@ -203,13 +210,39 @@ fn probe(dir: &Path) -> Result<BayResult, String> {
     Ok(result)
 }
 
-/// The config of the work repository at `dir`, and a `config` row when it has none. With none,
+/// The `claude` row: Claude Code against the hook minimum, where the adapter is configured.
+fn claude_row(claude: &Claude, minimum: &Version, report: &mut Report) {
+    let row = match claude {
+        Claude::NotConfigured => {
+            json!({"name": "claude", "state": "green", "note": "Claude adapter not configured"})
+        }
+        Claude::Absent => {
+            report.red(Reason::ClaudeAbsent, None);
+            json!({"name": "claude", "state": "red", "floor": CLAUDE_HOOK_MINIMUM,
+                "note": "claude is absent", "recovery": CLAUDE_RECOVERY})
+        }
+        Claude::Found(version) if version < minimum => {
+            report.red(Reason::ClaudeBelowFloor, None);
+            json!({"name": "claude", "version": version.to_string(), "floor": CLAUDE_HOOK_MINIMUM,
+                "state": "red", "recovery": CLAUDE_RECOVERY})
+        }
+        Claude::Found(version) => json!({"name": "claude", "version": version.to_string(),
+            "floor": CLAUDE_HOOK_MINIMUM, "state": "green"}),
+    };
+    report.rows.push(row);
+}
+
+/// The config of the work repository at `dir`, and a `config` row when it has none or it
+/// carries retired keys ([`ignored_row`]). With none,
 /// the other rows name the bootstrap's remote and trunk where there is one, and otherwise the
 /// defaults. The row is not red: the box is ready, and the repository's commands refuse
 /// `CONFIG_MISSING` until trunk has a config.
 fn repository_config(dir: &Path) -> Result<(Config, Option<Value>), String> {
     match Repo::open_with(dir, Fetch::Never) {
-        Ok(repo) => Ok((repo.config, None)),
+        Ok(repo) => {
+            let row = ignored_row(&repo.config);
+            Ok((repo.config, row))
+        }
         Err(OpenError::ConfigMissing(_, detail)) => {
             let mut config = Config::default();
             if let Some(Ok(bootstrap)) = Bootstrap::of(dir) {
@@ -222,6 +255,18 @@ fn repository_config(dir: &Path) -> Result<(Config, Option<Value>), String> {
         }
         Err(error) => Err(error.message()),
     }
+}
+
+/// A `config` row naming the retired keys the config carries, which bay accepts and never
+/// reads (ruling Q14), when it carries any. Green: the config loads, and the policy is the one
+/// source of every check command (G141).
+fn ignored_row(config: &Config) -> Option<Value> {
+    let ignored = config.ignored();
+    (!ignored.is_empty()).then(|| {
+        json!({"name": "config", "state": "green", "ignored": ignored,
+            "note": "ignored: checks and their commands are declared in .bay/policy.toml, and \
+                the update settings are the box's global Git config"})
+    })
 }
 
 /// The Git rows: the floor for `role`, the shared cache and the recommended features. Returns
@@ -316,12 +361,118 @@ fn hooks_row(
         row["recovery"] = json!("run install again");
         report.red(Reason::HooksMissing, Some("hooks missing"));
     }
+    // G158: the entry's timeout bounds a hung hook; without it the product's default holds the
+    // agent first. Not red: the hook still fails closed when the default fires.
+    if let Some(timeout) = agent_settings::claude_pre_tool_timeout(&settings) {
+        row["pre_tool_timeout_s"] = json!(timeout);
+        if timeout.is_none_or(|timeout| timeout > agent_settings::PRE_TOOL_TIMEOUT_S) {
+            row["timeout_note"] = json!(format!(
+                "bay's PreToolUse entry has no timeout of at most {} s, so a hung hook holds \
+                 the agent for the product's default before it denies; run install again",
+                agent_settings::PRE_TOOL_TIMEOUT_S
+            ));
+        }
+    }
+    // G169: an entry an earlier bay wrote has no presence test, so on a box of the fleet without
+    // bay it denies every tool. Not red: this box has bay, and the entry still fails closed here.
+    let outdated = agent_settings::outdated_claude_events(&settings);
+    if !outdated.is_empty() {
+        row["outdated"] = json!(outdated);
+        row["outdated_note"] = json!(
+            "these entries run bay without testing that it is installed, so on a box without bay \
+             they deny every tool; run install again"
+        );
+    }
     if let Some(recorded) = recorded_unrelated_digest(git)? {
         row["unrelated_hooks_unchanged"] =
             json!(recorded == agent_settings::unrelated_digest(&settings));
     }
     report.rows.push(row);
+    report
+        .rows
+        .push(claude_hooks_posture(&settings, missing.is_empty()));
+    let home = crate::platform::home().map(std::path::PathBuf::from);
+    hook_overrides_row(
+        &agent_settings::claude_override_paths(Path::new(&info.toplevel), home.as_deref()),
+        report,
+    );
     Ok(())
+}
+
+/// The `hook-overrides` row (G154): the settings files the agent product reads beside the
+/// project's that switch bay's hooks off, by `disableAllHooks: true` or by hook entries for one
+/// of bay's events without bay's command. Red with `HOOKS_MISSING`, naming each file; a file
+/// that cannot be read is named too, since what it does is unknown. Doctor only reads them.
+fn hook_overrides_row(paths: &[std::path::PathBuf], report: &mut Report) {
+    let mut overrides = Vec::new();
+    for path in paths {
+        let file = path.display().to_string();
+        let settings = match agent_settings::read(path) {
+            Ok(settings) => settings,
+            Err(why) => {
+                overrides.push(json!({"file": file, "unreadable": why}));
+                continue;
+            }
+        };
+        let disabled = settings.get("disableAllHooks") == Some(&Value::Bool(true));
+        let events = agent_settings::claude_events_without_bay(&settings);
+        if disabled || !events.is_empty() {
+            overrides.push(json!({"file": file, "disable_all_hooks": disabled, "events": events}));
+        }
+    }
+    if overrides.is_empty() {
+        report
+            .rows
+            .push(json!({"name": "hook-overrides", "state": "green",
+            "read": paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
+            "overrides": []}));
+        return;
+    }
+    let files: Vec<&str> = overrides
+        .iter()
+        .filter_map(|found| found["file"].as_str())
+        .collect();
+    report.red(
+        Reason::HooksMissing,
+        Some("local settings weaken bay's hooks"),
+    );
+    report.rows.push(json!({
+        "name": "hook-overrides",
+        "state": "red",
+        "overrides": overrides,
+        "recovery": format!(
+            "edit {}: remove disableAllHooks, and give each event named bay's own `bay hook <event>` entry or remove that event's hooks",
+            files.join(", ")
+        ),
+    }));
+}
+
+/// The `agent-hooks` row of one agent product (H4): whether its early refusal fails closed,
+/// read from the `onFailure` of bay's installed `PreToolUse` entry, and that `Stop` cannot
+/// (Claude Code ignores `onFailure` there, so the Stop refusal is a once-only nudge, ruling R7),
+/// and that the deny holds under `bypassPermissions` (G153, the G61 probes). Informational: red only when bay's entries are missing, and the `hooks` row already gives
+/// that reason. The guarantee never rests on this hook: land and the host hook re-judge.
+fn claude_hooks_posture(settings: &serde_json::Map<String, Value>, entries_present: bool) -> Value {
+    let on_failure = agent_settings::claude_pre_tool_on_failure(settings);
+    let early_refusal = match &on_failure {
+        None => "none",
+        Some(Some(value)) if value == "block" => "fail_closed",
+        Some(_) => "fail_open",
+    };
+    json!({
+        "name": "agent-hooks",
+        "product": "claude",
+        "state": state(entries_present),
+        "early_refusal": early_refusal,
+        "pre_tool": {"event": "PreToolUse", "on_failure": on_failure.flatten()},
+        "stop": {"event": "Stop", "fails_closed": false,
+            "why": "the product ignores onFailure on Stop; the Stop refusal is asked once"},
+        // G153: the G61 probes P5a and P5b ran the installed entry under both bypass flags.
+        "bypass_permissions": {"deny_holds": entries_present,
+            "why": "PreToolUse hooks run in bypassPermissions and exit 2 still denies (probed on Claude Code 2.1.303); session rows name each session's permission_mode"},
+        "guarantee": "land and trunk hook (G8, G23)",
+        "note": "the guarantee does not rest on this hook: land and the host hook re-judge every change",
+    })
 }
 
 /// The open quarantines of the policy at trunk as this box last read it (`DESIGN` § 7: an
@@ -350,6 +501,70 @@ fn quarantine_row(git: &Git, config: &Config, bare: bool, report: &mut Report) {
     }));
 }
 
+/// The `repository` row (G157): HEAD's distance from the trunk tracking ref, ahead and behind,
+/// from local refs only (doctor never fetches, so behind is as of the last fetch), and the
+/// count of tracked files that differ from HEAD, so a checkout that runs code no commit
+/// describes is named. Informational: green, with a note when HEAD is behind or files are
+/// modified. `git status` runs without optional locks, so the read writes no index.
+fn repository_row(git: &Git, config: &Config, report: &mut Report) {
+    let trunk = format!("refs/remotes/{}/{}", config.remote(), config.trunk());
+    let distance = git
+        .run(&[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("HEAD...{trunk}"),
+        ])
+        .ok()
+        .and_then(|counts| {
+            let (ahead, behind) = counts.split_once(char::is_whitespace)?;
+            Some((
+                ahead.trim().parse::<u64>().ok()?,
+                behind.trim().parse::<u64>().ok()?,
+            ))
+        });
+    let modified = git
+        .run(&[
+            "--no-optional-locks",
+            "status",
+            "--porcelain",
+            "--untracked-files=no",
+        ])
+        .ok()
+        .map(|status| status.lines().count());
+    let mut notes = Vec::new();
+    match distance {
+        None => notes.push(format!(
+            "no distance from {trunk}: HEAD or the trunk tracking ref is missing"
+        )),
+        Some((_, behind)) if behind > 0 => notes.push(format!(
+            "HEAD is {behind} commits behind {trunk} as of the last fetch"
+        )),
+        Some(_) => {}
+    }
+    match modified {
+        None => notes.push("the modified tracked files could not be read".to_owned()),
+        Some(count) if count > 0 => notes.push(format!(
+            "{count} tracked files differ from HEAD: this checkout runs code no commit describes"
+        )),
+        Some(_) => {}
+    }
+    let mut row = json!({
+        "name": "repository",
+        "required": false,
+        "state": "green",
+        "trunk": trunk,
+        "ahead": distance.map(|(ahead, _)| ahead),
+        "behind": distance.map(|(_, behind)| behind),
+        "modified": modified,
+        "fetched": false,
+    });
+    if !notes.is_empty() {
+        row["note"] = json!(notes.join("; "));
+    }
+    report.rows.push(row);
+}
+
 /// The last live summary push of this repository (§ 11a), present only when it failed: the
 /// pusher runs detached from the agent hook, so its refusal (a live ref bound to another key,
 /// for one) is shown here instead of being lost. Never red: no reason code names it.
@@ -369,6 +584,187 @@ fn live_row(git: &Git, report: &mut Report) {
             "why": last["why"],
         }));
     }
+}
+
+/// The `key-custody` row (G145, `crate::custody`), on every box. In a work repository its
+/// session records are this machine's evidence of which account runs agent sessions.
+fn custody_row(git: &Git, info: Option<&RepoInfo>, report: &mut Report) {
+    let sessions = info.filter(|info| !info.bare).and_then(|_| {
+        git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .ok()
+            .map(|common| Path::new(&common).join("bay").join("sessions"))
+    });
+    let custody = crate::custody::row(git, sessions.as_deref());
+    if custody.exposed {
+        report.red(
+            Reason::KeyExposed,
+            Some("a signing key is readable by the session account"),
+        );
+    }
+    report.rows.push(custody.row);
+}
+
+/// The `environments` row (`INTERFACES` § 8): the policy environments this box's executor
+/// serves (`bay.checkEnvironment`, § 7), and whether the box declared them or takes the
+/// default, every environment, as before the declaration existed. Under the default, `serves`
+/// lists the environments of the policy at trunk as this box last read it. For a stated
+/// executor (G63) a declaration that names none is red with `CHECK_UNAVAILABLE`: it would run no
+/// check. An agent view only reports it.
+fn environments_row(git: &Git, config: &Config, executor: bool, report: &mut Report) {
+    let served = crate::check::Served::read(git);
+    let trunk = format!("refs/remotes/{}/{}", config.remote(), config.trunk());
+    let mut needed: Vec<String> = crate::policy::load_at(git, &trunk)
+        .ok()
+        .flatten()
+        .map(|policy| {
+            policy
+                .checks
+                .iter()
+                .filter(|entry| !policy.is_quarantined(entry))
+                .map(|entry| entry.environment.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    needed.sort();
+    needed.dedup();
+    let listed: Vec<String> = match &served {
+        crate::check::Served::Every => needed.clone(),
+        crate::check::Served::Declared(declared) => declared.clone(),
+    };
+    let none = matches!(&served, crate::check::Served::Declared(declared) if declared.is_empty());
+    let mut row = json!({"name": "environments", "declared": served.declared(),
+        "source": served.source(), "serves": listed, "required": executor,
+        "state": if !executor { "informational" } else if none { "red" } else { "green" }});
+    if served == crate::check::Served::Every {
+        row["note"] = json!(format!(
+            "{} is not set: this box serves every environment; declare one value per environment to serve only those",
+            crate::check::ENVIRONMENT_KEY
+        ));
+    }
+    let unserved: Vec<&String> = needed
+        .iter()
+        .filter(|environment| !served.serves(environment))
+        .collect();
+    if !unserved.is_empty() {
+        row["unserved"] = json!(unserved);
+    }
+    if none {
+        row["recovery"] = json!(format!(
+            "git config --global --add {} <environment>",
+            crate::check::ENVIRONMENT_KEY
+        ));
+        if executor {
+            report.red(
+                Reason::CheckUnavailable,
+                Some("this box serves no check environment"),
+            );
+        }
+    }
+    report.rows.push(row);
+}
+
+/// For a stated executor (G63): each `env` name of a required check in the policy at trunk, as
+/// this box last read it, is set in this environment. An executor that lacks one records that
+/// check as `infra_failure` (ruling 8b), so the box is red with `CHECK_ENV_UNSET` before the
+/// first landing instead. A missing or invalid policy is the landing's refusal, not this row's.
+fn check_env_row(git: &Git, config: &Config, report: &mut Report) {
+    let trunk = format!("refs/remotes/{}/{}", config.remote(), config.trunk());
+    let policy = match crate::policy::load_at(git, &trunk) {
+        Ok(Some(policy)) => policy,
+        Ok(None) => {
+            report.rows.push(
+                json!({"name": "check-env", "required": true, "state": "green",
+                "note": "no policy at trunk"}),
+            );
+            return;
+        }
+        Err(error) => {
+            report
+                .rows
+                .push(json!({"name": "check-env", "required": true,
+                "state": "not judged", "note": String::from(error)}));
+            return;
+        }
+    };
+    let unset: Vec<Value> = policy
+        .checks
+        .iter()
+        .filter(|entry| !policy.is_quarantined(entry))
+        .flat_map(|entry| {
+            entry
+                .env
+                .iter()
+                .filter(|name| std::env::var_os(name).is_none())
+                .map(|name| {
+                    json!({"check": entry.id, "environment": entry.environment, "env": name})
+                })
+        })
+        .collect();
+    if unset.is_empty() {
+        report
+            .rows
+            .push(json!({"name": "check-env", "required": true, "state": "green"}));
+        return;
+    }
+    report.red(Reason::CheckEnvUnset, Some("a check's env name is unset"));
+    report.rows.push(
+        json!({"name": "check-env", "required": true, "state": "red",
+        "unset": unset, "recovery": "set each named variable in the executor's environment"}),
+    );
+}
+
+/// For a stated executor under a registry (G63, § 10a): the executor key that signs its
+/// publications and the producer key that signs its evidence are set, and each one's name is
+/// enrolled in its class file. Without a registry the executor publishes unsigned: green.
+fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report) {
+    use crate::registry::{KeyClass, Registry};
+    let registry = match Registry::current(git) {
+        Ok(None) => {
+            report
+                .rows
+                .push(json!({"name": "executor-keys", "required": false,
+                "state": "green", "note": "no registry: the executor publishes unsigned"}));
+            return;
+        }
+        Ok(Some(registry)) => registry,
+        Err(why) => {
+            report.red(Reason::ExecutorKeyMissing, Some("registry unreadable"));
+            report
+                .rows
+                .push(json!({"name": "executor-keys", "required": true,
+                "state": "red", "note": why}));
+            return;
+        }
+    };
+    let judge = |set: bool, class: KeyClass, name: &str| match (set, registry.enrols(class, name)) {
+        (false, _) => "not set",
+        (true, true) => "enrolled",
+        (true, false) => "not enrolled",
+    };
+    let executor = judge(
+        keys.executor.is_some(),
+        KeyClass::Executor,
+        &keys.executor_name,
+    );
+    let producer = judge(
+        keys.producer.is_some(),
+        KeyClass::Producer,
+        &keys.producer_name,
+    );
+    let green = executor == "enrolled" && producer == "enrolled";
+    let mut row = json!({"name": "executor-keys", "required": true, "state": state(green),
+        "executor": executor, "executor_name": keys.executor_name,
+        "producer": producer, "producer_name": keys.producer_name});
+    if !green {
+        report.red(
+            Reason::ExecutorKeyMissing,
+            Some("executor keys not enrolled"),
+        );
+        row["recovery"] = json!(
+            "set bay.executorKey and bay.producerKey, under the names bay.executorName and bay.producerName that the registry enrols"
+        );
+    }
+    report.rows.push(row);
 }
 
 /// The check sandbox (ruling R14): red with `SANDBOX_ABSENT` on a box in the executor or

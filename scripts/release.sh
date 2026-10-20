@@ -3,7 +3,15 @@
 #
 #   scripts/release.sh setup              create this box's release key (once) and record it
 #   scripts/release.sh build <version>    build, package and sign HEAD into target/release/<version>/
+#   scripts/release.sh attach-sig <version> <file>
+#                                         take SHA256SUMS.sig made by an external signer
 #   scripts/release.sh publish <version>  create the GitHub release v<version> from that directory
+#
+# With BAY_RELEASE_EXTERNAL_SIGNER=1, build writes SHA256SUMS and does not sign it: it prints the
+# file to sign, and the signature is made elsewhere (a hardware key that signs only with a touch,
+# `ssh-keygen -Y sign -n bay-release -f <key> SHA256SUMS`) and brought back with attach-sig, which
+# copies it in only when it verifies against a key in scripts/release/allowed_signers. publish
+# refuses a release whose SHA256SUMS.sig is absent or does not verify.
 #
 # A release is only made from a commit whose gate evidence verifies (scripts/gate.sh --verify),
 # so every binary is built from a tree that passed every check. The assets are one
@@ -15,8 +23,9 @@
 # the release's notes. BAY_RELEASE_TARGETS narrows the target list (a release may ship fewer
 # platforms; the changelog says which).
 #
-# Configuration (git config, per clone): bay.releaseKey (the SSH private key). Its public key is
-# scripts/release/allowed_signers under the principal bay-release.
+# Configuration (git config, per clone): bay.releaseKey (the SSH private key), unless the signer
+# is external. scripts/release/allowed_signers lists every release key under the principal
+# bay-release, the same keys as RELEASE_KEYS in src/update.rs (a unit test keeps them equal).
 set -eu
 
 root=$(git rev-parse --show-toplevel)
@@ -24,7 +33,13 @@ cd "$root"
 allowed="$root/scripts/release/allowed_signers"
 targets="${BAY_RELEASE_TARGETS:-aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl}"
 
-usage() { echo "usage: scripts/release.sh setup | build <version> | publish <version>" >&2; exit 2; }
+usage() { echo "usage: scripts/release.sh setup | build <version> | attach-sig <version> <file> | publish <version>" >&2; exit 2; }
+
+# Whether signature file $2 verifies SHA256SUMS in directory $1 against a listed release key.
+verifies() {
+    [ -f "$1/SHA256SUMS" ] && [ -f "$2" ] &&
+        ssh-keygen -Y verify -q -f "$allowed" -I bay-release -n bay-release -s "$2" < "$1/SHA256SUMS"
+}
 
 check_version() {
     printf '%s' "$1" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' ||
@@ -77,7 +92,8 @@ build)
     [ $# -eq 2 ] || usage
     version=$2
     check_version "$version"
-    signing_key=$(key)
+    external="${BAY_RELEASE_EXTERNAL_SIGNER:-}"
+    [ "$external" = 1 ] || signing_key=$(key)
     git diff --quiet HEAD || { echo "release: tracked files differ from HEAD" >&2; exit 1; }
     test -z "$(git ls-files --others --exclude-standard -- '*.rs' Cargo.toml Cargo.lock)" ||
         { echo "release: untracked Rust sources would be built" >&2; exit 1; }
@@ -102,16 +118,35 @@ build)
     done
     printf '%s\n' "$version" > "$out/VERSION"
     (cd "$out" && shasum -a 256 VERSION bay-*.tar.gz > SHA256SUMS)
+    if [ "$external" = 1 ]; then
+        echo "release: $version built from $(git rev-parse --short HEAD) in $out, unsigned"
+        echo "release: sign $out/SHA256SUMS (ssh-keygen -Y sign -n bay-release -f <key> SHA256SUMS), then: scripts/release.sh attach-sig $version <SHA256SUMS.sig>"
+        exit 0
+    fi
     ssh-keygen -Y sign -q -f "$signing_key" -n bay-release "$out/SHA256SUMS"
-    ssh-keygen -Y verify -q -f "$allowed" -I bay-release -n bay-release -s "$out/SHA256SUMS.sig" < "$out/SHA256SUMS"
+    verifies "$out" "$out/SHA256SUMS.sig"
     echo "release: $version built from $(git rev-parse --short HEAD) in $out"
+    ;;
+attach-sig)
+    [ $# -eq 3 ] || usage
+    version=$2
+    check_version "$version"
+    out="$root/target/release/$version"
+    [ -f "$out/SHA256SUMS" ] || { echo "release: $out/SHA256SUMS is absent; run build first" >&2; exit 1; }
+    verifies "$out" "$3" ||
+        { echo "release: $3 does not verify SHA256SUMS against a key in $allowed; nothing attached" >&2; exit 1; }
+    cp "$3" "$out/SHA256SUMS.sig"
+    echo "release: SHA256SUMS.sig attached to $version"
     ;;
 publish)
     [ $# -eq 2 ] || usage
     version=$2
     check_version "$version"
     out="$root/target/release/$version"
-    ssh-keygen -Y verify -q -f "$allowed" -I bay-release -n bay-release -s "$out/SHA256SUMS.sig" < "$out/SHA256SUMS"
+    [ -f "$out/SHA256SUMS.sig" ] ||
+        { echo "release: $out/SHA256SUMS.sig is absent; sign the release (build, or attach-sig)" >&2; exit 1; }
+    verifies "$out" "$out/SHA256SUMS.sig" ||
+        { echo "release: SHA256SUMS.sig does not verify against a key in $allowed" >&2; exit 1; }
     (cd "$out" && shasum -a 256 -c -q SHA256SUMS)
     commit=$(git rev-parse HEAD)
     git fetch -q origin
