@@ -64,6 +64,7 @@ mod g167_a_policy_refuses_a_key_it_does_not_know;
 mod g169_a_hook_entry_never_denies_on_a_box_without_bay;
 mod g16_identity_is_verifiable;
 mod g170_a_check_materializes_with_one_batched_fetch;
+mod g172_doctor_names_the_store_and_its_maintenance;
 mod g173_maintenance_never_prunes_a_candidate_in_flight;
 mod g174_a_bay_hosted_trunk_on_files_is_named_degraded;
 mod g17_offline_submission_publishes_once;

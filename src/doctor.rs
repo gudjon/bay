@@ -148,6 +148,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
         if info.bare {
             report.rows.push(ref_format_row(&info.ref_format));
         }
+        report.rows.push(store_row(&git, &config, info));
         quarantine_row(&git, &config, info.bare, &mut report);
         if !info.bare {
             repository_row(&git, &config, &mut report);
@@ -211,6 +212,57 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     .with_detail(detail);
     result.human = Some(line);
     Ok(result)
+}
+
+/// G172: the object store and its maintenance, as the site set them up. bay creates no store
+/// and runs no maintenance, so every finding is advisory and names the site's own choice.
+fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
+    let get = |key: &str| git.run(&["config", "--get", key]).ok();
+    let remote = config.remote();
+    let promisor = get(&format!("remote.{remote}.promisor")).is_some_and(|value| value == "true");
+    let filter = get(&format!("remote.{remote}.partialclonefilter"));
+    let views = git
+        .run(&["worktree", "list", "--porcelain"])
+        .map_or(0, |out| {
+            out.lines()
+                .filter(|line| line.starts_with("worktree ") && line.contains("/bay/views/"))
+                .count()
+        });
+    let populated = !info.bare
+        && git
+            .run(&["ls-files", "-t"])
+            .is_ok_and(|out| out.lines().any(|line| !line.starts_with('S')));
+    let auto = get("maintenance.auto").is_none_or(|value| value != "false")
+        && get("gc.auto").is_none_or(|value| value != "0");
+    let registered = git
+        .run(&["config", "--get-all", "maintenance.repo"])
+        .is_ok_and(|out| out.lines().any(|repo| repo == info.toplevel));
+    let mut notes = Vec::new();
+    if !info.bare && !promisor {
+        notes.push("a full clone: the site may share a blob-less store (git clone --filter=blob:none --no-checkout)");
+    }
+    if promisor && populated {
+        notes.push("a blob-less store with a populated work tree holds the blobs it checked out");
+    }
+    if !auto {
+        notes.push(
+            "auto maintenance is off: nothing repacks or prunes this store after a fetch or push",
+        );
+    }
+    if !registered {
+        notes.push("not registered for scheduled maintenance (git maintenance register)");
+    }
+    json!({"name": "store",
+        "state": if notes.is_empty() { "green" } else { "advisory" },
+        "promisor_remote": promisor.then_some(remote),
+        "filter": filter,
+        "ref_format": info.ref_format,
+        "views": views,
+        "work_tree": if info.bare { "none" } else if populated { "populated" } else { "empty" },
+        "maintenance_strategy": get("maintenance.strategy"),
+        "auto_maintenance": auto,
+        "scheduled": registered,
+        "notes": notes})
 }
 
 /// G174: the ref backend of a bay-hosted trunk. On `files` a multi-ref update is not one
