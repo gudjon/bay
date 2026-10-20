@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.14
+
+- `bay watch` never judges red from a registry it cannot read; it says `red_unread` and keeps its cursor.
+- `bay watch` says `talks_unread` when it cannot read talks, instead of listing none.
+
 ## 0.1.13
 
 - A live summary a blob-less cache cannot read is named in the fleet map, never shown as missing.
@@ -9,20 +14,27 @@
 
 ## 0.1.12
 
+Partial clones
 - An unreadable `.bay/policy.toml` is an error naming it: land never says POLICY_MISSING, status never reads red as clear.
+- The same holds for the committed config, registry key files, executor logs, queue entries, evidence notes and requests.
+- A red judgement bay cannot make shows as `red: {"unread": why}` in `bay status` and the fleet map.
+
+Docs
+- The README, skill and demo say main and merge; bay's commands keep trunk and land.
 
 ## 0.1.11
 
 Talk
 - The fleet map lists open talks, and each session counts the talks its actor owes and is owed.
-- `bay watch` lists when a talk arrives, is answered, turns lost or stale, and closes, once each.
+- `bay watch` lists when one of your talks arrives, is answered, turns lost or stale, and closes.
 - The fleet map's actors include the senders and recipients of open talks.
 - A talk's row in `bay status` names the change a delivery talk is about.
 
 Landing
-- A queued change hears of its merge conflict with trunk before it reaches the queue's head.
-- `bay status` shows that conflict's paths as `operation.conflict`; the change keeps its place.
+- `bay status` shows a queued change its merge conflict with trunk before it reaches the head.
+- The conflict's paths are in `operation.conflict`; the change keeps its place. It is not pushed to the agent.
 - A resubmission racing a background executor on one machine lands once, never panics or leaves an operation running.
+- An executor that faults after claiming an operation gives the claim back, so another takes it at once.
 
 Views
 - With `[view] warm_history = true`, `bay start` and `--resume` fetch the declared paths' history, and say how much.
@@ -42,7 +54,7 @@ Update
 - The daily background check no longer waits for a running executor either.
 - Each release is kept under `$XDG_DATA_HOME/bay/versions/`; updates keep the newest three and every running executor's.
 - An executor's operation starts child `bay` processes from its own version, ending on the version it began with.
-- Between operations a looping executor execs its new binary in place, and names the move in `detail.reexec`.
+- On Unix, between operations, a looping executor execs its new binary and names the move in `detail.reexec`.
 
 ## 0.1.10
 

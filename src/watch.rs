@@ -259,22 +259,33 @@ pub fn collect(
             })
             .filter(|event| record.as_ref().is_none_or(|record| touches(record, event))),
     );
-    let registry = crate::registry::Registry::current(git).ok().flatten();
-    // G195: from a cursor, only the landings after it and the notes that moved are read.
-    let (reds, judged) = crate::red::judge(
-        git,
-        &reached,
-        registry.as_ref(),
-        since.and_then(|cursor| cursor.judged.as_ref()),
-    )?;
-    events.extend(red_events(
-        since
-            .map(|cursor| cursor.red.as_slice())
-            .unwrap_or_default(),
-        &reds,
-        record.as_ref(),
-    ));
-    let (said, talks) = talk_events(git, since);
+    // A registry that cannot be read never reads as none: evidence would then count unsigned,
+    // so the red is not judged, the cursor keeps what it held, and the result says why.
+    let (reds, judged, red_unread) = match crate::registry::Registry::current(git) {
+        Ok(registry) => {
+            // G195: from a cursor, only the landings after it and the notes that moved are read.
+            let (reds, judged) = crate::red::judge(
+                git,
+                &reached,
+                registry.as_ref(),
+                since.and_then(|cursor| cursor.judged.as_ref()),
+            )?;
+            events.extend(red_events(
+                since
+                    .map(|cursor| cursor.red.as_slice())
+                    .unwrap_or_default(),
+                &reds,
+                record.as_ref(),
+            ));
+            (reds, judged, None)
+        }
+        Err(why) => (
+            since.map(|cursor| cursor.red.clone()).unwrap_or_default(),
+            since.and_then(|cursor| cursor.judged.clone()),
+            Some(why),
+        ),
+    };
+    let (said, talks, talks_unread) = talk_events(git, since);
     events.extend(said);
     let next = Cursor {
         trunk: Some(reached),
@@ -283,7 +294,7 @@ pub fn collect(
         red: reds,
         judged,
     };
-    Ok(json!({
+    let mut out = json!({
         "trunk": trunk,
         "since": since.map(Cursor::encode).transpose()?,
         "landings": landings,
@@ -291,7 +302,14 @@ pub fn collect(
         "invalidations": inputs::to_json(invalidations.iter()),
         "more": stopped_at.is_some() || read.more,
         "cursor": next.encode()?,
-    }))
+    });
+    if let Some(why) = red_unread {
+        out["red_unread"] = json!(why);
+    }
+    if let Some(why) = talks_unread {
+        out["talks_unread"] = json!(why);
+    }
+    Ok(out)
 }
 
 /// `bay watch --landed` (G73): the landings of [`collect`] after `since`, the count of
@@ -424,14 +442,19 @@ fn red_events(
 }
 
 /// G47b: the talk events after `since` (the module doc), and the talks the next cursor holds. A
-/// talk ref that cannot be read lists no talk event, and the cursor keeps the talks it held.
-fn talk_events(git: &Git, since: Option<&Cursor>) -> (Vec<Value>, BTreeMap<String, String>) {
+/// talk ref that cannot be read lists no talk event, the cursor keeps the talks it held, and
+/// the third value says why.
+fn talk_events(
+    git: &Git,
+    since: Option<&Cursor>,
+) -> (Vec<Value>, BTreeMap<String, String>, Option<String>) {
     let held = since.map(|cursor| cursor.talks.clone()).unwrap_or_default();
     let me = crate::change::actor_name();
     let now = crate::talk::standing::reader_now();
-    let Ok(followed) = crate::talk::standing::followed(git, &me, now, |id| held.contains_key(id))
-    else {
-        return (Vec::new(), held);
+    let followed = match crate::talk::standing::followed(git, &me, now, |id| held.contains_key(id))
+    {
+        Ok(followed) => followed,
+        Err(why) => return (Vec::new(), held, Some(why)),
     };
     let mut events = Vec::new();
     let mut next = BTreeMap::new();
@@ -484,7 +507,7 @@ fn talk_events(git: &Git, since: Option<&Cursor>) -> (Vec<Value>, BTreeMap<Strin
         }
         next.insert(id, format!("{standing}/{}", talk.replies));
     }
-    (events, next)
+    (events, next, None)
 }
 
 /// The event kinds about the acceptance policy, which is an input of every change (ruling R3).

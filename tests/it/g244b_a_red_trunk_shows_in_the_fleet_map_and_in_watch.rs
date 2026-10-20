@@ -205,3 +205,65 @@ fn watch_sees_a_red_clear_when_a_later_run_of_the_check_passes() {
     assert_eq!(cleared.len(), 1, "{events:?}");
     assert_eq!(cleared[0]["landing"], broken.as_str(), "{events:?}");
 }
+
+/// A registry that cannot be read never reads as none in watch: evidence would then count
+/// unsigned, so a record could clear a red trunk. The red is not judged, the cursor keeps the
+/// red it held, and the result names why.
+#[test]
+fn watch_judges_no_red_from_a_registry_it_cannot_read() {
+    let trunk = trunk();
+    let (_, landing) = trunk.land("src/b.rs", None);
+    trunk.suite(&landing, "product_failure");
+    trunk.test_box.bay_ok(&trunk.repo, &["status"]);
+    let (events, cursor) = trunk.watch(None);
+    assert_eq!(of_kind(&events, "trunk_red").len(), 1, "{events:?}");
+
+    // The registry ref names a commit whose agent file is no key list, and a pass is recorded.
+    let bad = trunk.test_box.path().join("bad-registry");
+    std::fs::create_dir_all(&bad).unwrap();
+    let format = trunk
+        .test_box
+        .git_ok(&trunk.repo, &["rev-parse", "--show-object-format"]);
+    trunk.test_box.git_ok(
+        &bad,
+        &["init", "-q", &format!("--object-format={}", format.trim())],
+    );
+    std::fs::write(bad.join("agent"), "not a key line\n").unwrap();
+    trunk.test_box.git_ok(&bad, &["add", "agent"]);
+    trunk
+        .test_box
+        .git_ok(&bad, &["commit", "-q", "-m", "registry"]);
+    trunk.test_box.git_ok(
+        &trunk.repo,
+        &[
+            "fetch",
+            "-q",
+            bad.to_str().unwrap(),
+            "HEAD:refs/bay/registry",
+        ],
+    );
+    let (code, written) = result_json(trunk.test_box.bay(&trunk.suite_box).args([
+        "evidence",
+        "record",
+        "--kind",
+        "check",
+        "--check",
+        "suite",
+        "--environment",
+        "local",
+        "--verdict",
+        "pass",
+        "--commit",
+        &landing,
+        "--version",
+        "2",
+    ]));
+    assert_eq!(code, 0, "{written}");
+    let watched = trunk
+        .test_box
+        .bay_ok(&trunk.repo, &["watch", "--since", &cursor]);
+    let detail = &watched["detail"];
+    assert!(detail["red_unread"].is_string(), "{watched}");
+    let events = detail["events"].as_array().unwrap();
+    assert_eq!(of_kind(events, "trunk_red_cleared").len(), 0, "{watched}");
+}
