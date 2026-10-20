@@ -9,6 +9,7 @@ pub mod change;
 pub mod check;
 pub mod claims;
 pub mod clock;
+pub mod commit_graph;
 pub mod compact;
 pub mod completion;
 pub mod config;

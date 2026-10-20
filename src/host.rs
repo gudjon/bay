@@ -86,12 +86,20 @@ fn run_init(path: &Path, trunk: &str, object_format: &str) -> Result<BayResult, 
         host.run(&["config", &key, value])
             .map_err(|error| error.message())?;
     }
+    // G191: a commit-graph with generation numbers and changed-path Bloom filters. The host
+    // is born empty, so Git's maintenance after a push writes the first graph and every one
+    // after it; bay runs no maintenance of its own (G172).
+    for (key, value) in crate::commit_graph::HOST_SETTINGS {
+        host.run(&["config", key, value])
+            .map_err(|error| error.message())?;
+    }
     Ok(BayResult::ok(json!({
         "host": path_text,
         "trunk": trunk,
         "ref format": "reftable",
         "object format": object_format,
         "hook": command,
+        "commit_graph": "changed-path Bloom filters, written by Git's maintenance after a push",
     })))
 }
 

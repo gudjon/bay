@@ -1,15 +1,33 @@
 # Changelog
 
+## 0.1.10
+
+Speed
+- `bay host init` sets the host to keep a commit-graph with changed-path Bloom filters, refreshed by Git's maintenance.
+- `bay install` in a clone keeps its commit-graph fresh on fetch and writes the first one with Bloom filters.
+- Evidence reads run two Git processes per tree, however many producers record evidence.
+
+Doctor
+- The `store` row reports the commit-graph: missing, without Bloom filters Git reads, or ok. It is advisory only.
+
+Status
+- `bay watch --since` judges a red trunk from its cursor, reading only new landings and moved evidence.
+
+Partial clones
+- On a blob-less cache, a view fetches only its declared paths' blobs, also when resumed onto a newer trunk.
+- Git never fetches a missing object on its own inside bay's reads; bay fetches its own files by name.
+- A bay file a blob-less cache cannot fetch is an error naming the file, never a silent default.
+
 ## 0.1.9
 
 Before you upgrade a bay-hosted trunk's clients, upgrade the host. Older hosts refuse an expired talk's close.
 
 Status
-- `bay status` and the fleet map name and count trunk merges and pushes that did not land through bay.
-- `bay watch` lists an `unattributed_landing` event for each landing outside bay.
+- `bay status` and the fleet map name and count recent trunk merges and pushes that did not land through bay.
+- `bay watch`, outside a view, lists an `unattributed_landing` event for each landing outside bay.
 
 Landing
-- Racing starts for one intent make one change; the others are refused, even while the remote's ref lock is held.
+- Racing starts for one intent make one change: a same-name start adopts it, the others get `CHANGE_SUPERSEDED`.
 - `bay undo` never rewinds this store's copy of the undone change's chain.
 
 Talk

@@ -112,7 +112,9 @@ fn undo_in(dir: &Path, repo: &Repo, change: &str, wait: bool) -> Result<BayResul
             Merge::Clean(tree) => (tree, None),
             Merge::Conflict(paths, tree) => (tree, Some(paths)),
         };
+    // G212: the sparse view's read-tree fetches only the declared files it writes.
     Git::new(view)
+        .fetching()
         .run(&["read-tree", "-u", "--reset", &tree])
         .map_err(|error| error.message())?;
     if let Some(conflicts) = conflicts {

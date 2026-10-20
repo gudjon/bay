@@ -33,6 +33,8 @@
 //! event for each it held that is no longer red (fixed, undone, passed or quarantined). Both
 //! are judged at the cursor's trunk, and without a cursor every red check is new. In a view
 //! only those whose paths cover the change's declared paths are listed; the cursor carries all.
+//! It also carries what decided each check (G195, [`crate::red::Judged`]), so a watch from it
+//! reads the post answers only of the landings after it and of those whose evidence moved.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -69,6 +71,10 @@ pub struct Cursor {
     /// with no red reads as one written before red was carried.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub red: Vec<crate::red::Red>,
+    /// What decided the red checks, and at which trunk (G195): the next watch reads only the
+    /// landings after it and those whose evidence moved. Left out when trunk has no post check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub judged: Option<crate::red::Judged>,
 }
 
 impl Cursor {
@@ -92,6 +98,15 @@ impl Cursor {
         if !cursor.trunk.as_deref().is_none_or(object_id)
             || !cursor.logs.values().all(|tip| object_id(tip))
             || !cursor.red.iter().all(|red| object_id(&red.landing))
+            || !cursor.judged.as_ref().is_none_or(|judged| {
+                object_id(&judged.trunk)
+                    && judged.evidence.values().all(|tip| object_id(tip))
+                    && judged.registry.as_deref().is_none_or(object_id)
+                    && judged
+                        .decided
+                        .iter()
+                        .all(|decided| decided.landing.as_deref().is_none_or(object_id))
+            })
         {
             return Err(bad("an id is not an object id"));
         }
@@ -232,7 +247,13 @@ pub fn collect(
             .filter(|event| record.as_ref().is_none_or(|record| touches(record, event))),
     );
     let registry = crate::registry::Registry::current(git).ok().flatten();
-    let reds = crate::red::red(git, &reached, registry.as_ref())?;
+    // G195: from a cursor, only the landings after it and the notes that moved are read.
+    let (reds, judged) = crate::red::judge(
+        git,
+        &reached,
+        registry.as_ref(),
+        since.and_then(|cursor| cursor.judged.as_ref()),
+    )?;
     events.extend(red_events(
         since
             .map(|cursor| cursor.red.as_slice())
@@ -245,6 +266,7 @@ pub fn collect(
         logs: read.tips,
         talks: since.map(|cursor| cursor.talks.clone()).unwrap_or_default(),
         red: reds,
+        judged,
     };
     Ok(json!({
         "trunk": trunk,
@@ -290,6 +312,7 @@ pub fn collect_landed(
         logs,
         talks: since.map(|cursor| cursor.talks.clone()).unwrap_or_default(),
         red: since.map(|cursor| cursor.red.clone()).unwrap_or_default(),
+        judged: since.and_then(|cursor| cursor.judged.clone()),
     };
     Ok(json!({
         "trunk": trunk,
@@ -539,6 +562,17 @@ mod tests {
                 landing: "c".repeat(40),
                 change: None,
             }],
+            judged: Some(crate::red::Judged {
+                trunk: "a".repeat(40),
+                evidence: [("suite-1".to_owned(), "d".repeat(40))].into(),
+                registry: None,
+                decided: vec![crate::red::Decided {
+                    check: "suite".to_owned(),
+                    environment: "local".to_owned(),
+                    landing: Some("c".repeat(40)),
+                    failed: true,
+                }],
+            }),
         };
         let text = cursor.encode().unwrap();
         assert!(
@@ -557,6 +591,9 @@ mod tests {
             encode(r#"{"trunk":null,"logs":{},"extra":1}"#),
             encode(
                 r#"{"trunk":null,"logs":{},"red":[{"check":"s","environment":"e","paths":null,"landing":"HEAD","change":null}]}"#,
+            ),
+            encode(
+                r#"{"trunk":null,"logs":{},"judged":{"trunk":"HEAD","evidence":{},"registry":null,"decided":[]}}"#,
             ),
         ] {
             assert!(Cursor::parse(&bad).is_err(), "{bad}");

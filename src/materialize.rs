@@ -443,7 +443,9 @@ fn stream(
     links: bool,
     tick: &mut dyn FnMut(),
 ) -> Result<(), Unmade> {
-    let mut cmd = git.command();
+    // After the prefetch every blob is here; a store whose promisor remote bay cannot name is
+    // left to Git's own fetch.
+    let mut cmd = git.fetching().command();
     cmd.env(NO_REPLACE.0, NO_REPLACE.1)
         .args(["cat-file", "--batch"])
         .stdin(Stdio::piped())

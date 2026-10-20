@@ -195,8 +195,9 @@ impl Config {
             commit,
             Result::is_ok,
             || -> Result<Option<String>, String> {
+                // The tree names the file; its blob need not be in a blob-less store (G104b).
                 let exists = git
-                    .run(&["cat-file", "-e", &path])
+                    .run(&["rev-parse", "--verify", "-q", &path])
                     .map(|_| true)
                     .or_else(|_| {
                         git.run(&["rev-parse", "--verify", &format!("{commit}^{{commit}}")])

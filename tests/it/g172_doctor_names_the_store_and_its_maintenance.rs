@@ -73,7 +73,13 @@ fn doctor_names_each_kind_of_store() {
     assert_eq!(row["views"], 0, "{row}");
     test_box.bay_ok(&cache, &["start", "CARD-1", "--paths", "src/"]);
     assert_eq!(store(&test_box, &cache)["views"], 1);
-    // Registered for scheduled maintenance, it says so.
+    // Registered for scheduled maintenance, it says so. Its commit-graph, kept on fetch, is
+    // G192's to report; here it is the one `bay install` would leave.
+    test_box.git_ok(
+        &cache,
+        &["commit-graph", "write", "--reachable", "--changed-paths"],
+    );
+    test_box.git_ok(&cache, &["config", "fetch.writeCommitGraph", "true"]);
     test_box.git_ok(
         &cache,
         &[

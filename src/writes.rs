@@ -510,7 +510,9 @@ fn git(view: &Path, args: &[&str], input: Option<&[u8]>) -> Option<Vec<u8>> {
         .arg(view)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0");
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        // G104b: a hook's snapshot reads only what the store holds, never fetching a blob.
+        .env("GIT_NO_LAZY_FETCH", "1");
     let output = crate::git::run_bounded_for(cmd, &args.join(" "), input, CALL_TIMEOUT).ok()?;
     output.status.success().then_some(output.stdout)
 }

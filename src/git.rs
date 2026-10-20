@@ -15,6 +15,18 @@
 //! G200: a handle lists its repository's config once ([`Git::config_get`]) and answers bay's
 //! own keys from that list until any `git config` write in this process; the common
 //! directory of a directory is asked once per process ([`Git::common_dir`]).
+//!
+//! G104b: no call fetches an object on its own. In a partial clone (the shared blob-less
+//! cache) Git would fetch any object a read touches and the store lacks, one round trip each,
+//! so a walk or a diff over undeclared paths would pull their blobs onto the machine (G212).
+//! Every call runs with `GIT_NO_LAZY_FETCH=1`: a missing object is an error bay reports. A read
+//! that names its objects (`cat-file <type> <name>`, `cat-file --batch` of names, `notes show`)
+//! asks for them by name: when the store lacks one, bay fetches exactly those objects in one
+//! `git fetch --stdin` from the promisor remote, the form Git's own promisor code uses, and
+//! reads again once. A handle made by [`Git::fetching`] lets Git fetch what it writes or
+//! merges: a view's declared files, a merge, a materialized tree. Git before 2.45 ignores the
+//! variable; the shared cache needs 2.48 (`GIT-FEATURES` § 1), so below it no store should
+//! have a promisor remote, and one that does fetches lazily as before.
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -35,6 +47,8 @@ pub struct Git {
     bare_dir: bool,
     /// G200: the config as this handle last listed it, for [`Git::config_get`].
     config: Mutex<Option<Snapshot>>,
+    /// G104b: Git may fetch an absent object as this handle's calls read it ([`Git::fetching`]).
+    lazy_fetch: bool,
 }
 
 /// G200: one `git config --list` of a handle, every entry in Git's order (the last value
@@ -147,6 +161,20 @@ impl Git {
             dir,
             bare_dir,
             config: Mutex::new(None),
+            lazy_fetch: false,
+        }
+    }
+
+    /// G104b, G212: a handle on the same repository whose calls let Git fetch an absent object
+    /// as they read it, for a call that means to: writing a view's declared files, a merge,
+    /// materializing a tree. Every other call of bay reads only what the store holds.
+    #[must_use]
+    pub fn fetching(&self) -> Self {
+        Self {
+            dir: self.dir.clone(),
+            bare_dir: self.bare_dir,
+            config: Mutex::new(None),
+            lazy_fetch: true,
         }
     }
 
@@ -369,12 +397,7 @@ impl Git {
         timeout: std::time::Duration,
     ) -> Result<Vec<u8>, GitError> {
         let args_display = args.join(" ");
-        let mut cmd = self.command();
-        cmd.args(args);
-        for (key, value) in envs {
-            cmd.env(key, value);
-        }
-        let output = run_bounded_for(cmd, &args_display, input, timeout)?;
+        let output = self.output(args, envs, input, timeout)?;
         let stderr = String::from_utf8(output.stderr).map_err(|_| GitError::NotUtf8 {
             args: args_display.clone(),
         })?;
@@ -394,10 +417,7 @@ impl Git {
     ///
     /// The git binary is missing or the call exceeds the timeout.
     pub fn run_status(&self, args: &[&str]) -> Result<(i32, String, String), GitError> {
-        let args_display = args.join(" ");
-        let mut cmd = self.command();
-        cmd.args(args);
-        let output = run_bounded_input(cmd, &args_display, None)?;
+        let output = self.output(args, &[], None, GIT_CALL_TIMEOUT)?;
         Ok((
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout)
@@ -405,6 +425,138 @@ impl Git {
                 .to_owned(),
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ))
+    }
+
+    /// Runs `git <args>` with `envs` and optional stdin, bounded by `timeout`. G104b: when a
+    /// read that names its objects finds one absent from a partial clone, those objects are
+    /// fetched by name from the promisor remote and the read runs once more; a failed fetch
+    /// leaves the first answer, which says what is missing.
+    fn output(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        input: Option<&[u8]>,
+        timeout: std::time::Duration,
+    ) -> Result<Output, GitError> {
+        let args_display = args.join(" ");
+        let run = || {
+            let mut cmd = self.command();
+            cmd.args(args);
+            for (key, value) in envs {
+                cmd.env(key, value);
+            }
+            run_bounded_for(cmd, &args_display, input, timeout)
+        };
+        let mut output = run()?;
+        if self.lazy_fetch {
+            return Ok(output);
+        }
+        let absent = named_absent(args, &output);
+        if absent.is_empty() {
+            return Ok(output);
+        }
+        match self.fetch_named(&absent, timeout) {
+            None => Ok(output),
+            Some(Ok(())) => run(),
+            Some(Err(why)) => {
+                output.stderr.extend_from_slice(why.as_bytes());
+                Ok(output)
+            }
+        }
+    }
+
+    /// G104b: fetches the objects `names` name from the promisor remote in one explicit
+    /// `fetch --stdin`. `None` in a full clone, or when no name resolves to an object id (a
+    /// path the tree lacks); the reason, to add to Git's own, when the fetch fails.
+    fn fetch_named(
+        &self,
+        names: &[String],
+        timeout: std::time::Duration,
+    ) -> Option<Result<(), String>> {
+        let remote = self.promisor_remote()?;
+        // A name is resolved through trees, which a blob-less store holds: no blob is read.
+        let mut ids = String::new();
+        for name in names {
+            if let Ok(oid) = self.run(&["rev-parse", "--verify", "-q", name]) {
+                ids.push_str(&oid);
+                ids.push('\n');
+            }
+        }
+        if ids.is_empty() {
+            return None;
+        }
+        let fetched = self.run_bytes_for(
+            &[
+                "-c",
+                "fetch.negotiationAlgorithm=noop",
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--recurse-submodules=no",
+                "--filter=blob:none",
+                "--stdin",
+                &remote,
+            ],
+            &[],
+            Some(ids.as_bytes()),
+            timeout,
+        );
+        Some(fetched.map(|_| ()).map_err(|error| {
+            format!(
+                "\n{} absent from this partial clone, and fetching it by id from its promisor remote {remote} failed: {}",
+                names.join(", "),
+                error.message()
+            )
+        }))
+    }
+
+    /// The remote a partial clone fetches its absent objects from, from this handle's config
+    /// snapshot: `extensions.partialClone`, else the first remote whose `remote.<name>.promisor`
+    /// is true. `None` in a full clone, or for a name Git would read as an option.
+    fn promisor_remote(&self) -> Option<String> {
+        let mut slot = self.config.lock().unwrap_or_else(PoisonError::into_inner);
+        let writes = CONFIG_WRITES.load(Ordering::SeqCst);
+        if slot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.writes != writes)
+        {
+            *slot = Some(self.list_config(writes).ok()?);
+        }
+        let snapshot = slot.as_ref()?;
+        let text = |entry: &ConfigEntry| {
+            String::from_utf8_lossy(entry.value.as_deref().unwrap_or_default())
+                .trim()
+                .to_owned()
+        };
+        let named = snapshot
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.key == b"extensions.partialclone")
+            .map(text)
+            .or_else(|| {
+                // Each remote's last `promisor` setting wins; the first remote it makes one.
+                let mut remotes: Vec<(&[u8], bool)> = Vec::new();
+                for entry in &snapshot.entries {
+                    let Some(name) = entry
+                        .key
+                        .strip_prefix(b"remote.")
+                        .and_then(|key| key.strip_suffix(b".promisor"))
+                    else {
+                        continue;
+                    };
+                    let on = entry.value.is_none() || config_true(&text(entry));
+                    match remotes.iter_mut().find(|(known, _)| *known == name) {
+                        Some(known) => known.1 = on,
+                        None => remotes.push((name, on)),
+                    }
+                }
+                remotes
+                    .into_iter()
+                    .find(|(_, on)| *on)
+                    .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
+            })?;
+        (!named.is_empty() && !named.starts_with('-')).then_some(named)
     }
 
     /// `git` aimed at this repository, with no arguments yet: for a call that streams its
@@ -420,6 +572,8 @@ impl Git {
         // G104: bay reads some of Git's answers by their words, so every call runs in the C
         // locale (which also stops `LANGUAGE` from translating them) and never prompts.
         cmd.env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
+        // G104b: Git fetches no absent object on its own, unless this handle means it to.
+        cmd.env("GIT_NO_LAZY_FETCH", if self.lazy_fetch { "0" } else { "1" });
         cmd
     }
 
@@ -678,6 +832,80 @@ fn bay_key(key: &str) -> Option<Vec<u8>> {
         .then(|| format!("bay.{}", name.to_ascii_lowercase()).into_bytes())
 }
 
+/// Whether a config value is one Git reads as boolean true.
+fn config_true(value: &str) -> bool {
+    matches!(value.to_ascii_lowercase().as_str(), "true" | "yes" | "on")
+        || value.parse::<i64>().is_ok_and(|number| number != 0)
+}
+
+/// G104b: the names a read of named objects found absent, from its `output`: the name of a
+/// failed `cat-file <type> <name>` whose object Git could not read, each `<name> missing`
+/// answer of `cat-file --batch` or `--batch-check`, or the note blob a failed `notes show`
+/// could not read. Empty for any other call, and for a call that asks Git itself
+/// (`--no-lazy-fetch`) which objects are absent.
+fn named_absent(args: &[&str], output: &Output) -> Vec<String> {
+    if args.contains(&"--no-lazy-fetch") {
+        return Vec::new();
+    }
+    let words: Vec<Cow<'_, str>> = args.iter().map(|arg| Cow::Borrowed(*arg)).collect();
+    let Some(at) = subcommand_at(&words) else {
+        return Vec::new();
+    };
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let failed = !output.status.success();
+    match (args[at], &args[at + 1..]) {
+        ("cat-file", [kind, name])
+            if matches!(*kind, "blob" | "tree" | "commit" | "tag" | "-s" | "-t") =>
+        {
+            // A path the tree lacks says "does not exist"; an object the store lacks, these.
+            let unreadable =
+                stderr.contains("bad file") || stderr.contains("could not get object info");
+            if failed && unreadable {
+                vec![(*name).to_owned()]
+            } else {
+                Vec::new()
+            }
+        }
+        ("cat-file", ["--batch"]) => batch_missing(&output.stdout, true),
+        ("cat-file", [batch]) if batch.starts_with("--batch-check") => {
+            batch_missing(&output.stdout, false)
+        }
+        // A note whose blob the store lacks: `fatal: bad object <note blob>`.
+        ("notes", rest) if failed && rest.contains(&"show") => stderr
+            .lines()
+            .filter_map(|line| line.strip_prefix("fatal: bad object "))
+            .map(|oid| oid.trim().to_owned())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The names `cat-file --batch` (`contents`) or `--batch-check` answered `<name> missing`. A
+/// `--batch` answer is a `<oid> <type> <size>` line, the contents and a newline; one this
+/// cannot read ends the scan.
+fn batch_missing(out: &[u8], contents: bool) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut rest = out;
+    while let Some(end) = rest.iter().position(|&byte| byte == b'\n') {
+        let line = String::from_utf8_lossy(&rest[..end]);
+        rest = &rest[end + 1..];
+        if let Some(name) = line.strip_suffix(" missing") {
+            names.push(name.to_owned());
+        } else if contents {
+            let Some(after) = line
+                .rsplit(' ')
+                .next()
+                .and_then(|size| size.parse::<usize>().ok())
+                .and_then(|size| rest.get(size + 1..))
+            else {
+                break;
+            };
+            rest = after;
+        }
+    }
+    names
+}
+
 /// A bare repository holds `HEAD` and `objects/` at its top and has no `.git`.
 fn is_bare_dir(dir: &Path) -> bool {
     dir.join("HEAD").is_file() && dir.join("objects").is_dir() && !dir.join(".git").exists()
@@ -820,7 +1048,7 @@ fn wait_until(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{Git, GitError, run_bounded_for};
+    use super::{Git, GitError, batch_missing, run_bounded_for};
     use std::process::Command;
     use std::time::{Duration, Instant};
 
@@ -906,6 +1134,21 @@ mod tests {
             reader.config_get("bay.trunk").unwrap(),
             asked(&reader, "bay.trunk", false)
         );
+    }
+
+    /// G104b: the absent names of a `cat-file --batch` answer are its `missing` lines, never a
+    /// line of an object's contents, and a `--batch-check` answer's alike.
+    #[test]
+    fn a_batch_answer_names_only_its_missing_objects() {
+        let body = "abc missing\nnot this one missing\n";
+        let out = format!(
+            "{oid} blob {size}\n{body}\ngone missing\nHEAD:x missing\n",
+            oid = "1".repeat(40),
+            size = body.len()
+        );
+        assert_eq!(batch_missing(out.as_bytes(), true), ["gone", "HEAD:x"]);
+        let checked = format!("{} blob 3\nHEAD:y missing\n", "2".repeat(40));
+        assert_eq!(batch_missing(checked.as_bytes(), false), ["HEAD:y"]);
     }
 
     /// G135: a call that hangs is killed at its bound and reported as a timeout, never waited

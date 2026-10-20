@@ -9,6 +9,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 
 use crate::agent_settings;
+use crate::commit_graph::State as GraphState;
 use crate::config::Config;
 use crate::git::{self, Git, GitError, RepoInfo};
 use crate::host;
@@ -216,6 +217,8 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
 
 /// G172: the object store and its maintenance, as the site set them up. bay creates no store
 /// and runs no maintenance, so every finding is advisory and names the site's own choice.
+/// G192: it also reports the commit-graph (missing, without Bloom filters Git reads, or ok),
+/// advisory too: a graph only speeds walks up.
 fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
     let get = |key: &str| git.run(&["config", "--get", key]).ok();
     let remote = config.remote();
@@ -256,6 +259,28 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
     if !registered {
         notes.push("not registered for scheduled maintenance (git maintenance register)");
     }
+    // G192: the commit-graph bay's path-limited walks read, from its files and config alone.
+    let graph = crate::commit_graph::read(git);
+    match graph.state {
+        GraphState::Disabled => {
+            notes.push("core.commitGraph is false: Git walks history without a commit-graph");
+        }
+        GraphState::Missing => notes.push(
+            "no commit-graph: walks parse every commit (git commit-graph write --reachable --changed-paths)",
+        ),
+        GraphState::NoBloomFilters => notes.push(
+            "no changed-path Bloom filters Git reads here: path-limited walks diff every tree \
+             (git commit-graph write --reachable --changed-paths)",
+        ),
+        GraphState::Ok => {}
+    }
+    let fetch_writes = (!info.bare)
+        .then(|| crate::commit_graph::config_bool(git, "fetch.writeCommitGraph") == Some(true));
+    if fetch_writes == Some(false) {
+        notes.push(
+            "a fetch does not refresh the commit-graph (bay install sets fetch.writeCommitGraph)",
+        );
+    }
     json!({"name": "store",
         "state": if notes.is_empty() { "green" } else { "advisory" },
         "promisor_remote": promisor.then_some(remote),
@@ -266,6 +291,8 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
         "maintenance_strategy": get("maintenance.strategy"),
         "auto_maintenance": auto,
         "scheduled": registered,
+        "commit_graph": graph.detail(),
+        "fetch_writes_commit_graph": fetch_writes,
         "notes": notes})
 }
 

@@ -2544,7 +2544,7 @@ fn policy_changed(
     if let Some(base) = base {
         paths.extend(base.adapter_paths());
     }
-    let mut args = vec!["diff", "--name-only", trunk, commit, "--"];
+    let mut args = vec!["diff", "--name-only", "--no-renames", trunk, commit, "--"];
     args.extend(paths.iter().map(String::as_str));
     Ok(!git.run(&args).map_err(|error| error.message())?.is_empty())
 }
@@ -2564,7 +2564,7 @@ fn only_policy_paths(
         .flat_map(policy::Policy::adapter_paths)
         .collect();
     let changed = git
-        .run(&["diff", "--name-only", trunk, commit])
+        .run(&["diff", "--name-only", "--no-renames", trunk, commit])
         .map_err(|error| error.message())?;
     Ok(changed.lines().all(|path| {
         path == policy::POLICY_PATH

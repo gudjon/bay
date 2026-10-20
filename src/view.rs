@@ -4,6 +4,10 @@
 //! at the change's draft. With declared paths it is sparse: an absent file is a
 //! skip-worktree entry of the index, so a draft built from the index never reads it as a
 //! deletion (§ 10, G27). The shared blob-less machine cache is kickstart item 15.
+//!
+//! G212: in that cache a view fetches only the blobs of its declared paths (and the hook-settings
+//! file bay adds): only its checkout may fetch, after the sparse set is written. Every other
+//! read of a view's Git runs without lazy fetch (G104b).
 
 use std::path::{Path, PathBuf};
 
@@ -302,7 +306,9 @@ pub fn create(repo: &Repo, id: &str, commit: &str, paths: &[String]) -> Result<P
     if std::env::var("BAY_TEST_KILL_AT").is_ok_and(|at| at == "start-mid-creation") {
         std::process::exit(137);
     }
-    let view = Git::new(&path);
+    // G212: the only calls of a view's creation that may fetch, and only the declared files
+    // they write: the sparse set comes first, so the checkout writes (and fetches) no other blob.
+    let view = Git::new(&path).fetching();
     if !paths.is_empty() {
         let mut args = vec![
             "sparse-checkout".to_owned(),
@@ -324,8 +330,9 @@ pub fn create(repo: &Repo, id: &str, commit: &str, paths: &[String]) -> Result<P
 /// level, so without it a session started there runs without bay's project hooks.
 fn hook_settings(repo: &Repo, commit: &str) -> Option<&'static str> {
     let file = crate::agent_settings::hook_settings_file(&repo.config)?;
+    // The tree names the file; its blob need not be in a blob-less store yet (G104b).
     repo.git
-        .run(&["cat-file", "-e", &format!("{commit}:{file}")])
+        .run(&["rev-parse", "--verify", "-q", &format!("{commit}:{file}")])
         .ok()
         .map(|_| file)
 }
@@ -351,7 +358,9 @@ pub fn keep_hook_settings(repo: &Repo, id: &str, declared: &[String]) -> Result<
     if list.lines().any(|line| line.trim() == pattern) {
         return Ok(());
     }
-    view.run(&["sparse-checkout", "add", &pattern]).map(|_| ())
+    view.fetching()
+        .run(&["sparse-checkout", "add", &pattern])
+        .map(|_| ())
 }
 
 /// Whether the view at `path` exists as a worktree directory.

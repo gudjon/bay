@@ -457,7 +457,13 @@ fn changed_paths(git: &Git, commit: &str) -> Result<Vec<String>, String> {
         .run(&["rev-parse", "--verify", "-q", &format!("{commit}^1")])
         .is_ok();
     let out = if has_parent {
-        git.run(&["diff", "--name-only", &format!("{commit}^1"), commit])
+        git.run(&[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            &format!("{commit}^1"),
+            commit,
+        ])
     } else {
         git.run(&["ls-tree", "-r", "--name-only", commit])
     }

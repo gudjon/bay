@@ -34,7 +34,8 @@ fn merge_tree(git: &Git, base: Option<&str>, ours: &str, theirs: &str) -> Result
     let mut args = vec!["merge-tree", "--write-tree", "--name-only", "--no-messages"];
     args.extend(base.as_deref());
     args.extend([ours, theirs]);
-    let (code, stdout, stderr) = git.run_status(&args)?;
+    // A content merge reads the blobs both sides changed: in a blob-less store, Git fetches them.
+    let (code, stdout, stderr) = git.fetching().run_status(&args)?;
     let mut lines = stdout.lines();
     let tree = lines.next().unwrap_or_default().to_owned();
     // G211: Git also exits 1 for a revision it cannot read, printing no tree, so a conflict is

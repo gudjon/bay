@@ -11,7 +11,8 @@
 //! writes `bay.machine` when it is unset: the folded host name (`live.rs`), and the bootstrap
 //! of the config (ruling: config location): `bay.trunk` and `bay.remote`, from `--trunk` and
 //! `--remote`, else what they already hold, else the remote's default branch
-//! (`refs/remotes/<remote>/HEAD`) and `origin`.
+//! (`refs/remotes/<remote>/HEAD`) and `origin`. It also sets the clone to keep a commit-graph
+//! with changed-path Bloom filters on fetch, and writes the first one (G193, `commit_graph`).
 
 use std::path::{Path, PathBuf};
 
@@ -102,6 +103,9 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
         }
         // § 11a, ruling R1: the name this machine's live summary ref carries.
         detail["machine"] = json!(crate::live::ensure_machine(&git)?);
+        // G193: this clone (an executor's, or the store its views share) keeps a commit-graph
+        // with changed-path filters on every fetch.
+        detail["commit_graph"] = crate::commit_graph::configure_clone(&git)?;
         if let Some(allowed) = signing_identity(&git)? {
             detail["allowed_signers"] = json!(allowed);
         }

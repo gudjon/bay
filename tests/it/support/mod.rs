@@ -586,6 +586,64 @@ impl TestBox {
         .collect()
     }
 
+    /// G191-G193: asserts that `git log <rev> -- <path>` in the repository `repo_args` names
+    /// (`--git-dir=<bare>`, or `-C <dir>`) reads a changed-path Bloom filter for every commit
+    /// `<rev>` reaches: Git counts a commit in its statistics only when the commit-graph holds
+    /// it, so a commit the graph does not cover is missing from the sum. Returns the statistics.
+    pub fn assert_walk_reads_filters(
+        &self,
+        repo_args: &[&str],
+        rev: &str,
+        path: &str,
+    ) -> serde_json::Value {
+        let walk = self
+            .bloom_statistics(repo_args, rev, path)
+            .unwrap_or_else(|| panic!("git log {rev} -- {path} read no Bloom filters"));
+        let mut count = repo_args.to_vec();
+        count.extend(["rev-list", "--count", rev]);
+        let commits: u64 = self.git_ok(self.path(), &count).parse().unwrap();
+        let counted = |key: &str| walk[key].as_u64().unwrap();
+        assert_eq!(counted("filter_not_present"), 0, "{walk}");
+        assert_eq!(
+            counted("maybe") + counted("definitely_not"),
+            commits,
+            "the graph does not cover every commit of {rev}: {walk}"
+        );
+        walk
+    }
+
+    /// G191-G193: the changed-path Bloom filter statistics Git's trace2 reports for
+    /// `git log <rev> -- <path>` in the repository `repo_args` names, or `None` when that walk
+    /// read no filters at all.
+    pub fn bloom_statistics(
+        &self,
+        repo_args: &[&str],
+        rev: &str,
+        path: &str,
+    ) -> Option<serde_json::Value> {
+        static TRACES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = TRACES.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let trace = self.path().join(format!("trace2-bloom-{n}.json"));
+        let out = self
+            .git(self.path())
+            .args(repo_args)
+            .args(["log", "--format=%H", rev, "--", path])
+            .env("GIT_TRACE2_EVENT", &trace)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git log: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|event| event["category"] == "bloom" && event["key"] == "statistics")
+            .map(|event| event["value"].clone())
+    }
+
     /// A clone of `bare` at `<root>/<name>`.
     pub fn clone_of(&self, bare: &Path, name: &str) -> PathBuf {
         let dir = self.path().join(name);

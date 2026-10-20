@@ -364,6 +364,10 @@ pub fn append(git: &Git, producer: &str, record: &EvidenceRecord) -> Result<(), 
 
 /// Every record on `tree`, from every producer ref, of the schema this bay reads.
 ///
+/// G196: one `for-each-ref` lists the producer refs and one `git cat-file --batch` reads every
+/// producer's note ([`notes_on`]), so the read spawns two `git` processes however many
+/// producers there are.
+///
 /// # Errors
 ///
 /// A git fault or an unreadable note.
@@ -371,26 +375,140 @@ pub fn records_for(git: &Git, tree: &str) -> Result<Vec<EvidenceRecord>, String>
     let refs = git
         .run(&["for-each-ref", "--format=%(refname)", EVIDENCE_PREFIX])
         .map_err(|error| error.message())?;
+    let producers: Vec<&str> = refs
+        .lines()
+        .map(|name| name.trim_start_matches(EVIDENCE_PREFIX))
+        .collect();
     let mut all = Vec::new();
-    for name in refs.lines() {
-        let producer = name.trim_start_matches(EVIDENCE_PREFIX);
+    for (producer, records) in producers.iter().zip(notes_on(git, &producers, tree)?) {
         // A record counts only from its own producer's ref, under its own namespaced id, and
         // only on the note of the tree it is about: a record copied onto another tree's note
         // says nothing about that tree.
-        all.extend(
-            without_conflicts(producer_records(git, producer, tree)?)
-                .into_iter()
-                .filter(|record| {
-                    // G86: a record of a schema major this bay does not know may mean something
-                    // it cannot judge, so it never counts here; it stays on the note.
-                    record.schema == EVIDENCE_SCHEMA
-                        && record.producer.name == producer
-                        && record.id.starts_with(&format!("{producer}/"))
-                        && record.subject.tree == tree
-                }),
-        );
+        all.extend(without_conflicts(records).into_iter().filter(|record| {
+            // G86: a record of a schema major this bay does not know may mean something
+            // it cannot judge, so it never counts here; it stays on the note.
+            record.schema == EVIDENCE_SCHEMA
+                && record.producer.name == *producer
+                && record.id.starts_with(&format!("{producer}/"))
+                && record.subject.tree == tree
+        }));
     }
     Ok(all)
+}
+
+/// G196: the records each of `producers` holds on `tree`, in their order, as
+/// [`producer_records`] reads them one by one, read through one `git cat-file --batch`.
+///
+/// Git finds a note at any fanout of its notes tree (`<tree>`, `ab/<rest>`, `ab/cd/<rest>`
+/// and so on; `git notes add` picks one by the number of notes), so each producer's note is
+/// asked at every fanout and found at the one its tree holds. A tree that is not a full object
+/// id, or a store `cat-file` cannot read, is read producer by producer as before.
+///
+/// # Errors
+///
+/// A git fault, or a note that is not a list of records.
+fn notes_on(git: &Git, producers: &[&str], tree: &str) -> Result<Vec<Vec<EvidenceRecord>>, String> {
+    let one_by_one = || -> Result<Vec<Vec<EvidenceRecord>>, String> {
+        producers
+            .iter()
+            .map(|producer| producer_records(git, producer, tree))
+            .collect()
+    };
+    if producers.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !crate::compact::is_object_id(tree) {
+        return one_by_one();
+    }
+    let paths = note_paths(tree);
+    let mut input = String::new();
+    for producer in producers {
+        for path in &paths {
+            input.push_str(&notes_ref(producer));
+            input.push(':');
+            input.push_str(path);
+            input.push('\n');
+        }
+    }
+    let out = match git.run_bytes(&["cat-file", "--batch"], &[], Some(input.as_bytes())) {
+        Ok(out) => out,
+        Err(GitError::Failed { .. }) => return one_by_one(),
+        Err(error) => return Err(error.message()),
+    };
+    let mut replies = out.as_slice();
+    producers
+        .iter()
+        .map(|producer| {
+            let notes = notes_ref(producer);
+            let mut found = None;
+            for _ in &paths {
+                if let Some(blob) = next_reply(&mut replies, &notes, tree)? {
+                    if found.is_some() {
+                        return Err(format!("{notes} on {tree}: more than one note"));
+                    }
+                    found = Some(blob);
+                }
+            }
+            let Some(blob) = found else {
+                return Ok(Vec::new());
+            };
+            let text = std::str::from_utf8(blob)
+                .map_err(|_| format!("{notes} on {tree}: the note is not utf-8"))?;
+            serde_json::from_str(text).map_err(|error| format!("{notes} on {tree}: {error}"))
+        })
+        .collect()
+}
+
+/// Every path a note on `tree` may sit at in a notes tree: flat, then each fanout of two hex
+/// digits per level, as Git's notes reader accepts them.
+fn note_paths(tree: &str) -> Vec<String> {
+    (0..tree.len() / 2)
+        .map(|levels| {
+            let mut path = String::with_capacity(tree.len() + levels);
+            for level in 0..levels {
+                path.push_str(&tree[level * 2..level * 2 + 2]);
+                path.push('/');
+            }
+            path.push_str(&tree[levels * 2..]);
+            path
+        })
+        .collect()
+}
+
+/// The next reply of a `git cat-file --batch` in `replies`: the blob's contents, or `None`
+/// when the name it was given is `missing`. `replies` moves past it.
+fn next_reply<'a>(
+    replies: &mut &'a [u8],
+    notes: &str,
+    tree: &str,
+) -> Result<Option<&'a [u8]>, String> {
+    let unreadable = || format!("{notes} on {tree}: git cat-file gave no full reply");
+    let end = replies
+        .iter()
+        .position(|&byte| byte == b'\n')
+        .ok_or_else(unreadable)?;
+    let header = String::from_utf8_lossy(&replies[..end]).into_owned();
+    *replies = &replies[end + 1..];
+    let words: Vec<&str> = header.split(' ').collect();
+    match words.as_slice() {
+        [_, "missing"] => Ok(None),
+        [_, kind, size] => {
+            let size: usize = size.parse().map_err(|_| unreadable())?;
+            if replies.len() <= size || replies[size] != b'\n' {
+                return Err(unreadable());
+            }
+            let body = &replies[..size];
+            *replies = &replies[size + 1..];
+            if *kind == "blob" {
+                Ok(Some(body))
+            } else {
+                Err(format!(
+                    "{notes} on {tree}: the note is a {kind}, not a blob"
+                ))
+            }
+        }
+        _ => Err(format!("{notes} on {tree}: git cat-file gave {header:?}")),
+    }
 }
 
 /// The records that count: with a registry, only those signed under their producer's name by a

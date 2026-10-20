@@ -788,7 +788,15 @@ fn bring_in_trunk(
     trunk: &str,
 ) -> Result<Result<Vec<String>, BayResult>, String> {
     let old_base = record.base.clone();
-    let mut args = vec!["diff", "--name-only", old_base.as_str(), trunk, "--"];
+    // `--no-renames`: which paths changed is read from trees alone, never from blob contents.
+    let mut args = vec![
+        "diff",
+        "--name-only",
+        "--no-renames",
+        old_base.as_str(),
+        trunk,
+        "--",
+    ];
     let declared = inputs::paths(&record.declared_inputs);
     args.extend(declared.iter().map(String::as_str));
     let changed = repo.git.run(&args).map_err(|error| error.message())?;
@@ -800,7 +808,9 @@ fn bring_in_trunk(
         Merge::Clean(tree) => {
             let rebased = commit_on(&repo.git, &tree, trunk, "resume onto trunk")
                 .map_err(|error| error.message())?;
+            // G212: the sparse checkout fetches only the declared files it writes.
             Git::new(repo.view_path(&record.id))
+                .fetching()
                 .run(&["checkout", "-q", "-f", "--detach", &rebased])
                 .map_err(|error| error.message())?;
             trunk.clone_into(&mut record.base);

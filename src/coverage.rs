@@ -18,6 +18,9 @@
 //! Each row and the result carry `trust`: `unsigned` without a registry (every record
 //! counts), else `signed`. A row whose only covering records do not verify says
 //! `unverifiable`. The query reads; it writes nothing.
+//!
+//! G195: with `--since`, its Git work grows with the commits after the rev, not with history:
+//! the walk stops at the rev (`^rev`), and each listed commit costs one note read.
 
 use std::collections::HashMap;
 use std::path::Path;

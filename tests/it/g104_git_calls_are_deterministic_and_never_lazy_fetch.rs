@@ -3,7 +3,7 @@
 //! bay judges some of Git's answers by their words (a path that is no repository, a rejected
 //! push, a held lock), so every Git call runs in the C locale: a box whose locale translates
 //! Git's messages (here `LANGUAGE=de`) reads them as any other box does. The card's other half,
-//! that metadata reads never fetch a blob lazily, is tested with the blob-less store (G212).
+//! that metadata reads never fetch a blob lazily, is tested with the blob-less store (G104b).
 
 use crate::support;
 
