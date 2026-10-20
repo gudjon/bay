@@ -701,16 +701,14 @@ fn run_one(
 /// never one, though the scratch sits under the repository's git directory (G241): a shell's
 /// error about the check's own adapter is no reach outside.
 fn reaches_out(stderr: &str, place: &Place) -> bool {
-    let mut seen = stderr.to_owned();
-    for own in [real(place.scratch), place.scratch.to_path_buf()] {
-        let own = own.display().to_string();
-        if !own.is_empty() {
-            seen = seen.replace(&own, "<check scratch>");
-        }
-    }
+    let own: Vec<String> = [real(place.scratch), place.scratch.to_path_buf()]
+        .iter()
+        .map(|path| path.display().to_string())
+        .filter(|path| !path.is_empty())
+        .collect();
     place.hidden.iter().any(|hidden| {
-        names_path(&seen, &hidden.display().to_string())
-            || names_path(&seen, &real(hidden).display().to_string())
+        names_path_outside(stderr, &hidden.display().to_string(), &own)
+            || names_path_outside(stderr, &real(hidden).display().to_string(), &own)
     })
 }
 
@@ -718,6 +716,12 @@ fn reaches_out(stderr: &str, place: &Place) -> bool {
 /// ends on a path boundary, so `/box/repo` is named by `/box/repo` and `/box/repo/x` but not by
 /// its sibling `/box/repo-remote.git` or by `/other/box/repo`.
 fn names_path(text: &str, path: &str) -> bool {
+    names_path_outside(text, path, &[])
+}
+
+/// [`names_path`], leaving out each mention of `path` that is the start of one of `own`: a
+/// path inside the check's own scratch, which may sit under `path`.
+fn names_path_outside(text: &str, path: &str, own: &[String]) -> bool {
     // What may stand next to a path in a message: whitespace, quotes and punctuation.
     let delimiter = |c: char| c.is_whitespace() || "'\"`:,;()[]<>=".contains(c);
     if path.is_empty() {
@@ -736,7 +740,10 @@ fn names_path(text: &str, path: &str) -> bool {
             Some('.') => after.next().is_none_or(delimiter),
             Some(c) => delimiter(c),
         };
-        if opens && closes {
+        let inside_own = own
+            .iter()
+            .any(|own| text[start..].starts_with(own.as_str()));
+        if opens && closes && !inside_own {
             return true;
         }
         from = start + text[start..].chars().next().map_or(1, char::len_utf8);
@@ -1119,6 +1126,26 @@ mod tests {
         /// `materialize_timeout_s` is a millisecond (see `materialize_bound`).
         pub(super) static MILLISECOND_BOUNDS: std::cell::Cell<bool> =
             const { std::cell::Cell::new(false) };
+    }
+
+    /// § 7, G26: a mention of a hidden path that is the check's own scratch (which sits under
+    /// the repository's git directory) is no reach outside; any other mention still is.
+    #[test]
+    fn the_checks_own_scratch_is_no_reach_outside() {
+        let hidden = "/box/repo";
+        let own = vec!["/box/repo/.git/bay/check/c1/check-0".to_owned()];
+        let names = |text: &str| super::names_path_outside(text, hidden, &own);
+        assert!(!names(
+            "sh: /box/repo/.git/bay/check/c1/check-0/adapter/scripts/bay-check: not found"
+        ));
+        assert!(names("sh: .: cannot open /box/repo/scripts/helper.sh"));
+        assert!(names(
+            "/box/repo/.git/bay/check/c1/check-0/adapter: ok; then /box/repo/secret: denied"
+        ));
+        assert!(
+            names("/box/repo/.git/config: denied"),
+            "the rest of .git stays hidden"
+        );
     }
 
     /// § 7, G26: a hidden path is named by whole components only. A sibling that shares its
