@@ -258,21 +258,28 @@ fn red_rows(repo: &Repo, trunk: &str) -> Value {
 }
 
 /// The open quarantines of the policy at trunk (ruling 8c), so a set-aside check is never
-/// silent. One past its end date stays in force and is shown as `overdue`. An unreadable
-/// policy lists none here; `land` names it with `POLICY_INVALID`.
-fn quarantines(repo: &Repo, trunk: &str) -> Vec<Value> {
-    open_quarantines(&repo.git, trunk)
+/// silent. One past its end date stays in force and is shown as `overdue`. An invalid policy
+/// lists none here; `land` names it with `POLICY_INVALID`. A policy bay cannot read (G104b)
+/// lists none and says why: an unread policy is never read as no quarantine.
+fn quarantines(repo: &Repo, trunk: &str) -> Value {
+    open_quarantines(&repo.git, trunk).map_or_else(|why| json!({"unread": why}), Value::from)
 }
 
-/// The open quarantines of the policy at `at`, each with whether it is overdue today. Read
-/// by `status` and by `bay doctor` (`DESIGN` § 7).
-pub(crate) fn open_quarantines(git: &crate::git::Git, at: &str) -> Vec<Value> {
-    let Ok(Some(policy)) = crate::policy::load_at(git, at) else {
-        return Vec::new();
+/// The open quarantines of the policy at `at`, each with whether it is overdue today; none
+/// without a policy or with an invalid one. Read by `status` and by `bay doctor` (`DESIGN` § 7).
+///
+/// # Errors
+///
+/// The policy file cannot be read (G104b), or a git fault.
+pub(crate) fn open_quarantines(git: &crate::git::Git, at: &str) -> Result<Vec<Value>, String> {
+    let policy = match crate::policy::load_at(git, at) {
+        Ok(Some(policy)) => policy,
+        Ok(None) | Err(crate::policy::LoadError::Invalid(_)) => return Ok(Vec::new()),
+        Err(crate::policy::LoadError::Git(why)) => return Err(why),
     };
     let now = now_rfc3339();
     let today = now.get(..10).unwrap_or_default();
-    policy
+    Ok(policy
         .quarantined
         .iter()
         .map(|quarantine| {
@@ -284,7 +291,7 @@ pub(crate) fn open_quarantines(git: &crate::git::Git, at: &str) -> Vec<Value> {
                 "overdue": quarantine.overdue(today),
             })
         })
-        .collect()
+        .collect())
 }
 
 /// Every view this machine still holds, with its change state, its age and whether it has

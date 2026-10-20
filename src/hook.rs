@@ -107,6 +107,12 @@ fn message(error: &GitError) -> String {
     error.message()
 }
 
+/// The live summaries a judgement reads, or why the first unreadable one cannot be read
+/// (G104b): a summary this host cannot read refuses the push, never counts as none.
+fn strict(summaries: Vec<crate::live::SummaryRead>) -> Result<Vec<Option<Value>>, String> {
+    summaries.into_iter().collect()
+}
+
 /// Judges one push. `input` is pre-receive's stdin: `<old> <new> <ref>` per line.
 ///
 /// # Errors
@@ -703,8 +709,9 @@ impl Judge<'_> {
     fn request(&self, request_id: &str, change: &str) -> Result<Request, String> {
         let text = self
             .git
-            .run(&["cat-file", "blob", &format!("{request_id}:request.json")])
-            .map_err(|_| format!("{request_id} is not a request"))?;
+            .file_at(request_id, "request.json")
+            .map_err(|error| message(&error))?
+            .ok_or_else(|| format!("{request_id} is not a request"))?;
         let request: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
         if request["change"] != change {
             return Err(format!("request {request_id} is for another change"));
@@ -925,7 +932,7 @@ impl Judge<'_> {
         let (names, tips): (Vec<String>, Vec<String>) = lives.into_iter().unzip();
         let own: Vec<&String> = names
             .iter()
-            .zip(crate::live::summaries_at(self.git, &tips)?)
+            .zip(strict(crate::live::summaries_at(self.git, &tips)?)?)
             .filter(|(_, summary)| {
                 summary
                     .as_ref()
@@ -940,7 +947,7 @@ impl Judge<'_> {
                 .take_while(|(_, at)| now.saturating_sub(*at) < window)
                 .collect();
             let commits: Vec<String> = entries.iter().map(|(commit, _)| commit.clone()).collect();
-            let summaries = crate::live::summaries_at(self.git, &commits)?;
+            let summaries = strict(crate::live::summaries_at(self.git, &commits)?)?;
             let newest = entries.iter().zip(&summaries).find(|(_, summary)| {
                 summary
                     .as_ref()
@@ -1028,7 +1035,7 @@ impl Judge<'_> {
                 crate::live::LIVE_MAX_BYTES
             ));
         }
-        let summary = crate::live::summary_at(self.git, &update.new)
+        let summary = crate::live::summary_at(self.git, &update.new)?
             .filter(|summary| summary["schema"] == crate::live::LIVE_SCHEMA)
             .ok_or_else(|| format!("{} holds no {}", update.new, crate::live::LIVE_SCHEMA))?;
         if summary["machine"] != machine {
@@ -1049,7 +1056,7 @@ impl Judge<'_> {
                 .into_iter()
                 .filter(|(name, _)| *name != update.name)
                 .unzip();
-            let summaries = crate::live::summaries_at(self.git, &tips)?;
+            let summaries = strict(crate::live::summaries_at(self.git, &tips)?)?;
             if let Some((other, _)) = names.iter().zip(&summaries).find(|(_, summary)| {
                 summary
                     .as_ref()
@@ -1140,8 +1147,9 @@ impl Judge<'_> {
         }
         let text = self
             .git
-            .run(&["cat-file", "blob", &format!("{}:request.json", update.new)])
-            .map_err(|_| format!("{} is not a request", update.new))?;
+            .file_at(&update.new, "request.json")
+            .map_err(|error| message(&error))?
+            .ok_or_else(|| format!("{} is not a request", update.new))?;
         let request: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
         if request["change"] != id {
             return Err("names a request of another change".to_owned());
@@ -1250,17 +1258,17 @@ impl Judge<'_> {
 
     /// The note on `object` in notes commit `notes`, or `None` when it has none. Git moves a
     /// note to a fan-out path (`ab/cdef…`) as a notes tree grows, so a note that only moved is
-    /// found at its new path and is never read as removed.
+    /// found at its new path and is never read as removed. G104b: a note the tree names whose
+    /// blob cannot be read is an error, never a note absent here, so no record of it is lost.
     fn note(&self, notes: &str, object: &str) -> Result<Option<String>, String> {
         let mut path = object.to_owned();
         for depth in 0..=NOTE_FANOUT_MAX {
-            match self
+            if let Some(text) = self
                 .git
-                .run(&["cat-file", "blob", &format!("{notes}:{path}")])
+                .file_at(notes, &path)
+                .map_err(|error| message(&error))?
             {
-                Ok(text) => return Ok(Some(text)),
-                Err(GitError::Failed { .. }) => {}
-                Err(error) => return Err(message(&error)),
+                return Ok(Some(text));
             }
             let split = 3 * depth + 2;
             if split >= path.len() {

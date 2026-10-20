@@ -40,6 +40,11 @@ use std::time::Instant;
 
 use crate::result::GIT_CALL_TIMEOUT;
 
+/// The options before a call that writes a work tree ([`Git::writing_tree`]): no CRLF
+/// conversion of the box's `core.autocrlf`, and long paths on Git for Windows (a key other Gits
+/// do not read).
+pub const TREE_WRITES: [&str; 4] = ["-c", "core.autocrlf=false", "-c", "core.longpaths=true"];
+
 pub struct Git {
     dir: PathBuf,
     /// `dir` is itself a bare repository. Git 3.0 sets `safe.bareRepository=explicit`,
@@ -49,6 +54,8 @@ pub struct Git {
     config: Mutex<Option<Snapshot>>,
     /// G104b: Git may fetch an absent object as this handle's calls read it ([`Git::fetching`]).
     lazy_fetch: bool,
+    /// This handle's calls write a work tree byte for byte ([`Git::writing_tree`]).
+    writes_tree: bool,
 }
 
 /// G200: one `git config --list` of a handle, every entry in Git's order (the last value
@@ -162,6 +169,7 @@ impl Git {
             bare_dir,
             config: Mutex::new(None),
             lazy_fetch: false,
+            writes_tree: false,
         }
     }
 
@@ -175,6 +183,22 @@ impl Git {
             bare_dir: self.bare_dir,
             config: Mutex::new(None),
             lazy_fetch: true,
+            writes_tree: self.writes_tree,
+        }
+    }
+
+    /// A handle on the same repository whose calls write a work tree as the tree holds it, on
+    /// every platform (plan W5): [`TREE_WRITES`] before each call, so no `core.autocrlf` of the
+    /// box turns a checked-out file into other bytes than its blob, and Git for Windows writes
+    /// a path longer than 260 characters. For a view's checkout, its sparse set and its reset.
+    #[must_use]
+    pub fn writing_tree(&self) -> Self {
+        Self {
+            dir: self.dir.clone(),
+            bare_dir: self.bare_dir,
+            config: Mutex::new(None),
+            lazy_fetch: self.lazy_fetch,
+            writes_tree: true,
         }
     }
 
@@ -579,6 +603,9 @@ impl Git {
             cmd.arg(format!("--git-dir={}", self.dir.display()));
         } else {
             cmd.arg("-C").arg(&self.dir);
+        }
+        if self.writes_tree {
+            cmd.args(TREE_WRITES);
         }
         // G104: bay reads some of Git's answers by their words, so every call runs in the C
         // locale (which also stops `LANGUAGE` from translating them) and never prompts.
@@ -1232,5 +1259,47 @@ mod tests {
             "{:?}",
             started.elapsed()
         );
+    }
+
+    /// Plan W5: a work tree written through [`Git::writing_tree`] holds each blob's bytes,
+    /// whatever `core.autocrlf` the box set; written without it, the box's setting converts.
+    #[test]
+    fn a_tree_written_through_writing_tree_holds_its_blobs_bytes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = Git::new(dir.path());
+        git.run(&["init", "-q"]).unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        git.run(&["add", "a.txt"]).unwrap();
+        git.run(&[
+            "-c",
+            "user.name=bay",
+            "-c",
+            "user.email=bay@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "lf",
+        ])
+        .unwrap();
+        git.run(&["config", "core.autocrlf", "true"]).unwrap();
+        let checkout = |git: &Git| {
+            std::fs::remove_file(&file).unwrap();
+            git.run(&["checkout", "-q", "-f", "HEAD", "--", "a.txt"])
+                .unwrap();
+            std::fs::read(&file).unwrap()
+        };
+        assert_eq!(checkout(&git.writing_tree()), b"one\ntwo\n");
+        assert_eq!(checkout(&git.fetching().writing_tree()), b"one\ntwo\n");
+        assert_eq!(checkout(&git), b"one\r\ntwo\r\n");
+        let args: Vec<_> = git
+            .writing_tree()
+            .command()
+            .get_args()
+            .map(ToOwned::to_owned)
+            .collect();
+        assert!(args.ends_with(&super::TREE_WRITES.map(std::ffi::OsString::from)));
     }
 }

@@ -136,17 +136,18 @@ fn refusal(
 
 /// The adapter's command as a process: a program path relative to the main work tree, then its
 /// arguments, with only `PATH` and `HOME` from bay's environment, as the notify adapter has.
-fn adapter_command(repo: &Repo, command: &str) -> Option<Command> {
+fn adapter_command(repo: &Repo, command: &str) -> Result<Command, String> {
     let mut words = command.split_whitespace();
-    let program = words.next()?;
-    let mut cmd = Command::new(repo.work_root.join(program));
+    let program = words.next().ok_or("[runtime] command is empty")?;
+    let mut cmd = crate::platform::script(&repo.work_root.join(program))
+        .map_err(|why| format!("the runtime adapter: {why}"))?;
     cmd.args(words).current_dir(&repo.work_root).env_clear();
     for name in ["PATH", "HOME"] {
         if let Some(value) = std::env::var_os(name) {
             cmd.env(name, value);
         }
     }
-    Some(cmd)
+    Ok(cmd)
 }
 
 /// What one runtime adapter run said: the records that count, for this read only, and the
@@ -181,7 +182,7 @@ pub fn observe(
     else {
         return Ok(None);
     };
-    let cmd = adapter_command(repo, command).ok_or("[runtime] command is empty")?;
+    let cmd = adapter_command(repo, command)?;
     let request = json!({"change": change, "commit": commit, "tree": tree}).to_string();
     let (status, stdout, stderr) =
         crate::inputs::run_bounded(cmd, request.as_bytes(), RUNTIME_TIMEOUT)

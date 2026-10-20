@@ -83,7 +83,10 @@ pub fn request(talk: &str, me: &Actor, machine: &str, urgent: bool, line: &str) 
 pub fn command_at(work_root: &Path, command: &str) -> Option<Command> {
     let mut words = command.split_whitespace();
     let program = words.next()?;
-    let mut cmd = Command::new(work_root.join(program));
+    // A `#!` script bay cannot start on Windows starts as it is, and so fails as an adapter
+    // that cannot start does (`crate::platform::script`).
+    let program = work_root.join(program);
+    let mut cmd = crate::platform::script(&program).unwrap_or_else(|_| Command::new(&program));
     cmd.args(words).current_dir(work_root).env_clear();
     for name in ["PATH", "HOME"] {
         if let Some(value) = std::env::var_os(name) {

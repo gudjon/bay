@@ -2094,7 +2094,7 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
     });
     let mut words = command.split_whitespace();
     let program = ctx.repo.work_root.join(words.next().unwrap_or_default());
-    let mut cmd = std::process::Command::new(program);
+    let mut cmd = crate::platform::script(&program)?;
     cmd.args(words)
         .arg("submit")
         .current_dir(&ctx.repo.work_root);

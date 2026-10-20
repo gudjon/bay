@@ -586,9 +586,10 @@ fn claude_hooks_posture(settings: &serde_json::Map<String, Value>, entries_prese
 }
 
 /// The open quarantines of the policy at trunk as this box last read it (`DESIGN` § 7: an
-/// overdue quarantine is shown by `bay doctor`). Present only when a quarantine is open. It is
-/// never red: `INTERFACES` § 8 has no reason code for it, and an overdue quarantine stays in
-/// force until the fixing change removes it.
+/// overdue quarantine is shown by `bay doctor`). Present only when a quarantine is open, or as
+/// `not judged` when the policy cannot be read (G104b). It is never red: `INTERFACES` § 8 has
+/// no reason code for it, and an overdue quarantine stays in force until the fixing change
+/// removes it.
 fn quarantine_row(git: &Git, config: &Config, bare: bool, report: &mut Report) {
     let trunk = if bare {
         let name = git
@@ -598,7 +599,17 @@ fn quarantine_row(git: &Git, config: &Config, bare: bool, report: &mut Report) {
     } else {
         format!("refs/remotes/{}/{}", config.remote(), config.trunk())
     };
-    let open = crate::status::open_quarantines(git, &trunk);
+    let open = match crate::status::open_quarantines(git, &trunk) {
+        Ok(open) => open,
+        // G104b: a policy this box cannot read is no judgement of its quarantines.
+        Err(why) => {
+            report
+                .rows
+                .push(json!({"name": "quarantine", "required": false,
+                "state": "not judged", "note": why}));
+            return;
+        }
+    };
     if open.is_empty() {
         return;
     }

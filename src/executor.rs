@@ -255,8 +255,17 @@ pub fn live_versions() -> Vec<String> {
         .collect()
 }
 
-/// `kill -0`: success, or a refusal to signal (EPERM), means the process exists.
+/// `kill -0`: success, or a refusal to signal (EPERM), means the process exists. On Windows,
+/// `tasklist` lists the process by its id (its CSV row holds `"<pid>"`).
 fn alive(pid: u32) -> bool {
+    if cfg!(windows) {
+        let mut probe = Command::new("tasklist");
+        probe.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);
+        return crate::git::run_bounded(probe, "tasklist").is_ok_and(|output| {
+            output.status.success()
+                && String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+        });
+    }
     let mut probe = Command::new("kill");
     probe.args(["-0", &pid.to_string()]).env("LC_ALL", "C");
     crate::git::run_bounded(probe, "kill -0").is_ok_and(|output| {

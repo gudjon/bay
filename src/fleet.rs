@@ -425,8 +425,11 @@ fn remote(
     let summaries = live::summaries_at(git, &commits)?;
     let agents = live::agents_file(git)?;
     for ((machine, (commit, since)), summary) in tips.into_iter().zip(summaries) {
+        // G104b: a summary the cache cannot read is named so, never read as a missing one.
         let checked = summary
-            .ok_or_else(|| "its summary is missing, too large or not JSON".to_owned())
+            .and_then(|summary| {
+                summary.ok_or_else(|| "its summary is missing, too large or not JSON".to_owned())
+            })
             .and_then(|summary| {
                 verified(git, commit, &summary, agents.as_deref()).map(|signer| (summary, signer))
             });

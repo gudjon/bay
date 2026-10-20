@@ -11,8 +11,9 @@
 //! a newer one that has none), downloads the release beside the installed binary
 //! (`$HOME/.local/bin/bay`, bay's one install path, whichever copy runs), verifies it all or
 //! nothing, unpacks only `bay` from the bytes it hashed, keeps it as that version's own file
-//! (`$XDG_DATA_HOME/bay/versions/<version>/bay`), and swaps it in with one `rename(2)`. A miss
-//! anywhere leaves the old binary byte-identical (G50).
+//! (`$XDG_DATA_HOME/bay/versions/<version>/bay`), and swaps it in with one `rename(2)` (on
+//! Windows, where a running `bay.exe` cannot be replaced, it moves aside to `bay.old.exe`
+//! first). A miss anywhere leaves the old binary byte-identical (G50).
 //!
 //! An update never waits for a running executor (owner ruling 2026-10-20). The install path
 //! stays a regular file that the rename replaces, so a version's kept file can be pruned without
@@ -21,9 +22,9 @@
 //! it replaces, and pruning keeps the newest three, the running one and every one a live
 //! executor names. The executor moves to the new version between operations (`crate::executor`).
 //!
-//! A release is `bay-<target>.tar.gz` per platform, `VERSION`, `SHA256SUMS` over both, and
-//! `SHA256SUMS.sig`: an SSH signature by one of the release keys, principal and namespace
-//! `bay-release`. The signed sums cover `VERSION`, so an older signed release cannot stand in
+//! A release is `bay-<target>.tar.gz` per platform (`.zip` for a Windows target), `VERSION`,
+//! `SHA256SUMS` over both, and `SHA256SUMS.sig`: an SSH signature by one of the release keys,
+//! principal and namespace `bay-release`. The signed sums cover `VERSION`, so an older signed release cannot stand in
 //! for the target.
 
 use std::cmp::Ordering;
@@ -142,15 +143,35 @@ pub fn allowed_signers(keys: &[String]) -> String {
     })
 }
 
-/// This platform's release target, as `scripts/release.sh` names its archives.
+/// This platform's release target, as `scripts/release.sh` names its archives. Windows has a
+/// target name, so an update there looks for its archive and, while no release has one, is
+/// refused as `UPDATE_UNAVAILABLE` naming the target.
 #[must_use]
 pub fn platform() -> Option<String> {
     let os = match std::env::consts::OS {
         "linux" => "unknown-linux-musl",
         "macos" => "apple-darwin",
+        "windows" => "pc-windows-msvc",
         _ => return None,
     };
     Some(format!("{}-{os}", std::env::consts::ARCH))
+}
+
+/// The release archive of `platform`: `bay-<target>.zip` for a Windows target (plan W3), else
+/// `bay-<target>.tar.gz`.
+#[must_use]
+pub fn archive_name(platform: &str) -> String {
+    if platform.ends_with("-windows-msvc") {
+        format!("bay-{platform}.zip")
+    } else {
+        format!("bay-{platform}.tar.gz")
+    }
+}
+
+/// The name of bay's binary on this platform, in an archive and on disk: `bay`, or `bay.exe`
+/// on Windows.
+fn binary_name() -> String {
+    format!("bay{}", std::env::consts::EXE_SUFFIX)
 }
 
 #[must_use]
@@ -420,7 +441,7 @@ fn resolve(source: &Source, pin: Option<String>, version: Option<String>) -> Res
     }
     let platform =
         platform().ok_or_else(|| unavailable("no release build for this platform".to_owned()))?;
-    let archive = format!("bay-{platform}.tar.gz");
+    let archive = archive_name(&platform);
     let built = |release: &Release| release.assets.contains(&archive);
     // Read until a built release no newer than this one, so every release an update may step
     // through is listed (G242); on GitHub that is almost always the first page of 100.
@@ -500,11 +521,14 @@ fn release_list(
     Ok(releases)
 }
 
-/// bay's one install path, `$HOME/.local/bin/bay` (`DESIGN` § 15.1). An update writes only
-/// this path, whichever copy of bay runs it.
+/// bay's one install path, `$HOME/.local/bin/bay` (`DESIGN` § 15.1; `bay.exe` under
+/// `USERPROFILE` on Windows). An update writes only this path, whichever copy of bay runs it.
 fn installed_path() -> Result<PathBuf, String> {
     let home = crate::platform::home().ok_or("HOME is not set; update cannot name its path")?;
-    Ok(PathBuf::from(home).join(".local").join("bin").join("bay"))
+    Ok(PathBuf::from(home)
+        .join(".local")
+        .join("bin")
+        .join(binary_name()))
 }
 
 /// Steps 3–4: downloads the release into `tmp` and verifies it, all or nothing. Returns the
@@ -512,7 +536,7 @@ fn installed_path() -> Result<PathBuf, String> {
 fn download_verified(source: &Source, plan: &Plan, tmp: &Path) -> Result<Vec<u8>, Refusal> {
     let platform =
         platform().ok_or_else(|| plan.unavailable("no release build for this platform"))?;
-    let archive = format!("bay-{platform}.tar.gz");
+    let archive = archive_name(&platform);
     let base = format!("{}/v{}", source.download, plan.target);
     let get = |name: &str| {
         let path = tmp.join(name);
@@ -555,21 +579,37 @@ fn download_verified(source: &Source, plan: &Plan, tmp: &Path) -> Result<Vec<u8>
 }
 
 /// Step 5: unpack only `bay` from the verified bytes, run the new binary's `--version`, keep it
-/// as its version's file, `rename(2)` it over the installed path, then run its `install`.
+/// as its version's file, `rename(2)` it over the installed path, then run its `install`. On
+/// Windows the archive is a zip, unpacked by the system's `tar` from a file, and the running
+/// `bay.exe` moves aside first (`crate::durable::replace_program`).
 fn swap(plan: &Plan, tmp: &Path, archive: &[u8], installed: &Path) -> Result<BayResult, Refusal> {
     let unpacked = tmp.join("x");
     std::fs::create_dir_all(&unpacked).map_err(|error| failed(error.to_string()))?;
-    let mut tar = Command::new("tar");
-    tar.args(["-xzf", "-", "--no-same-owner", "-C"])
-        .arg(&unpacked)
-        .arg("bay");
-    let output = git::run_bounded_with_input(tar, "tar", archive)
-        .map_err(|error| failed(error.message()))?;
-    let new = unpacked.join("bay");
+    let name = binary_name();
+    let output = if cfg!(windows) {
+        // A zip is read from a file, where its directory at the end can be found.
+        let zip = tmp.join("archive.zip");
+        std::fs::write(&zip, archive).map_err(|error| failed(error.to_string()))?;
+        // The system's own `tar` reads a zip; a GNU `tar` earlier on `PATH` does not.
+        let system = std::env::var_os("SystemRoot")
+            .map(|root| PathBuf::from(root).join("System32").join("tar.exe"))
+            .filter(|tar| tar.is_file());
+        let mut tar = Command::new(system.unwrap_or_else(|| PathBuf::from("tar")));
+        tar.arg("-xf").arg(&zip).arg("-C").arg(&unpacked).arg(&name);
+        git::run_bounded(tar, "tar")
+    } else {
+        let mut tar = Command::new("tar");
+        tar.args(["-xzf", "-", "--no-same-owner", "-C"])
+            .arg(&unpacked)
+            .arg(&name);
+        git::run_bounded_with_input(tar, "tar", archive)
+    }
+    .map_err(|error| failed(error.message()))?;
+    let new = unpacked.join(&name);
     // A link or anything else that is not a regular file is refused, never followed.
     let regular = std::fs::symlink_metadata(&new).is_ok_and(|meta| meta.file_type().is_file());
     if !output.status.success() || !regular {
-        return Err(plan.unverified("the archive holds no regular file named bay"));
+        return Err(plan.unverified(format!("the archive holds no regular file named {name}")));
     }
     set_executable(&new).map_err(failed)?;
     let mut probe = Command::new(&new);
@@ -592,7 +632,7 @@ fn swap(plan: &Plan, tmp: &Path, archive: &[u8], installed: &Path) -> Result<Bay
     let versioned = version_path(&plan.target)
         .ok_or_else(|| failed("neither XDG_DATA_HOME nor HOME is set"))?;
     place(&new, &versioned).map_err(failed)?;
-    crate::durable::rename(&new, installed)
+    crate::durable::replace_program(&new, installed)
         .map_err(|error| failed(format!("cannot replace {}: {error}", installed.display())))?;
     prune(&[plan.target.as_str(), BAY]);
 
@@ -734,8 +774,12 @@ const KEEP_VERSIONS: usize = 3;
 /// process that starts it starts the version it names for as long as it is kept.
 #[must_use]
 pub fn version_path(version: &str) -> Option<PathBuf> {
-    let name = format!("bay{}", std::env::consts::EXE_SUFFIX);
-    Some(data_dir()?.join("versions").join(version).join(name))
+    Some(
+        data_dir()?
+            .join("versions")
+            .join(version)
+            .join(binary_name()),
+    )
 }
 
 static OWN: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
@@ -1180,5 +1224,29 @@ mod tests {
         assert_eq!(sum_of(&sums, "VERSION"), Some(digest.clone()));
         assert_eq!(sum_of(&sums, "bay-x.tar.gz"), Some(digest));
         assert_eq!(sum_of(&sums, "other"), None);
+    }
+
+    #[test]
+    fn each_platform_has_its_archive() {
+        assert_eq!(
+            super::archive_name("x86_64-unknown-linux-musl"),
+            "bay-x86_64-unknown-linux-musl.tar.gz"
+        );
+        assert_eq!(
+            super::archive_name("aarch64-apple-darwin"),
+            "bay-aarch64-apple-darwin.tar.gz"
+        );
+        assert_eq!(
+            super::archive_name("x86_64-pc-windows-msvc"),
+            "bay-x86_64-pc-windows-msvc.zip"
+        );
+        let here = super::platform().unwrap();
+        assert!(here.starts_with(std::env::consts::ARCH));
+        assert_eq!(
+            std::path::Path::new(&super::archive_name(&here))
+                .extension()
+                .is_some_and(|ext| ext == "zip"),
+            cfg!(windows)
+        );
     }
 }

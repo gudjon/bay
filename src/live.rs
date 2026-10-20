@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
-use crate::git::Git;
+use crate::git::{Git, GitError};
 use crate::registry::{KeyClass, Registry};
 use crate::repo::Repo;
 use crate::result::BayResult;
@@ -516,7 +516,8 @@ pub fn heartbeat_of(
     agents: Option<&Path>,
     window: u64,
 ) -> Result<bool, String> {
-    if !summary_at(git, commit).is_some_and(|summary| names_change(&summary, change, actor, window))
+    if !summary_at(git, commit)?
+        .is_some_and(|summary| names_change(&summary, change, actor, window))
     {
         return Ok(false);
     }
@@ -558,7 +559,7 @@ pub fn other_session_of(
     now: u64,
     window: u64,
 ) -> Result<Option<LiveHolder>, String> {
-    let Some(summary) = summary_at(git, commit) else {
+    let Some(summary) = summary_at(git, commit)? else {
         return Ok(None);
     };
     let holder = summary["sessions"]
@@ -584,24 +585,37 @@ pub fn other_session_of(
     Ok((signer_of(git, commit, agents)?.as_deref() == Some(me.name.as_str())).then_some(holder))
 }
 
-/// The `live.json` a live commit carries.
-#[must_use]
-pub fn summary_at(git: &Git, commit: &str) -> Option<Value> {
-    let text = git
-        .run(&["cat-file", "blob", &format!("{commit}:{LIVE_FILE}")])
-        .ok()?;
-    serde_json::from_str(&text).ok()
+/// The `live.json` a live commit carries; `None` where its tree holds none or one that is not
+/// UTF-8 JSON. G104b: a `live.json` the tree names whose blob cannot be read is an error that
+/// names it, never `None`, so an unreadable heartbeat never reads as no heartbeat.
+///
+/// # Errors
+///
+/// The tree names `live.json` and its blob cannot be read, or a git fault.
+pub fn summary_at(git: &Git, commit: &str) -> Result<Option<Value>, String> {
+    match git.file_at(commit, LIVE_FILE) {
+        Ok(text) => Ok(text.and_then(|text| serde_json::from_str(&text).ok())),
+        Err(GitError::NotUtf8 { .. }) => Ok(None),
+        Err(error) => Err(error.message()),
+    }
 }
 
-/// The `live.json` of each commit; `None` where a commit holds none, one larger than
-/// [`LIVE_MAX_BYTES`], or one that is not JSON. Two `git cat-file` calls whatever the count:
-/// `--batch-check` sizes every file first, and `--batch` reads only the blobs within the
-/// bound, as bytes, so a large or non-UTF-8 blob is never read and spoils no other summary.
+/// One commit's `live.json` as [`summaries_at`] read it: `Ok(None)` where the commit holds
+/// none, one larger than [`LIVE_MAX_BYTES`], or one that is not JSON; `Err` naming the file
+/// where its tree names it and its blob cannot be read (G104b).
+pub type SummaryRead = Result<Option<Value>, String>;
+
+/// The `live.json` of each commit ([`SummaryRead`]). Two `git cat-file` calls whatever the
+/// count: `--batch-check` sizes every file first, and `--batch` reads only the blobs within
+/// the bound, as bytes, so a large or non-UTF-8 blob is never read and spoils no other summary.
+/// G104b: `--batch-check` answers `missing` for a path the tree lacks and for a blob the store
+/// lacks alike; each such answer is told apart by the tree alone, one `rev-parse` each, so an
+/// unreadable summary is named, never read as no summary.
 ///
 /// # Errors
 ///
 /// A git fault.
-pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<Option<Value>>, String> {
+pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<SummaryRead>, String> {
     if commits.is_empty() {
         return Ok(Vec::new());
     }
@@ -622,17 +636,30 @@ pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<Option<Value>>,
             Some(input.as_bytes()),
         )
         .map_err(|error| error.message())?;
-    // Per commit, the blob to read: a blob within the bound.
-    let wanted: Vec<Option<String>> = checked.lines().map(small_blob).collect();
-    if wanted.len() != commits.len() {
+    let lines: Vec<&str> = checked.lines().collect();
+    if lines.len() != commits.len() {
         return Err(format!(
             "git cat-file --batch-check answered {} lines for {} commits",
-            wanted.len(),
+            lines.len(),
             commits.len()
         ));
     }
+    // Per commit, the blob to read (a blob within the bound), or why its file is unreadable.
+    let mut wanted: Vec<Result<Option<String>, String>> = Vec::with_capacity(lines.len());
+    for (commit, line) in commits.iter().zip(&lines) {
+        wanted.push(if line.ends_with(" missing") {
+            let spec = format!("{commit}:{LIVE_FILE}");
+            match git.run(&["rev-parse", "--verify", "-q", &spec]) {
+                Ok(_) => Err(unreadable(&spec)),
+                Err(GitError::Failed { .. }) => Ok(None),
+                Err(error) => return Err(error.message()),
+            }
+        } else {
+            Ok(small_blob(line))
+        });
+    }
     let mut blobs = String::new();
-    for oid in wanted.iter().flatten() {
+    for oid in wanted.iter().flatten().flatten() {
         blobs.push_str(oid);
         blobs.push('\n');
     }
@@ -646,8 +673,24 @@ pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<Option<Value>>,
     };
     Ok(wanted
         .into_iter()
-        .map(|oid| oid.and_then(|oid| bodies.get(&oid).cloned().flatten()))
+        .zip(commits)
+        .map(|(oid, commit)| -> SummaryRead {
+            match oid? {
+                None => Ok(None),
+                // A blob sized a moment ago that `--batch` did not answer is unreadable too.
+                Some(oid) => bodies
+                    .get(&oid)
+                    .cloned()
+                    .ok_or_else(|| unreadable(&format!("{commit}:{LIVE_FILE}"))),
+            }
+        })
         .collect())
+}
+
+/// G104b: why the file at `spec` (`<commit>:<path>`) reads as nothing: its tree names it, and
+/// its blob cannot be read.
+fn unreadable(spec: &str) -> String {
+    format!("{spec} is named by its tree, but its blob cannot be read from this store or fetched")
 }
 
 /// The object id of a `--batch-check` line naming a blob of at most [`LIVE_MAX_BYTES`].

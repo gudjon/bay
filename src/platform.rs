@@ -106,9 +106,129 @@ pub fn detach_windows(cmd: &mut Command) {
     let _ = cmd;
 }
 
+/// A search path from `dirs`, joined with this platform's separator: `;` on Windows, where a
+/// directory holds a `:` after its drive letter, `:` elsewhere.
+#[must_use]
+pub fn search_path(dirs: &[String]) -> String {
+    dirs.join(if cfg!(windows) { ";" } else { ":" })
+}
+
+/// How an adapter's program starts, read from its first line (plan W6).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Launch {
+    /// No `#!` line: the program starts by itself.
+    Direct,
+    /// A `#!` line naming `sh` or `bash`, with the one argument the line passes, if any: on
+    /// Windows the script runs through Git for Windows' `sh.exe`.
+    Sh(Option<String>),
+    /// A `#!` line naming another interpreter, as written.
+    Other(String),
+}
+
+/// The [`Launch`] of a program whose first bytes are `head`. A `#!` line is the interpreter
+/// path and at most one argument, as Unix reads it; `/usr/bin/env sh` names `sh`.
+#[must_use]
+pub fn launch_of(head: &[u8]) -> Launch {
+    let Some(line) = head.strip_prefix(b"#!") else {
+        return Launch::Direct;
+    };
+    let line = line.split(|byte| *byte == b'\n').next().unwrap_or_default();
+    let line = String::from_utf8_lossy(line);
+    let line = line.trim();
+    let (interpreter, arg) = line
+        .split_once([' ', '\t'])
+        .map_or((line, None), |(interpreter, arg)| {
+            (interpreter, Some(arg.trim()).filter(|arg| !arg.is_empty()))
+        });
+    let name = |path: &str| {
+        path.rsplit(['/', '\\'])
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let shell = |name: &str| matches!(name, "sh" | "bash");
+    match (name(interpreter).as_str(), arg) {
+        ("env", Some(program)) if shell(program) => Launch::Sh(None),
+        (program, arg) if shell(program) => Launch::Sh(arg.map(str::to_owned)),
+        _ => Launch::Other(line.to_owned()),
+    }
+}
+
+/// Where Git for Windows keeps `sh.exe`, given Git's exec path (`git --exec-path`, as
+/// `C:/Program Files/Git/mingw64/libexec/git-core`): `bin/sh.exe`, then `usr/bin/sh.exe`, in
+/// each directory above the exec path, nearest first.
+#[must_use]
+pub fn sh_candidates(exec_path: &Path) -> Vec<PathBuf> {
+    exec_path
+        .ancestors()
+        .skip(1)
+        .take(3)
+        .flat_map(|dir| {
+            [
+                dir.join("bin").join("sh.exe"),
+                dir.join("usr").join("bin").join("sh.exe"),
+            ]
+        })
+        .collect()
+}
+
+/// Why a shebang adapter does not start on Windows when no `sh.exe` is found.
+pub const NO_SH: &str = "the adapter is a #! script, and Windows runs one only through \
+     Git for Windows' sh.exe, which was not found above git --exec-path";
+
+/// The command that starts the adapter program at `program`. On Unix the program itself. On
+/// Windows a `#!` script naming `sh` or `bash` runs through Git for Windows' `sh.exe` (plan W6);
+/// a script naming another interpreter, or one with no `sh.exe` to run it, is refused by name.
+/// A program that cannot be read starts as it is, so starting it fails as it would.
+///
+/// # Errors
+///
+/// On Windows only: a `#!` script that has no interpreter bay can start.
+pub fn script(program: &Path) -> Result<Command, String> {
+    if !cfg!(windows) {
+        return Ok(Command::new(program));
+    }
+    let mut head = [0u8; 256];
+    let read = std::fs::File::open(program)
+        .and_then(|mut file| std::io::Read::read(&mut file, &mut head))
+        .unwrap_or(0);
+    match launch_of(&head[..read]) {
+        Launch::Direct => Ok(Command::new(program)),
+        Launch::Sh(arg) => {
+            let sh = git_sh().ok_or_else(|| format!("{}: {NO_SH}", program.display()))?;
+            let mut cmd = Command::new(sh);
+            cmd.args(arg).arg(program);
+            Ok(cmd)
+        }
+        Launch::Other(line) => Err(format!(
+            "{}: the adapter's #! line names {line}, and on Windows bay runs only a sh or bash \
+             script (through Git for Windows' sh.exe) or a program that starts by itself",
+            program.display()
+        )),
+    }
+}
+
+/// Git for Windows' `sh.exe`, found once from `git --exec-path`.
+fn git_sh() -> Option<PathBuf> {
+    static SH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    SH.get_or_init(|| {
+        let mut cmd = Command::new("git");
+        cmd.arg("--exec-path");
+        let output = crate::git::run_bounded(cmd, "git --exec-path").ok()?;
+        let exec_path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !output.status.success() || exec_path.is_empty() {
+            return None;
+        }
+        sh_candidates(Path::new(&exec_path))
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+    })
+    .clone()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve;
+    use super::{Launch, launch_of, resolve, sh_candidates};
     use std::ffi::OsStr;
 
     fn dirs() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -181,5 +301,83 @@ mod tests {
         assert_eq!(resolve("claude", None, None), None);
         assert_eq!(resolve("", Some(&path), None), None);
         assert_eq!(resolve("bin/claude", Some(&path), None), None);
+    }
+
+    #[test]
+    fn a_shebang_names_how_the_adapter_starts() {
+        assert_eq!(launch_of(b"\x7fELF\x02"), Launch::Direct);
+        assert_eq!(launch_of(b"MZ\x90\x00"), Launch::Direct);
+        assert_eq!(launch_of(b""), Launch::Direct);
+        assert_eq!(launch_of(b"#!/bin/sh\nexit 0\n"), Launch::Sh(None));
+        assert_eq!(launch_of(b"#!/bin/bash\r\n"), Launch::Sh(None));
+        assert_eq!(
+            launch_of(b"#! /bin/sh -eu\nset -x\n"),
+            Launch::Sh(Some("-eu".to_owned()))
+        );
+        assert_eq!(launch_of(b"#!/usr/bin/env sh\n"), Launch::Sh(None));
+        assert_eq!(launch_of(b"#!/usr/bin/env bash\n"), Launch::Sh(None));
+        assert_eq!(
+            launch_of(b"#!/usr/bin/env python3\n"),
+            Launch::Other("/usr/bin/env python3".to_owned())
+        );
+        assert_eq!(
+            launch_of(b"#!/usr/bin/zsh\n"),
+            Launch::Other("/usr/bin/zsh".to_owned())
+        );
+        // A first line cut short by the read still names its interpreter.
+        assert_eq!(launch_of(b"#!/bin/sh"), Launch::Sh(None));
+    }
+
+    #[test]
+    fn sh_exe_is_looked_for_above_git_s_exec_path() {
+        let at = |parts: &[&str]| parts.iter().collect::<std::path::PathBuf>();
+        // Git for Windows: the exec path is `<root>/mingw64/libexec/git-core`, and its shell
+        // is `<root>/bin/sh.exe`, with `<root>/usr/bin/sh.exe` beside it.
+        let found = sh_candidates(&at(&["Git", "mingw64", "libexec", "git-core"]));
+        assert_eq!(
+            found,
+            [
+                at(&["Git", "mingw64", "libexec", "bin", "sh.exe"]),
+                at(&["Git", "mingw64", "libexec", "usr", "bin", "sh.exe"]),
+                at(&["Git", "mingw64", "bin", "sh.exe"]),
+                at(&["Git", "mingw64", "usr", "bin", "sh.exe"]),
+                at(&["Git", "bin", "sh.exe"]),
+                at(&["Git", "usr", "bin", "sh.exe"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_search_path_takes_this_platform_s_separator() {
+        let dirs = ["/usr/bin".to_owned(), "/bin".to_owned()];
+        let joined = super::search_path(&dirs);
+        let split: Vec<_> = std::env::split_paths(&joined).collect();
+        assert_eq!(
+            split,
+            [
+                std::path::Path::new("/usr/bin"),
+                std::path::Path::new("/bin")
+            ]
+        );
+    }
+
+    /// On Windows a `#!/bin/sh` adapter starts through `sh.exe` from Git for Windows.
+    #[cfg(windows)]
+    #[test]
+    fn a_sh_script_starts_through_git_s_sh_exe_on_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("adapter");
+        std::fs::write(&script, "#!/bin/sh\necho ok\n").unwrap();
+        let mut cmd = super::script(&script).unwrap();
+        assert!(
+            std::path::Path::new(cmd.get_program())
+                .file_name()
+                .is_some_and(|name| name.eq_ignore_ascii_case("sh.exe"))
+        );
+        let output = cmd.output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+        std::fs::write(&script, "#!/usr/bin/env python3\n").unwrap();
+        assert!(super::script(&script).is_err());
     }
 }

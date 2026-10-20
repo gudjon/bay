@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.13
+
+- A live summary a blob-less cache cannot read is named in the fleet map, never shown as missing.
+- `bay start` fails naming an unreadable live summary, never missing the session that holds the change.
+- An unreadable `.bay/policy.toml` shows as `quarantines.unread` in `bay status`, never as no quarantines.
+- A view's files hold their blobs' exact bytes, whatever `core.autocrlf` the box sets.
+
 ## 0.1.12
 
 - An unreadable `.bay/policy.toml` is an error naming it: land never says POLICY_MISSING, status never reads red as clear.

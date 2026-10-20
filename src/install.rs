@@ -61,7 +61,8 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
             bin_dir.display()
         ));
     }
-    let target = bin_dir.join("bay");
+    // `bay.exe` on Windows (plan W2).
+    let target = bin_dir.join(format!("bay{}", std::env::consts::EXE_SUFFIX));
     place_binary(&bin_dir, &target)?;
 
     // § 15.3 item 4: the skill this binary carries, at the one path doctor checks.
@@ -195,6 +196,7 @@ fn place_binary(bin_dir: &Path, target: &Path) -> Result<(), String> {
     let tmp = bin_dir.join(".bay.install-tmp");
     std::fs::copy(&source, &tmp)
         .map_err(|error| format!("cannot write {}: {error}", tmp.display()))?;
-    crate::durable::rename(&tmp, target)
+    // Another bay may be running from `target`: on Windows it moves aside (plan W3).
+    crate::durable::replace_program(&tmp, target)
         .map_err(|error| format!("cannot place {}: {error}", target.display()))
 }

@@ -386,7 +386,8 @@ fn run_provider(
         return Err(format!("the provider for {}: {why}", entry.name));
     }
     // A provider has no network (G62): it answers from the tree alone.
-    let mut cmd = crate::check::sandboxed(sandbox.kind, &program, &args, &hidden, scratch, false);
+    let mut cmd = crate::check::sandboxed(sandbox.kind, &program, &args, &hidden, scratch, false)
+        .map_err(|why| format!("the provider for {}: {why}", entry.name))?;
     // The same fixed baseline as a check (`INTERFACES` § 7): nothing from the caller's
     // environment, so an answer depends on the entry and the tree alone.
     cmd.current_dir(&tree_dir)
@@ -396,7 +397,7 @@ fn run_provider(
         .env("TMPDIR", &tmp)
         .env("LANG", "C.UTF-8");
     if !entry.path.is_empty() {
-        cmd.env("PATH", entry.path.join(":"));
+        cmd.env("PATH", crate::platform::search_path(&entry.path));
     }
     let request = json!({"input": entry.name, "tree": tree}).to_string();
     let (status, stdout, stderr) = run_bounded(
@@ -511,10 +512,18 @@ pub(crate) fn run_bounded(
     Ok((status, stdout, stderr))
 }
 
-/// Kills process group `group`, with a bounded `kill`.
+/// Kills process group `group`, with a bounded `kill`. On Windows, where a child leads no
+/// group, the process `group` names and every process it started, with a bounded `taskkill`.
 pub(crate) fn kill_group(group: u32) {
-    let mut kill = Command::new("kill");
-    kill.args(["-KILL", "--", &format!("-{group}")]);
+    let kill = if cfg!(windows) {
+        let mut kill = Command::new("taskkill");
+        kill.args(["/F", "/T", "/PID", &group.to_string()]);
+        kill
+    } else {
+        let mut kill = Command::new("kill");
+        kill.args(["-KILL", "--", &format!("-{group}")]);
+        kill
+    };
     let _ = crate::git::run_bounded_for(kill, "kill", None, Duration::from_secs(5));
 }
 

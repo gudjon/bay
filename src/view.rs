@@ -210,7 +210,9 @@ fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
                 return Ok(false);
             }
             let path_text = path.display().to_string();
+            // Plan W5: Git for Windows removes a path longer than 260 characters too.
             repo.git
+                .writing_tree()
                 .run(&["worktree", "remove", "--force", &path_text])?;
         }
     }
@@ -267,7 +269,10 @@ fn holds_nothing_newer(path: &Path, ended: &Ended) -> Result<bool, GitError> {
 pub fn discard(repo: &Repo, id: &str) -> Result<(), GitError> {
     let path = repo.view_path(id);
     let path_text = path.display().to_string();
-    let _ = repo.git.run(&["worktree", "remove", "--force", &path_text]);
+    let _ = repo
+        .git
+        .writing_tree()
+        .run(&["worktree", "remove", "--force", &path_text]);
     if path.exists() {
         std::fs::remove_dir_all(&path).map_err(GitError::Spawn)?;
     }
@@ -310,7 +315,8 @@ pub fn create(repo: &Repo, id: &str, commit: &str, paths: &[String]) -> Result<P
     }
     // G212: the only calls of a view's creation that may fetch, and only the declared files
     // they write: the sparse set comes first, so the checkout writes (and fetches) no other blob.
-    let view = Git::new(&path).fetching();
+    // Plan W5: the checkout writes each blob's bytes, and long paths on Windows.
+    let view = Git::new(&path).fetching().writing_tree();
     if !paths.is_empty() {
         let mut args = vec![
             "sparse-checkout".to_owned(),
@@ -361,6 +367,7 @@ pub fn keep_hook_settings(repo: &Repo, id: &str, declared: &[String]) -> Result<
         return Ok(());
     }
     view.fetching()
+        .writing_tree()
         .run(&["sparse-checkout", "add", &pattern])
         .map(|_| ())
 }

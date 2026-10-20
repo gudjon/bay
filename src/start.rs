@@ -845,6 +845,7 @@ fn bring_in_trunk(
             // G212: the sparse checkout fetches only the declared files it writes.
             Git::new(repo.view_path(&record.id))
                 .fetching()
+                .writing_tree()
                 .run(&["checkout", "-q", "-f", "--detach", &rebased])
                 .map_err(|error| error.message())?;
             trunk.clone_into(&mut record.base);

@@ -349,7 +349,12 @@ fn real(path: &Path) -> PathBuf {
 /// `scratch` (the candidate and the adapter) read-write, the system files of
 /// [`sandbox::SYSTEM_DIRS`] and [`sandbox::SYSTEM_ETC`] read-only, and nothing else; any of
 /// `hidden` inside those is hidden on top. The network is denied unless `network` (a check's
-/// `network = true`, judged at the base).
+/// `network = true`, judged at the base). With no sandbox, a `#!` script starts as
+/// [`crate::platform::script`] says (on Windows through Git for Windows' `sh.exe`).
+///
+/// # Errors
+///
+/// With no sandbox on Windows: a `#!` script bay cannot start ([`crate::platform::script`]).
 pub(crate) fn sandboxed(
     kind: &str,
     executable: &Path,
@@ -357,8 +362,8 @@ pub(crate) fn sandboxed(
     hidden: &[PathBuf],
     scratch: &Path,
     network: bool,
-) -> Command {
-    match kind {
+) -> Result<Command, String> {
+    Ok(match kind {
         "sandbox-exec" => {
             let mut cmd = Command::new("/usr/bin/sandbox-exec");
             cmd.arg("-p")
@@ -375,11 +380,11 @@ pub(crate) fn sandboxed(
             cmd
         }
         _ => {
-            let mut cmd = Command::new(executable);
+            let mut cmd = crate::platform::script(executable)?;
             cmd.args(args);
             cmd
         }
-    }
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -725,14 +730,17 @@ fn run_one(
     let scratch_home = place.scratch.join("home");
     let _ = std::fs::create_dir_all(&scratch_tmp);
     let _ = std::fs::create_dir_all(&scratch_home);
-    let mut cmd = sandboxed(
+    let mut cmd = match sandboxed(
         place.sandbox,
         &executable,
         &args,
         place.hidden,
         place.scratch,
         entry.network,
-    );
+    ) {
+        Ok(cmd) => cmd,
+        Err(why) => return Judged::without_units(Verdict::InfraFailure, Some(why)),
+    };
     // `INTERFACES` § 7: the check starts from a fixed baseline and nothing else, so evidence
     // names everything it could read: `PATH` from the policy, `HOME` and `TMPDIR` inside the
     // sandbox's scratch, `LANG=C.UTF-8`, bay's own `BAY_ADAPTER_DIR`, and the declared names.
@@ -746,7 +754,7 @@ fn run_one(
         .env("LANG", "C.UTF-8")
         // The policy states `path` or takes its stated default, so `PATH` is always set: a
         // shell never falls back to a search path no policy names.
-        .env("PATH", entry.path.join(":"))
+        .env("PATH", crate::platform::search_path(&entry.path))
         // `policy::load_at` refuses an `env` name of the baseline, so none overrides it.
         .envs(declared);
     let (output, stderr) = match exchange(hooks, cmd, &request, timeout, heartbeat) {

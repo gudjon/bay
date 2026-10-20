@@ -61,7 +61,10 @@ pub fn notice(event: &Value) -> String {
 pub fn command_at(work_root: &Path, command: &str) -> Option<Command> {
     let mut words = command.split_whitespace();
     let program = words.next()?;
-    let mut cmd = Command::new(work_root.join(program));
+    // A `#!` script bay cannot start on Windows starts as it is, and so is lost as an adapter
+    // that cannot start is (`crate::platform::script`).
+    let program = work_root.join(program);
+    let mut cmd = crate::platform::script(&program).unwrap_or_else(|_| Command::new(&program));
     cmd.args(words)
         .current_dir(work_root)
         .stdin(Stdio::piped())
