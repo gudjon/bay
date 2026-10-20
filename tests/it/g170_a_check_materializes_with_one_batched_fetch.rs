@@ -4,8 +4,9 @@
 //! promisor remote (or a second one for the adapter), not in one lazy fetch per file, and the
 //! tree the check saw is exactly the candidate's.
 
-// Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
-#![cfg(unix)]
+// Linux only: the check copies its tree out, so it runs unconfined (ruling R14), and on macOS a
+// check always runs under `sandbox-exec`. The whole file is gated, so its helpers are too.
+#![cfg(target_os = "linux")]
 
 use crate::support;
 
@@ -64,9 +65,6 @@ fn tree_of(test_box: &TestBox, dir: &Path) -> String {
     test_box.git_ok(dir, &[&git_dir, &work_tree, "write-tree"])
 }
 
-/// Linux only: the check copies its tree out, so it runs unconfined (ruling R14), and on macOS a
-/// check always runs under `sandbox-exec`.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_blobless_check_fetches_once_and_sees_the_exact_tree() {
     let test_box = TestBox::new();
