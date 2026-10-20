@@ -69,6 +69,7 @@ mod g17_offline_submission_publishes_once;
 mod g18_a_view_costs_what_the_task_reads;
 mod g19_two_executors_never_publish_one_operation_twice;
 mod g20_work_after_submission_survives;
+mod g211_a_merge_fault_never_becomes_a_candidate;
 mod g21_a_terminal_outcome_outlives_its_drafts;
 mod g22_finished_check_units_survive_a_dead_worker;
 mod g23_the_fleet_map_is_true;

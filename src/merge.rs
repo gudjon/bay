@@ -13,7 +13,8 @@ pub enum Merge {
 ///
 /// # Errors
 ///
-/// A git fault (a conflict is not one: it is [`Merge::Conflict`]).
+/// A git fault (a conflict is not one: it is [`Merge::Conflict`]), including a draft that shares
+/// no history with trunk: bay never passes `--allow-unrelated-histories` (G211).
 pub fn merge_onto(git: &Git, trunk: &str, draft: &str) -> Result<Merge, GitError> {
     merge_tree(git, None, trunk, draft)
 }
@@ -36,9 +37,12 @@ fn merge_tree(git: &Git, base: Option<&str>, ours: &str, theirs: &str) -> Result
     let (code, stdout, stderr) = git.run_status(&args)?;
     let mut lines = stdout.lines();
     let tree = lines.next().unwrap_or_default().to_owned();
+    // G211: Git also exits 1 for a revision it cannot read, printing no tree, so a conflict is
+    // exit 1 with a tree id; anything else is a fault and builds no candidate.
+    let is_tree = !tree.is_empty() && tree.bytes().all(|byte| byte.is_ascii_hexdigit());
     match code {
-        0 => Ok(Merge::Clean(tree)),
-        1 => Ok(Merge::Conflict(
+        0 if is_tree => Ok(Merge::Clean(tree)),
+        1 if is_tree => Ok(Merge::Conflict(
             lines
                 .take_while(|line| !line.is_empty())
                 .map(str::to_owned)
