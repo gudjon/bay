@@ -1,7 +1,6 @@
 # Changelog
 
 ## 0.1.8
-Pre-release.
 
 Speed
 - Commands run two to four times faster: bay no longer waits up to 20 ms after each Git call.
@@ -30,7 +29,6 @@ Trunk health
 - `bay watch` lists `trunk_red` when a post check turns trunk red, and `trunk_red_cleared` when it clears.
 
 ## 0.1.7
-Pre-release.
 
 Before you upgrade a bay-hosted trunk's clients, upgrade the host. Older hosts refuse an ack that names its wake.
 
@@ -53,7 +51,6 @@ Doctor
 - `hook-overrides` is red only for `disableAllHooks` or `allowManagedHooksOnly`.
 
 ## 0.1.6
-Pre-release.
 
 Before you upgrade a bay-hosted trunk: upgrade its host first. Older bays cannot read the new `no_effect` state.
 
@@ -90,7 +87,6 @@ Repository
 - Added CONTRIBUTING, SECURITY, a code of conduct, issue and pull request templates, and a public AGENTS.md.
 
 ## 0.1.5
-Pre-release.
 
 The first release signed by the hardware release key. Every release before it was signed by the old key.
 
@@ -100,7 +96,6 @@ Checks
 - A reason over 2 KB makes the run `infra_failure`. bay never cuts a reason or copies raw check output.
 
 ## 0.1.4
-Pre-release.
 
 Builds for Linux (x86_64 and aarch64, musl) and macOS. Apple silicon is tested; Intel (x86_64) is built but not yet run on an Intel Mac.
 
@@ -167,7 +162,6 @@ Configuration
 - Retired `[check] command` in `.bay/config.toml`. The policy names each check's command, and doctor lists the old key as ignored.
 
 ## 0.1.3
-Pre-release.
 
 Builds for Linux (x86_64 and aarch64, musl) and macOS. Apple silicon is tested; Intel (x86_64) is built but not yet run on an Intel Mac.
 
@@ -184,7 +178,6 @@ Builds for Linux (x86_64 and aarch64, musl) and macOS. Apple silicon is tested; 
 - Removed update channels: `--channel`, `BAY_UPDATE_CHANNEL` and `bay.updateChannel` are no longer read, and doctor names one that is still set.
 
 ## 0.1.2
-Pre-release.
 
 Builds for Linux (x86_64 and aarch64, musl) and macOS. The macOS builds were added on 19 October 2026, from the same commit. Apple silicon is tested; Intel (x86_64) is built but not yet run on an Intel Mac.
 
@@ -204,7 +197,6 @@ Builds for Linux (x86_64 and aarch64, musl) and macOS. The macOS builds were add
 - Fixed the release script: a new MINOR or MAJOR needs the owner's approval through `BAY_RELEASE_APPROVED`.
 
 ## 0.1.1
-Pre-release.
 
 Builds for Linux (x86_64 and aarch64, musl) and macOS. The macOS builds were added on 19 October 2026, from the same commit. Apple silicon is tested; Intel (x86_64) is built but not yet run on an Intel Mac.
 
@@ -236,7 +228,6 @@ Builds for Linux (x86_64 and aarch64, musl) and macOS. The macOS builds were add
 - Fixed release archives: they carry no extended attributes, so Linux tar unpacks them without warnings.
 
 ## 0.1.0-pilot.1
-Pre-release.
 
 - Added the first build: `bay start`, `land`, `status`, `doctor`, `install`, `share`, `host init` and `executor run`.
 - Added signed release assets: one archive per platform, `VERSION`, `SHA256SUMS` and `SHA256SUMS.sig`.

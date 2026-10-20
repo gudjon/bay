@@ -25,7 +25,7 @@ Anything that breaks one of bay's promises counts. For example:
 
 ## Supported versions
 
-bay is pre-release. Fixes go into the newest release only. Run `bay update` to get it.
+Fixes go into the newest release only. Run `bay update` to get it.
 
 ## Verify a release yourself
 
