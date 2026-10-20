@@ -362,7 +362,7 @@ pub fn append(git: &Git, producer: &str, record: &EvidenceRecord) -> Result<(), 
     .map_err(|error| error.message())
 }
 
-/// Every record on `tree`, from every producer ref.
+/// Every record on `tree`, from every producer ref, of the schema this bay reads.
 ///
 /// # Errors
 ///
@@ -381,7 +381,10 @@ pub fn records_for(git: &Git, tree: &str) -> Result<Vec<EvidenceRecord>, String>
             without_conflicts(producer_records(git, producer, tree)?)
                 .into_iter()
                 .filter(|record| {
-                    record.producer.name == producer
+                    // G86: a record of a schema major this bay does not know may mean something
+                    // it cannot judge, so it never counts here; it stays on the note.
+                    record.schema == EVIDENCE_SCHEMA
+                        && record.producer.name == producer
                         && record.id.starts_with(&format!("{producer}/"))
                         && record.subject.tree == tree
                 }),

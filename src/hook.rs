@@ -829,7 +829,9 @@ impl Judge<'_> {
                 }
                 if !matches!(
                     before.state,
-                    crate::change::ChangeState::Abandoned | crate::change::ChangeState::Superseded
+                    crate::change::ChangeState::Abandoned
+                        | crate::change::ChangeState::Superseded
+                        | crate::change::ChangeState::NoEffect
                 ) {
                     self.takeover_window(update, id, parent.as_deref(), &before.actor.name)?;
                 }

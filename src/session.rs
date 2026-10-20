@@ -592,7 +592,10 @@ pub fn session_start(dir: &Path, input: &str) -> String {
 fn may_be_refused(record: &ChangeRecord) -> bool {
     !matches!(
         record.state,
-        ChangeState::Landed | ChangeState::Abandoned | ChangeState::Superseded
+        ChangeState::Landed
+            | ChangeState::Abandoned
+            | ChangeState::Superseded
+            | ChangeState::NoEffect
     ) && record
         .operations
         .last()

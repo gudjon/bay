@@ -346,7 +346,7 @@ fn adopt_or_refuse(
     let free = record.actor.name == me.name
         || matches!(
             record.state,
-            ChangeState::Abandoned | ChangeState::Superseded
+            ChangeState::Abandoned | ChangeState::Superseded | ChangeState::NoEffect
         );
     if !free {
         if let Some(why) = holder_works(repo, &chain, change, &head, &record.actor.name)? {
@@ -364,7 +364,7 @@ fn adopt_or_refuse(
     if record.actor.name == me.name
         && !matches!(
             record.state,
-            ChangeState::Abandoned | ChangeState::Superseded
+            ChangeState::Abandoned | ChangeState::Superseded | ChangeState::NoEffect
         )
         && let Some(held) = live_holder(repo, change, me)?
     {

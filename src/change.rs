@@ -179,6 +179,8 @@ pub enum ChangeState {
     Landed,
     Superseded,
     Abandoned,
+    /// Its work is already on trunk: nothing was published (G213).
+    NoEffect,
 }
 
 /// The change record of § 3.1. Fields of later increments are added when they are built.
@@ -252,12 +254,18 @@ pub enum OpState {
     Blocked,
     Failed,
     Superseded,
+    /// The merged tree equals trunk's tree: the work is already on trunk, and nothing was
+    /// published (G213).
+    NoEffect,
 }
 
 impl OpState {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Published | Self::Failed | Self::Superseded)
+        matches!(
+            self,
+            Self::Published | Self::Failed | Self::Superseded | Self::NoEffect
+        )
     }
 }
 

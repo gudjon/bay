@@ -454,3 +454,48 @@ fn wait_until(
         thread::sleep(std::time::Duration::from_millis(20));
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::{GitError, run_bounded_for};
+    use std::process::Command;
+    use std::time::{Duration, Instant};
+
+    /// G135: a call that hangs is killed at its bound and reported as a timeout, never waited
+    /// on and never read as a result.
+    #[test]
+    fn a_hung_call_is_bounded() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 10"]);
+        let started = Instant::now();
+        let outcome = run_bounded_for(cmd, "hung", None, Duration::from_secs(1));
+        assert!(
+            matches!(outcome, Err(GitError::Timeout { secs: 1, .. })),
+            "{outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// G135: a hung call whose own child keeps the output pipe open (as a remote helper or an
+    /// ssh would) still returns at the bound: bay never waits for the pipe to close.
+    #[test]
+    fn a_hung_call_with_a_child_holding_its_pipe_is_bounded() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "sleep 10 & sleep 10"]);
+        let started = Instant::now();
+        let outcome = run_bounded_for(cmd, "hung", None, Duration::from_secs(1));
+        assert!(
+            matches!(outcome, Err(GitError::Timeout { .. })),
+            "{outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+}

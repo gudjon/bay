@@ -827,6 +827,8 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
                 || {
                     if result.decision == Decision::Landed {
                         "published".to_owned()
+                    } else if result.state.as_deref() == Some(NO_EFFECT) {
+                        NO_EFFECT.to_owned()
                     } else {
                         "failed".to_owned()
                     }
@@ -1541,6 +1543,13 @@ fn verify_request_digest(ctx: &Ctx, op_id: &str) -> Result<Option<BayResult>, St
     };
     let request: serde_json::Value =
         serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    // G86: a request of a schema major this executor does not know is refused, never guessed at.
+    if request["schema"] != REQUEST_SCHEMA {
+        return refuse(&format!(
+            "its request is {}; this bay reads {REQUEST_SCHEMA} (update bay)",
+            request["schema"]
+        ));
+    }
     let expected = digest(&json!({
         "change": ctx.id,
         "revision": op.revision,
@@ -1685,7 +1694,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
     // The request: an agent-signed commit on the revision, linked into the chain. Appending it
     // allocates the op id by compare-and-swap; `refs/bay/requests/<id>` moves with it.
     let request = json!({
-        "schema": "bay.request/1",
+        "schema": REQUEST_SCHEMA,
         "op_id": op_id,
         "change": ctx.id,
         "revision": revision,
@@ -1739,7 +1748,7 @@ fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<Ba
     ctx.chain.sign_with(agent);
     let draft = ctx.chain.drafts(id).map_err(|error| error.message())?[0].clone();
     let request = json!({
-        "schema": "bay.request/1",
+        "schema": REQUEST_SCHEMA,
         "kind": "abandon",
         "change": id,
         "actor": ctx.record.actor,
@@ -1850,6 +1859,76 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Step 2: the merged tree of `revision` onto `trunk`, or the `MERGE_CONFLICT` refusal, with the
+/// operation blocked on the condition that lifts it.
+fn merged(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Result<String, BayResult>, String> {
+    let git = &ctx.repo.git;
+    ctx.step.set("merge");
+    match merge_onto(git, trunk, revision).map_err(|error| error.message())? {
+        Merge::Clean(tree) => Ok(Ok(tree)),
+        Merge::Conflict(paths, _) => {
+            let condition = condition(git, revision, trunk, None, &ctx.record.observed_versions)?;
+            let op = ctx.op_mut(op_id);
+            op.state = OpState::Blocked;
+            op.outcome = Some(Reason::MergeConflict.code().to_owned());
+            op.blocked_on = Some(condition);
+            ctx.save(revision, None, "blocked: merge conflict")?;
+            ctx.push_chain();
+            Ok(Err(BayResult::blocked(Reason::MergeConflict)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(json!({"conflicts": paths, "trunk": trunk}))))
+        }
+    }
+}
+
+/// G213: a merged `tree` equal to `trunk`'s own tree is work already on trunk, whether another
+/// change landed the same bytes or the change's edits cancel out. Nothing is published and no
+/// check runs; the operation ends `no_effect`, naming the trunk commit that holds the work.
+fn no_effect(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+    tree: &str,
+) -> Result<Option<BayResult>, String> {
+    let trunk_tree = ctx
+        .repo
+        .git
+        .run(&["rev-parse", &format!("{trunk}^{{tree}}")])
+        .map_err(|error| error.message())?;
+    if trunk_tree != tree {
+        return Ok(None);
+    }
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::NoEffect;
+    op.outcome = Some(NO_EFFECT.to_owned());
+    ctx.record.state = ChangeState::NoEffect;
+    ctx.save(
+        revision,
+        None,
+        &format!("{NO_EFFECT} {op_id}: already on trunk at {trunk}"),
+    )?;
+    ctx.push_chain();
+    let mut result = BayResult::new(Decision::Ok)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(json!({"trunk_commit": trunk, "tree": tree}));
+    result.state = Some(NO_EFFECT.to_owned());
+    Ok(Some(result))
+}
+
+/// The schema of a land or abandon request.
+const REQUEST_SCHEMA: &str = "bay.request/1";
+
+/// The terminal outcome of an operation whose work is already on trunk (G213).
+pub const NO_EFFECT: &str = "no_effect";
+
 /// Steps 2–5: merge onto `trunk`, commit the candidate, check it, persist it.
 fn build_and_check(
     ctx: &mut Ctx,
@@ -1861,24 +1940,14 @@ fn build_and_check(
         Ok(judged) => judged,
         Err(refusal) => return Ok(Err(refusal)),
     };
-    let git = &ctx.repo.git;
-    ctx.step.set("merge");
-    let tree = match merge_onto(git, trunk, revision).map_err(|error| error.message())? {
-        Merge::Clean(tree) => tree,
-        Merge::Conflict(paths, _) => {
-            let condition = condition(git, revision, trunk, None, &ctx.record.observed_versions)?;
-            let op = ctx.op_mut(op_id);
-            op.state = OpState::Blocked;
-            op.outcome = Some(Reason::MergeConflict.code().to_owned());
-            op.blocked_on = Some(condition);
-            ctx.save(revision, None, "blocked: merge conflict")?;
-            ctx.push_chain();
-            return Ok(Err(BayResult::blocked(Reason::MergeConflict)
-                .with_change(ctx.id.clone())
-                .with_op(op_id)
-                .with_detail(json!({"conflicts": paths, "trunk": trunk}))));
-        }
+    let tree = match merged(ctx, op_id, revision, trunk)? {
+        Ok(tree) => tree,
+        Err(refusal) => return Ok(Err(refusal)),
     };
+    let git = &ctx.repo.git;
+    if let Some(no_effect) = no_effect(ctx, op_id, revision, trunk, &tree)? {
+        return Ok(Err(no_effect));
+    }
     anchor(git, op_id, &tree)?;
 
     let candidate_id = format!("{op_id}.{}", ctx.op(op_id).attempts.len() + 1);
