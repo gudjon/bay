@@ -409,7 +409,7 @@ fn keep_outcome(repo: &Repo, outcome: &Result<Value, String>) {
     let path = bay_dir(repo).join("live-push.json");
     let tmp = path.with_extension("tmp");
     if std::fs::write(&tmp, record.to_string()).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+        let _ = crate::durable::rename(&tmp, &path);
     }
 }
 

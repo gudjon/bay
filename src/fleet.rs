@@ -200,7 +200,7 @@ pub fn fetch(repo: &Repo) {
         .is_some_and(|dir| std::fs::create_dir_all(dir).is_ok())
         && std::fs::write(&tmp, record.to_string()).is_ok()
     {
-        let _ = std::fs::rename(&tmp, &path);
+        let _ = crate::durable::rename(&tmp, &path);
     }
 }
 

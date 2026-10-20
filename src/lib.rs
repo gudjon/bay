@@ -17,6 +17,7 @@ pub mod coverage;
 pub mod custody;
 pub mod deny;
 pub mod doctor;
+pub mod durable;
 pub mod evidence;
 pub mod executor;
 pub mod fleet;

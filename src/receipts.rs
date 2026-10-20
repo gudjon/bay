@@ -90,10 +90,7 @@ pub fn write_pending(repo: &Repo, receipt: &Receipt) -> Result<PathBuf, String> 
     let tmp = dir.join(format!(".{}.tmp", receipt.id));
     let text = serde_json::to_string_pretty(receipt).map_err(|error| error.to_string())?;
     std::fs::write(&tmp, text).map_err(|error| format!("{}: {error}", tmp.display()))?;
-    if let Ok(file) = std::fs::File::open(&tmp) {
-        let _ = file.sync_all();
-    }
-    std::fs::rename(&tmp, &path).map_err(|error| format!("{}: {error}", path.display()))?;
+    crate::durable::rename(&tmp, &path).map_err(|error| format!("{}: {error}", path.display()))?;
     Ok(path)
 }
 

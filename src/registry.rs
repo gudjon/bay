@@ -181,7 +181,7 @@ impl Registry {
         if !path.exists() {
             let tmp = dir.join(format!(".{}.tmp", class.file()));
             std::fs::write(&tmp, &self.files[&class]).map_err(|error| error.to_string())?;
-            std::fs::rename(&tmp, &path).map_err(|error| error.to_string())?;
+            crate::durable::rename(&tmp, &path).map_err(|error| error.to_string())?;
         }
         Ok(path)
     }
@@ -220,7 +220,7 @@ impl Registry {
         if !path.exists() {
             let tmp = class_path.with_file_name(format!(".{name}.tmp"));
             std::fs::write(&tmp, lines).map_err(|error| error.to_string())?;
-            std::fs::rename(&tmp, &path).map_err(|error| error.to_string())?;
+            crate::durable::rename(&tmp, &path).map_err(|error| error.to_string())?;
         }
         Ok(path)
     }

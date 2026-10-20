@@ -305,7 +305,7 @@ pub fn write(path: &Path, settings: &Map<String, Value>) -> Result<(), String> {
     text.push('\n');
     let tmp = path.with_extension("json.bay-tmp");
     std::fs::write(&tmp, text).map_err(|error| format!("{}: {error}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|error| format!("{}: {error}", path.display()))
+    crate::durable::rename(&tmp, path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// Lower-case hex of `bytes`.

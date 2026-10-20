@@ -99,7 +99,7 @@ pub fn install(dir: &Path) -> Result<(), String> {
         }
         let tmp = target.with_extension("bay-install-tmp");
         std::fs::write(&tmp, text).map_err(|error| io("write", &tmp, error))?;
-        std::fs::rename(&tmp, &target).map_err(|error| io("place", &target, error))?;
+        crate::durable::rename(&tmp, &target).map_err(|error| io("place", &target, error))?;
     }
     remove_extra(dir, Path::new(""))
 }

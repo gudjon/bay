@@ -141,7 +141,7 @@ pub fn set_journal(repo: &Repo, id: &str, state: Journal) -> Result<(), String> 
     };
     let text = serde_json::to_string(&file).map_err(|error| error.to_string())?;
     std::fs::write(&tmp, text).map_err(|error| format!("{}: {error}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|error| format!("{}: {error}", path.display()))
+    crate::durable::rename(&tmp, &path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
 /// Removes a half-made view so it can be created again.

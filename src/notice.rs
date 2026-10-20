@@ -186,7 +186,7 @@ fn write(state_dir: &Path, cursor: &Cursor) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir)?;
     let tmp = state_dir.join(format!("{STATE_FILE}.{}.tmp", std::process::id()));
     std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, cursor_path(state_dir)).inspect_err(|_| {
+    crate::durable::rename(&tmp, cursor_path(state_dir)).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
     })
 }

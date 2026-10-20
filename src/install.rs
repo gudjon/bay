@@ -191,6 +191,6 @@ fn place_binary(bin_dir: &Path, target: &Path) -> Result<(), String> {
     let tmp = bin_dir.join(".bay.install-tmp");
     std::fs::copy(&source, &tmp)
         .map_err(|error| format!("cannot write {}: {error}", tmp.display()))?;
-    std::fs::rename(&tmp, target)
+    crate::durable::rename(&tmp, target)
         .map_err(|error| format!("cannot place {}: {error}", target.display()))
 }

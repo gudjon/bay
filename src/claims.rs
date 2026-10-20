@@ -163,7 +163,7 @@ fn replace(file: &Path, claims: Vec<Claim>) {
     let temporary = dir.join(format!("{FILE}.{}.tmp", std::process::id()));
     if std::fs::create_dir_all(dir).is_ok()
         && std::fs::write(&temporary, text).is_ok()
-        && std::fs::rename(&temporary, file).is_err()
+        && crate::durable::rename(&temporary, file).is_err()
     {
         let _ = std::fs::remove_file(&temporary);
     }

@@ -311,7 +311,7 @@ pub fn version_at(
     {
         let partial = cached.with_extension("tmp");
         if std::fs::write(&partial, text).is_ok() {
-            let _ = std::fs::rename(&partial, &cached);
+            let _ = crate::durable::rename(&partial, &cached);
         }
     }
     Ok(version)

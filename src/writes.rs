@@ -296,7 +296,7 @@ fn store(state: &Path, ids: &Ids) {
         return;
     }
     let tmp = state.with_extension(format!("json.{}.tmp", std::process::id()));
-    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, state).is_err() {
+    if std::fs::write(&tmp, bytes).is_ok() && crate::durable::rename(&tmp, state).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
 }

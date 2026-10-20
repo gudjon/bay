@@ -503,7 +503,7 @@ fn swap(plan: &Plan, tmp: &Path, archive: &[u8], installed: &Path) -> Result<Bay
             plan.target
         )));
     }
-    std::fs::rename(&new, installed)
+    crate::durable::rename(&new, installed)
         .map_err(|error| failed(format!("cannot replace {}: {error}", installed.display())))?;
 
     // The new binary re-copies what belongs to its version (G49), for the box only: an
@@ -570,7 +570,7 @@ impl State {
         let tmp = dir.join(format!("update.json.{}", std::process::id()));
         let text = serde_json::to_string(self).map_err(|error| error.to_string())?;
         std::fs::write(&tmp, text).map_err(|error| error.to_string())?;
-        std::fs::rename(&tmp, &path).map_err(|error| error.to_string())
+        crate::durable::rename(&tmp, &path).map_err(|error| error.to_string())
     }
 
     /// A check that found `newest`.

@@ -136,7 +136,7 @@ impl Lock {
         let tmp = dir.join(format!(".{pid}.tmp"));
         std::fs::write(&tmp, format!("{pid}\n")).ok()?;
         let path = dir.join(pid.to_string());
-        std::fs::rename(&tmp, &path).ok()?;
+        crate::durable::rename(&tmp, &path).ok()?;
         Some(Self(path))
     }
 }

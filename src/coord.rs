@@ -180,7 +180,7 @@ pub fn write(repo: &Repo, at: SystemTime) -> Result<(), String> {
     // A whole file or none: a hook never reads half a cache.
     let partial = dir.join(format!("coord.json.{}.tmp", std::process::id()));
     std::fs::write(&partial, text).map_err(|error| format!("{}: {error}", partial.display()))?;
-    std::fs::rename(&partial, &file).map_err(|error| format!("{}: {error}", file.display()))
+    crate::durable::rename(&partial, &file).map_err(|error| format!("{}: {error}", file.display()))
 }
 
 /// The declared paths, or the whole tree when the change declares none.
