@@ -295,6 +295,32 @@ enum EvidenceAction {
         #[arg(long, value_name = "REV")]
         since: Option<String>,
     },
+    /// Write a signed record about trunk landings, as an outside producer or reviewer: one
+    /// record per --commit, pushed once (a rerun with the same content writes nothing)
+    Record {
+        /// The record kind, for example `review`; a `review` is signed by bay.reviewerKey
+        #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        kind: String,
+        /// `pass`, `product_failure`, `infra_failure` or `unknown`; there is no default
+        #[arg(long)]
+        verdict: String,
+        /// A landing the record is about; repeat for a range review
+        #[arg(long = "commit", value_name = "COMMIT", required = true)]
+        commits: Vec<String>,
+        /// The check id the record answers; the kind when not named
+        #[arg(long)]
+        check: Option<String>,
+        /// A `key=value` the record keeps as its inputs; repeatable
+        #[arg(long = "input", value_name = "KEY=VALUE")]
+        inputs: Vec<String>,
+        /// A JSON object whose fields each record keeps inside its signed bytes (for example
+        /// findings)
+        #[arg(long, value_name = "FILE")]
+        body: Option<std::path::PathBuf>,
+        /// The writer's own version, part of the record's id; bay's version when not named
+        #[arg(long)]
+        version: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -488,6 +514,26 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
                 kind,
                 producer,
                 since,
+            },
+        ),
+        EvidenceAction::Record {
+            kind,
+            verdict,
+            commits,
+            check,
+            inputs,
+            body,
+            version,
+        } => bay::outside::record(
+            dir,
+            &bay::outside::Record {
+                kind,
+                verdict,
+                commits,
+                check,
+                inputs,
+                body,
+                version,
             },
         ),
     }

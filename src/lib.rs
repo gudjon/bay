@@ -35,6 +35,7 @@ pub mod merge;
 pub mod names;
 pub mod notice;
 pub mod notify;
+pub mod outside;
 pub mod platform;
 pub mod policy;
 pub mod publish;

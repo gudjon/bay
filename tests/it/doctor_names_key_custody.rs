@@ -84,6 +84,26 @@ fn a_producer_key_readable_where_agent_sessions_run_is_red() {
     assert!(!result.to_string().contains(SECRET), "{result}");
 }
 
+/// G75's reviewer key is a signing key like the others: readable where agent sessions run, it
+/// is red (the review dossier's correction K7).
+#[test]
+fn a_reviewer_key_readable_where_agent_sessions_run_is_red() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let key = fake_key(&test_box, "reviewer");
+    test_box.git_ok(&repo, &["config", "bay.reviewerKey", key.to_str().unwrap()]);
+    session_record(&repo);
+    let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
+    assert_eq!(code, 10, "{result}");
+    assert_eq!(result["reason"], "KEY_EXPOSED", "{result}");
+    let custody = row(&result, "key-custody");
+    assert_eq!(
+        custody["keys"][0]["setting"], "bay.reviewerKey",
+        "{custody}"
+    );
+    assert_eq!(custody["keys"][0]["class"], "reviewer", "{custody}");
+}
+
 #[test]
 fn a_release_key_readable_by_a_user_with_passwordless_sudo_is_red() {
     let test_box = TestBox::new();

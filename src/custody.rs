@@ -31,6 +31,7 @@ const SETTINGS: &[(&str, &str)] = &[
     ("bay.releaseKey", "release"),
     ("bay.gateProducerKey", "producer"),
     ("bay.producerKey", "producer"),
+    ("bay.reviewerKey", "reviewer"),
     ("bay.executorKey", "executor"),
     ("bay.registryKey", "registry"),
     ("bay.agentKey", "agent"),
