@@ -203,6 +203,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         "leftovers": leftovers,
         "quarantines": quarantines,
         "red": red_rows(&repo, &trunk),
+        "talks": talk_rows(&repo),
         "trunk": trunk,
     }));
     if let (Some(detail), Some(accept)) = (result.detail.as_mut(), talk_accept) {
@@ -216,6 +217,16 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         fetched_at: fetched_at.unwrap_or_else(|| "not fetched (remote unreachable)".to_owned()),
     });
     Ok(result)
+}
+
+/// G47: the open talks this actor sent or must answer, each with who owes the reply, its ages
+/// and its standing; a lost or stale talk stays listed. Unreadable talks list nothing here.
+fn talk_rows(repo: &Repo) -> Value {
+    let Ok(me) = crate::change::current_actor() else {
+        return json!([]);
+    };
+    crate::talk::standing::rows(&repo.git, &me.name, crate::live::unix_now())
+        .map_or_else(|why| json!({"unread": why}), Value::from)
 }
 
 /// G244: the post checks trunk is red on, each owned by the landing that broke it.
