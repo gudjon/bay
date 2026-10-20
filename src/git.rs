@@ -458,6 +458,15 @@ impl Git {
         match self.fetch_named(&absent, timeout) {
             None => Ok(output),
             Some(Ok(())) => run(),
+            // A `--batch` read answers `<name> missing` and exits 0 for a path its tree lacks and
+            // for a blob the store lacks alike: one the tree names that no fetch could bring is
+            // an error, never read as absent.
+            Some(Err(why)) if output.status.success() && args.contains(&"--batch") => {
+                Err(GitError::Failed {
+                    args: args.join(" "),
+                    stderr: why.trim().to_owned(),
+                })
+            }
             Some(Err(why)) => {
                 output.stderr.extend_from_slice(why.as_bytes());
                 Ok(output)
@@ -476,10 +485,12 @@ impl Git {
         let remote = self.promisor_remote()?;
         // A name is resolved through trees, which a blob-less store holds: no blob is read.
         let mut ids = String::new();
+        let mut resolved = Vec::new();
         for name in names {
             if let Ok(oid) = self.run(&["rev-parse", "--verify", "-q", name]) {
                 ids.push_str(&oid);
                 ids.push('\n');
+                resolved.push(name.as_str());
             }
         }
         if ids.is_empty() {
@@ -504,7 +515,7 @@ impl Git {
         Some(fetched.map(|_| ()).map_err(|error| {
             format!(
                 "\n{} absent from this partial clone, and fetching it by id from its promisor remote {remote} failed: {}",
-                names.join(", "),
+                resolved.join(", "),
                 error.message()
             )
         }))
@@ -597,6 +608,29 @@ impl Git {
         match self.run(&["rev-parse", "--verify", "-q", &format!("{name}^{{object}}")]) {
             Ok(oid) => Ok(Some(oid)),
             Err(GitError::Failed { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The text of the file at `path` in the tree of `commit`, or `None` when that tree has no
+    /// such path (or `commit` names no tree this store holds). G104b: a path the tree names
+    /// whose blob cannot be read, here or by id from a partial clone's promisor remote, is an
+    /// error that names it, never `None`. The tree decides absence; no blob is read for it.
+    ///
+    /// # Errors
+    ///
+    /// The tree names the file and its blob cannot be read, or a git fault.
+    pub fn file_at(&self, commit: &str, path: &str) -> Result<Option<String>, GitError> {
+        let spec = format!("{commit}:{path}");
+        match self.run(&["cat-file", "blob", &spec]) {
+            Ok(text) => Ok(Some(text)),
+            Err(unread @ GitError::Failed { .. }) => {
+                match self.run(&["rev-parse", "--verify", "-q", &spec]) {
+                    Ok(_) => Err(unread),
+                    Err(GitError::Failed { .. }) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            }
             Err(error) => Err(error),
         }
     }

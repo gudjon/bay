@@ -346,7 +346,11 @@ fn every_record(git: &Git, keep: &dyn Fn(&Value) -> bool) -> Result<Vec<Value>, 
             .run(&["rev-list", name])
             .map_err(|error| error.message())?;
         for commit in commits.lines() {
-            let Ok(text) = git.run(&["cat-file", "blob", &format!("{commit}:record.json")]) else {
+            // G104b: a record the commit holds and bay cannot read is an error, never skipped.
+            let Some(text) = git
+                .file_at(commit, "record.json")
+                .map_err(|error| error.message())?
+            else {
                 continue;
             };
             if let Ok(record) = serde_json::from_str::<Value>(&text)

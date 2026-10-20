@@ -507,13 +507,21 @@ fn is_date(text: &str) -> bool {
 /// The `revision` of the policy file at `commit`, read even when the policy is invalid, so a
 /// repair of an invalid policy still raises it (`INTERFACES` § 7). `None` when there is no
 /// policy file or no integer `revision` in it.
-#[must_use]
-pub fn revision_at(git: &Git, commit: &str) -> Option<u64> {
-    let text = git
-        .run(&["cat-file", "blob", &format!("{commit}:{POLICY_PATH}")])
-        .ok()?;
-    let table: toml::Table = toml::from_str(&text).ok()?;
-    u64::try_from(table.get("revision")?.as_integer()?).ok()
+///
+/// # Errors
+///
+/// The tree names the policy file and its blob cannot be read (G104b), or a git fault.
+pub fn revision_at(git: &Git, commit: &str) -> Result<Option<u64>, String> {
+    let Some(text) = git
+        .file_at(commit, POLICY_PATH)
+        .map_err(|error| error.message())?
+    else {
+        return Ok(None);
+    };
+    Ok(toml::from_str::<toml::Table>(&text)
+        .ok()
+        .and_then(|table| table.get("revision")?.as_integer())
+        .and_then(|revision| u64::try_from(revision).ok()))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -588,7 +596,8 @@ impl From<LoadError> for String {
 /// `[[check]]`, puts one check id in both stages, has a bad `when_paths` or `producers` list,
 /// or, not unchecked, has no required pre-publication check whose `expected_minimum` is above
 /// zero.
-/// [`LoadError::Git`] on a git fault.
+/// [`LoadError::Git`] on a git fault, or a policy file the tree names whose blob cannot be read
+/// (G104b): unreadable is never "no policy".
 pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
     // The policy at a commit never changes: loaded once per process (plan B2). Kept only when
     // it loads, or is invalid by its text alone: a git fault may pass on a retry, no policy may
@@ -615,9 +624,11 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
 /// [`load_at`], read from Git every time. `ran_git` is set once the judgement runs any git
 /// call past the policy text itself.
 fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>, LoadError> {
-    let text = match git.run(&["cat-file", "blob", &format!("{commit}:{POLICY_PATH}")]) {
-        Ok(text) => text,
-        Err(GitError::Failed { .. }) => return Ok(None),
+    // G104b: the tree says whether the file is there; a file it names that cannot be read is a
+    // fault naming it, never "no policy".
+    let text = match git.file_at(commit, POLICY_PATH) {
+        Ok(Some(text)) => text,
+        Ok(None) => return Ok(None),
         Err(error) => return Err(LoadError::Git(error.message())),
     };
     let invalid = |why: String| LoadError::Invalid(format!("{POLICY_PATH} is invalid: {why}"));
@@ -704,8 +715,8 @@ pub fn requires_actor_at(git: &Git, commit: &str) -> Result<bool, String> {
         Ok(policy) => Ok(policy.is_some_and(|policy| policy.agent.require_actor)),
         Err(LoadError::Git(why)) => Err(why),
         Err(LoadError::Invalid(_)) => Ok(git
-            .run(&["cat-file", "blob", &format!("{commit}:{POLICY_PATH}")])
-            .ok()
+            .file_at(commit, POLICY_PATH)
+            .map_err(|error| error.message())?
             .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
             .and_then(|table| table.get("agent")?.get("require_actor")?.as_bool())
             .unwrap_or(false)),

@@ -245,14 +245,16 @@ fn unattributed_rows(repo: &Repo, trunk: &str) -> Value {
     crate::unattributed::scan(&repo.git, trunk).unwrap_or_else(|why| json!({"unread": why}))
 }
 
-/// G244: the post checks trunk is red on, each owned by the landing that broke it.
-fn red_rows(repo: &Repo, trunk: &str) -> Vec<Value> {
-    let registry = crate::registry::Registry::current(&repo.git).ok().flatten();
-    crate::red::red(&repo.git, trunk, registry.as_ref())
-        .unwrap_or_default()
-        .iter()
-        .map(crate::red::Red::to_json)
-        .collect()
+/// G244: the post checks trunk is red on, each owned by the landing that broke it. A judgement
+/// bay cannot make (a policy or registry it cannot read, G104b) lists none and says why: an
+/// unread trunk is never read as not red.
+fn red_rows(repo: &Repo, trunk: &str) -> Value {
+    crate::registry::Registry::current(&repo.git)
+        .and_then(|registry| crate::red::red(&repo.git, trunk, registry.as_ref()))
+        .map_or_else(
+            |why| json!({"unread": why}),
+            |reds| reds.iter().map(crate::red::Red::to_json).collect(),
+        )
 }
 
 /// The open quarantines of the policy at trunk (ruling 8c), so a set-aside check is never

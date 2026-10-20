@@ -42,11 +42,13 @@ pub struct Queue {
     pub release_reasons: BTreeMap<u64, String>,
 }
 
-fn entry_json(git: &Git, commit: &str, file: &str) -> Option<Value> {
-    let text = git
-        .run(&["cat-file", "blob", &format!("{commit}:{file}")])
-        .ok()?;
-    serde_json::from_str(&text).ok()
+/// The JSON `file` at `commit`: `None` when the commit holds none or it is not JSON. G104b: a
+/// file the commit holds that cannot be read is an error naming it, never a blank entry.
+fn entry_json(git: &Git, commit: &str, file: &str) -> Result<Option<Value>, String> {
+    Ok(git
+        .file_at(commit, file)
+        .map_err(|error| error.message())?
+        .and_then(|text| serde_json::from_str(&text).ok()))
 }
 
 impl Queue {
@@ -91,7 +93,7 @@ impl Queue {
                 .strip_prefix(QUEUE_PREFIX)
                 .and_then(|seq| seq.parse().ok())
             {
-                let entry = entry_json(git, commit, "entry.json").unwrap_or(Value::Null);
+                let entry = entry_json(git, commit, "entry.json")?.unwrap_or(Value::Null);
                 queue.entries.insert(
                     seq,
                     Entry {
@@ -106,7 +108,7 @@ impl Queue {
                 .and_then(|seq| seq.parse().ok())
             {
                 queue.released.insert(seq);
-                let reason = entry_json(git, commit, "release.json")
+                let reason = entry_json(git, commit, "release.json")?
                     .and_then(|release| release["reason"].as_str().map(str::to_owned))
                     .unwrap_or_default();
                 queue.release_reasons.insert(seq, reason);

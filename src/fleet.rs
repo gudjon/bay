@@ -625,14 +625,16 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     let trunk = git
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
         .ok();
-    // As `bay status` reads it: local records only, and an unreadable judgement lists none.
-    let red = trunk
-        .as_deref()
-        .map(|trunk| {
-            let registry = crate::registry::Registry::current(git).ok().flatten();
-            crate::red::red(git, trunk, registry.as_ref()).unwrap_or_default()
-        })
-        .unwrap_or_default();
+    // As `bay status` reads it: local records only, and an unreadable judgement lists none and
+    // says why (G104b), never read as not red.
+    let judged = trunk.as_deref().map(|trunk| {
+        crate::registry::Registry::current(git)
+            .and_then(|registry| crate::red::red(git, trunk, registry.as_ref()))
+    });
+    let red_unread = judged
+        .as_ref()
+        .and_then(|judged| judged.as_ref().err().cloned());
+    let red = judged.and_then(Result::ok).unwrap_or_default();
     let mut map = Map {
         now: live::unix_now(),
         window: repo.config.takeover().as_secs(),
@@ -671,7 +673,10 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     } else {
         Value::Null
     };
-    let red: Vec<Value> = map.red.iter().map(crate::red::Red::to_json).collect();
+    let red: Value = red_unread.map_or_else(
+        || map.red.iter().map(crate::red::Red::to_json).collect(),
+        |why| json!({"unread": why}),
+    );
     // G85: as `bay status` reads it, from the trunk this cache holds.
     let unattributed = map.trunk.as_deref().map(|trunk| {
         crate::unattributed::scan(git, trunk).unwrap_or_else(|why| json!({"unread": why}))

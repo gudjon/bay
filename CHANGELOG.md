@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.12
+
+- An unreadable `.bay/policy.toml` is an error naming it: land never says POLICY_MISSING, status never reads red as clear.
+
 ## 0.1.11
 
 Talk
@@ -41,14 +45,14 @@ Speed
 - Evidence reads run two Git processes per tree, however many producers record evidence.
 
 Doctor
-- The `store` row reports the commit-graph: missing, without Bloom filters Git reads, or ok. It is advisory only.
+- The `store` row reports the commit-graph: disabled, missing, no Bloom filters, or ok, and whether fetches keep it. Advisory.
 
 Status
 - `bay watch --since` judges a red trunk from its cursor, reading only new landings and moved evidence.
 
 Partial clones
-- On a blob-less cache, a view fetches only its declared paths' blobs, also when resumed onto a newer trunk.
-- Git never fetches a missing object on its own inside bay's reads; bay fetches its own files by name.
+- On a blob-less cache, a view fetches only its declared paths and hook settings, also on resume.
+- With Git 2.45+, Git never fetches a missing object inside bay's reads; bay fetches its files by name.
 - A bay file a blob-less cache cannot fetch is an error naming the file, never a silent default.
 
 ## 0.1.9

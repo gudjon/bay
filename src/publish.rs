@@ -1816,12 +1816,11 @@ fn verify_request_digest(ctx: &Ctx, op_id: &str) -> Result<Option<BayResult>, St
     let Some(request_id) = &op.request_id else {
         return refuse("it names no request");
     };
-    let Ok(text) = ctx
-        .repo
-        .git
-        .run(&["cat-file", "blob", &format!("{request_id}:request.json")])
-    else {
-        return refuse("its request is not a request commit");
+    // G104b: a request file its tree names that cannot be read is said so, never "not a request".
+    let text = match ctx.repo.git.file_at(request_id, "request.json") {
+        Ok(Some(text)) => text,
+        Ok(None) => return refuse("its request is not a request commit"),
+        Err(error) => return refuse(&error.message()),
     };
     let request: serde_json::Value =
         serde_json::from_str(&text).map_err(|error| error.to_string())?;
@@ -2675,11 +2674,13 @@ fn check_candidate(
         Err(policy::LoadError::Git(why)) => return refuse(why),
     };
     // An invalid base policy still states its revision; a repair must raise it too.
-    let base_revision = base_policy
-        .as_ref()
-        .map(|policy| policy.revision)
-        .or_else(|| policy::revision_at(git, trunk))
-        .unwrap_or(0);
+    let base_revision = match &base_policy {
+        Some(policy) => policy.revision,
+        None => match policy::revision_at(git, trunk) {
+            Ok(revision) => revision.unwrap_or(0),
+            Err(why) => return refuse(why),
+        },
+    };
     if own_policy.revision <= base_revision {
         return refuse(format!(
             "this change edits the policy or an adapter path, so it must raise revision above {base_revision}; it has {}",

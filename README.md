@@ -1,8 +1,8 @@
 <h1 align="center">bay</h1>
 
 <p align="center">
-  <strong>The landing layer for agent fleets.</strong><br>
-  Your agents submit once. bay lands exactly what was checked.
+  <strong>Many agents. Git. No merge mess.</strong><br>
+  Your agents submit once. bay merges exactly what was checked.
 </p>
 
 <p align="center">
@@ -24,33 +24,36 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
-    <img alt="Agents run bay land and leave. An executor builds the merged candidate, checks that exact commit, and lands it on trunk if trunk has not moved, recording evidence in Git notes." src="docs/assets/how-it-works-light.svg" width="860">
+    <img alt="Agents run bay land and leave. An executor builds the merged candidate, checks that exact commit, and merges it into main if main has not moved, recording evidence in Git notes." src="docs/assets/how-it-works-light.svg" width="860">
   </picture>
 </p>
 
 ---
 
-bay is a free, MIT-licensed command for teams that run many coding agents against one Git repository.
-An agent opens a change, edits, and asks to land. bay builds the exact commit it will land, checks that
-commit, and lands it on trunk. An executor finishes the landing, so the agent can leave. Your repository
-stays an ordinary Git repository, on the host you already have.
+Git is fine. The workflow around it was built for people. Run several coding agents in one codebase,
+often in the same files, and branches go stale, merges collide and main breaks, while someone watches
+every merge. bay is a free, MIT-licensed command that takes that work off your agents and your team.
+An agent opens a change, edits, and submits it once. bay combines it with the latest main, runs your
+checks on that exact result, and merges only what passed. An executor finishes the merge, so the agent
+can start its next task. Your repository stays an ordinary Git repository, on the host you already have.
 
 <p align="center">
-  <img src=".github/demo/demo.gif" alt="An agent opens a change with bay start, edits one file, lands it with bay land --wait, and bay status shows the check passed" width="900">
+  <img src=".github/demo/demo.gif" alt="Two agents in one codebase, one terminal pane each. Both add a service on port 8080. Agent A merges. bay checks agent B's change on the new main and refuses it with CHECK_FAILED. B moves to port 8081, and it merges." width="900">
 </p>
 
 ```sh
 bay start CARD-123 --paths src/api   # a view of only the files this change needs
 # … the agent edits …
-bay land                             # check that exact result; returns at once
+bay land                             # submit: bay checks the exact result and merges it; returns at once
 bay status                           # what every change is doing, what passed, and why it waits
 bay status --fleet                   # every machine and session on the repository
 bay watch                            # what changed that affects my work
 bay talk <agent> "<what>" …          # ask another agent for one change, decision or check
-bay undo c7k2m4                      # a new change that undoes one landing; history stays
+bay undo c7k2m4                      # a new change that undoes one merge; history stays
 ```
 
-Every command prints one JSON result on stdout. A refusal names its reason, what you can still do, and
+bay's commands call main `trunk` and a checked merge a landing (`bay land`, `landed`). Every command
+prints one JSON result on stdout. A refusal names its reason, what you can still do, and
 when to retry. There is no prompt to answer.
 
 ```json
@@ -63,16 +66,16 @@ every change. The benchmark figures below are targets, not results.
 
 ## Why bay
 
-Agents now write much of the code. They still land it through steps built for a person who reviews and
-then clicks merge: branches, pull requests, merge queues, and scripts. The merge itself takes seconds.
-The wait around it does not.
+Agents now write much of the code in minutes. They still merge it through steps built for a person who
+reviews and then clicks merge: branches, pull requests, merge queues, and scripts. The merge itself takes
+seconds. The wait around it takes hours.
 
 One team of about twenty agents on one repository measured a single day:
 
-- 95 minutes, and nothing landed
+- 95 minutes, and nothing merged
 - 40 minutes spent booking a test window, and 18 minutes waiting in a queue
 - 12 minutes of green tests thrown away by a timeout
-- a broken trunk blamed on the wrong change, because the commit that broke it named no change
+- a broken main blamed on the wrong change, because the commit that broke it named no change
 - 89 leftover branches, and 73 GB of notes and data in per-agent folders¹
 
 Each agent view also cost 27 seconds and 3.4–4.0 GB of disk to create, even for a task that read a few
@@ -93,7 +96,7 @@ not store it.</sub>
   address it reads. Only `git` (to your remote) and `curl` (for bay's releases) reach the network; the
   rest, such as `ssh-keygen`, `tar` and the check sandbox, run locally.
 - **Checks in a sandbox.** `bwrap` on Linux and `sandbox-exec` on macOS. A check gets no network unless
-  its entry in the policy on trunk says `network = true`.
+  its entry in the policy on main says `network = true`.
 - **Signed releases.** A hardware-held key signs every release from 0.1.5, and `install.sh` and
   `bay update` refuse one that does not verify.
 
@@ -122,7 +125,7 @@ cargo build --release
 ```
 
 bay needs Git 2.40 or newer in an agent view (2.50 or newer is recommended), 2.50 or newer on a machine
-that runs an executor, and 2.54 or newer on a machine that hosts a trunk with `bay host init`. `bay doctor`
+that runs an executor, and 2.54 or newer on a machine that hosts main with `bay host init`. `bay doctor`
 names any floor a machine is below. See [Install](https://getbay.io/docs/install) for every option.
 
 ### Teach your agent bay
@@ -140,11 +143,11 @@ The skill tells the agent how to install bay when it is missing. See [the skill 
 
 | Promise | In plain words |
 |---|---|
-| **What lands is what was checked** | bay builds the merged result first, checks that result, and lands it only if trunk has not moved. If trunk moved, bay builds and checks again. |
-| **Unknown is never a pass** | A check that crashed, timed out, or collected nothing blocks the landing. Checks that finished keep their results. |
-| **Agents can leave** | `bay land` returns at once. While an executor runs (`bay executor run`, or your CI through the same contract), it finishes the landing, recovers it, or asks for a precise repair. |
-| **A retry never lands twice** | Every operation has an id. A lost reply is reconciled, never sent again as a second landing. |
-| **Stale work is stopped, and repair stays open** | When an input that your change declared lands, bay tells you what changed, and states how much it could see. You can still edit; you cannot land until you check again. |
+| **What merges is what was checked** | bay builds the merged result first, checks that result, and merges it only if main has not moved. If main moved, bay builds and checks again. |
+| **Unknown is never a pass** | A check that crashed, timed out, or collected nothing blocks the merge. Checks that finished keep their results. |
+| **Agents can leave** | `bay land` returns at once. While an executor runs (`bay executor run`, or your CI through the same contract), it finishes the merge, recovers it, or asks for a precise repair. |
+| **A retry never merges twice** | Every operation has an id. A lost reply is reconciled, never sent again as a second merge. |
+| **Stale work is stopped, and repair stays open** | When an input that your change declared merges, bay tells you what changed, and states how much it could see. You can still edit; you cannot merge until you check again. |
 | **Every refusal says what to do next** | A stable reason, what you can still do, and when to retry. |
 | **A view costs what the task reads** | A view is a sparse worktree of your clone that holds only the paths you named, so views share the clone's objects. Build outputs, fixtures and broad searches can still cost more. |
 | **Git stays the only store** | Changes, evidence and events are Git commits, notes and refs. You can read and recover them with ordinary Git. |
@@ -154,14 +157,14 @@ Each promise has a failure test that must pass before bay calls it done.
 ## How it works
 
 1. **`bay start`** opens a change: a sparse view of the declared paths.
-2. **`bay land`** records a request to land and returns. The agent may leave.
-3. An **executor** merges the change onto trunk without touching any working tree, runs the checks your
+2. **`bay land`** records a request to merge and returns. The agent may leave.
+3. An **executor** merges the change with main without touching any working tree, runs the checks your
    `.bay/policy.toml` names on that exact candidate, and records each result as evidence in Git notes.
-4. If trunk has not moved, the executor lands the candidate. If it moved, the executor builds a new
+4. If main has not moved, the executor merges the candidate. If it moved, the executor builds a new
    candidate and checks again. After two such moves, the change joins a queue, and bay checks only the head.
 5. **`bay status`** and **`bay watch`** show every change, its evidence, and why it waits.
 
-bay reads `.bay/config.toml` and `.bay/policy.toml` only from trunk, so no change sets the rules it is
+bay reads `.bay/config.toml` and `.bay/policy.toml` only from main, so no change sets the rules it is
 judged by. Checks run in a sandbox that sees only the candidate, its adapter and system files, with no
 network unless the policy allows it.
 
@@ -169,15 +172,15 @@ network unless the policy allows it.
 
 bay works without keys: with no key registry, it runs unsigned, every evidence record counts, and results
 say `trust: unsigned`. Add a registry, `refs/bay/registry`, when only enrolled keys may sign. Then an agent
-signs a request to land, only an executor moves trunk, a checker signs the evidence, a reviewer signs a
+signs a request to merge, only an executor moves main, a checker signs the evidence, a reviewer signs a
 review, and a registry key adds and revokes keys. No one holds another actor's key, so an agent can leave.
 See [Keys and the registry](https://getbay.io/docs/keys).
 
 ## Compared with a merge queue
 
-Most teams compare bay with what they run now: agents open pull requests, and a merge queue lands them.
+Most teams compare bay with what they run now: agents open pull requests, and a merge queue merges them.
 That can merge, and a good merge queue keeps going after the author leaves. What it does not give is a
-record that the landed commit is the exact one that passed, partial results kept when a worker dies,
+record that the merged commit is the exact one that passed, partial results kept when a worker dies,
 recovery when the executor dies, or a stop on work whose inputs moved.
 
 You keep the Git host you already have: GitHub, GitLab, a bare repository over SSH, or `bay host init`
@@ -186,10 +189,10 @@ on any machine you can reach.
 ## Works with
 
 - **Claude Code first.** `bay hook` refuses a write it already knows is stale and a fixed list of
-  dangerous Git commands, and tells the agent once when a landing of its own is refused or its check
+  dangerous Git commands, and tells the agent once when a merge of its own is refused or its check
   fails. `bay install` adds the bay skill, so the agent knows the commands.
 - **Other coding agents** through the same commands, JSON results and skill. Hook adapters for other agent
-  products are not built yet; without one, a stale change still cannot land. See
+  products are not built yet; without one, a stale change still cannot merge. See
   [Agents and hooks](https://getbay.io/docs/agents).
 - **Any Git host.** GitHub, GitLab, a bare repository, or a bundle on a USB stick.
 - **Your checks.** Any command that returns a `bay.check.result/1` JSON document.
@@ -214,7 +217,7 @@ These are targets until the published results say otherwise.
 - [Executors](https://getbay.io/docs/executors) and [Undo](https://getbay.io/docs/undo)
 - [Agents and hooks](https://getbay.io/docs/agents), [the bay skill](https://getbay.io/docs/skill),
   [the fleet](https://getbay.io/docs/fleet) and [talk](https://getbay.io/docs/talk)
-- [Host a trunk](https://getbay.io/docs/host), [Keys](https://getbay.io/docs/keys),
+- [Host main](https://getbay.io/docs/host), [Keys](https://getbay.io/docs/keys),
   [Update](https://getbay.io/docs/update) and [Security and privacy](https://getbay.io/docs/security)
 - [CLI reference](https://getbay.io/docs/cli), [Results and refusals](https://getbay.io/docs/results) and
   [Changelog](https://getbay.io/docs/changelog)

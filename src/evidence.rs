@@ -320,9 +320,20 @@ pub fn producer_records(
         Ok(text) => {
             serde_json::from_str(&text).map_err(|error| format!("{notes} on {tree}: {error}"))
         }
+        // G104b: a note whose blob the store lacks (and no fetch by id could bring) is
+        // unreadable, never "no records".
+        Err(error @ GitError::Failed { .. }) if failed_on_absent_note(&error) => {
+            Err(format!("{notes} on {tree}: {}", error.message()))
+        }
         Err(GitError::Failed { .. }) => Ok(Vec::new()),
         Err(error) => Err(error.message()),
     }
+}
+
+/// Whether a failed `notes show` found a note whose blob the store cannot read: Git says
+/// `fatal: bad object <blob>`, where a tree with no note says `no note found`.
+fn failed_on_absent_note(error: &GitError) -> bool {
+    matches!(error, GitError::Failed { stderr, .. } if stderr.contains("fatal: bad object "))
 }
 
 /// Appends `record` to `producer`'s note on its subject tree.

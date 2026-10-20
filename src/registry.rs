@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::git::{Git, GitError};
+use crate::git::Git;
 
 pub const REGISTRY_REF: &str = crate::names::REGISTRY;
 
@@ -77,8 +77,9 @@ pub struct Registry {
     files: HashMap<KeyClass, String>,
 }
 
-/// The class files at `commit`, each empty when absent or unreadable, and whether the read is
-/// complete: the tree was listed and every class file in it was read.
+/// The class files at `commit`, each empty when absent, and whether the read is complete: the
+/// tree was listed and every class file in it was read. G104b: a class file the tree names whose
+/// blob cannot be read is an error naming it, never an empty class.
 fn read_files(git: &Git, commit: &str) -> (Result<HashMap<KeyClass, String>, String>, bool) {
     let listed = git.run(&["ls-tree", "-z", "--name-only", commit]);
     let mut complete = listed.is_ok();
@@ -93,10 +94,10 @@ fn read_files(git: &Git, commit: &str) -> (Result<HashMap<KeyClass, String>, Str
             files.insert(class, String::new());
             continue;
         }
-        let path = format!("{commit}:{}", class.file());
-        let text = match git.run(&["cat-file", "blob", &path]) {
-            Ok(text) => text,
-            Err(GitError::Failed { .. }) => {
+        let text = match git.file_at(commit, class.file()) {
+            Ok(Some(text)) => text,
+            // Only an unlisted tree reaches here without the file: absent, the read incomplete.
+            Ok(None) => {
                 complete = false;
                 String::new()
             }

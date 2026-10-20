@@ -142,3 +142,81 @@ fn a_metadata_object_the_cache_cannot_have_is_an_error() {
         assert!(lazy.is_empty(), "bay {command} fetched lazily: {lazy:#?}");
     }
 }
+
+/// The cache learns trunk's commit and trees, not its blobs; then its promisor remote is one
+/// that is gone, while trunk's remote still answers ref fetches and pushes. A blob the cache
+/// lacks can no longer be had by id: unreadable, though the tree names it.
+fn lose_promisor(test_box: &TestBox, cache: &Path) {
+    let fetched = test_box
+        .git(cache)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .args(["fetch", "-q", "origin"])
+        .output()
+        .unwrap();
+    assert!(fetched.status.success(), "{fetched:?}");
+    let gone = test_box.path().join("promisor-gone.git");
+    for (key, value) in [
+        ("remote.origin.promisor", "false"),
+        ("remote.lost.url", gone.to_str().unwrap()),
+        ("remote.lost.promisor", "true"),
+        ("extensions.partialClone", "lost"),
+    ] {
+        test_box.git_ok(cache, &["config", key, value]);
+    }
+}
+
+#[test]
+fn a_policy_the_cache_cannot_read_is_an_error_naming_it_never_no_policy() {
+    let path = ".bay/policy.toml";
+    let (test_box, _remote, seed, cache, view) = cache_and_view();
+    let blob = move_trunk(&test_box, &seed, path, "unreadable");
+    lose_promisor(&test_box, &cache);
+    assert!(!holds(&test_box, &cache, &blob));
+
+    // Status reads trunk's red judgement as unread, naming the file: never an empty list.
+    let (code, status) = result_json(test_box.bay(&view).arg("status"));
+    assert_eq!(code, 0, "{status}");
+    let red = &status["detail"]["red"];
+    assert!(
+        red["unread"].as_str().is_some_and(|why| why.contains(path)),
+        "an unreadable policy is no judgement of red: {status}"
+    );
+
+    // Watch cannot judge red either, and says which file it could not read.
+    let (code, watched) = result_json(test_box.bay(&view).arg("watch"));
+    assert_ne!(code, 0, "{watched}");
+    assert_ne!(watched["decision"], "ok", "{watched}");
+    assert!(watched.to_string().contains(path), "{watched}");
+
+    // Land fails naming the file it could not read: not POLICY_MISSING, and nothing lands.
+    std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
+    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    assert_ne!(code, 0, "{landed}");
+    assert_ne!(landed["reason"], "POLICY_MISSING", "{landed}");
+    assert!(!landed.to_string().contains("POLICY_MISSING"), "{landed}");
+    assert!(landed.to_string().contains(path), "{landed}");
+    assert!(
+        landed
+            .to_string()
+            .contains("absent from this partial clone"),
+        "the error says the file is unreadable, not absent: {landed}"
+    );
+    assert!(!holds(&test_box, &cache, &blob));
+}
+
+#[test]
+fn a_trunk_with_no_policy_file_is_still_policy_missing_on_a_blob_less_cache() {
+    let (test_box, _remote, seed, cache, view) = cache_and_view();
+    test_box.git_ok(&seed, &["rm", "-q", ".bay/policy.toml"]);
+    test_box.git_ok(&seed, &["commit", "-q", "-m", "no policy"]);
+    test_box.git_ok(&seed, &["push", "-q", "origin", "main"]);
+    let trunk = test_box.git_ok(&seed, &["rev-parse", "HEAD"]);
+    lose_promisor(&test_box, &cache);
+
+    std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
+    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    assert_eq!(code, 10, "{landed}");
+    assert_eq!(landed["reason"], "POLICY_MISSING", "{landed}");
+    assert_eq!(landed["detail"]["base"], trunk.as_str(), "{landed}");
+    assert_eq!(landed["detail"]["path"], ".bay/policy.toml", "{landed}");
+}

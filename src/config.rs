@@ -180,14 +180,18 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// A config that exists but does not parse.
+    /// A config that exists but does not parse, or one `HEAD`'s tree names that cannot be read
+    /// (G104b): only a config `HEAD` lacks is the default.
     pub fn load_or_committed(root: &Path, git: &crate::git::Git) -> Result<Self, String> {
         if root.join(CONFIG_PATH).exists() {
             return Self::load(root);
         }
-        match git.run(&["cat-file", "blob", &format!("HEAD:{CONFIG_PATH}")]) {
-            Ok(text) => Self::parse(&text).map_err(|error| format!("HEAD:{CONFIG_PATH}: {error}")),
-            Err(_) => Ok(Self::default()),
+        match git.file_at("HEAD", CONFIG_PATH) {
+            Ok(Some(text)) => {
+                Self::parse(&text).map_err(|error| format!("HEAD:{CONFIG_PATH}: {error}"))
+            }
+            Ok(None) => Ok(Self::default()),
+            Err(error) => Err(error.message()),
         }
     }
 
