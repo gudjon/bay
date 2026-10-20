@@ -145,6 +145,9 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
         report.rows.extend(config_row);
         remote_row(&git, &config, info.bare, &mut report)?;
         hooks_row(&git, &config, info, &mut report)?;
+        if info.bare {
+            report.rows.push(ref_format_row(&info.ref_format));
+        }
         quarantine_row(&git, &config, info.bare, &mut report);
         if !info.bare {
             repository_row(&git, &config, &mut report);
@@ -208,6 +211,19 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     .with_detail(detail);
     result.human = Some(line);
     Ok(result)
+}
+
+/// G174: the ref backend of a bay-hosted trunk. On `files` a multi-ref update is not one
+/// atomic write, so a reader can see half of it; publication still works, through trunk as the
+/// commit point, so the row is advisory. Only the host is judged: a forge's backend is its own.
+fn ref_format_row(ref_format: &str) -> Value {
+    if ref_format == "files" {
+        json!({"name": "ref-format", "ref_format": ref_format, "state": "degraded",
+            "note": "on files, readers can see half of a multi-ref update",
+            "recovery": "git refs migrate --ref-format=reftable"})
+    } else {
+        json!({"name": "ref-format", "ref_format": ref_format, "state": "green"})
+    }
 }
 
 /// The `claude` row: Claude Code against the hook minimum, where the adapter is configured.
