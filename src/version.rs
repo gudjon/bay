@@ -82,6 +82,9 @@ pub const GIT_FLOOR_HOSTED_TRUNK: &str = "2.54";
 pub const GIT_FLOOR_EXECUTOR: &str = "2.50";
 pub const GIT_SHARED_CACHE: &str = "2.48";
 pub const GIT_RECOMMENDED: &str = "2.50";
+/// The Git whose `backfill` takes a pathspec (2.54): the floor of a view's optional history
+/// warm-up (G175). The role floors do not change.
+pub const GIT_BACKFILL_PATHSPEC: &str = "2.54";
 /// The Claude Code version the hook events were read against (`DESIGN` § 11a).
 pub const CLAUDE_HOOK_MINIMUM: &str = "2.1.302";
 

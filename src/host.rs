@@ -24,12 +24,21 @@ pub const SCOPE_HOOK: &str = "bay-scope";
 /// The host's trunk branch name, read by the hook.
 pub const TRUNK_KEY: &str = "bay.trunk";
 
+/// `bay host init`, run in `dir`. With no `object_format` the host takes the object format of
+/// the repository that holds `dir`, so that repository can push to it; outside one, Git's own
+/// default (`init.defaultObjectFormat`, SHA-256 from Git 3.0). SHA-1 and SHA-256 repositories
+/// cannot exchange objects, so a fixed default would refuse every push from the other kind.
 #[must_use]
-pub fn init(path: &Path, trunk: &str, object_format: &str) -> BayResult {
-    run_init(path, trunk, object_format).unwrap_or_else(BayResult::failed)
+pub fn init(dir: &Path, path: &Path, trunk: &str, object_format: Option<&str>) -> BayResult {
+    run_init(dir, path, trunk, object_format).unwrap_or_else(BayResult::failed)
 }
 
-fn run_init(path: &Path, trunk: &str, object_format: &str) -> Result<BayResult, String> {
+fn run_init(
+    dir: &Path,
+    path: &Path,
+    trunk: &str,
+    object_format: Option<&str>,
+) -> Result<BayResult, String> {
     // Git runs a hook defined in configuration only from 2.54. Below it the trunk hook would
     // be silently ignored and trunk would accept a force push, so refuse first.
     let git_line = Git::new(Path::new("."))
@@ -58,20 +67,23 @@ fn run_init(path: &Path, trunk: &str, object_format: &str) -> Result<BayResult, 
         std::env::current_exe().map_err(|error| format!("cannot find the running bay: {error}"))?;
     let path_text = path.display().to_string();
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let object_format = object_format.map(str::to_owned).or_else(|| {
+        Git::new(dir)
+            .run(&["rev-parse", "--show-object-format"])
+            .ok()
+    });
     std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    let mut args = vec!["init", "-q", "--bare", "--ref-format=reftable"];
+    let format_arg = object_format.map(|format| format!("--object-format={format}"));
+    args.extend(format_arg.as_deref());
+    args.extend(["-b", trunk, path_text.as_str()]);
     Git::new(parent)
-        .run(&[
-            "init",
-            "-q",
-            "--bare",
-            "--ref-format=reftable",
-            &format!("--object-format={object_format}"),
-            "-b",
-            trunk,
-            &path_text,
-        ])
+        .run(&args)
         .map_err(|error| error.message())?;
     let host = Git::new(path);
+    let object_format = host
+        .run(&["rev-parse", "--show-object-format"])
+        .map_err(|error| error.message())?;
     let command = format!("'{}' host hook update", bay.display());
     let scope = format!("'{}' host hook pre-receive", bay.display());
     for (key, value) in [

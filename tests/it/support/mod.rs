@@ -165,6 +165,15 @@ impl TestBox {
         write_executable(&self.fakebin.join("git"), &script);
     }
 
+    /// Every `git` on this box's `PATH` runs `snippet` first (shell: `$real` names the real git,
+    /// `"$@"` holds the call's arguments), then runs the real git: for a test that makes another
+    /// writer act at the moment bay makes one exact call.
+    pub fn wrap_git(&self, snippet: &str) {
+        let real = self.real_git.display();
+        let script = format!("#!/bin/sh\nreal=\"{real}\"\n{snippet}\nexec \"$real\" \"$@\"\n");
+        write_executable(&self.fakebin.join("git"), &script);
+    }
+
     /// Puts a `claude` that reports `version` on PATH, or removes it.
     pub fn fake_claude(&self, version: Option<&str>) {
         let path = self.fakebin.join("claude");
@@ -304,9 +313,8 @@ impl TestBox {
         self.repo_without_remote(name, &object_format, &ref_format)
     }
 
-    /// `bay host init <path>` in the object format of [`formats`]. `host init` defaults to sha1
-    /// and does not yet follow the local repository's format (queued for the idiom pass), so a
-    /// host and its repositories must be given one format.
+    /// `bay host init <path>` in the object format of [`formats`]. Run outside any repository,
+    /// `host init` takes Git's default format, so a host and its repositories are given one.
     pub fn host_init(&self, path: &Path) -> serde_json::Value {
         let (object_format, _) = formats();
         self.bay_ok(

@@ -46,6 +46,8 @@ the view holds only those. Run `bay <command> --help` for every flag.
   error exits 2.
 - `queued` with `"published": false` means the landing has not happened yet. `waiting_for` says
   what it waits for. Do not report it as landed.
+- While a change waits in the queue, `bay status <change>` may show `operation.conflict`: trunk
+  moved into a `MERGE_CONFLICT` on the listed paths. It keeps its place; refresh and repair now.
 - A `blocked` or `failed` result names a `reason`, the actions still `allowed`, and `retry_when`:
   the condition under which a retry can succeed. bay refuses an unchanged retry, except for a few
   transient reasons that it retries itself.
@@ -81,8 +83,8 @@ Every code: https://getbay.io/docs/results
 
 | When | Run |
 | --- | --- |
-| See every machine and session on the repository, and who works on red paths (`on_red`) | `bay status --fleet` |
-| See landings, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
+| See every machine and session on the repository, who works on red paths (`on_red`), and the open talks (`talks`; each session's `owes_talks`) | `bay status --fleet` |
+| See landings, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`, `talk_arrived`, `talk_closed`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
 
@@ -98,8 +100,12 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    trunk. https://getbay.io/docs/configuration lists every key.
 2. `.bay/policy.toml` lists the required checks. Each `[[check]]` needs `expected_minimum`. A
    repository that wants no checks says `unchecked = true`.
-3. In each clone: `bay install --trunk <name> --remote <name>`.
-4. Run an executor: `bay executor run`, under a supervisor.
+3. Before you commit an adapter (a `[[check]]` command, `[wake] command` or `[notify] command`),
+   prove it: `bay adapter test check|wake|notify -- <command>`. It runs bay's contract cases the
+   way bay runs that adapter, changes nothing, and exits 0 only when every case passes.
+   `detail.cases` names each failing case and why.
+4. In each clone: `bay install --trunk <name> --remote <name>`.
+5. Run an executor: `bay executor run`, under a supervisor.
 
 ## Never
 

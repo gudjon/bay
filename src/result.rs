@@ -141,7 +141,6 @@ reasons! {
     UpdateUnavailable => "UPDATE_UNAVAILABLE", ["read"], "release_reachable", false;
     UpdateUnverified => "UPDATE_UNVERIFIED", ["read"], "release_republished", false;
     UpdatePinned => "UPDATE_PINNED", ["read"], "pin_moved", false;
-    UpdateInUse => "UPDATE_IN_USE", ["wait"], "operation_finished", false;
     // `DESIGN` § 11c and rulings R9, T1, T7 and T10 (`bay talk`); not yet in INTERFACES § 2
     TalkInvalid => "TALK_INVALID", ["repair"], "talk_corrected", false;
     TalkBodyConflict => "TALK_BODY_CONFLICT", ["read", "repair"], "ask_changed_or_superseded", false;
@@ -418,7 +417,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 55);
+        assert_eq!(Reason::ALL.len(), 54);
     }
 
     #[test]

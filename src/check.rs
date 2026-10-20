@@ -8,7 +8,7 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -527,7 +527,7 @@ pub fn run_all(
         let judged = match not_run {
             Some(judged) => judged,
             None => within_budget(
-                hooks.beat,
+                hooks,
                 limits.heartbeat,
                 entry,
                 policy,
@@ -589,15 +589,55 @@ pub fn run_all(
 }
 
 /// What a run calls back into: `keep` takes each record as soon as its check ends; `beat`
-/// renews the executor's lease while a check runs.
+/// renews the executor's lease while a check runs; `seen`, when set, is shown each exchange
+/// with the adapter as it ended (the conformance kit, `bay adapter test check`).
 pub struct Hooks<'a> {
     pub keep: &'a mut dyn FnMut(&mut EvidenceRecord) -> Result<(), String>,
     pub beat: &'a mut dyn FnMut(),
+    pub seen: Option<&'a mut dyn FnMut(&Exchange)>,
+}
+
+/// One exchange with a check adapter, as it ended: the request bay sent, and what came back.
+#[derive(Clone, Debug)]
+pub struct Exchange {
+    pub request: serde_json::Value,
+    /// The adapter's exit status; `None` when it did not start or ran past its timeout.
+    pub status: Option<ExitStatus>,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+    pub elapsed: Duration,
+    /// The adapter ran past its timeout and was killed.
+    pub timed_out: bool,
+    /// Why there is no status.
+    pub error: Option<String>,
+}
+
+impl Exchange {
+    fn new(
+        request: &serde_json::Value,
+        ran: &Result<(ExitStatus, Vec<u8>, String), String>,
+        elapsed: Duration,
+        timeout: Duration,
+    ) -> Self {
+        let (status, stdout, stderr, error) = match ran {
+            Ok((status, stdout, stderr)) => (Some(*status), stdout.clone(), stderr.clone(), None),
+            Err(why) => (None, Vec::new(), String::new(), Some(why.clone())),
+        };
+        Self {
+            request: request.clone(),
+            timed_out: status.is_none() && elapsed >= timeout,
+            status,
+            stdout,
+            stderr,
+            elapsed,
+            error,
+        }
+    }
 }
 
 /// Runs one check within its own timeout and what is left of the execution budget.
 fn within_budget(
-    beat: &mut dyn FnMut(),
+    hooks: &mut Hooks,
     heartbeat: Option<Duration>,
     entry: &CheckEntry,
     policy: &Policy,
@@ -612,7 +652,7 @@ fn within_budget(
             Some("the execution budget was exhausted before this check started".to_owned()),
         ),
         Some(remaining) if remaining < own => {
-            let mut judged = run_one(beat, heartbeat, entry, policy, candidate, place, remaining);
+            let mut judged = run_one(hooks, heartbeat, entry, policy, candidate, place, remaining);
             judged.why = judged.why.map(|why| {
                 if why.contains("timed out") {
                     format!("the execution budget was exhausted: {why}")
@@ -622,7 +662,7 @@ fn within_budget(
             });
             judged
         }
-        _ => run_one(beat, heartbeat, entry, policy, candidate, place, own),
+        _ => run_one(hooks, heartbeat, entry, policy, candidate, place, own),
     }
 }
 
@@ -635,8 +675,26 @@ struct Place<'a> {
     sandbox: &'a str,
 }
 
+/// The `bay.check.request/1` bay sends for `entry` on `candidate` (`INTERFACES` § 3).
+fn request(entry: &CheckEntry, policy: &Policy, candidate: &Candidate) -> serde_json::Value {
+    let mut requires = json!({"environment": entry.environment});
+    if !entry.fixtures.is_empty() {
+        // § 3: the fixtures the policy pins, by digest (ruling R18).
+        requires["fixtures"] = json!(entry.fixtures);
+    }
+    json!({
+        "schema": "bay.check.request/1",
+        "candidate": {"commit": candidate.commit, "tree": candidate.tree},
+        "changed_paths": candidate.changed_paths,
+        "plan": {"id": entry.id, "version": policy.revision.to_string()},
+        "requires": requires,
+        "timeout_s": entry.timeout_s,
+        "inputs": candidate.inputs,
+    })
+}
+
 fn run_one(
-    beat: &mut dyn FnMut(),
+    hooks: &mut Hooks,
     heartbeat: Option<Duration>,
     entry: &CheckEntry,
     policy: &Policy,
@@ -647,20 +705,7 @@ fn run_one(
     let (tree_dir, adapter_dir) = (place.tree, place.adapter);
     let mut words = entry.command.split_whitespace();
     let executable = adapter_dir.join(words.next().unwrap_or_default());
-    let mut requires = json!({"environment": entry.environment});
-    if !entry.fixtures.is_empty() {
-        // § 3: the fixtures the policy pins, by digest (ruling R18).
-        requires["fixtures"] = json!(entry.fixtures);
-    }
-    let request = json!({
-        "schema": "bay.check.request/1",
-        "candidate": {"commit": candidate.commit, "tree": candidate.tree},
-        "changed_paths": candidate.changed_paths,
-        "plan": {"id": entry.id, "version": policy.revision.to_string()},
-        "requires": requires,
-        "timeout_s": entry.timeout_s,
-        "inputs": candidate.inputs,
-    });
+    let request = request(entry, policy, candidate);
     let args: Vec<&str> = words.collect();
     // Ruling 8b: a named variable the executor does not set is an infrastructure failure;
     // the check never runs without what its policy declares.
@@ -704,11 +749,10 @@ fn run_one(
         .env("PATH", entry.path.join(":"))
         // `policy::load_at` refuses an `env` name of the baseline, so none overrides it.
         .envs(declared);
-    let (output, stderr) =
-        match run_with_timeout(cmd, &request.to_string(), timeout, beat, heartbeat) {
-            Ok(output) => output,
-            Err(why) => return Judged::without_units(Verdict::Unknown, Some(why)),
-        };
+    let (output, stderr) = match exchange(hooks, cmd, &request, timeout, heartbeat) {
+        Ok(output) => output,
+        Err(why) => return Judged::without_units(Verdict::Unknown, Some(why)),
+    };
     // § 7, G26: a check that reached outside its adapter and candidate is an infrastructure
     // failure, never a pass.
     let reached_out = reaches_out(&stderr, place);
@@ -738,6 +782,37 @@ fn run_one(
         return outside();
     }
     judge(&result, entry, candidate)
+}
+
+/// Runs the adapter with `request` on stdin within `timeout`, shows the exchange to
+/// `hooks.seen`, and returns its stdout and stderr. A spawn failure, a timeout, or a crash (an
+/// exit other than 0 with nothing on stdout or stderr) is an error the caller records as
+/// `unknown`.
+fn exchange(
+    hooks: &mut Hooks,
+    cmd: Command,
+    request: &serde_json::Value,
+    timeout: Duration,
+    heartbeat: Option<Duration>,
+) -> Result<(Vec<u8>, String), String> {
+    let started = Instant::now();
+    let ran = run_with_timeout(
+        cmd,
+        &request.to_string(),
+        timeout,
+        &mut *hooks.beat,
+        heartbeat,
+    );
+    if let Some(seen) = hooks.seen.as_deref_mut() {
+        seen(&Exchange::new(request, &ran, started.elapsed(), timeout));
+    }
+    let (status, output, stderr) = ran?;
+    if !status.success() && output.is_empty() && stderr.is_empty() {
+        return Err(format!(
+            "the check crashed ({status}) and returned no result"
+        ));
+    }
+    Ok((output, stderr))
 }
 
 /// Whether the check's stderr names a hidden path. A path inside the check's own scratch is
@@ -951,15 +1026,16 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
     }
 }
 
-/// Runs the adapter with the request on stdin; returns its stdout. A spawn failure, a
-/// timeout or a crash is an error, which the caller records as `unknown`.
+/// Runs the adapter with the request on stdin; returns its exit status, stdout and stderr. A
+/// spawn failure or a timeout is an error, which the caller records as `unknown`, as it does a
+/// crash: an exit other than 0 with nothing on stdout or stderr.
 fn run_with_timeout(
     mut cmd: Command,
     input: &str,
     timeout: Duration,
     beat: &mut dyn FnMut(),
     heartbeat: Option<Duration>,
-) -> Result<(Vec<u8>, String), String> {
+) -> Result<(ExitStatus, Vec<u8>, String), String> {
     let mut child = cmd
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1005,12 +1081,7 @@ fn run_with_timeout(
         .join()
         .map_err(|_| "the check's output reader failed")?;
     let stderr = String::from_utf8_lossy(&errors.join().unwrap_or_default()).into_owned();
-    if !status.success() && output.is_empty() && stderr.is_empty() {
-        return Err(format!(
-            "the check crashed ({status}) and returned no result"
-        ));
-    }
-    Ok((output, stderr))
+    Ok((status, output, stderr))
 }
 
 /// Materializes what `entry` sees of the candidate (its `paths`, or the whole tree) into
@@ -1400,6 +1471,7 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
                 &mut Hooks {
                     keep: &mut keep,
                     beat: &mut || {},
+                    seen: None,
                 },
             )
             .unwrap()

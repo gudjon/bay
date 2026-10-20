@@ -335,6 +335,20 @@ pub struct Operation {
     /// what no worker answered for. Cleared once a check of it runs to an answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<Unavailable>,
+    /// Set while the operation waits behind the queue's head and its revision does not merge
+    /// onto trunk (G177): what the executor's early probe found. The operation keeps its
+    /// place; its own merge, once it is head, still decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub early_conflict: Option<EarlyConflict>,
+}
+
+/// A conflict between a queued operation's revision and trunk, found before it is head (G177).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EarlyConflict {
+    /// The trunk tip the revision does not merge onto.
+    pub trunk: String,
+    /// The conflicting paths, as the publication merge names them (`DESIGN` § 6 step 2).
+    pub paths: Vec<String>,
 }
 
 /// Why an operation waits for a worker, and since when (`DESIGN` § 6, § 7).

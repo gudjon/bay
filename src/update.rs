@@ -10,8 +10,16 @@
 //! `--version`, then the newest release that has a build for this platform, skipping back past
 //! a newer one that has none), downloads the release beside the installed binary
 //! (`$HOME/.local/bin/bay`, bay's one install path, whichever copy runs), verifies it all or
-//! nothing, unpacks only `bay` from the bytes it hashed, and swaps it in with one `rename(2)`.
-//! A miss anywhere leaves the old binary byte-identical (G50).
+//! nothing, unpacks only `bay` from the bytes it hashed, keeps it as that version's own file
+//! (`$XDG_DATA_HOME/bay/versions/<version>/bay`), and swaps it in with one `rename(2)`. A miss
+//! anywhere leaves the old binary byte-identical (G50).
+//!
+//! An update never waits for a running executor (owner ruling 2026-10-20). The install path
+//! stays a regular file that the rename replaces, so a version's kept file can be pruned without
+//! breaking it; the kept file is a hard link where the file system allows one. A process starts
+//! every child `bay` from its own version's file ([`own_binary`]), the updater keeps the version
+//! it replaces, and pruning keeps the newest three, the running one and every one a live
+//! executor names. The executor moves to the new version between operations (`crate::executor`).
 //!
 //! A release is `bay-<target>.tar.gz` per platform, `VERSION`, `SHA256SUMS` over both, and
 //! `SHA256SUMS.sig`: an SSH signature by one of the release keys, principal and namespace
@@ -347,14 +355,9 @@ fn run(request: &Request) -> Result<BayResult, Refusal> {
         detail["due"] = json!(true);
         return Ok(BayResult::ok(detail));
     }
-    // A running executor finishes its operation first, then restarts on the new binary.
-    if let Some(pid) = crate::executor::busy() {
-        return Err(plan.refuse(
-            Decision::Blocked,
-            Reason::UpdateInUse,
-            format!("executor {pid} on this box holds an operation"),
-        ));
-    }
+    // Never waits for a running executor (owner ruling 2026-10-20): the release goes to its own
+    // file under `versions/`, an executor's operation starts its children from its own
+    // version's file there, and the executor moves to the new version between operations.
     let installed = installed_path().map_err(failed)?;
     let bin_dir = installed
         .parent()
@@ -551,8 +554,8 @@ fn download_verified(source: &Source, plan: &Plan, tmp: &Path) -> Result<Vec<u8>
     Ok(bytes)
 }
 
-/// Step 5: unpack only `bay` from the verified bytes, run the new binary's `--version`,
-/// `rename(2)` it over the installed path, then run its `install`.
+/// Step 5: unpack only `bay` from the verified bytes, run the new binary's `--version`, keep it
+/// as its version's file, `rename(2)` it over the installed path, then run its `install`.
 fn swap(plan: &Plan, tmp: &Path, archive: &[u8], installed: &Path) -> Result<BayResult, Refusal> {
     let unpacked = tmp.join("x");
     std::fs::create_dir_all(&unpacked).map_err(|error| failed(error.to_string()))?;
@@ -581,8 +584,17 @@ fn swap(plan: &Plan, tmp: &Path, archive: &[u8], installed: &Path) -> Result<Bay
             plan.target
         )));
     }
+    // The version this update runs keeps its own file when it is the one being replaced, so
+    // a process it came from still starts its children from it.
+    if std::env::current_exe().is_ok_and(|running| same_path(&running, installed)) {
+        let _ = pin(installed);
+    }
+    let versioned = version_path(&plan.target)
+        .ok_or_else(|| failed("neither XDG_DATA_HOME nor HOME is set"))?;
+    place(&new, &versioned).map_err(failed)?;
     crate::durable::rename(&new, installed)
         .map_err(|error| failed(format!("cannot replace {}: {error}", installed.display())))?;
+    prune(&[plan.target.as_str(), BAY]);
 
     // The new binary re-copies what belongs to its version (G49), for the box only: an
     // update never writes a repository's agent settings or Git config. A failure is recorded
@@ -703,6 +715,147 @@ pub fn state_dir() -> Option<PathBuf> {
     Some(base.join("bay"))
 }
 
+/// `$XDG_DATA_HOME/bay`, else `~/.local/share/bay`: this box's bay data.
+#[must_use]
+pub fn data_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| crate::platform::home().map(|home| PathBuf::from(home).join(".local/share")))?;
+    Some(base.join("bay"))
+}
+
+/// How many versions `versions/` keeps, newest first, besides the running one and every one a
+/// live executor names.
+const KEEP_VERSIONS: usize = 3;
+
+/// Where `version`'s binary is kept: `<data>/versions/<version>/bay` (owner ruling
+/// 2026-10-20). A file there is placed whole by a rename and never written in place, so a
+/// process that starts it starts the version it names for as long as it is kept.
+#[must_use]
+pub fn version_path(version: &str) -> Option<PathBuf> {
+    let name = format!("bay{}", std::env::consts::EXE_SUFFIX);
+    Some(data_dir()?.join("versions").join(version).join(name))
+}
+
+static OWN: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// The file every child `bay` this process starts runs: this version's own, so a child runs
+/// the version its parent runs even after an update replaced the install path. The first call,
+/// in `main` at start, resolves it: this version's kept file when it is this binary's
+/// length, else the running file. `bay executor run` pins it first ([`pin_own_binary`]). A kept
+/// file pruned since falls back to the running file.
+#[must_use]
+pub fn own_binary() -> Option<PathBuf> {
+    OWN.get_or_init(resolve_own)
+        .clone()
+        .filter(|path| path.exists())
+        .or_else(|| std::env::current_exe().ok())
+}
+
+fn resolve_own() -> Option<PathBuf> {
+    let running = std::env::current_exe().ok()?;
+    let len = |path: &Path| std::fs::metadata(path).ok().map(|meta| meta.len());
+    // A running file with no length was replaced already (Linux names it "<path> (deleted)").
+    if let Some(kept) = version_path(BAY)
+        && let Some(kept_len) = len(&kept)
+        && len(&running).is_none_or(|running_len| running_len == kept_len)
+    {
+        return Some(kept);
+    }
+    Some(running)
+}
+
+/// Keeps the running binary as this version's file under `versions/` and makes that file
+/// [`own_binary`], for the process whose children must start the version it began with: `bay
+/// executor run`, whose operation may outlast an update. Where nothing can be kept, children
+/// start the running file. Call it before anything resolves [`own_binary`].
+pub fn pin_own_binary() {
+    let pinned = std::env::current_exe()
+        .ok()
+        .and_then(|running| pin(&running).ok());
+    let _ = OWN.set(pinned.or_else(resolve_own));
+}
+
+/// Keeps `running`, this version's binary, as [`version_path`] of this version: a file there
+/// that holds the same bytes stays; any other is replaced whole.
+fn pin(running: &Path) -> Result<PathBuf, String> {
+    let kept = version_path(BAY).ok_or("neither XDG_DATA_HOME nor HOME is set")?;
+    if !same_bytes(running, &kept) {
+        place(running, &kept)?;
+    }
+    Ok(kept)
+}
+
+/// Places a copy of `from` at `to` by a temporary name beside `to` and a rename: a hard link
+/// where the file system allows one (no second copy of the bytes; neither name is ever written
+/// in place), else a copy.
+fn place(from: &Path, to: &Path) -> Result<(), String> {
+    let dir = to.parent().ok_or("the version path has no directory")?;
+    std::fs::create_dir_all(dir)
+        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    let tmp = dir.join(format!(".bay.{}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    if std::fs::hard_link(from, &tmp).is_err() {
+        std::fs::copy(from, &tmp)
+            .map_err(|error| format!("cannot write {}: {error}", tmp.display()))?;
+        set_executable(&tmp)?;
+    }
+    crate::durable::rename(&tmp, to).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("cannot place {}: {error}", to.display())
+    })
+}
+
+/// Whether `a` and `b` hold the same bytes: one file, or two of one length and content.
+fn same_bytes(a: &Path, b: &Path) -> bool {
+    let (Ok(first), Ok(second)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if (first.dev(), first.ino()) == (second.dev(), second.ino()) {
+            return true;
+        }
+    }
+    first.len() == second.len()
+        && matches!((std::fs::read(a), std::fs::read(b)), (Ok(x), Ok(y)) if x == y)
+}
+
+/// Whether `a` and `b` name one file.
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
+/// Removes kept versions past the newest [`KEEP_VERSIONS`], never one of `keep` (the one just
+/// installed and the running one) nor one a live executor on this box names: its operation's
+/// children start that version's file. Best effort: a version that cannot be removed stays.
+fn prune(keep: &[&str]) {
+    let Some(root) = data_dir().map(|dir| dir.join("versions")) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&root) else {
+        return;
+    };
+    let mut versions: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| valid(name))
+        .collect();
+    versions.sort_by(|a, b| compare(b, a));
+    let live = crate::executor::live_versions();
+    for (index, version) in versions.iter().enumerate() {
+        if index < KEEP_VERSIONS || keep.contains(&version.as_str()) || live.contains(version) {
+            continue;
+        }
+        let _ = std::fs::remove_dir_all(root.join(version));
+    }
+}
+
 fn now_s() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -710,7 +863,7 @@ fn now_s() -> u64 {
 }
 
 /// Auto-update, from `status` and `doctor` only (never `land`, `executor run` or the hook,
-/// which hold or may hold an operation, nor while an executor on this box holds one): at most one check a day, run as a detached
+/// which hold or may hold an operation): at most one check a day, run as a detached
 /// `bay update` so the command's result and exit code never change. `BAY_DISABLE_AUTOUPDATE=1`
 /// and the box's `bay.updateAuto = false` turn it off, and a pinned box never moves on its own;
 /// a repository's settings play no part. A build
@@ -738,11 +891,6 @@ pub fn auto() {
     if !settings.auto || settings.version.is_some() {
         return;
     }
-    // Not while an executor holds an operation; the day is not used up, so the next command
-    // checks again.
-    if crate::executor::busy().is_some() {
-        return;
-    }
     // Claimed and recorded before the check starts, so concurrent commands start at most one.
     if !State::claim(state.checked_at) {
         return;
@@ -751,7 +899,7 @@ pub fn auto() {
     if state.write().is_err() {
         return;
     }
-    let Ok(bay) = std::env::current_exe() else {
+    let Some(bay) = own_binary() else {
         return;
     };
     // No repository: the update and its install are the box's alone.

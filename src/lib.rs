@@ -2,6 +2,7 @@
 //!
 //! The design is `DESIGN`; the contracts are `INTERFACES`.
 
+pub mod adapter;
 pub mod agent_hook;
 pub mod agent_settings;
 pub mod canonical;

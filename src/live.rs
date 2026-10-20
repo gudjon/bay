@@ -470,7 +470,7 @@ pub fn after_event(dir: &Path, input: &str) {
     if lock_is_held(&lock, stale) {
         return;
     }
-    let Ok(bay) = std::env::current_exe() else {
+    let Some(bay) = crate::update::own_binary() else {
         return;
     };
     let mut cmd = Command::new(bay);

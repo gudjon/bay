@@ -12,10 +12,12 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 use crate::clock::now_rfc3339;
 use crate::git::{Git, GitError};
 use crate::repo::Repo;
+use crate::version::{GIT_BACKFILL_PATHSPEC, Version};
 
 /// The view journal (§ 10): `creating → ready → checkpointed → published → releasable`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -361,6 +363,129 @@ pub fn keep_hook_settings(repo: &Repo, id: &str, declared: &[String]) -> Result<
     view.fetching()
         .run(&["sparse-checkout", "add", &pattern])
         .map(|_| ())
+}
+
+/// How long the history warm-up may take: it fetches every past version of the declared paths,
+/// which can be far more than the one tip a view's checkout fetches.
+const WARM_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(10);
+
+/// A declared path as the pathspec the history warm-up names: `src/` is `src`. `git backfill`
+/// matches no directory written with its trailing `/`, and exits 0 having fetched nothing.
+#[must_use]
+pub fn history_pathspec(path: &str) -> String {
+    let trimmed = path
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/');
+    if trimmed.is_empty() {
+        ".".to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+/// The objects of the history of `pathspec` at the view's `HEAD` that its store does not hold:
+/// the `?` lines of a missing-object walk, which itself never fetches.
+fn missing_history(view: &Git, pathspec: &[String]) -> Result<Vec<String>, GitError> {
+    let mut args = vec!["rev-list", "--objects", "--missing=print", "HEAD", "--"];
+    args.extend(pathspec.iter().map(String::as_str));
+    let listed = view.run_with(&args, &[("GIT_NO_LAZY_FETCH", "1")], None)?;
+    Ok(listed
+        .lines()
+        .filter_map(|line| line.strip_prefix('?'))
+        .map(str::to_owned)
+        .collect())
+}
+
+/// The bytes of the objects `ids` that the store holds; an absent one counts nothing.
+fn held_bytes(view: &Git, ids: &[String]) -> Result<u64, GitError> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut input = ids.join("\n");
+    input.push('\n');
+    let sizes = view.run_with(
+        &["cat-file", "--batch-check=%(objectsize)"],
+        &[("GIT_NO_LAZY_FETCH", "1")],
+        Some(input.as_bytes()),
+    )?;
+    Ok(sizes
+        .lines()
+        .filter_map(|line| line.trim().parse::<u64>().ok())
+        .sum())
+}
+
+/// G175: warms the history of the declared `paths` in the view at `view` (`[view]
+/// warm_history`), and says how much it fetched. `git backfill --no-sparse -- <paths>` fetches
+/// every past version of the declared paths in batches, so `git log -p` and `git blame` on them
+/// read nothing lazily, offline too. It needs the pathspec form of Git 2.54; below that the
+/// answer is `skipped` with the floor. A view with no declared paths is skipped: its history is
+/// the whole repository's.
+///
+/// Backfill's exit status proves nothing (`--sparse` in a non-cone view, or a pathspec ending in
+/// `/`, fetch nothing and exit 0), so the answer is the missing-object count over the declared
+/// paths before and after: `warmed` only when none is left. A warm-up is optional: a fault is
+/// reported as `failed`, never as the start's.
+#[must_use]
+pub fn warm_history(view: &Path, paths: &[String]) -> serde_json::Value {
+    let git = Git::new(view);
+    let version = git
+        .version()
+        .map_or_else(|_| Version::parse("0"), |line| Version::parse(&line));
+    if version < Version::parse(GIT_BACKFILL_PATHSPEC) {
+        return json!({"state": "skipped", "git": version.to_string(),
+            "floor": GIT_BACKFILL_PATHSPEC});
+    }
+    if paths.is_empty() {
+        return json!({"state": "skipped", "why": "no declared paths"});
+    }
+    let pathspec: Vec<String> = paths.iter().map(|path| history_pathspec(path)).collect();
+    let failed =
+        |error: &GitError| json!({"state": "failed", "paths": pathspec, "error": error.message()});
+    let before = match missing_history(&git, &pathspec) {
+        Ok(before) => before,
+        Err(error) => return failed(&error),
+    };
+    if !before.is_empty() {
+        // The intended fetch: a store whose reads never fetch lazily still lets this one fetch.
+        let mut cmd = git.command();
+        cmd.env_remove("GIT_NO_LAZY_FETCH")
+            .args(["backfill", "--no-sparse", "--"])
+            .args(&pathspec);
+        let ran = crate::git::run_bounded_for(cmd, "backfill", None, WARM_TIMEOUT);
+        match ran {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                return failed(&GitError::Failed {
+                    args: "backfill".to_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                });
+            }
+            Err(error) => return failed(&error),
+        }
+    }
+    let after = match missing_history(&git, &pathspec) {
+        Ok(after) => after,
+        Err(error) => return failed(&error),
+    };
+    let left: std::collections::HashSet<&str> = after.iter().map(String::as_str).collect();
+    let fetched: Vec<String> = before
+        .iter()
+        .filter(|id| !left.contains(id.as_str()))
+        .cloned()
+        .collect();
+    let bytes = match held_bytes(&git, &fetched) {
+        Ok(bytes) => bytes,
+        Err(error) => return failed(&error),
+    };
+    json!({
+        "state": if after.is_empty() { "warmed" } else { "partial" },
+        "paths": pathspec,
+        "missing_before": before.len(),
+        "missing_after": after.len(),
+        "fetched": fetched.len(),
+        "bytes": bytes,
+    })
 }
 
 /// Whether the view at `path` exists as a worktree directory.

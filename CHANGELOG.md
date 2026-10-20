@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.11
+
+Talk
+- The fleet map lists open talks, and each session counts the talks its actor owes and is owed.
+- `bay watch` lists when a talk arrives, is answered, turns lost or stale, and closes, once each.
+- The fleet map's actors include the senders and recipients of open talks.
+- A talk's row in `bay status` names the change a delivery talk is about.
+
+Landing
+- A queued change hears of its merge conflict with trunk before it reaches the queue's head.
+- `bay status` shows that conflict's paths as `operation.conflict`; the change keeps its place.
+- A resubmission racing a background executor on one machine lands once, never panics or leaves an operation running.
+
+Views
+- With `[view] warm_history = true`, `bay start` and `--resume` fetch the declared paths' history, and say how much.
+- Below Git 2.54 the history warm-up is skipped, and the result names that floor.
+
+Repository
+- `bay host init` takes the object format of the repository it runs in, else Git's default.
+- `log.showSignature` on a box no longer adds signature lines to what bay reads.
+
+Adapters
+- `bay adapter test check|wake|notify -- <command>` runs bay's contract cases against a connector, as bay runs it.
+- Each case names what was sent, what came back and why; the command exits 0 only when all pass.
+- A late, noisy or environment-dependent answer is named, with what bay would record for it.
+
+Update
+- `bay update` installs at once, even while an executor holds an operation; `UPDATE_IN_USE` is gone.
+- The daily background check no longer waits for a running executor either.
+- Each release is kept under `$XDG_DATA_HOME/bay/versions/`; updates keep the newest three and every running executor's.
+- An executor's operation starts child `bay` processes from its own version, ending on the version it began with.
+- Between operations a looping executor execs its new binary in place, and names the move in `detail.reexec`.
+
 ## 0.1.10
 
 Speed

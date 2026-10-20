@@ -378,7 +378,7 @@ fn checkpoint_due(repo: &Repo, payload: &Payload, state_dir: &Path) -> Option<&'
 /// Starts one detached `bay live checkpoint <id>` in `cwd` (`crate::start::checkpoint`): the
 /// hook never pushes and never waits. Whether it started.
 fn start_checkpoint(cwd: &Path, id: &str) -> bool {
-    let Ok(bay) = std::env::current_exe() else {
+    let Some(bay) = crate::update::own_binary() else {
         return false;
     };
     let mut cmd = std::process::Command::new(bay);

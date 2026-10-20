@@ -152,6 +152,11 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Admin: prove a connector keeps an adapter contract, run as bay runs it; changes nothing
+    Adapter {
+        #[command(subcommand)]
+        action: AdapterAction,
+    },
     /// Admin: the agent hook entry point (`bay hook <event>`)
     Hook {
         /// The agent product's event, for example `pre-tool`
@@ -263,8 +268,9 @@ enum HostAction {
         path: PathBuf,
         #[arg(long, default_value = "main")]
         trunk: String,
-        #[arg(long, default_value = "sha1", value_parser = ["sha1", "sha256"])]
-        object_format: String,
+        /// By default the object format of the repository bay runs in, else Git's default
+        #[arg(long, value_parser = ["sha1", "sha256"])]
+        object_format: Option<String>,
     },
     /// The host hook Git runs on a push (configured by `host init`)
     #[command(hide = true)]
@@ -328,6 +334,40 @@ enum EvidenceAction {
 }
 
 #[derive(Subcommand)]
+enum AdapterAction {
+    /// Run the contract cases of one adapter kind against a command; exits 0 only when every
+    /// case passes
+    Test(AdapterTestArgs),
+}
+
+#[derive(Args)]
+struct AdapterTestArgs {
+    /// The adapter kind: `check` (a policy's `[[check]]`), `wake` (`[wake] command`) or
+    /// `notify` (`[notify] command`)
+    #[arg(value_parser = bay::adapter::KINDS)]
+    kind: String,
+    /// Check: the entry's `timeout_s` (default: the policy's default)
+    #[arg(long, value_name = "SECONDS")]
+    timeout_s: Option<u64>,
+    /// Check: the entry's `expected_minimum`
+    #[arg(long, value_name = "N", default_value = "1")]
+    expected_minimum: u64,
+    /// Check: a directory of the entry's `path` (repeatable; default: the policy's default)
+    #[arg(long = "path", value_name = "DIR")]
+    path: Vec<String>,
+    /// Check: a variable name of the entry's `env`, passed from this environment (repeatable)
+    #[arg(long = "env", value_name = "NAME")]
+    env: Vec<String>,
+    /// Check: another adapter path the command reads, relative to the repository (repeatable)
+    #[arg(long = "with", value_name = "PATH")]
+    with: Vec<String>,
+    /// The adapter's command, as the config or policy names it: a program path relative to
+    /// the repository, then its arguments
+    #[arg(last = true, required = true, value_name = "COMMAND")]
+    command: Vec<String>,
+}
+
+#[derive(Subcommand)]
 enum ExecutorAction {
     /// Drive queued operations to an outcome on this machine
     Run {
@@ -355,6 +395,7 @@ fn config_refusal(cli: &Cli) -> Option<BayResult> {
             | Command::Install(_)
             | Command::Update { .. }
             | Command::Hook { .. }
+            | Command::Adapter { .. }
     );
     needs_config
         .then(|| bay::repo::Repo::config_missing(&cli.dir))
@@ -369,8 +410,28 @@ fn install(dir: &std::path::Path, args: InstallArgs) -> BayResult {
     bay::install::install_with(dir, args.machine, &trunk)
 }
 
-fn main() -> ExitCode {
+/// The command line. The file every child `bay` starts from is resolved now, before an update
+/// can replace the running one; the executor pins its own first (`bay::update::pin_own_binary`).
+fn parse() -> Cli {
     let cli = Cli::parse();
+    if !matches!(cli.command, Command::Executor { .. }) {
+        let _ = bay::update::own_binary();
+    }
+    cli
+}
+
+/// `bay executor run`: its result, then, between operations, the new version in its place.
+fn executor_run(dir: &std::path::Path, json: bool, once: bool, interval_s: u64) -> ExitCode {
+    let result = bay::executor::run(dir, once, std::time::Duration::from_secs(interval_s));
+    bay::coord::after_command();
+    let code = render(&result, json);
+    // Returns only when the executor does not move, or cannot.
+    bay::executor::reexec(&result);
+    code
+}
+
+fn main() -> ExitCode {
+    let cli = parse();
     if let Some(refusal) = config_refusal(&cli) {
         return render(&refusal, cli.json);
     }
@@ -421,13 +482,13 @@ fn main() -> ExitCode {
                     trunk,
                     object_format,
                 },
-        } => bay::host::init(&path, &trunk, &object_format),
+        } => bay::host::init(&cli.dir, &path, &trunk, object_format.as_deref()),
         Command::Host {
             action: HostAction::Hook { event, args },
         } => return ExitCode::from(bay::host::hook(&event, &args)),
         Command::Executor {
             action: ExecutorAction::Run { once, interval_s },
-        } => bay::executor::run(&cli.dir, once, std::time::Duration::from_secs(interval_s)),
+        } => return executor_run(&cli.dir, cli.json, once, interval_s),
         Command::Live { action } => live(&cli.dir, action),
         Command::Status {
             change,
@@ -445,17 +506,14 @@ fn main() -> ExitCode {
         Command::Watch { since, .. } => bay::watch::watch(&cli.dir, since.as_ref()),
         Command::Talk(args) => talk(&cli.dir, *args),
         Command::Evidence { action } => evidence(&cli.dir, action),
-        Command::Doctor { role } => {
-            let result = bay::doctor::doctor_as(&cli.dir, role.as_deref() == Some("executor"));
-            bay::update::auto();
-            result
-        }
+        Command::Doctor { role } => doctor(&cli.dir, role.as_deref()),
         Command::Install(args) => install(&cli.dir, args),
         Command::Update {
             channel: _,
             version,
             check,
         } => bay::update::update(&bay::update::Request { version, check }),
+        Command::Adapter { action } => adapter(&cli.dir, action),
         Command::Hook { event } => {
             // The agent hook follows the agent product's exit protocol (INTERFACES § 1): for
             // Claude Code, exit 2 denies. The payload adapter decides (agent_hook.rs).
@@ -472,6 +530,30 @@ fn main() -> ExitCode {
     // (`DESIGN` § 11); a hook never writes it.
     bay::coord::after_command();
     render(&result, cli.json)
+}
+
+/// `bay doctor`, then the daily update check.
+fn doctor(dir: &std::path::Path, role: Option<&str>) -> BayResult {
+    let result = bay::doctor::doctor_as(dir, role == Some("executor"));
+    bay::update::auto();
+    result
+}
+
+/// `bay adapter test <kind> -- <command...>`: the conformance kit, which changes nothing.
+fn adapter(dir: &std::path::Path, action: AdapterAction) -> BayResult {
+    let AdapterAction::Test(args) = action;
+    bay::adapter::test(
+        dir,
+        &bay::adapter::Test {
+            kind: args.kind,
+            command: args.command,
+            timeout_s: args.timeout_s,
+            expected_minimum: args.expected_minimum,
+            path: args.path,
+            env: args.env,
+            with: args.with,
+        },
+    )
 }
 
 /// `bay evidence <action>`.

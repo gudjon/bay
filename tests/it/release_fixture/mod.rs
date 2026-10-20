@@ -210,7 +210,8 @@ impl Fixture {
         let stage = self.path().join("stage").join(tag);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&stage).unwrap();
-        // The new binary: prints its version, and records the arguments its `install` ran with.
+        // The new binary: prints its version, records the arguments its `install` ran with, and
+        // logs any other run to `$HOME/ran-<tag>` (an executor that moved to it, G251).
         let prints = build.prints.clone().unwrap_or_else(|| format!("bay {tag}"));
         let install = if build.install_fails {
             "echo '{\"schema\":\"bay.result/1\",\"decision\":\"failed\",\"detail\":\"no skill\"}'; exit 20".to_owned()
@@ -220,7 +221,7 @@ impl Fixture {
             )
         };
         let script = format!(
-            "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    --version) echo \"{prints}\"; exit 0 ;;\n    install) {install} ;;\n  esac\ndone\nexit 1\n"
+            "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    --version) echo \"{prints}\"; exit 0 ;;\n    install) {install} ;;\n  esac\ndone\necho \"$*\" >> \"$HOME/ran-{tag}\"\nexit 1\n"
         );
         let binary = stage.join("bay");
         let _ = std::fs::remove_file(&binary);

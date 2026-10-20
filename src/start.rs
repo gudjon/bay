@@ -19,7 +19,7 @@ use crate::inputs::{self, DeclaredInput, InputName};
 use crate::merge::{Merge, merge_onto};
 use crate::registry::Registry;
 use crate::repo::Repo;
-use crate::result::{BayResult, Reason};
+use crate::result::{BayResult, Decision, Reason};
 use crate::signing::{Keys, Signer};
 use crate::view;
 
@@ -53,6 +53,10 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         None => open(&repo, request),
     };
     let mut result = result.unwrap_or_else(BayResult::failed);
+    // G175: the opt-in warm-up of the view's history, once the view is made.
+    if repo.config.warm_history() {
+        warm_history(&repo, &mut result);
+    }
     // G97: views of ended changes past the retention window go, newer work never.
     let released = release_ended(&repo, dir);
     if !released.is_empty()
@@ -66,6 +70,36 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
     // G80: every result says which trunk it reflects, and when that trunk was fetched.
     result.freshness = result.freshness.or_else(|| repo.freshness());
     result
+}
+
+/// G175: with `[view] warm_history`, a start that made or kept a view fetches the history of
+/// its change's declared paths there, and its detail says how much (`history`).
+fn warm_history(repo: &Repo, result: &mut BayResult) {
+    if result.decision != Decision::Ok {
+        return;
+    }
+    let Some(id) = result.change.clone() else {
+        return;
+    };
+    let Some(detail) = result
+        .detail
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let Some(view_path) = detail.get("view").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let view_path = std::path::PathBuf::from(view_path);
+    let Ok((_, record)) = Chain::new(&repo.git).read(&id) else {
+        return;
+    };
+    let declared = inputs::paths(&record.declared_inputs);
+    detail.insert(
+        "history".to_owned(),
+        view::warm_history(&view_path, &declared),
+    );
 }
 
 /// G97: before a new change, release this machine's views of ended changes past the retention

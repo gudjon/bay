@@ -35,6 +35,16 @@
 //! only those whose paths cover the change's declared paths are listed; the cursor carries all.
 //! It also carries what decided each check (G195, [`crate::red::Judged`]), so a watch from it
 //! reads the post answers only of the landings after it and of those whose evidence moved.
+//!
+//! Talks (G47b, `DESIGN` § 11c: watch reads talks, never sends them) are derived the same way:
+//! the cursor's `talks` holds each open talk this actor sent or must answer, by id, as
+//! `<standing>/<replies>`. A watch lists `talk_arrived` for a talk to this actor it did not hold,
+//! `talk_answered` when a talk gained a backbrief or an answer, `talk_lost` and `talk_stale`
+//! when it turns lost or stale, and `talk_closed` (with `state`: `answered`, `superseded` or
+//! `expired`) once for a talk it held that closed or expired. Each is the talk's `bay status` row
+//! with the event's `schema`, `id` and `kind`, the talk's own kind as `talk_kind`. Talks are the
+//! actor's, so a view lists them all. A talk that opens and closes between two watches is
+//! listed by neither: the cursor holds open talks only, so it stays small.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -63,8 +73,8 @@ pub const MAX_EVENTS: usize = 500;
 pub struct Cursor {
     pub trunk: Option<String>,
     pub logs: BTreeMap<String, String>,
-    /// Where the caller's talks were read to (ruling R6). Nothing fills it yet (C3); it is
-    /// carried through, so a cursor that holds talks reads the same here.
+    /// The open talks the caller sent or must answer, by id, as `<standing>/<replies>` (ruling
+    /// R6, G47b): what a watch from here compares against.
     #[serde(default)]
     pub talks: BTreeMap<String, String>,
     /// The post checks trunk was red on at `trunk` (G244b). Left out when none was, so a cursor
@@ -109,6 +119,9 @@ impl Cursor {
             })
         {
             return Err(bad("an id is not an object id"));
+        }
+        if !cursor.talks.keys().all(|id| crate::talk::is_talk_id(id)) {
+            return Err(bad("a talk id is not one bay computes"));
         }
         Ok(cursor)
     }
@@ -261,10 +274,12 @@ pub fn collect(
         &reds,
         record.as_ref(),
     ));
+    let (said, talks) = talk_events(git, since);
+    events.extend(said);
     let next = Cursor {
         trunk: Some(reached),
         logs: read.tips,
-        talks: since.map(|cursor| cursor.talks.clone()).unwrap_or_default(),
+        talks,
         red: reds,
         judged,
     };
@@ -406,6 +421,70 @@ fn red_events(
         .filter(listed)
         .map(|then| event("trunk_red_cleared", then));
     turned.chain(cleared).collect()
+}
+
+/// G47b: the talk events after `since` (the module doc), and the talks the next cursor holds. A
+/// talk ref that cannot be read lists no talk event, and the cursor keeps the talks it held.
+fn talk_events(git: &Git, since: Option<&Cursor>) -> (Vec<Value>, BTreeMap<String, String>) {
+    let held = since.map(|cursor| cursor.talks.clone()).unwrap_or_default();
+    let me = crate::change::actor_name();
+    let now = crate::talk::standing::reader_now();
+    let Ok(followed) = crate::talk::standing::followed(git, &me, now, |id| held.contains_key(id))
+    else {
+        return (Vec::new(), held);
+    };
+    let mut events = Vec::new();
+    let mut next = BTreeMap::new();
+    for talk in followed {
+        let Some(id) = talk.row["talk"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        let before = held.get(&id).map(|state| {
+            state
+                .split_once('/')
+                .map_or((state.as_str(), 0), |(standing, replies)| {
+                    (standing, replies.parse().unwrap_or(0))
+                })
+        });
+        let event = |kind: &str| {
+            let mut event = talk.row.clone();
+            event["talk_kind"] = talk.row["kind"].clone();
+            event["schema"] = json!(crate::log::EVENT_SCHEMA);
+            event["id"] = json!(format!("{kind}:{id}:{}", talk.replies));
+            event["kind"] = json!(kind);
+            event
+        };
+        if before.is_none() && talk.closed.is_none() && talk.row["who"] == me.as_str() {
+            events.push(event("talk_arrived"));
+        }
+        if talk.replies > before.map_or(0, |(_, replies)| replies) {
+            events.push(event("talk_answered"));
+        }
+        let was = before.map(|(standing, _)| standing);
+        let standing = talk.row["standing"].as_str().unwrap_or_default();
+        if let Some(state) = &talk.closed {
+            // An expiry already listed is not listed again when the accept closes the talk.
+            if state != "expired" || was != Some("expired") {
+                let mut closed = event("talk_closed");
+                closed["state"] = json!(state);
+                events.push(closed);
+            }
+            continue;
+        }
+        if was != Some(standing) {
+            match standing {
+                "expired" => {
+                    let mut closed = event("talk_closed");
+                    closed["state"] = json!("expired");
+                    events.push(closed);
+                }
+                "lost" | "stale" => events.push(event(&format!("talk_{standing}"))),
+                _ => {}
+            }
+        }
+        next.insert(id, format!("{standing}/{}", talk.replies));
+    }
+    (events, next)
 }
 
 /// The event kinds about the acceptance policy, which is an input of every change (ruling R3).
@@ -551,10 +630,12 @@ mod tests {
 
     #[test]
     fn a_cursor_round_trips_and_nothing_else_reads_as_one() {
+        let talk = crate::ids::base32(&[7; 10]);
+        assert!(crate::talk::is_talk_id(&talk));
         let cursor = Cursor {
             trunk: Some("a".repeat(40)),
             logs: [("exec-1".to_owned(), "b".repeat(64))].into(),
-            talks: [("t1".to_owned(), "abcd".to_owned())].into(),
+            talks: [(talk, "arrived/0".to_owned())].into(),
             red: vec![crate::red::Red {
                 check: "suite".to_owned(),
                 environment: "local".to_owned(),
@@ -589,6 +670,7 @@ mod tests {
             encode(r#"{"trunk":"main","logs":{}}"#),
             encode(r#"{"trunk":null,"logs":{"x":"HEAD"}}"#),
             encode(r#"{"trunk":null,"logs":{},"extra":1}"#),
+            encode(r#"{"trunk":null,"logs":{},"talks":{"t1":"arrived/0"}}"#),
             encode(
                 r#"{"trunk":null,"logs":{},"red":[{"check":"s","environment":"e","paths":null,"landing":"HEAD","change":null}]}"#,
             ),

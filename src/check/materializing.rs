@@ -147,6 +147,7 @@ fn run_with(
         &mut Hooks {
             keep: &mut keep,
             beat,
+            seen: None,
         },
     )
     .unwrap()

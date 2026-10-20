@@ -205,7 +205,8 @@ pub fn fetch(repo: &Repo) {
 }
 
 /// The map being built: machines by name, session entries, and actors with their freshest age
-/// and the machines they are on.
+/// (`None` for an actor known only as a talk's recipient that has not acked it) and the machines
+/// they are on.
 struct Map {
     now: u64,
     window: u64,
@@ -213,7 +214,7 @@ struct Map {
     records: BTreeMap<String, ChangeRecord>,
     machines: BTreeMap<String, Value>,
     sessions: Vec<Value>,
-    actors: BTreeMap<String, (u64, BTreeSet<String>)>,
+    actors: BTreeMap<String, (Option<u64>, BTreeSet<String>)>,
     /// The post checks trunk is red on (G244b).
     red: Vec<crate::red::Red>,
 }
@@ -226,9 +227,25 @@ impl Map {
         let entry = self
             .actors
             .entry(name.to_owned())
-            .or_insert((age, BTreeSet::new()));
-        entry.0 = entry.0.min(age);
+            .or_insert((Some(age), BTreeSet::new()));
+        entry.0 = Some(entry.0.map_or(age, |held| held.min(age)));
         entry.1.insert(machine.to_owned());
+    }
+
+    /// An actor on an open talk (§ 11a), last heard `age` seconds ago on no machine the cache
+    /// names; `None` when the talk says nothing it wrote.
+    fn talk_actor(&mut self, name: Option<&str>, age: Option<u64>) {
+        let Some(name) = name else {
+            return;
+        };
+        let entry = self
+            .actors
+            .entry(name.to_owned())
+            .or_insert((None, BTreeSet::new()));
+        entry.0 = match (entry.0, age) {
+            (Some(held), Some(age)) => Some(held.min(age)),
+            (held, age) => held.or(age),
+        };
     }
 
     /// Whether trunk moved past the base of `change`; `null` for a change this cache does not
@@ -539,12 +556,56 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
     Ok(out)
 }
 
+/// G47b: every open talk this cache holds, as `bay status` lists them (who owes the reply, the
+/// ages, the standing, the change it is about). Each talk's sender is an actor heard at `sent`,
+/// and its recipient one heard at its ack or backbrief. Each session entry gets `owes_talks`, the
+/// open talks its actor owes the reply to, and `owed_talks`, those its actor sent that another
+/// actor owes: talks go to actors, so every session of one actor carries the same counts. An
+/// unreadable talk ref lists `{"unread": why}` and the counts are `null`, never `0`.
+fn talks(git: &Git, map: &mut Map) -> Value {
+    let rows = match crate::talk::standing::open_rows(git, crate::talk::standing::reader_now()) {
+        Ok(rows) => rows,
+        Err(why) => {
+            for entry in &mut map.sessions {
+                entry["owes_talks"] = Value::Null;
+                entry["owed_talks"] = Value::Null;
+            }
+            return json!({"unread": why});
+        }
+    };
+    for row in &rows {
+        map.talk_actor(row["from"].as_str(), row["age_s"].as_u64());
+        let heard = [row["ack_age_s"].as_u64(), row["reply_age_s"].as_u64()]
+            .into_iter()
+            .flatten()
+            .min();
+        map.talk_actor(row["who"].as_str(), heard);
+    }
+    for entry in &mut map.sessions {
+        let actor = entry["actor"]["name"].clone();
+        let (mut to_answer, mut awaited) = (0_usize, 0_usize);
+        if actor.is_string() {
+            for row in &rows {
+                if row["owes"] == actor {
+                    to_answer += 1;
+                } else if row["from"] == actor && row["owes"].is_string() {
+                    awaited += 1;
+                }
+            }
+        }
+        entry["owes_talks"] = json!(to_answer);
+        entry["owed_talks"] = json!(awaited);
+    }
+    Value::from(rows)
+}
+
 /// The fleet map from the recorded fetch (`DESIGN` § 11a, `INTERFACES` § 5a): one entry per
 /// fresh session row, this machine's from its records, each with how many commits its view's
 /// base is behind trunk (`behind_commits`) and the session's age (`session_age_s`, G166); an entry per held change no session
-/// names ([`unheld`]); every machine and actor the cache knows, each with `age_s`; talks `[]`
-/// until talk is built; and `default_actor_sessions`, the fresh sessions whose actor's name came
-/// from a default rather than `BAY_ACTOR` (G152). `red` lists the post checks trunk is red on,
+/// names ([`unheld`]); every machine and actor the cache knows, each with `age_s`, the actors of
+/// open talks among them; every open talk the cache holds ([`talks`], G47b); and
+/// `default_actor_sessions`, the fresh sessions whose actor's name came from a default rather
+/// than `BAY_ACTOR` (G152). `red` lists the post checks trunk is red on,
 /// as `bay status` does, and each entry's `on_red` names those whose paths cover its change's
 /// declared paths or the files its session last wrote (G244b).
 ///
@@ -557,7 +618,8 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
 /// calls, one signature check per summary under a registry, one bounded tail per session
 /// record of this machine, one trunk log per held change no session names, one red
 /// judgement over [`crate::red::WINDOW`] trunk commits, and one scan of the same window for
-/// unattributed landings ([`crate::unattributed::scan`]).
+/// unattributed landings ([`crate::unattributed::scan`]), and one read of the talk refs this
+/// cache holds ([`talks`]).
 fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     let git = &repo.git;
     let trunk = git
@@ -601,6 +663,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         .count();
     let unheld = unheld(repo, &map, lines.as_deref().unwrap_or_default())?;
     map.sessions.extend(unheld);
+    let talks = talks(git, &mut map);
 
     let fetch_age = unix_of(&fetched.at).map(|at| map.now.saturating_sub(at));
     let behind = if fetch_age.is_none_or(|age| age >= map.window) {
@@ -626,7 +689,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         "actors": map.actors.into_iter().map(|(actor, (age, on))| json!({
             "actor": actor, "machines": on, "age_s": age,
         })).collect::<Vec<_>>(),
-        "talks": [],
+        "talks": talks,
         "red": red,
         "unattributed": unattributed,
         "default_actor_sessions": default_actor,

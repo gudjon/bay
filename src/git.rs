@@ -441,7 +441,7 @@ impl Git {
         let args_display = args.join(" ");
         let run = || {
             let mut cmd = self.command();
-            cmd.args(args);
+            cmd.args(as_formatted(args));
             for (key, value) in envs {
                 cmd.env(key, value);
             }
@@ -904,6 +904,17 @@ fn batch_missing(out: &[u8], contents: bool) -> Vec<String> {
         }
     }
     names
+}
+
+/// `args`, with `--no-show-signature` after a `log` or `show`: G104, a box's
+/// `log.showSignature` would print each signature's verification among the lines bay parses.
+fn as_formatted<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> {
+    let first = args.first().copied();
+    let quiet = matches!(first, Some("log" | "show")).then_some("--no-show-signature");
+    first
+        .into_iter()
+        .chain(quiet)
+        .chain(args.iter().skip(1).copied())
 }
 
 /// A bare repository holds `HEAD` and `objects/` at its top and has no `.git`.

@@ -4,7 +4,7 @@
 //! (`[check] command`, `[update]`) are accepted and ignored, and doctor names them
 //! ([`Config::ignored`]). `[runtime] command` (the runtime adapter, `INTERFACES` § 4) is
 //! not in § 7's list yet. `[executor]` and `[retention]` are read by built features but are
-//! not in § 7's list yet (BACKLOG 18). A key or table bay does not know is a config error that
+//! not in § 7's list yet (BACKLOG 18), nor is `[view]` (G175). A key or table bay does not know is a config error that
 //! names it, as is `evidence_reuse` set to anything but `"off"` or `"exact-inputs"`: a misspelled
 //! setting never loads as a silent default. A config written for a later bay is refused by
 //! this one, and the recovery is `bay update`.
@@ -38,6 +38,7 @@ pub struct Config {
     pub runtime: Option<Runtime>,
     pub policy: Option<PolicyProfile>,
     pub hooks: Option<Hooks>,
+    pub view: Option<View>,
     /// `[update]` is accepted and ignored: the update pin and switch are the box's
     /// (`git config --global bay.update*`, `DESIGN` § 15.6), never a repository's, and an older
     /// config that still carries the table must keep loading.
@@ -88,6 +89,15 @@ pub struct Hooks {
     pub cache_max_age_s: Option<u64>,
     pub notice_budget_bytes: Option<u64>,
     pub checkpoint_idle_s: Option<u64>,
+}
+
+/// `[view] warm_history` (G175): whether `bay start` and `start --resume` also fetch the history
+/// of the view's declared paths (`crate::view::warm_history`). Off by default: a view costs what
+/// the task reads (G18), and history is read only by a task that asks for it.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct View {
+    pub warm_history: Option<bool>,
 }
 
 /// How long a closed change keeps its drafts before the retention cut (§ 5), and the bay ref
@@ -319,6 +329,15 @@ impl Config {
         )
     }
 
+    /// Whether a view warms the history of its declared paths (`[view] warm_history`, G175).
+    #[must_use]
+    pub fn warm_history(&self) -> bool {
+        self.view
+            .as_ref()
+            .and_then(|view| view.warm_history)
+            .unwrap_or(false)
+    }
+
     /// The instruction files (`[agent] instructions`, G155), paths relative to the top level.
     #[must_use]
     pub fn instructions(&self) -> Vec<String> {
@@ -526,6 +545,24 @@ product = "claude"                 # leave this table out when the box does not 
         assert_eq!(Config::default().checkpoint_idle().as_secs(), 600);
         let config = Config::parse("[hooks]\ncheckpoint_idle_s = 5\n").unwrap();
         assert_eq!(config.checkpoint_idle().as_secs(), 5);
+    }
+
+    #[test]
+    fn the_history_warm_up_is_off_unless_configured() {
+        // G175.
+        assert!(!Config::default().warm_history());
+        assert!(
+            Config::parse("[view]\nwarm_history = true\n")
+                .unwrap()
+                .warm_history()
+        );
+        assert!(
+            !Config::parse("[view]\nwarm_history = false\n")
+                .unwrap()
+                .warm_history()
+        );
+        assert!(Config::parse("[view]\nwarm_history = \"yes\"\n").is_err());
+        assert!(Config::parse("[view]\nwarm = true\n").is_err());
     }
 
     #[test]

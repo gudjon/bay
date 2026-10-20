@@ -8,7 +8,8 @@
 //! never retried. `bay watch` reads what a lost notice would have said (G9).
 
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::{Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -33,21 +34,36 @@ pub enum Delivery {
 /// path relative to the main work tree, then its arguments, as `[executor] command` is.
 #[must_use]
 pub fn notify(repo: &Repo, event: &Value) -> Delivery {
-    let Some(command) = repo
+    let Some(cmd) = repo
         .config
         .notify
         .as_ref()
         .and_then(|notify| notify.command.as_deref())
+        .and_then(|command| command_at(&repo.work_root, command))
     else {
         return Delivery::Unconfigured;
     };
+    send(cmd, notice(event).as_bytes(), NOTIFY_TIMEOUT).delivery(NOTIFY_TIMEOUT)
+}
+
+/// The bytes one notice of `event` puts on the adapter's stdin: its JSON and a newline.
+#[must_use]
+pub fn notice(event: &Value) -> String {
+    let mut text = event.to_string();
+    text.push('\n');
+    text
+}
+
+/// `[notify] command` as a process: a program path relative to `work_root`, then its
+/// arguments, run from `work_root` with only `PATH` and `HOME` from bay's environment, its
+/// output going nowhere. `None` for an empty command.
+#[must_use]
+pub fn command_at(work_root: &Path, command: &str) -> Option<Command> {
     let mut words = command.split_whitespace();
-    let Some(program) = words.next() else {
-        return Delivery::Unconfigured;
-    };
-    let mut cmd = Command::new(repo.work_root.join(program));
+    let program = words.next()?;
+    let mut cmd = Command::new(work_root.join(program));
     cmd.args(words)
-        .current_dir(&repo.work_root)
+        .current_dir(work_root)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -59,12 +75,27 @@ pub fn notify(repo: &Repo, event: &Value) -> Delivery {
             cmd.env(name, value);
         }
     }
-    let mut text = event.to_string();
-    text.push('\n');
-    if deliver(cmd, text.as_bytes(), NOTIFY_TIMEOUT) {
-        Delivery::Delivered
-    } else {
-        Delivery::Lost
+    Some(cmd)
+}
+
+/// How one notice ended.
+#[derive(Clone, Copy, Debug)]
+pub struct Sent {
+    /// The adapter's exit status; `None` when it did not start or ran past the bound.
+    pub status: Option<ExitStatus>,
+    pub elapsed: Duration,
+}
+
+impl Sent {
+    /// What bay records for this notice when its bound is `limit`: delivered only on an exit
+    /// of 0 within it.
+    #[must_use]
+    pub fn delivery(&self, limit: Duration) -> Delivery {
+        if self.status.is_some_and(|status| status.success()) && self.elapsed <= limit {
+            Delivery::Delivered
+        } else {
+            Delivery::Lost
+        }
     }
 }
 
@@ -72,14 +103,19 @@ pub fn notify(repo: &Repo, event: &Value) -> Delivery {
 /// `timeout` on the monotonic clock; past it the whole group is killed, so no child of the
 /// adapter outlives the bound. Its output goes nowhere, so a child it leaves behind after
 /// exiting holds no pipe of ours open.
-fn deliver(mut cmd: Command, input: &[u8], timeout: Duration) -> bool {
+#[must_use]
+pub fn send(mut cmd: Command, input: &[u8], timeout: Duration) -> Sent {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
         cmd.process_group(0);
     }
+    let started = Instant::now();
     let Ok(mut child) = cmd.spawn() else {
-        return false;
+        return Sent {
+            status: None,
+            elapsed: started.elapsed(),
+        };
     };
     let group = child.id();
     if let Some(mut stdin) = child.stdin.take() {
@@ -89,10 +125,14 @@ fn deliver(mut cmd: Command, input: &[u8], timeout: Duration) -> bool {
             let _ = stdin.write_all(&input);
         });
     }
-    let started = Instant::now();
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(status)) => {
+                return Sent {
+                    status: Some(status),
+                    elapsed: started.elapsed(),
+                };
+            }
             Ok(None) if started.elapsed() < timeout => {
                 std::thread::sleep(Duration::from_millis(20));
             }
@@ -100,10 +140,19 @@ fn deliver(mut cmd: Command, input: &[u8], timeout: Duration) -> bool {
                 crate::inputs::kill_group(group);
                 let _ = child.kill();
                 let _ = child.wait();
-                return false;
+                return Sent {
+                    status: None,
+                    elapsed: started.elapsed(),
+                };
             }
         }
     }
+}
+
+/// [`send`], delivered or not, as the unit tests read it.
+#[cfg(test)]
+fn deliver(cmd: Command, input: &[u8], timeout: Duration) -> bool {
+    send(cmd, input, timeout).delivery(timeout) == Delivery::Delivered
 }
 
 #[cfg(test)]

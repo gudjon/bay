@@ -12,12 +12,15 @@
 //! newer revision (kickstart item 19b); `complete` is the evidence notes. The ownership claim
 //! with epochs is item 16; leases and takeover are item 19a.
 //!
-//! While it owns an operation the executor holds a box-local lock: a file named by its pid in
-//! `executor.lock.d/` in bay's state directory, one per executor, which only its owner removes,
-//! so two executors on one box never free each other's hold. `bay update` waits while any of
-//! them names a live pid (`UPDATE_IN_USE`). Between
-//! operations it exits cleanly when its binary changed since it started, so its supervisor
-//! restarts it on the new one (owner ruling 2026-10-18).
+//! For as long as it runs, the executor names itself in a box-local file: `executor.lock.d/<pid>`
+//! in bay's state directory, holding its pid and its version, one per executor, which only its
+//! owner removes, so two executors on one box never free each other's. `bay update` never waits
+//! for it (owner ruling 2026-10-20): it keeps every version a live pid's file names, and the
+//! executor starts every child `bay` from its own version's kept file
+//! (`crate::update::pin_own_binary`), so an operation that began on one version ends on it.
+//! Between operations, an executor whose binary changed since it started moves to the new one:
+//! on Unix its result names the move (`detail.reexec`) and the process execs the new binary
+//! with the same arguments; elsewhere it says so and keeps running until it is restarted.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -27,12 +30,12 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, OpState};
+use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, EarlyConflict, OpState};
 use crate::publish;
 use crate::queue::Queue;
 use crate::receipts;
 use crate::repo::Repo;
-use crate::result::BayResult;
+use crate::result::{BayResult, Decision};
 use crate::signing::Keys;
 
 #[must_use]
@@ -40,9 +43,14 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     if let Some(refusal) = below_floor(dir) {
         return refusal;
     }
+    // Named before it pins its binary, so an update between the two keeps this version's file.
+    let _presence = Presence::hold();
+    crate::update::pin_own_binary();
     // The supervisor's own sightings of queue heads, on its monotonic clock (§ 6).
     let mut heads: HashMap<u64, Instant> = HashMap::new();
-    let binary = Binary::now();
+    let mut binary = Binary::now();
+    // A looping executor moves to a new binary between operations; `--once` finishes its pass.
+    let moves = !once && MOVES;
     loop {
         // Each pass reads the config at the trunk tip it fetched (ruling: config location),
         // so a config that landed since the last pass governs this one.
@@ -53,15 +61,28 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         // A release that could not be pushed never stops the supervisor, which every queued
         // operation depends on: it is reported and tried again on the next pass (§ 6, § 9a).
         let unreleased = deadlines(&repo, &mut heads).err();
-        let ran = match pass(&repo, &binary) {
+        let mut notes = Vec::new();
+        let ran = match pass(&repo, moves.then_some(&binary), &mut notes) {
             Ok(ran) => ran,
             Err(message) => return BayResult::failed(message),
         };
-        if binary.changed() {
-            return BayResult::ok(json!({"ran": ran, "restart": "the binary changed"}));
+        // Between passes, never inside an operation: the re-exec point.
+        if !once && binary.changed() {
+            if let Some(next) = binary.version().filter(|_| moves) {
+                return BayResult::ok(json!({"ran": ran, "reexec": {
+                    "from": crate::version::BAY,
+                    "to": next,
+                    "path": binary.path,
+                }}));
+            }
+            eprintln!("bay executor: {}", binary.stays());
+            binary.accept();
         }
         if once {
             let mut detail = json!({"ran": ran});
+            if !notes.is_empty() {
+                detail["early_conflicts"] = json!(notes);
+            }
             if let Some(message) = &unreleased {
                 detail["unreleased"] = json!(message);
             }
@@ -94,6 +115,32 @@ fn below_floor(dir: &Path) -> Option<BayResult> {
     })
 }
 
+/// Whether this platform can replace the running executor in place (`exec`).
+const MOVES: bool = cfg!(unix);
+
+/// Execs the binary `result` moves to (`detail.reexec.path`, from [`run`]) with this process's
+/// arguments, once the result is written: the executor's next pass runs on the new version,
+/// under the same pid and supervisor. Returns only when it cannot; this process then exits
+/// cleanly, and its supervisor starts it again.
+pub fn reexec(result: &BayResult) {
+    let Some(path) = result
+        .detail
+        .as_ref()
+        .and_then(|detail| detail["reexec"]["path"].as_str())
+    else {
+        return;
+    };
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        let error = Command::new(path).args(std::env::args_os().skip(1)).exec();
+        eprintln!("bay executor: cannot start {path}: {error}");
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
 /// The running binary as it was at start: its path and what identifies the file there.
 struct Binary {
     path: Option<PathBuf>,
@@ -113,6 +160,42 @@ impl Binary {
             .as_deref()
             .is_some_and(|path| stamp(path) != self.stamp)
     }
+
+    /// The version the file at the path answers now (`bay --version`); `None` when it does not
+    /// answer as bay, so it is never started in this executor's place.
+    fn version(&self) -> Option<String> {
+        let mut probe = Command::new(self.path.as_deref()?);
+        probe.arg("--version");
+        let output = crate::git::run_bounded(probe, "bay --version").ok()?;
+        let printed = String::from_utf8_lossy(&output.stdout);
+        let mut words = printed.split_whitespace();
+        if !output.status.success() || words.next() != Some("bay") {
+            return None;
+        }
+        words.next().map(str::to_owned)
+    }
+
+    /// Takes the file now at the path as this executor's own, so one change is told once.
+    fn accept(&mut self) {
+        self.stamp = self.path.as_deref().and_then(stamp);
+    }
+
+    /// Why this executor keeps running its own version though its binary changed.
+    fn stays(&self) -> String {
+        let path = self
+            .path
+            .as_deref()
+            .map_or_else(String::new, |path| path.display().to_string());
+        let why = if MOVES {
+            "does not answer as bay"
+        } else {
+            "changed, and this platform cannot start it in this process's place"
+        };
+        format!(
+            "{path} {why}; this executor keeps running bay {} until it is restarted",
+            crate::version::BAY
+        )
+    }
 }
 
 fn stamp(path: &Path) -> Option<(u64, Option<std::time::SystemTime>, u64)> {
@@ -124,24 +207,25 @@ fn stamp(path: &Path) -> Option<(u64, Option<std::time::SystemTime>, u64)> {
     Some((inode, meta.modified().ok(), meta.len()))
 }
 
-/// The box-local lock an executor holds while it owns an operation: `executor.lock.d/<pid>`,
-/// written by a temporary file and a rename, removed on drop by its owner only.
-struct Lock(PathBuf);
+/// The box-local file a running executor names itself in: `executor.lock.d/<pid>`, holding its
+/// pid and its version, written by a temporary file and a rename, removed on drop by its owner
+/// only. An executor that execs a new version keeps its pid, and the new version writes it again.
+struct Presence(PathBuf);
 
-impl Lock {
+impl Presence {
     fn hold() -> Option<Self> {
         let dir = crate::update::state_dir()?.join(LOCKS);
         std::fs::create_dir_all(&dir).ok()?;
         let pid = std::process::id();
         let tmp = dir.join(format!(".{pid}.tmp"));
-        std::fs::write(&tmp, format!("{pid}\n")).ok()?;
+        std::fs::write(&tmp, format!("{pid}\n{}\n", crate::version::BAY)).ok()?;
         let path = dir.join(pid.to_string());
         crate::durable::rename(&tmp, &path).ok()?;
         Some(Self(path))
     }
 }
 
-impl Drop for Lock {
+impl Drop for Presence {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
@@ -149,16 +233,26 @@ impl Drop for Lock {
 
 const LOCKS: &str = "executor.lock.d";
 
-/// The pid of a live executor on this box that holds an operation. A file whose pid is gone is
-/// stale and ignored; a pid this process may not signal exists, so it counts as live.
+/// The versions the live executors on this box run, from their files: an update never prunes
+/// one. A file whose pid is gone is stale and ignored; a pid this process may not signal exists,
+/// so it counts as live. A file that names no version (an older bay's) keeps nothing.
 #[must_use]
-pub fn busy() -> Option<u32> {
-    let dir = crate::update::state_dir()?.join(LOCKS);
-    std::fs::read_dir(dir)
-        .ok()?
+pub fn live_versions() -> Vec<String> {
+    let Some(dir) = crate::update::state_dir().map(|dir| dir.join(LOCKS)) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    entries
         .flatten()
-        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
-        .find(|&pid| alive(pid))
+        .filter_map(|entry| {
+            let pid = entry.file_name().to_str()?.parse::<u32>().ok()?;
+            let text = std::fs::read_to_string(entry.path()).ok()?;
+            let version = text.lines().nth(1)?.trim().to_owned();
+            (!version.is_empty() && alive(pid)).then_some(version)
+        })
+        .collect()
 }
 
 /// `kill -0`: success, or a refusal to signal (EPERM), means the process exists.
@@ -241,9 +335,15 @@ fn word(state: impl serde::Serialize) -> Option<String> {
         .and_then(|state| state.as_str().map(str::to_owned))
 }
 
-/// One pass: every operation that is neither terminal nor blocked runs to an outcome, each
-/// under the box-local lock. It stops between operations once the binary changed.
-fn pass(repo: &Repo, binary: &Binary) -> Result<Vec<Value>, String> {
+/// One pass: every operation that is neither terminal nor blocked runs to an outcome. With a
+/// `binary` to watch, it stops between operations once that binary changed. Before the
+/// first operation, and after each landing, the entries behind the queue's head are probed
+/// for a conflict with trunk (G177); what each probe noted goes to `notes`.
+fn pass(
+    repo: &Repo,
+    binary: Option<&Binary>,
+    notes: &mut Vec<Value>,
+) -> Result<Vec<Value>, String> {
     let _ = receipts::sync(repo);
     let refspec = format!("+{CHANGES_PREFIX}*:{CHANGES_PREFIX}*");
     repo.git
@@ -276,6 +376,7 @@ fn pass(repo: &Repo, binary: &Binary) -> Result<Vec<Value>, String> {
         Err(error) => Some(json!({"events_recovered": null, "error": error})),
     };
     crate::log::push(repo, &Keys::load(&repo.git).executor_name);
+    notes.extend(early_conflicts(repo, &queue));
     for record in &records {
         let id = record.id.as_str();
         let queued: Vec<String> = record
@@ -291,16 +392,20 @@ fn pass(repo: &Repo, binary: &Binary) -> Result<Vec<Value>, String> {
             continue;
         }
         for op_id in queued {
-            if binary.changed() {
+            if binary.is_some_and(Binary::changed) {
                 ran.extend(recovered.take());
                 return Ok(ran);
             }
             let step = Cell::new("read");
-            let lock = Lock::hold();
             let result =
                 publish::execute(repo, id, &op_id, &step).unwrap_or_else(BayResult::failed);
-            drop(lock);
             let result = publish::with_receipt(repo, id, step.get(), result).with_op(op_id.clone());
+            // Trunk moved: what waits behind the new head hears of a conflict now (G177).
+            if result.decision == Decision::Landed
+                && let Ok(queue) = Queue::read(repo)
+            {
+                notes.extend(early_conflicts(repo, &queue));
+            }
             ran.push(json!({
                 "change": id,
                 "op_id": op_id,
@@ -328,5 +433,93 @@ fn compaction(repo: &Repo, chain: &Chain, ids: &[&str]) -> Option<Value> {
         Ok(moved) if moved.is_empty() => None,
         Ok(moved) => Some(json!({"compacted": moved})),
         Err(error) => Some(json!({"compacted": null, "error": error})),
+    }
+}
+
+/// How many queue entries behind the head one probe tests (G177). The head merges for real
+/// when it runs; a longer queue is reached as its head moves on, since every landing probes
+/// again. A small constant bounds the probe's cost per pass, and the design names none.
+const EARLY_PROBES: usize = 8;
+
+/// G177 (`DESIGN` § 6 step 2): each live queue entry behind the head, up to [`EARLY_PROBES`],
+/// is test-merged onto the trunk tip this executor fetched with `git merge-tree --write-tree
+/// --quiet`, a clean or conflict answer that writes no objects (`GIT-FEATURES` § 2, Git 2.50,
+/// the executor floor). Only an entry that conflicts is merged again by the publication merge,
+/// for its paths, and its operation records them in its chain, where `bay status` shows
+/// `MERGE_CONFLICT` early. The entry keeps its place: its own merge, once it is head, still
+/// decides. A later probe that finds it clean clears the note. Every probe is best effort: a
+/// git fault skips its entry, and a note the remote did not take is written on a later pass.
+/// Returns what was noted, one object per chain written.
+fn early_conflicts(repo: &Repo, queue: &Queue) -> Vec<Value> {
+    let tracking = format!("{}^{{commit}}", repo.trunk_tracking_ref());
+    let Ok(trunk) = repo.git.run(&["rev-parse", "--verify", "-q", &tracking]) else {
+        return Vec::new();
+    };
+    let chain = Chain::new(&repo.git);
+    let mut notes = Vec::new();
+    let behind = queue
+        .entries
+        .values()
+        .filter(|entry| !queue.released.contains(&entry.seq))
+        .skip(1)
+        .take(EARLY_PROBES);
+    for entry in behind {
+        let Ok((_, record)) = chain.read(&entry.change) else {
+            continue;
+        };
+        let Some(op) = record
+            .operations
+            .iter()
+            .find(|op| op.op_id == entry.op_id)
+            .filter(|op| !op.state.is_terminal() && op.state != OpState::Blocked)
+        else {
+            continue;
+        };
+        let Ok(found) = probe(repo, &trunk, &op.revision) else {
+            continue;
+        };
+        let standing = op.early_conflict.as_ref().map(|standing| &standing.paths);
+        if standing == found.as_ref().map(|found| &found.paths) {
+            continue;
+        }
+        let paths = found.as_ref().map(|found| found.paths.clone());
+        match publish::note_early_conflict(repo, &entry.change, &entry.op_id, found) {
+            Ok(true) => notes.push(json!({
+                "change": entry.change,
+                "op_id": entry.op_id,
+                "trunk": trunk,
+                "conflicts": paths,
+            })),
+            Ok(false) => {}
+            Err(error) => notes.push(json!({
+                "change": entry.change,
+                "op_id": entry.op_id,
+                "error": error,
+            })),
+        }
+    }
+    notes
+}
+
+/// The conflict of `revision` with `trunk`, `None` when it merges cleanly; an error is a git
+/// fault. The quiet probe answers clean or conflict alone; only a conflict is merged again for
+/// its paths, and that merge decides.
+fn probe(repo: &Repo, trunk: &str, revision: &str) -> Result<Option<EarlyConflict>, String> {
+    let quiet = ["merge-tree", "--write-tree", "--quiet", trunk, revision];
+    let (code, _, stderr) = repo
+        .git
+        .run_status(&quiet)
+        .map_err(|error| error.message())?;
+    match code {
+        0 => return Ok(None),
+        1 => {}
+        _ => return Err(stderr),
+    }
+    match crate::merge::merge_onto(&repo.git, trunk, revision).map_err(|error| error.message())? {
+        crate::merge::Merge::Clean(_) => Ok(None),
+        crate::merge::Merge::Conflict(paths, _) => Ok(Some(EarlyConflict {
+            trunk: trunk.to_owned(),
+            paths,
+        })),
     }
 }

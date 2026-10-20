@@ -18,8 +18,8 @@ use serde_json::json;
 
 use crate::canonical::digest;
 use crate::change::{
-    Attempt, Chain, ChangeRecord, ChangeState, OpState, Operation, Unavailable, change_ref,
-    freeze_draft,
+    Attempt, Chain, ChainError, ChangeRecord, ChangeState, OpState, Operation, Unavailable,
+    change_ref, freeze_draft,
 };
 use crate::check::{self, Candidate};
 use crate::evidence::{self, Combined};
@@ -172,7 +172,8 @@ fn observe_land(
         return Ok(submitted);
     }
     let op_id = submitted.op_id.clone().unwrap_or_default();
-    let bay = std::env::current_exe().map_err(|error| error.to_string())?;
+    // This version's own file, so an update meanwhile never changes the run's version.
+    let bay = crate::update::own_binary().ok_or("cannot find the running bay")?;
     let mut run = std::process::Command::new(bay);
     run.arg("-C")
         .arg(dir)
@@ -434,19 +435,29 @@ impl<'a> Ctx<'a> {
         Ok(Ok(trunk))
     }
 
-    fn op_mut(&mut self, op_id: &str) -> &mut Operation {
+    /// The operation `op_id` of the record as this process last read it, if it holds one. A
+    /// re-read of the remote chain ([`Ctx::refetch`]) can lose an operation this process
+    /// appended but never got onto the remote: every lookup after a re-read goes through here.
+    fn find_op(&self, op_id: &str) -> Option<&Operation> {
+        self.record.operations.iter().find(|op| op.op_id == op_id)
+    }
+
+    fn find_op_mut(&mut self, op_id: &str) -> Option<&mut Operation> {
         self.record
             .operations
             .iter_mut()
             .find(|op| op.op_id == op_id)
+    }
+
+    /// The operation `op_id`, which this process's record holds: one it appended or read, and
+    /// no re-read of the remote chain dropped since ([`Ctx::find_op`] is for after a re-read).
+    fn op_mut(&mut self, op_id: &str) -> &mut Operation {
+        self.find_op_mut(op_id)
             .unwrap_or_else(|| unreachable!("operation {op_id} is in the record"))
     }
 
     fn op(&self, op_id: &str) -> &Operation {
-        self.record
-            .operations
-            .iter()
-            .find(|op| op.op_id == op_id)
+        self.find_op(op_id)
             .unwrap_or_else(|| unreachable!("operation {op_id} is in the record"))
     }
 
@@ -458,9 +469,33 @@ impl<'a> Ctx<'a> {
         Ok(())
     }
 
+    /// [`Ctx::save`] that tells a lost compare-and-swap from a fault: `false` when the local
+    /// chain ref is no longer the head this process read, and nothing was written. Every bay
+    /// process on this box shares that ref, and a re-read of the remote chain moves it.
+    fn save_cas(
+        &mut self,
+        draft: &str,
+        candidate: Option<&str>,
+        message: &str,
+    ) -> Result<bool, String> {
+        match self
+            .chain
+            .append_linking(&self.head, &self.record, draft, candidate, message)
+        {
+            Ok(head) => {
+                self.head = head;
+                Ok(true)
+            }
+            Err(ChainError::Moved { .. }) => Ok(false),
+            Err(error) => Err(error.message()),
+        }
+    }
+
     /// Pushes the chain. It only appends, so this is a fast-forward and never forced; once this
     /// process has pushed, the push is leased on that head, so it fails when another executor
-    /// moved the chain since.
+    /// moved the chain since. It pushes this process's own head, never the local ref: another
+    /// process on this box may have moved that ref, and a push of it could succeed without
+    /// carrying this process's write.
     fn push_chain(&mut self) -> bool {
         let name = change_ref(&self.id);
         let lease = self
@@ -471,17 +506,19 @@ impl<'a> Ctx<'a> {
         if let Some(lease) = &lease {
             args.push(lease);
         }
-        let refspec = format!("{name}:{name}");
+        let refspec = format!("{}:{name}", self.head);
         args.extend([self.repo.remote(), refspec.as_str()]);
         let pushed = self.repo.git.run(&args).is_ok();
         if pushed {
             self.pushed_head = Some(self.head.clone());
+            self.catch_up_local();
         }
         pushed
     }
 
     /// Pushes the chain and moves `refs/bay/requests/<id>` to `request` in one atomic push
-    /// (§ 10a). The requests ref always names the latest land request.
+    /// (§ 10a). The requests ref always names the latest land request. Like
+    /// [`Ctx::push_chain`] it pushes this process's own objects, never the local refs.
     fn push_chain_and_request(&mut self, request: &str) -> bool {
         let name = change_ref(&self.id);
         let requests = format!("{}{}", crate::names::REQUESTS, self.id);
@@ -494,14 +531,31 @@ impl<'a> Ctx<'a> {
         if let Some(lease) = &lease {
             args.push(lease);
         }
-        let chain = format!("{name}:{name}");
-        let request_spec = format!("+{requests}:{requests}");
+        let chain = format!("{}:{name}", self.head);
+        let request_spec = format!("+{request}:{requests}");
         args.extend([self.repo.remote(), chain.as_str(), request_spec.as_str()]);
         let pushed = self.repo.git.run(&args).is_ok();
         if pushed {
             self.pushed_head = Some(self.head.clone());
+            self.catch_up_local();
         }
         pushed
+    }
+
+    /// After this process pushed its head: a local chain ref that another process moved back
+    /// to an ancestor of it (its re-read of the remote) moves on to it, so the next
+    /// compare-and-swap on this box starts from what the remote holds.
+    fn catch_up_local(&self) {
+        let name = change_ref(&self.id);
+        let Ok(Some(local)) = self.repo.git.ref_target(&name) else {
+            return;
+        };
+        if local != self.head && is_ancestor(&self.repo.git, &local, &self.head).unwrap_or(false) {
+            let _ = self
+                .repo
+                .git
+                .run(&["update-ref", &name, &self.head, &local]);
+        }
     }
 
     /// Replaces the local chain with the remote's and reloads it.
@@ -867,6 +921,9 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     let repo = ctx.repo;
     let _anchored = Anchored::new(&repo.git, op_id)?;
     let outcome = run_attempts(ctx, op_id, &revision, trunk, &mut seq);
+    if outcome.is_err() {
+        release_after_fault(ctx, op_id, &revision);
+    }
     // The head always releases: an outcome other than its own publication (which released in
     // the publishing push) passes the head on. Not an operation given up on `REGISTRY_CHANGED`:
     // its key can sign no release, and the place stays with the operation, which the executor
@@ -905,6 +962,37 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
         let _ = crate::queue::release(ctx.repo, signer.as_ref(), at, op_id, &reason);
     }
     outcome
+}
+
+/// A fault ended this executor's run of `op_id` after its claim (§ 9a): the claim is given
+/// back on the remote chain, so the operation never stays `running` under an owner that has
+/// stopped. The next executor takes it at once, with no lease to wait out. Best effort: when
+/// the chain moved to another epoch, or the remote cannot be reached, that state stands.
+fn release_after_fault(ctx: &mut Ctx, op_id: &str, revision: &str) {
+    let mine = ctx.my_epoch;
+    if mine == 0 || ctx.refetch().is_err() {
+        return;
+    }
+    let name = ctx.executor_name();
+    let Some(op) = ctx.find_op_mut(op_id) else {
+        return;
+    };
+    let held = matches!(op.state, OpState::Running | OpState::Checked);
+    if op.epoch != mine || op.owner.as_deref() != Some(name.as_str()) || !held {
+        return;
+    }
+    op.owner = None;
+    if op.state == OpState::Running {
+        op.state = if op.job.is_some() {
+            OpState::Admitted
+        } else {
+            OpState::Submitted
+        };
+    }
+    let message = format!("released {op_id} epoch {mine} after a fault");
+    if ctx.save_cas(revision, None, &message).unwrap_or(false) {
+        ctx.push_chain();
+    }
 }
 
 /// Steps 2–7 for one operation, rebuilding when trunk moves; joins the queue after two
@@ -1460,6 +1548,45 @@ fn enqueue(
     Ok(result)
 }
 
+/// G177: records on the queued operation `op_id` of change `id` the conflict the executor's
+/// early probe found against trunk, or clears it with `None`, as one executor-signed chain
+/// state. It never takes ownership, moves the operation's state or touches its queue place.
+/// Returns whether the chain was pushed; an operation that is no longer queued, or whose note
+/// already names these paths, writes nothing.
+///
+/// # Errors
+///
+/// The chain cannot be read or written, or a key registry with no executor key here.
+pub fn note_early_conflict(
+    repo: &Repo,
+    id: &str,
+    op_id: &str,
+    conflict: Option<crate::change::EarlyConflict>,
+) -> Result<bool, String> {
+    let step = Cell::new("probe");
+    let mut ctx = Ctx::load(repo, &step, id)?;
+    let Some(op) = ctx.record.operations.iter().find(|op| op.op_id == op_id) else {
+        return Ok(false);
+    };
+    let same = op.early_conflict.as_ref().map(|noted| &noted.paths)
+        == conflict.as_ref().map(|found| &found.paths);
+    if same || op.state.is_terminal() || op.state == OpState::Blocked {
+        return Ok(false);
+    }
+    let revision = op.revision.clone();
+    repo.fetch_registry();
+    ctx.registry = Registry::current(&repo.git)?;
+    let executor = ctx.executor_signer()?;
+    ctx.chain.sign_with(executor);
+    let message = match &conflict {
+        Some(found) => format!("{op_id} conflicts with trunk {}", found.trunk),
+        None => format!("{op_id} merges onto trunk again"),
+    };
+    ctx.op_mut(op_id).early_conflict = conflict;
+    ctx.save(&revision, None, &message)?;
+    Ok(ctx.push_chain())
+}
+
 /// The ownership claim (§ 9a): a compare-and-swap on the remote chain that raises the epoch.
 /// Returns a report when this executor does not get to run the operation: it already
 /// published, it is not runnable, or another executor's claim won the race.
@@ -1478,52 +1605,92 @@ fn claim(
     }
     let name = ctx.executor_name();
     let id = ctx.id.clone();
-    let held = {
-        let op = ctx.op(op_id);
-        // An operation this executor left waiting for a worker holds no lease against it: it
-        // takes it back at once once its box serves it (§ 7).
-        let own_wait = op.unavailable.is_some() && op.owner.as_deref() == Some(name.as_str());
-        op.owner.is_some() && matches!(op.state, OpState::Running | OpState::Checked) && !own_wait
+    // The remote chain lacks an operation this process appended: its request never reached
+    // the remote (another process on this box re-read the chain over it). The caller reads
+    // the chain again and writes the request again.
+    let Some(op) = ctx.find_op(op_id) else {
+        return Err(CHAIN_MOVED.to_owned());
     };
+    // An operation this executor left waiting for a worker holds no lease against it: it
+    // takes it back at once once its box serves it (§ 7).
+    let own_wait = op.unavailable.is_some() && op.owner.as_deref() == Some(name.as_str());
+    let held =
+        op.owner.is_some() && matches!(op.state, OpState::Running | OpState::Checked) && !own_wait;
     // Another process holds the operation: take it over only once its lease expired, on this
     // process's own clock. A restarted supervisor watches a full lease again. A holder whose
     // executor key the registry revoked holds no lease (§ 10a).
     if held && !holder_revoked(ctx, op_id)? && !lease_expired(ctx) {
-        let op = ctx.op(op_id);
         let mut result = BayResult::new(Decision::Ok).with_change(&id).with_op(op_id);
         result.state = Some("running".to_owned());
+        let (owner, epoch) = ctx
+            .find_op(op_id)
+            .map_or((None, 0), |op| (op.owner.clone(), op.epoch));
         return Ok(Some(result.with_detail(
-            json!({"lease": "held", "owner": op.owner, "epoch": op.epoch}),
+            json!({"lease": "held", "owner": owner, "epoch": epoch}),
         )));
     }
     kill_point("before-claim");
-    let op = ctx.op_mut(op_id);
-    if op.state.is_terminal() {
-        return Ok(Some(superseded(&id, op_id, op.epoch, op.owner.as_ref())));
-    }
-    op.epoch += 1;
-    op.owner = Some(name.clone());
-    if op.state != OpState::Checked {
-        op.state = OpState::Running;
-    }
-    let epoch = op.epoch;
-    ctx.save(
-        revision,
-        None,
-        &format!("claim {op_id} epoch {epoch} by {name}"),
-    )?;
-    if !ctx.push_chain() {
+    // A claim is this process's own: its commit names the process, so two claims on one box
+    // are never one commit, and a push that carries another's claim is never taken for one.
+    let nonce = format!(
+        "{}.{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos())
+    );
+    for _ in 0..3 {
+        let Some(op) = ctx.find_op_mut(op_id) else {
+            return Err(CHAIN_MOVED.to_owned());
+        };
+        if op.state.is_terminal() {
+            return Ok(Some(superseded(&id, op_id, op.epoch, op.owner.as_ref())));
+        }
+        let read = op.epoch;
+        op.epoch += 1;
+        op.owner = Some(name.clone());
+        if op.state != OpState::Checked {
+            op.state = OpState::Running;
+        }
+        let epoch = op.epoch;
+        let message = format!("claim {op_id} epoch {epoch} by {name} (process {nonce})");
+        if ctx.save_cas(revision, None, &message)? {
+            kill_point("before-claim-push");
+            if ctx.push_chain() {
+                ctx.my_epoch = epoch;
+                return Ok(None);
+            }
+            // The compare-and-swap on the remote chain was lost: the winner holds it.
+            ctx.refetch()?;
+            let Some(op) = ctx.find_op(op_id) else {
+                return Err(CHAIN_MOVED.to_owned());
+            };
+            return Ok(Some(superseded(
+                &ctx.id,
+                op_id,
+                op.epoch,
+                op.owner.as_ref(),
+            )));
+        }
+        // Another process on this box moved the local chain ref first: read the remote chain
+        // again. Claimed meanwhile, the operation is the other claim's; else claim it again.
         ctx.refetch()?;
-        let op = ctx.op(op_id);
-        return Ok(Some(superseded(
-            &ctx.id,
-            op_id,
-            op.epoch,
-            op.owner.as_ref(),
-        )));
+        match ctx.find_op(op_id) {
+            None => return Err(CHAIN_MOVED.to_owned()),
+            Some(op) if op.epoch != read || op.state.is_terminal() => {
+                return Ok(Some(superseded(
+                    &ctx.id,
+                    op_id,
+                    op.epoch,
+                    op.owner.as_ref(),
+                )));
+            }
+            Some(_) => {}
+        }
     }
-    ctx.my_epoch = epoch;
-    Ok(None)
+    Err(format!(
+        "the change chain kept moving under the claim of {op_id}; nothing was run"
+    ))
 }
 
 /// Before the publishing push: the executor reads the chain from the remote, and if its epoch
@@ -1533,11 +1700,14 @@ fn still_owner(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<BayR
     if ctx.refetch().is_err() {
         return Ok(None);
     }
-    let op = ctx.op(op_id);
-    if op.epoch == ctx.my_epoch && op.state != OpState::Superseded {
-        return Ok(None);
-    }
-    let (epoch, owner) = (op.epoch, op.owner.clone());
+    // An operation the remote chain lacks is no one's to publish.
+    let (epoch, owner) = match ctx.find_op(op_id) {
+        Some(op) if op.epoch == ctx.my_epoch && op.state != OpState::Superseded => {
+            return Ok(None);
+        }
+        Some(op) => (op.epoch, op.owner.clone()),
+        None => (0, None),
+    };
     let trunk = ctx.repo.fetch_trunk().map_err(|error| error.message())?;
     if let Some(result) = scanned(ctx, &trunk, revision)? {
         return Ok(Some(existing(result)));
@@ -1802,6 +1972,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         publish_retries: 0,
         mid_publish_releases: Vec::new(),
         unavailable: None,
+        early_conflict: None,
     });
     // The request: an agent-signed commit on the revision, linked into the chain. Appending it
     // allocates the op id by compare-and-swap; `refs/bay/requests/<id>` moves with it.
@@ -1820,6 +1991,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         .map_err(|error| error.message())?;
     ctx.op_mut(&op_id).request_id = Some(request_id.clone());
     ctx.save(revision, Some(&request_id), &format!("request {op_id}"))?;
+    kill_point("before-request-push");
     if !ctx.push_chain_and_request(&request_id) && ctx.online {
         // The remote chain moved while this request was written (an executor appended): the
         // caller re-reads the chain and writes the request again.
@@ -2164,51 +2336,118 @@ fn build_and_check(
     // Step 5: persist before publishing. The candidate is linked into the chain; the evidence
     // is pushed and read back from the remote.
     let attempt = Attempt {
-        candidate_id: candidate_id.clone(),
+        candidate_id,
         base: trunk.to_owned(),
-        commit: commit.clone(),
+        commit,
         tree,
         verdict: verdict.to_owned(),
         epoch: ctx.my_epoch,
     };
+    persist_attempt(ctx, op_id, revision, attempt, refusal, has_policy)
+}
+
+/// Step 5 for a checked `attempt`: its evidence is pushed and read back from the remote, then
+/// the candidate is linked into the chain as checked, or as blocked on `refusal`.
+fn persist_attempt(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    attempt: Attempt,
+    refusal: Option<BayResult>,
+    has_policy: bool,
+) -> Result<Result<Attempt, BayResult>, String> {
     let blocked_on = if refusal.is_some() {
         Some(condition(
             &ctx.repo.git,
             revision,
-            trunk,
+            &attempt.base,
             Some(&attempt.tree),
             &ctx.record.observed_versions,
         )?)
     } else {
         None
     };
-    let op = ctx.op_mut(op_id);
-    op.attempts.push(attempt.clone());
-    op.unavailable = None;
-    if let Some(refusal) = refusal {
-        op.state = OpState::Blocked;
-        op.outcome = refusal.reason.map(|reason| reason.code().to_owned());
-        op.blocked_on = blocked_on;
-        ctx.save(revision, Some(&commit), &format!("blocked {candidate_id}"))?;
-        ctx.push_chain();
-        return Ok(Err(refusal));
-    }
-    op.state = OpState::Checked;
-    op.outcome = None;
-    ctx.save(revision, Some(&commit), &format!("checked {candidate_id}"))?;
-    if has_policy {
+    // The evidence is on the remote before the chain names the candidate checked.
+    if refusal.is_none() && has_policy {
         push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0)?;
     }
-    if !ctx.push_chain() {
-        // Another executor moved the chain: a newer claim means this one was superseded.
-        if ctx.refetch().is_ok() && ctx.op(op_id).epoch != ctx.my_epoch {
-            let op = ctx.op(op_id);
-            return Ok(Err(superseded(&ctx.id, op_id, op.epoch, op.owner.as_ref())));
+    let (state, word) = if refusal.is_some() {
+        (OpState::Blocked, "blocked")
+    } else {
+        (OpState::Checked, "checked")
+    };
+    let outcome = refusal
+        .as_ref()
+        .and_then(|refusal| refusal.reason)
+        .map(|reason| reason.code().to_owned());
+    let message = format!("{word} {}", attempt.candidate_id);
+    let persisted = persist_owned(ctx, op_id, revision, &attempt.commit, &message, |op| {
+        op.attempts.push(attempt.clone());
+        op.unavailable = None;
+        op.state = state;
+        op.outcome.clone_from(&outcome);
+        op.blocked_on.clone_from(&blocked_on);
+    })?;
+    match (persisted, refusal) {
+        (Persisted::Lost(result), _) => Ok(Err(*result)),
+        (_, Some(refusal)) => Ok(Err(refusal)),
+        (Persisted::Unpushed, None) => {
+            Err("the change chain could not be pushed; nothing was published".to_owned())
         }
-        return Err("the change chain could not be pushed; nothing was published".to_owned());
+        (Persisted::Pushed, None) => {
+            kill_point("after-persist");
+            Ok(Ok(attempt))
+        }
     }
-    kill_point("after-persist");
-    Ok(Ok(attempt))
+}
+
+/// What [`persist_owned`] did.
+enum Persisted {
+    /// The write is on the remote chain.
+    Pushed,
+    /// The write is in the local chain only: the remote could not be reached or kept moving.
+    Unpushed,
+    /// The operation is no longer this executor's: the result says so.
+    Lost(Box<BayResult>),
+}
+
+/// Step 5's write (§ 9a): `apply` to the operation this executor claimed, appended and pushed
+/// under the chain's compare-and-swap. A lost race, on this box's shared chain ref or on the
+/// remote, re-reads the remote chain and applies again while the operation is still this
+/// executor's epoch; once another epoch holds it, or the remote lacks it, it is `superseded`.
+fn persist_owned(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    candidate: &str,
+    message: &str,
+    apply: impl Fn(&mut Operation),
+) -> Result<Persisted, String> {
+    for _ in 0..3 {
+        let mine = ctx.my_epoch;
+        let Some(op) = ctx.find_op_mut(op_id) else {
+            return Ok(Persisted::Lost(Box::new(superseded(
+                &ctx.id, op_id, 0, None,
+            ))));
+        };
+        if op.epoch != mine || op.state.is_terminal() {
+            let (epoch, owner) = (op.epoch, op.owner.clone());
+            return Ok(Persisted::Lost(Box::new(superseded(
+                &ctx.id,
+                op_id,
+                epoch,
+                owner.as_ref(),
+            ))));
+        }
+        apply(op);
+        if ctx.save_cas(revision, Some(candidate), message)? && ctx.push_chain() {
+            return Ok(Persisted::Pushed);
+        }
+        if ctx.refetch().is_err() {
+            return Ok(Persisted::Unpushed);
+        }
+    }
+    Ok(Persisted::Unpushed)
 }
 
 /// § 8: a failing candidate of a change whose input moved is a repair still owed on that
@@ -2667,6 +2906,7 @@ fn run_policy(
         &mut check::Hooks {
             keep: &mut keep,
             beat: &mut || heartbeat(ctx, op_id),
+            seen: None,
         },
     )?;
     let _ = std::fs::remove_dir_all(&scratch);
@@ -3028,7 +3268,7 @@ fn heartbeat(ctx: &Ctx, op_id: &str) {
             "-q",
             &format!("--force-with-lease={name}:{head}"),
             ctx.repo.remote(),
-            &format!("{name}:{name}"),
+            &format!("{beat}:{name}"),
         ])
         .is_ok();
     if pushed {

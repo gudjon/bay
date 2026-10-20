@@ -897,6 +897,27 @@ fn post_checks(repo: &Repo, landed: Option<&crate::publish::Found>, read: &Read)
     rows.map_or_else(|why| json!({"unread": why}), Value::from)
 }
 
+/// What an operation under way waits on, besides its place: § 7, a worker for the
+/// environments no worker answered for; G177, a conflict with trunk the executor found while
+/// the operation waits behind the queue's head, as `MERGE_CONFLICT` with its paths, so its
+/// agent can refresh before the head reaches it.
+fn waiting(op: &crate::change::Operation, operation: &mut Value) {
+    if let Some(unavailable) = &op.unavailable {
+        operation["waiting_for"] = json!("worker");
+        operation["environments"] = json!(unavailable.environments);
+    }
+    if let Some(conflict) = &op.early_conflict {
+        let reason = Reason::MergeConflict;
+        operation["conflict"] = json!({
+            "reason": reason.code(),
+            "conflicts": conflict.paths,
+            "trunk": conflict.trunk,
+            "allowed": reason.allowed(),
+            "retry_when": reason.retry_when(),
+        });
+    }
+}
+
 fn describe(
     repo: &Repo,
     record: &ChangeRecord,
@@ -963,12 +984,8 @@ fn describe(
             operation["elapsed_s"] = json!(elapsed);
             operation["next"] = json!(next);
         }
-        // § 7: an operation no worker answered for waits for one, and names what it needs.
-        if let Some(waiting) = op.unavailable.as_ref().filter(|_| {
-            !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked
-        }) {
-            operation["waiting_for"] = json!("worker");
-            operation["environments"] = json!(waiting.environments);
+        if !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked {
+            waiting(op, &mut operation);
         }
         operation
     });

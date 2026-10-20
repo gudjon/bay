@@ -92,11 +92,76 @@ pub fn standing(
 ///
 /// A ref that is not a talk, or a git fault.
 pub fn rows(git: &Git, me: &str, now: u64) -> Result<Vec<Value>, String> {
-    let mut talks = talks_where(git, TALK_PREFIX, |talk| {
-        !talk.closed() && (talk.from_name() == me || talk.who == me)
-    })?;
+    open_where(git, now, |talk| talk.from_name() == me || talk.who == me)
+}
+
+/// Every open talk this cache holds, oldest first, as [`rows`] lists them: the fleet map's talks
+/// (`DESIGN` § 11a, G47b). The cache holds the talks to and from the actors that fetch here.
+///
+/// # Errors
+///
+/// A ref that is not a talk, or a git fault.
+pub fn open_rows(git: &Git, now: u64) -> Result<Vec<Value>, String> {
+    open_where(git, now, |_| true)
+}
+
+fn open_where(git: &Git, now: u64, keep: impl Fn(&Talk) -> bool) -> Result<Vec<Value>, String> {
+    let mut talks = talks_where(git, TALK_PREFIX, |talk| !talk.closed() && keep(talk))?;
     talks.sort_by_key(Talk::sent);
     talks.iter().map(|talk| row(git, talk, now)).collect()
+}
+
+/// One talk as `bay watch` follows it (G47b).
+#[derive(Clone, Debug)]
+pub struct Followed {
+    /// The talk's row, as [`rows`] lists it.
+    pub row: Value,
+    /// How it closed (`answered`, `superseded` or `expired`); `None` while it is open. A
+    /// discovery talk closed by its answer, with no close entry, closed as `answered`.
+    pub closed: Option<String>,
+    /// How many replies it holds: its backbriefs and answers.
+    pub replies: usize,
+}
+
+/// The talks `me` sent or must answer, oldest first, as `bay watch` follows them: every open one,
+/// and each closed one `held` keeps (those its cursor held open), so a close is seen once.
+///
+/// # Errors
+///
+/// A ref that is not a talk, or a git fault.
+pub fn followed(
+    git: &Git,
+    me: &str,
+    now: u64,
+    held: impl Fn(&str) -> bool,
+) -> Result<Vec<Followed>, String> {
+    let mut talks = talks_where(git, TALK_PREFIX, |talk| {
+        (talk.from_name() == me || talk.who == me) && (!talk.closed() || held(&talk.id))
+    })?;
+    talks.sort_by_key(Talk::sent);
+    talks
+        .iter()
+        .map(|talk| -> Result<Followed, String> {
+            let closed = if talk.closed() {
+                Some(
+                    talk.closed_as(git)?
+                        .unwrap_or_else(|| "answered".to_owned()),
+                )
+            } else {
+                None
+            };
+            let replies = talk
+                .entries
+                .iter()
+                .filter(|entry| matches!(entry.kind.as_str(), "backbrief" | "answer"))
+                .count();
+            Ok(Followed {
+                row: row(git, talk, now)?,
+                closed,
+                replies,
+            })
+        })
+        .collect()
 }
 
 fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
@@ -146,6 +211,7 @@ fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
         "who": talk.who,
         "owes": owes,
         "what": talk.body["what"],
+        "change": talk.about_change(),
         "sent": talk.body["sent"],
         "age_s": age(sent),
         "ack_age_s": acked.map(age),
