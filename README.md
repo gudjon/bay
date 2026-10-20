@@ -17,7 +17,7 @@
 <p align="center">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-187571"></a>
   <img alt="Written in Rust" src="https://img.shields.io/badge/written%20in-Rust-c5341c">
-  <a href="https://github.com/gudjon/bay/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/gudjon/bay?include_prereleases&label=release"></a>
+  <a href="https://github.com/gudjon/bay/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/gudjon/bay?label=release"></a>
   <a href="https://github.com/gudjon/bay/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/gudjon/bay?style=flat&color=187571"></a>
 </p>
 
@@ -90,7 +90,8 @@ not store it.</sub>
 - **Small enough to read.** One Rust program, five direct dependencies (`clap`, `serde`, `serde_json`,
   `sha2`, `toml`), and `unsafe_code = "forbid"`. Ask your coding agent to audit it:
   `grep -rn 'Command::new' src` lists every program bay starts, and `grep -rn 'https://' src` every
-  address it reads.
+  address it reads. Only `git` (to your remote) and `curl` (for bay's releases) reach the network; the
+  rest, such as `ssh-keygen`, `tar` and the check sandbox, run locally.
 - **Checks in a sandbox.** `bwrap` on Linux and `sandbox-exec` on macOS. A check gets no network unless
   its entry in the policy on trunk says `network = true`.
 - **Signed releases.** A hardware-held key signs every release from 0.1.5, and `install.sh` and
