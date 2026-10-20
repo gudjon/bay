@@ -354,8 +354,10 @@ fn a_candidate_that_adds_checks_under_an_unchecked_base_lands_unchecked() {
         "the candidate's own check never ran for its landing"
     );
 
-    // After it lands, its policy is the base: the next change is checked by it.
+    // After it lands, its policy is the base: the next change is checked by it. Its edit is its
+    // own: one already on trunk would end `no_effect` (G213).
     let (next, view) = test_box.start_and_edit(&repo);
+    std::fs::write(view.join("src/new.rs"), "fn next() {}\n").unwrap();
     let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert!(landed["detail"].get("unchecked").is_none(), "{landed}");

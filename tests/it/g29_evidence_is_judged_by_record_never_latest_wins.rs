@@ -76,19 +76,14 @@ fn another_operation_on_the_same_tree_is_rechecked_not_reused() {
             60,
         ),
     );
-    // Two changes make the same edit: the second candidate has the first one's tree.
+    // Two changes make the same edit: the second candidate has the first one's tree. The first
+    // is checked and stops before it publishes, so its tree is not on trunk (G213).
     let (_, first) = test_box.start_and_edit(&repo);
     let (_, second) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&first).args(["land", "--wait"]));
-    assert_eq!(code, 0);
-    let tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);
+    assert_eq!(land_stopped_before_publish(&test_box, &first), 137);
     let (code, landed) = result_json(test_box.bay(&second).args(["land", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(
-        test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]),
-        tree,
-        "the same tree"
-    );
+    let tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);
     assert_eq!(
         std::fs::read_to_string(&runs).unwrap().lines().count(),
         2,
@@ -149,6 +144,20 @@ fn failing_result() -> String {
     passing_result(1).replace("\\\"pass\\\"", "\\\"product_failure\\\"")
 }
 
+/// `bay land --wait` in `view`, stopped just before its publishing push: its check ran and its
+/// evidence is on the remote, and trunk did not move. Returns the exit code (137).
+fn land_stopped_before_publish(test_box: &TestBox, view: &std::path::Path) -> i32 {
+    test_box
+        .bay(view)
+        .env("BAY_TEST_KILL_AT", "before-publish")
+        .args(["--json", "land", "--wait"])
+        .output()
+        .unwrap()
+        .status
+        .code()
+        .unwrap_or(-1)
+}
+
 /// What two lands of one tree end in.
 struct TwoRuns {
     first: (i32, serde_json::Value),
@@ -157,9 +166,9 @@ struct TwoRuns {
     moved: bool,
 }
 
-/// Two changes make the same edit and land one after the other, so the second candidate has
-/// the first one's tree (on the trunk the first one made, or on the same trunk when the first
-/// did not land). The one required check `tests` answers `first` (shell that prints a result,
+/// Two changes make the same edit on one trunk, so the second candidate has the first one's
+/// tree and base. A first run that passes stops before it publishes (a tree on trunk would end
+/// `no_effect`, G213); one that fails is refused, as before. The one required check `tests` answers `first` (shell that prints a result,
 /// or exits with none) on its first run and `second` on the next; `extra` is appended to its
 /// `[[check]]` table. Reuse is off, so the second change runs the check again, and its verdict
 /// is judged over every record on the tree.
@@ -189,8 +198,25 @@ fn two_runs_on_one_tree(first: &str, second: &str, extra: &str) -> TwoRuns {
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (_, one) = test_box.start_and_edit(&repo);
     let (_, two) = test_box.start_and_edit(&repo);
-    let first = result_json(test_box.bay(&one).args(["land", "--wait"]));
+    // A first run that passes stops before it publishes, so its tree is a candidate, not trunk:
+    // a tree already on trunk would end `no_effect` (G213). It reads as code 0, `checked`.
     let trunk = test_box.git_bare(&remote, &["rev-parse", "main"]);
+    let mut stopped = test_box.bay(&one);
+    stopped.env("BAY_TEST_KILL_AT", "before-publish");
+    let out = stopped.args(["--json", "land", "--wait"]).output().unwrap();
+    let first = if out.status.code() == Some(137) {
+        (
+            0,
+            serde_json::json!({"decision": "checked", "published": false}),
+        )
+    } else {
+        let text = String::from_utf8(out.stdout).unwrap();
+        (
+            out.status.code().unwrap_or(-1),
+            serde_json::from_str(&text).unwrap(),
+        )
+    };
+    assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
     let second = result_json(test_box.bay(&two).args(["land", "--wait"]));
     let moved = test_box.git_bare(&remote, &["rev-parse", "main"]) != trunk;
     TwoRuns {

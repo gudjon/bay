@@ -336,6 +336,10 @@ struct Ctx<'a> {
     /// Events this run wrote mid-operation, told to the notify adapter only once the operation
     /// reached its outcome, so a slow adapter never holds an operation past its lease.
     deferred: std::cell::RefCell<Vec<serde_json::Value>>,
+    /// Uncounted retries this process made, whatever the chain on the remote says: a remote
+    /// that takes no write (a held reftable lock) never records them, and a retry it never
+    /// records must still exhaust (G128).
+    retries_here: u32,
 }
 
 impl<'a> Ctx<'a> {
@@ -359,6 +363,7 @@ impl<'a> Ctx<'a> {
             online: true,
             beat_pushed: std::cell::RefCell::new(None),
             deferred: std::cell::RefCell::new(Vec::new()),
+            retries_here: 0,
         })
     }
 
@@ -1008,6 +1013,11 @@ fn after_refused_push(
         }
         return enqueue(ctx, op_id, revision, Reason::PublicationQueued).map(Some);
     }
+    // G128: another process on the remote holds a ref lock. Trunk did not move, so the same
+    // candidate is pushed again after a short wait, uncounted; bay never unlinks the lock.
+    if now == *trunk && held_lock(error) {
+        return lock_held(ctx, op_id, revision);
+    }
     if now == *trunk {
         return Ok(Some(
             BayResult::failed(format!("the publishing push was refused: {error}"))
@@ -1147,6 +1157,23 @@ fn hook_timed_out(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<B
     Ok(None)
 }
 
+/// Whether a refused push says a ref lock on the remote is held by another process: the files
+/// backend's `cannot lock ref '<name>': Unable to create '<name>.lock': File exists`, and the
+/// reftable backend's `cannot lock references`.
+fn held_lock(error: &str) -> bool {
+    error.contains("cannot lock ref")
+}
+
+/// G128: the remote's ref lock was held: retry the same candidate after a short wait (`None`),
+/// uncounted toward `TRUNK_MOVED` and the queue's deadline, as a hook timeout is.
+fn lock_held(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<BayResult>, String> {
+    if let Some(blocked) = uncounted_retry(ctx, op_id, revision, "remote ref lock held")? {
+        return Ok(Some(blocked));
+    }
+    std::thread::sleep(HOOK_RETRY_WAIT);
+    Ok(None)
+}
+
 /// Counts one uncounted retry (a `HOOK_TIMEOUT`, or a deadline release during a publish): the
 /// fifth blocks the operation with `PUBLISH_RETRY_EXHAUSTED` (`DESIGN` § 6). The count lives in
 /// the chain, since the next pass re-reads the record from the remote.
@@ -1156,8 +1183,10 @@ fn uncounted_retry(
     revision: &str,
     why: &str,
 ) -> Result<Option<BayResult>, String> {
+    ctx.retries_here += 1;
+    let here = ctx.retries_here;
     let op = ctx.op_mut(op_id);
-    op.publish_retries += 1;
+    op.publish_retries = op.publish_retries.max(here - 1) + 1;
     let retries = op.publish_retries;
     if retries < PUBLISH_RETRY_LIMIT {
         ctx.save(revision, None, &format!("{op_id}: {why}, retry {retries}"))?;

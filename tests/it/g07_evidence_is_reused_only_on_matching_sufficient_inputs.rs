@@ -318,23 +318,33 @@ fn the_same_tree_under_another_fixture_digest_runs_again() {
 }
 
 /// The same tree on another base: the adapter was given other `changed_paths`, so the first
-/// landing's record does not stand for the second (`INTERFACES` § 3).
+/// candidate's record does not stand for the second (`INTERFACES` § 3). Two changes make the
+/// same two edits; executor E1 checks the first and dies before it publishes. A third change
+/// then lands one of the two edits, so the second change's candidate has the first one's tree
+/// on a base with another tree. (A tree already on trunk would end `no_effect`, G213.)
 #[test]
 fn the_same_tree_on_another_base_is_rechecked() {
     let trunk = trunk(REUSE_ON, &policy(1, &[fixture('a')], ""), "pass", true);
     let first = trunk.start("CARD-1");
     let second = trunk.start("CARD-2");
-    let (code, landed) = trunk.land_wait(&first);
-    assert_eq!(code, 0, "{landed}");
-    let tree = trunk.trunk_tree();
+    for view in [&first, &second] {
+        std::fs::write(view.join("src/b.rs"), "fn b() {}\n").unwrap();
+    }
+    trunk.submit(&first);
+    trunk.checked_elsewhere(PRODUCER);
     assert_eq!(trunk.requests().len(), 1);
+    let part = trunk.start("CARD-3");
+    std::fs::remove_file(part.join("src/new.rs")).unwrap();
+    std::fs::write(part.join("src/b.rs"), "fn b() {}\n").unwrap();
+    trunk.produce_as(&trunk.repo, OTHER_PRODUCER);
+    let (code, landed) = trunk.land_wait(&part);
+    assert_eq!(code, 0, "{landed}");
     let (code, landed) = trunk.land_wait(&second);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(trunk.trunk_tree(), tree, "the same tree");
-    assert_eq!(trunk.test_box.trunk_change_ids(&trunk.remote).len(), 2);
     let ran = trunk.requests();
-    assert_eq!(ran.len(), 2, "rechecked on its own base");
-    assert_ne!(ran[0]["changed_paths"], ran[1]["changed_paths"]);
+    assert_eq!(ran.len(), 3, "rechecked on its own base: {ran:?}");
+    assert_eq!(ran[0]["candidate"]["tree"], ran[2]["candidate"]["tree"]);
+    assert_ne!(ran[0]["changed_paths"], ran[2]["changed_paths"]);
 }
 
 /// A refusal that rests on a reused `product_failure` says what to repair (§ 8), as one that

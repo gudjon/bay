@@ -37,6 +37,7 @@ mod g101_a_live_claim_in_the_same_tree_denies_a_held_path;
 mod g103_each_fact_has_one_definition;
 mod g10_every_refusal_says_what_to_do_next;
 mod g11_a_view_is_never_half_made;
+mod g128_a_held_ref_lock_is_retried_and_never_unlinked;
 mod g12_failures_record_themselves;
 mod g138_a_box_serves_only_the_environments_it_declares;
 mod g13_a_submission_outlives_its_session;
