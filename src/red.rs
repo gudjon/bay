@@ -15,6 +15,7 @@
 //! naming the owner and the ways out; a change that names the owning change in `--fixes`, an
 //! undo of it, or a superseding change is never refused.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::git::Git;
@@ -23,8 +24,10 @@ use crate::registry::Registry;
 /// How many first-parent trunk commits a red judgement reads back.
 pub const WINDOW: usize = 50;
 
-/// Trunk red on one post-publication check.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Trunk red on one post-publication check. A `bay watch` cursor carries the red checks it saw
+/// in this shape (G244b).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Red {
     pub check: String,
     pub environment: String,
@@ -41,6 +44,15 @@ impl Red {
     pub fn to_json(&self) -> Value {
         json!({"check": self.check, "environment": self.environment, "paths": self.paths,
             "landing": self.landing, "change": self.change})
+    }
+
+    /// Whether this is the same red as `other`: the same check, owned by the same landing. Its
+    /// paths may differ, after a policy edit.
+    #[must_use]
+    pub fn same(&self, other: &Self) -> bool {
+        self.check == other.check
+            && self.environment == other.environment
+            && self.landing == other.landing
     }
 
     /// Whether a change touching `changed` lands on this red.

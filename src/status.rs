@@ -297,12 +297,7 @@ fn leftovers(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
         // the published revision. Newer work is kept, never cleaned away.
         let mut newer_work = false;
         if landed && view::exists(&path) {
-            let published = record
-                .operations
-                .iter()
-                .rev()
-                .find(|op| op.state == crate::change::OpState::Published)
-                .map_or_else(|| latest.clone(), |op| op.revision.clone());
+            let published = last_revision(&record, &latest);
             newer_work =
                 view::uncheckpointed(&path, &published).map_err(|error| error.message())?;
             let next = if newer_work {
@@ -326,6 +321,19 @@ fn leftovers(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
     }
     out.extend(stale_inflight(repo, &chain)?);
     Ok(out)
+}
+
+/// The revision a view is measured against once its change ended (§ 9a): the change's last
+/// published operation's, else its `latest` draft. `leftovers` and the G97 release
+/// (`crate::start`) both read it, so a view `status` calls releasable is one `start` may release.
+#[must_use]
+pub fn last_revision(record: &ChangeRecord, latest: &str) -> String {
+    record
+        .operations
+        .iter()
+        .rev()
+        .find(|op| op.state == crate::change::OpState::Published)
+        .map_or_else(|| latest.to_owned(), |op| op.revision.clone())
 }
 
 /// The in-flight refs this store still holds whose operation ended or is gone (G173): an
@@ -865,7 +873,7 @@ fn post_checks(repo: &Repo, landed: Option<&crate::publish::Found>, read: &Read)
     let pending = |rows: &[Value]| rows.iter().any(|row| row["state"] == "pending");
     let rows = match judge() {
         Ok(rows) if pending(&rows) => {
-            repo.fetch_evidence(&crate::signing::Keys::load(&repo.git).producer_name);
+            repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
             judge()
         }
         other => other,

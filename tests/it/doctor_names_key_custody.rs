@@ -207,3 +207,65 @@ fn a_hardware_key_an_agent_key_or_no_key_is_green() {
         .unwrap();
     assert_eq!(listed["hardware"], true, "{custody}");
 }
+
+/// G243: two actors run sessions under this account, which can read the agent key: bay cannot
+/// prove which actor signed, and says so. Advisory: the box is not refused. One actor, a hardware
+/// agent key, or no agent key at all leaves the row green.
+#[test]
+fn actors_sharing_an_os_account_are_named_and_unproven() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let dir = repo.join(".git/bay/sessions");
+    std::fs::create_dir_all(&dir).unwrap();
+    // The shape the session hook writes: the actor is a name and a session.
+    for (session, actor) in [("s-1", "actor-a"), ("s-2", "actor-b"), ("s-3", "actor-a")] {
+        std::fs::write(
+            dir.join(format!("{session}.jsonl")),
+            format!(
+                "{{\"schema\":\"bay.session/1\",\"session\":\"{session}\",\"actor\":{{\"name\":\"{actor}\",\"session\":\"{session}\"}},\"event\":\"session-start\"}}\n"
+            ),
+        )
+        .unwrap();
+    }
+    let doctor = || {
+        let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
+        assert_eq!(code, 0, "{result}");
+        assert_ne!(result["reason"], "KEY_EXPOSED", "{result}");
+        row(&result, "key-custody").clone()
+    };
+
+    // Two actors but no agent key: there is nothing to sign as another actor with.
+    let custody = doctor();
+    assert_eq!(custody["state"], "green", "{custody}");
+    assert_eq!(custody["actor_proof"], "none", "{custody}");
+
+    let key = fake_key(&test_box, "agent");
+    test_box.git_ok(&repo, &["config", "bay.agentKey", key.to_str().unwrap()]);
+    let custody = doctor();
+    assert_eq!(custody["actor_proof"], "account", "{custody}");
+    assert_eq!(
+        custody["actors"],
+        serde_json::json!(["actor-a", "actor-b"]),
+        "{custody}"
+    );
+    assert_eq!(custody["state"], "degraded", "{custody}");
+    assert!(custody["actor_note"].is_string(), "{custody}");
+
+    // A hardware agent key signs only with a touch on its device: the key proves who signed.
+    std::fs::write(
+        key.with_extension("pub"),
+        "sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIDgOPZsmzgIilFlX+FEXSGHrntiIAzexLc6I0f+I9/4qAAAAD3NzaDpiYXktcmVsZWFzZQ== agent\n",
+    )
+    .unwrap();
+    let custody = doctor();
+    assert_eq!(custody["state"], "green", "{custody}");
+    assert_eq!(custody["actor_proof"], "key", "{custody}");
+    std::fs::remove_file(key.with_extension("pub")).unwrap();
+
+    // One actor, in two sessions: the key proves who signed.
+    std::fs::remove_file(dir.join("s-2.jsonl")).unwrap();
+    let custody = doctor();
+    assert_eq!(custody["state"], "green", "{custody}");
+    assert_eq!(custody["actor_proof"], "key", "{custody}");
+    assert!(custody.get("actor_note").is_none(), "{custody}");
+}

@@ -63,6 +63,21 @@ fn a_stated_executor_with_no_sandbox_and_no_choice_is_red() {
     let sandbox = row(&result, "sandbox");
     assert_eq!(sandbox["required"], true, "{result}");
     assert_eq!(sandbox["state"], "red", "{result}");
+    let recovery = sandbox["recovery"].as_str().unwrap();
+    assert!(!recovery.contains("AppArmor"), "{result}");
+
+    // G62b: under the kernel's user-namespace restriction, the red row names its fix, and still
+    // the choice to run without a sandbox.
+    test_box.userns_restricted(true);
+    let (_, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let recovery = row(&result, "sandbox")["recovery"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(recovery.contains("AppArmor"), "{result}");
+    assert!(recovery.contains("/fakebin/bwrap"), "{result}");
+    assert!(recovery.contains("bay.executorSandbox none"), "{result}");
+    test_box.userns_restricted(false);
 
     test_box.choose_unsandboxed(true);
     let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));

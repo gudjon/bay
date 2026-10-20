@@ -144,6 +144,115 @@ pub fn set_journal(repo: &Repo, id: &str, state: Journal) -> Result<(), String> 
     crate::durable::rename(&tmp, &path).map_err(|error| format!("{}: {error}", path.display()))
 }
 
+/// What [`release_ended`] knows of one ended change (landed, abandoned or `no_effect`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ended {
+    /// The revision the change ended with ([`crate::status::last_revision`]).
+    pub revision: String,
+    /// When the change ended, in Unix seconds.
+    pub at_unix: u64,
+    /// The commits bay itself leaves a view's `HEAD` at: the change's drafts and bases. Any
+    /// other `HEAD` but `revision` is a commit made in the view.
+    pub placed: Vec<String>,
+}
+
+/// G97: removes this machine's views of ended changes whose end is `window` or more ago.
+/// `ended` names each such change, and `None` for one that has not ended or whose view is in
+/// use. Right before each removal it checks that the view holds nothing newer than the revision
+/// the change ended with: its `HEAD` is the revision or a commit bay placed, its files equal the
+/// revision's tree, and it has no untracked files. Files the view's ignore rules match are not
+/// work and go with it. A directory that is not a worktree of this repository (no `.git`, or a
+/// damaged one) and a locked worktree are kept, and so is a view whose worktree git does not
+/// remove: nothing is deleted by hand. The view's worktree and its journal both go, so
+/// `bay status` no longer lists it; a view whose directory is already gone loses its journal.
+///
+/// One view's fault keeps that view and the pass goes on. Returns the ids it released.
+#[must_use]
+pub fn release_ended(
+    repo: &Repo,
+    window: std::time::Duration,
+    ended: &dyn Fn(&str) -> Option<Ended>,
+) -> Vec<String> {
+    let now = unix_now();
+    all(repo)
+        .into_iter()
+        .filter(|id| {
+            ended(id).is_some_and(|change| {
+                now.saturating_sub(change.at_unix) >= window.as_secs()
+                    && release(repo, id, &change).unwrap_or(false)
+            })
+        })
+        .collect()
+}
+
+/// Releases the view of ended change `id` when it holds nothing newer; whether it did.
+fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
+    let path = repo.view_path(id);
+    // Git names a worktree's administrative directory after the view's own directory.
+    let lock = repo.common_dir.join("worktrees").join(id).join("locked");
+    if lock.exists() {
+        return Ok(false);
+    }
+    match std::fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(GitError::Spawn(error)),
+        Ok(_) => {
+            let Some(admin) = worktree_admin(repo, &path) else {
+                return Ok(false);
+            };
+            if admin.join("locked").exists() || !holds_nothing_newer(&path, ended)? {
+                return Ok(false);
+            }
+            let path_text = path.display().to_string();
+            repo.git
+                .run(&["worktree", "remove", "--force", &path_text])?;
+        }
+    }
+    let _ = repo.git.run(&["worktree", "prune"]);
+    match std::fs::remove_file(journal_path(repo, id)) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(GitError::Spawn(error)),
+        _ => Ok(true),
+    }
+}
+
+/// The administrative directory (`<common-dir>/worktrees/<name>`) of the worktree whose top is
+/// `path`, when it is a worktree of this repository; `None` for a directory with no `.git`
+/// file, a damaged one, or another repository's.
+fn worktree_admin(repo: &Repo, path: &Path) -> Option<PathBuf> {
+    if !path.join(".git").is_file() {
+        return None;
+    }
+    let listed = Git::new(path)
+        .run(&[
+            "rev-parse",
+            "--path-format=absolute",
+            "--show-toplevel",
+            "--git-dir",
+            "--git-common-dir",
+        ])
+        .ok()?;
+    let mut lines = listed.lines().map(|line| Path::new(line).canonicalize());
+    let (Some(Ok(top)), Some(Ok(admin)), Some(Ok(common))) =
+        (lines.next(), lines.next(), lines.next())
+    else {
+        return None;
+    };
+    let worktrees = common.join("worktrees");
+    let ours = top == path.canonicalize().ok()?
+        && common == repo.common_dir.canonicalize().ok()?
+        && admin.parent() == Some(worktrees.as_path());
+    ours.then_some(admin)
+}
+
+/// Whether the view at `path` holds nothing newer than the revision its change ended with.
+fn holds_nothing_newer(path: &Path, ended: &Ended) -> Result<bool, GitError> {
+    let head = Git::new(path).run(&["rev-parse", "--verify", "HEAD"])?;
+    if head != ended.revision && !ended.placed.contains(&head) {
+        return Ok(false);
+    }
+    Ok(!uncheckpointed(path, &ended.revision)?)
+}
+
 /// Removes a half-made view so it can be created again.
 ///
 /// # Errors

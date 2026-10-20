@@ -113,6 +113,16 @@ impl TestBox {
         write_executable(&self.fakebin.join("bwrap"), "#!/bin/sh\nexit 1\n");
     }
 
+    /// Makes this box's kernel report that `AppArmor` restricts unprivileged user namespaces,
+    /// or not (a new box reports nothing).
+    pub fn userns_restricted(&self, restricted: bool) {
+        std::fs::write(
+            self.path().join("userns-restrict"),
+            if restricted { "1\n" } else { "0\n" },
+        )
+        .unwrap();
+    }
+
     /// Sets or clears this box's choice to run checks with no sandbox, the global Git config
     /// `bay.executorSandbox = none` (ruling R14). A new test box has made that choice, so a
     /// machine without a sandbox still runs the suite's checks.
@@ -141,6 +151,17 @@ impl TestBox {
                 "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = --version ]; then echo \"git version {version}\"; exit 0; fi\ndone\nexec \"{real}\" \"$@\"\n"
             ),
         };
+        write_executable(&self.fakebin.join("git"), &script);
+    }
+
+    /// Every `git` on this box's `PATH` appends its arguments to `log`, each ended by `\x1f`
+    /// and the call by `\x1e`, in one write, then runs the real git (G171).
+    pub fn log_git_calls(&self, log: &Path) {
+        let real = self.real_git.display();
+        let script = format!(
+            "#!/bin/sh\nline=$(printf '%s\\037' \"$@\")\nprintf '%s\\036' \"$line\" >> '{}'\nexec \"{real}\" \"$@\"\n",
+            log.display()
+        );
         write_executable(&self.fakebin.join("git"), &script);
     }
 
@@ -200,7 +221,12 @@ impl TestBox {
             .env("HOME", &self.home)
             .env("GIT_CONFIG_GLOBAL", &self.global_config)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CEILING_DIRECTORIES", self.path());
+            .env("GIT_CEILING_DIRECTORIES", self.path())
+            // The host's user-namespace restriction never reaches a test: see `userns_restricted`.
+            .env(
+                "BAY_TEST_USERNS_RESTRICT",
+                self.path().join("userns-restrict"),
+            );
         cmd
     }
 
@@ -214,7 +240,12 @@ impl TestBox {
             .env("HOME", &self.home)
             .env("GIT_CONFIG_GLOBAL", &self.global_config)
             .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CEILING_DIRECTORIES", self.path());
+            .env("GIT_CEILING_DIRECTORIES", self.path())
+            // The host's user-namespace restriction never reaches a test: see `userns_restricted`.
+            .env(
+                "BAY_TEST_USERNS_RESTRICT",
+                self.path().join("userns-restrict"),
+            );
         cmd
     }
 
@@ -225,6 +256,11 @@ impl TestBox {
             .env("GIT_CONFIG_GLOBAL", &self.global_config)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CEILING_DIRECTORIES", self.path())
+            // The host's user-namespace restriction never reaches a test: see `userns_restricted`.
+            .env(
+                "BAY_TEST_USERNS_RESTRICT",
+                self.path().join("userns-restrict"),
+            )
             .env("GIT_AUTHOR_NAME", "bay test")
             .env("GIT_AUTHOR_EMAIL", "test@bay.invalid")
             .env("GIT_COMMITTER_NAME", "bay test")

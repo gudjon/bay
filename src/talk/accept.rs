@@ -6,7 +6,9 @@
 //! registry actors, the root commit signed by the sender's agent key at `sent`), and writes the ack
 //! on the same chain, signed by the recipient's key and naming its session. A talk that fails
 //! accept is listed as refused and gets no ack. An accepted talk that supersedes another of this
-//! recipient's talks closes that one as `superseded`, naming its successor (ruling T1). An acked
+//! recipient's talks closes that one as `superseded`, naming its successor (ruling T1). A
+//! reviewer's talk about a change that stands beside another open talk of that reviewer about
+//! that change, one this box acked or an earlier one, is refused (G149b). An acked
 //! delivery talk about a change closes as `answered` once a landing on trunk names that change in
 //! `Fixes:`, `Reverts:` or `Supersedes:`, naming the landing (G148). Then every
 //! chain this machine moved is pushed. A push the host refuses (another session acked first)
@@ -28,13 +30,14 @@ use serde_json::{Value, json};
 use super::send::{Pushed, agent_key, fetch_matching, push};
 use super::{
     ANSWERS, TALK_PREFIX, TALK_SCHEMA, Talk, check_actors, check_body, entry_commit, files,
-    split_values, talks_matching, talks_where,
+    open_findings, split_values, talks_matching, talks_where,
 };
 use crate::change::{Actor, Chain, change_ref};
 use crate::clock::{now_rfc3339, unix_of};
 use crate::ids::is_change_id;
 use crate::registry::{KeyClass, Registry};
 use crate::repo::Repo;
+use crate::result::Reason;
 use crate::signing;
 
 /// Accepts this actor's new talks and acks them; `None` without a key registry, where no talk
@@ -126,22 +129,23 @@ fn accept(repo: &Repo, registry: &Registry) -> Result<Outcome, String> {
     };
     fetch_matching(repo, &format!("{prefix}*"));
     let mut outcome = Outcome::new("accepted");
-    for talk in talks_matching(&repo.git, &prefix)? {
+    let talks = talks_matching(&repo.git, &prefix)?;
+    for talk in &talks {
         if talk.has("ack") {
             continue;
         }
-        match verify(repo, registry, &talk, &me.name) {
+        match verify(repo, registry, talk, &me.name, &talks) {
             Ok(()) => {
                 // G58, G53: the wake adapter is asked once, at accept, and its answer is on the
                 // ack, so the sender sees whether its talk woke the recipient.
-                let wake = super::wake::wake(repo, &talk, &me);
+                let wake = super::wake::wake(repo, talk, &me);
                 let ack = json!({"schema": TALK_SCHEMA, "entry": "ack", "talk": talk.id,
                     "ack": true, "actor": {"name": me.name, "session": me.session},
                     "at": now_rfc3339(), "wake": wake});
                 // One talk whose ack cannot be written here (a sibling session moved its ref,
                 // a lock) is that talk's failure, not the whole accept's.
-                match append(repo, &talk, &ack, &key, &me.name) {
-                    Ok(()) => outcome.acked.push(talk.id),
+                match append(repo, talk, &ack, &key, &me.name) {
+                    Ok(()) => outcome.acked.push(talk.id.clone()),
                     Err(why) => outcome.failed.push(json!({"talk": talk.id, "why": why})),
                 }
             }
@@ -169,8 +173,16 @@ fn append(
 }
 
 /// Accept's check of a talk to `me`: the body's rules, the registry actors, and the root commit:
-/// `talk.json` alone, the same body, signed by the sender's agent key, committed at `sent`.
-fn verify(repo: &Repo, registry: &Registry, talk: &Talk, me: &str) -> Result<(), String> {
+/// `talk.json` alone, the same body, signed by the sender's agent key, committed at `sent`. A
+/// reviewer's talk also stands beside no other open talk of that reviewer about its change, among
+/// `talks` (G149b).
+fn verify(
+    repo: &Repo,
+    registry: &Registry,
+    talk: &Talk,
+    me: &str,
+    talks: &[Talk],
+) -> Result<(), String> {
     check_body(&talk.body).map_err(|refusal| refusal.text())?;
     check_actors(registry, &talk.body).map_err(|refusal| refusal.text())?;
     if talk.body["who"] != me || talk.body["id"] != talk.id.as_str() || talk.who != me {
@@ -212,6 +224,20 @@ fn verify(repo: &Repo, registry: &Registry, talk: &Talk, me: &str) -> Result<(),
         let _ = repo.fetch_refs(&[crate::evidence::notes_ref(from)]);
         super::reviewed(git, registry, &repo.trunk_tracking_ref(), &talk.body)
             .map_err(|refusal| refusal.text())?;
+        // G149b: one open talk per reviewer and change. Of two that a host without bay's hook let
+        // through, the one this box already acked, or else the earlier one, stands.
+        let all: Vec<&Talk> = talks.iter().collect();
+        if let Some(open) = open_findings(&all, &talk.body)
+            .into_iter()
+            .find(|open| open.has("ack") || (open.sent(), &open.id) < (talk.sent(), &talk.id))
+        {
+            return Err(format!(
+                "{}: reviewer {from} holds open talk {} about change {}; a reviewer holds one open talk per change, and a later finding supersedes it",
+                Reason::TalkBacklog.code(),
+                open.id,
+                talk.body["change"].as_str().unwrap_or_default()
+            ));
+        }
     }
     let time = git
         .run(&["show", "-s", "--format=%ct", root])

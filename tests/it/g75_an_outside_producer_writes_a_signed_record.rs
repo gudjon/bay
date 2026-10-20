@@ -59,12 +59,7 @@ fn reviewed() -> (TestBox, PathBuf, PathBuf, [String; 2], PathBuf, TestKeys) {
         assert_eq!(code, 0, "{result}");
         landed.push(result["detail"]["commit"].as_str().unwrap().to_owned());
     }
-    let box_dir = test_box.clone_of(&remote, "reviewer-box");
-    test_box.git_ok(&box_dir, &["config", "bay.reviewerName", REVIEWER]);
-    test_box.git_ok(
-        &box_dir,
-        &["config", "bay.reviewerKey", reviewer.to_str().unwrap()],
-    );
+    let box_dir = reviewer_box(&test_box, &remote, "reviewer-box", &reviewer);
     (
         test_box,
         remote,
@@ -73,6 +68,17 @@ fn reviewed() -> (TestBox, PathBuf, PathBuf, [String; 2], PathBuf, TestKeys) {
         reviewer,
         keys,
     )
+}
+
+/// A clone of `remote` that records reviews as `review-1`, signed by `key`.
+fn reviewer_box(test_box: &TestBox, remote: &Path, name: &str, key: &Path) -> PathBuf {
+    let box_dir = test_box.clone_of(remote, name);
+    test_box.git_ok(&box_dir, &["config", "bay.reviewerName", REVIEWER]);
+    test_box.git_ok(
+        &box_dir,
+        &["config", "bay.reviewerKey", key.to_str().unwrap()],
+    );
+    box_dir
 }
 
 fn record(test_box: &TestBox, dir: &Path, args: &[&str]) -> (i32, serde_json::Value) {
@@ -265,4 +271,121 @@ fn a_review_needs_the_reviewer_key_and_a_verdict() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// The remote refuses every notes push until the hook is removed again.
+fn refuse_notes_pushes(remote: &Path) -> PathBuf {
+    let hook = remote.join("hooks/pre-receive");
+    std::fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    std::fs::write(&hook, "#!/bin/sh\ngrep -q refs/notes/ && exit 1\nexit 0\n").unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    hook
+}
+
+/// The reviewer's records in `dir`'s local notes, about `commit`.
+fn held(test_box: &TestBox, dir: &Path, commit: &str) -> Vec<EvidenceRecord> {
+    let git = Git::new(dir);
+    let tree = test_box.git_ok(dir, &["rev-parse", &format!("{commit}^{{tree}}")]);
+    evidence::producer_records(&git, REVIEWER, &tree)
+        .unwrap()
+        .into_iter()
+        .filter(|record| record.subject.commit == commit)
+        .collect()
+}
+
+fn review(commit: &str) -> [&str; 6] {
+    ["--kind", "review", "--verdict", "pass", "--commit", commit]
+}
+
+/// A record written here whose push failed is never lost to the next run's fetch: the writer's
+/// own notes ref is never overwritten from the remote, even when the remote already holds one,
+/// and the next run pushes it although that run writes nothing new.
+#[test]
+fn a_record_whose_push_failed_survives_the_next_run() {
+    let (test_box, remote, box_dir, [first, second], _, _) = reviewed();
+    // The remote holds the reviewer's notes ref.
+    let (code, pushed) = record(&test_box, &box_dir, &review(&first));
+    assert_eq!(code, 0, "{pushed}");
+    assert_eq!(on_remote(&test_box, &remote, &first).len(), 1);
+
+    // The remote refuses evidence pushes for a while: the second record stays here.
+    let hook = refuse_notes_pushes(&remote);
+    let (code, failed) = record(&test_box, &box_dir, &review(&second));
+    assert_ne!(code, 0, "the push was refused: {failed}");
+    assert_eq!(held(&test_box, &box_dir, &second).len(), 1, "kept here");
+    assert_eq!(on_remote(&test_box, &remote, &second).len(), 0);
+
+    // The remote takes pushes again. A run that writes nothing new (a rerun of the first) still
+    // fetches past the remote's older ref and pushes the second.
+    std::fs::remove_file(&hook).unwrap();
+    let (code, again) = record(&test_box, &box_dir, &review(&first));
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["detail"]["written"], 0, "{again}");
+    assert_eq!(held(&test_box, &box_dir, &second).len(), 1, "still here");
+    assert_eq!(on_remote(&test_box, &remote, &first).len(), 1);
+    assert_eq!(
+        on_remote(&test_box, &remote, &second).len(),
+        1,
+        "the record whose push failed reached the remote"
+    );
+}
+
+/// When another clone recorded under the same name, this box's notes ref is behind the
+/// remote's: the next run fast-forwards it, so its push is not refused forever.
+#[test]
+fn a_notes_ref_behind_the_remote_fast_forwards() {
+    let (test_box, remote, box_dir, [first, second], reviewer, _) = reviewed();
+    let (code, pushed) = record(&test_box, &box_dir, &review(&first));
+    assert_eq!(code, 0, "{pushed}");
+    let other = reviewer_box(&test_box, &remote, "reviewer-box-2", &reviewer);
+    let (code, pushed) = record(&test_box, &other, &review(&second));
+    assert_eq!(code, 0, "{pushed}");
+    assert_eq!(held(&test_box, &box_dir, &second).len(), 0);
+
+    let (code, again) = record(&test_box, &box_dir, &review(&first));
+    assert_eq!(code, 0, "{again}");
+    let notes = evidence::notes_ref(REVIEWER);
+    assert_eq!(
+        test_box.git_ok(&box_dir, &["rev-parse", &notes]),
+        test_box.git_bare(&remote, &["rev-parse", &notes]),
+        "fast-forwarded to the remote's"
+    );
+    assert_eq!(held(&test_box, &box_dir, &second).len(), 1, "{again}");
+    assert_eq!(on_remote(&test_box, &remote, &first).len(), 1);
+}
+
+/// When this box and the remote each hold records the other lacks, neither is overwritten: the
+/// run writes nothing and says the ref diverged.
+#[test]
+fn a_diverged_notes_ref_is_reported_and_left_alone() {
+    let (test_box, remote, box_dir, [first, second], reviewer, _) = reviewed();
+    let (code, pushed) = record(&test_box, &box_dir, &review(&first));
+    assert_eq!(code, 0, "{pushed}");
+    // A record here the remote lacks...
+    let hook = refuse_notes_pushes(&remote);
+    let (code, failed) = record(&test_box, &box_dir, &review(&second));
+    assert_ne!(code, 0, "{failed}");
+    std::fs::remove_file(&hook).unwrap();
+    // ...and one on the remote, from another clone under the same name, this box lacks.
+    let other = reviewer_box(&test_box, &remote, "reviewer-box-2", &reviewer);
+    let mut elsewhere = review(&first).to_vec();
+    elsewhere.extend(["--input", "clone=second"]);
+    let (code, pushed) = record(&test_box, &other, &elsewhere);
+    assert_eq!(code, 0, "{pushed}");
+
+    let notes = evidence::notes_ref(REVIEWER);
+    let here = test_box.git_ok(&box_dir, &["rev-parse", &notes]);
+    let there = test_box.git_bare(&remote, &["rev-parse", &notes]);
+    let (code, diverged) = record(&test_box, &box_dir, &review(&first));
+    assert_ne!(code, 0, "{diverged}");
+    assert!(
+        diverged["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("diverged")),
+        "{diverged}"
+    );
+    assert_eq!(test_box.git_ok(&box_dir, &["rev-parse", &notes]), here);
+    assert_eq!(test_box.git_bare(&remote, &["rev-parse", &notes]), there);
+    assert_eq!(held(&test_box, &box_dir, &second).len(), 1, "kept here");
+    assert_eq!(on_remote(&test_box, &remote, &second).len(), 0);
 }

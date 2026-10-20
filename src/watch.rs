@@ -25,6 +25,12 @@
 //! the stream with `change: null` and `outside_bay: true`. `off_first_parent` counts the
 //! commits in the same range reached only through a merge's other parent: they are never
 //! listed, and the count says so.
+//!
+//! A red trunk (G244, G244b) is derived, not logged: the cursor carries the red checks it saw,
+//! and a watch lists a `trunk_red` event for each red one it did not, and a `trunk_red_cleared`
+//! event for each it held that is no longer red (fixed, undone, passed or quarantined). Both
+//! are judged at the cursor's trunk, and without a cursor every red check is new. In a view
+//! only those whose paths cover the change's declared paths are listed; the cursor carries all.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -57,6 +63,10 @@ pub struct Cursor {
     /// carried through, so a cursor that holds talks reads the same here.
     #[serde(default)]
     pub talks: BTreeMap<String, String>,
+    /// The post checks trunk was red on at `trunk` (G244b). Left out when none was, so a cursor
+    /// with no red reads as one written before red was carried.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub red: Vec<crate::red::Red>,
 }
 
 impl Cursor {
@@ -79,6 +89,7 @@ impl Cursor {
         };
         if !cursor.trunk.as_deref().is_none_or(object_id)
             || !cursor.logs.values().all(|tip| object_id(tip))
+            || !cursor.red.iter().all(|red| object_id(&red.landing))
         {
             return Err(bad("an id is not an object id"));
         }
@@ -127,6 +138,17 @@ fn run(dir: &Path, since: Option<&Cursor>, landed_only: bool) -> Result<BayResul
         .git
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
         .map_err(|error| format!("the local cache holds no trunk: {}", error.message()))?;
+    // G244b: a red trunk turns on records a runner elsewhere writes after the landing, so a
+    // watch over a policy with post checks reads the other producers' evidence first.
+    if !landed_only
+        && fetched_at.is_some()
+        && crate::policy::load_at(&repo.git, &trunk)
+            .ok()
+            .flatten()
+            .is_some_and(|policy| !policy.post.is_empty())
+    {
+        repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
+    }
     // A watch the caller asked for may run a provider its cache has no answer for, as `status`
     // does (ruling R-A3-3); a hook that reads watch passes `Probe::Cached`.
     let detail = if landed_only {
@@ -192,10 +214,20 @@ pub fn collect(
         Some(record) => invalidations(repo, record, since, &reached, probe)?,
         None => Vec::new(),
     };
+    let registry = crate::registry::Registry::current(git).ok().flatten();
+    let reds = crate::red::red(git, &reached, registry.as_ref())?;
+    events.extend(red_events(
+        since
+            .map(|cursor| cursor.red.as_slice())
+            .unwrap_or_default(),
+        &reds,
+        record.as_ref(),
+    ));
     let next = Cursor {
         trunk: Some(reached),
         logs: read.tips,
         talks: since.map(|cursor| cursor.talks.clone()).unwrap_or_default(),
+        red: reds,
     };
     Ok(json!({
         "trunk": trunk,
@@ -235,10 +267,12 @@ pub fn collect_landed(
         (None, Some(_)) => BTreeMap::new(),
         (None, None) => crate::log::tips(git)?,
     };
+    // The red checks move with events, not trunk: a full watch from this cursor lists them.
     let next = Cursor {
         trunk: Some(reached.clone()),
         logs,
         talks: since.map(|cursor| cursor.talks.clone()).unwrap_or_default(),
+        red: since.map(|cursor| cursor.red.clone()).unwrap_or_default(),
     };
     Ok(json!({
         "trunk": trunk,
@@ -297,6 +331,41 @@ pub fn off_first_parent(git: &Git, from: Option<&str>, to: &str) -> Result<u64, 
             .map_err(|_| format!("git rev-list --count printed {text:?}"))
     };
     Ok(count(false)?.saturating_sub(count(true)?))
+}
+
+/// G244b: a `trunk_red` event for each check red `now` that was not red `before`, then a
+/// `trunk_red_cleared` event for each red `before` that no longer is, each in the shape of
+/// [`crate::red::Red::to_json`] with the event's `schema`, `id` and `kind`. The id names the
+/// check and the owning landing, so the same turn reads as the same event. In `record`'s view,
+/// only those whose paths cover its declared paths.
+fn red_events(
+    before: &[crate::red::Red],
+    now: &[crate::red::Red],
+    record: Option<&ChangeRecord>,
+) -> Vec<Value> {
+    let event = |kind: &str, red: &crate::red::Red| {
+        let mut event = red.to_json();
+        event["schema"] = json!(crate::log::EVENT_SCHEMA);
+        event["id"] = json!(format!(
+            "{kind}:{}:{}:{}",
+            red.check, red.environment, red.landing
+        ));
+        event["kind"] = json!(kind);
+        event
+    };
+    let declared = record.map(|record| inputs::paths(&record.declared_inputs));
+    let listed = |red: &&crate::red::Red| declared.as_ref().is_none_or(|paths| red.covers(paths));
+    let turned = now
+        .iter()
+        .filter(|red| !before.iter().any(|then| then.same(red)))
+        .filter(listed)
+        .map(|red| event("trunk_red", red));
+    let cleared = before
+        .iter()
+        .filter(|then| !now.iter().any(|red| red.same(then)))
+        .filter(listed)
+        .map(|then| event("trunk_red_cleared", then));
+    turned.chain(cleared).collect()
 }
 
 /// The event kinds about the acceptance policy, which is an input of every change (ruling R3).
@@ -440,6 +509,13 @@ mod tests {
             trunk: Some("a".repeat(40)),
             logs: [("exec-1".to_owned(), "b".repeat(64))].into(),
             talks: [("t1".to_owned(), "abcd".to_owned())].into(),
+            red: vec![crate::red::Red {
+                check: "suite".to_owned(),
+                environment: "local".to_owned(),
+                paths: Some(vec!["src/**".to_owned()]),
+                landing: "c".repeat(40),
+                change: None,
+            }],
         };
         let text = cursor.encode().unwrap();
         assert!(
@@ -456,6 +532,9 @@ mod tests {
             encode(r#"{"trunk":"main","logs":{}}"#),
             encode(r#"{"trunk":null,"logs":{"x":"HEAD"}}"#),
             encode(r#"{"trunk":null,"logs":{},"extra":1}"#),
+            encode(
+                r#"{"trunk":null,"logs":{},"red":[{"check":"s","environment":"e","paths":null,"landing":"HEAD","change":null}]}"#,
+            ),
         ] {
             assert!(Cursor::parse(&bad).is_err(), "{bad}");
         }

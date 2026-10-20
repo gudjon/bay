@@ -289,10 +289,12 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
 
 /// Sends `ask` from `sender`: every refusal first, then the commit and its push.
 fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Result<BayResult, Stop> {
-    let body = build(ask, sender, crate::live::unix_now())?;
+    let sent = crate::live::unix_now();
+    let mut body = build(ask, sender, sent)?;
     check_body(&body)?;
     check_actors(registry, &body)?;
-    let key = if super::sender_class(registry, &body) == Some(KeyClass::Reviewer) {
+    let reviewer = super::sender_class(registry, &body) == Some(KeyClass::Reviewer);
+    let key = if reviewer {
         // G149: a reviewer talks only about a landing it reviewed, under its reviewer key.
         let _ = repo.fetch_trunk();
         super::reviewed(&repo.git, registry, &repo.trunk_tracking_ref(), &body)?;
@@ -300,10 +302,13 @@ fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Resul
     } else {
         agent_key(&repo.git, registry, &sender.name)?
     };
-    let id = body["id"].as_str().unwrap_or_default().to_owned();
     let who = body["who"].as_str().unwrap_or_default().to_owned();
-    let name = talk_ref(&who, &id);
     fetch_matching(repo, &format!("{TALK_PREFIX}{who}/*"));
+    if reviewer {
+        body = later_finding(repo, ask, sender, sent, body)?;
+    }
+    let id = body["id"].as_str().unwrap_or_default().to_owned();
+    let name = talk_ref(&who, &id);
     if let Some(tip) = repo
         .git
         .ref_target(&name)
@@ -363,6 +368,61 @@ fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Resul
         }
         Pushed::NotNow(why) => Ok(sent_result(detail, "not_pushed", Some(why))),
     }
+}
+
+/// G149b: a reviewer holds one open talk per change, so its later finding on that change
+/// supersedes the open one. With no `--supersedes`, the body names the reviewer's open talk about
+/// the change; the same ask as that open talk is a retry of it, under its own `supersedes`. A
+/// `--supersedes` that leaves the open talk standing is `TALK_BACKLOG`, naming it.
+fn later_finding(
+    repo: &Repo,
+    ask: &Ask,
+    sender: &Actor,
+    sent: u64,
+    body: Value,
+) -> Result<Value, Stop> {
+    let who = body["who"].as_str().unwrap_or_default();
+    let talks = talks_where(&repo.git, &format!("{TALK_PREFIX}{who}/"), |talk| {
+        talk.from_name() == sender.name || talk.supersedes().is_some()
+    })?;
+    let all: Vec<&Talk> = talks.iter().collect();
+    let Some(open) = super::open_findings(&all, &body).first().copied() else {
+        return Ok(body);
+    };
+    let change = body["change"].as_str().unwrap_or_default();
+    if ask.supersedes.is_some() {
+        return Err(Refusal::new(
+            Reason::TalkBacklog,
+            format!(
+                "{} holds open talk {} to {who} about change {change}; a reviewer holds one open talk per change: supersede {} (or leave out --supersedes)",
+                sender.name, open.id, open.id
+            ),
+        )
+        .with("oldest", json!(open.id))
+        .with("open", json!(1))
+        .with("max", json!(1))
+        .into());
+    }
+    let unchanged = |body: &Value| {
+        let mut ask = ask_of(body);
+        if let Some(map) = ask.as_object_mut() {
+            map.remove("id");
+            map.remove("supersedes");
+        }
+        ask
+    };
+    let supersedes = if unchanged(&open.body) == unchanged(&body) {
+        open.supersedes().map(str::to_owned)
+    } else {
+        Some(open.id.clone())
+    };
+    let later = Ask {
+        supersedes,
+        ..ask.clone()
+    };
+    let body = build(&later, sender, sent)?;
+    check_body(&body)?;
+    Ok(body)
 }
 
 fn sent_result(mut detail: Value, state: &str, not_pushed: Option<String>) -> BayResult {

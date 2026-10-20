@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.1.8
+Pre-release.
+
+Speed
+- Commands run two to four times faster: bay no longer waits up to 20 ms after each Git call.
+
+Doctor
+- `key-custody` lists the actors whose sessions run under this account, and how a signature proves who signed.
+- Several actors under one account that can read the agent key make `key-custody` degraded, not red.
+- A red `sandbox` row names the AppArmor profile fix when the kernel restricts user namespaces.
+
+Views
+- `bay start` releases clean views of landed, abandoned or no-effect changes once past the retention window.
+- A view with changes, new commits, a lock, a live session, or your working directory is always kept.
+
+Evidence
+- `bay evidence record` keeps a record whose push failed, and pushes it on the next run.
+- It catches up when another clone recorded under the same name first, and reports a divergence.
+
+Talk
+- A reviewer's later finding on a change supersedes its open talk there, so the author sees one.
+
+Sandbox
+- On macOS, a check's own scratch under `/private/var` is no longer read as a reach outside.
+
+Trunk health
+- `bay status --fleet` lists the red checks, and marks each session or change working on red paths.
+- `bay watch` lists `trunk_red` when a post check turns trunk red, and `trunk_red_cleared` when it clears.
+
 ## 0.1.7
 Pre-release.
 

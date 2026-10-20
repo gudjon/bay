@@ -71,6 +71,7 @@ Common reasons:
 | `CHECK_FAILED` | Repair the change, then land again. |
 | `CHECK_UNKNOWN` | Wait for a result. Never treat it as a pass. |
 | `CHECK_FLAKY` | Tell the user: the check gives two answers for one tree. |
+| `TRUNK_RED` | Trunk is red on these paths. Wait, or fix the owner's change: `bay start --fixes <change>`. |
 | `COVERAGE_UNKNOWN` | Keep editing; land when coordination data is reachable. |
 | `CONFIG_MISSING` / `POLICY_MISSING` | The repository is not set up. Tell the user, or set it up if asked. |
 
@@ -80,8 +81,8 @@ Every code: https://getbay.io/docs/results
 
 | When | Run |
 | --- | --- |
-| See every machine and session on the repository | `bay status --fleet` |
-| See landings, events and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
+| See every machine and session on the repository, and who works on red paths (`on_red`) | `bay status --fleet` |
+| See landings, events (`trunk_red`, `trunk_red_cleared`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
 

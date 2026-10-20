@@ -82,7 +82,10 @@ fn run(dir: &Path, request: &Record) -> Result<BayResult, String> {
     };
     repo.fetch_trunk().map_err(|error| error.message())?;
     repo.fetch_registry();
-    repo.fetch_evidence(&crate::signing::Keys::load(git).producer_name);
+    // The writer's own notes ref is never overwritten from the remote: a record written here
+    // whose push failed would be lost. It only moves forward to the remote's.
+    refresh_own(&repo, &name)?;
+    repo.fetch_evidence(&crate::signing::Keys::load(git));
 
     // Every record is built and judged before any is written: a conflict or an oversized
     // record anywhere writes nothing.
@@ -120,15 +123,14 @@ fn run(dir: &Path, request: &Record) -> Result<BayResult, String> {
         }
     }
     let notes = evidence::notes_ref(&name);
-    if written > 0 {
-        git.run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
-            .map_err(|error| {
-                format!(
-                    "the records are written here but not pushed: {}",
-                    error.message()
-                )
-            })?;
-    }
+    // Pushed on every run, so a record an earlier run wrote but could not push goes too.
+    git.run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
+        .map_err(|error| {
+            format!(
+                "the records are written here but not pushed: {}",
+                error.message()
+            )
+        })?;
     let ids: Vec<&str> = built.iter().map(|(record, _)| record.id.as_str()).collect();
     let mut result = BayResult::ok(json!({
         "records": ids,
@@ -138,6 +140,49 @@ fn run(dir: &Path, request: &Record) -> Result<BayResult, String> {
     }));
     result.freshness = repo.freshness();
     Ok(result)
+}
+
+/// Brings `name`'s notes ref here up to the remote's, never losing a record written here. The
+/// remote's is fetched beside it, under [`crate::names::FETCH_EVIDENCE`]: none here takes the
+/// remote's, one behind it fast-forwards, and one ahead of it is kept (records an earlier run
+/// could not push). Diverged, neither is changed and nothing is written: another box records
+/// under the same name. Best effort when the remote holds none or cannot be reached: the
+/// push reports what is wrong.
+fn refresh_own(repo: &Repo, name: &str) -> Result<(), String> {
+    let git = &repo.git;
+    let own = evidence::notes_ref(name);
+    let fetched = format!("{}{name}", crate::names::FETCH_EVIDENCE);
+    let got = git.run(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        repo.remote(),
+        &format!("+{own}:{fetched}"),
+    ]);
+    let remote = git.ref_target(&fetched).ok().flatten();
+    let _ = git.run(&["update-ref", "-d", &fetched]);
+    let (Ok(_), Some(remote)) = (got, remote) else {
+        return Ok(());
+    };
+    let update = |old: &str| {
+        git.run(&["update-ref", &own, &remote, old])
+            .map(|_| ())
+            .map_err(|error| error.message())
+    };
+    let Some(local) = git.ref_target(&own).map_err(|error| error.message())? else {
+        // An empty old value: the ref must still not exist.
+        return update("");
+    };
+    if crate::publish::is_ancestor(git, &remote, &local)? {
+        // The same, or ahead by records an earlier run wrote here but could not push.
+        return Ok(());
+    }
+    if !crate::publish::is_ancestor(git, &local, &remote)? {
+        return Err(format!(
+            "{own} has diverged: here it is {local}, on the remote {remote}, and each holds records the other lacks (another box records as {name}); nothing is written and neither is changed"
+        ));
+    }
+    update(&local)
 }
 
 /// The name and key that sign a record of `kind`: the reviewer's for `review`, the

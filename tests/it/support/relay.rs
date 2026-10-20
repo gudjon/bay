@@ -65,6 +65,15 @@ impl Watcher {
                     if !in_flight.lock().unwrap().insert(request.clone()) {
                         continue;
                     }
+                    // The list was read before this insert, and a request served since then
+                    // has left `in_flight` already: its answer is renamed into place first, so
+                    // one that is answered (or gone with its scratch) is not served twice. A
+                    // second serve would run the check's shell twice: a doubled run log line,
+                    // a second trunk move.
+                    if request.join("r").exists() || !request.join("q").is_dir() {
+                        in_flight.lock().unwrap().remove(&request);
+                        continue;
+                    }
                     let (root, env, in_flight) =
                         (root.clone(), Arc::clone(&env), Arc::clone(&in_flight));
                     std::thread::spawn(move || {

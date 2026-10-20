@@ -40,6 +40,9 @@ pub const TALK: &str = "refs/bay/talk/";
 pub const FLEET: &str = "refs/bay/fleet/";
 /// `refs/bay/fetch/<Change-Id>`: a fetched remote chain, local only.
 pub const FETCH: &str = "refs/bay/fetch/";
+/// `refs/bay/fetch-evidence/<writer>`: the remote's copy of this machine's own evidence notes
+/// ref, local only, while `bay evidence record` compares the two.
+pub const FETCH_EVIDENCE: &str = "refs/bay/fetch-evidence/";
 /// The enrolment registry.
 pub const REGISTRY: &str = "refs/bay/registry";
 

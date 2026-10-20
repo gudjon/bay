@@ -864,8 +864,11 @@ fn sandbox_row(sandbox: &crate::check::Sandbox, runs_checks: bool, report: &mut 
             "state": "green", "note": "no check sandbox; this box runs no checks (agent-view role)"}),
         (Some(why), true) => {
             report.red(Reason::SandboxAbsent, Some("no check sandbox"));
+            let recovery = crate::check::apparmor_remedy_here().unwrap_or_else(|| {
+                "install the check sandbox, or choose to run checks without one: git config --global bay.executorSandbox none".to_owned()
+            });
             json!({"name": "sandbox", "kind": sandbox.kind, "required": true, "state": "red",
-                "note": why, "recovery": "install the check sandbox, or choose to run checks without one: git config --global bay.executorSandbox none"})
+                "note": why, "recovery": recovery})
         }
     };
     report.rows.push(row);

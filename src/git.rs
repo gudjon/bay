@@ -6,10 +6,16 @@
 //! 40-character object IDs, and never read `.git/refs` directly; ask Git.
 //!
 //! Every call stops at [`crate::result::GIT_CALL_TIMEOUT`].
+//!
+//! G171: a test build counts its Git spawns. With `BAY_TEST_GIT_TRACE` naming a file, each
+//! `git` this process runs appends one JSON line there when it ends: its subcommand, its
+//! duration in microseconds from spawn to exit, and its exit code (`null` when killed). A
+//! release build (`BAY_RELEASE_VERSION` set at build time) never reads the variable.
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::Instant;
 
@@ -330,6 +336,66 @@ impl Git {
     }
 }
 
+/// Test hooks are compiled in unless `scripts/release.sh` built this binary.
+const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+
+/// The file `BAY_TEST_GIT_TRACE` names, read once per process; `None` in a release build.
+fn trace_file() -> Option<&'static Path> {
+    static FILE: OnceLock<Option<PathBuf>> = OnceLock::new();
+    FILE.get_or_init(|| {
+        std::env::var_os("BAY_TEST_GIT_TRACE")
+            .filter(|value| TEST_HOOKS && !value.is_empty())
+            .map(PathBuf::from)
+    })
+    .as_deref()
+}
+
+/// G171: appends the trace line of one `git` spawn of `cmd` that started at `started` and
+/// ended with `code`, when `BAY_TEST_GIT_TRACE` names a file. Any other program is not
+/// traced. The line goes out in one write, so lines from concurrent calls do not interleave.
+pub(crate) fn trace(cmd: &Command, started: Instant, code: Option<i32>) {
+    let Some(file) = trace_file() else {
+        return;
+    };
+    if cmd.get_program() != "git" {
+        return;
+    }
+    let micros = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+    let mut line = serde_json::json!({
+        "sub": subcommand(cmd),
+        "us": micros,
+        "exit": code,
+        "pid": std::process::id(),
+    })
+    .to_string();
+    line.push('\n');
+    // The trace never changes what bay does: a file that cannot be written is skipped.
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .and_then(|mut out| out.write_all(line.as_bytes()));
+}
+
+/// The Git subcommand of `cmd`: its first argument past the global options bay puts before
+/// it (`-C <dir>`, `-c <key=value>`, `--git-dir=<dir>` and other `-` options); `--version` is
+/// its own. Empty when there is none.
+fn subcommand(cmd: &Command) -> String {
+    let mut args = cmd.get_args();
+    while let Some(arg) = args.next() {
+        let text = arg.to_string_lossy();
+        match &*text {
+            "-C" | "-c" => {
+                args.next();
+            }
+            "--version" => return text.into_owned(),
+            _ if text.starts_with('-') => {}
+            _ => return text.into_owned(),
+        }
+    }
+    String::new()
+}
+
 /// A bare repository holds `HEAD` and `objects/` at its top and has no `.git`.
 fn is_bare_dir(dir: &Path) -> bool {
     dir.join("HEAD").is_file() && dir.join("objects").is_dir() && !dir.join(".git").exists()
@@ -386,6 +452,7 @@ pub fn run_bounded_for(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(GitError::Spawn)?;
+    let started = Instant::now();
 
     let stdin_handle = match (input, child.stdin.take()) {
         (Some(bytes), Some(mut stdin)) => {
@@ -405,7 +472,16 @@ pub fn run_bounded_for(
     let stdout_handle = thread::spawn(move || read_to_end(&mut stdout));
     let stderr_handle = thread::spawn(move || read_to_end(&mut stderr));
 
-    let status = wait_until(&mut child, display, timeout)?;
+    let status = wait_until(&mut child, display, timeout);
+    trace(
+        &cmd,
+        started,
+        status
+            .as_ref()
+            .ok()
+            .and_then(std::process::ExitStatus::code),
+    );
+    let status = status?;
     if let Some(handle) = stdin_handle {
         // A child that exits without reading all input closes the pipe; its exit status decides.
         let _ = handle.join();
@@ -436,6 +512,9 @@ fn wait_until(
     timeout: std::time::Duration,
 ) -> Result<std::process::ExitStatus, GitError> {
     let started = Instant::now();
+    // Most git calls end within a few milliseconds, so the first polls come quickly and the
+    // pause doubles up to 20 ms: a fixed 20 ms pause cost every call about that much (G171).
+    let mut pause = std::time::Duration::from_millis(1);
     loop {
         if let Some(status) = child.try_wait().map_err(GitError::Spawn)? {
             return Ok(status);
@@ -448,7 +527,8 @@ fn wait_until(
                 secs: timeout.as_secs(),
             });
         }
-        thread::sleep(std::time::Duration::from_millis(20));
+        thread::sleep(pause);
+        pause = (pause * 2).min(std::time::Duration::from_millis(20));
     }
 }
 

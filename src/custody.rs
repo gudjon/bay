@@ -85,10 +85,40 @@ pub fn row(git: &Git, sessions: Option<&Path>) -> Custody {
         );
     }
     let exposed = !reasons.is_empty();
+    // G243: an agent key belongs to the session account, so when several actors run their
+    // sessions under this one account, any of them can sign as any other: bay cannot prove
+    // which actor signed. Advisory, never red: the box works, and the remedy is the site's.
+    let actors = sessions.map(|dir| account.actors(dir)).unwrap_or_default();
+    let agent_key_here = keys.iter().any(|key| {
+        key.class == "agent" && !key.hardware && key.file.is_some_and(|(_, _, readable)| readable)
+    });
+    let shared = agent_key_here && actors.len() > 1;
+    let agent_key = keys.iter().any(|key| key.class == "agent");
+    let actor_proof = if shared {
+        "account"
+    } else if agent_key {
+        "key"
+    } else {
+        "none"
+    };
+    let state = if exposed {
+        "red"
+    } else if shared {
+        "degraded"
+    } else {
+        "green"
+    };
     let mut row = json!({"name": "key-custody", "required": true,
-        "state": if exposed { "red" } else { "green" }, "uid": account.uid,
+        "state": state, "uid": account.uid,
         "keys": keys.iter().map(Key::to_json).collect::<Vec<_>>(),
-        "session_records": records, "passwordless_sudo": sudo});
+        "session_records": records, "passwordless_sudo": sudo,
+        "actors": actors, "actor_proof": actor_proof});
+    if shared {
+        row["actor_note"] = json!(format!(
+            "{} actors run sessions under this one OS account, which can read the agent keys: bay cannot prove which actor signed; give each actor its own OS account, or a hardware agent key",
+            actors.len()
+        ));
+    }
     if exposed {
         row["note"] = json!(format!(
             "a file-based signing key or a token beside it is readable by this account: {}",
@@ -148,6 +178,30 @@ impl Account {
             || (meta.uid() == self.uid && mode & 0o400 != 0)
             || (self.groups.contains(&meta.gid()) && mode & 0o040 != 0)
             || mode & 0o004 != 0
+    }
+
+    /// The actors named in the session records in `dir` this account wrote (G243).
+    fn actors(&self, dir: &Path) -> std::collections::BTreeSet<String> {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return std::collections::BTreeSet::new();
+        };
+        entries
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "jsonl"))
+            .filter(|entry| {
+                entry
+                    .metadata()
+                    .is_ok_and(|meta| meta.is_file() && meta.uid() == self.uid)
+            })
+            .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+            .flat_map(|text| {
+                text.lines()
+                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                    .filter_map(|line| line["actor"]["name"].as_str().map(str::to_owned))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// The session records in `dir` this account wrote: agent sessions run under it.

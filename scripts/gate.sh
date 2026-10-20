@@ -73,8 +73,64 @@ if rustup target list --installed 2>/dev/null | grep -qx x86_64-pc-windows-msvc;
 else
     echo "gate: check-windows skipped, not recorded: the x86_64-pc-windows-msvc target is not installed (rustup target add x86_64-pc-windows-msvc)" >&2
 fi
-run test-sha1-files env BAY_TEST_FORMATS=sha1/files cargo test -q
-run test-sha256-reftable env BAY_TEST_FORMATS=sha256/reftable cargo test -q
+# The two repository formats run at once by default: the tests are built once, then each
+# format runs the built test binaries on its own half of the CPUs this gate may use (its
+# affinity list, where taskset is present). BAY_GATE_SERIAL=1 runs them one after the other.
+# Either way each format records its pass only when every one of its tests passed.
+formats="sha1/files sha256/reftable"
+if [ "${BAY_GATE_SERIAL:-}" = 1 ]; then
+    for format in $formats; do
+        run "test-$(echo "$format" | tr / -)" env BAY_TEST_FORMATS="$format" cargo test -q
+    done
+else
+    echo "gate: build tests" >&2
+    # The gate's own scratch, under the target directory cargo already ignores.
+    logs="$root/target/gate"
+    mkdir -p "$logs"
+    cargo test -q --no-run --message-format=json >"$logs/build.json"
+    # The test harnesses only (built with the test profile): cargo also lists the binary and
+    # the examples it built.
+    binaries=$(grep -o '"profile":{[^}]*"test":true[^}]*}.*"executable":"[^"]*"' "$logs/build.json" |
+        sed 's/.*"executable":"//; s/"$//')
+    test -n "$binaries" || { echo "gate: no test binaries were built" >&2; exit 1; }
+    # This gate's CPUs, split in two; empty where taskset is absent.
+    cpus=$(taskset -cp $$ 2>/dev/null | sed 's/.*: //' | awk -F, '{
+        for (i = 1; i <= NF; i++) { n = split($i, r, "-"); for (c = r[1]; c <= r[n]; c++) l[k++] = c }
+        if (k < 2) exit
+        h = int(k / 2); a = l[0]; for (i = 1; i < h; i++) a = a "," l[i]
+        b = l[h]; for (i = h + 1; i < k; i++) b = b "," l[i]
+        print a " " b }')
+    # The script's own arguments stay as they are: the halves are read by position here.
+    half=1
+    pids=
+    for format in $formats; do
+        name="test-$(echo "$format" | tr / -)"
+        pin=$(echo "$cpus" | cut -s -d' ' -f"$half")
+        half=$((half + 1))
+        echo "gate: $name${pin:+ on CPUs $pin}" >&2
+        (
+            export BAY_TEST_FORMATS="$format"
+            for binary in $binaries; do
+                ${pin:+taskset -c "$pin"} "$binary" -q || exit 1
+            done
+            cargo test -q --doc
+        ) >"$logs/$name.log" 2>&1 &
+        pids="$pids $!:$name"
+    done
+    failed=
+    for entry in $pids; do
+        wait "${entry%%:*}" || failed="$failed ${entry#*:}"
+    done
+    for format in $formats; do
+        name="test-$(echo "$format" | tr / -)"
+        echo "gate: $name output" >&2
+        cat "$logs/$name.log" >&2
+    done
+    test -z "$failed" || { echo "gate: failed:$failed" >&2; exit 1; }
+    for format in $formats; do
+        run "test-$(echo "$format" | tr / -)" true
+    done
+fi
 evidence verify "$allowed" HEAD $checks $windows
 
 if [ "${1:-}" != "--no-push" ]; then

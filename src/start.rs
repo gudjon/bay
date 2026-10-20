@@ -50,9 +50,69 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         None => open(&repo, request),
     };
     let mut result = result.unwrap_or_else(BayResult::failed);
+    // G97: views of ended changes past the retention window go, newer work never.
+    let released = release_ended(&repo, dir);
+    if !released.is_empty()
+        && let Some(detail) = result
+            .detail
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        detail.insert("released_views".to_owned(), json!(released));
+    }
     // G80: every result says which trunk it reflects, and when that trunk was fetched.
     result.freshness = result.freshness.or_else(|| repo.freshness());
     result
+}
+
+/// G97: before a new change, release this machine's views of ended changes past the retention
+/// window, keeping any that holds newer work than the revision its change ended with. The view
+/// `dir` stands in, and the view of a live session on this machine (its latest work record line
+/// is fresh and not ended), are in use and kept.
+fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
+    let chain = Chain::new(&repo.git);
+    let mut in_use: Vec<String> = repo.view_change(dir).into_iter().collect();
+    let lines = crate::live::lines(repo).unwrap_or_default();
+    let rows = crate::live::rows_of(
+        lines,
+        crate::live::unix_now(),
+        repo.config.takeover().as_secs(),
+    );
+    in_use.extend(
+        rows.iter()
+            .filter_map(|row| row["change"].as_str().map(str::to_owned)),
+    );
+    let ended = |id: &str| {
+        if in_use.iter().any(|used| used == id) {
+            return None;
+        }
+        let (head, record) = chain.read(id).ok()?;
+        let ended = matches!(
+            record.state,
+            ChangeState::Landed | ChangeState::Abandoned | ChangeState::NoEffect
+        );
+        if !ended {
+            return None;
+        }
+        let mut placed = chain.drafts(id).ok()?;
+        let revision = crate::status::last_revision(&record, placed.first()?);
+        // The change ended with its chain's last state commit; a time that cannot be read is
+        // never past the window.
+        let at_unix: u64 = repo
+            .git
+            .run(&["log", "-1", "--format=%ct", &head])
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        placed.extend([record.base, record.base_first]);
+        Some(view::Ended {
+            revision,
+            at_unix,
+            placed,
+        })
+    };
+    view::release_ended(repo, repo.config.retention_window(), &ended)
 }
 
 fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {

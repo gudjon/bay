@@ -123,6 +123,47 @@ pub(crate) fn sandbox_kind() -> &'static str {
     }
 }
 
+/// The remedy for a Linux box whose `bwrap` is installed but cannot build a sandbox because
+/// `AppArmor` restricts unprivileged user namespaces (Ubuntu 24.04 and later): `bwrap` is where
+/// it is installed, and `restricted` is the contents of
+/// `kernel.apparmor_restrict_unprivileged_userns`.
+#[must_use]
+pub fn apparmor_remedy(bwrap: Option<&Path>, restricted: Option<&str>) -> Option<String> {
+    let bwrap = bwrap?;
+    restricted
+        .is_some_and(|value| value.trim() == "1")
+        .then(|| {
+            let bwrap = bwrap.display();
+            format!(
+                "bwrap is installed, but AppArmor restricts unprivileged user namespaces \
+             (kernel.apparmor_restrict_unprivileged_userns = 1): add an AppArmor profile for \
+             {bwrap} that allows userns (abi <abi/4.0>, profile bwrap {bwrap} \
+             flags=(unconfined) {{ userns, }}) in /etc/apparmor.d/bwrap and load it with \
+             apparmor_parser -r; or choose to run checks without a sandbox: \
+             git config --global {UNSANDBOXED_KEY} none"
+            )
+        })
+}
+
+/// Where this machine says whether `AppArmor` restricts unprivileged user namespaces; in a
+/// test build `BAY_TEST_USERNS_RESTRICT` names a file to read instead.
+const USERNS_RESTRICT: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
+const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+
+/// This machine's [`apparmor_remedy`], read from `PATH` and `/proc`.
+#[must_use]
+pub fn apparmor_remedy_here() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let bwrap = Some(on_path("bwrap")).filter(|path| path.is_absolute())?;
+    let file = std::env::var_os("BAY_TEST_USERNS_RESTRICT")
+        .filter(|_| TEST_HOOKS)
+        .map_or_else(|| PathBuf::from(USERNS_RESTRICT), PathBuf::from);
+    let restricted = std::fs::read_to_string(file).ok();
+    apparmor_remedy(Some(&bwrap), restricted.as_deref())
+}
+
 /// The box's choice to run checks with no sandbox (ruling R14): global Git config, never a
 /// repository's, as the update pin is the box's. Its one value is `none`.
 pub const UNSANDBOXED_KEY: &str = "bay.executorSandbox";
@@ -701,15 +742,31 @@ fn run_one(
 /// never one, though the scratch sits under the repository's git directory (G241): a shell's
 /// error about the check's own adapter is no reach outside.
 fn reaches_out(stderr: &str, place: &Place) -> bool {
-    let own: Vec<String> = [real(place.scratch), place.scratch.to_path_buf()]
-        .iter()
-        .map(|path| path.display().to_string())
-        .filter(|path| !path.is_empty())
-        .collect();
+    let own = forms(place.scratch);
     place.hidden.iter().any(|hidden| {
-        names_path_outside(stderr, &hidden.display().to_string(), &own)
-            || names_path_outside(stderr, &real(hidden).display().to_string(), &own)
+        forms(hidden)
+            .iter()
+            .any(|form| names_path_outside(stderr, form, &own))
     })
+}
+
+/// Each form a message may name `path` by: as given, its real path, and, for a path under
+/// macOS's `/private/var`, `/private/tmp` or `/private/etc`, the short form through the
+/// `/var`, `/tmp` or `/etc` link, which a shell prints when its `TMPDIR` or argument used it.
+fn forms(path: &Path) -> Vec<String> {
+    let mut forms = Vec::new();
+    for given in [path.to_path_buf(), real(path)] {
+        let given = given.display().to_string();
+        let short = ["/var", "/tmp", "/etc"].iter().find_map(|link| {
+            let rest = given.strip_prefix("/private")?.strip_prefix(link)?;
+            (rest.is_empty() || rest.starts_with('/')).then(|| format!("{link}{rest}"))
+        });
+        forms.extend(Some(given).into_iter().chain(short));
+    }
+    forms.retain(|form| !form.is_empty());
+    forms.sort();
+    forms.dedup();
+    forms
 }
 
 /// Whether `text` names `path` or a path inside it: an occurrence of `path` that starts and
@@ -1129,6 +1186,26 @@ mod tests {
             const { std::cell::Cell::new(false) };
     }
 
+    /// The `AppArmor` remedy is named only for an installed bwrap under the restriction, and
+    /// names that bwrap.
+    #[test]
+    fn the_apparmor_remedy_is_named_only_where_it_applies() {
+        let bwrap = std::path::Path::new("/opt/tools/bwrap");
+        let remedy = super::apparmor_remedy(Some(bwrap), Some("1\n")).unwrap();
+        assert!(remedy.contains("userns"), "{remedy}");
+        assert!(
+            remedy.contains("profile bwrap /opt/tools/bwrap"),
+            "{remedy}"
+        );
+        assert!(remedy.contains(super::UNSANDBOXED_KEY), "{remedy}");
+        assert!(super::apparmor_remedy(Some(bwrap), Some("0\n")).is_none());
+        assert!(
+            super::apparmor_remedy(None, Some("1\n")).is_none(),
+            "install bwrap first"
+        );
+        assert!(super::apparmor_remedy(Some(bwrap), None).is_none());
+    }
+
     /// § 7, G26: a mention of a hidden path that is the check's own scratch (which sits under
     /// the repository's git directory) is no reach outside; any other mention still is.
     #[test]
@@ -1147,6 +1224,22 @@ mod tests {
             names("/box/repo/.git/config: denied"),
             "the rest of .git stays hidden"
         );
+    }
+
+    /// § 7, G26 on macOS: a hidden path under `/private/var` is also named by its `/var` form,
+    /// which is how a shell prints it; a path that only shares the prefix gets no short form.
+    #[test]
+    fn a_private_path_is_also_named_by_its_short_form() {
+        let forms = |path: &str| super::forms(std::path::Path::new(path));
+        let hidden = forms("/private/var/folders/x/T/box/repo");
+        assert!(
+            hidden.contains(&"/var/folders/x/T/box/repo".to_owned()),
+            "{hidden:?}"
+        );
+        assert!(hidden.contains(&"/private/var/folders/x/T/box/repo".to_owned()));
+        assert!(forms("/private/tmp").contains(&"/tmp".to_owned()));
+        assert!(!forms("/private/variable/x").contains(&"/variable/x".to_owned()));
+        assert_eq!(forms("/box/repo"), vec!["/box/repo".to_owned()]);
     }
 
     /// § 7, G26: a hidden path is named by whole components only. A sibling that shares its

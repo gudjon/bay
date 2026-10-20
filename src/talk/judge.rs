@@ -8,7 +8,9 @@
 //! A `supersedes` names a talk this host holds, or this push brings, whose sender, or `decides`,
 //! is this sender, that is not closed and has no other successor (`TALK_SUPERSEDE_REFUSED`). The
 //! sender's open talks to `who`, the superseded one aside, number fewer than `BAY_TALK_OPEN_MAX`,
-//! counting this push's other creates by the same sender (`TALK_BACKLOG`, naming the oldest).
+//! counting this push's other creates by the same sender (`TALK_BACKLOG`, naming the oldest). A
+//! reviewer's delivery talk about a change stands beside no other open talk of that reviewer about
+//! that change, the one it supersedes aside (G149b, `TALK_BACKLOG` naming the open one).
 //!
 //! An append is one or more commits, each on the one before it, from the old tip; each keeps every
 //! file byte for byte (so a different body under the same id is refused) and adds the next
@@ -27,8 +29,8 @@ use serde_json::Value;
 use super::{
     ANSWERS, BAY_TALK_CLOCK_SKEW_S, BAY_TALK_MAX_BYTES, BAY_TALK_OPEN_MAX, ENTRIES_MAX, File,
     Known, STATUS_WORDS, TALK_FILE, TALK_PREFIX, Talk, backlog, check_actors, check_body,
-    check_entry, entry_name, files, is_talk_id, talk_ref, talks_matching, talks_where,
-    trailer_values,
+    check_entry, entry_name, files, is_talk_id, open_findings, talk_ref, talks_matching,
+    talks_where, trailer_values,
 };
 use crate::canonical::canonical;
 use crate::clock::unix_of;
@@ -646,6 +648,17 @@ fn create(push: &Push, new: &str, who: &str, id: &str) -> Result<(), String> {
         return Err(format!(
             "TALK_BACKLOG: {from} holds {open} open talks to {who} (BAY_TALK_OPEN_MAX {BAY_TALK_OPEN_MAX}); the oldest open one is {oldest}"
         ));
+    }
+    if super::sender_class(push.registry, &body) == Some(KeyClass::Reviewer) {
+        // G149b: a reviewer holds one open talk per change; a later finding supersedes it.
+        let talks: Vec<&Talk> = held.iter().chain(&pushed).collect();
+        if let Some(open) = open_findings(&talks, &body).first() {
+            return Err(format!(
+                "TALK_BACKLOG: reviewer {from} holds open talk {} to {who} about change {}; a reviewer holds one open talk per change, and a later finding supersedes it",
+                open.id,
+                body["change"].as_str().unwrap_or_default()
+            ));
+        }
     }
     Ok(())
 }

@@ -53,7 +53,7 @@ fn run(dir: &Path, request: &Missing) -> Result<BayResult, String> {
     // `freshness` says so.
     let fetched_at = repo.fetch_trunk().ok().map(|_| now_rfc3339());
     repo.fetch_registry();
-    repo.fetch_evidence(&crate::signing::Keys::load(&repo.git).producer_name);
+    repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
     let git = &repo.git;
     let trunk = git
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])

@@ -222,7 +222,8 @@ fn another_producers_record_on_the_same_tree_and_base_is_reused() {
 #[test]
 fn with_reuse_off_the_same_tree_and_base_is_rechecked() {
     let (trunk, added) = reuse_across_producers("", &policy(1, &[fixture('a')], ""), true);
-    // Seen once under a loaded run as 2; the requests say which candidate ran twice.
+    // Seen once under a loaded run as 2: the test's relay could serve one adapter request twice
+    // (`support::relay`), logging one run as two. The requests say which candidate ran twice.
     assert_eq!(added, 1, "rechecked, not reused: {:?}", trunk.requests());
 }
 

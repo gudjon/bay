@@ -452,9 +452,15 @@ fn stream(
     let mut child = cmd
         .spawn()
         .map_err(|error| Unmade::Failed(format!("failed to run git: {error}")))?;
+    let started = Instant::now();
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         let _ = child.kill();
-        let _ = child.wait();
+        let status = child.wait().ok();
+        crate::git::trace(
+            &cmd,
+            started,
+            status.as_ref().and_then(std::process::ExitStatus::code),
+        );
         return Err(Unmade::Failed("git cat-file has no pipes".to_owned()));
     };
     let mut ids = Vec::with_capacity(blobs.len() * 65);
@@ -492,7 +498,12 @@ fn stream(
     let _ = watchdog.join();
     if let Ok(mut child) = child.lock() {
         let _ = child.kill();
-        let _ = child.wait();
+        let status = child.wait().ok();
+        crate::git::trace(
+            &cmd,
+            started,
+            status.as_ref().and_then(std::process::ExitStatus::code),
+        );
     }
     let _ = feeder.join();
     match written {

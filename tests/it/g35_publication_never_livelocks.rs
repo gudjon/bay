@@ -446,19 +446,24 @@ fn twenty_agents_and_three_executors_all_land_with_bounded_check_time() {
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
     let runs = test_box.path().join("runs");
-    test_box.seed_with_check(
-        &repo,
-        &[("src/a.rs", "fn a() {}\n")],
-        &check_files(
-            &format!(
-                "{}sleep 0.3",
-                test_box.relay(&format!("echo \"$tree\" >> '{}'", runs.display()))
-            ),
-            &passing_result(1),
-            1,
-            60,
+    let mut files = check_files(
+        &format!(
+            "{}sleep 0.3",
+            test_box.relay(&format!("echo \"$tree\" >> '{}'", runs.display()))
         ),
+        &passing_result(1),
+        1,
+        60,
     );
+    // No executor dies here, so the lease is the default one, not the short lease of the tests
+    // that kill one: on a loaded box an executor's chain can stay still for seconds while it
+    // publishes, and a short lease would let another executor take that operation over and
+    // check it again, which is worker time this bound does not count.
+    files.push((
+        ".bay/config.toml".to_owned(),
+        "[executor]\nlease_s = 60\n".to_owned(),
+    ));
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let mut ids = Vec::new();
     for agent in 0..AGENTS {
         let file = format!("agent{agent}");
@@ -741,6 +746,23 @@ const LEASE_S: u64 = 1;
 const EXECUTION_BUDGET_S: u64 = 6;
 const PUBLISH_WINDOW_S: u64 = 1;
 
+/// The outage case's config: the scaled lease, and with `scaled_deadline` the scaled execution
+/// budget and publish window. A check that runs to an answer (before and after the outage) runs
+/// without the budget: on a loaded box it can take longer than the scaled budget, which would
+/// end it `unknown`, never queued. In the outage the adapter answers `unavailable` at once, so
+/// the scaled budget there only sets the progress deadline the outage must outlast.
+fn outage_config(scaled_deadline: bool) -> String {
+    let mut config = format!("[executor]\nlease_s = {LEASE_S}\nheartbeat_s = 1\ntakeover_s = 2\n");
+    if scaled_deadline {
+        use std::fmt::Write;
+        let _ = write!(
+            config,
+            "execution_budget_s = {EXECUTION_BUDGET_S}\npublish_window_s = {PUBLISH_WINDOW_S}\n"
+        );
+    }
+    config
+}
+
 /// How many places one operation can hold within `span` of an outage, by the rule of
 /// `DESIGN` § 6: the place it held when the outage began, and one per rejoin, the first one
 /// lease after the `unavailable` release and each later gap doubled, up to ten leases.
@@ -759,7 +781,7 @@ fn places_within(span: std::time::Duration) -> usize {
 
 /// A trunk whose check moves trunk from another clone on its first two runs, as `setup(2, 0)`
 /// does, and whose adapter answers `unavailable` while `marker` exists (`INTERFACES` § 3),
-/// under the scaled lease, execution budget and publish window. Returns it and the marker.
+/// under the scaled lease ([`outage_config`]). Returns it and the marker.
 fn setup_outage() -> (Queued, PathBuf) {
     let test_box = TestBox::new();
     let marker = test_box.path().join("outage");
@@ -782,12 +804,7 @@ fn setup_outage() -> (Queued, PathBuf) {
         ),
     );
     let mut files = check_files(&before, &passing_result(1), 1, 60);
-    files.push((
-        ".bay/config.toml".to_owned(),
-        format!(
-            "[executor]\nlease_s = {LEASE_S}\nheartbeat_s = 1\ntakeover_s = 2\nexecution_budget_s = {EXECUTION_BUDGET_S}\npublish_window_s = {PUBLISH_WINDOW_S}\n"
-        ),
-    ));
+    files.push((".bay/config.toml".to_owned(), outage_config(false)));
     test_box.seed_with_check(
         &repo,
         &[("src/a.rs", "fn a() {}\n"), ("docs/keep.md", "k\n")],
@@ -826,7 +843,9 @@ fn release_reasons(queued: &Queued) -> (String, Vec<String>) {
 /// with reason `unavailable` and waits outside the queue for a worker; the executor's passes
 /// span more than three (scaled) progress deadlines. The queue grows by at most the backoff's
 /// bound, and once the marker is gone each change lands exactly once (`DESIGN` § 6;
-/// rulings-open-questions.md Q4).
+/// rulings-open-questions.md Q4). The scaled deadline lands on trunk just before the outage and
+/// the unscaled config just before its end ([`outage_config`]); each executor pass reads the
+/// config at the trunk it fetched.
 #[test]
 fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
     let (queued, marker) = setup_outage();
@@ -845,7 +864,10 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
     );
     assert_eq!(runs(&queued), 2);
 
-    // The outage: the executor keeps making passes, its agents gone.
+    // The outage: the executor keeps making passes, its agents gone, under the scaled deadline.
+    queued
+        .test_box
+        .commit_config(&queued.repo, &outage_config(true));
     std::fs::write(&marker, "down").unwrap();
     let mut looping = queued
         .test_box
@@ -884,9 +906,14 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
     );
     assert_eq!(runs(&queued), 2, "no check ran to an answer in the outage");
 
-    // The workers return: further passes land all three, each once.
+    // The workers return: further passes land all three, each once. A pass that began before
+    // the unscaled config landed may meet trunk moved under its head's check: that head checks
+    // again, a `TRUNK_MOVED` retry, never a publish retry. The deadline only stops a stuck run.
+    queued
+        .test_box
+        .commit_config(&queued.repo, &outage_config(false));
     std::fs::remove_file(&marker).unwrap();
-    let until = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(600);
     while queued.test_box.trunk_change_ids(&queued.remote).len() < 3
         && std::time::Instant::now() < until
     {
@@ -1088,13 +1115,19 @@ fn a_policy_landing_during_the_heads_check_releases_it_and_the_queue_keeps_its_o
     }
 }
 
-/// A bay-hosted, signed trunk whose trunk hook has a 3 s time bound (an honest judgement takes about 1 s), and a change ready to land.
-/// Returns the box, the host, the change id and its view.
+/// The trunk hook's time bound in the hook-timeout cases. An honest judgement takes about 1 s
+/// on an idle box and several on a loaded one; every push to the host is judged within this
+/// bound (the chain, the evidence, trunk), so it is well above that. A slowed push
+/// (`BAY_TEST_HOOK_SLOW_PUSHES`) sleeps past the bound, whatever it is.
+const HOOK_BOUND_S: &str = "10";
+
+/// A bay-hosted, signed trunk whose trunk hook has a [`HOOK_BOUND_S`] time bound, and a change
+/// ready to land. Returns the box, the host, the change id and its view.
 fn hosted_with_hook_bound() -> (TestBox, PathBuf, String, PathBuf) {
     let test_box = TestBox::new();
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
-    test_box.git_bare(&host, &["config", "bay.hookTimeoutS", "3"]);
+    test_box.git_bare(&host, &["config", "bay.hookTimeoutS", HOOK_BOUND_S]);
     let repo = test_box.repo_without_remote_any("repo");
     test_box.add_origin(&repo, &host);
     test_box.seed_with_check(
@@ -1197,7 +1230,8 @@ fn pause_head_and_release_as(
         .spawn()
         .unwrap();
     let paused = queued.test_box.path().join(format!("go-{seq}.paused"));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    // The head checks before it pauses; this deadline only stops a run that is stuck.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     while !paused.exists() {
         if child.try_wait().unwrap().is_some() {
             let out = child.wait_with_output().unwrap();

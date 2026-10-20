@@ -447,13 +447,18 @@ impl Repo {
         ]);
     }
 
-    /// Fetches every other producer's evidence notes ref from the remote, so an operation
+    /// Fetches every other writer's evidence notes ref from the remote, so an operation
     /// resumed on this machine sees the records its earlier attempts wrote elsewhere (§ 7).
-    /// `own`'s ref is never fetched: only this producer writes it, and a remote copy this
-    /// machine did not write is a collision its push reports. Best effort: offline, the local
-    /// records are what this machine can see.
-    pub fn fetch_evidence(&self, own: &str) {
-        let own = crate::evidence::notes_ref(own);
+    /// The refs of `keys`' own names (its producer and its reviewer) are never fetched: only
+    /// this machine writes them, a record written here whose push failed would be lost, and a
+    /// remote copy this machine did not write is a collision its push reports. Best effort:
+    /// offline, the local records are what this machine can see.
+    pub fn fetch_evidence(&self, keys: &crate::signing::Keys) {
+        let own: Vec<String> = keys
+            .own_names()
+            .into_iter()
+            .map(crate::evidence::notes_ref)
+            .collect();
         let pattern = format!("{}*", crate::evidence::EVIDENCE_PREFIX);
         let Ok(listed) = self.git.run(&["ls-remote", self.remote(), &pattern]) else {
             return;
@@ -461,7 +466,7 @@ impl Repo {
         let refspecs: Vec<String> = listed
             .lines()
             .filter_map(|line| line.split_whitespace().nth(1))
-            .filter(|name| *name != own)
+            .filter(|name| !own.iter().any(|own| own == name))
             .map(|name| format!("+{name}:{name}"))
             .collect();
         if refspecs.is_empty() {

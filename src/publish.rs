@@ -3087,7 +3087,7 @@ fn finished_checks(
             .iter()
             .any(|attempt| attempt.epoch != ctx.my_epoch)
     {
-        ctx.repo.fetch_evidence(&ctx.keys.producer_name);
+        ctx.repo.fetch_evidence(&ctx.keys);
     }
     // This operation's own records are a resume; another operation's are reuse, and with
     // reuse off another operation on the same tree is rechecked (G29).

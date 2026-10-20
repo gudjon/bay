@@ -20,7 +20,8 @@
 //! superseded one as `superseded`, naming its successor. A delivery talk about a change closes as
 //! `answered` once a landing that names the change (`Fixes:`, `Reverts:` or `Supersedes:`) is on
 //! trunk, naming that landing (G148). One sender holds at most
-//! [`BAY_TALK_OPEN_MAX`] open talks to one recipient.
+//! [`BAY_TALK_OPEN_MAX`] open talks to one recipient, and a reviewer one open talk per change:
+//! its later finding on that change supersedes the open one (G149b, [`open_findings`]).
 //!
 //! Delivery is the recipient's fetch and accept ([`receive`]), which any fetching bay command on
 //! the recipient's machine runs (`bay status`, `bay watch`): it writes the ack on the same chain,
@@ -1085,6 +1086,39 @@ pub fn backlog(
             open.first().map(|talk| talk.id.clone()).unwrap_or_default(),
         )
     })
+}
+
+/// G149b (the review dossier's K10 d): the open talks among `talks` that the reviewer's delivery
+/// talk `body` would stand beside. These are its sender's other delivery talks about the same
+/// change that are not closed and that no talk supersedes, the one `body` supersedes aside. A
+/// reviewer holds at most one open talk per change, so its later finding supersedes the open one.
+/// Empty when a talk among `talks` supersedes `body` itself: a replaced finding stands beside none.
+#[must_use]
+pub fn open_findings<'a>(talks: &[&'a Talk], body: &Value) -> Vec<&'a Talk> {
+    let id = body["id"].as_str().unwrap_or_default();
+    let from = body["from"]["name"].as_str().unwrap_or_default();
+    let Some(change) = body["change"]
+        .as_str()
+        .filter(|_| body["kind"] == "delivery")
+    else {
+        return Vec::new();
+    };
+    let replaced: Vec<&str> = talks
+        .iter()
+        .copied()
+        .filter_map(Talk::supersedes)
+        .chain(body["supersedes"].as_str())
+        .collect();
+    if replaced.contains(&id) {
+        return Vec::new();
+    }
+    talks
+        .iter()
+        .copied()
+        .filter(|talk| talk.id != id && talk.from_name() == from && !talk.closed())
+        .filter(|talk| talk.about_change() == Some(change))
+        .filter(|talk| !replaced.contains(&talk.id.as_str()))
+        .collect()
 }
 
 fn write_blob(git: &Git, text: &str) -> Result<String, String> {

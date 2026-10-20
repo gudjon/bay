@@ -214,6 +214,8 @@ struct Map {
     machines: BTreeMap<String, Value>,
     sessions: Vec<Value>,
     actors: BTreeMap<String, (u64, BTreeSet<String>)>,
+    /// The post checks trunk is red on (G244b).
+    red: Vec<crate::red::Red>,
 }
 
 impl Map {
@@ -257,11 +259,39 @@ impl Map {
             .map_or(Value::Null, Value::from)
     }
 
+    /// The red checks (G244b) whose paths cover the paths `change` declared or the files its
+    /// session last wrote (`wrote`), so an operator sees who works on red paths. `[]` when none
+    /// does, or when this cache holds neither.
+    fn on_red(&self, change: &Value, wrote: &Value) -> Vec<Value> {
+        if self.red.is_empty() {
+            return Vec::new();
+        }
+        let mut paths: Vec<String> = change
+            .as_str()
+            .and_then(|id| self.records.get(id))
+            .map(|record| crate::inputs::paths(&record.declared_inputs))
+            .unwrap_or_default();
+        paths.extend(
+            wrote
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_owned),
+        );
+        self.red
+            .iter()
+            .filter(|red| red.covers(&paths))
+            .map(|red| json!({"check": red.check, "environment": red.environment}))
+            .collect()
+    }
+
     fn session(&mut self, repo: &Git, machine: &str, row: &Value, age: u64, wrote: &Value) {
         self.actor(row["actor"]["name"].as_str(), age, machine);
         let behind = self.behind(&row["change"]);
         let behind_commits = self.behind_commits(repo, &row["change"]);
         let session_age = session_age(row, age);
+        let on_red = self.on_red(&row["change"], &wrote["wrote"]);
         self.sessions.push(json!({
             "machine": machine,
             "session": row["session"],
@@ -281,6 +311,7 @@ impl Map {
             "behind_commits": behind_commits,
             "started": row["started"],
             "session_age_s": session_age,
+            "on_red": on_red,
             "tracked": true,
         }));
     }
@@ -501,6 +532,7 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
             "behind_commits": map.behind_commits(&repo.git, &json!(id)),
             "started": null,
             "session_age_s": null,
+            "on_red": map.on_red(&json!(id), &Value::Null),
             "tracked": tracked,
         }));
     }
@@ -512,7 +544,9 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
 /// base is behind trunk (`behind_commits`) and the session's age (`session_age_s`, G166); an entry per held change no session
 /// names ([`unheld`]); every machine and actor the cache knows, each with `age_s`; talks `[]`
 /// until talk is built; and `default_actor_sessions`, the fresh sessions whose actor's name came
-/// from a default rather than `BAY_ACTOR` (G152).
+/// from a default rather than `BAY_ACTOR` (G152). `red` lists the post checks trunk is red on,
+/// as `bay status` does, and each entry's `on_red` names those whose paths cover its change's
+/// declared paths or the files its session last wrote (G244b).
 ///
 /// `detail.behind` is never a known `false`: whether the remote moved since the fetch cannot
 /// be known without the network, which the map never touches. It is `true` once the fetch is a
@@ -521,19 +555,30 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
 /// The cost is bounded: one ref listing of the changes and one chain read each, at most
 /// [`FLEET_MAX_MACHINES`] summaries of at most `live::LIVE_MAX_BYTES` read in two `cat-file`
 /// calls, one signature check per summary under a registry, one bounded tail per session
-/// record of this machine, and one trunk log per held change no session names.
+/// record of this machine, one trunk log per held change no session names, and one red
+/// judgement over [`crate::red::WINDOW`] trunk commits.
 fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     let git = &repo.git;
+    let trunk = git
+        .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
+        .ok();
+    // As `bay status` reads it: local records only, and an unreadable judgement lists none.
+    let red = trunk
+        .as_deref()
+        .map(|trunk| {
+            let registry = crate::registry::Registry::current(git).ok().flatten();
+            crate::red::red(git, trunk, registry.as_ref()).unwrap_or_default()
+        })
+        .unwrap_or_default();
     let mut map = Map {
         now: live::unix_now(),
         window: repo.config.takeover().as_secs(),
-        trunk: git
-            .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
-            .ok(),
+        trunk,
         records: local_records(git)?,
         machines: BTreeMap::new(),
         sessions: Vec::new(),
         actors: BTreeMap::new(),
+        red,
     };
     let here = live::machine(git).ok();
     let truncated = remote(repo, fetched, here.as_deref(), &mut map)?;
@@ -562,6 +607,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     } else {
         Value::Null
     };
+    let red: Vec<Value> = map.red.iter().map(crate::red::Red::to_json).collect();
     let mut result = BayResult::ok(json!({
         "remote": repo.remote(),
         "fetched_at": fetched.at,
@@ -576,6 +622,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
             "actor": actor, "machines": on, "age_s": age,
         })).collect::<Vec<_>>(),
         "talks": [],
+        "red": red,
         "default_actor_sessions": default_actor,
         "sessions": map.sessions,
     }));
