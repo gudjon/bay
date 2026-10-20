@@ -10,13 +10,14 @@
   <a href="https://getbay.io/docs">Docs</a> ·
   <a href="https://getbay.io/docs/install">Install</a> ·
   <a href="https://getbay.io/docs/quickstart">Quickstart</a> ·
+  <a href="https://getbay.io/docs/changelog">Changelog</a> ·
   <a href="https://getbay.io/blog">Blog</a>
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-187571"></a>
   <img alt="Written in Rust" src="https://img.shields.io/badge/written%20in-Rust-c5341c">
-  <img alt="Status: in development" src="https://img.shields.io/badge/status-in%20development-8d6105">
+  <a href="https://github.com/gudjon/bay/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/gudjon/bay?include_prereleases&label=release"></a>
 </p>
 
 ---
@@ -31,15 +32,17 @@ bay start CARD-123 --paths src/api   # a view of only the files this change need
 # … the agent edits …
 bay land                             # check that exact result; returns at once
 bay status                           # what every change is doing, what passed, and why it waits
+bay status --fleet                   # every machine and session on the repository
 bay watch                            # what changed that affects my work
+bay talk <agent> "<what>" …          # ask another agent for one change, decision or check
 bay undo c7k2m4                      # a new change that undoes one landing; history stays
 ```
 
 Every command prints one JSON result on stdout. A refusal names its reason, what you can still do, and
 when to retry. There is no prompt to answer.
 
-> **Status: in development.** This README describes bay as it will ship. The benchmark figures below
-> are targets, not results. Follow progress at [getbay.io](https://getbay.io).
+bay is at 0.x: every release is a pre-release, offered best effort. The benchmark figures below are
+targets, not results. What changed in each release is in the [changelog](https://getbay.io/docs/changelog).
 
 ## Why bay
 
@@ -69,17 +72,30 @@ macOS and Linux, on ARM and Intel:
 curl -fsSL https://getbay.io/install.sh | sh
 ```
 
-The script downloads one binary from this repository's GitHub Releases, checks the signed `SHA256SUMS`
-and the archive's sha256, installs it to `~/.local/bin/bay`, then runs `bay install` and `bay doctor`.
-Windows gets its own installer at launch. To build from source:
+The script downloads the newest release from this repository's GitHub Releases. It checks `SHA256SUMS`
+against the bay release key, a hardware-held key, and the archive against `SHA256SUMS`. It installs one
+binary to `~/.local/bin/bay`, then runs `bay install`, and `bay doctor` inside a repository. There is no
+Windows build: on Windows, run the same command inside WSL. To build from source:
 
 ```sh
 cargo build --release
 ./target/release/bay install
 ```
 
-bay needs Git 2.40 or newer in an agent view (2.50 or newer is recommended), and 2.54 or newer on a
-machine that hosts a trunk with `bay host init`. `bay doctor` names any floor a machine is below. See [Install](https://getbay.io/docs/install) for every option.
+bay needs Git 2.40 or newer in an agent view (2.50 or newer is recommended), 2.50 or newer on a machine
+that runs an executor, and 2.54 or newer on a machine that hosts a trunk with `bay host init`. `bay doctor`
+names any floor a machine is below. See [Install](https://getbay.io/docs/install) for every option.
+
+### Teach your agent bay
+
+`bay install` copies the bay skill, `skills/bay/SKILL.md`, where Claude Code reads it. For other agents,
+or before bay is installed, add the skill with the skills CLI:
+
+```sh
+npx skills add gudjon/bay --skill bay -g
+```
+
+The skill tells the agent how to install bay when it is missing. See [the skill page](https://getbay.io/docs/skill).
 
 ## What bay promises
 
@@ -89,44 +105,53 @@ machine that hosts a trunk with `bay host init`. `bay doctor` names any floor a 
 | **Unknown is never a pass** | A check that crashed, timed out, or collected nothing blocks the landing. Checks that finished keep their results. |
 | **Agents can leave** | `bay land` returns at once. While an executor runs (`bay executor run`, or your CI through the same contract), it finishes the landing, recovers it, or asks for a precise repair. |
 | **A retry never lands twice** | Every operation has an id. A lost reply is reconciled, never sent again as a second landing. |
-| **Stale work is stopped, and repair stays open** | When something your work depends on lands, bay tells you what changed. This covers the declared and observed inputs, and bay states its coverage. You can still edit; you cannot land until you check again. |
+| **Stale work is stopped, and repair stays open** | When an input that your change declared lands, bay tells you what changed, and states how much it could see. You can still edit; you cannot land until you check again. |
 | **Every refusal says what to do next** | A stable reason, what you can still do, and when to retry. |
-| **A view costs what the task reads** | Only the files you named. Views share the objects of one blob-less clone per machine, which you create (`git clone --filter=blob:none`). This holds for a warm cache; build outputs, fixtures and broad searches can still cost more. |
+| **A view costs what the task reads** | A view is a sparse worktree of your clone that holds only the paths you named, so views share the clone's objects. Build outputs, fixtures and broad searches can still cost more. |
 | **Git stays the only store** | Changes, evidence and events are Git commits, notes and refs. You can read and recover them with ordinary Git. |
 
 Each promise has a failure test that must pass before bay calls it done.
 
 ## How it works
 
-1. **`bay start`** opens a change: a sparse view of the declared paths over one shared object cache.
-2. **`bay land`** signs a request to land and returns. The agent may leave.
+1. **`bay start`** opens a change: a sparse view of the declared paths.
+2. **`bay land`** records a request to land and returns. The agent may leave.
 3. An **executor** merges the change onto trunk without touching any working tree, runs the checks your
-   `.bay/policy.toml` names on that exact candidate, and records each result as signed evidence in Git.
+   `.bay/policy.toml` names on that exact candidate, and records each result as evidence in Git notes.
 4. If trunk has not moved, the executor lands the candidate. If it moved, the executor builds a new
    candidate and checks again. After two such moves, the change joins a queue, and bay checks only the head.
 5. **`bay status`** and **`bay watch`** show every change, its evidence, and why it waits.
 
-An agent signs a request to land. Only an executor moves trunk. A checker signs the evidence. A registry
-key, held by the people who run the repository, adds and revokes keys. No one holds another actor's key,
-so an agent can leave.
+bay reads `.bay/config.toml` and `.bay/policy.toml` only from trunk, so no change sets the rules it is
+judged by. Checks run in a sandbox that sees only the candidate, its adapter and system files, with no
+network unless the policy allows it.
+
+## Keys are optional
+
+bay works without keys: with no key registry, it runs unsigned, every evidence record counts, and results
+say `trust: unsigned`. Add a registry, `refs/bay/registry`, when only enrolled keys may sign. Then an agent
+signs a request to land, only an executor moves trunk, a checker signs the evidence, a reviewer signs a
+review, and a registry key adds and revokes keys. No one holds another actor's key, so an agent can leave.
+See [Keys and the registry](https://getbay.io/docs/keys).
 
 ## Compared with a merge queue
 
 Most teams compare bay with what they run now: agents open pull requests, and a merge queue lands them.
 That can merge, and a good merge queue keeps going after the author leaves. What it does not give is a
-signed record that the landed commit is the exact one that passed, partial results kept when a worker
-dies, recovery when the executor dies, or a stop on work whose inputs moved.
+record that the landed commit is the exact one that passed, partial results kept when a worker dies,
+recovery when the executor dies, or a stop on work whose inputs moved.
 
 You keep the Git host you already have: GitHub, GitLab, a bare repository over SSH, or `bay host init`
 on any machine you can reach.
 
 ## Works with
 
-- **Claude Code first.** `bay hook` refuses a write it already knows is stale, and tells the agent in one
-  line when something it depends on changes. `bay install` adds the bay skill, so the agent knows the
-  commands.
-- **Other coding agents** through the same JSON interface. Each agent product gets one adapter behind
-  `bay hook`; see [Agents and hooks](https://getbay.io/docs/agents).
+- **Claude Code first.** `bay hook` refuses a write it already knows is stale and a fixed list of
+  dangerous Git commands, and tells the agent once when a landing of its own is refused or its check
+  fails. `bay install` adds the bay skill, so the agent knows the commands.
+- **Other coding agents** through the same commands, JSON results and skill. Hook adapters for other agent
+  products are not built yet; without one, a stale change still cannot land. See
+  [Agents and hooks](https://getbay.io/docs/agents).
 - **Any Git host.** GitHub, GitLab, a bare repository, or a bundle on a USB stick.
 - **Your checks.** Any command that returns a `bay.check.result/1` JSON document.
 
@@ -143,12 +168,19 @@ These are targets until the published results say otherwise.
 
 ## Documentation
 
-- [Overview](https://getbay.io/docs) and [Quickstart](https://getbay.io/docs/quickstart)
+- [Overview](https://getbay.io/docs), [Quickstart](https://getbay.io/docs/quickstart) and
+  [Several agents, one repository](https://getbay.io/docs/several-agents)
 - [Concepts](https://getbay.io/docs/concepts): one meaning for each name
 - [Configuration](https://getbay.io/docs/configuration): `.bay/config.toml` and `.bay/policy.toml`
-- [Executors](https://getbay.io/docs/executors) and [Agents and hooks](https://getbay.io/docs/agents)
-- [CLI reference](https://getbay.io/docs/cli) and [Results and refusals](https://getbay.io/docs/results)
-- [Update](https://getbay.io/docs/update): `bay update`, pins
+- [Executors](https://getbay.io/docs/executors) and [Undo](https://getbay.io/docs/undo)
+- [Agents and hooks](https://getbay.io/docs/agents), [the bay skill](https://getbay.io/docs/skill),
+  [the fleet](https://getbay.io/docs/fleet) and [talk](https://getbay.io/docs/talk)
+- [Host a trunk](https://getbay.io/docs/host), [Keys](https://getbay.io/docs/keys) and
+  [Update](https://getbay.io/docs/update)
+- [CLI reference](https://getbay.io/docs/cli), [Results and refusals](https://getbay.io/docs/results) and
+  [Changelog](https://getbay.io/docs/changelog)
+
+Every docs page also reads as markdown: add `.md` to its address, or see [llms.txt](https://getbay.io/llms.txt).
 
 ## Contributing
 
