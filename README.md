@@ -204,7 +204,6 @@ on real repositories, with the scripts and raw results published so anyone can r
 
 - more than 1,000× less network on a warm cache
 - more than 50× faster to the first check that can run
-- at least 2× fewer model tokens per accepted change
 
 These are targets until the published results say otherwise.
 
