@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.7
+Pre-release.
+
+Before you upgrade a bay-hosted trunk's clients, upgrade the host. Older hosts refuse an ack that names its wake.
+
+Trunk health
+- Added a red trunk: a failed post-publication check makes its paths red, owned by the landing that broke it.
+- A landing on red paths is refused `TRUNK_RED`, naming the owner and the ways out.
+- A fix, undo or supersede of the owner always lands. A later pass or a quarantine clears it too.
+- `bay status` lists the red checks. `bay evidence record` takes `--environment` to answer a post check.
+
+Talk
+- `bay status` lists each open talk you sent or must answer: who owes the reply, ages, and standing.
+- A talk with no ack within 24 hours is `lost`, and one past its `follow_up` is `stale`. Both stay listed.
+- Added the wake adapter, `[wake] command`. Its answer is recorded on the ack, and the sender sees it.
+- A wake adapter that fails or takes over 5 seconds is recorded `uncertain`. It is never called twice.
+- Added `bay hook talk-wait`: an idle wait that polls for talks and exits 2 when one arrives.
+- A live session's hooks fetch talks at most once every 30 seconds.
+
+Doctor
+- Changed `hook-overrides`: another tool's hooks for bay's events are listed, not red. They run beside bay's.
+- `hook-overrides` is red only for `disableAllHooks` or `allowManagedHooksOnly`.
+
 ## 0.1.6
 Pre-release.
 
