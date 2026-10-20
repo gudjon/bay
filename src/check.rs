@@ -715,6 +715,7 @@ fn reaches_out(stderr: &str, place: &Place) -> bool {
 /// Whether `text` names `path` or a path inside it: an occurrence of `path` that starts and
 /// ends on a path boundary, so `/box/repo` is named by `/box/repo` and `/box/repo/x` but not by
 /// its sibling `/box/repo-remote.git` or by `/other/box/repo`.
+#[cfg(test)]
 fn names_path(text: &str, path: &str) -> bool {
     names_path_outside(text, path, &[])
 }
