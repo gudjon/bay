@@ -20,8 +20,9 @@
 //! repository holds, acked here, so its recipient's accept judged it) is one notice too, given
 //! once like a `check_failed` one, at the same events and within the same budget. The cursor
 //! keeps the talk ids it passed (`talks`). A talk already closed when it arrives, or one the actor
-//! sent itself, is passed and not told. A talk with no ack yet is read again at the next hook:
-//! the ack is what makes it arrived.
+//! sent itself, is passed and not told, except one closed as `expired` (read after its `expires`,
+//! G52): it is told with `EXPIRED` before the rest of the line, and owes no backbrief. A talk
+//! with no ack yet is read again at the next hook: the ack is what makes it arrived.
 //!
 //! A log entry is data, not text for the agent: any process on the box can write a ref under
 //! `refs/bay/log/`, and nothing here verifies its signer. A notice line is bay's own words; from
@@ -317,6 +318,8 @@ struct Arrived {
     id: String,
     kind: Option<&'static str>,
     tell: bool,
+    /// Closed as `expired`: read after its `expires` (G52).
+    expired: bool,
 }
 
 /// The talks to `actor` this repository holds that `cursor` has not passed, read at most
@@ -349,13 +352,18 @@ fn arrived(repo: &Repo, actor: &str, cursor: &Cursor) -> Vec<Arrived> {
     crate::talk::read_created(&repo.git, &new)
         .into_iter()
         .filter(|talk| talk.has("ack"))
-        .map(|talk| Arrived {
-            kind: TALK_KINDS
-                .iter()
-                .copied()
-                .find(|kind| talk.body["kind"] == *kind),
-            tell: !talk.closed() && talk.from_name() != actor,
-            id: talk.id,
+        .map(|talk| {
+            let expired = talk.has("close")
+                && talk.closed_as(&repo.git).ok().flatten().as_deref() == Some("expired");
+            Arrived {
+                kind: TALK_KINDS
+                    .iter()
+                    .copied()
+                    .find(|kind| talk.body["kind"] == *kind),
+                tell: (expired || !talk.closed()) && talk.from_name() != actor,
+                expired,
+                id: talk.id,
+            }
         })
         .collect()
 }
@@ -394,10 +402,16 @@ fn tell_talks(
     cursor.talks.drain(..excess);
 }
 
-/// The one line for a talk to `actor`: its id and kind, and where to read it.
+/// The one line for a talk to `actor`: its id and kind, and where to read it; `EXPIRED` first
+/// when it was read after its `expires` (G52).
 fn talk_line(actor: &str, talk: &Arrived) -> String {
+    let (lead, owed) = if talk.expired {
+        ("EXPIRED: ", " after its `expires`, so it owes no backbrief")
+    } else {
+        ("", "")
+    };
     let mut out: String = format!(
-        "bay: talk {id} ({kind}) arrived for {actor}: read it with `git show {}{actor}/{id}:{}`",
+        "bay: {lead}talk {id} ({kind}) arrived for {actor}{owed}: read it with `git show {}{actor}/{id}:{}`",
         crate::talk::TALK_PREFIX,
         crate::talk::TALK_FILE,
         id = talk.id,
@@ -778,6 +792,7 @@ mod tests {
             id: id.to_owned(),
             kind: Some("delivery"),
             tell,
+            expired: false,
         };
         let mut cursor = Cursor::default();
         let mut delivery = super::Delivery::default();
@@ -792,6 +807,17 @@ mod tests {
         let mut again = super::Delivery::default();
         super::tell_talks(&mut cursor, "a", &arrived, 2048, 1, &mut again);
         assert_eq!(again, super::Delivery::default());
+        // G52: a talk read after its `expires` is told as EXPIRED.
+        let expired = [super::Arrived {
+            expired: true,
+            ..talk("t3", true)
+        }];
+        let mut late = super::Delivery::default();
+        super::tell_talks(&mut cursor, "a", &expired, 2048, 2, &mut late);
+        assert_eq!(
+            late.text,
+            "bay: EXPIRED: talk t3 (delivery) arrived for a after its `expires`, so it owes no backbrief: read it with `git show refs/bay/talk/a/t3:talk.json`\n"
+        );
     }
 
     #[test]

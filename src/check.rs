@@ -691,6 +691,8 @@ fn run_one(
     // `INTERFACES` § 7: the check starts from a fixed baseline and nothing else, so evidence
     // names everything it could read: `PATH` from the policy, `HOME` and `TMPDIR` inside the
     // sandbox's scratch, `LANG=C.UTF-8`, bay's own `BAY_ADAPTER_DIR`, and the declared names.
+    // The working directory is the candidate tree, the root an adapter judges its paths from:
+    // the tree's absolute path usually holds a `.git` part, a path inside it never does (G241).
     cmd.current_dir(tree_dir)
         .env_clear()
         .env("BAY_ADAPTER_DIR", adapter_dir)

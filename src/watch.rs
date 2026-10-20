@@ -22,7 +22,9 @@
 //! `bay watch --landed` (G73) is the landed stream alone, for a producer that reads every
 //! landing: the same landings and cursor, no events and no invalidations. Each landing names
 //! its base (the first parent) and its committer time, and one landed outside bay stays in
-//! the stream with `change: null` and `outside_bay: true`. `off_first_parent` counts the
+//! the stream with `change: null`, `outside_bay: true` and `landed_as` (`merge` or `outside`,
+//! [`crate::unattributed`]); a full watch also lists an `unattributed_landing` event for each
+//! such landing it lists, outside a view (G85). `off_first_parent` counts the
 //! commits in the same range reached only through a merge's other parent: they are never
 //! listed, and the count says so.
 //!
@@ -214,6 +216,21 @@ pub fn collect(
         Some(record) => invalidations(repo, record, since, &reached, probe)?,
         None => Vec::new(),
     };
+    // G85: each landing listed here that did not land through bay is named as an event too,
+    // filtered in a view as the logged events are.
+    events.extend(
+        landings
+            .iter()
+            .filter(|landing| landing["outside_bay"] == true)
+            .filter_map(|landing| {
+                Some(crate::unattributed::event(
+                    landing["commit"].as_str()?,
+                    landing["landed_as"].as_str()?,
+                    landing["subject"].as_str().unwrap_or_default(),
+                ))
+            })
+            .filter(|event| record.as_ref().is_none_or(|record| touches(record, event))),
+    );
     let registry = crate::registry::Registry::current(git).ok().flatten();
     let reds = crate::red::red(git, &reached, registry.as_ref())?;
     events.extend(red_events(
@@ -392,8 +409,8 @@ fn touches(record: &ChangeRecord, event: &Value) -> bool {
 /// Trunk's first-parent commits after `from` (all of trunk when `None`), oldest first, at most
 /// [`MAX_LANDINGS`], and the last one listed when more follow it. Each names its base (the
 /// first parent; `null` for a root) and its committer time. A landing outside bay has no
-/// `change` and is `outside_bay`: it carries no `Change-Id`, or, with a registry, it does not
-/// verify as a publication (as [`crate::publish::scan`] judges one).
+/// `change`, is `outside_bay` and names how it `landed_as`: it is not a publication as
+/// [`crate::unattributed::is_publication`] judges one.
 fn landings(
     repo: &Repo,
     from: Option<&str>,
@@ -447,13 +464,19 @@ fn landings(
             return Ok((out, last));
         }
         let some = |text: &str| (!text.is_empty()).then(|| text.to_owned());
-        let outside_bay = change.is_empty()
-            || (signatures
-                && !crate::publish::verify_publication(&repo.git, commit, registry_id, committer));
+        let outside_bay = !crate::unattributed::is_publication(
+            &repo.git,
+            signatures,
+            commit,
+            change,
+            registry_id,
+            committer,
+        );
         out.push(json!({
             "commit": commit,
             "change": (!outside_bay).then(|| (*change).to_owned()),
             "outside_bay": outside_bay,
+            "landed_as": outside_bay.then(|| crate::unattributed::landed_as(parents)),
             "base": parents.split_whitespace().next(),
             "actor": some(actor),
             "at": time.parse().ok().map(crate::clock::rfc3339_of),

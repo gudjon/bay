@@ -10,7 +10,9 @@
 //! Completion is reported per dimension, `running` and `effective` from counted runtime
 //! records ([`crate::runtime`]), with the selected profile's verdict ([`crate::completion`]).
 //! After a fetch it accepts and acks this actor's talks ([`crate::talk::receive`], § 11c), and
-//! says so in `detail.talk_accept`.
+//! says so in `detail.talk_accept`. Trunk commits that did not land through bay (merges and
+//! pushes outside it) are named and counted under `detail.unattributed`
+//! ([`crate::unattributed`], G85).
 
 use std::path::Path;
 
@@ -106,32 +108,10 @@ fn synchronize(repo: &Repo) -> Result<(String, Option<String>), String> {
     }
 }
 
-fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
-    let repo = match Repo::open_fetched(dir) {
-        Ok(repo) => repo,
-        Err(error) => return Ok(error.into_result()),
-    };
-    let _ = receipts::sync(&repo);
-    let pending = receipts::pending(&repo);
-    let (trunk, fetched_at) = synchronize(&repo)?;
-    // § 11c: a fetching command on the recipient's machine accepts and acks its talks.
-    let talk_accept = fetched_at
-        .is_some()
-        .then(|| crate::talk::receive(&repo))
-        .flatten();
-    let ids: Vec<String> = match change.map(str::to_owned).or_else(|| repo.view_change(dir)) {
-        Some(id) => vec![id],
-        None => repo
-            .git
-            .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
-            .map_err(|error| error.message())?
-            .lines()
-            .map(|name| name.trim_start_matches(CHANGES_PREFIX).to_owned())
-            .collect(),
-    };
-    let chain = Chain::new(&repo.git);
-    crate::log::fetch(&repo);
-    for id in &ids {
+/// Reads each change of `ids` fresh from the remote: a fast-forward brings what an executor
+/// recorded elsewhere, and a retention cut replaces the local chain.
+fn refresh_chains(repo: &Repo, chain: &Chain, ids: &[String]) -> Result<(), String> {
+    for id in ids {
         // The chain is read fresh: a fast-forward from the remote brings what an executor
         // recorded elsewhere. Local work the remote lacks was pushed by the sync above.
         let name = change_ref(id);
@@ -180,6 +160,35 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
             })?;
         }
     }
+    Ok(())
+}
+
+fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
+    let repo = match Repo::open_fetched(dir) {
+        Ok(repo) => repo,
+        Err(error) => return Ok(error.into_result()),
+    };
+    let _ = receipts::sync(&repo);
+    let pending = receipts::pending(&repo);
+    let (trunk, fetched_at) = synchronize(&repo)?;
+    // § 11c: a fetching command on the recipient's machine accepts and acks its talks.
+    let talk_accept = fetched_at
+        .is_some()
+        .then(|| crate::talk::receive(&repo))
+        .flatten();
+    let ids: Vec<String> = match change.map(str::to_owned).or_else(|| repo.view_change(dir)) {
+        Some(id) => vec![id],
+        None => repo
+            .git
+            .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
+            .map_err(|error| error.message())?
+            .lines()
+            .map(|name| name.trim_start_matches(CHANGES_PREFIX).to_owned())
+            .collect(),
+    };
+    let chain = Chain::new(&repo.git);
+    crate::log::fetch(&repo);
+    refresh_chains(&repo, &chain, &ids)?;
     // The runtime adapter is asked only for a change this read names: a listing of every
     // change stays bounded however many have landed.
     let read = Read::Full {
@@ -205,6 +214,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         "red": red_rows(&repo, &trunk),
         "talks": talk_rows(&repo),
         "trunk": trunk,
+        "unattributed": unattributed_rows(&repo, &trunk),
     }));
     if let (Some(detail), Some(accept)) = (result.detail.as_mut(), talk_accept) {
         detail["talk_accept"] = accept;
@@ -225,8 +235,14 @@ fn talk_rows(repo: &Repo) -> Value {
     let Ok(me) = crate::change::current_actor() else {
         return json!([]);
     };
-    crate::talk::standing::rows(&repo.git, &me.name, crate::live::unix_now())
+    crate::talk::standing::rows(&repo.git, &me.name, crate::talk::standing::reader_now())
         .map_or_else(|why| json!({"unread": why}), Value::from)
+}
+
+/// G85: the trunk commits that did not land through bay, named and counted. An unreadable
+/// trunk lists none and says why.
+fn unattributed_rows(repo: &Repo, trunk: &str) -> Value {
+    crate::unattributed::scan(&repo.git, trunk).unwrap_or_else(|why| json!({"unread": why}))
 }
 
 /// G244: the post checks trunk is red on, each owned by the landing that broke it.

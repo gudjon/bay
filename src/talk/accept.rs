@@ -10,7 +10,9 @@
 //! reviewer's talk about a change that stands beside another open talk of that reviewer about
 //! that change, one this box acked or an earlier one, is refused (G149b). An acked
 //! delivery talk about a change closes as `answered` once a landing on trunk names that change in
-//! `Fixes:`, `Reverts:` or `Supersedes:`, naming the landing (G148). Then every
+//! `Fixes:`, `Reverts:` or `Supersedes:`, naming the landing (G148). A talk read after its
+//! `expires` (its ack's commit time is later) closes as `expired`: the ack keeps arrival a fact,
+//! and no backbrief is owed (G52, ruling T3). Then every
 //! chain this machine moved is pushed. A push the host refuses (another session acked first)
 //! takes the host's chain instead; one the remote cannot take now stays for the next accept.
 //!
@@ -29,7 +31,7 @@ use serde_json::{Value, json};
 
 use super::send::{Pushed, agent_key, fetch_matching, push};
 use super::{
-    ANSWERS, TALK_PREFIX, TALK_SCHEMA, Talk, check_actors, check_body, entry_commit, files,
+    ANSWERS, Known, TALK_PREFIX, TALK_SCHEMA, Talk, check_actors, check_body, entry_commit, files,
     open_findings, split_values, talks_matching, talks_where,
 };
 use crate::change::{Actor, Chain, change_ref};
@@ -153,6 +155,7 @@ fn accept(repo: &Repo, registry: &Registry) -> Result<Outcome, String> {
         }
     }
     close_superseded(repo, &prefix, &key, &me, &mut outcome)?;
+    close_expired(repo, &prefix, &key, &me, &mut outcome)?;
     close_answered(repo, &prefix, &key, &me, &mut outcome)?;
     outcome.pushed = push_moved(repo, &prefix, &remote)?;
     Ok(outcome)
@@ -279,6 +282,43 @@ fn close_superseded(
                 .closed
                 .push(json!({"talk": old, "state": "superseded", "by": successor.id})),
             Err(why) => outcome.failed.push(json!({"talk": old, "why": why})),
+        }
+    }
+    Ok(())
+}
+
+/// G52 (ruling T3): closes each acked, open talk of this recipient that was read after its
+/// `expires`, as `expired`. The read is the ack, judged by its commit time
+/// ([`Talk::expired_known`]), never by this machine's clock now: a talk read in time still owes
+/// its backbrief.
+fn close_expired(
+    repo: &Repo,
+    prefix: &str,
+    key: &std::path::Path,
+    me: &Actor,
+    outcome: &mut Outcome,
+) -> Result<(), String> {
+    let talks = talks_matching(&repo.git, prefix)?;
+    for talk in talks
+        .iter()
+        .filter(|talk| talk.has("ack") && !talk.closed() && talk.expires().is_some())
+    {
+        match talk.expired_known(&repo.git, &Known::new()) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(why) => {
+                outcome.failed.push(json!({"talk": talk.id, "why": why}));
+                continue;
+            }
+        }
+        let close = json!({"schema": TALK_SCHEMA, "entry": "close", "talk": talk.id,
+            "actor": {"name": me.name, "session": me.session}, "state": "expired",
+            "at": now_rfc3339()});
+        match append(repo, talk, &close, key, &me.name) {
+            Ok(()) => outcome.closed.push(
+                json!({"talk": talk.id, "state": "expired", "expires": talk.body["expires"]}),
+            ),
+            Err(why) => outcome.failed.push(json!({"talk": talk.id, "why": why})),
         }
     }
     Ok(())

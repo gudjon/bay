@@ -22,7 +22,8 @@
 //! the standing answer names that answer's commit in `supersedes` (`TALK_ANSWER_CONFLICT`); a
 //! close as `superseded` by a talk under the same `who` that supersedes it, or as `answered` by
 //! the landing of a change whose `Fixes:`, `Reverts:` or `Supersedes:` names the delivery talk's
-//! change (G148). A closed talk takes nothing. A chain holds at most [`ENTRIES_MAX`] entries.
+//! change (G148), or as `expired` when its ack's commit time is later than its `expires` (G52).
+//! A closed talk takes nothing. A chain holds at most [`ENTRIES_MAX`] entries.
 
 use serde_json::Value;
 
@@ -453,7 +454,7 @@ impl Chain {
             "ack" => ack(talk, actor, &entry),
             "backbrief" => backbrief(push, talk, actor, &entry, &self.known),
             "answer" => answer(git, talk, actor, &entry, &self.known),
-            "close" => close(push, talk, actor, &entry),
+            "close" => close(push, talk, actor, &entry, &self.known),
             other => Err(format!("`{other}` is not a talk entry")),
         }?;
         self.talk.entries.push(super::Entry {
@@ -846,7 +847,13 @@ fn answer(git: &Git, talk: &Talk, actor: &str, entry: &Value, known: &Known) -> 
     }
 }
 
-fn close(push: &Push, talk: &Talk, actor: &str, entry: &Value) -> Result<(), String> {
+fn close(
+    push: &Push,
+    talk: &Talk,
+    actor: &str,
+    entry: &Value,
+    known: &Known,
+) -> Result<(), String> {
     if actor != talk.who {
         return Err(format!("only {} closes talk {}", talk.who, talk.id));
     }
@@ -856,6 +863,9 @@ fn close(push: &Push, talk: &Talk, actor: &str, entry: &Value) -> Result<(), Str
     if entry.get("landing").is_some() || ANSWERS.iter().any(|(field, _)| entry.get(field).is_some())
     {
         return Err("only an answered close names a landing".to_owned());
+    }
+    if entry["state"] == "expired" {
+        return expired(push, talk, entry, known);
     }
     let by = entry["by"].as_str().filter(|by| is_talk_id(by));
     let (Some("superseded"), Some(by)) = (entry["state"].as_str(), by) else {
@@ -874,6 +884,21 @@ fn close(push: &Push, talk: &Talk, actor: &str, entry: &Value) -> Result<(), Str
     let successor = Talk::read(push.git, &name, &tip)?;
     if successor.supersedes() != Some(talk.id.as_str()) {
         return Err(format!("talk {by} does not supersede {}", talk.id));
+    }
+    Ok(())
+}
+
+/// G52 (ruling T3): an `expired` close names no successor, and stands only on a talk read after
+/// its `expires`: its ack's commit time is later.
+fn expired(push: &Push, talk: &Talk, entry: &Value, known: &Known) -> Result<(), String> {
+    if entry.get("by").is_some() {
+        return Err("an expired close names no talk `by`".to_owned());
+    }
+    if !talk.expired_known(push.git, known)? {
+        return Err(format!(
+            "talk {} was not read after its `expires`: an expired close stands only on an ack later than `expires`",
+            talk.id
+        ));
     }
     Ok(())
 }

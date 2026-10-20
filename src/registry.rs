@@ -77,6 +77,36 @@ pub struct Registry {
     files: HashMap<KeyClass, String>,
 }
 
+/// The class files at `commit`, each empty when absent or unreadable, and whether the read is
+/// complete: the tree was listed and every class file in it was read.
+fn read_files(git: &Git, commit: &str) -> (Result<HashMap<KeyClass, String>, String>, bool) {
+    let listed = git.run(&["ls-tree", "-z", "--name-only", commit]);
+    let mut complete = listed.is_ok();
+    let present: Vec<&str> = listed
+        .as_deref()
+        .map(|names| names.split('\0').collect())
+        .unwrap_or_default();
+    let mut files = HashMap::new();
+    for class in KeyClass::ALL {
+        // A file the listed tree does not hold is absent: no read to fail.
+        if complete && !present.contains(&class.file()) {
+            files.insert(class, String::new());
+            continue;
+        }
+        let path = format!("{commit}:{}", class.file());
+        let text = match git.run(&["cat-file", "blob", &path]) {
+            Ok(text) => text,
+            Err(GitError::Failed { .. }) => {
+                complete = false;
+                String::new()
+            }
+            Err(error) => return (Err(error.message()), false),
+        };
+        files.insert(class, text);
+    }
+    (Ok(files), complete)
+}
+
 impl Registry {
     /// The registry at `commit`, validated.
     ///
@@ -85,15 +115,20 @@ impl Registry {
     /// A git fault, or a registry that breaks a line rule, puts one key in two places, or
     /// enrols a reviewer name as a producer or an agent too.
     pub fn load_at(git: &Git, commit: &str) -> Result<Self, String> {
-        let mut files = HashMap::new();
-        for class in KeyClass::ALL {
-            let text = match git.run(&["cat-file", "blob", &format!("{commit}:{}", class.file())]) {
-                Ok(text) => text,
-                Err(GitError::Failed { .. }) => String::new(),
-                Err(error) => return Err(error.message()),
-            };
-            files.insert(class, text);
-        }
+        // The class files at a commit never change: read once per process (plan B2). Kept only
+        // when the commit's tree was listed and every class file it lists was read: a failed
+        // read of a listed file (a lazy fetch, a fault) may pass on a retry, and a commit whose
+        // tree cannot be listed may be one not fetched yet.
+        let files = crate::memo::at(
+            "registry",
+            git,
+            commit,
+            |(read, complete): &(Result<HashMap<KeyClass, String>, String>, bool)| {
+                *complete && read.is_ok()
+            },
+            || read_files(git, commit),
+        )
+        .0?;
         let registry = Self {
             commit: commit.to_owned(),
             files,
@@ -169,9 +204,7 @@ impl Registry {
     ///
     /// The file cannot be written.
     pub fn class_file(&self, git: &Git, class: KeyClass) -> Result<PathBuf, String> {
-        let common = git
-            .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .map_err(|error| error.message())?;
+        let common = git.common_dir().map_err(|error| error.message())?;
         let dir = PathBuf::from(common)
             .join("bay")
             .join("registry")

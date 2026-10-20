@@ -550,7 +550,7 @@ pub struct Policy {
 }
 
 /// Why a policy could not be loaded.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum LoadError {
     /// The policy breaks a validity rule (§ 7): at the accepted base, `POLICY_INVALID`.
     Invalid(String),
@@ -584,6 +584,31 @@ impl From<LoadError> for String {
 /// zero.
 /// [`LoadError::Git`] on a git fault.
 pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
+    // The policy at a commit never changes: loaded once per process (plan B2). Kept only when
+    // it loads, or is invalid by its text alone: a git fault may pass on a retry, no policy may
+    // be a commit not fetched yet, and an invalid judgement that ran git (an adapter path, an
+    // input) may rest on a failed or timed-out call.
+    crate::memo::at(
+        "policy",
+        git,
+        commit,
+        |(loaded, ran_git): &(Result<Option<Policy>, LoadError>, bool)| match loaded {
+            Ok(policy) => policy.is_some(),
+            Err(LoadError::Invalid(_)) => !ran_git,
+            Err(LoadError::Git(_)) => false,
+        },
+        || {
+            let mut ran_git = false;
+            let loaded = read_at(git, commit, &mut ran_git);
+            (loaded, ran_git)
+        },
+    )
+    .0
+}
+
+/// [`load_at`], read from Git every time. `ran_git` is set once the judgement runs any git
+/// call past the policy text itself.
+fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>, LoadError> {
     let text = match git.run(&["cat-file", "blob", &format!("{commit}:{POLICY_PATH}")]) {
         Ok(text) => text,
         Err(GitError::Failed { .. }) => return Ok(None),
@@ -619,6 +644,7 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
             )));
         }
         let mut adapter_ids = BTreeMap::new();
+        *ran_git = true;
         for path in &entry.adapter {
             let spec = format!("{commit}:{}", path.trim_end_matches('/'));
             let oid = git
@@ -637,6 +663,7 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
             }
         }
     }
+    *ran_git = true;
     validate_inputs(git, commit, &file.input).map_err(invalid)?;
     let dimensions = crate::completion::site_dimensions(file.dimension).map_err(invalid)?;
     let profiles = crate::completion::requirements(file.profile, &dimensions).map_err(invalid)?;

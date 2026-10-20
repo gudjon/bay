@@ -142,6 +142,11 @@ pub struct Agent {
     pub instructions: Option<Vec<String>>,
 }
 
+/// The [`crate::memo`] kind of the config text committed at a commit: `Some(text)`, or `None`
+/// when that commit's tree has no config. [`Config::at`] and the trunk read when a repository
+/// opens share it.
+pub(crate) const COMMITTED: &str = "config";
+
 /// The instruction files of `[agent] instructions` when the config names none (G155).
 pub const DEFAULT_INSTRUCTIONS: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
@@ -183,21 +188,33 @@ impl Config {
     /// The committed config does not parse, or git cannot say whether it exists.
     pub fn at(git: &crate::git::Git, commit: &str) -> Result<Self, String> {
         let path = format!("{commit}:{CONFIG_PATH}");
-        let exists = git
-            .run(&["cat-file", "-e", &path])
-            .map(|_| true)
-            .or_else(|_| {
-                git.run(&["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
-                    .map(|_| false)
+        // The config text at a commit never changes: read once per process (plan B2).
+        let text = crate::memo::at(
+            COMMITTED,
+            git,
+            commit,
+            Result::is_ok,
+            || -> Result<Option<String>, String> {
+                let exists = git
+                    .run(&["cat-file", "-e", &path])
+                    .map(|_| true)
+                    .or_else(|_| {
+                        git.run(&["rev-parse", "--verify", &format!("{commit}^{{commit}}")])
+                            .map(|_| false)
+                            .map_err(|error| error.message())
+                    })?;
+                if !exists {
+                    return Ok(None);
+                }
+                git.run(&["cat-file", "blob", &path])
+                    .map(Some)
                     .map_err(|error| error.message())
-            })?;
-        if !exists {
-            return Ok(Self::default());
+            },
+        )?;
+        match text {
+            Some(text) => Self::parse(&text).map_err(|error| format!("{path}: {error}")),
+            None => Ok(Self::default()),
         }
-        let text = git
-            .run(&["cat-file", "blob", &path])
-            .map_err(|error| error.message())?;
-        Self::parse(&text).map_err(|error| format!("{path}: {error}"))
     }
 
     /// Parses a config text. A key bay does not know, a value of the wrong type, and a value

@@ -194,8 +194,9 @@ fn writer(git: &Git, kind: &str) -> Result<(String, PathBuf), String> {
         ("bay.producerName", "bay.producerKey")
     };
     let get = |key: &str| {
-        git.run(&["config", "--get", key])
+        git.config_get(key)
             .ok()
+            .flatten()
             .filter(|value| !value.is_empty())
     };
     let name = get(name_key).ok_or(format!("a {kind} record needs {name_key}"))?;

@@ -39,6 +39,9 @@ pub struct StartRequest {
     pub fixes: Option<String>,
 }
 
+/// How long a start whose claim push met a held remote ref lock waits before it re-reads.
+const CLAIM_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
+
 #[must_use]
 pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
     let repo = match Repo::open_fetched(dir) {
@@ -348,16 +351,27 @@ fn create(
         .create(&record, base, &format!("start {intent}"))
         .map_err(|error| error.message())?;
     let name = change_ref(&id);
+    // G198: both refs are create-only. A lease that expects no ref refuses one that exists,
+    // even when the new value fast-forwards it, so of racing starts exactly one creates the
+    // claim and every other one re-reads the claims.
     if let Err(error) = repo.git.run(&[
         "push",
         "-q",
         "--atomic",
+        &format!("--force-with-lease={name}:"),
+        &format!("--force-with-lease={intent_ref}:"),
         repo.remote(),
         &format!("{name}:{name}"),
         &format!("{head}:{intent_ref}"),
     ]) {
-        let _ = repo.git.run(&["update-ref", "-d", &name]);
+        let _ = repo.git.run(&["update-ref", "-d", &name, &head]);
         if remote_has(repo, &intent_ref)? {
+            return Ok(None);
+        }
+        // The remote's ref lock was held by a writer that has not committed yet: the claim is
+        // undecided, never a fault. Re-read the claims after a short wait.
+        if error.message().contains("cannot lock ref") {
+            std::thread::sleep(CLAIM_LOCK_WAIT);
             return Ok(None);
         }
         return Err(format!(
@@ -365,7 +379,8 @@ fn create(
             error.message()
         ));
     }
-    let _ = repo.git.run(&["update-ref", &intent_ref, &head]);
+    // The claim is the remote's now; its local copy is created, never moved (G198).
+    let _ = repo.git.run(&["update-ref", &intent_ref, &head, ""]);
     let view = view::create(repo, &id, base, &request.paths).map_err(|error| error.message())?;
     Ok(Some(
         BayResult::ok(json!({

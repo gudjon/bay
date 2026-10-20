@@ -112,8 +112,9 @@ fn hostname() -> String {
 }
 
 fn configured(git: &Git) -> Option<String> {
-    git.run(&["config", "--get", MACHINE_KEY])
+    git.config_get(MACHINE_KEY)
         .ok()
+        .flatten()
         .filter(|name| !name.is_empty())
 }
 

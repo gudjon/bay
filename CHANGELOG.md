@@ -1,9 +1,27 @@
 # Changelog
 
+## 0.1.9
+
+Before you upgrade a bay-hosted trunk's clients, upgrade the host. Older hosts refuse an expired talk's close.
+
+Status
+- `bay status` and the fleet map name and count trunk merges and pushes that did not land through bay.
+- `bay watch` lists an `unattributed_landing` event for each landing outside bay.
+
+Landing
+- Racing starts for one intent make one change; the others are refused, even while the remote's ref lock is held.
+- `bay undo` never rewinds this store's copy of the undone change's chain.
+
+Talk
+- A talk read after its `expires` closes as expired: the notice prints `EXPIRED`, and no reply is owed.
+- Expiry is judged by the ack's commit time, so a talk read in time still owes its reply.
+- `bay status` shows an unread talk past its `expires` as `expired`, never `lost`.
+- `bay land` and `bay undo` list open talks about that change in `detail.open_talks`, and never block on them.
+
 ## 0.1.8
 
 Speed
-- Commands run two to four times faster: bay no longer waits up to 20 ms after each Git call.
+- Commands run two to four times faster: bay no longer waits a fixed 20 ms for each Git call.
 
 Doctor
 - `key-custody` lists the actors whose sessions run under this account, and how a signature proves who signed.
@@ -12,7 +30,7 @@ Doctor
 
 Views
 - `bay start` releases clean views of landed, abandoned or no-effect changes once past the retention window.
-- A view with changes, new commits, a lock, a live session, or your working directory is always kept.
+- A view with changes, own commits, a lock, a live session, a broken worktree, or your directory is kept.
 
 Evidence
 - `bay evidence record` keeps a record whose push failed, and pushes it on the next run.

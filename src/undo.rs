@@ -8,7 +8,9 @@
 //! through the normal publication with a `Reverts: <Change-Id>` trailer. It never claims a
 //! generation of the undone change's intent. When the revert tree is trunk's own tree (the effect
 //! is already gone), no change is opened. A remote that cannot be read is a failure, never
-//! `CHANGE_NOT_LANDED`.
+//! `CHANGE_NOT_LANDED`. An undo never moves a ref back (G199): trunk moves only by the
+//! never-forced publishing push, and the undone change's chain is read beside this store's copy,
+//! which only ever moves forward.
 
 use std::path::Path;
 
@@ -39,9 +41,13 @@ fn run(dir: &Path, change: &str, wait: bool) -> Result<BayResult, String> {
         Ok(repo) => repo,
         Err(error) => return Ok(error.into_result()),
     };
+    // G56 (ruling T9): the talks on the undone change, fetched before the undo and named in
+    // its result. A talk never blocks an undo.
+    let open_talks = crate::talk::open_on(&repo, change);
     // G80: every result says which trunk it reflects, and when that trunk was fetched.
     let mut result = undo_in(dir, &repo, change, wait)?;
     result.freshness = result.freshness.or_else(|| repo.freshness());
+    crate::talk::name_open_talks(&mut result, open_talks);
     Ok(result)
 }
 
@@ -154,9 +160,9 @@ pub(crate) fn landed_commit(
     else {
         return Ok(None);
     };
-    repo.fetch_refs(&[change_ref(change)]).map_err(unreadable)?;
-    let (_, record) = Chain::new(&repo.git)
-        .read(change)
+    let remote = fetch_chain(repo, change).map_err(unreadable)?;
+    let record = Chain::new(&repo.git)
+        .record_at(&remote)
         .map_err(|error| error.message())?;
     let scan = publish::scan(&repo.git, &record.base_first, trunk, change)?;
     Ok(scan
@@ -164,4 +170,38 @@ pub(crate) fn landed_commit(
         .into_iter()
         .any(|found| found.commit == landed)
         .then_some(landed))
+}
+
+/// The remote head of `change`'s chain, read without moving this store's copy back (G199): it
+/// is fetched into `refs/bay/fetch/<id>`, and the local chain is created at it, or moved to it
+/// only when it descends from the local head, each by compare-and-swap. A local chain that is
+/// ahead of the remote, or apart from it, is left where it is.
+fn fetch_chain(repo: &Repo, change: &str) -> Result<String, crate::git::GitError> {
+    let git = &repo.git;
+    let name = change_ref(change);
+    let fetched = format!("{}{change}", crate::names::FETCH);
+    git.run(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        repo.remote(),
+        &format!("+{name}:{fetched}"),
+    ])?;
+    let remote = git.run(&["rev-parse", "--verify", &fetched])?;
+    let _ = git.run(&["update-ref", "-d", &fetched, &remote]);
+    match git.ref_target(&name)? {
+        None => {
+            let _ = git.run(&["update-ref", &name, &remote, ""]);
+        }
+        Some(local)
+            if local != remote
+                && git
+                    .run(&["merge-base", "--is-ancestor", &local, &remote])
+                    .is_ok() =>
+        {
+            let _ = git.run(&["update-ref", &name, &remote, &local]);
+        }
+        Some(_) => {}
+    }
+    Ok(remote)
 }

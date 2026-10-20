@@ -11,11 +11,18 @@
 //! `git` this process runs appends one JSON line there when it ends: its subcommand, its
 //! duration in microseconds from spawn to exit, and its exit code (`null` when killed). A
 //! release build (`BAY_RELEASE_VERSION` set at build time) never reads the variable.
+//!
+//! G200: a handle lists its repository's config once ([`Git::config_get`]) and answers bay's
+//! own keys from that list until any `git config` write in this process; the common
+//! directory of a directory is asked once per process ([`Git::common_dir`]).
 
+use std::borrow::Cow;
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Instant;
 
@@ -26,7 +33,73 @@ pub struct Git {
     /// `dir` is itself a bare repository. Git 3.0 sets `safe.bareRepository=explicit`,
     /// which stops discovering a bare repository from `-C`, so bay names it with `--git-dir`.
     bare_dir: bool,
+    /// G200: the config as this handle last listed it, for [`Git::config_get`].
+    config: Mutex<Option<Snapshot>>,
 }
+
+/// G200: one `git config --list` of a handle, every entry in Git's order (the last value
+/// wins), read when [`CONFIG_WRITES`] stood at `writes`.
+struct Snapshot {
+    writes: u64,
+    entries: Vec<ConfigEntry>,
+    /// Each config file the listing read, and the global ones that may appear, with what they
+    /// were when listed: another process's `git config` (a key set while an executor runs)
+    /// replaces its file, so a changed file lists again.
+    files: Vec<(PathBuf, Option<FileStamp>)>,
+}
+
+/// What a config file was: its length, modification time and, on Unix, its inode (Git writes
+/// a config file by renaming a new one over it).
+type FileStamp = (u64, Option<std::time::SystemTime>, u64);
+
+fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((meta.len(), meta.modified().ok(), inode))
+}
+
+impl Snapshot {
+    fn changed(&self) -> bool {
+        self.files
+            .iter()
+            .any(|(path, stamp)| file_stamp(path) != *stamp)
+    }
+}
+
+/// The global config files Git reads, whether or not they exist yet.
+fn global_config_files() -> Vec<PathBuf> {
+    if let Some(global) = std::env::var_os("GIT_CONFIG_GLOBAL") {
+        return vec![PathBuf::from(global)];
+    }
+    let home = crate::platform::home().map(PathBuf::from);
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.as_ref().map(|home| home.join(".config")));
+    home.map(|home| home.join(".gitconfig"))
+        .into_iter()
+        .chain(xdg.map(|xdg| xdg.join("git/config")))
+        .collect()
+}
+
+struct ConfigEntry {
+    /// The key as Git lists it: section and name in lower case, a subsection as written.
+    key: Vec<u8>,
+    /// `None` for a key written with no `=`, which `git config --get` prints as empty.
+    value: Option<Vec<u8>>,
+    /// Written in the repository's own config file, which alone `git config --local` reads
+    /// (it follows no include).
+    local: bool,
+}
+
+/// G200: how many `git config` calls that may write this process has run. A snapshot read
+/// before the latest one is read again.
+static CONFIG_WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// G200: the common directory of each directory a handle asked, by the path it was given.
+static COMMON_DIRS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
 
 /// Formats and location of a repository, as reported by Git.
 pub struct RepoInfo {
@@ -70,7 +143,174 @@ impl Git {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();
         let bare_dir = is_bare_dir(&dir);
-        Self { dir, bare_dir }
+        Self {
+            dir,
+            bare_dir,
+            config: Mutex::new(None),
+        }
+    }
+
+    /// `git config --get <key>`: the last value of `key` in the config Git reads here (a key
+    /// with no value is empty), `None` when it is unset. A key of bay's own section is answered
+    /// from this handle's snapshot, listed once and again after any `git config` write this
+    /// process runs; Git itself never writes bay's keys. Any other key, or a snapshot Git
+    /// cannot list, asks Git for that key alone.
+    ///
+    /// # Errors
+    ///
+    /// See [`Git::run`]; a value that is not UTF-8 is [`GitError::NotUtf8`].
+    pub fn config_get(&self, key: &str) -> Result<Option<String>, GitError> {
+        self.config_value(key, false)
+    }
+
+    /// [`Git::config_get`] of the repository's own config file only, as
+    /// `git config --local --get <key>` reads it.
+    ///
+    /// # Errors
+    ///
+    /// See [`Git::config_get`].
+    pub fn config_get_local(&self, key: &str) -> Result<Option<String>, GitError> {
+        self.config_value(key, true)
+    }
+
+    fn config_value(&self, key: &str, local: bool) -> Result<Option<String>, GitError> {
+        let ask_git = || -> Result<Option<String>, GitError> {
+            let mut args = vec!["config"];
+            if local {
+                args.push("--local");
+            }
+            args.extend(["--get", key]);
+            match self.run_status(&args)? {
+                (0, value, _) => Ok(Some(value)),
+                // Exit 1 with nothing on stderr: the key is unset.
+                (1, _, stderr) if stderr.is_empty() => Ok(None),
+                (_, _, stderr) => Err(GitError::Failed {
+                    args: args.join(" "),
+                    stderr,
+                }),
+            }
+        };
+        let Some(wanted) = bay_key(key) else {
+            return ask_git();
+        };
+        let mut slot = self.config.lock().unwrap_or_else(PoisonError::into_inner);
+        let writes = CONFIG_WRITES.load(Ordering::SeqCst);
+        if slot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.writes != writes || snapshot.changed())
+        {
+            // A config Git cannot list (a broken global file, say) may still answer `--local`,
+            // or fail as the one key's read does: Git says which.
+            let Ok(snapshot) = self.list_config(writes) else {
+                return ask_git();
+            };
+            *slot = Some(snapshot);
+        }
+        let Some(snapshot) = slot.as_ref() else {
+            return ask_git();
+        };
+        let Some(entry) = snapshot
+            .entries
+            .iter()
+            .rev()
+            .find(|entry| entry.key == wanted && (entry.local || !local))
+        else {
+            return Ok(None);
+        };
+        let value = String::from_utf8(entry.value.clone().unwrap_or_default()).map_err(|_| {
+            GitError::NotUtf8 {
+                args: format!("config --get {key}"),
+            }
+        })?;
+        Ok(Some(value.trim_end().to_owned()))
+    }
+
+    /// Lists the config Git reads here, with each entry's scope and file.
+    fn list_config(&self, writes: u64) -> Result<Snapshot, GitError> {
+        let out = self.run_bytes(
+            &["config", "--list", "--show-scope", "--show-origin", "-z"],
+            &[],
+            None,
+        )?;
+        let mut fields: Vec<&[u8]> = out.split(|&byte| byte == 0).collect();
+        if fields.last().is_some_and(|last| last.is_empty()) {
+            fields.pop();
+        }
+        if !fields.len().is_multiple_of(3) {
+            return Err(GitError::UnexpectedOutput(
+                "unexpected git config --list output",
+            ));
+        }
+        // The repository's own file is where its first entry comes from: an include is itself
+        // an entry of the file that holds it, listed before what it includes.
+        let own = fields
+            .chunks(3)
+            .find(|entry| entry[0] == b"local")
+            .map(|entry| entry[1]);
+        let entries = fields
+            .chunks(3)
+            .map(|entry| {
+                let (key, value) = match entry[2].iter().position(|&byte| byte == b'\n') {
+                    Some(at) => (&entry[2][..at], Some(entry[2][at + 1..].to_vec())),
+                    None => (entry[2], None),
+                };
+                ConfigEntry {
+                    key: key.to_vec(),
+                    value,
+                    local: entry[0] == b"local" && Some(entry[1]) == own,
+                }
+            })
+            .collect();
+        let base = if self.bare_dir {
+            std::env::current_dir().unwrap_or_default()
+        } else {
+            self.dir.clone()
+        };
+        let mut paths: Vec<PathBuf> = fields
+            .chunks(3)
+            .filter_map(|entry| entry[1].strip_prefix(b"file:"))
+            .filter_map(|path| std::str::from_utf8(path).ok())
+            .map(|path| base.join(path))
+            .chain(global_config_files())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        let files = paths
+            .into_iter()
+            .map(|path| {
+                let stamp = file_stamp(&path);
+                (path, stamp)
+            })
+            .collect();
+        Ok(Snapshot {
+            writes,
+            entries,
+            files,
+        })
+    }
+
+    /// `rev-parse --path-format=absolute --git-common-dir`, asked once per process for each
+    /// directory a handle is given: a directory's repository does not move while bay runs. A
+    /// directory that is gone asks Git again, so its error is Git's.
+    ///
+    /// # Errors
+    ///
+    /// See [`Git::run`].
+    pub fn common_dir(&self) -> Result<String, GitError> {
+        if self.dir.is_dir()
+            && let Some(known) = COMMON_DIRS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&self.dir)
+        {
+            return Ok(known.clone());
+        }
+        let common = self.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        COMMON_DIRS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(self.dir.clone(), common.clone());
+        Ok(common)
     }
 
     /// Runs `git <args>` and returns trimmed stdout.
@@ -381,19 +621,61 @@ pub(crate) fn trace(cmd: &Command, started: Instant, code: Option<i32>) {
 /// it (`-C <dir>`, `-c <key=value>`, `--git-dir=<dir>` and other `-` options); `--version` is
 /// its own. Empty when there is none.
 fn subcommand(cmd: &Command) -> String {
-    let mut args = cmd.get_args();
-    while let Some(arg) = args.next() {
-        let text = arg.to_string_lossy();
-        match &*text {
-            "-C" | "-c" => {
-                args.next();
-            }
-            "--version" => return text.into_owned(),
-            _ if text.starts_with('-') => {}
-            _ => return text.into_owned(),
+    let args = args_of(cmd);
+    subcommand_at(&args).map_or_else(String::new, |at| args[at].clone().into_owned())
+}
+
+fn args_of(cmd: &Command) -> Vec<Cow<'_, str>> {
+    cmd.get_args()
+        .map(std::ffi::OsStr::to_string_lossy)
+        .collect()
+}
+
+/// Where [`subcommand`] finds the subcommand among `args`.
+fn subcommand_at(args: &[Cow<'_, str>]) -> Option<usize> {
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        match &**arg {
+            "-C" | "-c" => at += 2,
+            "--version" => return Some(at),
+            text if text.starts_with('-') => at += 1,
+            _ => return Some(at),
         }
     }
-    String::new()
+    None
+}
+
+/// G200: whether `cmd` is a `git config` that may write: any that is not a `--get`, `--list`
+/// or `get`/`list` read. Every snapshot of [`Git::config_get`] is then read again.
+fn writes_config(cmd: &Command) -> bool {
+    if cmd.get_program() != "git" {
+        return false;
+    }
+    let args = args_of(cmd);
+    let Some(at) = subcommand_at(&args).filter(|&at| args[at] == "config") else {
+        return false;
+    };
+    let rest = &args[at + 1..];
+    let read = rest
+        .first()
+        .is_some_and(|first| first == "get" || first == "list")
+        || rest.iter().any(|arg| {
+            matches!(
+                &**arg,
+                "--get" | "--get-all" | "--get-regexp" | "--get-urlmatch" | "--list" | "-l"
+            )
+        });
+    !read
+}
+
+/// The key `git config --list` would print for `key` when it is a plain key of bay's own
+/// section (`bay.<name>`, no subsection), section and name in lower case; `None` otherwise.
+fn bay_key(key: &str) -> Option<Vec<u8>> {
+    let (section, name) = key.split_once('.')?;
+    let plain = name.starts_with(|c: char| c.is_ascii_alphabetic())
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    (section.eq_ignore_ascii_case("bay") && plain)
+        .then(|| format!("bay.{}", name.to_ascii_lowercase()).into_bytes())
 }
 
 /// A bare repository holds `HEAD` and `objects/` at its top and has no `.git`.
@@ -473,6 +755,10 @@ pub fn run_bounded_for(
     let stderr_handle = thread::spawn(move || read_to_end(&mut stderr));
 
     let status = wait_until(&mut child, display, timeout);
+    // Counted however the call ended: a write that timed out may have landed.
+    if writes_config(&cmd) {
+        CONFIG_WRITES.fetch_add(1, Ordering::SeqCst);
+    }
     trace(
         &cmd,
         started,
@@ -534,9 +820,93 @@ fn wait_until(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{GitError, run_bounded_for};
+    use super::{Git, GitError, run_bounded_for};
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    /// What `git config [--local] --get <key>` answers in `git`'s repository, spawned.
+    fn asked(git: &Git, key: &str, local: bool) -> Option<String> {
+        let mut args = vec!["config"];
+        if local {
+            args.push("--local");
+        }
+        args.extend(["--get", key]);
+        match git.run_status(&args).unwrap() {
+            (0, value, _) => Some(value),
+            (1, _, stderr) if stderr.is_empty() => None,
+            other => panic!("{key}: {other:?}"),
+        }
+    }
+
+    /// G200: the snapshot answers every read of bay's keys as `git config --get` and
+    /// `git config --local --get` do (the last value wins, a key with no value is empty, names
+    /// are case-insensitive, `--local` follows no include), and a write through any handle is
+    /// seen by the next read.
+    #[test]
+    fn the_config_snapshot_answers_as_git_does() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let init = Command::new("git")
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let config = dir.path().join(".git").join("config");
+        let mut text = std::fs::read_to_string(&config).unwrap();
+        text.push_str(
+            "[bay]\n\tmulti = a\n\tmulti = b\n\tflag\n\tMixedCase = X \n\ttrunk = main\n\
+             [include]\n\tpath = included\n[bay]\n\tafter = local\n",
+        );
+        std::fs::write(&config, text).unwrap();
+        std::fs::write(
+            dir.path().join(".git").join("included"),
+            "[bay]\n\ttrunk = included\n\tonlyIncluded = yes\n\tafter = included\n",
+        )
+        .unwrap();
+        let keys = [
+            "bay.multi",
+            "bay.flag",
+            "bay.mixedcase",
+            "BAY.MIXEDCASE",
+            "bay.trunk",
+            "bay.onlyIncluded",
+            "bay.after",
+            "bay.unset",
+        ];
+        for handle in [Git::new(dir.path()), Git::new(dir.path().join(".git"))] {
+            for key in keys {
+                for local in [false, true] {
+                    let snapshot = if local {
+                        handle.config_get_local(key)
+                    } else {
+                        handle.config_get(key)
+                    };
+                    assert_eq!(
+                        snapshot.unwrap(),
+                        asked(&handle, key, local),
+                        "{key} local={local}"
+                    );
+                }
+            }
+        }
+
+        let reader = Git::new(dir.path());
+        assert_eq!(
+            reader.config_get("bay.trunk").unwrap().as_deref(),
+            Some("included")
+        );
+        Git::new(dir.path())
+            .run(&["config", "--local", "bay.trunk", "moved"])
+            .unwrap();
+        assert_eq!(
+            reader.config_get_local("bay.trunk").unwrap().as_deref(),
+            Some("moved")
+        );
+        assert_eq!(
+            reader.config_get("bay.trunk").unwrap(),
+            asked(&reader, "bay.trunk", false)
+        );
+    }
 
     /// G135: a call that hangs is killed at its bound and reported as a timeout, never waited
     /// on and never read as a result.

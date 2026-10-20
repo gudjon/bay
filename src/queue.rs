@@ -268,6 +268,8 @@ pub fn join(
             .run(&[
                 "push",
                 "-q",
+                // G198: a reservation is create-only, so a lease expects no ref.
+                &format!("--force-with-lease={name}:"),
                 repo.remote(),
                 &format!("{reservation}:{name}"),
             ])
@@ -368,7 +370,14 @@ pub fn release(
     let name = format!("{DONE_PREFIX}{seq}");
     if repo
         .git
-        .run(&["push", "-q", repo.remote(), &format!("{release}:{name}")])
+        .run(&[
+            "push",
+            "-q",
+            // G198: a release is create-only, so a lease expects no ref.
+            &format!("--force-with-lease={name}:"),
+            repo.remote(),
+            &format!("{release}:{name}"),
+        ])
         .is_ok()
     {
         return Ok(());

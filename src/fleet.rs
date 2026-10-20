@@ -555,8 +555,9 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
 /// The cost is bounded: one ref listing of the changes and one chain read each, at most
 /// [`FLEET_MAX_MACHINES`] summaries of at most `live::LIVE_MAX_BYTES` read in two `cat-file`
 /// calls, one signature check per summary under a registry, one bounded tail per session
-/// record of this machine, one trunk log per held change no session names, and one red
-/// judgement over [`crate::red::WINDOW`] trunk commits.
+/// record of this machine, one trunk log per held change no session names, one red
+/// judgement over [`crate::red::WINDOW`] trunk commits, and one scan of the same window for
+/// unattributed landings ([`crate::unattributed::scan`]).
 fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     let git = &repo.git;
     let trunk = git
@@ -608,6 +609,10 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         Value::Null
     };
     let red: Vec<Value> = map.red.iter().map(crate::red::Red::to_json).collect();
+    // G85: as `bay status` reads it, from the trunk this cache holds.
+    let unattributed = map.trunk.as_deref().map(|trunk| {
+        crate::unattributed::scan(git, trunk).unwrap_or_else(|why| json!({"unread": why}))
+    });
     let mut result = BayResult::ok(json!({
         "remote": repo.remote(),
         "fetched_at": fetched.at,
@@ -623,6 +628,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         })).collect::<Vec<_>>(),
         "talks": [],
         "red": red,
+        "unattributed": unattributed,
         "default_actor_sessions": default_actor,
         "sessions": map.sessions,
     }));

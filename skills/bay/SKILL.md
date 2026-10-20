@@ -32,7 +32,7 @@ leave. Docs: https://getbay.io/docs (each page also reads as markdown: add `.md`
 | A follow-up after your change landed | `bay start <intent> --new` |
 | Fix a change that already landed | `bay start <intent> --fixes <change>` (the landing names it in a `Fixes:` trailer) |
 | Give the change up, so another agent may adopt it | `bay land --abandon` |
-| Read state | `bay status` |
+| Read state, and trunk commits that did not land through bay (`unattributed`) | `bay status` |
 | Reverse a landed change with a new, checked change | `bay undo <change>` |
 
 `<intent>` is the card, issue or ticket id. `--paths` lists every path the change reads and writes:
@@ -82,11 +82,15 @@ Every code: https://getbay.io/docs/results
 | When | Run |
 | --- | --- |
 | See every machine and session on the repository, and who works on red paths (`on_red`) | `bay status --fleet` |
-| See landings, events (`trunk_red`, `trunk_red_cleared`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
+| See landings, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
 
 Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
+
+- A talk read after its `--expires` is void: the notice prints `EXPIRED`, and it owes no reply.
+- `bay land` and `bay undo` list the open talks about that change in `detail.open_talks`. Read them;
+  they never block the landing.
 
 ## Set up a repository (only when the user asks)
 

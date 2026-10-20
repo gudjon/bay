@@ -86,9 +86,7 @@ impl Bootstrap {
     /// holds it.
     #[must_use]
     pub fn of(dir: &Path) -> Option<Result<Self, BootstrapError>> {
-        let common = Git::new(dir)
-            .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .ok()?;
+        let common = Git::new(dir).common_dir().ok()?;
         Some(Self::read(&Git::new(common)))
     }
 
@@ -101,9 +99,8 @@ impl Bootstrap {
 
 /// A key of the repository-local git config (`$GIT_COMMON_DIR/config`); `None` when unset.
 fn local_config(git: &Git, key: &str) -> Result<Option<String>, BootstrapError> {
-    match git.run(&["config", "--local", "--get", key]) {
-        Ok(value) if !value.is_empty() => Ok(Some(value)),
-        Ok(_) => Ok(None),
+    match git.config_get_local(key) {
+        Ok(value) => Ok(value.filter(|value| !value.is_empty())),
         // Exit 1 with nothing on stderr: the key is unset. Anything else is not "unset".
         Err(GitError::Failed { stderr, .. }) if stderr.trim().is_empty() => Ok(None),
         Err(error) => Err(BootstrapError::Unreadable(error.message())),
@@ -279,7 +276,7 @@ impl Repo {
     pub fn open_with(dir: &Path, fetch: Fetch) -> Result<Self, OpenError> {
         let here = Git::new(dir);
         let common = here
-            .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .common_dir()
             .map_err(|error| OpenError::NoRepository(error.message()))?;
         let common_dir = PathBuf::from(common);
         let known = |message: String| OpenError::Known(common_dir.clone(), message);
@@ -312,15 +309,17 @@ impl Repo {
         };
         let mut prefetched = None;
         let mut fetch_error = None;
-        let have = tip_of(&git).map_err(known)?;
+        let mut have = tip_of(&git).map_err(known)?;
         if fetch == Fetch::First || (fetch == Fetch::IfMissing && have.is_none()) {
             let fetched = fetch_into(&git, &bootstrap, &work_root);
             if let Err(error) = &fetched {
                 fetch_error = Some(error.message());
             }
             prefetched = Some(fetched);
+            // G200: only a fetch moves the tracking ref here, so only after one is it read again.
+            have = tip_of(&git).map_err(known)?;
         }
-        let Some(tip) = tip_of(&git).map_err(known)? else {
+        let Some(tip) = have else {
             return Err(OpenError::ConfigMissing(
                 common_dir.clone(),
                 missing_config(&bootstrap, &tracking, false, fetch_error),
@@ -512,25 +511,34 @@ fn fetch_into(git: &Git, bootstrap: &Bootstrap, work_root: &Path) -> Result<Stri
 /// The config committed at `commit`; `None` when that commit's tree has no
 /// `.bay/config.toml`. A tree git cannot read is an error, never "no config".
 fn committed_config(git: &Git, commit: &str) -> Result<Option<Config>, String> {
-    let listed = git
-        .run(&["ls-tree", "-z", "--full-tree", commit, "--", CONFIG_PATH])
-        .map_err(|error| error.message())?;
-    let entry = listed.trim_end_matches('\0');
-    if entry.is_empty() {
-        return Ok(None);
-    }
-    let Some(("blob", blob)) = entry
-        .split('\t')
-        .next()
-        .and_then(|head| head.split_once(' ').map(|(_, rest)| rest))
-        .and_then(|rest| rest.split_once(' '))
-    else {
-        return Err(format!("{commit}:{CONFIG_PATH} is not a file"));
-    };
-    let text = git
-        .run(&["cat-file", "blob", blob])
-        .map_err(|error| error.message())?;
-    Config::parse(&text).map(Some)
+    // Read once per process (plan B2), shared with `Config::at` at the same commit.
+    let text = crate::memo::at(
+        crate::config::COMMITTED,
+        git,
+        commit,
+        Result::is_ok,
+        || -> Result<Option<String>, String> {
+            let listed = git
+                .run(&["ls-tree", "-z", "--full-tree", commit, "--", CONFIG_PATH])
+                .map_err(|error| error.message())?;
+            let entry = listed.trim_end_matches('\0');
+            if entry.is_empty() {
+                return Ok(None);
+            }
+            let Some(("blob", blob)) = entry
+                .split('\t')
+                .next()
+                .and_then(|head| head.split_once(' ').map(|(_, rest)| rest))
+                .and_then(|rest| rest.split_once(' '))
+            else {
+                return Err(format!("{commit}:{CONFIG_PATH} is not a file"));
+            };
+            git.run(&["cat-file", "blob", blob])
+                .map(Some)
+                .map_err(|error| error.message())
+        },
+    )?;
+    text.map(|text| Config::parse(&text)).transpose()
 }
 
 #[cfg(test)]

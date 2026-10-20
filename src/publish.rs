@@ -127,6 +127,9 @@ pub fn land(
     let Some(id) = change.map(str::to_owned).or_else(|| repo.view_change(dir)) else {
         return BayResult::failed("run bay land in a change's view, or name the change");
     };
+    // G56 (ruling T9): the talks on this change, fetched before the landing and named in its
+    // result. A talk never blocks a landing.
+    let open_talks = crate::talk::open_on(&repo, &id);
     let step = Cell::new("read");
     let mut result = Err(CHAIN_MOVED.to_owned());
     for _ in 0..3 {
@@ -148,6 +151,7 @@ pub fn land(
     let mut result = with_receipt(&repo, &id, step.get(), result);
     // G80: every result says which trunk it reflects, and when that trunk was fetched.
     result.freshness = result.freshness.or_else(|| repo.freshness());
+    crate::talk::name_open_talks(&mut result, open_talks);
     result
 }
 
@@ -2590,6 +2594,9 @@ fn run_policy(
 ) -> Result<(&'static str, Option<BayResult>), String> {
     let git = &ctx.repo.git;
     let base_tree = tree_of(git, trunk)?;
+    // The checks' scratch stays inside the git common dir: private to the repository, on its
+    // filesystem, and hidden from every check but its own part (G26, G62). Its path holds a
+    // `.git` part, so an adapter judges paths relative to its tree (G241).
     let scratch = ctx
         .repo
         .common_dir
@@ -3315,8 +3322,10 @@ fn publish_push(
     // when the new value fast-forwards it (a later publication descends from an earlier one).
     let landed_lease = format!("--force-with-lease={}{id}:", crate::names::LANDED);
     let intent_lease = claim.map(|claim| format!("--force-with-lease={}:", claim.landed_ref()));
+    let done_lease =
+        release.map(|(seq, _)| format!("--force-with-lease={}{seq}:", crate::queue::DONE_PREFIX));
     let mut args = vec!["push", "-q", "--atomic", landed_lease.as_str()];
-    if let Some(lease) = &intent_lease {
+    for lease in [&intent_lease, &done_lease].into_iter().flatten() {
         args.push(lease);
     }
     args.extend([repo.remote(), trunk.as_str(), landed.as_str()]);

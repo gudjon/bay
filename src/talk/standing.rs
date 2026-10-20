@@ -7,14 +7,19 @@
 //! - `reply_owed`: a backbrief came, and the talk is still open, before `follow_up`.
 //! - `stale`: acked, and the `follow_up` it owes (the latest backbrief's, or the body's) has
 //!   passed. The row stays.
+//! - `expired` (G52, ruling T3): read after its `expires`, judged by the ack's commit time, or not
+//!   read yet with `expires` passed, so any read is later. It owes nothing: `owes` is null, and
+//!   it is never `lost` or `stale`. The recipient's accept closes a talk read after `expires`.
 //!
 //! A closed talk is not listed. A backbrief that says `done` closes nothing: only evidence does.
 
 use serde_json::{Value, json};
 
-use super::{Entry, TALK_PREFIX, Talk, talks_where};
+use super::{Entry, TALK_PREFIX, Talk, read_after_expiry, talks_where};
 use crate::clock::unix_of;
 use crate::git::Git;
+
+const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
 
 /// No ack within this many seconds of `sent` is a lost arrival (`DESIGN` § 11c: 24 hours).
 pub const BAY_TALK_ACK_BOUND_S: u64 = 24 * 3600;
@@ -27,6 +32,7 @@ pub enum Standing {
     Arrived,
     ReplyOwed,
     Stale,
+    Expired,
 }
 
 impl Standing {
@@ -38,23 +44,42 @@ impl Standing {
             Self::Arrived => "arrived",
             Self::ReplyOwed => "reply_owed",
             Self::Stale => "stale",
+            Self::Expired => "expired",
         }
     }
 }
 
-/// The standing of an open talk sent at `sent`, acked at `acked`, last backbriefed at
-/// `replied`, owing a reply by `follow_up`, read at `now` (all Unix seconds).
+/// The reader's clock for talk standings: this machine's, or in a test build shifted by
+/// `BAY_TEST_TALK_CLOCK_SKEW_S` seconds, so G52 reads with a skewed clock.
+#[must_use]
+pub fn reader_now() -> u64 {
+    let skew = std::env::var("BAY_TEST_TALK_CLOCK_SKEW_S")
+        .ok()
+        .filter(|_| TEST_HOOKS)
+        .and_then(|text| text.parse::<i64>().ok())
+        .unwrap_or(0);
+    crate::live::unix_now().saturating_add_signed(skew)
+}
+
+/// The standing of an open talk sent at `sent`, acked at `acked` (the ack's commit time), last
+/// backbriefed at `replied`, owing a reply by `follow_up`, void after `expires`, looked at `now`
+/// (all Unix seconds).
 #[must_use]
 pub fn standing(
     sent: u64,
     acked: Option<u64>,
     replied: Option<u64>,
     follow_up: Option<u64>,
+    expires: Option<u64>,
     now: u64,
 ) -> Standing {
     match acked {
+        // Not read yet and void now: any read is after `expires`, so nothing is owed.
+        None if read_after_expiry(now, expires) => Standing::Expired,
         None if now >= sent.saturating_add(BAY_TALK_ACK_BOUND_S) => Standing::Lost,
         None => Standing::NotOnRecipient,
+        // G52: read after `expires`, judged by the ack's commit time, never by `now`.
+        Some(read) if read_after_expiry(read, expires) => Standing::Expired,
         Some(_) if follow_up.is_some_and(|due| now > due) => Standing::Stale,
         Some(_) if replied.is_some() => Standing::ReplyOwed,
         Some(_) => Standing::Arrived,
@@ -102,10 +127,17 @@ fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
     let follow_up = talk.follow_up(git)?;
     let due = follow_up.as_deref().and_then(unix_of);
     let sent = talk.sent();
-    let owes = backbrief
-        .as_ref()
-        .and_then(|value| value["owes"].as_str().map(str::to_owned))
-        .unwrap_or_else(|| talk.who.clone());
+    let held = standing(sent, acked, replied, due, talk.expires(), now);
+    let owes = if held == Standing::Expired {
+        Value::Null
+    } else {
+        json!(
+            backbrief
+                .as_ref()
+                .and_then(|value| value["owes"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| talk.who.clone())
+        )
+    };
     let age = |at: u64| now.saturating_sub(at);
     Ok(json!({
         "talk": talk.id,
@@ -120,7 +152,8 @@ fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
         "reply_age_s": replied.map(age),
         "follow_up": follow_up,
         "wake": wake,
-        "standing": standing(sent, acked, replied, due, now).as_str(),
+        "expires": talk.body["expires"],
+        "standing": held.as_str(),
     }))
 }
 
@@ -134,31 +167,106 @@ mod tests {
         let sent = 1_000;
         let bound = sent + BAY_TALK_ACK_BOUND_S;
         assert_eq!(
-            standing(sent, None, None, None, sent + 5),
+            standing(sent, None, None, None, None, sent + 5),
             Standing::NotOnRecipient
         );
         assert_eq!(
-            standing(sent, None, None, None, bound - 1),
+            standing(sent, None, None, None, None, bound - 1),
             Standing::NotOnRecipient
         );
-        assert_eq!(standing(sent, None, None, None, bound), Standing::Lost);
+        assert_eq!(
+            standing(sent, None, None, None, None, bound),
+            Standing::Lost
+        );
         let due = sent + 600;
         assert_eq!(
-            standing(sent, Some(sent + 9), None, Some(due), sent + 60),
+            standing(sent, Some(sent + 9), None, Some(due), None, sent + 60),
             Standing::Arrived
         );
         assert_eq!(
-            standing(sent, Some(sent + 9), Some(sent + 30), Some(due), sent + 60),
+            standing(
+                sent,
+                Some(sent + 9),
+                Some(sent + 30),
+                Some(due),
+                None,
+                sent + 60
+            ),
             Standing::ReplyOwed
         );
         assert_eq!(
-            standing(sent, Some(sent + 9), None, Some(due), due + 1),
+            standing(sent, Some(sent + 9), None, Some(due), None, due + 1),
             Standing::Stale
         );
         assert_eq!(
-            standing(sent, Some(sent + 9), Some(sent + 30), Some(due), due + 1),
+            standing(
+                sent,
+                Some(sent + 9),
+                Some(sent + 30),
+                Some(due),
+                None,
+                due + 1
+            ),
             Standing::Stale,
             "a backbrief that keeps the old follow_up is stale after it"
+        );
+    }
+
+    /// G52: an expired talk owes nothing, and the read is judged by the ack's time, never by the
+    /// clock it is looked at with.
+    #[test]
+    fn an_expired_talk_owes_nothing() {
+        let sent = 1_000;
+        let (expires, due) = (sent + 300, sent + 600);
+        let late = sent + BAY_TALK_ACK_BOUND_S + 1;
+        let read_in_time = Some(sent + 9);
+        assert_eq!(
+            standing(
+                sent,
+                read_in_time,
+                None,
+                Some(due),
+                Some(expires),
+                expires + 1
+            ),
+            Standing::Arrived,
+            "read before `expires`: the backbrief is owed after it"
+        );
+        assert_eq!(
+            standing(sent, read_in_time, None, Some(due), Some(expires), late),
+            Standing::Stale
+        );
+        assert_eq!(
+            standing(
+                sent,
+                Some(expires + 1),
+                None,
+                Some(due),
+                Some(expires),
+                expires + 2
+            ),
+            Standing::Expired
+        );
+        assert_eq!(
+            standing(
+                sent,
+                Some(expires + 1),
+                None,
+                Some(due),
+                Some(expires),
+                late
+            ),
+            Standing::Expired,
+            "never stale"
+        );
+        assert_eq!(
+            standing(sent, None, None, Some(due), Some(expires), late),
+            Standing::Expired,
+            "never lost"
+        );
+        assert_eq!(
+            standing(sent, None, None, Some(due), Some(expires), expires),
+            Standing::NotOnRecipient
         );
     }
 }

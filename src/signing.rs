@@ -58,8 +58,9 @@ pub struct Keys {
 }
 
 fn config(git: &Git, key: &str) -> Option<String> {
-    git.run(&["config", "--get", key])
+    git.config_get(key)
         .ok()
+        .flatten()
         .filter(|value| !value.is_empty())
 }
 

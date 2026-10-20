@@ -136,8 +136,9 @@ pub(crate) fn agent_key(git: &Git, registry: &Registry, name: &str) -> Result<Pa
 fn reviewer_key(git: &Git, registry: &Registry, name: &str) -> Result<PathBuf, Refusal> {
     let not_actor = |why: String| Refusal::new(Reason::TalkSenderNotActor, why);
     let key = git
-        .run(&["config", "--get", "bay.reviewerKey"])
+        .config_get("bay.reviewerKey")
         .ok()
+        .flatten()
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .ok_or_else(|| {

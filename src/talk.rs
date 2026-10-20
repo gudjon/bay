@@ -21,7 +21,10 @@
 //! `answered` once a landing that names the change (`Fixes:`, `Reverts:` or `Supersedes:`) is on
 //! trunk, naming that landing (G148). One sender holds at most
 //! [`BAY_TALK_OPEN_MAX`] open talks to one recipient, and a reviewer one open talk per change:
-//! its later finding on that change supersedes the open one (G149b, [`open_findings`]).
+//! its later finding on that change supersedes the open one (G149b, [`open_findings`]). A talk
+//! read after its `expires` (its ack's commit time is later) closes as `expired` and owes no
+//! backbrief (G52, ruling T3). `land` and `undo` name the open talks on their change (G56,
+//! [`open_on`]).
 //!
 //! Delivery is the recipient's fetch and accept ([`receive`]), which any fetching bay command on
 //! the recipient's machine runs (`bay status`, `bay watch`): it writes the ack on the same chain,
@@ -31,6 +34,7 @@
 mod accept;
 mod judge;
 mod lander;
+mod open;
 pub mod poll;
 mod send;
 pub mod standing;
@@ -38,6 +42,7 @@ pub mod wake;
 
 pub use accept::receive;
 pub use judge::{Push, judge};
+pub use open::{name_open_talks, open_on};
 pub use send::{Answer, Ask, answer, talk};
 
 use std::fmt::Write as _;
@@ -166,6 +171,14 @@ pub(crate) const ANSWERS: [(&str, &str); 3] = [
     ("superseded_by", "Supersedes"),
 ];
 const ENTRY_COMMON: [&str; 5] = ["schema", "entry", "talk", "actor", "at"];
+
+/// G52 (ruling T3): whether a talk read at `read` (Unix seconds) was read after its `expires`.
+/// `read` is the time the read is on record at, the ack's commit time, never a later reader's
+/// clock: a talk read in time owes its backbrief however late it is looked at.
+#[must_use]
+pub fn read_after_expiry(read: u64, expires: Option<u64>) -> bool {
+    expires.is_some_and(|due| read > due)
+}
 
 /// The ref of the talk `id` to `who`.
 #[must_use]
@@ -748,8 +761,60 @@ impl Talk {
         self.body["sent"].as_str().and_then(unix_of).unwrap_or(0)
     }
 
-    /// Closed: superseded, or a discovery talk with an answer (ruling T2). Delivery and
-    /// reliability talks close on evidence, which comes with backbriefs (G47).
+    /// The talk's `expires`, in Unix seconds (G52).
+    #[must_use]
+    pub fn expires(&self) -> Option<u64> {
+        self.body["expires"].as_str().and_then(unix_of)
+    }
+
+    /// The latest entry of `kind`, read from `known` (by blob) where it is there.
+    pub(crate) fn last_entry(
+        &self,
+        git: &Git,
+        known: &Known,
+        kind: &str,
+    ) -> Result<Option<Value>, String> {
+        let Some(entry) = self.entries.iter().rev().find(|entry| entry.kind == kind) else {
+            return Ok(None);
+        };
+        if let Some((_, value)) = known.get(&entry.blob) {
+            return Ok(Some(value.clone()));
+        }
+        let text = git
+            .run(&["cat-file", "blob", &entry.blob])
+            .map_err(|error| error.message())?;
+        serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|error| error.to_string())
+    }
+
+    /// G52: whether the talk was read after its `expires`. The read is its ack, judged by the
+    /// ack's `at`, which the host holds to the ack's commit time ([`read_after_expiry`]).
+    pub(crate) fn expired_known(&self, git: &Git, known: &Known) -> Result<bool, String> {
+        let Some(expires) = self.expires() else {
+            return Ok(false);
+        };
+        let read = self
+            .last_entry(git, known, "ack")?
+            .and_then(|ack| ack["at"].as_str().and_then(unix_of));
+        Ok(read.is_some_and(|read| read_after_expiry(read, Some(expires))))
+    }
+
+    /// The state the talk's close names (`superseded`, `answered` or `expired`), if it is closed
+    /// by a close entry.
+    ///
+    /// # Errors
+    ///
+    /// A git fault, or a close entry that is not JSON.
+    pub fn closed_as(&self, git: &Git) -> Result<Option<String>, String> {
+        Ok(self
+            .last_entry(git, &Known::new(), "close")?
+            .and_then(|close| close["state"].as_str().map(str::to_owned)))
+    }
+
+    /// Closed: a close entry (superseded, answered, or read after its `expires`, G52), or a
+    /// discovery talk with an answer (ruling T2). Delivery and reliability talks close on
+    /// evidence, which comes with backbriefs (G47).
     #[must_use]
     pub fn closed(&self) -> bool {
         self.has("close") || (self.body["kind"] == "discovery" && self.has("answer"))
