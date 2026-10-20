@@ -35,6 +35,10 @@ An agent opens a change, edits, and asks to land. bay builds the exact commit it
 commit, and lands it on trunk. An executor finishes the landing, so the agent can leave. Your repository
 stays an ordinary Git repository, on the host you already have.
 
+<p align="center">
+  <img src=".github/demo/demo.gif" alt="An agent opens a change with bay start, edits one file, lands it with bay land --wait, and bay status shows the check passed" width="900">
+</p>
+
 ```sh
 bay start CARD-123 --paths src/api   # a view of only the files this change needs
 # … the agent edits …
