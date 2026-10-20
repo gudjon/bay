@@ -202,6 +202,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         "changes": changes,
         "leftovers": leftovers,
         "quarantines": quarantines,
+        "red": red_rows(&repo, &trunk),
         "trunk": trunk,
     }));
     if let (Some(detail), Some(accept)) = (result.detail.as_mut(), talk_accept) {
@@ -215,6 +216,16 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         fetched_at: fetched_at.unwrap_or_else(|| "not fetched (remote unreachable)".to_owned()),
     });
     Ok(result)
+}
+
+/// G244: the post checks trunk is red on, each owned by the landing that broke it.
+fn red_rows(repo: &Repo, trunk: &str) -> Vec<Value> {
+    let registry = crate::registry::Registry::current(&repo.git).ok().flatten();
+    crate::red::red(&repo.git, trunk, registry.as_ref())
+        .unwrap_or_default()
+        .iter()
+        .map(crate::red::Red::to_json)
+        .collect()
 }
 
 /// The open quarantines of the policy at trunk (ruling 8c), so a set-aside check is never

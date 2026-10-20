@@ -98,6 +98,8 @@ reasons! {
     PolicyMissing => "POLICY_MISSING", ["read"], "policy_added", false;
     WorkspaceIncomplete => "WORKSPACE_INCOMPLETE", ["resume"], "journal_ready", false;
     PublishOutcomeUnknown => "PUBLISH_OUTCOME_UNKNOWN", [], "trunk_read_again", false;
+    // G244: a post-publication check failed on a landing that touches the same paths.
+    TrunkRed => "TRUNK_RED", ["read", "repair"], "trunk_green_or_change_names_the_owner", false;
     ChangeAlreadyLanded => "CHANGE_ALREADY_LANDED", ["read"], "never", false;
     ChangeSuperseded => "CHANGE_SUPERSEDED", ["read"], "existing_change_landed_abandoned_or_past_takeover", false;
     // Ruled 2026-10-19 (rulings-open-questions.md Q8): another live session of the same actor
@@ -416,7 +418,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 54);
+        assert_eq!(Reason::ALL.len(), 55);
     }
 
     #[test]

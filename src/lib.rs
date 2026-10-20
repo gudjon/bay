@@ -41,6 +41,7 @@ pub mod policy;
 pub mod publish;
 pub mod queue;
 pub mod receipts;
+pub mod red;
 pub mod registry;
 pub mod repo;
 pub mod result;

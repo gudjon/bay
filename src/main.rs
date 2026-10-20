@@ -310,6 +310,10 @@ enum EvidenceAction {
         /// The check id the record answers; the kind when not named
         #[arg(long)]
         check: Option<String>,
+        /// The environment of that check, as the policy names it (for a post check's record);
+        /// `any` when not named
+        #[arg(long)]
+        environment: Option<String>,
         /// A `key=value` the record keeps as its inputs; repeatable
         #[arg(long = "input", value_name = "KEY=VALUE")]
         inputs: Vec<String>,
@@ -521,6 +525,7 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
             verdict,
             commits,
             check,
+            environment,
             inputs,
             body,
             version,
@@ -531,6 +536,7 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
                 verdict,
                 commits,
                 check,
+                environment,
                 inputs,
                 body,
                 version,

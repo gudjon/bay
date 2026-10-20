@@ -1967,6 +1967,66 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// G244: trunk is red on paths this change touches, and the change does not name the landing
+/// that made it red (by `--fixes`, an undo, or a supersede): `TRUNK_RED`, naming the owner and
+/// the ways out. The operation is blocked on trunk's state, never failed.
+fn red_gate(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Option<BayResult>, String> {
+    let git = &ctx.repo.git;
+    let reds = crate::red::red(git, trunk, ctx.registry.as_ref())?;
+    if reds.is_empty() {
+        return Ok(None);
+    }
+    let base = git
+        .run(&["merge-base", trunk, revision])
+        .map_err(|error| error.message())?;
+    let changed = check::changed_paths(git, &base, revision)?;
+    let names: Vec<&String> = [
+        &ctx.record.fixes,
+        &ctx.record.reverts,
+        &ctx.record.supersedes,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let blocking: Vec<&crate::red::Red> = reds
+        .iter()
+        .filter(|red| red.covers(&changed))
+        .filter(|red| {
+            red.change
+                .as_ref()
+                .is_none_or(|owner| !names.contains(&owner))
+        })
+        .collect();
+    if blocking.is_empty() {
+        return Ok(None);
+    }
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Blocked;
+    op.outcome = Some(Reason::TrunkRed.code().to_owned());
+    ctx.save(revision, None, &format!("blocked {op_id}: trunk is red"))?;
+    ctx.push_chain();
+    let owners: Vec<Option<&String>> = blocking.iter().map(|red| red.change.as_ref()).collect();
+    Ok(Some(
+        BayResult::blocked(Reason::TrunkRed)
+            .with_change(ctx.id.clone())
+            .with_op(op_id)
+            .with_detail(json!({
+                "red": blocking.iter().map(|red| red.to_json()).collect::<Vec<_>>(),
+                "ways_out": [
+                    "land a change that names the owner: bay start --fixes <owner>, or bay undo <owner>",
+                    "a later run of the post check passes on trunk",
+                    "quarantine the check in the policy",
+                ],
+                "owners": owners,
+            })),
+    ))
+}
+
 /// Step 2: the merged tree of `revision` onto `trunk`, or the `MERGE_CONFLICT` refusal, with the
 /// operation blocked on the condition that lifts it.
 fn merged(
@@ -2048,6 +2108,9 @@ fn build_and_check(
         Ok(judged) => judged,
         Err(refusal) => return Ok(Err(refusal)),
     };
+    if let Some(red) = red_gate(ctx, op_id, revision, trunk)? {
+        return Ok(Err(red));
+    }
     let tree = match merged(ctx, op_id, revision, trunk)? {
         Ok(tree) => tree,
         Err(refusal) => return Ok(Err(refusal)),
@@ -3507,6 +3570,22 @@ pub fn post_checks(
     commit: &str,
     registry: Option<&crate::registry::Registry>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    post_answers(git, commit, registry, false)
+}
+
+/// [`post_checks`], and with `recorded` the answers on `commit` whatever its diff: a recorded
+/// run of a check its `when_paths` did not require still says what that commit's tree does
+/// (G244: a later pass on trunk turns it green).
+///
+/// # Errors
+///
+/// A git fault, or an unreadable note.
+pub fn post_answers(
+    git: &Git,
+    commit: &str,
+    registry: Option<&crate::registry::Registry>,
+    recorded: bool,
+) -> Result<Vec<serde_json::Value>, String> {
     let base = format!("{commit}^1");
     let policy = match policy::load_at(git, &base) {
         Ok(Some(policy)) if !policy.post.is_empty() => policy,
@@ -3527,6 +3606,7 @@ pub fn post_checks(
         if let Some(skipped) = policy
             .check(&id)
             .and_then(|check| policy.unwoken(check, &changed))
+            .filter(|_| !recorded)
         {
             row["state"] = json!("not_required");
             row["reason"] = json!(skipped.reason);

@@ -42,6 +42,8 @@ pub struct Record {
     pub commits: Vec<String>,
     /// The check id the record answers; the kind when not named.
     pub check: Option<String>,
+    /// The environment of that check, as the policy names it; `any` when not named.
+    pub environment: Option<String>,
     /// `key=value` pairs, kept as the record's `inputs`.
     pub inputs: Vec<String>,
     /// A JSON object whose fields are added to each record.
@@ -291,7 +293,7 @@ fn build(
             unknown: Map::new(),
         },
         inputs: common.inputs.clone(),
-        check: CheckId::new(&check, "any"),
+        check: CheckId::new(&check, request.environment.as_deref().unwrap_or("any")),
         policy_revision,
         manifest_digest,
         policy_provenance: None,
