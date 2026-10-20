@@ -87,7 +87,14 @@ fn a_talk_that_arrives_is_one_notice_and_never_again() {
     assert_eq!(code, 0, "{sent}");
     let id = sent["detail"]["talk"].as_str().unwrap().to_owned();
 
-    // Fetched without an accept: not arrived, no notice.
+    // Fetched without an accept: not arrived, no notice. The live poll (G54) ran a moment ago,
+    // so this hook does not accept it either.
+    let now = bay::live::unix_now();
+    std::fs::write(
+        case.b.join(".git/bay/talk-poll.json"),
+        format!("{{\"last\": {now}}}"),
+    )
+    .unwrap();
     case.test_box.git_ok(
         &case.b,
         &[

@@ -208,6 +208,17 @@ pub struct Outcome {
 /// (`INTERFACES` § 1): exit 2 denies, with the reason on stderr.
 #[must_use]
 pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
+    // G54: the idle wait an asynchronous hook runs: exit 2 (the wake) at the first accepted talk.
+    if event == "talk-wait" {
+        return talk_wait(dir);
+    }
+    // G54: a live session accepts its talks at most once per poll interval; what arrives is
+    // told by the talk notice at a later hook (G147).
+    if matches!(event, "user-prompt-submit" | "post-tool")
+        && let Ok(repo) = crate::repo::Repo::open(dir)
+    {
+        let _ = crate::talk::poll::live(&repo, crate::live::unix_now());
+    }
     // `PreToolUse` is the blocking path (`onFailure: "block"`): § 11a gives it only the refusal,
     // and the same step's `PostToolBatch` records it.
     let mut recorded = crate::session::Recorded::default();
@@ -256,6 +267,38 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
     match unknown {
         Some(unreadable) if outcome.exit == 0 => claims_unknown(input, dir, &unreadable, &outcome),
         _ => outcome,
+    }
+}
+
+/// `bay hook talk-wait` (G54): poll this actor's talks for at most an hour, on the poll schedule;
+/// exit 2 with one line per accepted talk when one arrives, exit 0 when none did.
+fn talk_wait(dir: &Path) -> Outcome {
+    const MAX_WAIT_S: u64 = 3600;
+    let Ok(repo) = crate::repo::Repo::open(dir) else {
+        return Outcome::default();
+    };
+    let (exit, outcome) = crate::talk::poll::wait(&repo, MAX_WAIT_S);
+    let stderr = if exit == 2 {
+        let talks: Vec<String> = outcome["accepted"]["acked"]
+            .as_array()
+            .map(|acked| {
+                acked
+                    .iter()
+                    .filter_map(|id| id.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        format!(
+            "bay: a talk arrived: {} (bay status shows it)\n",
+            talks.join(", ")
+        )
+    } else {
+        String::new()
+    };
+    Outcome {
+        exit,
+        stdout: outcome.to_string(),
+        stderr,
     }
 }
 
