@@ -37,8 +37,12 @@ fn trunk_lock(test_box: &TestBox, remote: &Path) -> PathBuf {
     }
 }
 
-/// A submitted change, and an executor held just before its publishing push.
-fn paused_before_publish(test_box: &TestBox) -> (String, PathBuf, PathBuf, Killed) {
+/// A submitted change, and an executor held just before its publishing push, with `env` added
+/// to its environment.
+fn paused_before_publish(
+    test_box: &TestBox,
+    env: &[(&str, &str)],
+) -> (String, PathBuf, PathBuf, Killed) {
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
     test_box.seed_with_check(
@@ -56,6 +60,7 @@ fn paused_before_publish(test_box: &TestBox) -> (String, PathBuf, PathBuf, Kille
             .bay_process(&executor)
             .env("BAY_TEST_PAUSE_AT", "before-publish")
             .env("BAY_TEST_PAUSE_FILE", &release)
+            .envs(env.iter().copied())
             .args(["--json", "executor", "run", "--once"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -76,7 +81,7 @@ fn paused_before_publish(test_box: &TestBox) -> (String, PathBuf, PathBuf, Kille
 #[test]
 fn a_lock_released_meanwhile_is_waited_out_and_the_change_lands() {
     let test_box = TestBox::new();
-    let (id, remote, release, mut child) = paused_before_publish(&test_box);
+    let (id, remote, release, mut child) = paused_before_publish(&test_box, &[]);
     let lock = trunk_lock(&test_box, &remote);
     std::fs::write(&lock, "").unwrap();
     std::fs::write(&release, "go").unwrap();
@@ -94,8 +99,19 @@ fn a_lock_released_meanwhile_is_waited_out_and_the_change_lands() {
 
 #[test]
 fn a_lock_never_released_is_a_stated_refusal_and_stays_in_place() {
+    never_released(&[]);
+}
+
+/// G104: Git's messages are read in the C locale, so a box whose locale translates them (here
+/// `LANGUAGE=de`) still reads a held lock as one.
+#[test]
+fn a_held_lock_is_read_as_one_whatever_the_boxs_language() {
+    never_released(&[("LANG", "en_US.UTF-8"), ("LANGUAGE", "de")]);
+}
+
+fn never_released(env: &[(&str, &str)]) {
     let test_box = TestBox::new();
-    let (id, remote, release, mut child) = paused_before_publish(&test_box);
+    let (id, remote, release, mut child) = paused_before_publish(&test_box, env);
     let trunk = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let lock = trunk_lock(&test_box, &remote);
     std::fs::write(&lock, "held by another process\n").unwrap();

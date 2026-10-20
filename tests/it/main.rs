@@ -35,6 +35,7 @@ mod g08_invalidation_stops_stale_work_and_permits_repair;
 mod g09_a_missed_notice_never_hides_a_landing;
 mod g101_a_live_claim_in_the_same_tree_denies_a_held_path;
 mod g103_each_fact_has_one_definition;
+mod g104_git_calls_are_deterministic_and_never_lazy_fetch;
 mod g10_every_refusal_says_what_to_do_next;
 mod g11_a_view_is_never_half_made;
 mod g128_a_held_ref_lock_is_retried_and_never_unlinked;

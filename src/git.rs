@@ -149,13 +149,8 @@ impl Git {
     /// The git binary is missing or the call exceeds the timeout.
     pub fn run_status(&self, args: &[&str]) -> Result<(i32, String, String), GitError> {
         let args_display = args.join(" ");
-        let mut cmd = Command::new("git");
-        if self.bare_dir {
-            cmd.arg(format!("--git-dir={}", self.dir.display()));
-        } else {
-            cmd.arg("-C").arg(&self.dir);
-        }
-        cmd.args(args).env("GIT_TERMINAL_PROMPT", "0");
+        let mut cmd = self.command();
+        cmd.args(args);
         let output = run_bounded_input(cmd, &args_display, None)?;
         Ok((
             output.status.code().unwrap_or(-1),
@@ -176,7 +171,9 @@ impl Git {
         } else {
             cmd.arg("-C").arg(&self.dir);
         }
-        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        // G104: bay reads some of Git's answers by their words, so every call runs in the C
+        // locale (which also stops `LANGUAGE` from translating them) and never prompts.
+        cmd.env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
         cmd
     }
 
@@ -266,7 +263,7 @@ impl Git {
     ///
     /// See [`Git::run`]; also a repository Git found but cannot read.
     pub fn outside_repository(&self) -> Result<bool, GitError> {
-        match self.run_with(&["rev-parse", "--git-dir"], &[("LC_ALL", "C")], None) {
+        match self.run(&["rev-parse", "--git-dir"]) {
             Ok(_) => Ok(false),
             Err(GitError::Failed { args, stderr })
                 if stderr.contains("not a git repository (or any") =>
