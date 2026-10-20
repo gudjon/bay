@@ -30,12 +30,13 @@ bay is pre-release. Fixes go into the newest release only. Run `bay update` to g
 ## Verify a release yourself
 
 Every release carries `SHA256SUMS` and `SHA256SUMS.sig`, an SSH signature in the namespace
-`bay-release`. The trusted keys are in [`scripts/release/allowed_signers`](scripts/release/allowed_signers).
+`bay-release`. The trusted keys are in [`scripts/release/allowed_signers`](scripts/release/allowed_signers): the
+key that signed releases up to 0.1.4, and the hardware-held key that signs them from 0.1.5.
 
 ```sh
 ssh-keygen -Y verify -f scripts/release/allowed_signers -I bay-release -n bay-release \
   -s SHA256SUMS.sig < SHA256SUMS
-sha256sum -c SHA256SUMS --ignore-missing
+sha256sum -c SHA256SUMS --ignore-missing    # on macOS: shasum -a 256 -c SHA256SUMS --ignore-missing
 ```
 
 `install.sh` and `bay update` run the same checks before they replace a binary.
