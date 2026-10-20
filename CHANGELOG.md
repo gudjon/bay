@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.1.6
+Pre-release.
+
+Before you upgrade a bay-hosted trunk: upgrade its host first. Older bays cannot read the new `no_effect` state.
+
+Landing
+- Added `no_effect`: a change whose work is already on trunk publishes nothing. Before, it published an empty commit.
+- Changed a lost push reply with trunk then unreadable to `PUBLISH_OUTCOME_UNKNOWN`, never `failed`. The next land reconciles.
+- Changed a held ref lock on the remote into a retry. A lock never released ends `PUBLISH_RETRY_EXHAUSTED`.
+- Fixed an executor that retried forever while a reftable lock blocked every ref update.
+- Fixed a merge Git could not read being reported as `MERGE_CONFLICT` with no paths. It is now a fault.
+- Added `freshness` to the results of `start`, `land` and `undo`.
+- Added `elapsed_s`, `receipts` and `next` to an asynchronous land, and `elapsed_s` and `next` to status.
+
+Evidence and review
+- Added `bay evidence record`, the write path for an outside producer or reviewer.
+- Records are signed whole, findings included. A rerun writes nothing, and records over 64 KiB are refused.
+- Added `bay.reviewerName` and `bay.reviewerKey`. A review record is signed by the reviewer key only.
+- Added reviewer delivery talks: a reviewer tells a landing's author what it found, with no agent key.
+- A reviewer talks only about a landing it holds a review record on.
+- Added `[[dimension]]` to the policy: a site's own completion dimension, such as `reviewed`.
+- A profile may require a site dimension. The landing verdict never reads it.
+- A rejection is answered only by a landing that names the change, never by a later pass.
+- Changed evidence readers to ignore a record of a schema major they do not know. Executors refuse such a request.
+
+Updates and robustness
+- Changed `bay update` to step through the newest release it can verify after a key rollover.
+- Every file bay replaces now survives a crash whole.
+- Every Git call runs in the C locale, so translated Git messages are read correctly.
+- Fixed a check whose shell could not start being reported as reaching outside its sandbox.
+- Added doctor rows: the object store and its maintenance, and a hosted trunk on the `files` ref format.
+- The doctor `key-custody` row also covers `bay.reviewerKey`.
+- `scripts/release.sh publish` tags the commit it built, even if trunk moved since.
+
+Repository
+- Added CONTRIBUTING, SECURITY, a code of conduct, issue and pull request templates, and a public AGENTS.md.
+
 ## 0.1.5
 Pre-release.
 
