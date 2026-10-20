@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://getbay.io/docs
+    about: Install, quickstart, concepts, configuration and the CLI reference.
+  - name: Report a security problem
+    url: https://github.com/gudjon/bay/security/advisories/new
+    about: Report privately. Please do not open a public issue.
+  - name: Questions
+    url: mailto:hello@getbay.io
+    about: Ask the maintainers.

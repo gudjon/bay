@@ -1,0 +1,41 @@
+name: Bug report
+description: bay did something it promised not to, or refused without saying why.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. For a security problem, do not open an issue: see SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, what you expected, and what bay did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: The bay.result/1 it printed
+      description: The JSON document on stdout. Remove anything private.
+      render: json
+  - type: textarea
+    id: doctor
+    attributes:
+      label: bay doctor
+      description: The output of `bay doctor` on the machine where it happened.
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: bay version
+      placeholder: "bay --version"
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS, Git version, and agent product
+      placeholder: "macOS 27, git 2.54, Claude Code 2.1"

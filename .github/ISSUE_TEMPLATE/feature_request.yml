@@ -1,0 +1,28 @@
+name: Idea or feature
+description: Something bay should do, or a promise it should make.
+labels: ["idea"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What your agents or your team are stuck on today. Numbers help.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like bay to do
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do now instead
+  - type: checkboxes
+    id: neutral
+    attributes:
+      label: Organisation-neutral
+      options:
+        - label: This makes sense for teams other than mine.
+          required: true

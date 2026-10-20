@@ -3,6 +3,15 @@ name = "bay"
 version = "0.1.5"
 edition = "2024"
 rust-version = "1.99"
+description = "The landing layer for agent fleets: agents submit once, bay lands exactly what was checked."
+authors = ["Gudjon Mar Gudjonsson"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://getbay.io"
+documentation = "https://getbay.io/docs"
+repository = "https://github.com/gudjon/bay"
+keywords = ["git", "ai-agents", "merge-queue", "monorepo", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 publish = false
 
 [dependencies]

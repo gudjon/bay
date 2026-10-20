@@ -18,6 +18,14 @@
   <a href="LICENSE"><img alt="MIT licence" src="https://img.shields.io/badge/licence-MIT-187571"></a>
   <img alt="Written in Rust" src="https://img.shields.io/badge/written%20in-Rust-c5341c">
   <a href="https://github.com/gudjon/bay/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/gudjon/bay?include_prereleases&label=release"></a>
+  <a href="https://github.com/gudjon/bay/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/gudjon/bay?style=flat&color=187571"></a>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
+    <img alt="Agents run bay land and leave. An executor builds the merged candidate, checks that exact commit, and lands it on trunk if trunk has not moved, recording evidence in Git notes." src="docs/assets/how-it-works-light.svg" width="860">
+  </picture>
 </p>
 
 ---
@@ -40,6 +48,10 @@ bay undo c7k2m4                      # a new change that undoes one landing; his
 
 Every command prints one JSON result on stdout. A refusal names its reason, what you can still do, and
 when to retry. There is no prompt to answer.
+
+```json
+{"schema":"bay.result/1","op_id":"c7k2m4.1","candidate":"c7k2m4.1.2","decision":"queued","state":"admitted","published":false,"waiting_for":"executor_capacity"}
+```
 
 bay is at 0.x: every release is a pre-release, offered best effort. The benchmark figures below are
 targets, not results. What changed in each release is in the [changelog](https://getbay.io/docs/changelog).
@@ -75,7 +87,8 @@ curl -fsSL https://getbay.io/install.sh | sh
 The script downloads the newest release from this repository's GitHub Releases. It checks `SHA256SUMS`
 against the bay release key, a hardware-held key, and the archive against `SHA256SUMS`. It installs one
 binary to `~/.local/bin/bay`, then runs `bay install`, and `bay doctor` inside a repository. There is no
-Windows build: on Windows, run the same command inside WSL. To build from source:
+Windows build: on Windows, run the same command inside WSL. You can also
+[verify a release by hand](SECURITY.md#verify-a-release-yourself). To build from source:
 
 ```sh
 cargo build --release
@@ -182,14 +195,26 @@ These are targets until the published results say otherwise.
 
 Every docs page also reads as markdown: add `.md` to its address, or see [llms.txt](https://getbay.io/llms.txt).
 
+## Built the way it asks you to build
+
+bay has no hosted CI. Every push to `main` is gated: the commit at its tip carries signed
+`bay.evidence/1` records in Git notes, one per check (fmt, clippy, and the tests under SHA-1/files and
+SHA-256/reftable), made on that exact tree before it was pushed. Each guarantee above has a failure test
+in [`tests/it`](tests/it), named for what it proves. Check it yourself (needs `ssh-keygen`):
+
+```sh
+git fetch origin 'refs/notes/bay/*:refs/notes/bay/*'
+scripts/gate.sh --verify origin/main
+```
+
 ## Contributing
 
-bay is built in the open, and contributions are welcome. Before you send a pull
-request, run `cargo fmt --check`, `cargo clippy --all-targets` and `cargo test`. A new promise comes with
-a failure test that fails without the change. bay stays organisation-neutral: no one company's names,
-hosts, paths or defaults go into this repository.
+bay is built in the open, and contributions are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) to
+build, test and send a pull request, and the [code of conduct](CODE_OF_CONDUCT.md). Found a security
+problem? Report it privately: see [SECURITY.md](SECURITY.md).
 
-Questions and ideas: [hello@getbay.io](mailto:hello@getbay.io).
+Questions and ideas: [open an issue](https://github.com/gudjon/bay/issues/new/choose) or write to
+[hello@getbay.io](mailto:hello@getbay.io). If bay helps your fleet, a star helps others find it.
 
 ## Licence
 
