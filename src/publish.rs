@@ -938,10 +938,12 @@ fn after_refused_push(
     attempt: &Attempt,
     error: &str,
 ) -> Result<Option<BayResult>, String> {
-    let now = ctx
-        .repo
-        .fetch_trunk()
-        .map_err(|fetch| format!("{error}; then trunk could not be read: {}", fetch.message()))?;
+    let now = match ctx.repo.fetch_trunk() {
+        Ok(now) => now,
+        Err(fetch) => {
+            return outcome_unknown(ctx, op_id, revision, attempt, error, &fetch.message());
+        }
+    };
     if let Some(result) = scanned(ctx, &now, revision)? {
         return Ok(Some(existing(result)));
     }
@@ -1155,6 +1157,36 @@ fn hook_timed_out(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<B
     }
     std::thread::sleep(HOOK_RETRY_WAIT);
     Ok(None)
+}
+
+/// G81: the publishing push failed and trunk could not then be read, so whether C landed is
+/// unknown: the reply may have been lost after the remote moved trunk. bay acts on nothing and
+/// says so; the change's next land reads trunk again and finds the landing or builds anew,
+/// never a second publication (`DESIGN` § 9).
+fn outcome_unknown(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    attempt: &Attempt,
+    push: &str,
+    fetch: &str,
+) -> Result<Option<BayResult>, String> {
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Blocked;
+    op.outcome = Some(Reason::PublishOutcomeUnknown.code().to_owned());
+    // The chain may not reach the remote either; it is saved here, and the next pass reconciles.
+    ctx.save(
+        revision,
+        None,
+        &format!("blocked {op_id}: publish outcome unknown"),
+    )?;
+    ctx.push_chain();
+    Ok(Some(
+        BayResult::blocked(Reason::PublishOutcomeUnknown)
+            .with_change(ctx.id.clone())
+            .with_op(op_id)
+            .with_detail(json!({"candidate": attempt.commit, "push": push, "trunk": fetch})),
+    ))
 }
 
 /// Whether a refused push says a ref lock on the remote is held by another process: the files
