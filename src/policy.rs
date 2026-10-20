@@ -39,6 +39,9 @@ struct PolicyFile {
     /// The completion profiles (`DESIGN` § 7, ruling R12): `[profile.<name>] require = [...]`.
     #[serde(default)]
     profile: BTreeMap<String, crate::completion::ProfileEntry>,
+    /// The site's own completion dimensions (G150): `[[dimension]] name, kind, producers`.
+    #[serde(default)]
+    dimension: Vec<crate::completion::SiteDimension>,
     /// What the policy asks of the acting agent (G152).
     #[serde(default)]
     agent: AgentPolicy,
@@ -534,6 +537,9 @@ pub struct Policy {
     /// The `[profile.<name>]` tables: the completion dimensions each profile requires, and
     /// whether it counts only signed evidence.
     pub profiles: BTreeMap<String, crate::completion::Profile>,
+    /// The `[[dimension]]` tables (G150): completion dimensions the site defines, reported by
+    /// `bay status` and required only through a profile.
+    pub dimensions: Vec<crate::completion::SiteDimension>,
     /// The digest of the sorted manifest (`INTERFACES` § 7), its post-publication entries with
     /// it: a record of a post check is judged under the same digest. A profile is not in it: a profile
     /// says what a change needs, not what a check computes, so editing one leaves every check's
@@ -632,7 +638,8 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
         }
     }
     validate_inputs(git, commit, &file.input).map_err(invalid)?;
-    let profiles = crate::completion::requirements(file.profile).map_err(invalid)?;
+    let dimensions = crate::completion::site_dimensions(file.dimension).map_err(invalid)?;
+    let profiles = crate::completion::requirements(file.profile, &dimensions).map_err(invalid)?;
     let mut frozen: Vec<ManifestEntry> = manifest.iter().chain(&post).cloned().collect();
     let manifest_digest = manifest_digest(&mut frozen).map_err(LoadError::Git)?;
     sort_manifest(&mut manifest);
@@ -646,6 +653,7 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
         manifest,
         post,
         profiles,
+        dimensions,
         manifest_digest,
         agent: file.agent,
     }))

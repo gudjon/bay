@@ -58,6 +58,82 @@ impl Dimension {
     }
 }
 
+/// One requirement of a profile: a dimension bay defines, or one the policy declares in a
+/// `[[dimension]]` table (G150), such as `reviewed`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Need {
+    Builtin(Dimension),
+    Site(String),
+}
+
+impl Need {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Builtin(dimension) => dimension.as_str(),
+            Self::Site(name) => name,
+        }
+    }
+
+    fn missing(&self) -> String {
+        match self {
+            Self::Builtin(dimension) => dimension.missing().to_owned(),
+            Self::Site(name) => format!("{name} missing"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Need {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        Ok(
+            serde_json::from_value::<Dimension>(json!(name))
+                .map_or(Self::Site(name), Self::Builtin),
+        )
+    }
+}
+
+/// A `[[dimension]]` table of `.bay/policy.toml` (G150): a completion dimension the site
+/// defines, met for a landing by a record of `kind` from one of `producers` about that landing
+/// commit. It is reported by `bay status` and may be required by a profile; it never enters the
+/// landing verdict.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SiteDimension {
+    pub name: String,
+    pub kind: String,
+    pub producers: Vec<String>,
+}
+
+/// The policy's `[[dimension]]` tables, once each is valid: a name bay does not define, used
+/// once, with a kind and at least one producer.
+///
+/// # Errors
+///
+/// The first rule a table breaks, naming it.
+pub fn site_dimensions(tables: Vec<SiteDimension>) -> Result<Vec<SiteDimension>, String> {
+    let mut seen = Vec::new();
+    for table in &tables {
+        if serde_json::from_value::<Dimension>(json!(table.name)).is_ok() {
+            return Err(format!(
+                "[[dimension]] {} is a dimension bay defines; a site dimension needs a name of its own",
+                table.name
+            ));
+        }
+        if table.name.is_empty() || table.kind.is_empty() || table.producers.is_empty() {
+            return Err(format!(
+                "[[dimension]] {:?} needs a name, a kind and at least one producer",
+                table.name
+            ));
+        }
+        if seen.contains(&table.name) {
+            return Err(format!("[[dimension]] {} is declared twice", table.name));
+        }
+        seen.push(table.name.clone());
+    }
+    Ok(tables)
+}
+
 /// The profile a policy without one of that name means by `default`: today's behaviour, a
 /// change is complete once published and checked; runtime is reported, not required.
 pub const DEFAULT_PROFILE: &str = "default";
@@ -67,7 +143,7 @@ pub const DEFAULT_REQUIRE: [Dimension; 2] = [Dimension::Published, Dimension::Ch
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileEntry {
-    pub require: Vec<Dimension>,
+    pub require: Vec<Need>,
     /// Whether only signed evidence may establish a dimension (G160). Off by default: unsigned
     /// records count, as unsigned check records do (owner ruling Q6).
     #[serde(default)]
@@ -77,7 +153,7 @@ pub struct ProfileEntry {
 /// What one profile asks: the dimensions it requires, and whether only signed evidence counts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Profile {
-    pub require: Vec<Dimension>,
+    pub require: Vec<Need>,
     pub require_signed: bool,
 }
 
@@ -90,8 +166,21 @@ pub struct Profile {
 /// The first rule a profile breaks, naming it.
 pub fn requirements(
     profiles: BTreeMap<String, ProfileEntry>,
+    declared: &[SiteDimension],
 ) -> Result<BTreeMap<String, Profile>, String> {
     validate(&profiles)?;
+    // A name neither bay nor the policy defines is refused: a typo never requires less.
+    for (name, entry) in &profiles {
+        for need in &entry.require {
+            if let Need::Site(site) = need
+                && !declared.iter().any(|table| table.name == *site)
+            {
+                return Err(format!(
+                    "[profile.{name}] requires {site}, which is neither a dimension bay defines nor a [[dimension]] of the policy"
+                ));
+            }
+        }
+    }
     Ok(profiles
         .into_iter()
         .map(|(name, entry)| {
@@ -135,7 +224,7 @@ pub fn requirement(name: &str, profiles: &BTreeMap<String, Profile>) -> Result<P
     match profiles.get(name) {
         Some(profile) => Ok(profile.clone()),
         None if name == DEFAULT_PROFILE => Ok(Profile {
-            require: DEFAULT_REQUIRE.to_vec(),
+            require: DEFAULT_REQUIRE.into_iter().map(Need::Builtin).collect(),
             require_signed: false,
         }),
         None => Err(format!(
@@ -154,8 +243,8 @@ pub fn requirement(name: &str, profiles: &BTreeMap<String, Profile>) -> Result<P
 pub fn verdict(
     name: &str,
     profile: Result<Profile, String>,
-    met: &[Dimension],
-    unsigned: &[Dimension],
+    met: &[Need],
+    unsigned: &[Need],
 ) -> Value {
     let profile = match profile {
         Ok(profile) => profile,
@@ -172,34 +261,40 @@ pub fn verdict(
         }
     };
     let require = &profile.require;
-    let (have, missing): (Vec<Dimension>, Vec<Dimension>) = Dimension::ALL
+    // Bay's dimensions in their own order, then the site's in the profile's order.
+    let ordered: Vec<Need> = Dimension::ALL
         .into_iter()
-        .filter(|dimension| require.contains(dimension))
-        .partition(|dimension| met.contains(dimension));
-    let resting: Vec<Dimension> = have
+        .map(Need::Builtin)
+        .filter(|need| require.contains(need))
+        .chain(
+            require
+                .iter()
+                .filter(|need| matches!(need, Need::Site(_)))
+                .cloned(),
+        )
+        .collect();
+    let (have, missing): (Vec<Need>, Vec<Need>) =
+        ordered.into_iter().partition(|need| met.contains(need));
+    let resting: Vec<Need> = have
         .iter()
-        .copied()
-        .filter(|dimension| unsigned.contains(dimension))
+        .filter(|need| unsigned.contains(need))
+        .cloned()
         .collect();
     // Under `require_signed`, a dimension on unsigned records alone is neither met nor missing.
-    let (have, unknown): (Vec<Dimension>, Vec<Dimension>) = have
+    let (have, unknown): (Vec<Need>, Vec<Need>) = have
         .into_iter()
-        .partition(|dimension| !profile.require_signed || !resting.contains(dimension));
+        .partition(|need| !profile.require_signed || !resting.contains(need));
     let mut parts = Vec::new();
     if !have.is_empty() {
-        parts.push(and_list(have.iter().map(|dimension| dimension.as_str())));
+        parts.push(and_list(have.iter().map(Need::as_str)));
     }
     if !unknown.is_empty() {
         parts.push(format!(
             "{} unknown: only unsigned evidence, and [profile.{name}] sets require_signed",
-            and_list(unknown.iter().map(|dimension| dimension.as_str()))
+            and_list(unknown.iter().map(Need::as_str))
         ));
     }
-    parts.extend(
-        missing
-            .iter()
-            .map(|dimension| dimension.missing().to_owned()),
-    );
+    parts.extend(missing.iter().map(Need::missing));
     let word = if !missing.is_empty() {
         "incomplete"
     } else if !unknown.is_empty() {
@@ -209,10 +304,10 @@ pub fn verdict(
     };
     json!({
         "name": name,
-        "require": require.iter().map(|dimension| dimension.as_str()).collect::<Vec<_>>(),
+        "require": require.iter().map(Need::as_str).collect::<Vec<_>>(),
         "require_signed": profile.require_signed,
-        "missing": missing.iter().map(|dimension| dimension.as_str()).collect::<Vec<_>>(),
-        "unsigned": resting.iter().map(|dimension| dimension.as_str()).collect::<Vec<_>>(),
+        "missing": missing.iter().map(Need::as_str).collect::<Vec<_>>(),
+        "unsigned": resting.iter().map(Need::as_str).collect::<Vec<_>>(),
         "verdict": word,
         "summary": parts.join("; "),
     })
@@ -232,17 +327,34 @@ fn and_list<'a>(words: impl Iterator<Item = &'a str>) -> String {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{Dimension, Profile, ProfileEntry, requirement, validate, verdict};
+    use super::{
+        Dimension, Need, Profile, ProfileEntry, SiteDimension, requirement, requirements,
+        site_dimensions, validate, verdict,
+    };
 
-    const PUBLISHED_AND_CHECKED: [Dimension; 2] = [Dimension::Published, Dimension::Checked];
+    fn needs(dimensions: &[Dimension]) -> Vec<Need> {
+        dimensions.iter().copied().map(Need::Builtin).collect()
+    }
+
+    fn published_and_checked() -> Vec<Need> {
+        needs(&[Dimension::Published, Dimension::Checked])
+    }
+
+    fn reviewed() -> SiteDimension {
+        SiteDimension {
+            name: "reviewed".to_owned(),
+            kind: "review".to_owned(),
+            producers: vec!["review-1".to_owned()],
+        }
+    }
 
     #[test]
     fn a_missing_runtime_dimension_is_named_never_done() {
         let all = Profile {
-            require: Dimension::ALL.to_vec(),
+            require: needs(&Dimension::ALL),
             require_signed: false,
         };
-        let out = verdict("deploy", Ok(all), &PUBLISHED_AND_CHECKED, &[]);
+        let out = verdict("deploy", Ok(all), &published_and_checked(), &[]);
         assert_eq!(out["verdict"], "incomplete");
         assert_eq!(
             out["summary"],
@@ -255,9 +367,9 @@ mod tests {
     #[test]
     fn the_default_profile_requires_published_and_checked() {
         let require = requirement("default", &BTreeMap::new()).unwrap();
-        assert_eq!(require.require, [Dimension::Published, Dimension::Checked]);
+        assert_eq!(require.require, published_and_checked());
         assert!(!require.require_signed);
-        let out = verdict("default", Ok(require), &PUBLISHED_AND_CHECKED, &[]);
+        let out = verdict("default", Ok(require), &published_and_checked(), &[]);
         assert_eq!(out["verdict"], "complete");
         assert_eq!(out["summary"], "published and checked");
     }
@@ -272,9 +384,11 @@ mod tests {
     #[test]
     fn a_profile_that_requires_nothing_or_one_dimension_twice_is_invalid() {
         let parse = |text: &str| toml::from_str::<ProfileEntry>(text);
+        let typo: BTreeMap<String, ProfileEntry> =
+            [("p".to_owned(), parse("require = [\"runing\"]\n").unwrap())].into();
         assert!(
-            parse("require = [\"runing\"]\n").is_err(),
-            "a typo never parses"
+            requirements(typo, &[]).is_err(),
+            "a name neither bay nor the policy defines is refused: a typo never requires less"
         );
         assert!(parse("require = [\"published\"]\nrequires = []\n").is_err());
         let mut profiles = BTreeMap::new();
@@ -287,5 +401,39 @@ mod tests {
         assert!(validate(&profiles).is_err());
         profiles.insert("p".to_owned(), parse("require = [\"running\"]\n").unwrap());
         assert!(validate(&profiles).is_ok());
+    }
+
+    /// G150: a site dimension the policy declares is required by name, named when missing, and
+    /// a dimension bay defines is no site name.
+    #[test]
+    fn a_site_dimension_is_required_by_name_and_named_when_missing() {
+        let parse = |text: &str| toml::from_str::<ProfileEntry>(text).unwrap();
+        let release: BTreeMap<String, ProfileEntry> = [(
+            "release".to_owned(),
+            parse("require = [\"published\", \"checked\", \"reviewed\"]\n"),
+        )]
+        .into();
+        let profiles = requirements(release, &[reviewed()]).unwrap();
+        let profile = requirement("release", &profiles).unwrap();
+        let out = verdict(
+            "release",
+            Ok(profile.clone()),
+            &published_and_checked(),
+            &[],
+        );
+        assert_eq!(out["verdict"], "incomplete");
+        assert_eq!(out["summary"], "published and checked; reviewed missing");
+        assert_eq!(out["missing"], serde_json::json!(["reviewed"]));
+        let mut met = published_and_checked();
+        met.push(Need::Site("reviewed".to_owned()));
+        assert_eq!(
+            verdict("release", Ok(profile), &met, &[])["verdict"],
+            "complete"
+        );
+
+        let mut shadow = reviewed();
+        shadow.name = "checked".to_owned();
+        assert!(site_dimensions(vec![shadow]).is_err());
+        assert!(site_dimensions(vec![reviewed(), reviewed()]).is_err());
     }
 }

@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, ChangeState, change_ref};
 use crate::clock::now_rfc3339;
-use crate::completion::{self, Dimension};
+use crate::completion::{self, Dimension, Need};
 use crate::evidence::{self, EvidenceRecord};
 use crate::inputs::Probe;
 use crate::publish::scan;
@@ -559,30 +559,59 @@ fn completion_dimensions(
     // The adapter is asked only when its answer can change the verdict: the profile requires a
     // runtime dimension and a registry exists, without which nothing it prints could count.
     let needs_runtime = require.as_ref().is_ok_and(|profile| {
-        profile.require.contains(&Dimension::Running)
-            || profile.require.contains(&Dimension::Effective)
+        profile.require.contains(&Need::Builtin(Dimension::Running))
+            || profile
+                .require
+                .contains(&Need::Builtin(Dimension::Effective))
     });
     let ask = *ask_runtime && needs_runtime && registry.is_some();
     let (confirmed, runtime) = match landed {
         Some(found) => runtime(repo, record, found, registry.as_ref(), ask)?,
         None => (Confirmed::default(), json!(null)),
     };
-    let met: Vec<Dimension> = [
+    let mut met: Vec<Need> = [
         (Dimension::Published, landed.is_some()),
         (Dimension::Checked, checked),
         (Dimension::Running, !confirmed.running.is_empty()),
         (Dimension::Effective, !confirmed.effective.is_empty()),
     ]
     .into_iter()
-    .filter_map(|(dimension, met)| met.then_some(dimension))
+    .filter_map(|(dimension, met)| met.then_some(Need::Builtin(dimension)))
     .collect();
     // G160: without a registry, `checked` rests on unsigned records alone. A runtime dimension
     // never counts an unsigned record ([`crate::runtime`]), and `published` is trunk's own fact.
-    let unsigned: &[Dimension] = if registry.is_none() && checked {
-        &[Dimension::Checked]
+    let mut unsigned: Vec<Need> = if registry.is_none() && checked {
+        vec![Need::Builtin(Dimension::Checked)]
     } else {
-        &[]
+        Vec::new()
     };
+    // G150: the site's own dimensions, each judged for the landing; reported here and required
+    // only through a profile, never in the landing verdict.
+    let mut sites = serde_json::Map::new();
+    for dimension in declared_dimensions(repo, trunk, landed) {
+        let (state, records, rests_unsigned) = match landed {
+            Some(found) => site_dimension(
+                repo,
+                &dimension,
+                &record.id,
+                found,
+                trunk,
+                registry.as_ref(),
+            )?,
+            None => ("missing", Vec::new(), false),
+        };
+        let need = Need::Site(dimension.name.clone());
+        if matches!(state, "met" | "answered") {
+            met.push(need.clone());
+            if rests_unsigned {
+                unsigned.push(need);
+            }
+        }
+        sites.insert(
+            dimension.name,
+            json!({"state": state, "kind": dimension.kind, "producers": dimension.producers, "records": records}),
+        );
+    }
     let word = |ids: &[String]| {
         if ids.is_empty() {
             "unconfirmed"
@@ -597,7 +626,8 @@ fn completion_dimensions(
         "effective": word(&confirmed.effective),
         "runtime": runtime,
         "trust": evidence::trust(registry.as_ref()),
-        "profile": completion::verdict(&name, require, &met, unsigned),
+        "dimensions": sites,
+        "profile": completion::verdict(&name, require, &met, &unsigned),
     }))
 }
 
@@ -670,6 +700,87 @@ fn selected_profile(
         Err(error) => Err(String::from(error)),
     };
     (name, require)
+}
+
+/// The `[[dimension]]` tables of the policy a change is judged by: at the landing's accepted
+/// base once landed, else at trunk, as [`selected_profile`] reads it (G150).
+fn declared_dimensions(
+    repo: &Repo,
+    trunk: &str,
+    landed: Option<&crate::publish::Found>,
+) -> Vec<completion::SiteDimension> {
+    let at = landed.map_or_else(|| trunk.to_owned(), |found| format!("{}^1", found.commit));
+    crate::policy::load_at(&repo.git, &at)
+        .ok()
+        .flatten()
+        .map(|policy| policy.dimensions)
+        .unwrap_or_default()
+}
+
+/// G150: one site dimension of a landing. Records count when they are of the dimension's kind,
+/// from one of its producers, about that landing commit (never a tree alone: K11b), and, with a
+/// registry, verify against the class file their kind names (K11c). A non-pass record is
+/// answered only by a later landing whose `Fixes:`, `Reverts:` or `Supersedes:` names the
+/// change, never by a later pass (G29, K11a). Returns the state (`met`, `answered`, `rejected`
+/// or `missing`), the counted record ids, and whether they rest on unsigned records alone.
+fn site_dimension(
+    repo: &Repo,
+    dimension: &completion::SiteDimension,
+    change: &str,
+    found: &crate::publish::Found,
+    trunk: &str,
+    registry: Option<&crate::registry::Registry>,
+) -> Result<(&'static str, Vec<String>, bool), String> {
+    let git = &repo.git;
+    // The producers' notes refs, which this box may not hold yet; one that has none is no
+    // error: its records are missing.
+    for producer in &dimension.producers {
+        let _ = repo.fetch_refs(&[evidence::notes_ref(producer)]);
+    }
+    let tree = git
+        .run(&["rev-parse", &format!("{}^{{tree}}", found.commit)])
+        .map_err(|error| error.message())?;
+    let mut counted = Vec::new();
+    for record in evidence::records_for(git, &tree)? {
+        if record.kind != dimension.kind
+            || !dimension.producers.contains(&record.producer.name)
+            || record.subject.commit != found.commit
+        {
+            continue;
+        }
+        if let Some(registry) = registry
+            && !record.verifies_in(git, registry)?
+        {
+            continue;
+        }
+        counted.push(record);
+    }
+    let ids = counted.iter().map(|record| record.id.clone()).collect();
+    let unsigned = registry.is_none() && !counted.is_empty();
+    if counted.is_empty() {
+        return Ok(("missing", ids, false));
+    }
+    if counted
+        .iter()
+        .all(|record| record.verdict == evidence::Verdict::Pass)
+    {
+        return Ok(("met", ids, unsigned));
+    }
+    let answered = crate::lineage::RELATIONS.iter().any(|(_, trailer)| {
+        git.run(&[
+            "log",
+            "--first-parent",
+            "--format=%H",
+            &format!("--grep=^{trailer}: {change}$"),
+            &format!("{}..{trunk}", found.commit),
+        ])
+        .is_ok_and(|out| !out.trim().is_empty())
+    });
+    Ok((
+        if answered { "answered" } else { "rejected" },
+        ids,
+        unsigned,
+    ))
 }
 
 /// The counted runtime records on landed `found`'s tree. When `ask` and they do not confirm
