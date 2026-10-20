@@ -14,6 +14,7 @@ pub mod commit_graph;
 pub mod compact;
 pub mod completion;
 pub mod config;
+pub mod contract;
 pub mod coord;
 pub mod coverage;
 pub mod custody;

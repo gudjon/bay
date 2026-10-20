@@ -175,19 +175,28 @@ pub fn sync(repo: &Repo) -> usize {
 /// while the remote was unreachable (an offline request, a checkpoint) reaches it on the next
 /// bay command. A chain only appends, so each push is a fast-forward; a refusal is left for
 /// the owner of that chain to resolve, never forced. Returns how many chains were pushed.
+///
+/// A chain whose latest land request the remote's `refs/bay/requests/<id>` does not name yet
+/// takes that ref along in one atomic push (§ 10a): the chain may carry a request another bay
+/// process on this box wrote and has not pushed yet, and a remote chain whose latest request
+/// the requests ref does not name is one the trunk hook never lets land.
 #[must_use]
 pub fn sync_chains(repo: &Repo) -> usize {
+    let changes = crate::change::CHANGES_PREFIX;
+    let requests = crate::names::REQUESTS;
     let Ok(local) = repo.git.run(&[
         "for-each-ref",
         "--format=%(objectname) %(refname)",
-        crate::change::CHANGES_PREFIX,
+        changes,
+        requests,
     ]) else {
         return 0;
     };
     let Ok(remote) = repo.git.run(&[
         "ls-remote",
         repo.remote(),
-        &format!("{}*", crate::change::CHANGES_PREFIX),
+        &format!("{changes}*"),
+        &format!("{requests}*"),
     ]) else {
         return 0;
     };
@@ -196,23 +205,51 @@ pub fn sync_chains(repo: &Repo) -> usize {
         let Some((oid, name)) = line.split_once(' ') else {
             continue;
         };
-        let on_remote = remote.lines().find_map(|line| {
-            line.split_once('\t')
-                .filter(|(_, ref_name)| *ref_name == name)
-                .map(|(oid, _)| oid)
-        });
-        if on_remote == Some(oid) {
+        let Some(id) = name.strip_prefix(changes) else {
+            continue;
+        };
+        if listed(&remote, '\t', name) == Some(oid) {
             continue;
         }
-        if repo
-            .git
-            .run(&["push", "-q", repo.remote(), &format!("{name}:{name}")])
-            .is_ok()
-        {
+        let request_ref = format!("{requests}{id}");
+        let carried = listed(&local, ' ', &request_ref)
+            .filter(|request| listed(&remote, '\t', &request_ref) != Some(*request))
+            .filter(|request| latest_request(repo, oid).as_deref() == Some(*request))
+            .map(|request| format!("+{request}:{request_ref}"));
+        let chain = format!("{oid}:{name}");
+        let mut args = vec!["push", "-q"];
+        if carried.is_some() {
+            args.push("--atomic");
+        }
+        args.extend([repo.remote(), chain.as_str()]);
+        if let Some(carried) = &carried {
+            args.push(carried.as_str());
+        }
+        if repo.git.run(&args).is_ok() {
             pushed += 1;
         }
     }
     pushed
+}
+
+/// The object id `listing` (lines of an id, `separator`, a ref name) gives ref `name`.
+fn listed<'a>(listing: &'a str, separator: char, name: &str) -> Option<&'a str> {
+    listing.lines().find_map(|line| {
+        line.split_once(separator)
+            .filter(|(_, ref_name)| *ref_name == name)
+            .map(|(oid, _)| oid)
+    })
+}
+
+/// The latest land request the chain state `head` records, if it records one.
+fn latest_request(repo: &Repo, head: &str) -> Option<String> {
+    Chain::new(&repo.git)
+        .record_at(head)
+        .ok()?
+        .operations
+        .iter()
+        .rev()
+        .find_map(|op| op.request_id.clone())
 }
 
 /// Seconds since the receipt was written.

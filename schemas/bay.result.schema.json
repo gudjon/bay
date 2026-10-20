@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "bay.result/1",
+  "description": "The one result every bay command prints on stdout.",
+  "type": "object",
+  "required": [
+    "schema",
+    "decision"
+  ],
+  "additionalProperties": false,
+  "dependentRequired": {
+    "reason": [
+      "allowed",
+      "retry_when"
+    ]
+  },
+  "properties": {
+    "schema": {
+      "const": "bay.result/1"
+    },
+    "op_id": {
+      "type": "string"
+    },
+    "candidate": {
+      "type": "string"
+    },
+    "decision": {
+      "enum": [
+        "ok",
+        "landed",
+        "queued",
+        "blocked",
+        "failed"
+      ]
+    },
+    "state": {
+      "type": "string"
+    },
+    "published": {
+      "type": "boolean"
+    },
+    "reason": {
+      "enum": [
+        "INPUT_CHANGED",
+        "INPUT_UNOBSERVED",
+        "MERGE_CONFLICT",
+        "TRUNK_MOVED",
+        "PUBLISH_RETRY_EXHAUSTED",
+        "REGISTRY_CHANGED",
+        "CHECK_FLAKY",
+        "CHANGE_NOT_LANDED",
+        "HOOK_TIMEOUT",
+        "QUEUE_HELD",
+        "QUEUE_DEADLINE_EXCEEDED",
+        "PUBLICATION_QUEUED",
+        "CHECK_FAILED",
+        "CHECK_UNAVAILABLE",
+        "CHECK_UNKNOWN",
+        "POLICY_CHANGED",
+        "POLICY_INVALID",
+        "POLICY_MISSING",
+        "WORKSPACE_INCOMPLETE",
+        "PUBLISH_OUTCOME_UNKNOWN",
+        "TRUNK_RED",
+        "CHANGE_ALREADY_LANDED",
+        "CHANGE_SUPERSEDED",
+        "CHANGE_HELD",
+        "ABANDON_REFUSED",
+        "ACTOR_UNNAMED",
+        "COVERAGE_UNKNOWN",
+        "HOOK_INPUT_INVALID",
+        "SHELL_DENIED",
+        "PATH_HELD",
+        "REMOTE_NOT_FETCHED",
+        "CONFIG_MISSING",
+        "GIT_BELOW_FLOOR",
+        "CLAUDE_BELOW_FLOOR",
+        "CLAUDE_ABSENT",
+        "REMOTE_UNREACHABLE",
+        "HOOKS_MISSING",
+        "SKILL_MISMATCH",
+        "SANDBOX_ABSENT",
+        "CHECK_ENV_UNSET",
+        "EXECUTOR_KEY_MISSING",
+        "KEY_EXPOSED",
+        "UPDATE_UNAVAILABLE",
+        "UPDATE_UNVERIFIED",
+        "UPDATE_PINNED",
+        "TALK_INVALID",
+        "TALK_BODY_CONFLICT",
+        "TALK_CLOSED",
+        "TALK_SUPERSEDE_REFUSED",
+        "TALK_ANSWER_CONFLICT",
+        "TALK_SENDER_NOT_ACTOR",
+        "TALK_BACKLOG",
+        "UNATTRIBUTED_LANDING",
+        "EVIDENCE_WITHDRAWN"
+      ]
+    },
+    "change": {
+      "type": "string"
+    },
+    "detail": {},
+    "allowed": {
+      "type": "array",
+      "items": {
+        "enum": [
+          "read",
+          "refresh",
+          "repair",
+          "edit_locally",
+          "wait",
+          "resume"
+        ]
+      }
+    },
+    "retry_when": {
+      "enum": [
+        "candidate_validated_against_required_versions",
+        "required_version_read",
+        "conflict_paths_changed",
+        "retried_once_then_queued",
+        "cause_fixed",
+        "resigned_by_valid_executor",
+        "check_fixed_or_quarantined",
+        "change_landed",
+        "retried_after_short_wait",
+        "reached_queue_head",
+        "operation_changed_or_budget_raised",
+        "candidate_changed",
+        "capable_worker_reachable",
+        "check_produced_result",
+        "rechecked_under_current_policy",
+        "policy_repaired",
+        "policy_added",
+        "journal_ready",
+        "trunk_read_again",
+        "trunk_green_or_change_names_the_owner",
+        "never",
+        "existing_change_landed_abandoned_or_past_takeover",
+        "holder_session_ended_or_heartbeat_past_takeover_window",
+        "current_actor_abandons_or_adopt_rules_apply",
+        "bay_actor_set",
+        "coordination_data_reachable",
+        "hook_payload_readable_by_this_bay",
+        "holder_session_stopped_or_claim_past_deadline",
+        "remote_fetched",
+        "config_added",
+        "git_upgraded_to_floor",
+        "claude_upgraded_or_adapter_removed",
+        "claude_installed_or_adapter_removed",
+        "remote_answers_with_box_key",
+        "install_wrote_hook_entries",
+        "install_copied_skill_for_this_version",
+        "sandbox_present_or_executor_sandbox_none",
+        "executor_sets_the_named_variables",
+        "executor_and_producer_keys_set_and_enrolled",
+        "keys_on_hardware_or_outside_the_session_account",
+        "release_reachable",
+        "release_republished",
+        "pin_moved",
+        "talk_corrected",
+        "ask_changed_or_superseded",
+        "follow_up_changed_or_superseded",
+        "sender_or_decides_supersedes",
+        "answer_supersedes_the_standing_answer",
+        "sent_with_the_senders_agent_key",
+        "an_open_talk_closed_or_superseded"
+      ]
+    },
+    "waiting_for": {
+      "type": "string"
+    },
+    "elapsed_s": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "receipts": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "next": {
+      "type": "string"
+    },
+    "receipt": {
+      "type": "string"
+    },
+    "freshness": {
+      "type": "object",
+      "required": [
+        "trunk",
+        "fetched_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "trunk": {
+          "type": "string"
+        },
+        "fetched_at": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

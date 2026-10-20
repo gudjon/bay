@@ -38,7 +38,8 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Reverse a merged change with a new, checked change | `bay undo <change>` |
 
 `<intent>` is the card, issue or ticket id. `--paths` lists every path the change reads and writes:
-the view holds only those. Run `bay <command> --help` for every flag.
+the view holds only those. Run `bay <command> --help` for every flag. `bay help --json` lists every
+command, flag and reason code, with the JSON Schema of `bay.result/1`.
 
 ## Read the result
 

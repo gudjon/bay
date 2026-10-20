@@ -2,12 +2,12 @@ use std::io::Read as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 use bay::result::BayResult;
 
 #[derive(Parser)]
-#[command(version = bay::version::BAY, about)]
+#[command(version = bay::version::BAY, about, disable_help_subcommand = true)]
 struct Cli {
     /// Run as if bay was started in <PATH> (like `git -C`)
     #[arg(short = 'C', global = true, value_name = "PATH", default_value = ".")]
@@ -161,6 +161,13 @@ enum Command {
     Hook {
         /// The agent product's event, for example `pre-tool`
         event: String,
+    },
+    /// The help of bay or of one command. With --json: every command, flag and reason code,
+    /// and the JSON Schema of bay.result/1
+    Help {
+        /// The command, for example `host init` (default: bay itself)
+        #[arg(value_name = "COMMAND")]
+        command: Vec<String>,
     },
 }
 
@@ -396,6 +403,7 @@ fn config_refusal(cli: &Cli) -> Option<BayResult> {
             | Command::Update { .. }
             | Command::Hook { .. }
             | Command::Adapter { .. }
+            | Command::Help { .. }
     );
     needs_config
         .then(|| bay::repo::Repo::config_missing(&cli.dir))
@@ -514,6 +522,7 @@ fn main() -> ExitCode {
             check,
         } => bay::update::update(&bay::update::Request { version, check }),
         Command::Adapter { action } => adapter(&cli.dir, action),
+        Command::Help { command } => return help(&command, cli.json),
         Command::Hook { event } => {
             // The agent hook follows the agent product's exit protocol (INTERFACES § 1): for
             // Claude Code, exit 2 denies. The payload adapter decides (agent_hook.rs).
@@ -530,6 +539,20 @@ fn main() -> ExitCode {
     // (`DESIGN` § 11); a hook never writes it.
     bay::coord::after_command();
     render(&result, cli.json)
+}
+
+/// `bay help [COMMAND]`: the help `bay [COMMAND] --help` prints; with `--json`, the contract
+/// (`bay::contract`), read from this command line.
+fn help(command: &[String], json: bool) -> ExitCode {
+    if json {
+        return render(&bay::contract::contract(Cli::command()), true);
+    }
+    let args = std::iter::once("bay".to_owned())
+        .chain(command.iter().cloned())
+        .chain(std::iter::once("--help".to_owned()));
+    // Prints the help and exits 0, as `--help` does; an unknown command is a usage error.
+    let _ = Cli::command().get_matches_from(args);
+    ExitCode::SUCCESS
 }
 
 /// `bay doctor`, then the daily update check.

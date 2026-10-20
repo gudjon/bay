@@ -140,7 +140,8 @@ pub fn land(
         }
         result = match observe.filter(|_| wait) {
             Some(timeout) => observe_land(&repo, dir, &id, &step, timeout),
-            None => submit_land(&repo, &id, &step, wait),
+            None if wait => wait_land(&repo, &id, &step),
+            None => submit_land(&repo, &id, &step, false),
         };
         if result.as_ref().is_err_and(|why| why == CHAIN_MOVED) {
             continue;
@@ -152,6 +153,86 @@ pub fn land(
     // G80: every result says which trunk it reflects, and when that trunk was fetched.
     result.freshness = result.freshness.or_else(|| repo.freshness());
     crate::talk::name_open_talks(&mut result, open_talks);
+    result
+}
+
+/// `land --wait` (`INTERFACES` § 1: run the publication here and return its outcome). A claim
+/// another process holds, or one a race moved on, is no outcome of the operation: the lander
+/// reads the chain again and goes on until the operation has one. It runs it, waits out the
+/// holder's lease and takes it over, or reports the holder's landing or refusal. It never
+/// answers `ok` for an operation it did not see land.
+fn wait_land(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<BayResult, String> {
+    loop {
+        let result = submit_land(repo, id, step, true)?;
+        if !not_taken(&result) {
+            return Ok(result);
+        }
+        adopt_remote_chain(repo, id);
+        let (_, record) = Chain::new(&repo.git)
+            .read(id)
+            .map_err(|error| error.message())?;
+        // A live operation, or one another process landed, is the next pass's to run or to
+        // report; one that ended otherwise is stated as it ended.
+        match record.operations.last() {
+            Some(op) if !op.state.is_terminal() || op.state == OpState::Published => {}
+            latest => return Ok(ended_elsewhere(repo, id, &result, latest)),
+        }
+        // The holder's chain moves at most once a heartbeat: never spin on it.
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Whether `result` is a claim this process did not take (§ 9a): another process holds the
+/// operation (`lease: held`), or a race moved it on (`superseded`). Neither is the
+/// operation's outcome.
+fn not_taken(result: &BayResult) -> bool {
+    result.decision == Decision::Ok
+        && result
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail["superseded"] == true || detail["lease"] == "held")
+}
+
+/// The answer of a `land --wait` whose operation another process ended without a landing:
+/// `ok` only for `no_effect` (`INTERFACES` § 1), else the refusal or fault it ended in.
+fn ended_elsewhere(
+    repo: &Repo,
+    id: &str,
+    taken: &BayResult,
+    latest: Option<&Operation>,
+) -> BayResult {
+    let op_id = latest
+        .map(|op| op.op_id.clone())
+        .or_else(|| taken.op_id.clone())
+        .unwrap_or_default();
+    let state = latest.map(|op| op.state);
+    let outcome = latest.and_then(|op| op.outcome.clone());
+    if state == Some(OpState::NoEffect) {
+        let trunk = repo
+            .git
+            .ref_target(&repo.trunk_tracking_ref())
+            .ok()
+            .flatten();
+        let mut result = BayResult::new(Decision::Ok)
+            .with_change(id)
+            .with_op(op_id)
+            .with_detail(json!({"trunk_commit": trunk}));
+        result.state = Some(NO_EFFECT.to_owned());
+        return result;
+    }
+    if state == Some(OpState::Failed) {
+        return BayResult::failed(format!(
+            "operation {op_id} failed in another process: {}",
+            outcome.unwrap_or_default()
+        ))
+        .with_change(id)
+        .with_op(op_id);
+    }
+    let mut result = BayResult::blocked(Reason::ChangeSuperseded)
+        .with_change(id)
+        .with_op(op_id)
+        .with_detail(json!({"state": state, "outcome": outcome, "landed": false}));
+    result.published = Some(false);
     result
 }
 
@@ -558,6 +639,19 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Takes this process's unpushed head off the local chain ref: back to `before`, the head
+    /// it wrote on, unless another process on this box moved the ref meanwhile. A write that
+    /// never reached the remote then stays this process's own, and no push of the ref by
+    /// another process (a sync of offline work) carries it there later.
+    fn withdraw(&mut self, before: &str) {
+        let name = change_ref(&self.id);
+        let _ = self
+            .repo
+            .git
+            .run(&["update-ref", &name, before, &self.head]);
+        before.clone_into(&mut self.head);
+    }
+
     /// Replaces the local chain with the remote's and reloads it.
     fn refetch(&mut self) -> Result<(), String> {
         let name = change_ref(&self.id);
@@ -919,7 +1013,14 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     }
     // G173: whatever the outcome, the operation's anchor goes with it.
     let repo = ctx.repo;
-    let _anchored = Anchored::new(&repo.git, op_id)?;
+    // A claim this process gives up before any attempt is given back, never left `running`.
+    let _anchored = match Anchored::new(&repo.git, op_id) {
+        Ok(anchored) => anchored,
+        Err(why) => {
+            release_after_fault(ctx, op_id, &revision);
+            return Err(why);
+        }
+    };
     let outcome = run_attempts(ctx, op_id, &revision, trunk, &mut seq);
     if outcome.is_err() {
         release_after_fault(ctx, op_id, &revision);
@@ -1654,43 +1755,51 @@ fn claim(
         }
         let epoch = op.epoch;
         let message = format!("claim {op_id} epoch {epoch} by {name} (process {nonce})");
+        let before = ctx.head.clone();
         if ctx.save_cas(revision, None, &message)? {
             kill_point("before-claim-push");
             if ctx.push_chain() {
                 ctx.my_epoch = epoch;
                 return Ok(None);
             }
-            // The compare-and-swap on the remote chain was lost: the winner holds it.
-            ctx.refetch()?;
-            let Some(op) = ctx.find_op(op_id) else {
-                return Err(CHAIN_MOVED.to_owned());
-            };
-            return Ok(Some(superseded(
-                &ctx.id,
-                op_id,
-                op.epoch,
-                op.owner.as_ref(),
-            )));
+            // The claim never reached the remote: it leaves this box's chain ref too, so no
+            // other process here pushes it later for an owner that gave up (§ 9a).
+            ctx.withdraw(&before);
         }
-        // Another process on this box moved the local chain ref first: read the remote chain
-        // again. Claimed meanwhile, the operation is the other claim's; else claim it again.
-        ctx.refetch()?;
-        match ctx.find_op(op_id) {
-            None => return Err(CHAIN_MOVED.to_owned()),
-            Some(op) if op.epoch != read || op.state.is_terminal() => {
-                return Ok(Some(superseded(
-                    &ctx.id,
-                    op_id,
-                    op.epoch,
-                    op.owner.as_ref(),
-                )));
-            }
-            Some(_) => {}
+        // Lost: another process on this box moved the local chain ref first, or the remote's
+        // compare-and-swap refused the push. Read the remote chain again.
+        if let Some(lost) = lost_claim(ctx, op_id, read)? {
+            return Ok(Some(lost));
         }
     }
     Err(format!(
         "the change chain kept moving under the claim of {op_id}; nothing was run"
     ))
+}
+
+/// After a claim of `op_id` this process lost, `read` being the epoch it claimed over: the
+/// remote chain is read again. An operation another claim holds, or one that ended, is
+/// `superseded` for this process, which runs nothing. One that no claim holds (the other
+/// claim never reached the remote, or was given back) is never taken for another's: `None`,
+/// and this process claims it again.
+fn lost_claim(ctx: &mut Ctx, op_id: &str, read: u64) -> Result<Option<BayResult>, String> {
+    ctx.refetch()?;
+    let Some(op) = ctx.find_op(op_id) else {
+        return Err(CHAIN_MOVED.to_owned());
+    };
+    let ended = op.state.is_terminal() || op.state == OpState::Blocked;
+    let claimed = op.epoch != read
+        && op.owner.is_some()
+        && matches!(op.state, OpState::Running | OpState::Checked);
+    if ended || claimed {
+        return Ok(Some(superseded(
+            &ctx.id,
+            op_id,
+            op.epoch,
+            op.owner.as_ref(),
+        )));
+    }
+    Ok(None)
 }
 
 /// Before the publishing push: the executor reads the chain from the remote, and if its epoch

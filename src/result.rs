@@ -23,6 +23,15 @@ pub enum Decision {
 }
 
 impl Decision {
+    /// Every decision, in the order of `INTERFACES` § 1.
+    pub const ALL: &'static [Self] = &[
+        Self::Ok,
+        Self::Landed,
+        Self::Queued,
+        Self::Blocked,
+        Self::Failed,
+    ];
+
     /// Process exit code for this decision. Usage errors are clap's exit 2.
     #[must_use]
     pub const fn exit_code(self) -> i32 {
@@ -33,7 +42,9 @@ impl Decision {
         }
     }
 
-    const fn word(self) -> &'static str {
+    /// The decision as `bay.result/1` spells it.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
         match self {
             Self::Ok => "ok",
             Self::Landed => "landed",
@@ -387,6 +398,22 @@ mod tests {
         assert_eq!(value["schema"], SCHEMA);
         assert_eq!(value["decision"], "ok");
         assert_eq!(result.decision.exit_code(), 0);
+    }
+
+    #[test]
+    fn every_decision_is_listed_once_and_serializes_as_its_word() {
+        let words: HashSet<&str> = Decision::ALL
+            .iter()
+            .map(|decision| decision.word())
+            .collect();
+        assert_eq!(words.len(), Decision::ALL.len());
+        for decision in Decision::ALL {
+            assert_eq!(
+                serde_json::to_value(decision).unwrap(),
+                serde_json::Value::String(decision.word().to_owned())
+            );
+        }
+        assert_eq!(Decision::ALL.len(), 5);
     }
 
     #[test]

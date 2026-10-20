@@ -11,8 +11,12 @@
 //!   before its push still reaches the remote, and lands: no panic over an operation missing
 //!   from the record, no `CHAIN_MOVED` (the second `land --wait` of a two-agent race).
 //! - A lander whose claim is rewound off the local ref while the executor claims and checks the
-//!   operation loses the claim's compare-and-swap: it records `superseded`, runs nothing, and
+//!   operation loses the claim's compare-and-swap: its claim never reaches the remote, and it
 //!   never faults at `persist` (two `persist` fault receipts and an operation left `running`).
+//! - A `land --wait` that loses its claim to a live executor never answers `ok` while nothing
+//!   landed (the third `land --wait` of the race printed `ok`, and the executor was then stopped
+//!   with the operation `running`): it waits for the operation's outcome, takes it over once
+//!   the holder's lease passes, and the change lands once.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -118,9 +122,9 @@ fn a_resubmission_rewound_off_the_local_chain_still_lands() {
 /// The lander and the executor on one box take the same operation. The lander wrote its claim
 /// and is held before the claim's push; a reader moves the local chain ref back, and the
 /// executor claims, checks and persists the operation, then dies before it publishes. The
-/// lander resumes: its claim's push carries its own claim, which the remote refuses, so it
-/// records `superseded` under the executor's epoch, never a `persist` fault. The next executor
-/// takes the operation over after its lease and lands it once.
+/// lander resumes: its claim's push carries its own claim, which the remote refuses, so the
+/// executor's epoch stands and the lander never faults at `persist`. It waits for the outcome:
+/// once the dead executor's lease passes it takes the operation over and lands it once.
 #[test]
 fn a_claim_rewound_off_the_local_chain_is_never_taken_for_ownership() {
     let test_box = TestBox::new();
@@ -172,18 +176,120 @@ fn a_claim_rewound_off_the_local_chain_is_never_taken_for_ownership() {
     assert_ne!(persisted, submitted, "the executor claimed nothing");
 
     std::fs::write(&release, "go").unwrap();
-    let (code, lost) = finished(&mut lander, "the lander");
-    assert_eq!(code, Some(0), "{lost}");
-    assert_eq!(lost["decision"], "ok", "{lost}");
-    assert_eq!(lost["detail"]["superseded"], true, "{lost}");
-    assert_eq!(lost["detail"]["epoch"], 1, "{lost}");
+    let (code, answer) = finished(&mut lander, "the lander");
+    assert_eq!(code, Some(0), "{answer}");
+    assert_eq!(answer["decision"], "landed", "{answer}");
+    assert_eq!(answer["op_id"], format!("{id}.1"), "{answer}");
+    let claims = claims_on_remote(&test_box, &remote, &id);
     assert_eq!(
-        remote_chain(&test_box, &remote, &id),
-        persisted,
-        "the superseded lander wrote nothing"
+        claims
+            .iter()
+            .filter(|claim| claim.contains(" epoch 1 "))
+            .count(),
+        1,
+        "the lander's lost claim reached the remote: {claims:?}"
+    );
+    assert!(
+        claims.iter().any(|claim| claim.contains(" epoch 2 ")),
+        "the lander never took the operation over: {claims:?}"
     );
 
-    let ran = test_box.bay_ok(&repo, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    test_box.bay_ok(&repo, &["executor", "run", "--once"]);
+    assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
+}
+
+/// The claim commits on the remote chain of change `id`, newest first.
+fn claims_on_remote(test_box: &TestBox, remote: &Path, id: &str) -> Vec<String> {
+    test_box
+        .git_bare(
+            remote,
+            &["log", "--format=%s", &format!("refs/bay/changes/{id}")],
+        )
+        .lines()
+        .filter(|subject| subject.starts_with("claim "))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The resubmission race of two agents and a background executor on one box: B's
+/// `land --wait` read its operation unclaimed and is about to claim it when the executor
+/// claims, checks and persists it, and is held before it publishes. The lander's claim loses
+/// the compare-and-swap on this box's chain ref. Nothing has landed, so the lander never
+/// answers `ok` for it: it waits for the operation's outcome, takes the operation over once
+/// the held executor's lease passes, and lands it. Its lost claim never reaches the remote;
+/// the executor, released, finds the landing and publishes nothing.
+///
+/// Guard: `not_taken` in `wait_land` (`src/publish.rs`). Made to answer `false`, the lander
+/// prints `ok` with `superseded` while trunk holds nothing of the change.
+#[test]
+fn a_land_wait_that_loses_its_claim_to_a_live_executor_answers_with_the_outcome() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let remote = test_box.path().join("repo-remote.git");
+    test_box.seed_with_check(
+        &repo,
+        &[("src/a.rs", "fn a() {}\n")],
+        &check_files("true", &passing_result(1), 1, 60),
+    );
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    assert_eq!(code, 0, "{queued}");
+
+    // The lander has read the operation unclaimed and is held just before its claim.
+    let release_lander = test_box.path().join("release-lander");
+    let child = test_box
+        .bay_process(&view)
+        .env("BAY_TEST_PAUSE_AT", "before-claim")
+        .env("BAY_TEST_PAUSE_FILE", &release_lander)
+        .args(["--json", "land", "--wait"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lander = Held(Some(child));
+    wait_paused(&release_lander, "the lander");
+
+    // The executor claims, checks and persists it, and is held before it publishes.
+    let release_executor = test_box.path().join("release-executor");
+    let child = test_box
+        .bay_process(&repo)
+        .env("BAY_TEST_PAUSE_AT", "after-persist")
+        .env("BAY_TEST_PAUSE_FILE", &release_executor)
+        .args(["--json", "executor", "run", "--once"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut executor = Held(Some(child));
+    wait_paused(&release_executor, "the executor");
+    assert_eq!(test_box.trunk_change_ids(&remote), Vec::<String>::new());
+
+    std::fs::write(&release_lander, "go").unwrap();
+    let (code, answer) = finished(&mut lander, "the lander");
+    assert_eq!(
+        answer["decision"], "landed",
+        "land --wait answered without the operation's outcome: {answer}"
+    );
+    assert_eq!(code, Some(0), "{answer}");
+    assert_eq!(answer["op_id"], format!("{id}.1"), "{answer}");
+    assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
+    let claims = claims_on_remote(&test_box, &remote, &id);
+    assert_eq!(
+        claims
+            .iter()
+            .filter(|claim| claim.contains(" epoch 1 "))
+            .count(),
+        1,
+        "the lander's lost claim reached the remote: {claims:?}"
+    );
+
+    std::fs::write(&release_executor, "go").unwrap();
+    let (code, ran) = finished(&mut executor, "the executor");
+    assert_eq!(code, Some(0), "{ran}");
+    let late = &ran["detail"]["ran"][0];
+    assert!(
+        late["detail"]["existing"] == true || late["detail"]["superseded"] == true,
+        "{ran}"
+    );
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.15
+
+- `bay land --wait` waits for another process's run of its operation and returns its outcome, not an early `ok`.
+- `bay help --json` lists every command, flag and reason code, read from the binary itself.
+- It includes the JSON Schema of `bay.result/1`, also kept as `schemas/bay.result.schema.json`.
+
 ## 0.1.14
 
 - `bay watch` never judges red from a registry it cannot read; it says `red_unread` and keeps its cursor.
