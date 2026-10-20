@@ -5,7 +5,8 @@
 #   scripts/release.sh build <version>    build, package and sign HEAD into target/release/<version>/
 #   scripts/release.sh attach-sig <version> <file>
 #                                         take SHA256SUMS.sig made by an external signer
-#   scripts/release.sh publish <version>  create the GitHub release v<version> from that directory
+#   scripts/release.sh publish <version>  create the GitHub release v<version> from that directory,
+#                                         tagging the commit build recorded in it (COMMIT)
 #
 # With BAY_RELEASE_EXTERNAL_SIGNER=1, build writes SHA256SUMS and does not sign it: it prints the
 # file to sign, and the signature is made elsewhere (a hardware key that signs only with a touch,
@@ -68,8 +69,9 @@ check_bump() {
 }
 
 # The CHANGELOG.md section of version $1, without its heading.
+# The CHANGELOG section of version $1, read at commit $2.
 notes() {
-    awk -v head="## $1" '$0 == head { on = 1; next } on && /^## / { exit } on' CHANGELOG.md
+    git show "$2:CHANGELOG.md" | awk -v head="## $1" '$0 == head { on = 1; next } on && /^## / { exit } on'
 }
 
 key() {
@@ -117,6 +119,8 @@ build)
         rm -rf "$stage"
     done
     printf '%s\n' "$version" > "$out/VERSION"
+    # The built commit: publish tags it and reads its notes there, whatever HEAD is by then.
+    git rev-parse HEAD > "$out/COMMIT"
     (cd "$out" && shasum -a 256 VERSION bay-*.tar.gz > SHA256SUMS)
     if [ "$external" = 1 ]; then
         echo "release: $version built from $(git rev-parse --short HEAD) in $out, unsigned"
@@ -141,21 +145,26 @@ attach-sig)
 publish)
     [ $# -eq 2 ] || usage
     version=$2
-    check_version "$version"
     out="$root/target/release/$version"
+    # build checked the version against the commit it built; publish reads that commit, not HEAD,
+    # so trunk may move while an external signature is made.
+    [ -s "$out/COMMIT" ] ||
+        { echo "release: $out/COMMIT is absent; build the release again" >&2; exit 1; }
+    [ "$(cat "$out/VERSION" 2>/dev/null)" = "$version" ] ||
+        { echo "release: $out/VERSION is not $version" >&2; exit 1; }
     [ -f "$out/SHA256SUMS.sig" ] ||
         { echo "release: $out/SHA256SUMS.sig is absent; sign the release (build, or attach-sig)" >&2; exit 1; }
     verifies "$out" "$out/SHA256SUMS.sig" ||
         { echo "release: SHA256SUMS.sig does not verify against a key in $allowed" >&2; exit 1; }
     (cd "$out" && shasum -a 256 -c -q SHA256SUMS)
-    commit=$(git rev-parse HEAD)
+    commit=$(cat "$out/COMMIT")
     git fetch -q origin
-    git merge-base --is-ancestor "$commit" origin/main || { echo "release: HEAD is not on origin/main" >&2; exit 1; }
+    git merge-base --is-ancestor "$commit" origin/main || { echo "release: the built commit $commit is not on origin/main" >&2; exit 1; }
     pre=""
     case "$version" in *-*) pre="--prerelease" ;; esac
-    notes "$version" | sed '/./,$!d' | head -1 | grep -qx 'Pre-release.' && pre="--prerelease"
+    notes "$version" "$commit" | sed '/./,$!d' | head -1 | grep -qx 'Pre-release.' && pre="--prerelease"
     notes_file="$out/NOTES.md"
-    { notes "$version"; printf '\nBuilt from %s. Verify SHA256SUMS with SHA256SUMS.sig (ssh-keygen -Y verify, namespace bay-release).\n' "$commit"; } > "$notes_file"
+    { notes "$version" "$commit"; printf '\nBuilt from %s. Verify SHA256SUMS with SHA256SUMS.sig (ssh-keygen -Y verify, namespace bay-release).\n' "$commit"; } > "$notes_file"
     gh release create "v$version" --target "$commit" $pre --title "bay $version" \
         --notes-file "$notes_file" \
         "$out/VERSION" "$out/SHA256SUMS" "$out/SHA256SUMS.sig" "$out"/bay-*.tar.gz

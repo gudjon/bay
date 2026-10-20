@@ -59,11 +59,14 @@ impl Release {
         release.git(&["commit", "-q", "-m", "release fixture"]);
         let out = release.out();
         std::fs::create_dir_all(&out).unwrap();
-        std::fs::write(
-            out.join("SHA256SUMS"),
-            format!("{}  VERSION\n", "0".repeat(64)),
-        )
-        .unwrap();
+        std::fs::write(out.join("VERSION"), format!("{VERSION}\n")).unwrap();
+        let sums = Command::new("shasum")
+            .args(["-a", "256", "VERSION"])
+            .current_dir(&out)
+            .output()
+            .unwrap();
+        std::fs::write(out.join("SHA256SUMS"), sums.stdout).unwrap();
+        std::fs::write(out.join("COMMIT"), format!("{}\n", release.head())).unwrap();
         release
     }
 
@@ -83,6 +86,14 @@ impl Release {
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1"));
+    }
+
+    fn head(&self) -> String {
+        let out = ok(Command::new("git")
+            .arg("-C")
+            .arg(self.repo())
+            .args(["rev-parse", "HEAD"]));
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
     }
 
     fn keygen(&self, name: &str) -> PathBuf {
@@ -106,10 +117,25 @@ impl Release {
     }
 
     fn script(&self, args: &[&str]) -> (i32, String) {
+        // A `gh` that records its arguments and the notes file, in place of the real one.
+        let bin = self.root.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let gh = bin.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > {log}/gh-args\nwhile [ $# -gt 0 ]; do [ \"$1\" = --notes-file ] && cp \"$2\" {log}/gh-notes; shift; done\n",
+                log = self.root.path().display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
         let out = Command::new("sh")
             .arg("scripts/release.sh")
             .args(args)
             .current_dir(self.repo())
+            .env("PATH", path)
             .env("HOME", self.root.path())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -165,4 +191,55 @@ fn publish_refuses_an_absent_or_unverified_signature() {
     let (code, stderr) = release.script(&["publish", VERSION]);
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("does not verify"), "{stderr}");
+}
+
+/// publish tags the commit build recorded and reads its notes there, so trunk can move while an
+/// external signature is made; a release directory without that record is refused.
+#[test]
+fn publish_tags_the_built_commit_after_trunk_moved() {
+    let release = Release::new();
+    let built = release.head();
+    let origin = release.root.path().join("origin.git");
+    ok(Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg("--bare")
+        .arg(&origin));
+    release.git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+    std::fs::write(release.repo().join("later.txt"), "later\n").unwrap();
+    release.git(&["add", "later.txt"]);
+    std::fs::write(
+        release.repo().join("CHANGELOG.md"),
+        "# Changelog\n\n## 9.9.10\nLater.\n\n## 9.9.9\nMoved on.\n",
+    )
+    .unwrap();
+    release.git(&["commit", "-qam", "trunk moves on"]);
+    release.git(&["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    assert_ne!(release.head(), built);
+
+    let a = release.root.path().join("keys/a");
+    let (code, stderr) = release.script(&[
+        "attach-sig",
+        VERSION,
+        release.signed_by(&a).to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+    let (code, stderr) = release.script(&["publish", VERSION]);
+    assert_eq!(code, 0, "{stderr}");
+    let args = std::fs::read_to_string(release.root.path().join("gh-args")).unwrap();
+    let args: Vec<&str> = args.lines().collect();
+    let target = args.iter().position(|arg| *arg == "--target").unwrap();
+    assert_eq!(args[target + 1], built, "{args:?}");
+    let notes = std::fs::read_to_string(release.root.path().join("gh-notes")).unwrap();
+    assert!(
+        notes.contains("Pre-release."),
+        "the built commit's notes: {notes}"
+    );
+    assert!(!notes.contains("Moved on."), "{notes}");
+    assert!(notes.contains(&format!("Built from {built}.")), "{notes}");
+
+    std::fs::remove_file(release.out().join("COMMIT")).unwrap();
+    let (code, stderr) = release.script(&["publish", VERSION]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("COMMIT is absent"), "{stderr}");
 }
