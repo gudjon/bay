@@ -64,6 +64,9 @@ fn a_local_settings_file_that_disables_or_replaces_bays_hooks_is_red() {
     let local = repo.join(".claude/settings.local.json");
 
     let text = write(&local, &json!({"disableAllHooks": true}));
+    // Doctor names the file by its real path: on macOS the temporary directory is a link
+    // (`/var` to `/private/var`).
+    let local = local.canonicalize().unwrap();
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "HOOKS_MISSING", "{result}");

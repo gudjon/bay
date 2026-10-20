@@ -64,6 +64,9 @@ fn tree_of(test_box: &TestBox, dir: &Path) -> String {
     test_box.git_ok(dir, &[&git_dir, &work_tree, "write-tree"])
 }
 
+/// Linux only: the check copies its tree out, so it runs unconfined (ruling R14), and on macOS a
+/// check always runs under `sandbox-exec`.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_blobless_check_fetches_once_and_sees_the_exact_tree() {
     let test_box = TestBox::new();

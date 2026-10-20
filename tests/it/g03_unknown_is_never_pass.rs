@@ -252,6 +252,36 @@ fn a_check_that_never_starts_is_unknown() {
     );
 }
 
+/// The same missing interpreter inside the sandbox: the sandbox starts, and the shell's own
+/// error names the adapter's path. That path is in the check's own scratch, which sits under the
+/// repository's git directory (G241), so it is no reach outside: the check is `unknown`, never
+/// an infrastructure failure of its own making.
+#[test]
+fn a_check_that_never_starts_in_the_sandbox_is_unknown() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let files: Vec<(String, String)> = check_files("true", &passing_result(1), 1, 60)
+        .into_iter()
+        .map(|(path, text)| {
+            let text = if path == "scripts/bay-check" {
+                text.replacen("#!/bin/sh\n", "#!/nonexistent/bay-no-such-shell\n", 1)
+            } else {
+                text
+            };
+            (path, text)
+        })
+        .collect();
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    let (_, view) = test_box.start_and_edit(&repo);
+    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    assert_eq!(code, 10, "{result}");
+    assert_eq!(result["reason"], "CHECK_UNKNOWN", "{result}");
+    assert_eq!(
+        result["detail"]["checks"][0]["verdict"], "unknown",
+        "{result}"
+    );
+}
+
 /// A required check with no result that counts: the check ran and passed, but its record is
 /// signed by a producer key the registry does not hold under that producer's name, so no
 /// counted record answers the required id. A required id with no result is never pass.

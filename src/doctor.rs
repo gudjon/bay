@@ -234,9 +234,13 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
             .is_ok_and(|out| out.lines().any(|line| !line.starts_with('S')));
     let auto = get("maintenance.auto").is_none_or(|value| value != "false")
         && get("gc.auto").is_none_or(|value| value != "0");
+    // Compared by real path: `git maintenance register` writes the path it was given, which on
+    // macOS may run through a link (`/var` to `/private/var`).
+    let real = |path: &str| std::fs::canonicalize(path).unwrap_or_else(|_| path.into());
+    let here = real(&info.toplevel);
     let registered = git
         .run(&["config", "--get-all", "maintenance.repo"])
-        .is_ok_and(|out| out.lines().any(|repo| repo == info.toplevel));
+        .is_ok_and(|out| out.lines().any(|repo| real(repo) == here));
     let mut notes = Vec::new();
     if !info.bare && !promisor {
         notes.push("a full clone: the site may share a blob-less store (git clone --filter=blob:none --no-checkout)");

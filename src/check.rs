@@ -668,10 +668,7 @@ fn run_one(
         };
     // § 7, G26: a check that reached outside its adapter and candidate is an infrastructure
     // failure, never a pass.
-    let reached_out = place.hidden.iter().any(|hidden| {
-        names_path(&stderr, &hidden.display().to_string())
-            || names_path(&stderr, &real(hidden).display().to_string())
-    });
+    let reached_out = reaches_out(&stderr, place);
     let outside = || {
         Judged::without_units(
             Verdict::InfraFailure,
@@ -698,6 +695,23 @@ fn run_one(
         return outside();
     }
     judge(&result, entry, candidate)
+}
+
+/// Whether the check's stderr names a hidden path. A path inside the check's own scratch is
+/// never one, though the scratch sits under the repository's git directory (G241): a shell's
+/// error about the check's own adapter is no reach outside.
+fn reaches_out(stderr: &str, place: &Place) -> bool {
+    let mut seen = stderr.to_owned();
+    for own in [real(place.scratch), place.scratch.to_path_buf()] {
+        let own = own.display().to_string();
+        if !own.is_empty() {
+            seen = seen.replace(&own, "<check scratch>");
+        }
+    }
+    place.hidden.iter().any(|hidden| {
+        names_path(&seen, &hidden.display().to_string())
+            || names_path(&seen, &real(hidden).display().to_string())
+    })
 }
 
 /// Whether `text` names `path` or a path inside it: an occurrence of `path` that starts and
