@@ -100,10 +100,33 @@ pub struct Unit {
     /// adapter sent none, and on records written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f64>,
+    /// Why the unit did not pass, as the adapter chose to show it (G240, at most
+    /// [`REASON_MAX_BYTES`]). Absent on a pass and on records written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
     /// Fields this version does not know, kept as read: they are signed, so a record a later
     /// version wrote still verifies here.
     #[serde(flatten)]
     pub unknown: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The longest unit `reason` an adapter may send, in bytes of UTF-8 (G240). A longer one makes
+/// the run `infra_failure`; bay never cuts it.
+pub const REASON_MAX_BYTES: usize = 2048;
+
+/// The units of `record` that did not pass and say why, as `detail.checks[].reasons` and
+/// `bay status` show them (G240).
+#[must_use]
+pub fn reasons(units: &[Unit]) -> Vec<serde_json::Value> {
+    units
+        .iter()
+        .filter(|unit| unit.verdict != Verdict::Pass)
+        .filter_map(|unit| {
+            unit.reason.as_ref().map(|reason| {
+                serde_json::json!({"unit": unit.id, "verdict": unit.verdict, "reason": reason})
+            })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -641,6 +641,7 @@ fn evidence_read(
             "kind": record.kind,
             "check": record.check.id,
             "verdict": record.verdict,
+            "reasons": evidence::reasons(&record.units),
             "verified": verified,
         })).collect::<Vec<_>>(),
     }))

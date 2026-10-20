@@ -2618,7 +2618,10 @@ fn verdict(
     let mut why: Vec<serde_json::Value> = named
         .iter()
         .filter(|record| in_gap(record) && policy.listed(record))
-        .map(|record| json!({"check": record.check.id, "verdict": record.verdict, "why": record.why}))
+        .map(|record| {
+            json!({"check": record.check.id, "verdict": record.verdict, "why": record.why,
+                "reasons": evidence::reasons(&record.units)})
+        })
         .collect();
     // G163: each record that would have answered a gap but for the check's producers list.
     why.extend(

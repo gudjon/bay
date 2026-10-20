@@ -1,9 +1,21 @@
 # Changelog
 
+## 0.1.5
+Pre-release.
+
+The first release signed by the hardware release key. Every release before it was signed by the old key.
+
+Checks
+- Fixed checks on macOS 27, where every check aborted at start under the 0.1.4 sandbox.
+- Added a unit `reason` to check results. A refusal and `bay status` show why each failed unit failed.
+- A reason over 2 KB makes the run `infra_failure`. bay never cuts a reason or copies raw check output.
+
 ## 0.1.4
 Pre-release.
 
 Builds for Linux (x86_64 and aarch64, musl) and macOS. Apple silicon is tested; Intel (x86_64) is built but not yet run on an Intel Mac.
+
+Known issue: on macOS, checks fail to start (`CHECK_UNKNOWN`). Use 0.1.3 on Macs, or 0.1.5.
 
 Before you upgrade an executor: checks now run in an allow-list sandbox with no network. A check that reads outside its candidate and adapter now fails as `infra_failure`. List extra files in `[[check]] paths`. Set `network = true` in the base policy for a check that needs the network.
 

@@ -420,6 +420,8 @@ struct ResultUnit {
     verdict: Verdict,
     #[serde(default)]
     seconds: Option<f64>,
+    #[serde(default)]
+    reason: Option<String>,
 }
 
 /// Runs every required check of `policy` on `candidate` that is not in `finished`, hands each
@@ -728,6 +730,46 @@ fn names_path(text: &str, path: &str) -> bool {
     false
 }
 
+/// The units as the evidence record keeps them: a time only when it is a real one, a reason
+/// only on a unit that did not pass, and none of the adapter's other fields.
+fn recorded_units(result: &CheckResult) -> Vec<Unit> {
+    result
+        .checks
+        .iter()
+        .map(|unit| Unit {
+            id: unit.id.clone(),
+            verdict: unit.verdict,
+            seconds: unit
+                .seconds
+                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0),
+            reason: unit
+                .reason
+                .clone()
+                .filter(|_| unit.verdict != Verdict::Pass),
+            unknown: serde_json::Map::new(),
+        })
+        .collect()
+}
+
+/// G240: a reason is shown whole or not at all; one too long to show makes the run an infra
+/// failure of the adapter, never a cut message.
+fn overlong_reason(result: &CheckResult) -> Option<Judged> {
+    let unit = result.checks.iter().find(|unit| {
+        unit.reason
+            .as_ref()
+            .is_some_and(|reason| reason.len() > crate::evidence::REASON_MAX_BYTES)
+    })?;
+    Some(Judged::without_units(
+        Verdict::InfraFailure,
+        Some(format!(
+            "unit {} sent a reason of {} bytes; at most {} are shown",
+            unit.id,
+            unit.reason.as_ref().map_or(0, String::len),
+            crate::evidence::REASON_MAX_BYTES
+        )),
+    ))
+}
+
 fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Judged {
     if result.schema != "bay.check.result/1" {
         return Judged::without_units(Verdict::Unknown, Some(format!("schema {}", result.schema)));
@@ -738,18 +780,10 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
             Some("the result is for a different commit or tree; rejected whole".to_owned()),
         );
     }
-    let units: Vec<Unit> = result
-        .checks
-        .iter()
-        .map(|unit| Unit {
-            id: unit.id.clone(),
-            verdict: unit.verdict,
-            seconds: unit
-                .seconds
-                .filter(|seconds| seconds.is_finite() && *seconds >= 0.0),
-            unknown: serde_json::Map::new(),
-        })
-        .collect();
+    if let Some(too_long) = overlong_reason(result) {
+        return too_long;
+    }
+    let units = recorded_units(result);
     let with = |verdict: Verdict, why: Option<String>, units: Vec<Unit>| Judged {
         verdict,
         why,

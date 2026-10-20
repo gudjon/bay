@@ -124,7 +124,8 @@ pub fn bwrap_args(hidden: &[PathBuf], scratch: &Path, network: bool) -> Vec<OsSt
 }
 
 /// The macOS read-only allow-list: the system, the dynamic loader's cache, the time zone and
-/// the same few files of `/etc` as on Linux (`/etc` is `/private/etc` there).
+/// the same few files of `/etc` as on Linux (`/etc` is `/private/etc` there), and the link
+/// `/bin/sh` reads to pick its shell.
 pub const MACOS_READ: &[(&str, &str)] = &[
     ("subpath", "/usr"),
     ("subpath", "/bin"),
@@ -137,6 +138,7 @@ pub const MACOS_READ: &[(&str, &str)] = &[
     ("literal", "/private/etc/group"),
     ("literal", "/private/etc/hosts"),
     ("literal", "/private/etc/localtime"),
+    ("literal", "/private/var/select/sh"),
     ("literal", "/dev/null"),
     ("literal", "/dev/zero"),
     ("literal", "/dev/random"),
@@ -194,6 +196,9 @@ pub fn macos_profile(hidden: &[PathBuf], scratch: &Path, network: bool) -> Strin
         "(allow file-read-metadata {})",
         ancestors.join(" ")
     ));
+    // The dynamic loader reads the root's names before `main` (macOS 27 aborts every program
+    // without it). That lists `/`, nothing below it.
+    rules.push("(allow file-read-data (literal \"/\"))".to_owned());
     let read: Vec<String> = MACOS_READ
         .iter()
         .map(|(kind, path)| filter(kind, Path::new(path)))
@@ -255,7 +260,12 @@ mod tests {
             closed.contains("(deny file-read* file-write* (subpath \"/nonexistent/repo\"))"),
             "{closed}"
         );
-        // Neither HOME nor the root is readable: only looked up on the way to the scratch.
+        // The loader lists the root's names to start any program (macOS 27 aborts it
+        // otherwise), but nothing below the root is readable, and HOME is not on the list.
+        assert!(
+            closed.contains("(allow file-read-data (literal \"/\"))"),
+            "{closed}"
+        );
         assert!(!closed.contains("(subpath \"/\")"), "{closed}");
         assert!(!closed.contains("/Users"), "{closed}");
         let open = macos_profile(&hidden, scratch, true);
