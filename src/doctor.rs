@@ -471,12 +471,14 @@ fn hooks_row(
     Ok(())
 }
 
-/// The `hook-overrides` row (G154): the settings files the agent product reads beside the
-/// project's that switch bay's hooks off, by `disableAllHooks: true` or by hook entries for one
-/// of bay's events without bay's command. Red with `HOOKS_MISSING`, naming each file; a file
-/// that cannot be read is named too, since what it does is unknown. Doctor only reads them.
+/// The `hook-overrides` row (G154, R22): the settings files the agent product reads beside the
+/// project's that switch bay's hooks off, by `disableAllHooks: true` or
+/// `allowManagedHooksOnly: true`. Red with `HOOKS_MISSING`, naming each file; a file that cannot
+/// be read is named too, since what it does is unknown. Another tool's hooks for bay's events
+/// are listed under `added`: they run beside bay's. Doctor only reads them.
 fn hook_overrides_row(paths: &[std::path::PathBuf], report: &mut Report) {
     let mut overrides = Vec::new();
+    let mut added = Vec::new();
     for path in paths {
         let file = path.display().to_string();
         let settings = match agent_settings::read(path) {
@@ -487,9 +489,17 @@ fn hook_overrides_row(paths: &[std::path::PathBuf], report: &mut Report) {
             }
         };
         let disabled = settings.get("disableAllHooks") == Some(&Value::Bool(true));
+        let managed_only = settings.get("allowManagedHooksOnly") == Some(&Value::Bool(true));
+        // Claude Code runs the hooks of every settings scope together, so another tool's entry
+        // for one of bay's events adds to bay's, never replaces it (R22). It is listed, and
+        // only a setting that switches hooks off weakens bay's.
         let events = agent_settings::claude_events_without_bay(&settings);
-        if disabled || !events.is_empty() {
-            overrides.push(json!({"file": file, "disable_all_hooks": disabled, "events": events}));
+        if !events.is_empty() {
+            added.push(json!({"file": file, "events": events}));
+        }
+        if disabled || managed_only {
+            overrides.push(json!({"file": file, "disable_all_hooks": disabled,
+                "allow_managed_hooks_only": managed_only}));
         }
     }
     if overrides.is_empty() {
@@ -497,7 +507,7 @@ fn hook_overrides_row(paths: &[std::path::PathBuf], report: &mut Report) {
             .rows
             .push(json!({"name": "hook-overrides", "state": "green",
             "read": paths.iter().map(|path| path.display().to_string()).collect::<Vec<_>>(),
-            "overrides": []}));
+            "overrides": [], "added": added}));
         return;
     }
     let files: Vec<&str> = overrides
@@ -512,8 +522,9 @@ fn hook_overrides_row(paths: &[std::path::PathBuf], report: &mut Report) {
         "name": "hook-overrides",
         "state": "red",
         "overrides": overrides,
+        "added": added,
         "recovery": format!(
-            "edit {}: remove disableAllHooks, and give each event named bay's own `bay hook <event>` entry or remove that event's hooks",
+            "edit {}: remove disableAllHooks and allowManagedHooksOnly, which switch bay's hooks off",
             files.join(", ")
         ),
     }));

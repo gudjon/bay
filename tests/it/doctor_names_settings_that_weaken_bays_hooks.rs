@@ -87,18 +87,33 @@ fn a_local_settings_file_that_disables_or_replaces_bays_hooks_is_red() {
     // Doctor wrote nothing.
     assert_eq!(std::fs::read_to_string(&local).unwrap(), text);
 
-    // Entries for one of bay's events that leave out bay's command.
+    // Another tool's entries for one of bay's events run beside bay's (Claude Code merges the
+    // hooks of every scope), so they are listed and the row stays green (R22).
     write(
         &local,
         &json!({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "other-tool check"}]}]}}),
     );
+    let (_, result) = result_json(test_box.bay(&repo).arg("doctor"));
+    let row = overrides(&result);
+    assert_eq!(row["state"], "green", "{row}");
+    assert_eq!(
+        row["added"][0]["file"],
+        local.display().to_string(),
+        "{row}"
+    );
+    assert_eq!(row["added"][0]["events"], json!(["PreToolUse"]), "{row}");
+    assert_ne!(result["reason"], "HOOKS_MISSING", "{result}");
+
+    // Managed hooks only: bay's project entries do not run.
+    write(&local, &json!({"allowManagedHooksOnly": true}));
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 10, "{result}");
     let row = overrides(&result);
     assert_eq!(row["state"], "red", "{row}");
-    let found = &row["overrides"][0];
-    assert_eq!(found["file"], local.display().to_string(), "{row}");
-    assert_eq!(found["events"], json!(["PreToolUse"]), "{row}");
+    assert_eq!(
+        row["overrides"][0]["allow_managed_hooks_only"], true,
+        "{row}"
+    );
 }
 
 #[test]
@@ -122,10 +137,7 @@ fn the_user_settings_file_is_read_where_the_product_reads_it() {
     // With CLAUDE_CONFIG_DIR set, the product reads its user settings there, not under $HOME.
     let config_dir = test_box.path().join("claude-config");
     let moved = config_dir.join("settings.json");
-    write(
-        &moved,
-        &json!({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "other-tool stop"}]}]}}),
-    );
+    write(&moved, &json!({"disableAllHooks": true}));
     write(&user, &json!({"disableAllHooks": true}));
     let (_, result) = result_json(
         test_box
@@ -142,7 +154,7 @@ fn the_user_settings_file_is_read_where_the_product_reads_it() {
         .map(|found| found["file"].as_str().unwrap())
         .collect();
     assert_eq!(files, [moved.display().to_string()], "{row}");
-    assert_eq!(row["overrides"][0]["events"], json!(["Stop"]), "{row}");
+    assert_eq!(row["overrides"][0]["disable_all_hooks"], true, "{row}");
 }
 
 fn row_state<'a>(result: &'a Value, name: &str) -> &'a Value {
