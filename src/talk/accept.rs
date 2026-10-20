@@ -132,9 +132,12 @@ fn accept(repo: &Repo, registry: &Registry) -> Result<Outcome, String> {
         }
         match verify(repo, registry, &talk, &me.name) {
             Ok(()) => {
+                // G58, G53: the wake adapter is asked once, at accept, and its answer is on the
+                // ack, so the sender sees whether its talk woke the recipient.
+                let wake = super::wake::wake(repo, &talk, &me);
                 let ack = json!({"schema": TALK_SCHEMA, "entry": "ack", "talk": talk.id,
                     "ack": true, "actor": {"name": me.name, "session": me.session},
-                    "at": now_rfc3339()});
+                    "at": now_rfc3339(), "wake": wake});
                 // One talk whose ack cannot be written here (a sibling session moved its ref,
                 // a lock) is that talk's failure, not the whole accept's.
                 match append(repo, &talk, &ack, &key, &me.name) {

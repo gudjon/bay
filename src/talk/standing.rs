@@ -82,10 +82,13 @@ fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
         serde_json::from_str(&text).map_err(|error| error.to_string())
     };
     let at = |value: &Value| value["at"].as_str().and_then(unix_of);
-    let acked = match talk.entries.iter().find(|entry| entry.kind == "ack") {
-        Some(found) => at(&entry(found)?),
+    let ack = match talk.entries.iter().find(|entry| entry.kind == "ack") {
+        Some(found) => Some(entry(found)?),
         None => None,
     };
+    let acked = ack.as_ref().and_then(at);
+    // G53: the wake adapter's answer, as the recipient's ack recorded it.
+    let wake = ack.as_ref().map_or(Value::Null, |ack| ack["wake"].clone());
     let backbrief = match talk
         .entries
         .iter()
@@ -116,6 +119,7 @@ fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
         "ack_age_s": acked.map(age),
         "reply_age_s": replied.map(age),
         "follow_up": follow_up,
+        "wake": wake,
         "standing": standing(sent, acked, replied, due, now).as_str(),
     }))
 }

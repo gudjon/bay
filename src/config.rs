@@ -33,6 +33,8 @@ pub struct Config {
     /// carries the table keeps loading; nothing reads it but [`Config::ignored`].
     check: Option<toml::Table>,
     pub notify: Option<Notify>,
+    /// `[wake] command`: the wake adapter (G58), asked once when this machine accepts a talk.
+    pub wake: Option<Wake>,
     pub runtime: Option<Runtime>,
     pub policy: Option<PolicyProfile>,
     pub hooks: Option<Hooks>,
@@ -47,6 +49,13 @@ pub struct Config {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Notify {
+    pub command: Option<String>,
+}
+
+/// `[wake] command`: the wake adapter (G58, `crate::talk::wake`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Wake {
     pub command: Option<String>,
 }
 

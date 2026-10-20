@@ -56,7 +56,7 @@ pub fn hosted_talk_landing() -> TalkCase {
 }
 
 /// The talk host, with `seed` writing trunk on `a` before the registry exists.
-fn hosted_talk_seeded(seed: impl FnOnce(&TestBox, &Path)) -> TalkCase {
+pub fn hosted_talk_seeded(seed: impl FnOnce(&TestBox, &Path)) -> TalkCase {
     let test_box = TestBox::new();
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);

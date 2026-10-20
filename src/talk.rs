@@ -32,6 +32,7 @@ mod judge;
 mod lander;
 mod send;
 pub mod standing;
+pub mod wake;
 
 pub use accept::receive;
 pub use judge::{Push, judge};
@@ -128,7 +129,7 @@ const ID_FIELDS: [&str; 10] = [
 ];
 /// Each entry kind and the fields it may carry. An ack carries no essay.
 const ENTRY_FIELDS: [(&str, &[&str]); 4] = [
-    ("ack", &["ack"]),
+    ("ack", &["ack", "wake"]),
     (
         "backbrief",
         &[
@@ -628,6 +629,20 @@ pub fn check_entry(kind: &str, id: &str, entry: &Value) -> Result<(), String> {
     for (key, value) in map {
         if let Value::String(text) = value {
             plain(key, text).map_err(|refusal| refusal.why)?;
+        }
+    }
+    // G53: an ack's `wake` is the wake adapter's answer: a known result and a reason code.
+    if let Some(wake) = map.get("wake") {
+        let result = wake["result"].as_str().unwrap_or_default();
+        let reason_ok = wake["reason"].is_null()
+            || wake["reason"].as_str().is_some_and(|code| {
+                !code.is_empty() && code.bytes().all(|c| c.is_ascii_uppercase() || c == b'_')
+            });
+        if !wake::RESULTS.contains(&result)
+            || !reason_ok
+            || wake.as_object().is_none_or(|w| w.len() > 2)
+        {
+            return Err("an ack's `wake` names a result (woken, skipped, not_attempted or uncertain) and a reason code".to_owned());
         }
     }
     Ok(())
