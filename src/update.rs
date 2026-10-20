@@ -248,12 +248,40 @@ fn failed(message: impl Into<String>) -> Refusal {
 struct Plan {
     target: String,
     pin: Option<String>,
+    /// The newest release, when this plan steps to an older one first (G242).
+    newest: Option<String>,
+    /// Older releases, newest first and all newer than the installed one, that an unpinned
+    /// update may step to when this binary cannot verify the target's signature (G242).
+    steps: Vec<String>,
 }
 
 impl Plan {
     fn detail(&self, updated: bool) -> Value {
-        json!({"installed": BAY, "target": self.target, "pinned": self.pin,
-            "updated": updated})
+        let mut detail = json!({"installed": BAY, "target": self.target, "pinned": self.pin,
+            "updated": updated});
+        if let Some(newest) = self
+            .newest
+            .as_ref()
+            .filter(|newest| **newest != self.target)
+        {
+            detail["newest"] = json!(newest);
+            detail["stepped"] = json!(true);
+            detail["next"] = json!(format!(
+                "{} trusts the key {newest} is signed with: run bay update again to reach it",
+                self.target
+            ));
+        }
+        detail
+    }
+
+    /// The plan that installs `version` on the way to this plan's target.
+    fn step_to(&self, version: &str) -> Self {
+        Self {
+            target: version.to_owned(),
+            pin: None,
+            newest: Some(self.target.clone()),
+            steps: Vec::new(),
+        }
     }
 
     fn refuse(&self, decision: Decision, reason: Reason, why: impl Into<String>) -> Refusal {
@@ -335,8 +363,39 @@ fn run(request: &Request) -> Result<BayResult, Refusal> {
         .map_err(|error| failed(format!("cannot create {}: {error}", bin_dir.display())))?;
     // Beside the binary, so the swap is a rename within one filesystem.
     let tmp = TempDir::new(bin_dir).map_err(failed)?;
-    let archive = download_verified(&source, &plan, &tmp.0)?;
-    swap(&plan, &tmp.0, &archive, &installed)
+    match download_verified(&source, &plan, &tmp.0) {
+        Ok(archive) => swap(&plan, &tmp.0, &archive, &installed),
+        Err(refusal) if unsigned_for_us(&refusal) => {
+            // G242: the newest release is signed by a key this binary does not trust yet, as
+            // after a release-key rollover. Step to the newest release that verifies and is
+            // newer than this one; it trusts the new key, and the next update reaches the
+            // newest. Only a signature this binary cannot verify steps: a release whose bytes
+            // do not match its signed sums is refused.
+            for version in &plan.steps {
+                let step = plan.step_to(version);
+                let tmp = TempDir::new(bin_dir).map_err(failed)?;
+                match download_verified(&source, &step, &tmp.0) {
+                    Ok(archive) => return swap(&step, &tmp.0, &archive, &installed),
+                    Err(next) if unsigned_for_us(&next) => {}
+                    Err(next) => return Err(next),
+                }
+            }
+            Err(refusal)
+        }
+        Err(refusal) => Err(refusal),
+    }
+}
+
+/// Why a release's `SHA256SUMS.sig` fails: it verifies against no key this binary trusts.
+const NOT_OUR_KEY: &str = "SHA256SUMS does not verify against a bay release key";
+
+/// Whether `refusal` is [`NOT_OUR_KEY`], the one refusal an update steps past (G242).
+fn unsigned_for_us(refusal: &Refusal) -> bool {
+    refusal.reason == Some(Reason::UpdateUnverified)
+        && refusal
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail["why"] == NOT_OUR_KEY)
 }
 
 /// A pin wins, then `--version`, then the newest release that has a build for this platform.
@@ -349,25 +408,44 @@ fn resolve(source: &Source, pin: Option<String>, version: Option<String>) -> Res
         )
     };
     if let Some(target) = pin.clone().or(version) {
-        return Ok(Plan { target, pin });
+        return Ok(Plan {
+            target,
+            pin,
+            newest: None,
+            steps: Vec::new(),
+        });
     }
     let platform =
         platform().ok_or_else(|| unavailable("no release build for this platform".to_owned()))?;
     let archive = format!("bay-{platform}.tar.gz");
     let built = |release: &Release| release.assets.contains(&archive);
-    let releases =
-        release_list(source, |releases| releases.iter().any(built)).map_err(unavailable)?;
-    let newest = releases
+    // Read until a built release no newer than this one, so every release an update may step
+    // through is listed (G242); on GitHub that is almost always the first page of 100.
+    let releases = release_list(source, |releases| {
+        releases
+            .iter()
+            .any(|release| built(release) && compare(&release.version, BAY) != Ordering::Greater)
+    })
+    .map_err(unavailable)?;
+    let mut versions: Vec<String> = releases
         .into_iter()
         .filter(built)
         .map(|release| release.version)
-        .max_by(|a, b| compare(a, b));
-    State::record(newest.as_deref());
-    let newest =
-        newest.ok_or_else(|| unavailable(format!("no release has a build for {platform}")))?;
+        .collect();
+    versions.sort_by(|a, b| compare(b, a));
+    State::record(versions.first().map(String::as_str));
+    let mut versions = versions.into_iter();
+    let newest = versions
+        .next()
+        .ok_or_else(|| unavailable(format!("no release has a build for {platform}")))?;
+    let steps = versions
+        .filter(|version| compare(version, BAY) == Ordering::Greater)
+        .collect();
     Ok(Plan {
         target: newest,
         pin,
+        newest: None,
+        steps,
     })
 }
 
@@ -450,7 +528,7 @@ fn download_verified(source: &Source, plan: &Plan, tmp: &Path) -> Result<Vec<u8>
         .map_err(|error| failed(error.to_string()))?;
     let signature = String::from_utf8_lossy(&signature);
     if !crate::signing::verify_data(&allowed, PRINCIPAL, PRINCIPAL, &sums, &signature) {
-        return Err(plan.unverified("SHA256SUMS does not verify against a bay release key"));
+        return Err(plan.unverified(NOT_OUR_KEY));
     }
     let sums = String::from_utf8_lossy(&sums);
     if sum_of(&sums, "VERSION") != Some(sha256(&version)) {

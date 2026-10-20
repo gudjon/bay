@@ -80,6 +80,7 @@ mod g21_a_terminal_outcome_outlives_its_drafts;
 mod g22_finished_check_units_survive_a_dead_worker;
 mod g23_the_fleet_map_is_true;
 mod g240_a_failed_check_says_why;
+mod g242_an_update_steps_through_the_newest_release_it_can_verify;
 mod g24_a_replaced_executor_never_publishes;
 mod g25_an_operation_acts_only_as_its_actor;
 mod g26_a_candidate_cannot_weaken_its_own_criteria;

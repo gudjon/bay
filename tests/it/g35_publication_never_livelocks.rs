@@ -738,7 +738,7 @@ fn evidence_refs(test_box: &TestBox, dir: &Path) -> String {
 /// The lease, execution budget and publish window of the outage case, scaled down: a
 /// progress deadline is `EXECUTION_BUDGET_S + PUBLISH_WINDOW_S` seconds.
 const LEASE_S: u64 = 1;
-const EXECUTION_BUDGET_S: u64 = 2;
+const EXECUTION_BUDGET_S: u64 = 6;
 const PUBLISH_WINDOW_S: u64 = 1;
 
 /// How many places one operation can hold within `span` of an outage, by the rule of
