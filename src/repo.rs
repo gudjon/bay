@@ -138,6 +138,8 @@ pub struct Repo {
     /// What an opening fetch ([`Fetch::First`]) found, handed to the first
     /// [`Repo::fetch_trunk`] so one command fetches once.
     prefetched: Mutex<Option<Result<String, GitError>>>,
+    /// When this command last fetched trunk, for the result's `freshness` (G80).
+    fetched_at: Mutex<Option<String>>,
 }
 
 /// Why [`Repo::open_with`] could not open a repository.
@@ -356,6 +358,12 @@ impl Repo {
             work_root,
             bootstrap,
             config,
+            fetched_at: Mutex::new(
+                prefetched
+                    .as_ref()
+                    .is_some_and(Result::is_ok)
+                    .then(crate::clock::now_rfc3339),
+            ),
             prefetched: Mutex::new(prefetched),
         })
     }
@@ -398,7 +406,32 @@ impl Repo {
         if let Some(opened) = opened {
             return opened;
         }
-        fetch_into(&self.git, &self.bootstrap, &self.work_root)
+        let fetched = fetch_into(&self.git, &self.bootstrap, &self.work_root);
+        if fetched.is_ok()
+            && let Ok(mut at) = self.fetched_at.lock()
+        {
+            *at = Some(crate::clock::now_rfc3339());
+        }
+        fetched
+    }
+
+    /// The trunk a result reflects: the tracking ref's tip, and when this command fetched it,
+    /// or that it read the local cache without a fetch (G80, `INTERFACES` § 1). `None` before
+    /// the first fetch, when there is no tracking ref.
+    #[must_use]
+    pub fn freshness(&self) -> Option<crate::result::Freshness> {
+        let trunk = self
+            .git
+            .ref_target(&self.bootstrap.tracking_ref())
+            .ok()
+            .flatten()?;
+        let fetched_at = self
+            .fetched_at
+            .lock()
+            .ok()
+            .and_then(|at| at.clone())
+            .unwrap_or_else(|| crate::status::CACHED.to_owned());
+        Some(crate::result::Freshness { trunk, fetched_at })
     }
 
     /// Fetches `refs/bay/registry` when the remote has one. A remote without a registry leaves

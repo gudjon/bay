@@ -145,7 +145,10 @@ pub fn land(
         break;
     }
     let result = result.unwrap_or_else(BayResult::failed);
-    with_receipt(&repo, &id, step.get(), result)
+    let mut result = with_receipt(&repo, &id, step.get(), result);
+    // G80: every result says which trunk it reflects, and when that trunk was fetched.
+    result.freshness = result.freshness.or_else(|| repo.freshness());
+    result
 }
 
 /// `land --wait` with an observation timeout (§ 9a): the run happens in a detached process,
@@ -610,7 +613,51 @@ fn submit_land(
         .and_then(|value| value.as_str().map(str::to_owned));
     result.published = Some(false);
     result.waiting_for = Some(if online { "executor" } else { "remote" }.to_owned());
-    Ok(result)
+    Ok(with_progress(&ctx.repo.git, ctx.op(&op_id), result))
+}
+
+/// How far operation `op` has come (G80, `INTERFACES` § 1): seconds since its request was
+/// committed, the evidence records on its candidates so far, and the state it moves to next.
+/// The time is the request commit's own; `None` when that commit cannot be read.
+#[must_use]
+pub fn progress(git: &Git, op: &Operation) -> (Option<u64>, Vec<String>, Option<&'static str>) {
+    let elapsed = op
+        .request_id
+        .as_ref()
+        .and_then(|request| git.run(&["log", "-1", "--format=%ct", request]).ok())
+        .and_then(|at| at.trim().parse::<u64>().ok())
+        .and_then(|at| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|now| now.as_secs().saturating_sub(at))
+        });
+    let receipts = op
+        .attempts
+        .iter()
+        .filter_map(|attempt| {
+            evidence::records_for(git, &attempt.tree)
+                .ok()
+                .map(|records| (attempt, records))
+        })
+        .flat_map(|(attempt, records)| {
+            records
+                .into_iter()
+                .filter(|record| record.subject.commit == attempt.commit)
+                .map(|record| record.id)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    (elapsed, receipts, op.state.next())
+}
+
+/// Sets `result`'s progress fields from operation `op` (G80).
+fn with_progress(git: &Git, op: &Operation, mut result: BayResult) -> BayResult {
+    let (elapsed, receipts, next) = progress(git, op);
+    result.elapsed_s = elapsed;
+    result.receipts = Some(receipts);
+    result.next = next;
+    result
 }
 
 /// The executor's part: runs operation `op_id` of change `id` to a stated outcome.

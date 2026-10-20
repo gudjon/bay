@@ -39,8 +39,15 @@ fn run(dir: &Path, change: &str, wait: bool) -> Result<BayResult, String> {
         Ok(repo) => repo,
         Err(error) => return Ok(error.into_result()),
     };
+    // G80: every result says which trunk it reflects, and when that trunk was fetched.
+    let mut result = undo_in(dir, &repo, change, wait)?;
+    result.freshness = result.freshness.or_else(|| repo.freshness());
+    Ok(result)
+}
+
+fn undo_in(dir: &Path, repo: &Repo, change: &str, wait: bool) -> Result<BayResult, String> {
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
-    let Some(commit) = landed_commit(&repo, change, &trunk)? else {
+    let Some(commit) = landed_commit(repo, change, &trunk)? else {
         return Ok(BayResult::blocked(Reason::ChangeNotLanded)
             .with_change(change)
             .with_detail(json!({"trunk": trunk})));
@@ -74,7 +81,7 @@ fn run(dir: &Path, change: &str, wait: bool) -> Result<BayResult, String> {
 
     let intent = format!("undo of {change}");
     let request = StartRequest {
-        new: start::claimed(&repo, &intent, UNDO_REVISION)?,
+        new: start::claimed(repo, &intent, UNDO_REVISION)?,
         intent: Some(intent),
         intent_revision: UNDO_REVISION.to_owned(),
         paths,
@@ -113,7 +120,7 @@ fn run(dir: &Path, change: &str, wait: bool) -> Result<BayResult, String> {
                 "reverts": change,
                 "trunk": base,
             }));
-        return Ok(publish::with_receipt(&repo, &id, "undo", refused));
+        return Ok(publish::with_receipt(repo, &id, "undo", refused));
     }
     Ok(publish::land(view, Some(&id), wait, None, false))
 }

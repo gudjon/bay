@@ -800,6 +800,12 @@ fn describe(
             "published": landed.is_some_and(|found| found.revision == op.revision),
             "cost": op_cost,
         });
+        // G80: an operation under way says how long it has been and what comes next.
+        if !published && !op.state.is_terminal() {
+            let (elapsed, _, next) = crate::publish::progress(&repo.git, op);
+            operation["elapsed_s"] = json!(elapsed);
+            operation["next"] = json!(next);
+        }
         // § 7: an operation no worker answered for waits for one, and names what it needs.
         if let Some(waiting) = op.unavailable.as_ref().filter(|_| {
             !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked

@@ -49,7 +49,10 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         Some(id) => resume(&repo, id),
         None => open(&repo, request),
     };
-    result.unwrap_or_else(BayResult::failed)
+    let mut result = result.unwrap_or_else(BayResult::failed);
+    // G80: every result says which trunk it reflects, and when that trunk was fetched.
+    result.freshness = result.freshness.or_else(|| repo.freshness());
+    result
 }
 
 fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {

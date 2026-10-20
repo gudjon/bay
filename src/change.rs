@@ -260,6 +260,21 @@ pub enum OpState {
 }
 
 impl OpState {
+    /// The state an operation under way moves to next (G80); `None` for one that waits on a
+    /// repair (its refusal says which) or has ended.
+    #[must_use]
+    pub const fn next(self) -> Option<&'static str> {
+        match self {
+            Self::Submitted => Some("admitted"),
+            Self::Admitted => Some("running"),
+            Self::Running => Some("checked"),
+            Self::Checked => Some("published"),
+            Self::Blocked | Self::Published | Self::Failed | Self::Superseded | Self::NoEffect => {
+                None
+            }
+        }
+    }
+
     #[must_use]
     pub const fn is_terminal(self) -> bool {
         matches!(

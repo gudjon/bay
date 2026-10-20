@@ -227,6 +227,15 @@ pub struct BayResult {
     pub retry_when: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<String>,
+    /// Seconds since the operation's request, for an operation still under way (G80).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub elapsed_s: Option<u64>,
+    /// The evidence records the operation has so far (G80).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipts: Option<Vec<String>>,
+    /// The state the operation moves to next, when it is under way (G80).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -252,6 +261,9 @@ impl BayResult {
             allowed: None,
             retry_when: None,
             waiting_for: None,
+            elapsed_s: None,
+            receipts: None,
+            next: None,
             receipt: None,
             freshness: None,
             human: None,
