@@ -52,7 +52,7 @@ fn a_view_killed_mid_creation_builds_no_candidate_until_resumed() {
     );
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "WORKSPACE_INCOMPLETE");
-    assert_eq!(result["allowed"], serde_json::json!(["resume"]));
+    assert_eq!(result["allowed"], serde_json::json!(["refresh"]));
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
     let chain = test_box.git_ok(
         &repo,

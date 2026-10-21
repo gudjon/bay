@@ -231,7 +231,7 @@ pub struct ChangeRecord {
     /// The intent claim this change holds: `refs/bay/intent/<hash>/<generation>` (§ 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub claim: Option<IntentClaim>,
-    /// The landed change of the intent's previous generation, for `start --new` (§ 4).
+    /// The previous generation's change of the intent: landed, or ended without landing (§ 4).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<String>,
     /// The landed change this change undoes, for `bay undo` (§ 4): its `Reverts:` trailer.

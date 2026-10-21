@@ -40,7 +40,8 @@ enum Command {
         /// Restore an existing change: checkpoint its draft, bring in newer trunk
         #[arg(long, value_name = "CHANGE", conflicts_with = "intent")]
         resume: Option<String>,
-        /// A follow-up after the intent's change landed or was abandoned: claim its next generation
+        /// No longer needed after a landing: plain start takes the intent's next generation.
+        /// After an abandon, claim the next generation instead of adopting the abandoned change
         #[arg(long)]
         new: bool,
         /// The landed change this one fixes; its landing carries a Fixes: trailer
@@ -59,14 +60,17 @@ enum Command {
     /// Freeze the draft, build the candidate, check it, publish it
     Land {
         /// The change (default: the change of the view bay runs in)
-        #[arg(long)]
         change: Option<String>,
-        /// Run the publication here and return its outcome, instead of returning at once
-        #[arg(long)]
-        wait: bool,
-        /// With --wait: stop watching after this many seconds; the run continues
-        #[arg(long, value_name = "SECONDS", requires = "wait")]
-        observe: Option<u64>,
+        /// The change, as a flag: the same as the positional one, kept for older scripts
+        #[arg(
+            long = "change",
+            value_name = "CHANGE",
+            hide = true,
+            conflicts_with = "change"
+        )]
+        change_flag: Option<String>,
+        #[command(flatten)]
+        wait: WaitArgs,
         /// Submit the abandon request instead: the change is given up, any actor may adopt it
         #[arg(long, conflicts_with_all = ["wait", "observe"])]
         abandon: bool,
@@ -101,9 +105,8 @@ enum Command {
     Undo {
         /// The landed change to undo
         change: String,
-        /// Run the publication here and return its outcome, instead of returning at once
-        #[arg(long)]
-        wait: bool,
+        #[command(flatten)]
+        wait: WaitArgs,
     },
     /// Current state, derived on read from trunk and refs
     Status {
@@ -218,6 +221,31 @@ enum Command {
         #[arg(value_name = "COMMAND")]
         command: Vec<String>,
     },
+}
+
+/// `--wait[=SECONDS]`, the one flag `bay land` and `bay undo` share. `Option<Option<_>>` is
+/// clap's flag with an optional value: absent, present alone, or present with SECONDS.
+#[derive(Args)]
+#[allow(clippy::option_option)]
+struct WaitArgs {
+    /// Run the publication here and return its outcome, instead of returning at once. With
+    /// SECONDS: watch it that long, then return while the run goes on
+    #[arg(long, value_name = "SECONDS", num_args = 0..=1, require_equals = true)]
+    wait: Option<Option<u64>>,
+    /// The same as --wait=SECONDS, kept for older scripts
+    #[arg(long, value_name = "SECONDS", hide = true)]
+    observe: Option<u64>,
+}
+
+impl WaitArgs {
+    /// Whether to wait, and for how long at most: `None` waits for the outcome.
+    fn wait(&self) -> (bool, Option<std::time::Duration>) {
+        let seconds = self.wait.flatten().or(self.observe);
+        (
+            self.wait.is_some() || self.observe.is_some(),
+            seconds.map(std::time::Duration::from_secs),
+        )
+    }
 }
 
 #[derive(Args)]
@@ -568,7 +596,10 @@ fn main() -> ExitCode {
         }
         Command::Waiting => bay::approve::waiting(&cli.dir),
         approve @ Command::Approve { .. } => approve_change(&cli.dir, approve),
-        Command::Undo { change, wait } => bay::undo::undo(&cli.dir, &change, wait),
+        Command::Undo { change, wait } => {
+            let (wait, observe) = wait.wait();
+            bay::undo::undo(&cli.dir, &change, wait, observe)
+        }
         Command::Share {
             change,
             bundle,
@@ -576,16 +607,19 @@ fn main() -> ExitCode {
         } => bay::share::share(&cli.dir, &change, bundle.as_deref(), remote.as_deref()),
         Command::Land {
             change,
+            change_flag,
             wait,
-            observe,
             abandon,
-        } => bay::publish::land(
-            &cli.dir,
-            change.as_deref(),
-            wait,
-            observe.map(std::time::Duration::from_secs),
-            abandon,
-        ),
+        } => {
+            let (wait, observe) = wait.wait();
+            bay::publish::land(
+                &cli.dir,
+                change.or(change_flag).as_deref(),
+                wait,
+                observe,
+                abandon,
+            )
+        }
         Command::Host {
             action:
                 HostAction::Init {

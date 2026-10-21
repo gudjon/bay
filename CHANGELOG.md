@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.7
+
+- An approval now holds while the files it covers are unchanged; unrelated landings no longer ask again.
+- A landing names each approval it carried from an earlier candidate under `carried_approvals`.
+- When gated files change, `bay status` and the refusal name them under `set_aside`.
+- `[[check]] carry = false` asks for an approval on every candidate.
+- `allowed` now uses four words: read, refresh, repair, wait.
+- `bay start <intent>` after a landing opens the next change; `--new` is no longer needed there.
+- `bay land --wait=SECONDS` and `bay undo --wait=SECONDS` watch that long, then return while the run continues.
+- `bay land <change>` takes the change positionally; `--change` and `--observe` still work.
+
 ## 0.2.6
 
 - Without a key registry, an approval now blocks promotion and status the same way it already blocks landing.

@@ -838,11 +838,14 @@ impl Judge<'_> {
             ));
         }
         // The operation is not cancelled, and the change is of no lane.
+        // G292: the change's candidates, whose approvals may hold for this one.
+        let mut earlier = Vec::new();
         if let Some(head) = self.after(&format!("{}{change}", crate::names::CHANGES))? {
             let record = Chain::new(self.git)
                 .record_at(&head)
                 .map_err(|error| error.message())?;
             never_a_lane(&record, commit)?;
+            earlier = crate::throughput::candidates_of(&record);
             if record
                 .operations
                 .iter()
@@ -865,11 +868,12 @@ impl Judge<'_> {
         // § 10a, G33: evidence counts only under the current registry. Evidence that passes
         // under the version C names but not under the current one rests on a producer key the
         // registry revoked since: that is `REGISTRY_CHANGED` too, and the executor rechecks.
-        let evidence = self.judged_evidence(commit, request.repair, self.registry, judged);
+        let evidence =
+            self.judged_evidence(commit, request.repair, self.registry, judged, &earlier);
         let producer_revoked = evidence.is_err()
             && named.commit != self.registry.commit
             && self
-                .judged_evidence(commit, request.repair, &named, judged)
+                .judged_evidence(commit, request.repair, &named, judged, &earlier)
                 .is_ok();
         // Refused for a reason of its own, or accepted: never `REGISTRY_CHANGED`.
         if !producer_revoked && (evidence.is_err() || !key_revoked) {
@@ -888,19 +892,23 @@ impl Judge<'_> {
 
     /// [`Judge::evidence_passes`] as `judged` says (`crate::throughput`): a batch member before
     /// the last stands on the batch tip's evidence, which the push holds; the tip is judged at
-    /// the batch's base.
+    /// the batch's base. G292: a commit judged at its parent may stand on an approval of one of
+    /// its change's `earlier` candidates that still holds; a batch tip lands several changes,
+    /// so none carries onto it.
     fn judged_evidence(
         &self,
         commit: &str,
         repair: bool,
         registry: &Registry,
         judged: &Judged,
+        earlier: &[crate::throughput::Earlier],
     ) -> Result<(), String> {
         match judged {
-            Judged::Parent => self.evidence_passes(commit, repair, registry, None),
+            Judged::Parent => self.evidence_passes(commit, repair, registry, (None, earlier)),
             Judged::InBatch => Ok(()),
             Judged::BatchBase(base) => {
-                self.evidence_passes(commit, repair, registry, Some(base.as_str()))
+                let none: &[crate::throughput::Earlier] = &[];
+                self.evidence_passes(commit, repair, registry, (Some(base.as_str()), none))
             }
         }
     }
@@ -908,13 +916,15 @@ impl Judge<'_> {
     /// The producer-signed evidence on the commit's tree, counted under `registry`, passes the
     /// policy at its parent (or, for a registry-signed repair, the candidate's own policy), for
     /// the checks its diff against its parent requires. With `base`, a batch tip's, it is judged
-    /// at the batch's base instead, over the batch's whole diff (`crate::throughput`).
+    /// at the batch's base instead, over the batch's whole diff (`crate::throughput`). G292: an
+    /// approval of one of the change's `earlier` candidates that still holds answers here too,
+    /// as the executor judged it (`crate::throughput::carried_approvals`).
     fn evidence_passes(
         &self,
         commit: &str,
         repair: bool,
         registry: &Registry,
-        base: Option<&str>,
+        (base, earlier): (Option<&str>, &[crate::throughput::Earlier]),
     ) -> Result<(), String> {
         let parent = base.map_or_else(|| format!("{commit}^1"), str::to_owned);
         let judged_by = if repair {
@@ -936,11 +946,27 @@ impl Judge<'_> {
             .run(&["rev-parse", &format!("{commit}^{{tree}}")])
             .map_err(|error| message(&error))?;
         // G163: a record from a producer the check's list leaves out never answers it.
-        let records = policy.answering(evidence::counted(
+        let mut records = policy.answering(evidence::counted(
             self.git,
             evidence::records_for(self.git, &tree)?,
             Some(registry),
         )?);
+        // G292: an approval holds while the files it covers are unchanged.
+        if !earlier.is_empty() {
+            let base_tree = self
+                .git
+                .run(&["rev-parse", &format!("{parent}^{{tree}}")])
+                .map_err(|error| message(&error))?;
+            let carried = crate::throughput::carried_approvals(
+                self.git,
+                &policy,
+                Some(registry),
+                (tree.as_str(), base_tree.as_str()),
+                &records,
+                earlier,
+            )?;
+            records.extend(carried.records);
+        }
         // G146: the checks the commit's own diff against its parent requires, as land judged.
         let changed = crate::check::changed_paths(self.git, &parent, commit)?;
         let (required, _) = policy.required(&changed);

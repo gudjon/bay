@@ -500,6 +500,230 @@ pub fn carry(
     carried
 }
 
+/// G292: a candidate of one change as its chain names it: its commit and tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Earlier {
+    pub commit: String,
+    pub tree: String,
+}
+
+/// G292: every candidate the operations of `record` built, oldest first: what an approval of
+/// the change may have answered.
+#[must_use]
+pub fn candidates_of(record: &crate::change::ChangeRecord) -> Vec<Earlier> {
+    record
+        .operations
+        .iter()
+        .flat_map(|op| op.attempts.iter())
+        .map(|attempt| Earlier {
+            commit: attempt.commit.clone(),
+            tree: attempt.tree.clone(),
+        })
+        .collect()
+}
+
+/// G292: the candidates of the change whose `Change-Id` trailer `commit` carries, as the change
+/// chain this repository holds names them; none for a commit of no one change, or of a change
+/// whose chain this repository does not hold.
+#[must_use]
+pub fn change_candidates(git: &Git, commit: &str) -> Vec<Earlier> {
+    let Ok(change) = git.run(&[
+        "log",
+        "-1",
+        "--format=%(trailers:key=Change-Id,valueonly,separator=%x2c)",
+        commit,
+    ]) else {
+        return Vec::new();
+    };
+    let change = change.trim();
+    if change.is_empty() || change.contains(',') {
+        return Vec::new();
+    }
+    Chain::new(git)
+        .read(change)
+        .map(|(_, record)| candidates_of(&record))
+        .unwrap_or_default()
+}
+
+/// G292: what the approval checks of one candidate take from the approvals of its change's
+/// earlier candidates ([`carried_approvals`]).
+#[derive(Debug, Default)]
+pub struct CarriedApprovals {
+    /// The approver-signed passes of earlier candidates that answer here: each the record as
+    /// its approver signed it, about the candidate it named. Nothing new is written for them.
+    pub records: Vec<EvidenceRecord>,
+    /// Each earlier pass set aside because the files it covers changed since:
+    /// `{"check", "environment", "record", "commit", "paths"}`, `paths` the gated paths whose
+    /// content differs in the candidate's tree or in its base's.
+    pub set_aside: Vec<Value>,
+}
+
+impl CarriedApprovals {
+    /// What a result names of each carried record: `{"check", "environment", "carried_from",
+    /// "commit", "approver"}`, `carried_from` the record that answers.
+    #[must_use]
+    pub fn named(&self) -> Vec<Value> {
+        self.records
+            .iter()
+            .map(|record| {
+                json!({
+                    "check": record.check.id,
+                    "environment": record.check.environment,
+                    "carried_from": record.id,
+                    "commit": record.subject.commit,
+                    "approver": record.producer.name,
+                })
+            })
+            .collect()
+    }
+
+    /// The set-aside rows of approval check `check` on `environment`.
+    #[must_use]
+    pub fn set_aside_of(&self, check: &str, environment: &str) -> Vec<Value> {
+        self.set_aside
+            .iter()
+            .filter(|row| row["check"] == check && row["environment"] == environment)
+            .cloned()
+            .collect()
+    }
+}
+
+/// G292: an approval holds while the files it covers are unchanged. For each approval check of
+/// `policy` that carries ([`CheckEntry::carries`]) and that the candidate's own counted records
+/// (`own`) leave unanswered, the counted passes of that check, under the same manifest, on an
+/// earlier candidate of the same change (`earlier`, as its chain names them), whose stamp is
+/// this candidate's: the check's `when_paths` content, byte for byte, in the candidate's `tree`
+/// and in its `base_tree` ([`stamp`], [`same_stamp`]). That is the footprint rule of NEW-10,
+/// applied to a person's yes without any `[executor]` setting.
+///
+/// A rejection never carries forward, and it outweighs every pass: a rejection of an earlier
+/// candidate with the same stamp (or with none, which bay cannot compare) carries nothing for
+/// the check, and a rejection of this candidate is its own answer. An earlier pass with a
+/// stamp that differs is set aside, with the gated paths that changed; one with no stamp
+/// carries nothing. Every reader takes this from here, landing, `bay status`, a target's
+/// promotion rule and the host hook, so an approval counts the same everywhere (G288).
+///
+/// # Errors
+///
+/// A git fault, an unreadable note, or a class file that cannot be written.
+pub fn carried_approvals(
+    git: &Git,
+    policy: &Policy,
+    registry: Option<&crate::registry::Registry>,
+    (tree, base_tree): (&str, &str),
+    own: &[EvidenceRecord],
+    earlier: &[Earlier],
+) -> Result<CarriedApprovals, String> {
+    use crate::evidence::{CheckId, Combined, KIND_APPROVAL, Verdict};
+    let mut out = CarriedApprovals::default();
+    let listed = policy.answering(own.to_vec());
+    let open: Vec<&CheckEntry> = policy
+        .checks
+        .iter()
+        .filter(|entry| entry.carries())
+        .filter(|entry| {
+            let id = CheckId::new(&entry.id, &entry.environment);
+            crate::evidence::combine(&listed, &id, &policy.manifest_digest, None)
+                == Combined::Unknown
+        })
+        .collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let earlier: Vec<&Earlier> = earlier
+        .iter()
+        .filter(|candidate| candidate.tree != tree && seen.insert(candidate.commit.as_str()))
+        .collect();
+    if open.is_empty() || earlier.is_empty() {
+        return Ok(out);
+    }
+    // Each earlier candidate's counted approvals about it, under this manifest, read once.
+    let mut approvals: Vec<EvidenceRecord> = Vec::new();
+    for candidate in earlier {
+        let records = policy.answering(crate::evidence::counted(
+            git,
+            crate::evidence::records_for(git, &candidate.tree)?,
+            registry,
+        )?);
+        approvals.extend(records.into_iter().filter(|record| {
+            record.kind == KIND_APPROVAL
+                && record.subject.commit == candidate.commit
+                && record.manifest_digest == policy.manifest_digest
+        }));
+    }
+    for entry in open {
+        let id = CheckId::new(&entry.id, &entry.environment);
+        let Some(stamp) = stamp(git, entry, tree, base_tree) else {
+            continue;
+        };
+        let mut passes = Vec::new();
+        let mut rejected = false;
+        for record in approvals.iter().filter(|record| record.check == id) {
+            let held = record.unknown.get(FOOTPRINT);
+            let same = same_stamp(record, &stamp);
+            match record.verdict {
+                Verdict::ProductFailure if same || held.is_none() => rejected = true,
+                Verdict::Pass if same => passes.push(record.clone()),
+                Verdict::Pass if held.is_some() => out.set_aside.push(json!({
+                    "check": entry.id,
+                    "environment": entry.environment,
+                    "record": record.id,
+                    "commit": record.subject.commit,
+                    "paths": gated_changes(git, entry, record, tree, base_tree),
+                })),
+                _ => {}
+            }
+        }
+        if !rejected {
+            out.records.extend(passes);
+        }
+    }
+    Ok(out)
+}
+
+/// G292: the paths approval check `entry` covers whose content differs between what `record`
+/// approved and the candidate `tree` on `base_tree`, in either tree; the check's globs when a
+/// tree cannot be read here.
+fn gated_changes(
+    git: &Git,
+    entry: &CheckEntry,
+    record: &EvidenceRecord,
+    tree: &str,
+    base_tree: &str,
+) -> Vec<String> {
+    let globs = entry.when_paths.clone().unwrap_or_default();
+    let mut paths = std::collections::BTreeSet::new();
+    for (from, to) in [
+        (record.subject.tree.as_str(), tree),
+        (record.subject.base_tree.as_str(), base_tree),
+    ] {
+        if from == to {
+            continue;
+        }
+        match git.run(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--no-renames",
+            from,
+            to,
+        ]) {
+            Ok(listed) => paths.extend(
+                listed
+                    .split('\0')
+                    .filter(|path| {
+                        !path.is_empty()
+                            && globs
+                                .iter()
+                                .any(|glob| crate::policy::glob_matches(glob, path))
+                    })
+                    .map(str::to_owned),
+            ),
+            Err(_) => paths.extend(globs.iter().cloned()),
+        }
+    }
+    paths.into_iter().collect()
+}
+
 /// `[executor] batch` (`crate::config`): a batch has at least `min` members (and always two)
 /// and at most `max`, and none forms while its lane's recent failure rate is above
 /// `max_failure_rate`.

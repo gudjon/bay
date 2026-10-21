@@ -26,12 +26,12 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 
 | When | Run |
 | --- | --- |
-| Open one change | `bay start <intent> --paths <paths> [--input <kind>:<name>]` |
+| Open one change, or a follow-up after the intent's change merged | `bay start <intent> --paths <paths> [--input <kind>:<name>]` |
 | Work | Edit only inside the view that `bay start` prints. |
 | Submit the change | `bay land` (returns at once; an executor checks and merges it) |
-| Wait for the outcome here | `bay land --wait` |
+| Wait for the outcome here | `bay land --wait` (`--wait=<seconds>`: watch that long, then return; the run goes on) |
+| Submit a change from outside its view | `bay land <change>` |
 | Bring in newer main and see what moved | `bay start --resume <change>` |
-| A follow-up after your change merged | `bay start <intent> --new` |
 | Fix a change that already merged | `bay start <intent> --fixes <change>` (the merge names it in a `Fixes:` trailer) |
 | Try work that must never merge, in a sandbox lane the config declares | `bay start <intent> --paths <paths> --lane <lane>` (`bay land` runs its checks; it never merges) |
 | Take in a branch made outside bay (a bot's or a person's) as one change | `bay start <intent> --paths <paths> --from <branch>` (the remote's tip when the remote has the branch; `--paths` must cover every file it changes; then `bay land`) |
@@ -44,8 +44,9 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Read state, and main commits that did not merge through bay (`unattributed`) | `bay status` |
 | See each promotion target (`staging`): its tip, `drift`, `lag`, checks, freeze and the `promotable` commit | `bay status` (`detail.targets`) |
 | See whether main is held, by whom (`source`: `freeze` or `adapter`), why and until when | `bay status` (`detail.hold`) |
-| Reverse a merged change with a new, checked change | `bay undo <change>` |
+| Reverse a merged change with a new, checked change | `bay undo <change> [--wait[=<seconds>]]` |
 
+After a merge, a plain `bay start <intent>` opens the next change; `--new` is no longer needed there.
 `<intent>` is the card, issue or ticket id. `--paths` lists every path the change reads and writes:
 the view holds only those. `bay start` lists in `detail.overlaps` the live changes whose
 declared paths overlap yours (change, intent, actor, paths). It does not refuse; talk to them, or
@@ -79,7 +80,7 @@ command, flag and reason code, with the JSON Schema of `bay.result/1`.
   transient reasons that it retries itself.
 - Unknown is not success. A missing, unreadable or unexpected result is a failure to report.
 
-What each `allowed` action means:
+`allowed` uses four words. What each one means:
 
 | Action | Do |
 | --- | --- |
@@ -104,7 +105,7 @@ Common reasons:
 | `DEPENDENCY_PENDING` | A change named by `--after` has not merged yet (`detail.pending`). The change stays queued and merges after it. |
 | `DEPENDENCY_ABANDONED` | A change named by `--after` ended unmerged (`detail.ended`). `bay land --abandon`, then `bay start <intent> --new` without it; or restart that change. |
 | `PROMOTION_REFUSED` | The host refused a push to a target such as `staging`. Push the commit `bay status` names promotable, or wait. |
-| `APPROVAL_PENDING` | These paths need a person's yes. Tell the user who can approve (`detail.approval.checks[].approvers`). The approver runs `bay approve <change>` (`detail.approval.approve`). The executor lands it once approved; without one, `bay land --wait`. |
+| `APPROVAL_PENDING` | These paths need a person's yes, which holds while they are unchanged (`checks[].set_aside` names the ones that changed). Tell the user who can approve (`detail.approval.checks[].approvers`). The approver runs `bay approve <change>` (`detail.approval.approve`). The executor lands it once approved; without one, `bay land --wait`. |
 | `COVERAGE_UNKNOWN` | Keep editing; `bay land` when coordination data is reachable. |
 | `LANE_NEVER_LANDS` | A lane change: read the check verdicts in `detail`. It never merges. |
 | `PATHS_UNDECLARED` | The `--from` branch changes paths you did not declare (`detail.uncovered`). Start again with `--paths` covering them. |
@@ -183,7 +184,6 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
   or a push of `--all` or `--mirror`. bay's hook refuses them, also inside `bash -c`.
 - Never merge, cherry-pick, check out or restore from a lane's refs (`[[lane]]` in the config) in a
   view that is not of that lane. bay's hook refuses those commands, and `bay land` refuses lane commits.
-- Never grant a key, widen the policy, or quarantine a check to get a change through.
 - Never approve on your own, or ask for an approver's key. Only the person approves: run
   `bay approve` only when they ask, on their machine, where their key signs it.
 - Never grant a key, widen the policy, quarantine a check, or set `allow_flaky` to get a change through.

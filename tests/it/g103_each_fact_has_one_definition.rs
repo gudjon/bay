@@ -29,7 +29,8 @@ const FLAGS: &[(&[&str], &[&str])] = &[
             "--fixes",
         ],
     ),
-    (&["land"], &["--change", "--wait", "--observe", "--abandon"]),
+    (&["land"], &["--wait", "--abandon"]),
+    (&["undo"], &["--wait"]),
     (&["status"], &["--fleet"]),
     (&["update"], &["--version", "--check"]),
     (&["host", "init"], &["--trunk", "--object-format"]),
@@ -37,9 +38,15 @@ const FLAGS: &[(&[&str], &[&str])] = &[
     (&["share"], &["--remote", "--bundle"]),
 ];
 
-/// Flags § 1 lists that `--help` does not show, each with its reason. `bay update --channel`
-/// is accepted and ignored since update channels were removed, and hidden from `--help`.
-const HIDDEN_FLAGS: &[(&str, &str)] = &[("update", "--channel")];
+/// Flags § 1 lists that `--help` does not show, each with a value it parses. `bay update
+/// --channel` is accepted and ignored since update channels were removed. `bay land --change`
+/// and `--observe` are kept for older scripts (G293): the change is positional, and
+/// `--wait=SECONDS` observes.
+const HIDDEN_FLAGS: &[(&str, &str, &str)] = &[
+    ("update", "--channel", "x"),
+    ("land", "--change", "abcd2345"),
+    ("land", "--observe", "2"),
+];
 
 fn src() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
@@ -273,10 +280,10 @@ fn every_flag_interfaces_1_documents_is_in_help() {
         missing.join("\n")
     );
     // The hidden flags are still accepted: clap parses them, so a usage error never names them.
-    for (command, flag) in HIDDEN_FLAGS {
+    for (command, flag, value) in HIDDEN_FLAGS {
         let output = Command::cargo_bin("bay")
             .unwrap()
-            .args([*command, *flag, "x", "--help"])
+            .args([*command, *flag, *value, "--help"])
             .output()
             .unwrap();
         assert!(output.status.success(), "bay {command} {flag}: {output:?}");

@@ -1149,11 +1149,15 @@ pub fn approval_pending(
     } else {
         None
     };
+    // G292: an earlier candidate's approval holds while the files it covers are unchanged.
     let mut approval = match crate::publish::pending_approval(
         &repo.git,
-        &attempt.base,
-        &attempt.commit,
-        &attempt.tree,
+        (
+            attempt.base.as_str(),
+            attempt.commit.as_str(),
+            attempt.tree.as_str(),
+        ),
+        &crate::throughput::candidates_of(record),
         registry.or(fetched.as_ref()),
     ) {
         Ok(Some(approval)) => approval,

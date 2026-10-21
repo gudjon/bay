@@ -1,9 +1,9 @@
 //! G36. One intent, one revision, one landing.
 //!
-//! A replacement session's `start` on an intent whose change landed is `CHANGE_ALREADY_LANDED`
-//! unless `--new`; generation n+1 is refused before generation n landed; after a landing
-//! `start --new` claims generation 2 and lands once (with `Supersedes:`), and two concurrent
-//! `--new` calls make one generation-2 change; two concurrent `start` calls of one actor yield
+//! Generation n+1 is refused before generation n landed; after a landing a replacement
+//! session's plain `start` claims generation 2 (G293: `--new` is no longer needed there), and
+//! two concurrent such starts make one generation-2 change, which lands once (with
+//! `Supersedes:`); each generation lands once; two concurrent `start` calls of one actor yield
 //! one change; another actor is refused while the holder works, and adopts an idle change
 //! after the takeover window and lands it once; the actor it was adopted from is told so; two
 //! changes holding one generation still land once (the landed-intent marker). A resubmission of
@@ -66,7 +66,7 @@ fn edit_and_land(
 }
 
 #[test]
-fn a_landed_intent_needs_new_and_generation_two_lands_once() {
+fn after_a_landing_start_claims_generation_two_and_it_lands_once() {
     let (test_box, repo, remote) = setup();
     let (code, first) = start_as(&test_box, &repo, "agent-a", &["CARD-9", "--paths", "src/"]);
     assert_eq!(code, 0, "{first}");
@@ -82,17 +82,13 @@ fn a_landed_intent_needs_new_and_generation_two_lands_once() {
     let (code, _) = edit_and_land(&test_box, "agent-a", &first, "one");
     assert_eq!(code, 0);
 
-    // A replacement session on the landed intent.
-    let (code, again) = start_as(&test_box, &repo, "agent-b", &["CARD-9", "--paths", "src/"]);
-    assert_eq!(code, 10, "{again}");
-    assert_eq!(again["reason"], "CHANGE_ALREADY_LANDED");
-
-    // Two concurrent --new calls make one generation-2 change.
+    // A replacement session on the landed intent: two concurrent plain starts make one
+    // generation-2 change (G293).
     let spawn = || {
         test_box
             .bay_process(&repo)
             .env("BAY_ACTOR", "agent-b")
-            .args(["--json", "start", "CARD-9", "--new", "--paths", "src/"])
+            .args(["--json", "start", "CARD-9", "--paths", "src/"])
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap()
@@ -103,14 +99,22 @@ fn a_landed_intent_needs_new_and_generation_two_lands_once() {
         .map(|child| serde_json::from_slice(&child.wait_with_output().unwrap().stdout).unwrap())
         .collect();
     assert_eq!(results[0]["change"], results[1]["change"], "{results:?}");
+    // The start that created it names its claim; the other adopted it.
     let second = results
         .iter()
-        .find(|result| result["decision"] == "ok")
+        .find(|result| result["decision"] == "ok" && result["detail"]["intent"].is_string())
         .unwrap()
         .clone();
+    let first_id = first["change"].as_str().unwrap();
+    assert_ne!(second["change"], first_id, "{second}");
+    assert!(
+        second["detail"]["intent"]
+            .as_str()
+            .is_some_and(|claim| claim.ends_with("/2")),
+        "{second}"
+    );
     let (code, landed) = edit_and_land(&test_box, "agent-b", &second, "two");
     assert_eq!(code, 0, "{landed}");
-    let first_id = first["change"].as_str().unwrap();
     let trailer = test_box.git_bare(
         &remote,
         &[

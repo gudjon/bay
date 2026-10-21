@@ -332,17 +332,29 @@ fn build(
         .clone()
         .unwrap_or_else(|| request.kind.clone());
     let judged = if request.kind == evidence::KIND_APPROVAL {
-        approval_policies(git, &base, &commit, &check, request.environment.as_deref())?
+        approval_policies(
+            git,
+            (base.as_str(), commit.as_str()),
+            (tree.as_str(), base_tree.as_str()),
+            &check,
+            request.environment.as_deref(),
+        )?
     } else {
         let policy = crate::policy::load_at(git, &base).map_err(String::from)?;
         let (revision, digest) = policy
             .map(|policy| (policy.revision, policy.manifest_digest))
             .unwrap_or_default();
         let environment = request.environment.as_deref().unwrap_or("any");
-        vec![(revision, digest, environment.to_owned())]
+        vec![(revision, digest, environment.to_owned(), None)]
     };
     let mut records = Vec::new();
-    for (policy_revision, manifest_digest, environment) in judged {
+    for (policy_revision, manifest_digest, environment, stamp) in judged {
+        let mut unknown = common.body.clone();
+        // G292: an approval holds the stamp of what it covers, so it answers a later candidate
+        // of the same change whose gated files are byte for byte the same.
+        if let Some(stamp) = stamp {
+            unknown.insert(crate::throughput::FOOTPRINT.to_owned(), stamp);
+        }
         let mut named = json!({"inputs": common.inputs, "version": common.version});
         // Two approvals of one candidate under two policies are two records, never one id.
         if request.kind == evidence::KIND_APPROVAL {
@@ -381,7 +393,7 @@ fn build(
             sandbox: None,
             seconds: None,
             signature: None,
-            unknown: common.body.clone(),
+            unknown,
         });
     }
     Ok(records)
@@ -390,15 +402,18 @@ fn build(
 /// G245: each policy that judges candidate `commit` (the one at `base`, and its own when it
 /// differs) with approval check `check` (on `environment`, when named), as its revision,
 /// manifest digest and the check's environment. An approval that would answer no approval
-/// check never counts, so none is refused before anything is written.
+/// check never counts, so none is refused before anything is written. G292: with each, the
+/// stamp of what the check covers in the candidate's `tree` and its `base_tree`
+/// (`crate::throughput::stamp`), when the check carries.
+#[allow(clippy::type_complexity)]
 fn approval_policies(
     git: &Git,
-    base: &str,
-    commit: &str,
+    (base, commit): (&str, &str),
+    (tree, base_tree): (&str, &str),
     check: &str,
     environment: Option<&str>,
-) -> Result<Vec<(u64, String, String)>, String> {
-    let mut judged: Vec<(u64, String, String)> = Vec::new();
+) -> Result<Vec<(u64, String, String, Option<Value>)>, String> {
+    let mut judged: Vec<(u64, String, String, Option<Value>)> = Vec::new();
     for at in [base, commit] {
         let loaded = crate::policy::load_at(git, at);
         // A candidate's own invalid policy is its land's refusal; the base still judges.
@@ -410,7 +425,7 @@ fn approval_policies(
         };
         if judged
             .iter()
-            .any(|(_, digest, _)| *digest == policy.manifest_digest)
+            .any(|(_, digest, _, _)| *digest == policy.manifest_digest)
         {
             continue;
         }
@@ -428,6 +443,7 @@ fn approval_policies(
                 policy.revision,
                 policy.manifest_digest.clone(),
                 entry.environment.clone(),
+                crate::throughput::stamp(git, entry, tree, base_tree),
             )),
             [] => {}
             _ => {

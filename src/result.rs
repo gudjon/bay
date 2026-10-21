@@ -97,9 +97,9 @@ reasons! {
     CheckFlaky => "CHECK_FLAKY", ["repair"], "check_fixed_or_quarantined", false;
     ChangeNotLanded => "CHANGE_NOT_LANDED", ["read"], "change_landed", false;
     HookTimeout => "HOOK_TIMEOUT", [], "retried_after_short_wait", true;
-    QueueHeld => "QUEUE_HELD", ["edit_locally"], "reached_queue_head", false;
+    QueueHeld => "QUEUE_HELD", ["wait"], "reached_queue_head", false;
     QueueDeadlineExceeded => "QUEUE_DEADLINE_EXCEEDED", ["read", "repair"], "operation_changed_or_budget_raised", false;
-    PublicationQueued => "PUBLICATION_QUEUED", ["edit_locally"], "reached_queue_head", false;
+    PublicationQueued => "PUBLICATION_QUEUED", ["wait"], "reached_queue_head", false;
     CheckFailed => "CHECK_FAILED", ["repair"], "candidate_changed", false;
     CheckUnavailable => "CHECK_UNAVAILABLE", ["wait"], "capable_worker_reachable", true;
     CheckUnknown => "CHECK_UNKNOWN", ["wait", "repair"], "check_produced_result", false;
@@ -107,7 +107,7 @@ reasons! {
     PolicyInvalid => "POLICY_INVALID", ["repair"], "policy_repaired", false;
     // The missing-policy ruling; not yet in INTERFACES § 2: no `.bay/policy.toml` at the base.
     PolicyMissing => "POLICY_MISSING", ["read"], "policy_added", false;
-    WorkspaceIncomplete => "WORKSPACE_INCOMPLETE", ["resume"], "journal_ready", false;
+    WorkspaceIncomplete => "WORKSPACE_INCOMPLETE", ["refresh"], "journal_ready", false;
     PublishOutcomeUnknown => "PUBLISH_OUTCOME_UNKNOWN", [], "trunk_read_again", false;
     // G244: a post-publication check failed on a landing that touches the same paths.
     TrunkRed => "TRUNK_RED", ["read", "repair"], "trunk_green_or_change_names_the_owner", false;
@@ -124,7 +124,7 @@ reasons! {
     // require_actor_proof` and the agent key cannot prove which actor signs: several actors run
     // sessions under this OS account, which can read a file-based agent key.
     ActorUnproven => "ACTOR_UNPROVEN", ["read"], "actor_key_on_hardware_or_own_account", false;
-    CoverageUnknown => "COVERAGE_UNKNOWN", ["edit_locally"], "coordination_data_reachable", false;
+    CoverageUnknown => "COVERAGE_UNKNOWN", ["wait"], "coordination_data_reachable", false;
     // Ruling R-H1 (AGENT-HOOKS-0.1 § 6.3, `context_invalid`); not yet in INTERFACES § 2: a
     // `pre-tool` payload bay cannot read is denied.
     HookInputInvalid => "HOOK_INPUT_INVALID", ["read"], "hook_payload_readable_by_this_bay", false;
@@ -217,7 +217,8 @@ impl Reason {
         self.row().code
     }
 
-    /// What is still allowed. Empty means "none needed": bay acts on its own.
+    /// What is still allowed. Empty means "none needed": bay acts on its own. Every word is one
+    /// of four (G293): `read`, `refresh`, `repair` and `wait`.
     #[must_use]
     pub const fn allowed(self) -> &'static [&'static str] {
         self.row().allowed

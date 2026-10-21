@@ -313,7 +313,9 @@ fn every_command_clap_knows_is_listed_with_the_flags_its_help_shows() {
             .clone()
     };
     assert_eq!(flag("--change")["takes_value"], true);
-    assert_eq!(flag("--wait")["takes_value"], false);
+    // G293: `--wait[=SECONDS]` takes an optional value; `--abandon` takes none.
+    assert_eq!(flag("--wait")["takes_value"], true);
+    assert_eq!(flag("--abandon")["takes_value"], false);
     let undo = commands
         .iter()
         .find(|command| command["command"] == "undo")

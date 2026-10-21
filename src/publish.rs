@@ -260,7 +260,7 @@ fn observe_land(
     let mut run = std::process::Command::new(bay);
     run.arg("-C")
         .arg(dir)
-        .args(["land", "--wait", "--change", id])
+        .args(["land", "--wait", id])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -4302,6 +4302,38 @@ fn change_facts(ctx: &Ctx, revision: &str) -> check::ChangeFacts {
     }
 }
 
+/// The counted records on `tree`, with the approvals of earlier candidates of this change that
+/// still hold (G292: an approval holds while the files it covers are unchanged; it answers as
+/// its approver signed it, and nothing new is written). A batch's tip lands several changes,
+/// so no one change's approvals carry onto it (`one_change` false).
+fn counted_and_carried(
+    ctx: &Ctx,
+    policy: &policy::Policy,
+    (tree, base_tree): (&str, &str),
+    one_change: bool,
+) -> Result<(Vec<evidence::EvidenceRecord>, throughput::CarriedApprovals), String> {
+    let git = &ctx.repo.git;
+    let mut all = evidence::counted(
+        git,
+        evidence::records_for(git, tree)?,
+        ctx.registry.as_ref(),
+    )?;
+    let carried = if one_change {
+        throughput::carried_approvals(
+            git,
+            policy,
+            ctx.registry.as_ref(),
+            (tree, base_tree),
+            &all,
+            &throughput::candidates_of(&ctx.record),
+        )?
+    } else {
+        throughput::CarriedApprovals::default()
+    };
+    all.extend(carried.records.iter().cloned());
+    Ok((all, carried))
+}
+
 /// Runs `policy`'s checks on the candidate with the adapter materialized from `adapter_from`,
 /// and combines the evidence on its tree under that policy's manifest. `change` is the change
 /// the candidate lands, when it lands one (a batch's lands several).
@@ -4407,11 +4439,7 @@ fn run_policy(
             Some(unavailable(ctx, op_id, &[environment], Some(&reason))),
         ));
     }
-    let all = evidence::counted(
-        git,
-        evidence::records_for(git, tree)?,
-        ctx.registry.as_ref(),
-    )?;
+    let (all, carried) = counted_and_carried(ctx, policy, (tree, &base_tree), change.is_some())?;
     // What to repair: this run's records and the ones reused in place of a run (§ 8).
     let named: Vec<&evidence::EvidenceRecord> = records.iter().chain(&reused).collect();
     Ok(judge_seen(
@@ -4426,6 +4454,7 @@ fn run_policy(
             changed: &changed,
             all: &all,
             named: &named,
+            carried: &carried,
         },
     ))
 }
@@ -4473,6 +4502,9 @@ struct Seen<'a> {
     all: &'a [evidence::EvidenceRecord],
     /// What to repair: this run's records and the ones reused in place of a run (§ 8).
     named: &'a [&'a evidence::EvidenceRecord],
+    /// G292: the approvals of earlier candidates of the change that answer here (in `all`
+    /// too), and those set aside because the files they cover changed.
+    carried: &'a throughput::CarriedApprovals,
 }
 
 /// The verdict of `policy` on what `seen` saw: `pass`, or the verdict word and the refusal
@@ -4496,7 +4528,13 @@ fn judge_seen(
         "trust": evidence::trust(registry),
     });
     // G245: the approvals still owed, who can give them, and the exact candidate to name.
-    let owed = approval_rows(policy, seen.changed, registry, seen.all, seen.commit);
+    let owed = approval_rows(
+        policy,
+        seen.changed,
+        registry,
+        (seen.all, seen.carried),
+        seen.commit,
+    );
     if !owed.is_empty() {
         detail["approval"] = approval_detail(&owed, seen.commit, seen.tree, registry);
         // G281: the one command an approver runs to answer it.
@@ -4517,12 +4555,14 @@ fn judge_seen(
 /// that the counted `records` on its tree do not pass: its state (`pending`, or `rejected` by a
 /// `product_failure`), the enrolled approvers who may answer it (the registry's approver file,
 /// narrowed by the check's `producers` list), the changed paths its `when_paths` cover (G280),
-/// and the command that records the answer for `commit`, the candidate.
+/// and the command that records the answer for `commit`, the candidate. `records` hold the
+/// approvals `carried` from earlier candidates of the change (G292); each earlier approval
+/// `carried` set aside is named on its row under `set_aside`, with the gated paths that changed.
 fn approval_rows(
     policy: &policy::Policy,
     changed: &[String],
     registry: Option<&Registry>,
-    records: &[evidence::EvidenceRecord],
+    (records, carried): (&[evidence::EvidenceRecord], &throughput::CarriedApprovals),
     commit: &str,
 ) -> Vec<serde_json::Value> {
     let listed = policy.answering(records.to_vec());
@@ -4549,7 +4589,7 @@ fn approval_rows(
                         .is_none_or(|names| names.contains(*name))
                 })
                 .collect();
-            Some(json!({
+            let mut row = json!({
                 "check": entry.id,
                 "environment": entry.environment,
                 "state": state,
@@ -4560,7 +4600,13 @@ fn approval_rows(
                     "bay evidence record --kind approval --check {} --verdict pass --commit {commit}",
                     entry.id
                 ),
-            }))
+            });
+            // G292: an earlier approval that no longer holds, and the gated paths that changed.
+            let set_aside = carried.set_aside_of(&entry.id, &entry.environment);
+            if !set_aside.is_empty() {
+                row["set_aside"] = json!(set_aside);
+            }
+            Some(row)
         })
         .collect()
 }
@@ -4588,24 +4634,33 @@ fn approval_detail(
 
 /// G245: the approvals the candidate `commit` (tree `tree`, merged onto `base`) still waits
 /// on, as `bay status` names them, judged by the policy at `base` like its land; `None` when it
-/// waits on none.
+/// waits on none. G292: an approval of one of the change's `earlier` candidates that still
+/// holds answers here too, and one set aside is named with the gated paths that changed.
 ///
 /// # Errors
 ///
 /// A git fault, an unreadable policy or note, or a class file that cannot be written.
 pub fn pending_approval(
     git: &Git,
-    base: &str,
-    commit: &str,
-    tree: &str,
+    (base, commit, tree): (&str, &str, &str),
+    earlier: &[throughput::Earlier],
     registry: Option<&Registry>,
 ) -> Result<Option<serde_json::Value>, String> {
     let Some(policy) = policy::load_at(git, base).map_err(String::from)? else {
         return Ok(None);
     };
     let changed = check::changed_paths(git, base, commit)?;
-    let records = evidence::counted(git, evidence::records_for(git, tree)?, registry)?;
-    let rows = approval_rows(&policy, &changed, registry, &records, commit);
+    let mut records = evidence::counted(git, evidence::records_for(git, tree)?, registry)?;
+    let carried = throughput::carried_approvals(
+        git,
+        &policy,
+        registry,
+        (tree, tree_of(git, base)?.as_str()),
+        &records,
+        earlier,
+    )?;
+    records.extend(carried.records.iter().cloned());
+    let rows = approval_rows(&policy, &changed, registry, (&records, &carried), commit);
     Ok((!rows.is_empty()).then(|| approval_detail(&rows, commit, tree, registry)))
 }
 
@@ -5475,6 +5530,14 @@ fn derive_landed(
     if let (Some(detail), Some(batch)) = (result.detail.as_mut(), batch) {
         detail["batch"] = json!(batch);
     }
+    // G292: each approval that answered from an earlier candidate is named with its record.
+    if let Some(detail) = result.detail.as_mut() {
+        match approvals_carried(ctx, op_id) {
+            Ok(carried) if carried.is_empty() => {}
+            Ok(carried) => detail["carried_approvals"] = json!(carried),
+            Err(why) => detail["carried_approvals_unread"] = json!(why),
+        }
+    }
     // The change is published: a fault while reading its gaps or its inputs never turns the
     // landing into an error. The result says what could not be read, so none is hidden.
     let gaps = match coverage_gaps(ctx, op_id) {
@@ -5520,6 +5583,38 @@ fn derive_landed(
         }
     }
     Ok(result)
+}
+
+/// G292: the approvals the landed candidate of `op_id` stands on that an approver gave an
+/// earlier candidate of the change, judged by the policy at its base as its land was: each
+/// names its check and `carried_from`, the record that answers. None for a batch member.
+fn approvals_carried(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, String> {
+    let Some(attempt) = ctx
+        .op(op_id)
+        .attempts
+        .last()
+        .filter(|attempt| attempt.batch.is_none())
+    else {
+        return Ok(Vec::new());
+    };
+    let git = &ctx.repo.git;
+    let Ok(Some(policy)) = policy::load_at(git, &attempt.base) else {
+        return Ok(Vec::new());
+    };
+    let own = evidence::counted(
+        git,
+        evidence::records_for(git, &attempt.tree)?,
+        ctx.registry.as_ref(),
+    )?;
+    let carried = throughput::carried_approvals(
+        git,
+        &policy,
+        ctx.registry.as_ref(),
+        (attempt.tree.as_str(), tree_of(git, &attempt.base)?.as_str()),
+        &own,
+        &throughput::candidates_of(&ctx.record),
+    )?;
+    Ok(carried.named())
 }
 
 /// G30: the checks the landing passed without testing code, each a coverage gap: a check

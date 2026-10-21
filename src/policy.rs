@@ -334,6 +334,15 @@ pub struct CheckEntry {
     /// `paths` or `when_paths`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub footprint: bool,
+    /// G292: whether an approval check's record also answers a later candidate of the same
+    /// change whose `when_paths` content, in its tree and in its base's, is byte for byte the
+    /// approved candidate's ([`CheckEntry::carries`], `crate::throughput::carried_approvals`).
+    /// A person approves the change to the gated files, so an unrelated landing does not ask
+    /// them again. Absent, an approval check carries; `carry = false` asks an approval of every
+    /// candidate. Only an approval check names it. Judged at the base; it enters the definition
+    /// digest only when set, and absent is left out of the canonical entry (the G26 vector).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carry: Option<bool>,
     /// How many times the executor runs the check again on the identical tree after a
     /// `product_failure`, at most [`MAX_RETRY_ON_FAILURE`]; 0, the default, runs it once. Only a
     /// `product_failure` is run again: an `unknown` or `infra_failure` is no answer and never
@@ -519,11 +528,28 @@ impl CheckEntry {
             .collect()
     }
 
+    /// G292: whether this is an approval check whose record carries onto a later candidate of
+    /// the same change with the same `when_paths` content: every approval check but one that
+    /// says `carry = false`.
+    #[must_use]
+    pub fn carries(&self) -> bool {
+        self.is_approval() && self.carry != Some(false)
+    }
+
     /// NEW-10: what a check with `footprint = true` reads, its verdict's whole input besides
     /// its definition: its `paths` (the only part of the tree its materialization holds) when it
-    /// has them, else its `when_paths`. `None` for a check without `footprint = true`.
+    /// has them, else its `when_paths`. `None` for a check without `footprint = true`. G292: an
+    /// approval check that carries reads its `when_paths`; one with `carry = false` reads none.
     #[must_use]
     pub fn read_set(&self) -> Option<&[String]> {
+        // G292: an approval check that carries reads its `when_paths`: what a person approves.
+        if self.is_approval() {
+            return if self.carries() {
+                self.when_paths.as_deref()
+            } else {
+                None
+            };
+        }
         if !self.footprint {
             return None;
         }
@@ -1454,6 +1480,13 @@ fn validate_when_paths(entry: &CheckEntry) -> Result<(), String> {
 /// change is stated as `when_paths = ["**"]`, never by leaving the list out.
 fn validate_kind(entry: &CheckEntry) -> Result<(), String> {
     if !entry.is_approval() {
+        // G292: `carry` is an approval's; a run check carries its record only by `footprint`.
+        if entry.carry.is_some() {
+            return Err(format!(
+                "check {} names carry, which only an approval check names; a check bay runs carries its record with footprint = true",
+                entry.id
+            ));
+        }
         if entry.command.trim().is_empty() {
             return Err(format!(
                 "check {} has no command; a check bay runs names its command (or is kind = \"approval\")",
@@ -2059,6 +2092,41 @@ mod tests {
         bare.when_paths = None;
         assert!(super::validate_footprint(&bare).is_err());
         assert!(super::validate_footprint(&entry("footprint = true\n")).is_ok());
+    }
+
+    /// G292: `carry` enters the definition digest only when set; absent, an approval check
+    /// carries and reads its `when_paths`; `carry = false` reads nothing, and a run check that
+    /// names `carry` is invalid.
+    #[test]
+    fn a_carry_enters_the_digest_only_when_set() {
+        let approval = "id = \"billing-approval\"\nenvironment = \"people\"\nkind = \"approval\"\nwhen_paths = [\"billing/\"]\n";
+        let ids = BTreeMap::new();
+        let entry =
+            |extra: &str| -> CheckEntry { toml::from_str(&format!("{approval}{extra}")).unwrap() };
+        let digest_of = |extra: &str| {
+            manifest_entry(&entry(extra), &ids)
+                .unwrap()
+                .definition_digest
+        };
+        assert!(
+            serde_json::to_value(entry(""))
+                .unwrap()
+                .get("carry")
+                .is_none()
+        );
+        assert_ne!(digest_of(""), digest_of("carry = false\n"));
+        assert_ne!(digest_of(""), digest_of("carry = true\n"));
+        let when = ["billing/".to_owned()];
+        assert!(entry("").carries());
+        assert_eq!(entry("").read_set(), Some(&when[..]));
+        assert!(!entry("carry = false\n").carries());
+        assert_eq!(entry("carry = false\n").read_set(), None);
+        assert!(super::validate_kind(&entry("carry = false\n")).is_ok());
+        let run: CheckEntry = toml::from_str(
+            "id = \"tests\"\nenvironment = \"local\"\ncommand = \"x\"\nadapter = [\"x\"]\nexpected_minimum = 1\ncarry = true\n",
+        )
+        .unwrap();
+        assert!(super::validate_kind(&run).is_err());
     }
 
     /// G146: the `when_paths` globs.

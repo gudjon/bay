@@ -124,9 +124,7 @@
           "read",
           "refresh",
           "repair",
-          "edit_locally",
-          "wait",
-          "resume"
+          "wait"
         ]
       }
     },

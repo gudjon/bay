@@ -25,8 +25,9 @@ use crate::view;
 
 pub struct StartRequest {
     pub intent: Option<String>,
-    /// Claim the intent's next generation after its change landed, or ended without landing
-    /// (`start --new`, G272).
+    /// Claim the intent's next generation after its change ended without landing, instead of
+    /// adopting it (`start --new`, G272). After a landing every start claims the next generation
+    /// (G293), so there `--new` changes nothing.
     pub new: bool,
     pub intent_revision: String,
     pub paths: Vec<String>,
@@ -377,13 +378,9 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
             Some((generation, change)) => {
                 let landed = remote_has(repo, &format!("{}{change}", crate::names::LANDED))?;
                 match (landed, request.new) {
-                    (true, true) => (generation + 1, Some(change.clone())),
-                    (true, false) => {
-                        return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded)
-                            .with_change(change.clone())
-                            .with_detail(json!({"intent": intent, "generation": generation,
-                                "next": "start --new claims the next generation"})));
-                    }
+                    // G293: a landed change closes its generation, so any start claims the
+                    // next one, `--new` or not; the new change supersedes the landed one.
+                    (true, _) => (generation + 1, Some(change.clone())),
                     // G272: a change that ended without landing closes its generation too.
                     (false, true) if ended_unlanded(fetched_record(repo, change)?.state) => {
                         (generation + 1, Some(change.clone()))
@@ -516,7 +513,8 @@ fn remote_claims(
 }
 
 /// Whether `state` ends a change without a landing (G272): abandoned, superseded or no effect.
-/// Such a change closes its generation, so `start --new` may claim the next one.
+/// Such a change closes its generation, so `start --new` may claim the next one; a plain start
+/// adopts it.
 fn ended_unlanded(state: ChangeState) -> bool {
     matches!(
         state,
@@ -933,6 +931,7 @@ fn create(
             "actor": record.actor,
             "actor_source": record.actor_source,
             "fixes": record.fixes,
+            "supersedes": record.supersedes,
             "lane": record.lane,
             "from": record.from,
             "after": record.after,

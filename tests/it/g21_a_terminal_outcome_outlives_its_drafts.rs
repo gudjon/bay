@@ -7,7 +7,8 @@
 //! that drops the latest request; a cut racing a late publishing push keeps what the push needs.
 //! Past the ref budget an executor compacts the markers of a landed, cut change into the shard
 //! index (`DESIGN` § 10a, ruling R11): a re-create of a compacted name is refused at the host,
-//! `start` still answers `CHANGE_ALREADY_LANDED`, and the landing is still found.
+//! `start` still knows the generation landed and claims the next one (G293), and the landing
+//! is still found.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -663,32 +664,24 @@ fn compacted_markers_still_answer(
     id: &str,
     intent: &str,
 ) {
-    // A start on the compacted intent still answers CHANGE_ALREADY_LANDED.
+    // The landing is still found: undo opens its compensating change.
     let fresh = test_box.clone_of(host, "fresh");
     test_box.use_keys(&fresh, keys);
-    let (code, again) =
+    let (code, undone) = result_json(test_box.bay(&fresh).args(["undo", id]));
+    assert_eq!(code, 0, "{undone}");
+    assert_ne!(undone["reason"], "CHANGE_NOT_LANDED", "{undone}");
+
+    // A start on the compacted intent still knows generation 1 landed: it claims generation 2,
+    // which supersedes the landed change (G293), and never re-opens that change.
+    let (code, next) =
         result_json(
             test_box
                 .bay(&fresh)
                 .args(["start", "COMPACT-1", "--paths", "src/"]),
         );
-    assert_eq!(code, 10, "{again}");
-    assert_eq!(again["reason"], "CHANGE_ALREADY_LANDED", "{again}");
-    assert_eq!(again["change"], id, "{again}");
-
-    // The landing is still found: undo opens its compensating change.
-    let (code, undone) = result_json(test_box.bay(&fresh).args(["undo", id]));
-    assert_eq!(code, 0, "{undone}");
-    assert_ne!(undone["reason"], "CHANGE_NOT_LANDED", "{undone}");
-
-    // The host still knows generation 1 landed: `start --new` claims generation 2.
-    let (code, next) =
-        result_json(
-            test_box
-                .bay(&fresh)
-                .args(["start", "COMPACT-1", "--new", "--paths", "src/"]),
-        );
     assert_eq!(code, 0, "{next}");
+    assert_ne!(next["change"], id, "{next}");
+    assert_eq!(next["detail"]["supersedes"], id, "{next}");
     let claim = next["detail"]["intent"].as_str().unwrap_or_default();
     assert_eq!(claim, intent.replace("/1", "/2"), "{next}");
 }

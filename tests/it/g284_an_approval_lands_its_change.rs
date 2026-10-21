@@ -4,8 +4,9 @@
 //! again. Once an enrolled approver records `bay evidence record --kind approval` for its
 //! exact candidate, one pass lands that same candidate: the author lands nothing a second
 //! time, and the check whose evidence still holds does not run again. When trunk moved after
-//! the approval, the pass rebuilds the change on the new trunk, and it waits
-//! `APPROVAL_PENDING` again, naming the new candidate the approval must name. A pass that finds
+//! the approval, the pass rebuilds the change on the new trunk; under `carry = false` it waits
+//! `APPROVAL_PENDING` again, naming the new candidate the approval must name (without it, an
+//! approval holds while the files it covers are unchanged: G292). A pass that finds
 //! nothing changed leaves it waiting. A rejection ends it `CHECK_FAILED`, and no later pass
 //! runs it. The refusal states the plain next step: an executor lands it once approved, and
 //! without one the author's `bay land --wait` does.
@@ -64,6 +65,12 @@ fn files(keys: &TestKeys, approvers: &str) -> Vec<(&'static str, String)> {
 /// asks an approval for `billing/`; the registry enrols approver `approver-a`. The work
 /// repository holds the agent, executor and producer keys, and runs the executor.
 fn trunk() -> Trunk {
+    trunk_with("")
+}
+
+/// [`trunk`], with `extra` keys on the approval check (G292: `carry = false` asks an approval
+/// of every candidate).
+fn trunk_with(extra: &str) -> Trunk {
     let test_box = TestBox::new();
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
@@ -75,6 +82,7 @@ fn trunk() -> Trunk {
     for (path, text) in &mut check {
         if path == ".bay/policy.toml" {
             text.push_str(APPROVAL);
+            text.push_str(extra);
         }
     }
     test_box.seed_with_check(
@@ -221,7 +229,8 @@ fn an_approval_lands_the_approved_candidate_with_no_second_land() {
 
 #[test]
 fn a_moved_trunk_rebuilds_and_waits_for_an_approval_of_the_new_candidate() {
-    let trunk = trunk();
+    // G292: under `carry = false` an approval answers its exact candidate only.
+    let trunk = trunk_with("carry = false\n");
     let (id, view) = trunk.start("CARD-billing", "billing/discount.txt");
     let (code, waiting) = trunk.land(&view);
     assert_eq!(code, 10, "{waiting}");

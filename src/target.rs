@@ -267,11 +267,28 @@ pub fn checks(
         .run(&["rev-parse", &format!("{commit}^{{tree}}")])
         .map_err(|error| error.message())?;
     // G163: only records from the producers a check lists answer it.
-    let records = policy.answering(evidence::counted(
+    let mut records = policy.answering(evidence::counted(
         git,
         evidence::records_for(git, &tree)?,
         registry,
     )?);
+    // G292: an approval of an earlier candidate of the commit's change that still holds
+    // answers here as it answered the landing.
+    let earlier = crate::throughput::change_candidates(git, commit);
+    if !earlier.is_empty() {
+        let base_tree = git
+            .run(&["rev-parse", &format!("{base}^{{tree}}")])
+            .map_err(|error| error.message())?;
+        let carried = crate::throughput::carried_approvals(
+            git,
+            &policy,
+            registry,
+            (tree.as_str(), base_tree.as_str()),
+            &records,
+            &earlier,
+        )?;
+        records.extend(carried.records);
+    }
     let mut out = Vec::new();
     for id in requires {
         let entries: Vec<&crate::policy::CheckEntry> = policy

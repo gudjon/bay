@@ -153,6 +153,8 @@ mod g287_an_agent_hears_when_no_executor_is_live;
 mod g288_an_approval_counts_the_same_everywhere;
 mod g28_a_reused_op_id_with_a_different_request_is_refused;
 mod g291_a_hung_adapter_is_killed_whole;
+mod g292_an_approval_holds_while_its_files_are_unchanged;
+mod g293_one_word_per_idea;
 mod g29_evidence_is_judged_by_record_never_latest_wins;
 mod g30_coverage_is_judged_against_the_frozen_manifest;
 mod g31_a_dead_executor_is_replaced;
