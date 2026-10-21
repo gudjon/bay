@@ -251,7 +251,9 @@ pub fn install(dir: &Path, request: &Request) -> BayResult {
     install_in(dir, request).unwrap_or_else(BayResult::failed)
 }
 
-fn refused(message: String, detail: serde_json::Value) -> BayResult {
+fn refused(message: String, mut detail: serde_json::Value) -> BayResult {
+    // The reason goes in `detail.why`, where `say` and every agent read it.
+    detail["why"] = serde_json::Value::String(message.clone());
     let mut result = BayResult::new(Decision::Failed).with_detail(detail);
     result.human = Some(message);
     result

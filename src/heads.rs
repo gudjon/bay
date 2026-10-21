@@ -460,9 +460,7 @@ fn prove_by_change(repo: &Repo, trunk_tip: &str, rows: &mut [Head], unmatched: &
                     let Some(marker) = markers.get(change) else {
                         continue;
                     };
-                    let reached = git
-                        .run_status(&["merge-base", "--is-ancestor", marker, trunk_tip])
-                        .is_ok_and(|(code, _, _)| code == 0);
+                    let reached = git.is_ancestor(marker, trunk_tip).unwrap_or(false);
                     if reached {
                         landed.insert(change.clone());
                     }

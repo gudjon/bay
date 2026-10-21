@@ -560,9 +560,10 @@ fn next_reply<'a>(
     }
 }
 
-/// The records that count: with a registry, only those signed under their producer's name by a
-/// key of the class their kind needs (§ 7, Q12); without one, bay runs unsigned and every
-/// record counts.
+/// The records that count, as every reader counts them (landing, promotion, status, the hook):
+/// with a registry, only those signed under their producer's name by a key of the class their
+/// kind needs (§ 7, Q12); without one, bay runs unsigned and every record counts but an
+/// `approval`, which no key can prove (G245).
 ///
 /// # Errors
 ///
@@ -588,15 +589,17 @@ pub enum Verified {
     Unsigned,
     /// Signed under its producer's name by a key of the class its kind needs.
     Verified,
-    /// A registry exists and the record does not verify under it: it never counts.
+    /// A registry exists and the record does not verify under it, or there is none and the
+    /// record is an `approval`, which only a registered approver key can prove (G245): it
+    /// never counts.
     Unverifiable,
 }
 
 /// The trust a result names for the evidence it reports (G160): `unsigned` without a registry,
-/// where every record counts unattested; `signed` with one, where only verified records count;
-/// and `approvals` with one under `[policy] signing = "approvals"` (N-21), where only an
-/// `approval` record must verify and every other record counts unsigned. Each record's own
-/// standing is its `verified` ([`Verified`]).
+/// where every record but an `approval` counts unattested (G245); `signed` with one, where only
+/// verified records count; and `approvals` with one under `[policy] signing = "approvals"`
+/// (N-21), where only an `approval` record must verify and every other record counts unsigned.
+/// Each record's own standing is its `verified` ([`Verified`]).
 #[must_use]
 pub fn trust(registry: Option<&Registry>) -> &'static str {
     match registry {
@@ -614,7 +617,8 @@ pub fn signed_kind(registry: &Registry, kind: &str) -> bool {
 }
 
 /// Each record with how it stands: with a registry, verified or unverifiable against the class
-/// file its kind names (§ 7, Q12); without one, every record is unsigned. Under `signing =
+/// file its kind names (§ 7, Q12); without one, every record is unsigned but an `approval`,
+/// which is unverifiable: an unsigned yes proves nobody said it (G245). Under `signing =
 /// "approvals"` (N-21) only an `approval` record is judged against its class file, and every
 /// other record is unsigned, as without a registry.
 ///
@@ -629,7 +633,16 @@ pub fn tagged(
     let Some(registry) = registry else {
         return Ok(records
             .into_iter()
-            .map(|record| (record, Verified::Unsigned))
+            .map(|record| {
+                // G245: without a registry no approver key can be verified, so no `approval`
+                // record counts, wherever it is read.
+                let verified = if record.kind == KIND_APPROVAL {
+                    Verified::Unverifiable
+                } else {
+                    Verified::Unsigned
+                };
+                (record, verified)
+            })
             .collect());
     };
     records

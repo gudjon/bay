@@ -272,22 +272,6 @@ pub fn walk(
     Ok(line)
 }
 
-/// Whether `ancestor` is an ancestor of `commit` (or `commit` itself).
-///
-/// # Errors
-///
-/// A git fault.
-pub fn is_ancestor(git: &Git, ancestor: &str, commit: &str) -> Result<bool, String> {
-    let (code, _, stderr) = git
-        .run_status(&["merge-base", "--is-ancestor", ancestor, commit])
-        .map_err(|error| error.message())?;
-    match code {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(format!("git merge-base --is-ancestor: {stderr}")),
-    }
-}
-
 /// Whether `commit` (a full object id) is on the landing line of `tip`: on its first-parent
 /// line, or a bay landing that a foreign merge on that line brought in. The merge is the
 /// oldest first-parent commit that reaches `commit`, found by bisection: a newer first-parent
@@ -300,7 +284,7 @@ pub fn on_line(git: &Git, tip: &str, commit: &str) -> Result<bool, String> {
     if crate::target::on_first_parent(git, tip, commit)? {
         return Ok(true);
     }
-    if !is_ancestor(git, commit, tip)? {
+    if !git.is_ancestor(commit, tip)? {
         return Ok(false);
     }
     // The first-parent commits not reachable from `commit`, newest first: the merge that
@@ -310,13 +294,13 @@ pub fn on_line(git: &Git, tip: &str, commit: &str) -> Result<bool, String> {
         .map_err(|error| error.message())?;
     let line: Vec<&str> = listed.lines().map(str::trim).collect();
     let (mut reaches, mut misses) = (0_usize, line.len());
-    if line.is_empty() || !is_ancestor(git, commit, line[0])? {
+    if line.is_empty() || !git.is_ancestor(commit, line[0])? {
         return Ok(false);
     }
     // Invariant: line[reaches] reaches `commit`; line[misses] (when in range) does not.
     while misses - reaches > 1 {
         let mid = reaches + (misses - reaches) / 2;
-        if is_ancestor(git, commit, line[mid])? {
+        if git.is_ancestor(commit, line[mid])? {
             reaches = mid;
         } else {
             misses = mid;

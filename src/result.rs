@@ -543,8 +543,10 @@ fn plain_word(word: &str) -> &str {
     }
 }
 
-/// How many words of a fault's message `say` repeats.
-const SHORT_WORDS: usize = 12;
+/// The longest first sentence of a fault's message that `say` repeats. A sentence is never cut,
+/// since a cut can flip its meaning ("... are not both set" read "... are"); a longer one is
+/// left to the result's detail.
+const SHORT_WORDS: usize = 30;
 
 /// The string at the first of `pointers` in `detail` that holds a non-empty one.
 fn text_at<'v>(detail: Option<&'v Value>, pointers: &[&str]) -> Option<&'v str> {
@@ -647,8 +649,12 @@ fn short(detail: Option<&Value>) -> Option<String> {
         other => text_at(Some(other), &["/why", "/error", "/message"])?,
     };
     let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
-    let words: Vec<&str> = line.split_whitespace().take(SHORT_WORDS).collect();
-    let short = words.join(" ");
+    // The first sentence, whole: up to the first ". " (or the line's end).
+    let sentence = line.split_once(". ").map_or(line, |(first, _)| first);
+    if sentence.split_whitespace().count() > SHORT_WORDS {
+        return None;
+    }
+    let short = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
     let short = plain(short.trim_end_matches(['.', ':', ';', ',']));
     (!short.is_empty()).then_some(short)
 }

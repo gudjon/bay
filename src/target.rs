@@ -167,7 +167,7 @@ fn line_candidates(git: &Git, from_tip: &str, tip: Option<&str>) -> Result<Vec<C
     for entry in line.entries {
         if entry.via.is_some()
             && let Some(tip) = tip
-            && !is_ancestor(git, tip, &entry.commit)?
+            && !git.is_ancestor(tip, &entry.commit)?
         {
             continue;
         }
@@ -216,17 +216,6 @@ pub fn on_first_parent(git: &Git, tip: &str, commit: &str) -> Result<bool, Strin
             &format!("{tip}~{count}^{{commit}}"),
         ])
         .is_ok_and(|at| at == commit))
-}
-
-fn is_ancestor(git: &Git, old: &str, new: &str) -> Result<bool, String> {
-    let (code, _, stderr) = git
-        .run_status(&["merge-base", "--is-ancestor", old, new])
-        .map_err(|error| error.message())?;
-    match code {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(format!("git merge-base --is-ancestor: {stderr}")),
-    }
 }
 
 fn count(git: &Git, args: &[&str]) -> Result<u64, String> {
@@ -420,7 +409,7 @@ pub fn judge(
     }
     if let Some(old) = old
         && old != commit
-        && !is_ancestor(git, old, commit)?
+        && !git.is_ancestor(old, commit)?
     {
         failed.push(failure(
             "not_fast_forward",

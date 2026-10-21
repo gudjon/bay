@@ -352,13 +352,10 @@ impl Registry {
         if !known {
             return Ok(None);
         }
-        let (code, _, stderr) = git
-            .run_status(&["merge-base", "--is-ancestor", named, &self.commit])
-            .map_err(|error| error.message())?;
-        match code {
-            0 => Self::load_at(git, named).map(Some),
-            1 => Ok(None),
-            _ => Err(format!("merge-base --is-ancestor: {stderr}")),
+        if git.is_ancestor(named, &self.commit)? {
+            Self::load_at(git, named).map(Some)
+        } else {
+            Ok(None)
         }
     }
 

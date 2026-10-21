@@ -6,9 +6,8 @@
 //! directory. The request goes on stdin; a `bay.check.result/1` comes back on stdout. An
 //! exit code alone is never evidence: anything short of a valid, matching result is `unknown`.
 
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -2142,60 +2141,33 @@ fn judge_units(result: &CheckResult, entry: &CheckEntry, units: Vec<Unit>) -> Ju
 
 /// Runs the adapter with the request on stdin; returns its exit status, stdout and stderr. A
 /// spawn failure or a timeout is an error, which the caller records as `unknown`, as it does a
-/// crash: an exit other than 0 with nothing on stdout or stderr.
+/// crash: an exit other than 0 with nothing on stdout or stderr. The sandbox around it is
+/// `cmd`'s own; it runs as any adapter does, in a process group of its own that is killed
+/// whole at the bound (`crate::run::bounded`).
 fn run_with_timeout(
-    mut cmd: Command,
+    cmd: Command,
     input: &str,
     timeout: Duration,
     beat: &mut dyn FnMut(),
     heartbeat: Option<Duration>,
 ) -> Result<(ExitStatus, Vec<u8>, String), String> {
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("the check did not start: {error}"))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let input = input.as_bytes().to_vec();
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&input);
-        });
-    }
-    let mut stdout = child.stdout.take().ok_or("stdout pipe is missing")?;
-    let reader = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = stdout.read_to_end(&mut buffer);
-        buffer
-    });
-    let mut stderr = child.stderr.take().ok_or("stderr pipe is missing")?;
-    let errors = std::thread::spawn(move || {
-        let mut buffer = Vec::new();
-        let _ = stderr.read_to_end(&mut buffer);
-        buffer
-    });
-    let started = Instant::now();
-    let mut last_beat = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            break status;
+    let ran = crate::run::bounded(
+        cmd,
+        Some(input.as_bytes()),
+        timeout,
+        crate::run::Streams::Captured,
+        beat,
+        heartbeat,
+    )
+    .map_err(|fault| match fault {
+        crate::run::Fault::Spawn(error) => format!("the check did not start: {error}"),
+        crate::run::Fault::Timeout(_) => {
+            format!("the check timed out after {}s", timeout.as_secs())
         }
-        if heartbeat.is_some_and(|every| last_beat.elapsed() >= every) {
-            beat();
-            last_beat = Instant::now();
-        }
-        if started.elapsed() >= timeout {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("the check timed out after {}s", timeout.as_secs()));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let output = reader
-        .join()
-        .map_err(|_| "the check's output reader failed")?;
-    let stderr = String::from_utf8_lossy(&errors.join().unwrap_or_default()).into_owned();
-    Ok((status, output, stderr))
+        other => other.to_string(),
+    })?;
+    let stderr = String::from_utf8_lossy(&ran.stderr).into_owned();
+    Ok((ran.status, ran.stdout, stderr))
 }
 
 /// Materializes what `entry` sees of the candidate (its `paths`, or the whole tree) into

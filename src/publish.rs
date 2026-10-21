@@ -418,6 +418,10 @@ struct Ctx<'a> {
     /// The chain head this process last pushed: later pushes are leased on it, so a chain
     /// another executor moved is never overwritten.
     pushed_head: Option<String>,
+    /// The head this process's first write not yet on the remote went on; `None` once every
+    /// write it made is pushed or withdrawn. [`Ctx::refetch`] takes those writes off the local
+    /// chain ref, and only those: any other local work the remote lacks is kept (G289).
+    unpushed_from: Option<String>,
     /// The epoch this process claimed, when it acts as the executor.
     my_epoch: u64,
     /// The registry principal that signed the request, when it is a policy repair (§ 7).
@@ -459,6 +463,7 @@ impl<'a> Ctx<'a> {
             registry: None,
             keys,
             pushed_head: None,
+            unpushed_from: None,
             my_epoch: 0,
             repair: None,
             online: true,
@@ -528,7 +533,11 @@ impl<'a> Ctx<'a> {
         let trunk = self.repo.fetch_trunk().map_err(|error| error.message())?;
         self.repo.fetch_registry();
         self.registry = Registry::current(&self.repo.git)?;
-        if !is_ancestor(&self.repo.git, &self.record.observed_remote, &trunk)? {
+        if !self
+            .repo
+            .git
+            .is_ancestor(&self.record.observed_remote, &trunk)?
+        {
             return Ok(Err(BayResult::failed(format!(
                 "trunk was rewound: {} is no longer an ancestor of the remote trunk {trunk}; bay never forces",
                 self.record.observed_remote
@@ -566,11 +575,18 @@ impl<'a> Ctx<'a> {
     }
 
     fn save(&mut self, draft: &str, candidate: Option<&str>, message: &str) -> Result<(), String> {
-        self.head = self
+        let head = self
             .chain
             .append_linking(&self.head, &self.record, draft, candidate, message)
             .map_err(|error| error.message())?;
+        self.wrote(head);
         Ok(())
+    }
+
+    /// This process wrote `head` on its head: until a push takes it, it is unpushed.
+    fn wrote(&mut self, head: String) {
+        let before = std::mem::replace(&mut self.head, head);
+        self.unpushed_from.get_or_insert(before);
     }
 
     /// [`Ctx::save`] that tells a lost compare-and-swap from a fault: `false` when the local
@@ -587,7 +603,7 @@ impl<'a> Ctx<'a> {
             .append_linking(&self.head, &self.record, draft, candidate, message)
         {
             Ok(head) => {
-                self.head = head;
+                self.wrote(head);
                 Ok(true)
             }
             Err(ChainError::Moved { .. }) => Ok(false),
@@ -615,6 +631,7 @@ impl<'a> Ctx<'a> {
         let pushed = self.repo.git.run(&args).is_ok();
         if pushed {
             self.pushed_head = Some(self.head.clone());
+            self.unpushed_from = None;
             self.catch_up_local();
         }
         pushed
@@ -641,6 +658,7 @@ impl<'a> Ctx<'a> {
         let pushed = self.repo.git.run(&args).is_ok();
         if pushed {
             self.pushed_head = Some(self.head.clone());
+            self.unpushed_from = None;
             self.catch_up_local();
         }
         pushed
@@ -654,7 +672,13 @@ impl<'a> Ctx<'a> {
         let Ok(Some(local)) = self.repo.git.ref_target(&name) else {
             return;
         };
-        if local != self.head && is_ancestor(&self.repo.git, &local, &self.head).unwrap_or(false) {
+        if local != self.head
+            && self
+                .repo
+                .git
+                .is_ancestor(&local, &self.head)
+                .unwrap_or(false)
+        {
             let _ = self
                 .repo
                 .git
@@ -673,24 +697,33 @@ impl<'a> Ctx<'a> {
             .git
             .run(&["update-ref", &name, before, &self.head]);
         before.clone_into(&mut self.head);
+        if self.unpushed_from.as_deref() == Some(before) {
+            self.unpushed_from = None;
+        }
     }
 
-    /// Replaces the local chain with the remote's and reloads it.
+    /// Reads the remote's chain ([`Repo::remote_record`]) and goes on from its head. The local
+    /// chain ref is never forced (G289): it moves only forward, and keeps local work the remote
+    /// lacks. This process's own writes the remote never took leave it, as [`Ctx::withdraw`]
+    /// takes them, so no later push of the ref carries them; a local head another process
+    /// wrote stays, and this process's next compare-and-swap on the ref loses until that
+    /// process pushes it. Offline, nothing moves.
     fn refetch(&mut self) -> Result<(), String> {
-        let name = change_ref(&self.id);
-        self.repo
-            .git
-            .run(&[
-                "fetch",
-                "-q",
-                "--no-tags",
-                self.repo.remote(),
-                &format!("+{name}:{name}"),
-            ])
-            .map_err(|error| error.message())?;
-        let (head, record) = self.chain.read(&self.id).map_err(|error| error.message())?;
-        self.head = head;
-        self.record = record;
+        let remote = self.repo.remote_record(&self.id)?;
+        if let Some(from) = self.unpushed_from.take()
+            && remote.kept.as_deref() == Some(self.head.as_str())
+        {
+            let git = &self.repo.git;
+            let name = change_ref(&self.id);
+            if git.run(&["update-ref", &name, &from, &self.head]).is_ok()
+                && from != remote.head
+                && git.is_ancestor(&from, &remote.head).unwrap_or(false)
+            {
+                let _ = git.run(&["update-ref", &name, &remote.head, &from]);
+            }
+        }
+        self.head = remote.head;
+        self.record = remote.record;
         self.pushed_head = Some(self.head.clone());
         Ok(())
     }
@@ -1536,6 +1569,7 @@ fn bisect_batch(
     if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
         ctx.head.clone_from(&beat);
         ctx.pushed_head = Some(beat);
+        ctx.unpushed_from = None;
     }
     push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0)?;
     Ok(Some((search, checks)))
@@ -3026,17 +3060,11 @@ fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<Ba
     )
 }
 
-/// Makes the remote's chain the local one (§ 9a): the remote holds what executors recorded.
-/// Local-only work was pushed by the sync before this, or is re-made by landing again.
+/// Brings the remote's chain here (§ 9a): the remote holds what executors recorded. The local
+/// chain moves only forward ([`Repo::remote_chain`], G289): local-only work the sync before
+/// this could not push is kept, and this landing carries it.
 fn adopt_remote_chain(repo: &Repo, id: &str) {
-    let name = change_ref(id);
-    let _ = repo.git.run(&[
-        "fetch",
-        "-q",
-        "--no-tags",
-        repo.remote(),
-        &format!("+{name}:{name}"),
-    ]);
+    let _ = repo.remote_chain(id);
 }
 
 /// § 3a submission order: the request is persisted; then the configured executor's `submit`
@@ -3060,60 +3088,67 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
         "request_digest": op.request_digest,
         "candidate": revision,
     });
-    let mut words = command.split_whitespace();
-    let name = words.next().unwrap_or_default();
-    let program = ctx.repo.work_root.join(name);
-    let started = crate::platform::script(&program)
-        .map_err(|why| ("submission_failed", why))
-        .and_then(|mut cmd| {
-            cmd.args(words)
-                .arg("submit")
-                .current_dir(&ctx.repo.work_root);
-            crate::git::run_bounded_for(
-                cmd,
-                "executor submit",
-                Some(request.to_string().as_bytes()),
-                ctx.repo.config.submission_timeout(),
-            )
-            .map_err(|error| match error {
-                crate::git::GitError::Timeout { secs, .. } => (
+    let name = command.split_whitespace().next().unwrap_or_default();
+    let timeout = ctx.repo.config.submission_timeout();
+    // The executor runs as any adapter does (`crate::run`): from the work tree, with only
+    // `PATH` and `HOME` of bay's environment, killed whole at its bound. What it needs it is
+    // given explicitly: its action as an argument and the request on stdin.
+    let started = match crate::run::command(&ctx.repo.work_root, &command) {
+        Some(Ok(cmd)) => Ok(cmd),
+        Some(Err(why)) => Err(("submission_failed", why)),
+        None => Err((
+            "submission_failed",
+            "the executor command is empty".to_owned(),
+        )),
+    }
+    .and_then(|mut cmd| {
+        // The executor adapter alone keeps bay's whole environment, as it always has: an
+        // external executor may need its own credentials, which the minimal environment of the
+        // other adapters (`crate::run::command`) would drop.
+        cmd.envs(std::env::vars_os());
+        cmd.arg("submit");
+        crate::run::captured(cmd, Some(request.to_string().as_bytes()), timeout).map_err(|fault| {
+            match fault {
+                crate::run::Fault::Timeout(_) => (
                     "submission_timeout",
                     format!(
-                        "the executor did not admit {op_id} within the submission timeout of {secs}s"
+                        "the executor did not admit {op_id} within the submission timeout of {}s",
+                        timeout.as_secs()
                     ),
                 ),
-                crate::git::GitError::Spawn(error) => (
+                crate::run::Fault::Spawn(error) => (
                     "submission_failed",
                     format!("the executor command {name} could not be started: {error}"),
                 ),
-                other => ("submission_failed", other.message()),
-            })
-        })
-        .and_then(|output| {
-            if output.status.success() {
-                Ok(output)
-            } else {
-                Err((
-                    "submission_refused",
-                    format!(
-                        "the executor refused the submission: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    ),
-                ))
+                other => ("submission_failed", other.to_string()),
             }
         })
-        .and_then(|output| {
-            let reply: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
-                (
-                    "submission_refused",
-                    format!("the executor's submit reply is not JSON: {error}"),
-                )
-            })?;
-            reply["job"].as_str().map(str::to_owned).ok_or((
+    })
+    .and_then(|output| {
+        if output.status.success() {
+            Ok(output)
+        } else {
+            Err((
                 "submission_refused",
-                "the executor's submit reply has no job".to_owned(),
+                format!(
+                    "the executor refused the submission: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
             ))
-        });
+        }
+    })
+    .and_then(|output| {
+        let reply: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            (
+                "submission_refused",
+                format!("the executor's submit reply is not JSON: {error}"),
+            )
+        })?;
+        reply["job"].as_str().map(str::to_owned).ok_or((
+            "submission_refused",
+            "the executor's submit reply has no job".to_owned(),
+        ))
+    });
     // A submission the executor never took ends the operation with a stated outcome (§ 9a),
     // so no executor pass lands what this land answered as failed.
     let job = match started {
@@ -3745,6 +3780,7 @@ fn build_and_check(
     if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
         ctx.head.clone_from(&beat);
         ctx.pushed_head = Some(beat);
+        ctx.unpushed_from = None;
     }
     let refusal = match refusal {
         Some(waiting) if waiting.reason == Some(Reason::CheckUnavailable) => {
@@ -4468,14 +4504,8 @@ fn judge_seen(
 ) -> (&'static str, Option<BayResult>) {
     let (required, _) = policy.required(seen.changed);
     let registry = ctx.registry.as_ref();
-    let Some((code, word, why)) = verdict(
-        policy,
-        &required,
-        seen.all,
-        seen.named,
-        seen.commit,
-        registry.is_some(),
-    ) else {
+    let Some((code, word, why)) = verdict(policy, &required, seen.all, seen.named, seen.commit)
+    else {
         return ("pass", None);
     };
     let mut detail = json!({
@@ -4502,19 +4532,6 @@ fn judge_seen(
     )
 }
 
-/// G245: without a registry no approver key can be verified, so no `approval` record counts
-/// (an unsigned yes proves nobody said it); with one, the records are already counted.
-fn approvals_counted(
-    records: &[evidence::EvidenceRecord],
-    signed: bool,
-) -> Vec<evidence::EvidenceRecord> {
-    records
-        .iter()
-        .filter(|record| signed || record.kind != evidence::KIND_APPROVAL)
-        .cloned()
-        .collect()
-}
-
 /// G245: each approval check `policy` requires of a candidate whose diff changes `changed`
 /// that the counted `records` on its tree do not pass: its state (`pending`, or `rejected` by a
 /// `product_failure`), the enrolled approvers who may answer it (the registry's approver file,
@@ -4527,7 +4544,7 @@ fn approval_rows(
     records: &[evidence::EvidenceRecord],
     commit: &str,
 ) -> Vec<serde_json::Value> {
-    let listed = policy.answering(approvals_counted(records, registry.is_some()));
+    let listed = policy.answering(records.to_vec());
     let enrolled = registry
         .map(|registry| registry.principals(KeyClass::Approver))
         .unwrap_or_default();
@@ -4732,19 +4749,18 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str) -> Option<BayResult> {
 
 /// The verdict of `policy` over every counted record on the tree (`all`): `None` for a pass,
 /// else its refusal code and word, and what `named` say about each gap. `required` is the part
-/// of its manifest the candidate's diff requires (G146). `signed` says a registry verified
-/// `all`: without one no approval counts (G245).
+/// of its manifest the candidate's diff requires (G146). Without a registry `all` holds no
+/// approval: [`evidence::counted`] counts none (G245).
 fn verdict(
     policy: &policy::Policy,
     required: &[policy::ManifestEntry],
     all: &[evidence::EvidenceRecord],
     named: &[&evidence::EvidenceRecord],
     commit: &str,
-    signed: bool,
 ) -> Option<(Reason, &'static str, Vec<serde_json::Value>)> {
     // G163: a record from a producer the check's list leaves out never answers it. G245: nor
-    // does a record of the other kind, or an approval no registry verified.
-    let listed: Vec<evidence::EvidenceRecord> = policy.answering(approvals_counted(all, signed));
+    // does a record of the other kind; an approval no registry verified was never counted.
+    let listed: Vec<evidence::EvidenceRecord> = policy.answering(all.to_vec());
     let approval = |id: &evidence::CheckId| {
         policy
             .check(id)
@@ -5975,22 +5991,6 @@ fn parent_of(git: &Git, commit: &str) -> Result<Option<String>, String> {
         Ok(parent) => Ok(Some(parent)),
         Err(GitError::Failed { .. }) => Ok(None),
         Err(error) => Err(error.message()),
-    }
-}
-
-/// Whether `ancestor` is an ancestor of (or equal to) `descendant`.
-///
-/// # Errors
-///
-/// A git fault.
-pub fn is_ancestor(git: &Git, ancestor: &str, descendant: &str) -> Result<bool, String> {
-    let (code, _, stderr) = git
-        .run_status(&["merge-base", "--is-ancestor", ancestor, descendant])
-        .map_err(|error| error.message())?;
-    match code {
-        0 => Ok(true),
-        1 => Ok(false),
-        _ => Err(format!("merge-base --is-ancestor: {stderr}")),
     }
 }
 

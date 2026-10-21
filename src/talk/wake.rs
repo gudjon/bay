@@ -10,9 +10,11 @@
 //! - An exit other than 0, no valid document, or no answer within the bound: `uncertain`,
 //!   `WAKE_ADAPTER_FAILED`. bay never calls `wake` twice for one talk: an ack is written once.
 //!
+//! `[wake] command` is a program path relative to the work tree, then its arguments, run from the
+//! work tree with only `PATH` and `HOME` from bay's environment (`crate::run`).
+//!
 //! `bay adapter test wake` (`crate::adapter`) runs these same parts against a connector.
 
-use std::path::Path;
 use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
 
@@ -20,8 +22,8 @@ use serde_json::{Value, json};
 
 use super::Talk;
 use crate::change::Actor;
-use crate::git::GitError;
 use crate::repo::Repo;
+use crate::run::Fault;
 
 /// How long the wake adapter has to answer.
 pub const WAKE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -49,9 +51,13 @@ pub fn wake(repo: &Repo, talk: &Talk, me: &Actor) -> Value {
         .wake
         .as_ref()
         .and_then(|wake| wake.command.as_deref())
-        .and_then(|command| command_at(&repo.work_root, command))
+        .and_then(|command| crate::run::command(&repo.work_root, command))
     else {
         return json!({"result": "not_attempted", "reason": "NO_WAKE_ADAPTER"});
+    };
+    // A `#!` script bay cannot start on Windows fails as an adapter that cannot start does.
+    let Ok(cmd) = cmd else {
+        return failed();
     };
     let request = request(
         &talk.id,
@@ -76,26 +82,6 @@ pub fn request(talk: &str, me: &Actor, machine: &str, urgent: bool, line: &str) 
     })
 }
 
-/// `[wake] command` as a process: a program path relative to `work_root`, then its arguments,
-/// run from `work_root` with only `PATH` and `HOME` from bay's environment. `None` for an empty
-/// command.
-#[must_use]
-pub fn command_at(work_root: &Path, command: &str) -> Option<Command> {
-    let mut words = command.split_whitespace();
-    let program = words.next()?;
-    // A `#!` script bay cannot start on Windows starts as it is, and so fails as an adapter
-    // that cannot start does (`crate::platform::script`).
-    let program = work_root.join(program);
-    let mut cmd = crate::platform::script(&program).unwrap_or_else(|_| Command::new(&program));
-    cmd.args(words).current_dir(work_root).env_clear();
-    for name in ["PATH", "HOME"] {
-        if let Some(value) = std::env::var_os(name) {
-            cmd.env(name, value);
-        }
-    }
-    Some(cmd)
-}
-
 /// What the adapter did with one request.
 #[derive(Debug)]
 pub struct Answer {
@@ -110,30 +96,31 @@ pub struct Answer {
     pub error: Option<String>,
 }
 
-/// Runs `cmd` with `request` on stdin, killed once `bound` has passed.
+/// Runs `cmd` with `request` on stdin; once `bound` has passed, its whole process group is
+/// killed (`crate::run::bounded`).
 #[must_use]
 pub fn ask(cmd: Command, request: &Value, bound: Duration) -> Answer {
     let input = format!("{request}\n");
     let started = Instant::now();
-    let output = crate::git::run_bounded_for(cmd, "wake", Some(input.as_bytes()), bound);
+    let ran = crate::run::captured(cmd, Some(input.as_bytes()), bound);
     let elapsed = started.elapsed();
-    let (timed_out, error) = match output {
-        Ok(output) => {
+    let (timed_out, error) = match ran {
+        Ok(ran) => {
             return Answer {
-                status: Some(output.status),
-                stdout: output.stdout,
-                stderr: output.stderr,
+                status: Some(ran.status),
+                stdout: ran.stdout,
+                stderr: ran.stderr,
                 elapsed,
                 timed_out: false,
                 error: None,
             };
         }
-        Err(GitError::Spawn(error)) => (false, format!("it did not start: {error}")),
-        Err(GitError::Timeout { .. }) => (
+        // `Fault::Spawn` reads "it did not start: <why>".
+        Err(Fault::Timeout(_)) => (
             true,
             format!("it did not answer within {} s", bound.as_secs_f64()),
         ),
-        Err(other) => (false, other.message()),
+        Err(other) => (false, other.to_string()),
     };
     Answer {
         status: None,

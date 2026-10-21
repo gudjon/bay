@@ -168,17 +168,12 @@ pub fn judge_update(
         }
         return Ok(None);
     }
-    let (code, _, stderr) = git.run_status(&["merge-base", "--is-ancestor", old, new])?;
-    match code {
-        0 => Ok(None),
-        1 => Ok(Some(format!(
-            "{refname} is append-only: a non-fast-forward update is refused"
-        ))),
-        _ => Err(GitError::Failed {
-            args: "merge-base --is-ancestor".to_owned(),
-            stderr,
-        }),
-    }
+    let fast_forward = git.is_ancestor(old, new).map_err(|why| GitError::Failed {
+        args: "merge-base --is-ancestor".to_owned(),
+        stderr: why,
+    })?;
+    Ok((!fast_forward)
+        .then(|| format!("{refname} is append-only: a non-fast-forward update is refused")))
 }
 
 /// How long the scoped hook may judge one push: `bay.hookTimeoutS` on the host, default 30 s.

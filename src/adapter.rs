@@ -268,11 +268,13 @@ fn with_callers_env(mut cmd: Command) -> Command {
 fn test_wake(dir: &Path, command: &str) -> BayResult {
     let limit = wake::WAKE_TIMEOUT;
     let bound = limit * GRACE;
-    let (Some(cmd), Some(callers)) = (
-        wake::command_at(dir, command),
-        wake::command_at(dir, command),
-    ) else {
-        return refused("wake", "name the adapter's command after --");
+    let (cmd, callers) = match (
+        crate::run::command(dir, command),
+        crate::run::command(dir, command),
+    ) {
+        (Some(Ok(cmd)), Some(Ok(callers))) => (cmd, callers),
+        (Some(Err(why)), _) | (_, Some(Err(why))) => return refused("wake", &why),
+        _ => return refused("wake", "name the adapter's command after --"),
     };
     let me = Actor {
         name: "adapter-test".to_owned(),
@@ -443,7 +445,7 @@ fn sample_event() -> Value {
 }
 
 fn tell(dir: &Path, command: &str, event: &Value, callers: bool, bound: Duration) -> notify::Sent {
-    let Some(cmd) = notify::command_at(dir, command) else {
+    let Some(Ok(cmd)) = crate::run::command(dir, command) else {
         return notify::Sent {
             status: None,
             elapsed: Duration::ZERO,

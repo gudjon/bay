@@ -59,11 +59,7 @@ pub(crate) fn resolve(repo: &Repo, target: &str) -> Result<Result<Lander, Refusa
             "{target:?} is neither a change id nor a commit this repository holds"
         ))));
     };
-    if repo
-        .git
-        .run(&["merge-base", "--is-ancestor", &commit, &trunk])
-        .is_err()
-    {
+    if !repo.git.is_ancestor(&commit, &trunk)? {
         return Ok(Err(not_landed(format!(
             "commit {commit} is not on trunk: a talk addressed by change goes to the actor that landed it"
         ))));

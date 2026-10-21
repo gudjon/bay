@@ -153,3 +153,18 @@ fn a_failure_says_what_went_wrong_and_the_human_rendering_says_it_first() {
         "the sentence comes first: {human}"
     );
 }
+
+/// A fault's sentence is repeated whole or not at all: cut short, "... are not both set" would
+/// read "... are", and say the opposite.
+#[test]
+fn a_long_refusal_is_never_cut_into_its_opposite() {
+    let test_box = TestBox::new();
+    let repo = seeded(&test_box, "pass");
+    let (code, refused) = result_json(test_box.bay(&repo).args(["approve", "abcd2345"]));
+    assert_eq!(code, 20, "{refused}");
+    let say = refused["say"].as_str().unwrap_or_default();
+    assert!(
+        say.contains("not both set") || !say.contains("approverKey"),
+        "a cut sentence flips its meaning: {say}"
+    );
+}

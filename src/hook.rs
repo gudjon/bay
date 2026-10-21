@@ -583,12 +583,7 @@ impl Judge<'_> {
         if is_zero(&update.new) {
             return Err("a shard index is never deleted".to_owned());
         }
-        if !is_zero(&update.old)
-            && self
-                .git
-                .run(&["merge-base", "--is-ancestor", &update.old, &update.new])
-                .is_err()
-        {
+        if !is_zero(&update.old) && !self.git.is_ancestor(&update.old, &update.new)? {
             return Err("a shard index takes only a fast-forward".to_owned());
         }
         if !matches!(
@@ -1018,13 +1013,13 @@ impl Judge<'_> {
         if !is_zero(&update.old) {
             return Err("a landed marker is never moved or deleted".to_owned());
         }
-        let with_trunk = self.updates.iter().any(|other| {
-            other.name == trunk
-                && self
-                    .git
-                    .run(&["merge-base", "--is-ancestor", &update.new, &other.new])
-                    .is_ok()
-        });
+        let mut with_trunk = false;
+        for other in self.updates.iter().filter(|other| other.name == trunk) {
+            if self.git.is_ancestor(&update.new, &other.new)? {
+                with_trunk = true;
+                break;
+            }
+        }
         if !with_trunk {
             return Err(format!(
                 "is created only together with the trunk update that lands {id}"
@@ -1066,11 +1061,8 @@ impl Judge<'_> {
             return Err("a change chain is never deleted".to_owned());
         }
         let chain = Chain::new(self.git);
-        let fast_forward = is_zero(&update.old)
-            || self
-                .git
-                .run(&["merge-base", "--is-ancestor", &update.old, &update.new])
-                .is_ok();
+        let fast_forward =
+            is_zero(&update.old) || self.git.is_ancestor(&update.old, &update.new)?;
         if !fast_forward {
             return self.retention_cut(update, id);
         }
@@ -1633,11 +1625,7 @@ impl Judge<'_> {
         let range = if is_zero(&update.old) {
             update.new.clone()
         } else {
-            if self
-                .git
-                .run(&["merge-base", "--is-ancestor", &update.old, &update.new])
-                .is_err()
-            {
+            if !self.git.is_ancestor(&update.old, &update.new)? {
                 return Err("an executor log only appends".to_owned());
             }
             format!("{}..{}", update.old, update.new)
@@ -1663,11 +1651,7 @@ impl Judge<'_> {
                 "the registry is created once by its first push and never deleted".to_owned(),
             );
         }
-        if self
-            .git
-            .run(&["merge-base", "--is-ancestor", &update.old, &update.new])
-            .is_err()
-        {
+        if !self.git.is_ancestor(&update.old, &update.new)? {
             return Err("the registry only fast-forwards".to_owned());
         }
         let commits = self
@@ -1878,12 +1862,8 @@ impl Judge<'_> {
         if self.trailer(commit, throughput::BATCH_TRAILER)?.is_empty() {
             return Ok(false);
         }
-        let ancestor = |of: &str| {
-            self.git
-                .run(&["merge-base", "--is-ancestor", commit, of])
-                .is_ok()
-        };
-        Ok(ancestor(&trunk.new) && (is_zero(&trunk.old) || !ancestor(&trunk.old)))
+        Ok(self.git.is_ancestor(commit, &trunk.new)?
+            && (is_zero(&trunk.old) || !self.git.is_ancestor(commit, &trunk.old)?))
     }
 
     /// A release: created once, executor-signed, for a reservation that exists.

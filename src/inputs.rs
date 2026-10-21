@@ -19,11 +19,8 @@
 //! a view reads it before running a provider, and a hook reads only it and never runs one.
 
 use std::collections::BTreeMap;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -408,20 +405,23 @@ fn run_provider(
         cmd.env("PATH", crate::platform::search_path(&entry.path));
     }
     let request = json!({"input": entry.name, "tree": tree}).to_string();
-    let (status, stdout, stderr) = run_bounded(
+    // An input provider runs as any adapter does: in a process group of its own, killed whole
+    // at its bound (`crate::run::bounded`).
+    let ran = crate::run::captured(
         cmd,
-        request.as_bytes(),
+        Some(request.as_bytes()),
         Duration::from_secs(entry.timeout_s),
     )
-    .map_err(|why| format!("the provider for {}: {why}", entry.name))?;
-    if !status.success() {
+    .map_err(|fault| format!("the provider for {}: {fault}", entry.name))?;
+    if !ran.status.success() {
         return Err(format!(
-            "the provider for {} exited with {status}: {}",
+            "the provider for {} exited with {}: {}",
             entry.name,
-            String::from_utf8_lossy(&stderr).trim()
+            ran.status,
+            String::from_utf8_lossy(&ran.stderr).trim()
         ));
     }
-    let version: Version = serde_json::from_slice(&stdout).map_err(|error| {
+    let version: Version = serde_json::from_slice(&ran.stdout).map_err(|error| {
         format!(
             "the provider for {} printed no version: {error}",
             entry.name
@@ -434,105 +434,6 @@ fn run_provider(
         ));
     }
     Ok(version)
-}
-
-/// Runs `cmd` with `input` on stdin in a process group of its own, and returns its status,
-/// stdout and stderr, all within `timeout`. A child the provider leaves running belongs to the
-/// provider: once the provider exits, its group is killed, so no child holds its output open,
-/// and the output is waited for no longer than the timeout.
-pub(crate) fn run_bounded(
-    mut cmd: Command,
-    input: &[u8],
-    timeout: Duration,
-) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), String> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        cmd.process_group(0);
-    }
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("it did not start: {error}"))?;
-    let group = child.id();
-    let deadline = Instant::now() + timeout;
-    if let Some(mut stdin) = child.stdin.take() {
-        let input = input.to_vec();
-        std::thread::spawn(move || {
-            let _ = stdin.write_all(&input);
-        });
-    }
-    let (sender, outputs) = mpsc::channel();
-    let pipes: [(usize, Option<Box<dyn Read + Send>>); 2] = [
-        (0, child.stdout.take().map(|pipe| Box::new(pipe) as _)),
-        (1, child.stderr.take().map(|pipe| Box::new(pipe) as _)),
-    ];
-    for (which, pipe) in pipes {
-        let mut pipe = pipe.ok_or("an output pipe is missing")?;
-        let sender = sender.clone();
-        std::thread::spawn(move || {
-            let mut buffer = Vec::new();
-            let _ = pipe.read_to_end(&mut buffer);
-            let _ = sender.send((which, buffer));
-        });
-    }
-    drop(sender);
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            kill_group(group);
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("it timed out after {}s", timeout.as_secs()));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let mut output = [Vec::new(), Vec::new()];
-    let mut received = 0;
-    let mut killed = false;
-    while received < 2 {
-        // A provider whose output is still open shortly after it exited left a child holding
-        // it: the group goes, and the output is waited for until the deadline at most.
-        let wait = if killed {
-            deadline
-                .saturating_duration_since(Instant::now())
-                .max(Duration::from_secs(1))
-        } else {
-            Duration::from_millis(200)
-        };
-        match outputs.recv_timeout(wait) {
-            Ok((which, buffer)) => {
-                output[which] = buffer;
-                received += 1;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) if !killed => {
-                kill_group(group);
-                killed = true;
-            }
-            Err(_) => return Err("a child it left behind held its output open".to_owned()),
-        }
-    }
-    let [stdout, stderr] = output;
-    Ok((status, stdout, stderr))
-}
-
-/// Kills process group `group`, with a bounded `kill`. On Windows, where a child leads no
-/// group, the process `group` names and every process it started, with a bounded `taskkill`.
-pub(crate) fn kill_group(group: u32) {
-    let kill = if cfg!(windows) {
-        let mut kill = Command::new("taskkill");
-        kill.args(["/F", "/T", "/PID", &group.to_string()]);
-        kill
-    } else {
-        let mut kill = Command::new("kill");
-        kill.args(["-KILL", "--", &format!("-{group}")]);
-        kill
-    };
-    let _ = crate::git::run_bounded_for(kill, "kill", None, Duration::from_secs(5));
 }
 
 /// The version of each of `record`'s named inputs at `base`, under the policy at `base`: what

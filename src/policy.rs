@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::canonical::digest;
-use crate::git::{Git, GitError};
+use crate::git::Git;
 use crate::inputs::InputEntry;
 
 pub const POLICY_PATH: &str = ".bay/policy.toml";
@@ -814,7 +814,7 @@ pub fn outside_edits(
             continue;
         }
         if let Some(bootstrap) = &bootstrap
-            && is_ancestor(git, last, bootstrap)?
+            && git.is_ancestor(last, bootstrap)?
         {
             continue;
         }
@@ -840,33 +840,22 @@ pub fn outside_edits(
     Ok(edits)
 }
 
-/// Whether `ancestor` is an ancestor of (or equal to) `descendant`.
-fn is_ancestor(git: &Git, ancestor: &str, descendant: &str) -> Result<bool, String> {
-    match git.run(&["merge-base", "--is-ancestor", ancestor, descendant]) {
-        Ok(_) => Ok(true),
-        Err(GitError::Failed { .. }) => Ok(false),
-        Err(error) => Err(error.message()),
-    }
-}
-
-/// The files `commit` changed against its first parent (every file, for a root commit).
+/// The files `commit` changed against its first parent (every file, for a root commit), read
+/// as [`crate::check::changed_paths`] reads them: NUL-separated, so Git never quotes a name.
 fn changed_paths(git: &Git, commit: &str) -> Result<Vec<String>, String> {
-    let has_parent = git
-        .run(&["rev-parse", "--verify", "-q", &format!("{commit}^1")])
-        .is_ok();
-    let out = if has_parent {
-        git.run(&[
-            "diff",
-            "--name-only",
-            "--no-renames",
-            &format!("{commit}^1"),
-            commit,
-        ])
-    } else {
-        git.run(&["ls-tree", "-r", "--name-only", commit])
+    let parent = format!("{commit}^1");
+    let has_parent = git.run(&["rev-parse", "--verify", "-q", &parent]).is_ok();
+    if has_parent {
+        return crate::check::changed_paths(git, &parent, commit);
     }
-    .map_err(|error| error.message())?;
-    Ok(out.lines().map(str::to_owned).collect())
+    let out = git
+        .run(&["ls-tree", "-r", "-z", "--name-only", commit])
+        .map_err(|error| error.message())?;
+    Ok(out
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect())
 }
 
 const fn default_timeout() -> u64 {
@@ -2193,5 +2182,38 @@ mod tests {
             digest,
             "sha256:648dc0a34161fcd3d98d99ba9a6344ff8bb74db55fed4177ccd0debf0eb2387e"
         );
+    }
+
+    /// A changed path is read as Git stores it, never quoted: a name with a space and a
+    /// non-ASCII character comes back whole, from a root commit and from a child alike.
+    #[test]
+    fn a_changed_path_with_a_space_and_a_non_ascii_character_round_trips() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = crate::git::Git::new(dir.path());
+        git.run(&["init", "-q"]).unwrap();
+        let commit = |path: &str| {
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, "x\n").unwrap();
+            git.run(&["add", "--", path]).unwrap();
+            git.run(&[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                path,
+            ])
+            .unwrap();
+            git.run(&["rev-parse", "HEAD"]).unwrap()
+        };
+        let root_path = "r\u{e9}sum\u{e9} one.txt";
+        let child_path = "d\u{f6}cs/a b.txt";
+        let root = commit(root_path);
+        let child = commit(child_path);
+        assert_eq!(super::changed_paths(&git, &root).unwrap(), [root_path]);
+        assert_eq!(super::changed_paths(&git, &child).unwrap(), [child_path]);
     }
 }

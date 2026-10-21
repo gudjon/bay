@@ -119,6 +119,27 @@ pub enum Fetch {
     First,
 }
 
+/// What [`Repo::remote_chain`] read of a change's chain on the remote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteChain {
+    /// The remote's head of the chain.
+    pub head: String,
+    /// This store's head of the chain, when the read kept it because it holds commits the
+    /// remote lacks (G289); `None` when the local chain ref names `head`.
+    pub kept: Option<String>,
+}
+
+/// What [`Repo::remote_record`] read: [`RemoteChain`] and the record at the remote's head.
+#[derive(Debug, Clone)]
+pub struct RemoteRecord {
+    /// The remote's head of the chain.
+    pub head: String,
+    /// The record at `head`: the remote's view of the change.
+    pub record: crate::change::ChangeRecord,
+    /// As [`RemoteChain::kept`].
+    pub kept: Option<String>,
+}
+
 pub struct Repo {
     /// Git on the common directory: every view of this repository shares it.
     pub git: Git,
@@ -487,6 +508,134 @@ impl Repo {
         let refspecs: Vec<String> = refs.iter().map(|name| format!("+{name}:{name}")).collect();
         args.extend(refspecs.iter().map(String::as_str));
         self.git.run(&args).map(|_| ())
+    }
+
+    /// The remote's head of `change`'s chain, read by the one rule every reader of a remote
+    /// chain follows (G199, G289): this store's chain ref is never moved back.
+    ///
+    /// - A fast-forward fetch into the chain ref is tried first: it creates a chain this store
+    ///   lacks, and moves one the remote's head descends from.
+    /// - When git refuses it, the remote's head is fetched into `refs/bay/fetch/<id>`, read and
+    ///   the ref removed again; `FETCH_HEAD` is never read, since a fetch that fails can leave it
+    ///   holding another change's chain. The local chain is then created at the remote's head,
+    ///   or moved to it only when it descends from the local head, each by compare-and-swap.
+    /// - A local chain with commits the remote lacks (ahead of the remote's, or apart from it)
+    ///   is kept where it is, and [`RemoteChain::kept`] names its head. Such commits are work
+    ///   not yet pushed: an offline request, or a write another bay process on this box is
+    ///   about to push. Only its writer's push, or `receipts::sync`, takes it to the remote.
+    /// - The one exception is a retention cut (§ 4): the remote's one rewrite of a chain, made
+    ///   only once the change closed and its window passed, replaces the local chain, again by
+    ///   compare-and-swap on the head read.
+    ///
+    /// No caller forces a chain ref over its local copy, and the executor never does either:
+    /// it goes on from the remote's head, and when the local ref holds work the remote lacks,
+    /// its compare-and-swap on that ref loses and it reads again. The sync at the start of each
+    /// executor pass pushes such work first.
+    ///
+    /// # Errors
+    ///
+    /// The remote cannot be read, or lacks the chain.
+    pub fn remote_chain(&self, change: &str) -> Result<RemoteChain, GitError> {
+        let git = &self.git;
+        let name = crate::change::change_ref(change);
+        if git
+            .run(&[
+                "fetch",
+                "-q",
+                "--no-tags",
+                self.remote(),
+                &format!("{name}:{name}"),
+            ])
+            .is_ok()
+            && let Some(head) = git.ref_target(&name)?
+        {
+            return Ok(RemoteChain { head, kept: None });
+        }
+        let fetched = format!("{}{change}", crate::names::FETCH);
+        git.run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            self.remote(),
+            &format!("+{name}:{fetched}"),
+        ])?;
+        let remote = git.run(&["rev-parse", "--verify", &fetched])?;
+        let _ = git.run(&["update-ref", "-d", &fetched, &remote]);
+        match git.ref_target(&name)? {
+            None => {
+                let _ = git.run(&["update-ref", &name, &remote, ""]);
+            }
+            Some(local) if local == remote => {}
+            Some(local)
+                if git.is_ancestor(&local, &remote).unwrap_or(false)
+                    || crate::change::Chain::new(git)
+                        .record_at(&remote)
+                        .is_ok_and(|record| record.retention_cut && record.id == change) =>
+            {
+                let _ = git.run(&["update-ref", &name, &remote, &local]);
+            }
+            Some(_) => {}
+        }
+        // A compare-and-swap another process won leaves the ref as that process set it.
+        let kept = git.ref_target(&name)?.filter(|local| *local != remote);
+        Ok(RemoteChain { head: remote, kept })
+    }
+
+    /// [`Repo::remote_chain`] and the record at the remote's head: the remote's view of the
+    /// change, whatever this store's chain ref keeps.
+    ///
+    /// # Errors
+    ///
+    /// The remote cannot be read, lacks the chain, or its record does not parse.
+    pub fn remote_record(&self, change: &str) -> Result<RemoteRecord, String> {
+        let RemoteChain { head, kept } =
+            self.remote_chain(change).map_err(|error| error.message())?;
+        let record = crate::change::Chain::new(&self.git)
+            .record_at(&head)
+            .map_err(|error| error.message())?;
+        Ok(RemoteRecord { head, record, kept })
+    }
+
+    /// Every change chain of the remote, read by [`Repo::remote_chain`]'s rule in one batch:
+    /// one fast-forward fetch of them all. Only when git refuses some ref is each chain whose
+    /// local head differs from the remote's read on its own, so a batch the remote and this
+    /// store agree on costs one fetch, however many chains there are (G200b).
+    ///
+    /// # Errors
+    ///
+    /// The remote cannot be read.
+    pub fn fetch_chains(&self) -> Result<(), GitError> {
+        let prefix = crate::change::CHANGES_PREFIX;
+        let Err(refused) = self.git.run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            self.remote(),
+            &format!("{prefix}*:{prefix}*"),
+        ]) else {
+            return Ok(());
+        };
+        let Ok(listed) = self
+            .git
+            .run(&["ls-remote", self.remote(), &format!("{prefix}*")])
+        else {
+            return Err(refused);
+        };
+        let local = self
+            .git
+            .run(&["for-each-ref", "--format=%(objectname) %(refname)", prefix])?;
+        for (head, name) in listed.lines().filter_map(|line| line.split_once('\t')) {
+            let Some(change) = name.strip_prefix(prefix) else {
+                continue;
+            };
+            let same = local
+                .lines()
+                .any(|line| line.split_once(' ') == Some((head, name)));
+            if !same {
+                let _ = self.remote_chain(change);
+            }
+        }
+        Ok(())
     }
 
     /// The view directory's change id, when `dir` is one of this repository's views.

@@ -20,7 +20,7 @@
 //!
 //! and in `src/hold.rs`, `run_in`, which the hold adapter shares:
 //!
-//! - `crate::notify::command_at(scratch, command)`: pass `&repo.work_root` for `scratch`, and
+//! - `crate::run::command(scratch, command)`: pass `&repo.work_root` for `scratch`, and
 //!   the uncommitted work-tree copy of the adapter runs in place of the trunk's;
 //! - `if !scratch.join(program).is_file()`: drop it, and the missing adapter's `why` no longer
 //!   names that it is not in trunk.

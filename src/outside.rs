@@ -183,11 +183,11 @@ fn refresh_own(repo: &Repo, name: &str) -> Result<(), String> {
         // An empty old value: the ref must still not exist.
         return update("");
     };
-    if crate::publish::is_ancestor(git, &remote, &local)? {
+    if git.is_ancestor(&remote, &local)? {
         // The same, or ahead by records an earlier run wrote here but could not push.
         return Ok(());
     }
-    if !crate::publish::is_ancestor(git, &local, &remote)? {
+    if !git.is_ancestor(&local, &remote)? {
         return Err(format!(
             "{own} has diverged: here it is {local}, on the remote {remote}, and each holds records the other lacks (another box records as {name}); nothing is written and neither is changed"
         ));

@@ -16,7 +16,6 @@
 //! there itself.
 
 use std::collections::BTreeSet;
-use std::process::Command;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -138,22 +137,6 @@ fn refusal(
     }
 }
 
-/// The adapter's command as a process: a program path relative to the main work tree, then its
-/// arguments, with only `PATH` and `HOME` from bay's environment, as the notify adapter has.
-fn adapter_command(repo: &Repo, command: &str) -> Result<Command, String> {
-    let mut words = command.split_whitespace();
-    let program = words.next().ok_or("[runtime] command is empty")?;
-    let mut cmd = crate::platform::script(&repo.work_root.join(program))
-        .map_err(|why| format!("the runtime adapter: {why}"))?;
-    cmd.args(words).current_dir(&repo.work_root).env_clear();
-    for name in ["PATH", "HOME"] {
-        if let Some(value) = std::env::var_os(name) {
-            cmd.env(name, value);
-        }
-    }
-    Ok(cmd)
-}
-
 /// What one runtime adapter run said: the records that count, for this read only, and the
 /// records refused, each with why.
 #[derive(Debug, Default)]
@@ -186,18 +169,22 @@ pub fn observe(
     else {
         return Ok(None);
     };
-    let cmd = adapter_command(repo, command)?;
+    // A program path relative to the main work tree, then its arguments, with only `PATH` and
+    // `HOME` from bay's environment, as the notify adapter has (`crate::run`).
+    let cmd = crate::run::command(&repo.work_root, command)
+        .ok_or("[runtime] command is empty")?
+        .map_err(|why| format!("the runtime adapter: {why}"))?;
     let request = json!({"change": change, "commit": commit, "tree": tree}).to_string();
-    let (status, stdout, stderr) =
-        crate::inputs::run_bounded(cmd, request.as_bytes(), RUNTIME_TIMEOUT)
-            .map_err(|why| format!("the runtime adapter: {why}"))?;
-    if !status.success() {
+    let ran = crate::run::captured(cmd, Some(request.as_bytes()), RUNTIME_TIMEOUT)
+        .map_err(|fault| format!("the runtime adapter: {fault}"))?;
+    if !ran.status.success() {
         return Err(format!(
-            "the runtime adapter exited with {status}: {}",
-            String::from_utf8_lossy(&stderr).trim()
+            "the runtime adapter exited with {}: {}",
+            ran.status,
+            String::from_utf8_lossy(&ran.stderr).trim()
         ));
     }
-    let records = parse(&stdout)?;
+    let records = parse(&ran.stdout)?;
     let producers = Registry::signing(registry)
         .map(|registry| registry.class_file(&repo.git, crate::registry::KeyClass::Producer))
         .transpose()?;

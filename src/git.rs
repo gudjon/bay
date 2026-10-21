@@ -626,6 +626,28 @@ impl Git {
         self.run(&["cat-file", "-e", rev]).is_ok()
     }
 
+    /// Whether `ancestor` is an ancestor of `descendant`, or the same commit, as
+    /// `git merge-base --is-ancestor` answers: exit 0 is yes and exit 1 is no. Every other
+    /// answer, a missing object among them, is an error and never "no". bay's one reading of
+    /// ancestry.
+    ///
+    /// # Errors
+    ///
+    /// Git cannot run, or it exits other than 0 or 1 (an absent object, a name that is no
+    /// commit).
+    pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, String> {
+        let (code, _, stderr) = self
+            .run_status(&["merge-base", "--is-ancestor", ancestor, descendant])
+            .map_err(|error| error.message())?;
+        match code {
+            0 => Ok(true),
+            1 => Ok(false),
+            _ => Err(format!(
+                "git merge-base --is-ancestor {ancestor} {descendant}: {stderr}"
+            )),
+        }
+    }
+
     /// The object a ref points at, or `None` when the ref does not exist.
     ///
     /// # Errors
@@ -1253,6 +1275,40 @@ mod tests {
             reader.config_get("bay.trunk").unwrap(),
             asked(&reader, "bay.trunk", false)
         );
+    }
+
+    /// Ancestry is read one way: an ancestor is `true`, a commit apart is `false`, and a name
+    /// Git cannot find is an error, never "not an ancestor".
+    #[test]
+    fn ancestry_answers_yes_no_or_an_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = Git::new(dir.path());
+        git.run(&["init", "-q"]).unwrap();
+        let commit = |message: &str| {
+            git.run(&[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                message,
+            ])
+            .unwrap();
+            git.run(&["rev-parse", "HEAD"]).unwrap()
+        };
+        let first = commit("first");
+        let second = commit("second");
+        assert_eq!(git.is_ancestor(&first, &second), Ok(true));
+        assert_eq!(git.is_ancestor(&first, &first), Ok(true));
+        assert_eq!(git.is_ancestor(&second, &first), Ok(false));
+        let absent = "1".repeat(first.len());
+        let missing = git.is_ancestor(&absent, &second);
+        assert!(missing.is_err(), "{missing:?}");
+        let missing = git.is_ancestor(&first, &absent);
+        assert!(missing.is_err(), "{missing:?}");
     }
 
     /// G104b: the absent names of a `cat-file --batch` answer are its `missing` lines, never a

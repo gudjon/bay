@@ -228,11 +228,7 @@ pub fn reached(
     heads: &[&str],
     base: Option<&str>,
 ) -> Result<Vec<Leak>, String> {
-    let on_base = |commit: &str| {
-        base.map_or(Ok(false), |base| {
-            crate::publish::is_ancestor(git, commit, base)
-        })
-    };
+    let on_base = |commit: &str| base.map_or(Ok(false), |base| git.is_ancestor(commit, base));
     let mut leaks = Vec::new();
     for tip in tips {
         if on_base(tip.commit.as_str())? {

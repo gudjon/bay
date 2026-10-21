@@ -453,8 +453,8 @@ const fn op_state(op: &crate::change::Operation) -> &'static str {
     }
 }
 
-/// What happens after the answer, in plain words. An executor never runs an operation held
-/// for an approval again on its own: the change's author submits it again.
+/// What happens after the answer, in plain words. A running executor lands an approved change
+/// on its next pass (G284); without one, the change's author lands it.
 fn next_step(repo: &Repo, held: &Held, reject: bool) -> String {
     let actor = &held.record.actor.name;
     if reject {
@@ -475,7 +475,8 @@ fn next_step(repo: &Repo, held: &Held, reject: bool) -> String {
         Ok(Some(rows)) if crate::presence::any_fresh(&rows)
     );
     if live {
-        format!("an executor runs: the change lands once {actor}, its author, runs bay land again")
+        "an executor runs: its next pass lands the change; nobody needs to run bay land again"
+            .to_owned()
     } else {
         format!("{actor}, the change's author, runs bay land --wait, and the change lands")
     }

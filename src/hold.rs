@@ -207,10 +207,12 @@ fn run_in(
         return Err(format!("{program} is not in trunk {trunk}"));
     }
     let mut cmd =
-        crate::notify::command_at(scratch, command).ok_or_else(|| format!("{what} is empty"))?;
+        crate::run::command(scratch, command).ok_or_else(|| format!("{what} is empty"))??;
     cmd.args(args);
     let left = deadline.saturating_duration_since(Instant::now());
-    crate::inputs::run_bounded(cmd, &[], left.max(Duration::from_millis(1)))
+    let ran = crate::run::captured(cmd, None, left.max(Duration::from_millis(1)))
+        .map_err(|fault| fault.to_string())?;
+    Ok((ran.status, ran.stdout, ran.stderr))
 }
 
 /// The adapter's answer on stdout: `{"held": true|false, "reason": "..."}`, and an `end` it

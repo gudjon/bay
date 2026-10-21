@@ -79,7 +79,7 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         .run(&["rev-parse", "--verify", "-q", "HEAD^{commit}"])
         .map_err(|_| "the main checkout has no commit at HEAD to save onto".to_owned())?;
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
-    if !publish::is_ancestor(&repo.git, &head, &trunk)? {
+    if !repo.git.is_ancestor(&head, &trunk)? {
         return Err(format!(
             "the main checkout's HEAD {head} is not on the history of trunk {} ({trunk}): \
              bay save lands only edits made on trunk's history",
@@ -537,7 +537,7 @@ fn may_move(
             "HEAD moved from {head} to {now} during the save: HEAD and the files stay"
         )));
     }
-    if !publish::is_ancestor(&repo.git, head, commit)? {
+    if !repo.git.is_ancestor(head, commit)? {
         return Ok(Some(format!(
             "HEAD {head} is not an ancestor of the landing {commit}: HEAD and the files stay"
         )));
