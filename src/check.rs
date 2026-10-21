@@ -1323,7 +1323,7 @@ fn answers_on_base(
     base: &str,
 ) -> bool {
     // N-18: a changed-only check's base record is the base's own, on its own first parent.
-    let commit_keyed = entry.inputs.iter().any(|input| input == "commit") || entry.changed_only();
+    let commit_keyed = entry.commit_keyed();
     record.kind == crate::evidence::KIND_CHECK
         && record.check == CheckId::new(&entry.id, &entry.environment)
         && record.subject.tree == candidate.base_tree

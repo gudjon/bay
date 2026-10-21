@@ -101,12 +101,16 @@ pub fn answer(dir: &Path, answer: &Answer) -> BayResult {
 fn open(dir: &Path) -> Result<(Repo, Registry, Actor), Stop> {
     let repo = Repo::open(dir)?;
     repo.fetch_registry();
-    let registry = Registry::current(&repo.git)?.ok_or_else(|| {
-        Refusal::invalid(format!(
-            "a talk needs the repository's key registry ({}): the sender and `who` are registry actors",
-            crate::names::REGISTRY
-        ))
-    })?;
+    // N-21: under `[policy] signing = "approvals"` no agent signs, so no talk exists, as
+    // without a registry.
+    let registry = Registry::current(&repo.git)?
+        .filter(Registry::signs_all)
+        .ok_or_else(|| {
+            Refusal::invalid(format!(
+                "a talk needs the repository's key registry ({}): the sender and `who` are registry actors, and the policy's [policy] signing must be \"all\"",
+                crate::names::REGISTRY
+            ))
+        })?;
     let actor = crate::change::current_actor()?;
     Ok((repo, registry, actor))
 }

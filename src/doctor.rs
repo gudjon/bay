@@ -152,6 +152,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
         report.rows.push(store_row(&git, &config, info));
         gc_log_row(&git, &mut report);
         quarantine_row(&git, &config, info.bare, &mut report);
+        signing_row(&git, &mut report);
         if !info.bare {
             repository_row(&git, &config, &mut report);
             live_row(&git, &mut report);
@@ -882,9 +883,31 @@ fn check_env_row(git: &Git, config: &Config, report: &mut Report) {
     );
 }
 
+/// The `signing` row (N-21), never red: whether this repository has a key registry, and what it
+/// signs under the policy at trunk, `all` or `approvals` (`[policy] signing`). Without a
+/// registry nothing is signed, and no approval can count.
+fn signing_row(git: &Git, report: &mut Report) {
+    let row = match crate::registry::Registry::current(git) {
+        Ok(None) => json!({"name": "signing", "required": false, "state": "green",
+            "registry": null, "mode": "unsigned",
+            "note": "no key registry: nothing is signed, and no approval can count"}),
+        Ok(Some(registry)) if registry.signs_all() => json!({"name": "signing",
+            "required": false, "state": "green", "registry": registry.commit,
+            "mode": registry.mode().name(),
+            "note": "landings, requests, chains and evidence are signed by enrolled keys"}),
+        Ok(Some(registry)) => json!({"name": "signing", "required": false, "state": "green",
+            "registry": registry.commit, "mode": registry.mode().name(),
+            "note": "only approvals are signed, by keys of the registry's approver file; landings, requests, chains and other evidence run unsigned"}),
+        Err(why) => json!({"name": "signing", "required": false, "state": "unread",
+            "note": why}),
+    };
+    report.rows.push(row);
+}
+
 /// For a stated executor under a registry (G63, § 10a): the executor key that signs its
 /// publications and the producer key that signs its evidence are set, and each one's name is
-/// enrolled in its class file. Without a registry the executor publishes unsigned: green.
+/// enrolled in its class file. Without a registry the executor publishes unsigned: green. Under
+/// `[policy] signing = "approvals"` (N-21) neither key is needed: green.
 fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report) {
     use crate::registry::{KeyClass, Registry};
     let registry = match Registry::current(git) {
@@ -893,6 +916,13 @@ fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report
                 .rows
                 .push(json!({"name": "executor-keys", "required": false,
                 "state": "green", "note": "no registry: the executor publishes unsigned"}));
+            return;
+        }
+        // N-21: under `[policy] signing = "approvals"` no executor or producer key signs.
+        Ok(Some(registry)) if !registry.signs_all() => {
+            report.rows.push(json!({"name": "executor-keys", "required": false,
+                "state": "green", "signing": registry.mode().name(),
+                "note": "the policy at trunk says [policy] signing = \"approvals\": the executor publishes unsigned, and only approvals are signed"}));
             return;
         }
         Ok(Some(registry)) => registry,

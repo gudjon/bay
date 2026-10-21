@@ -37,6 +37,21 @@ A promise is done when its failure test passes in bay's gate, and the pass is on
   No model sits in bay's decision path.
 - bay does not carry any one organisation's landing tooling.
 
+## One place, one truth
+
+bay removes complexity, so it never adds a second place to look, a second copy of a fact, or a second concept to
+learn.
+- People act in the conversation they are already in. There is no dashboard, mirror or extra page.
+- Each fact has one home:
+  - Git holds the state.
+  - `bay.result/1` is what a command says; its `say` sentence is derived from it.
+  - The policy at the base holds the rules.
+  - The registry holds the keys.
+  - The skill holds the agent's guide.
+  - The CHANGELOG holds the release notes.
+- A new command or flag must take a step away from someone, not add one.
+- When a feature would need a second surface or a copy, extend the one home instead.
+
 ## Organisation-neutral
 
 bay is a general tool. Nothing in this repository is specific to one organisation: no organisation's

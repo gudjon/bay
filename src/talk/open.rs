@@ -17,7 +17,7 @@ use crate::result::BayResult;
 /// name no talk can reach, or when the talks cannot be read: the list only tells.
 #[must_use]
 pub fn open_on(repo: &Repo, change: &str) -> Vec<Value> {
-    if !matches!(Registry::current(&repo.git), Ok(Some(_))) {
+    if !matches!(Registry::current(&repo.git), Ok(Some(registry)) if registry.signs_all()) {
         return Vec::new();
     }
     let me = crate::change::actor_name();

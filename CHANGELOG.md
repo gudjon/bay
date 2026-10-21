@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.4
+
+- `bay save <intent>` lands the edits made in the main checkout as one change.
+- After a save lands, the main checkout fast-forwards to the new main, losing no edit.
+- A refused save leaves the main checkout's files exactly as they were and names the change.
+- `[policy] signing = "approvals"` signs only approvals, so small teams land without executor or producer keys.
+- Under approvals-only signing, landings and check evidence run unsigned and results say `trust: "approvals"`.
+- An approval still counts only when an enrolled approver's key signed it.
+- `bay doctor` shows the signing mode.
+- A dependency that ends `no_effect` is met: its dependent lands, never `DEPENDENCY_ABANDONED`.
+- A check reading history with `baseline = "base"` now matches its base record by commit, never by tree.
+
 ## 0.2.3
 
 - `bay start --after <change>` lands a change only after the named changes landed on main.
@@ -11,11 +23,11 @@
 - Such a check's request says `"materialized": "changed"`, and its evidence is keyed by commit.
 - `bay status --heads --prune` runs an optional `[heads] on_prune` adapter after each delete, from trunk's copy.
 - A failing prune adapter never undoes the prune or stops it; each branch records the adapter's outcome.
-- `bay start --from <branch>` takes the remote's tip when the remote has it, even over a local branch.
+- `bay start --from <branch>` takes the remote's tip when it has one, and fails if the remote cannot be listed.
 - A `--from` branch touching undeclared paths is refused as `PATHS_UNDECLARED`, naming them.
 - bay finds landings that an outside merge pushed off trunk's first-parent line, by ancestry.
-- Red judgement, culprits, targets and undo read that landing line, including landings behind outside merges.
-- `bay status` and `bay watch` warn `trunk_not_linear` for each such merge; require linear history on the host.
+- Red judgement, culprits and targets read that landing line; undo finds such a landing by ancestry.
+- `bay status` warns `trunk_not_linear` for such merges in the red window; `bay watch` names each new one once.
 
 ## 0.2.2
 
@@ -25,7 +37,7 @@
 - `bay start --from <branch>` takes in a branch made outside bay; it lands as one checked commit.
 - `bay status --heads` lists every remote branch as trunk, target, lane, landed, stale or unique.
 - `bay status --heads --prune` archives each landed branch under `refs/bay/archive/heads/`, then deletes it under a lease.
-- Only branches proven landed by ancestry or equal patches are pruned, never by Change-Id alone.
+- Only branches shown merged by ancestry or equal patches are pruned, never by Change-Id alone.
 - A `[[freeze]]` naming the trunk holds it: only fixes and reverts land until its end.
 - A `[hold] command` adapter can hold the trunk; an unreadable answer counts as held.
 - Held changes wait queued with `TRUNK_HELD`; `bay status` shows the hold in `detail.hold`.
@@ -33,7 +45,7 @@
 - Pre-existing failures land named under `coverage_gaps` as `baseline_failures`, never as a pass.
 - After `bay land --abandon`, `bay start <intent> --new` claims the next generation, superseding the abandoned change.
 - `bay start --resume` refuses an abandoned change once a newer generation of its intent exists.
-- Re-opening a change reports `behind`, how many trunk commits it missed, with a hint to resume.
+- Re-opening a change with plain `bay start` reports `behind`, the trunk commits it missed, with a hint to resume.
 
 ## 0.2.1
 
@@ -43,7 +55,7 @@
 - A `[[target]]` with `advance = true` is fast-forwarded by the executor to its newest promotable commit.
 - A live change's session hears once when another change lands on its declared paths, and should refresh.
 - `bay start` refuses `WIP_LIMIT` when an actor already holds `[agent] max_live_changes` live changes.
-- Below the box's `bay.minFreeMiB` floor, `bay start` and check materialization refuse `DISK_LOW`.
+- Below the box's `bay.minFreeMiB` floor, `bay start` refuses `DISK_LOW`; a check there ends `infra_failure` naming it.
 - `bay doctor` names a `gc.log` that blocks automatic garbage collection.
 
 ## 0.2.0
@@ -59,7 +71,7 @@ Red trunk
 - A red post check names its `suspect` range: the last pass, the first failure, and the landings between.
 - `[executor] bisect_post = true` bisects a red post check's suspect range, recording each run as post evidence.
 - The bisect reruns the suspect once to rule out a flake, in at most log2(n) + 1 runs.
-- A red pinned to one landing names it `culprit`, with the verdict of each run; it owns the red and `TRUNK_RED`.
+- A red pinned to one landing names it `culprit` with each run's verdict; it owns the red and `TRUNK_RED`.
 
 Promotion
 - `[[target]]` in `.bay/config.toml` names promotion targets such as `staging`, with required checks and a soak.

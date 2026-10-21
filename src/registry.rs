@@ -11,11 +11,18 @@
 //! nor an agent name (an author never reviews or approves its own landing under one name, Q7),
 //! and no name is both a reviewer and an approver. Enrolment is plain Git: whoever runs the
 //! repository commits the files with a registry key and pushes.
+//!
+//! What a registry signs is the policy's to say (N-21, `[policy] signing` at the accepted base,
+//! [`crate::policy::Signing`]): `all`, the default, signs every landing, request, chain and
+//! record; `approvals` signs only `approval` records, and everything else runs as with no
+//! registry. A registry read by [`Registry::current`] carries the mode of the trunk tip this
+//! repository judges by; [`Registry::signs_all`] is the guard every other signing rule asks.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::git::Git;
+use crate::policy::Signing;
 
 pub const REGISTRY_REF: &str = crate::names::REGISTRY;
 
@@ -82,6 +89,9 @@ const KEY_TYPES: &[&str] = &[
 pub struct Registry {
     pub commit: String,
     files: HashMap<KeyClass, String>,
+    /// What this registry signs (N-21): `all` from [`Registry::load_at`], the mode of the
+    /// policy at the accepted base from [`Registry::current`].
+    mode: Signing,
 }
 
 /// The class files at `commit`, each empty when absent, and whether the read is complete: the
@@ -140,23 +150,64 @@ impl Registry {
         let registry = Self {
             commit: commit.to_owned(),
             files,
+            mode: Signing::All,
         };
         registry.validate()?;
         Ok(registry)
     }
 
-    /// The registry this repository holds at `refs/bay/registry`, if any.
+    /// The registry this repository holds at `refs/bay/registry`, if any, with the signing mode
+    /// of the policy at the accepted base (N-21, [`accepted_base`]): a candidate never sets the
+    /// mode it is judged by. With no base known the mode is `all`.
     ///
     /// # Errors
     ///
-    /// See [`Registry::load_at`].
+    /// See [`Registry::load_at`], or a policy at the base that cannot be read.
     pub fn current(git: &Git) -> Result<Option<Self>, String> {
         match git
             .ref_target(REGISTRY_REF)
             .map_err(|error| error.message())?
         {
-            Some(commit) => Self::load_at(git, &commit).map(Some),
+            Some(commit) => {
+                let mut registry = Self::load_at(git, &commit)?;
+                if let Some(base) = accepted_base(git)? {
+                    registry.mode = crate::policy::signing_at(git, &base)?;
+                }
+                Ok(Some(registry))
+            }
             None => Ok(None),
+        }
+    }
+
+    /// What this registry signs (N-21).
+    #[must_use]
+    pub const fn mode(&self) -> Signing {
+        self.mode
+    }
+
+    /// Whether this registry signs everything (N-21, `signing = "all"`): landings, requests,
+    /// chains, executor logs, reservations, live summaries, talks and every kind of evidence.
+    /// Under `signing = "approvals"` only an `approval` record is signed, and every rule that
+    /// asks this runs as with no registry.
+    #[must_use]
+    pub fn signs_all(&self) -> bool {
+        self.mode == Signing::All
+    }
+
+    /// `registry` when it signs everything, else `None`: for a rule that requires a signature
+    /// only when every write is signed (N-21).
+    #[must_use]
+    pub fn signing(registry: Option<&Self>) -> Option<&Self> {
+        registry.filter(|registry| registry.signs_all())
+    }
+
+    /// The key of a judgement made under this registry: its commit, and the mode when it signs
+    /// only approvals, so a judgement cached under one mode is never read under the other.
+    #[must_use]
+    pub fn judged_key(&self) -> String {
+        match self.mode {
+            Signing::All => self.commit.clone(),
+            Signing::Approvals => format!("{}/{}", self.commit, Signing::Approvals.name()),
         }
     }
 
@@ -346,4 +397,45 @@ impl Registry {
             matches!(words.as_slice(), [name, kind, key, ..] if *name == principal && *kind == key_type && *key == blob)
         })
     }
+}
+
+/// The trunk tip this repository judges by (N-21): in a work repository the tracking ref of the
+/// remote trunk ([`crate::repo::Bootstrap`]), never a local branch a change can move; on a host
+/// (a bare repository) its trunk branch, `bay.trunk` or `main` as the host hook names it, as it
+/// stands before the push the hook judges. `None` when neither is known.
+///
+/// # Errors
+///
+/// A git fault.
+fn accepted_base(git: &Git) -> Result<Option<String>, String> {
+    if let Ok(bootstrap) = crate::repo::Bootstrap::read(git)
+        && let Some(tip) = git
+            .ref_target(&bootstrap.tracking_ref())
+            .map_err(|error| error.message())?
+    {
+        return Ok(Some(tip));
+    }
+    let bare = git
+        .run(&["rev-parse", "--is-bare-repository"])
+        .map_err(|error| error.message())?;
+    if bare.trim() != "true" {
+        return Ok(None);
+    }
+    let trunk = git
+        .run(&["config", "--get", "bay.trunk"])
+        .unwrap_or_else(|_| "main".to_owned());
+    git.ref_target(&format!("refs/heads/{}", trunk.trim()))
+        .map_err(|error| error.message())
+}
+
+/// Whether trunk commit `commit` landed with every write signed (N-21): the policy at its first
+/// parent, the base it was judged at, does not say `signing = "approvals"`. A parent or policy
+/// that cannot be read is signed, so unknown never weakens a check. Asked only where a registry
+/// exists: without one nothing is signed.
+#[must_use]
+pub fn landing_signed(git: &Git, commit: &str) -> bool {
+    !matches!(
+        crate::policy::signing_stated_at(git, &format!("{commit}^1")),
+        Ok(Signing::Approvals)
+    )
 }

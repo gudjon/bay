@@ -583,7 +583,8 @@ pub fn counted(
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verified {
-    /// There is no registry: nothing can verify the record, and it counts unsigned.
+    /// There is no registry, or one under `signing = "approvals"` and the record is no
+    /// `approval` (N-21): nothing verifies the record, and it counts unsigned.
     Unsigned,
     /// Signed under its producer's name by a key of the class its kind needs.
     Verified,
@@ -592,19 +593,30 @@ pub enum Verified {
 }
 
 /// The trust a result names for the evidence it reports (G160): `unsigned` without a registry,
-/// where every record counts unattested, and `signed` with one, where only verified records
-/// count.
+/// where every record counts unattested; `signed` with one, where only verified records count;
+/// and `approvals` with one under `[policy] signing = "approvals"` (N-21), where only an
+/// `approval` record must verify and every other record counts unsigned. Each record's own
+/// standing is its `verified` ([`Verified`]).
 #[must_use]
-pub const fn trust(registry: Option<&Registry>) -> &'static str {
-    if registry.is_some() {
-        "signed"
-    } else {
-        "unsigned"
+pub fn trust(registry: Option<&Registry>) -> &'static str {
+    match registry {
+        None => "unsigned",
+        Some(registry) if registry.signs_all() => "signed",
+        Some(_) => "approvals",
     }
 }
 
+/// Whether a record of `kind` must verify under `registry` to count: every kind when it signs
+/// all, only an `approval` under `signing = "approvals"` (N-21).
+#[must_use]
+pub fn signed_kind(registry: &Registry, kind: &str) -> bool {
+    registry.signs_all() || kind == KIND_APPROVAL
+}
+
 /// Each record with how it stands: with a registry, verified or unverifiable against the class
-/// file its kind names (§ 7, Q12); without one, every record is unsigned.
+/// file its kind names (§ 7, Q12); without one, every record is unsigned. Under `signing =
+/// "approvals"` (N-21) only an `approval` record is judged against its class file, and every
+/// other record is unsigned, as without a registry.
 ///
 /// # Errors
 ///
@@ -623,6 +635,9 @@ pub fn tagged(
     records
         .into_iter()
         .map(|record| {
+            if !signed_kind(registry, &record.kind) {
+                return Ok((record, Verified::Unsigned));
+            }
             let verified = if record.verifies_in(git, registry)? {
                 Verified::Verified
             } else {

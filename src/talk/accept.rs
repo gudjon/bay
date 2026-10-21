@@ -43,12 +43,13 @@ use crate::result::Reason;
 use crate::signing;
 
 /// Accepts this actor's new talks and acks them; `None` without a key registry, where no talk
-/// exists. The value is the outcome: see the module doc.
+/// exists, or one under `[policy] signing = "approvals"` (N-21), where no agent signs a talk.
+/// The value is the outcome: see the module doc.
 #[must_use]
 pub fn receive(repo: &Repo) -> Option<Value> {
     let registry = match Registry::current(&repo.git) {
-        Ok(Some(registry)) => registry,
-        Ok(None) => return None,
+        Ok(Some(registry)) if registry.signs_all() => registry,
+        Ok(_) => return None,
         Err(why) => return Some(Outcome::new("error").why(why).value()),
     };
     Some(

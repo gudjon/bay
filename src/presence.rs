@@ -266,7 +266,7 @@ pub fn rows(git: &Git, config: &Config, held: &[Held], now: u64) -> Result<Vec<V
     }
     let commits: Vec<String> = held.iter().map(|held| held.commit.clone()).collect();
     let reads = crate::live::files_at(git, &commits, PRESENCE_FILE, PRESENCE_MAX_BYTES)?;
-    let executors = match Registry::current(git)? {
+    let executors = match Registry::current(git)?.filter(Registry::signs_all) {
         Some(registry) => Some(registry.class_file(git, KeyClass::Executor)?),
         None => None,
     };

@@ -53,6 +53,103 @@ struct PolicyFile {
     /// What the policy asks of the acting agent (G152).
     #[serde(default)]
     agent: AgentPolicy,
+    /// The `[policy]` table (N-21): what a key registry signs.
+    #[serde(default)]
+    policy: PolicyTable,
+}
+
+/// The `[policy]` table: `signing = "all"` (the default) or `"approvals"` (N-21). Any other value
+/// does not parse, so the policy is `POLICY_INVALID`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyTable {
+    #[serde(default)]
+    signing: Signing,
+}
+
+/// What a key registry signs (N-21, `[policy] signing`), judged at the accepted base like every
+/// policy key, so a candidate never switches the mode of its own landing. It applies only where
+/// a registry exists: without one nothing is signed and no approval counts, whatever it says.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Signing {
+    /// Every landing, request, chain and evidence record is signed by an enrolled key (§ 10a).
+    #[default]
+    All,
+    /// Only `approval` records are signed, by a key of the registry's approver file (G245).
+    /// Landings, requests, chains and every other record run as with no registry: unsigned, and
+    /// they count unsigned. For a small team with no executor host.
+    Approvals,
+}
+
+impl Signing {
+    /// The value as the policy and results name it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Approvals => "approvals",
+        }
+    }
+}
+
+/// The `[policy] signing` mode of the policy at `commit` (N-21), judged at the base like every
+/// other policy key: [`load_at`]'s, read once per process with the rest of the policy. No
+/// policy is [`Signing::All`]. An invalid policy keeps the mode its text states
+/// ([`signing_stated_at`]): it lands nothing, and its refusal is `POLICY_INVALID`, never a
+/// missing key.
+///
+/// # Errors
+///
+/// A git fault, or a policy file the tree names whose blob cannot be read (G104b).
+pub fn signing_at(git: &Git, commit: &str) -> Result<Signing, String> {
+    match load_at(git, commit) {
+        Ok(policy) => Ok(policy.map_or(Signing::All, |policy| policy.signing)),
+        Err(LoadError::Git(why)) => Err(why),
+        Err(LoadError::Invalid(_)) => signing_stated_at(git, commit),
+    }
+}
+
+/// The `[policy] signing` mode the policy text at `commit` states, with no other part of the
+/// policy judged: for a reader of many commits, such as each landing's parent (N-21). Only
+/// `signing = "approvals"` is [`Signing::Approvals`]: no policy, no key, another value or a text
+/// that does not parse is [`Signing::All`], so unknown never weakens signing.
+///
+/// # Errors
+///
+/// A git fault, or a policy file the tree names whose blob cannot be read (G104b).
+pub fn signing_stated_at(git: &Git, commit: &str) -> Result<Signing, String> {
+    // Read once per process for a fixed commit, kept only when the file was there: no policy
+    // may be a commit not fetched yet.
+    crate::memo::at(
+        "signing",
+        git,
+        commit,
+        |(read, present): &(Result<Signing, String>, bool)| read.is_ok() && *present,
+        || match git.file_at(commit, POLICY_PATH) {
+            Ok(Some(text)) => (Ok(signing_in(&text)), true),
+            Ok(None) => (Ok(Signing::All), false),
+            Err(error) => (Err(error.message()), false),
+        },
+    )
+    .0
+}
+
+/// The mode policy text `text` states: [`Signing::Approvals`] only for `[policy] signing =
+/// "approvals"`.
+fn signing_in(text: &str) -> Signing {
+    let approvals = toml::from_str::<toml::Table>(text).is_ok_and(|table| {
+        table
+            .get("policy")
+            .and_then(|policy| policy.get("signing"))
+            .and_then(toml::Value::as_str)
+            == Some(Signing::Approvals.name())
+    });
+    if approvals {
+        Signing::Approvals
+    } else {
+        Signing::All
+    }
 }
 
 /// The `[agent]` table: `require_actor = true` makes `bay start` refuse `ACTOR_UNNAMED` while
@@ -844,6 +941,8 @@ pub struct Policy {
     pub manifest_digest: String,
     /// The `[agent]` table (G152).
     pub agent: AgentPolicy,
+    /// `[policy] signing` (N-21): what a key registry signs.
+    pub signing: Signing,
 }
 
 /// Why a policy could not be loaded.
@@ -988,6 +1087,7 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
         dimensions,
         manifest_digest,
         agent: file.agent,
+        signing: file.policy.signing,
     }))
 }
 
@@ -1543,7 +1643,55 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{CheckEntry, Quarantine, covers, manifest_digest, manifest_entry};
+    use super::{
+        CheckEntry, PolicyFile, Quarantine, Signing, covers, manifest_digest, manifest_entry,
+        signing_in,
+    };
+
+    /// N-21: `[policy] signing` is `all` by default or `approvals`; any other value, or another
+    /// key in `[policy]`, does not parse (`POLICY_INVALID`). The mode read from the text is
+    /// `approvals` only for that exact value, so unknown never weakens signing.
+    #[test]
+    fn signing_is_all_or_approvals_and_unknown_is_all() {
+        let file = |extra: &str| {
+            toml::from_str::<PolicyFile>(&format!("revision = 1\nunchecked = true\n{extra}"))
+        };
+        assert_eq!(file("").unwrap().policy.signing, Signing::All);
+        assert_eq!(
+            file("[policy]\nsigning = \"all\"\n")
+                .unwrap()
+                .policy
+                .signing,
+            Signing::All
+        );
+        assert_eq!(
+            file("[policy]\nsigning = \"approvals\"\n")
+                .unwrap()
+                .policy
+                .signing,
+            Signing::Approvals
+        );
+        for bad in [
+            "[policy]\nsigning = \"none\"\n",
+            "[policy]\nsigning = \"Approvals\"\n",
+            "[policy]\nsigning = true\n",
+            "[policy]\nsign = \"approvals\"\n",
+        ] {
+            assert!(file(bad).is_err(), "{bad}");
+        }
+        assert_eq!(
+            signing_in("revision = 1\n[policy]\nsigning = \"approvals\"\n"),
+            Signing::Approvals
+        );
+        for text in [
+            "revision = 1\n",
+            "revision = 1\n[policy]\nsigning = \"none\"\n",
+            "revision = 1\nsigning = \"approvals\"\n",
+            "[policy\nsigning = \"approvals\"\n",
+        ] {
+            assert_eq!(signing_in(text), Signing::All, "{text}");
+        }
+    }
 
     /// A quarantine's age counts whole days from `since`; without `since` it has none.
     #[test]

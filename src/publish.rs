@@ -382,11 +382,13 @@ pub fn scan(git: &Git, base_first: &str, trunk: &str, id: &str) -> Result<Scan, 
 }
 
 /// Whether `commit` verifies against the executor file of the registry version `registry_id`
-/// names, under the executor that committed it.
+/// names, under the executor that committed it. A commit that names no registry verifies only
+/// when it landed under `[policy] signing = "approvals"` at its parent (N-21), where landings are
+/// unsigned and trailers decide, as without a registry.
 #[must_use]
 pub fn verify_publication(git: &Git, commit: &str, registry_id: &str, committer: &str) -> bool {
     if registry_id.is_empty() || registry_id == "none" {
-        return false;
+        return !crate::registry::landing_signed(git, commit);
     }
     Registry::load_at(git, registry_id)
         .is_ok_and(|registry| verifies_under(git, commit, &registry, committer))
@@ -469,9 +471,16 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// The agent's signer: its key under the change's actor name. Required with a registry.
+    /// The registry when it signs everything, `None` without one or under `[policy] signing =
+    /// "approvals"` (N-21), where landings, requests, chains and check evidence are unsigned.
+    fn signing(&self) -> Option<&Registry> {
+        Registry::signing(self.registry.as_ref())
+    }
+
+    /// The agent's signer: its key under the change's actor name. Required with a registry
+    /// that signs everything.
     fn agent_signer(&self) -> Result<Option<Signer>, String> {
-        if self.registry.is_none() {
+        if self.signing().is_none() {
             return Ok(None);
         }
         let key = self.keys.agent.clone().ok_or(
@@ -483,9 +492,10 @@ impl<'a> Ctx<'a> {
         }))
     }
 
-    /// The executor's signer. Required with a registry.
+    /// The executor's signer. Required with a registry that signs everything (N-21: never
+    /// under `signing = "approvals"`).
     fn executor_signer(&self) -> Result<Option<Signer>, String> {
-        if self.registry.is_none() {
+        if self.signing().is_none() {
             return Ok(None);
         }
         self.keys.executor.clone().map(Some).ok_or_else(|| {
@@ -493,10 +503,11 @@ impl<'a> Ctx<'a> {
         })
     }
 
-    /// The producer name evidence is recorded under, and its signer when signing is on.
+    /// The producer name evidence is recorded under, and its signer when signing is on for
+    /// everything (N-21: check evidence is unsigned under `signing = "approvals"`).
     fn producer(&self) -> Result<(String, Option<Signer>), String> {
         let name = self.keys.producer_name.clone();
-        if self.registry.is_none() {
+        if self.signing().is_none() {
             return Ok((name, None));
         }
         let signer = self.keys.producer.clone().ok_or(
@@ -1022,7 +1033,8 @@ pub fn recover_events(repo: &Repo, records: &[ChangeRecord]) -> Result<usize, St
     crate::log::fetch(repo);
     let held = crate::log::held_events(&repo.git)?;
     let keys = Keys::load(&repo.git);
-    let signer = match Registry::current(&repo.git)? {
+    // N-21: executor logs are signed only where the registry signs everything.
+    let signer = match Registry::current(&repo.git)?.filter(Registry::signs_all) {
         None => None,
         Some(_) => Some(keys.executor.clone().ok_or(
             "the repository has a key registry and this machine has no executor key (git config bay.executorKey)",
@@ -1347,7 +1359,7 @@ fn batch_plan(
     let Some(bounds) = repo.config.batch() else {
         return Ok(None);
     };
-    if ctx.registry.is_none()
+    if ctx.signing().is_none()
         || !repo.config.evidence_reuse()
         || ctx.repair.is_some()
         || ctx.op(op_id).batch_culprit.is_some()
@@ -1640,9 +1652,9 @@ fn build_batch<'a>(
 ) -> Result<(Vec<Built>, Vec<Anchored<'a>>), String> {
     let repo: &'a Repo = ctx.repo;
     let git = &repo.git;
+    // N-21: an unsigned landing (no registry, or `signing = "approvals"`) names none.
     let registry_id = ctx
-        .registry
-        .as_ref()
+        .signing()
         .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
     let mut parent = trunk.to_owned();
     let mut built = Vec::new();
@@ -1943,7 +1955,7 @@ fn registry_changed(
 /// current registry no longer holds. That key can write nothing more (no heartbeat, no
 /// release), so its lease is not waited out: the revocation released the operation.
 fn holder_revoked(ctx: &Ctx, op_id: &str) -> Result<bool, String> {
-    let (Some(registry), Some(owner)) = (&ctx.registry, &ctx.op(op_id).owner) else {
+    let (Some(registry), Some(owner)) = (ctx.signing(), &ctx.op(op_id).owner) else {
         return Ok(false);
     };
     let committer = ctx
@@ -2265,7 +2277,7 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
     let repo = ctx.repo;
     let git = &repo.git;
     // § 7: only a producer-signed record stands for a run, and no record shows named inputs.
-    if ctx.registry.is_none()
+    if ctx.signing().is_none()
         || !repo.config.evidence_reuse()
         || !inputs::names(&ctx.record.declared_inputs).is_empty()
     {
@@ -2677,12 +2689,13 @@ fn verify_request_digest(ctx: &Ctx, op_id: &str) -> Result<Option<BayResult>, St
 }
 
 /// The executor verifies the agent-signed request before it builds anything (§ 9a): signed by
-/// a key in the agent file, under the actor the change records (G25).
+/// a key in the agent file, under the actor the change records (G25). Unsigned, as without a
+/// registry, under `[policy] signing = "approvals"` (N-21).
 fn verify_request(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
     if let Some(refusal) = verify_request_digest(ctx, op_id)? {
         return Ok(Some(refusal));
     }
-    let Some(registry) = &ctx.registry else {
+    let Some(registry) = ctx.signing() else {
         return Ok(None);
     };
     let request = ctx.op(op_id).request_id.clone().unwrap_or_default();
@@ -2814,7 +2827,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         "revision": revision,
         "request_digest": ctx.op(&op_id).request_digest,
         "actor": ctx.record.actor,
-        "registry": ctx.registry.as_ref().map(|registry| registry.commit.clone()),
+        "registry": ctx.signing().map(|registry| registry.commit.clone()),
     });
     let request_id = ctx
         .chain
@@ -2867,7 +2880,7 @@ fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<Ba
         "kind": "abandon",
         "change": id,
         "actor": ctx.record.actor,
-        "registry": ctx.registry.as_ref().map(|registry| registry.commit.clone()),
+        "registry": ctx.signing().map(|registry| registry.commit.clone()),
     });
     let request_id = ctx
         .chain
@@ -3540,9 +3553,9 @@ fn build_and_check(
 
     let candidate_id = format!("{op_id}.{}", ctx.op(op_id).attempts.len() + 1);
     let request_id = ctx.op(op_id).request_id.clone().unwrap_or_default();
+    // N-21: an unsigned landing (no registry, or `signing = "approvals"`) names none.
     let registry_id = ctx
-        .registry
-        .as_ref()
+        .signing()
         .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
     let message = candidate_message(ctx, revision, &request_id, &candidate_id, &registry_id);
     let commit = commit_candidate(ctx, &tree, trunk, &message)?;
@@ -4997,12 +5010,13 @@ fn carry_over(
 }
 
 /// Whether evidence reuse applies to this judgement (G7): `[policy] evidence_reuse =
-/// "exact-inputs"`, a producer registry, so that only producer-signed records stand for a run
+/// "exact-inputs"`, a producer registry that signs everything, so that only producer-signed records stand for a run
 /// (`DESIGN` § 7: an unsigned record never counts as evidence), and a request without named
 /// inputs. A record does not hold the request's input versions, so it cannot show they
 /// matched: a change with named inputs is always rechecked.
 fn reuses(ctx: &Ctx, judged: &Judged) -> bool {
-    ctx.repo.config.evidence_reuse() && ctx.registry.is_some() && judged.inputs.is_empty()
+    // N-21: under `signing = "approvals"` no producer signs, so nothing is reused.
+    ctx.repo.config.evidence_reuse() && ctx.signing().is_some() && judged.inputs.is_empty()
 }
 
 /// Whether `records` answer check `id` under `digest` (for `subject`, when commit-keyed):

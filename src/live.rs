@@ -279,7 +279,7 @@ pub fn write(repo: &Repo) -> Result<Option<(String, String)>, String> {
         return Ok(None);
     };
     let git = &repo.git;
-    let key = if Registry::current(git)?.is_some() {
+    let key = if Registry::current(git)?.is_some_and(|registry| registry.signs_all()) {
         Some(Keys::load(git).agent.ok_or(
             "the repository has a key registry and this machine has no agent key (git config bay.agentKey)",
         )?)
@@ -747,13 +747,14 @@ fn batch_bodies(out: &[u8]) -> std::collections::BTreeMap<String, Option<Value>>
     bodies
 }
 
-/// The agent class file of the registry this repository holds, or `None` without one.
+/// The agent class file of the registry this repository holds, or `None` without one or under
+/// `[policy] signing = "approvals"` (N-21), where live summaries are unsigned.
 ///
 /// # Errors
 ///
 /// A registry that does not load.
 pub fn agents_file(git: &Git) -> Result<Option<PathBuf>, String> {
-    match Registry::current(git)? {
+    match Registry::current(git)?.filter(Registry::signs_all) {
         Some(registry) => Ok(Some(registry.class_file(git, KeyClass::Agent)?)),
         None => Ok(None),
     }

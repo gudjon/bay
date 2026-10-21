@@ -259,7 +259,8 @@ pub struct Judged {
     pub trunk: String,
     /// The tip of each producer's evidence notes ref then, by producer.
     pub evidence: BTreeMap<String, String>,
-    /// The registry commit the records were counted under; `None` when bay ran unsigned.
+    /// The registry commit the records were counted under, with its mode under `signing =
+    /// "approvals"` ([`Registry::judged_key`], N-21); `None` when bay ran unsigned.
     pub registry: Option<String>,
     /// How each post check judged was decided.
     pub decided: Vec<Decided>,
@@ -346,7 +347,7 @@ pub fn judge(
         Some(Judged {
             trunk: trunk.to_owned(),
             evidence,
-            registry: registry.map(|registry| registry.commit.clone()),
+            registry: registry.map(Registry::judged_key),
             decided,
         }),
     ))
@@ -671,7 +672,7 @@ fn moved(
     registry: Option<&Registry>,
     landings: &[Landing],
 ) -> Option<Moved> {
-    if before.registry.as_deref() != registry.map(|registry| registry.commit.as_str())
+    if before.registry != registry.map(Registry::judged_key)
         || before
             .evidence
             .keys()

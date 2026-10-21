@@ -71,6 +71,15 @@ enum Command {
         #[arg(long, conflicts_with_all = ["wait", "observe"])]
         abandon: bool,
     },
+    /// Land the edits made in the main checkout as one change: start, land --wait, then move
+    /// the checkout to the new trunk tip. Never in a view (use land there)
+    Save {
+        /// The intent: a card, issue or ticket id
+        intent: String,
+        /// The first draft's commit message, kept in the change's chain (trunk keeps bay's own)
+        #[arg(long)]
+        message: Option<String>,
+    },
     /// A new change that undoes one landing, checked and landed like any other; never a rewrite
     Undo {
         /// The landed change to undo
@@ -495,6 +504,7 @@ fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
             lane,
             from,
             after,
+            saved: None,
         },
     )
 }
@@ -506,6 +516,9 @@ fn main() -> ExitCode {
     }
     let result = match cli.command {
         start @ Command::Start { .. } => start_change(&cli.dir, start),
+        Command::Save { intent, message } => {
+            bay::save::save(&cli.dir, &bay::save::SaveRequest { intent, message })
+        }
         Command::Undo { change, wait } => bay::undo::undo(&cli.dir, &change, wait),
         Command::Share {
             change,

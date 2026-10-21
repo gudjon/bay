@@ -128,7 +128,10 @@ impl Cursor {
             || !cursor.judged.as_ref().is_none_or(|judged| {
                 object_id(&judged.trunk)
                     && judged.evidence.values().all(|tip| object_id(tip))
-                    && judged.registry.as_deref().is_none_or(object_id)
+                    // N-21: a registry key under `signing = "approvals"` names the mode too.
+                    && judged.registry.as_deref().is_none_or(|key| {
+                        object_id(key.strip_suffix("/approvals").unwrap_or(key))
+                    })
                     && judged
                         .decided
                         .iter()

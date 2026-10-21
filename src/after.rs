@@ -33,6 +33,8 @@ pub enum Standing {
     Pending(String),
     /// Ended without landing, in this state.
     Ended(String),
+    /// Ended `no_effect`: its work was already on trunk, so a change after it may land.
+    Met,
 }
 
 /// One dependency of a change, and where it stands.
@@ -53,6 +55,7 @@ impl Dependency {
             Standing::Ended(state) => {
                 json!({"change": self.change, "state": state, "landed": false})
             }
+            Standing::Met => json!({"change": self.change, "state": "no_effect", "met": true}),
         }
     }
 }
@@ -66,13 +69,11 @@ pub fn trailers(after: &[String]) -> String {
     })
 }
 
-/// Whether `state` ends a change without a landing: abandoned, superseded or no effect.
+/// Whether `state` ends a change without a landing and without its work on trunk: abandoned or
+/// superseded. A `no_effect` change ended because its work was already on trunk, so it is met.
 #[must_use]
 pub const fn ended_unlanded(state: ChangeState) -> bool {
-    matches!(
-        state,
-        ChangeState::Abandoned | ChangeState::Superseded | ChangeState::NoEffect
-    )
+    matches!(state, ChangeState::Abandoned | ChangeState::Superseded)
 }
 
 /// Where each of `after` stands against trunk at `trunk` (a commit), in the order given.
@@ -109,7 +110,9 @@ fn unlanded(repo: &Repo, change: &str) -> Standing {
     match Chain::new(&repo.git).record_at(&head) {
         Ok(record) => {
             let state = state_word(record.state);
-            if ended_unlanded(record.state) {
+            if record.state == ChangeState::NoEffect {
+                Standing::Met
+            } else if ended_unlanded(record.state) {
                 Standing::Ended(state)
             } else {
                 Standing::Pending(state)

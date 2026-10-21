@@ -119,10 +119,11 @@ pub fn pending(repo: &Repo) -> Vec<(PathBuf, Receipt)> {
 #[must_use]
 pub fn sync(repo: &Repo) -> usize {
     let _ = sync_chains(repo);
+    // N-21: receipts are signed only where the registry signs everything.
     let signing = crate::registry::Registry::current(&repo.git)
         .ok()
         .flatten()
-        .is_some();
+        .is_some_and(|registry| registry.signs_all());
     let keys = crate::signing::Keys::load(&repo.git);
     let mut synced = 0;
     for (path, receipt) in pending(repo) {

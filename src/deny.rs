@@ -680,6 +680,10 @@ mod tests {
             "git push origin refs/bay/changes/abcd2345:refs/bay/changes/abcd2345",
             "git push origin topic",
             "echo 'git reset --hard' > notes.txt",
+            // G279: `bay save` is bay's own way to land the main checkout's edits.
+            "bay save CARD-1",
+            "bay save CARD-1 --message 'git push origin main'",
+            "bash -c 'bay save CARD-1'",
         ] {
             assert!(
                 denied(command, "main", Some("topic")).is_none(),

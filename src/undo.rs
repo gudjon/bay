@@ -98,6 +98,7 @@ fn undo_in(dir: &Path, repo: &Repo, change: &str, wait: bool) -> Result<BayResul
         lane: None,
         from: None,
         after: Vec::new(),
+        saved: None,
     };
     let started = start::start(dir, &request);
     if started.decision != Decision::Ok {

@@ -113,7 +113,7 @@ struct Writer {
 
 impl Writer {
     fn of(keys: &Keys, registry: Option<&Registry>) -> Result<Self, String> {
-        let signer = match (registry, &keys.producer) {
+        let signer = match (Registry::signing(registry), &keys.producer) {
             (None, _) => None,
             (Some(_), Some(signer)) => Some(signer.clone()),
             (Some(_), None) => {

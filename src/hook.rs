@@ -12,6 +12,12 @@
 //! marker compaction into the shard indexes (`crate::compact`): a compacted name is never created
 //! again, a marker is deleted only by its compaction, and a shard index only appends.
 //!
+//! N-21: when the policy at the host's trunk tip, before the push, says `[policy] signing =
+//! "approvals"`, the hook judges only what that mode signs: the registry (only a registry key
+//! moves it) and evidence notes, where every `approval` record added verifies against the
+//! approver file and no record is withdrawn. Everything else is kept as on a host with no
+//! registry. A push never sets the mode it is judged by: the mode is read before it lands.
+//!
 //! A push that moves a promotion target (`[[target]]`, NEW-5) is judged on every bay host, with
 //! or without a registry (`targets`, `crate::target`): it is refused with `PROMOTION_REFUSED`
 //! unless the target moves to a promotable commit.
@@ -143,6 +149,23 @@ fn strict(summaries: Vec<crate::live::SummaryRead>) -> Result<Vec<Option<Value>>
     summaries.into_iter().collect()
 }
 
+/// § 10a: one push's compaction is bounded, so its judgement stays cheap.
+fn compaction_bound(updates: &[Update]) -> Result<(), String> {
+    let compactions = updates
+        .iter()
+        .filter(|update| {
+            compact::compactable(&update.name) && is_zero(&update.new) && !is_zero(&update.old)
+        })
+        .count();
+    if compactions > compact::PUSH_MAX {
+        return Err(format!(
+            "a push moves at most {} markers into the shard indexes; this one moves {compactions}",
+            compact::PUSH_MAX
+        ));
+    }
+    Ok(())
+}
+
 /// Judges one push. `input` is pre-receive's stdin: `<old> <new> <ref>` per line.
 ///
 /// # Errors
@@ -172,19 +195,11 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
     let Some(registry) = registry else {
         return Ok(());
     };
-    // § 10a: one push's compaction is bounded, so its judgement stays cheap.
-    let compactions = updates
-        .iter()
-        .filter(|update| {
-            compact::compactable(&update.name) && is_zero(&update.new) && !is_zero(&update.old)
-        })
-        .count();
-    if compactions > compact::PUSH_MAX {
-        return Err(format!(
-            "a push moves at most {} markers into the shard indexes; this one moves {compactions}",
-            compact::PUSH_MAX
-        ));
+    // N-21: `Registry::current` read the mode at the trunk tip as it stands before this push.
+    if !registry.signs_all() {
+        return approvals_only(git, &registry, &updates);
     }
+    compaction_bound(&updates)?;
     // The talks this push creates, read once for every talk ref it judges (`crate::talk`).
     let talk_creates: Vec<(String, String)> = updates
         .iter()
@@ -330,6 +345,39 @@ fn targets(
         if !failed.is_empty() {
             return Err(refused(crate::target::refusal(&rule, &failed)));
         }
+    }
+    Ok(())
+}
+
+/// N-21: a push to a host whose registry signs only approvals (`[policy] signing =
+/// "approvals"` at trunk before the push). Only a registry key moves the registry
+/// ([`Judge::registry`]), and an evidence notes ref adds only records that are its producer's,
+/// every `approval` among them signed by an enrolled approver under that name, and withdraws
+/// none ([`Judge::evidence`]). Every other ref is kept as on a host with no registry: trunk by
+/// the append-only update hook, promotion targets by [`targets`].
+fn approvals_only(git: &Git, registry: &Registry, updates: &[Update]) -> Result<(), String> {
+    let judge = Judge {
+        git,
+        registry,
+        updates,
+        by_name: updates
+            .iter()
+            .map(|update| (update.name.as_str(), update))
+            .collect(),
+        appended: RefCell::new(HashMap::new()),
+        talk_creates: Vec::new(),
+        queue: std::cell::OnceCell::new(),
+    };
+    for update in updates {
+        let name = update.name.as_str();
+        let verdict = if name == REGISTRY_REF {
+            judge.registry(update)
+        } else if let Some(producer) = name.strip_prefix(evidence::EVIDENCE_PREFIX) {
+            judge.evidence(update, producer)
+        } else {
+            Ok(())
+        };
+        verdict.map_err(|why| format!("{name}: {why}"))?;
     }
     Ok(())
 }
@@ -1465,8 +1513,8 @@ impl Judge<'_> {
     }
 
     /// A producer's or a reviewer's notes ref: every record it adds is signed by that name, with
-    /// a key of the class the record's kind needs (Q12), and every record it held stays (G159,
-    /// [`kept`]).
+    /// a key of the class the record's kind needs (Q12; under `signing = "approvals"` only an
+    /// `approval` record, N-21), and every record it held stays (G159, [`kept`]).
     fn evidence(&self, update: &Update, producer: &str) -> Result<(), String> {
         if is_zero(&update.new) {
             return Err("evidence is never deleted".to_owned());
@@ -1527,8 +1575,11 @@ impl Judge<'_> {
                 }
                 // Q12, G245: the record's kind names the one class file it verifies against, so
                 // a reviewer key writes only `review` records, an approver key only `approval`
-                // records, and a producer key neither.
-                if !record.verifies_in(self.git, self.registry)? {
+                // records, and a producer key neither. N-21: under `signing = "approvals"` only
+                // an approval is signed; every other record is taken unsigned.
+                if evidence::signed_kind(self.registry, &record.kind)
+                    && !record.verifies_in(self.git, self.registry)?
+                {
                     let class = evidence::signer_class(&record.kind);
                     let file = class.file();
                     return Err(format!(

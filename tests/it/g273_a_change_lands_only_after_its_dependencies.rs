@@ -236,3 +236,31 @@ fn start_refuses_an_after_that_is_no_other_change() {
     );
     assert_eq!(host_record(&test_box, &host, &own)["after"], Value::Null);
 }
+
+/// A dependency that ends `no_effect` (its work was already on trunk) is met, not abandoned: its
+/// dependent lands.
+#[test]
+fn a_dependency_with_no_effect_is_met_and_its_dependent_lands() {
+    let (test_box, host, repo, _) = hosted();
+    let (first, first_view) = start_writing(&test_box, &repo, "CARD-2736", "src/first.rs", &[]);
+    // Its only edit is undone: the view holds trunk's tree again, so landing it has no effect.
+    std::fs::remove_file(first_view.join("src/first.rs")).unwrap();
+    let (code, nothing) = land_wait(&test_box, &first_view);
+    assert_eq!(code, 0, "{nothing}");
+    let (_, second_view) = start_writing(
+        &test_box,
+        &repo,
+        "CARD-2737",
+        "src/second.rs",
+        &[first.as_str()],
+    );
+    let (code, landed) = land_wait(&test_box, &second_view);
+    assert_eq!(code, 0, "{landed}");
+    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert!(
+        test_box
+            .trunk_change_ids(&host)
+            .contains(&landed["change"].as_str().unwrap().to_owned()),
+        "{landed}"
+    );
+}

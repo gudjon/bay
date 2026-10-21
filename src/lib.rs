@@ -58,6 +58,7 @@ pub mod registry;
 pub mod repo;
 pub mod result;
 pub mod runtime;
+pub mod save;
 pub mod session;
 pub mod share;
 pub mod signing;

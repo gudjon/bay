@@ -16,7 +16,8 @@
 //! producer class for every other kind (rulings-open-questions.md Q12).
 //!
 //! Each row and the result carry `trust`: `unsigned` without a registry (every record
-//! counts), else `signed`. A row whose only covering records do not verify says
+//! counts), or with one under `[policy] signing = "approvals"` for a kind other than
+//! `approval` (N-21), else `signed`. A row whose only covering records do not verify says
 //! `unverifiable`. The query reads; it writes nothing.
 //!
 //! G195: with `--since`, its Git work grows with the commits after the rev, not with history:
@@ -77,6 +78,7 @@ fn run(dir: &Path, request: &Missing) -> Result<BayResult, String> {
     let registry = Registry::current(git)?;
     let producers = registry
         .as_ref()
+        .filter(|registry| evidence::signed_kind(registry, &request.kind))
         .map(|registry| registry.class_file(git, evidence::signer_class(&request.kind)))
         .transpose()?;
     let (checked, rows) = uncovered(git, request, &trunk, since.as_deref(), producers.as_deref())?;

@@ -856,7 +856,9 @@ fn completion_dimensions(
                 .require
                 .contains(&Need::Builtin(Dimension::Effective))
     });
-    let ask = *ask_runtime && needs_runtime && registry.is_some();
+    // N-21: under `signing = "approvals"` no producer signs, so nothing it prints counts.
+    let signs_all = crate::registry::Registry::signing(registry.as_ref()).is_some();
+    let ask = *ask_runtime && needs_runtime && signs_all;
     let (confirmed, runtime) = match landed {
         Some(found) => runtime(repo, record, found, registry.as_ref(), ask)?,
         None => (Confirmed::default(), json!(null)),
@@ -870,9 +872,10 @@ fn completion_dimensions(
     .into_iter()
     .filter_map(|(dimension, met)| met.then_some(Need::Builtin(dimension)))
     .collect();
-    // G160: without a registry, `checked` rests on unsigned records alone. A runtime dimension
-    // never counts an unsigned record ([`crate::runtime`]), and `published` is trunk's own fact.
-    let mut unsigned: Vec<Need> = if registry.is_none() && checked {
+    // G160: without a registry, or under `signing = "approvals"` (N-21), `checked` rests on
+    // unsigned records alone. A runtime dimension never counts an unsigned record
+    // ([`crate::runtime`]), and `published` is trunk's own fact.
+    let mut unsigned: Vec<Need> = if !signs_all && checked {
         vec![Need::Builtin(Dimension::Checked)]
     } else {
         Vec::new()
@@ -1040,7 +1043,9 @@ fn site_dimension(
         {
             continue;
         }
+        // N-21: under `signing = "approvals"` only an approval must verify.
         if let Some(registry) = registry
+            && evidence::signed_kind(registry, &record.kind)
             && !record.verifies_in(git, registry)?
         {
             continue;
@@ -1048,7 +1053,9 @@ fn site_dimension(
         counted.push(record);
     }
     let ids = counted.iter().map(|record| record.id.clone()).collect();
-    let unsigned = registry.is_none() && !counted.is_empty();
+    let unsigned = registry
+        .is_none_or(|registry| !evidence::signed_kind(registry, &dimension.kind))
+        && !counted.is_empty();
     if counted.is_empty() {
         return Ok(("missing", ids, false));
     }

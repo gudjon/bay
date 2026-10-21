@@ -53,7 +53,8 @@ fn observed<'a>(record: &'a EvidenceRecord, commit: &str) -> Option<Vec<&'a str>
 }
 
 /// Which of `records` confirm `running` and `effective` for `commit`: producer-signed only,
-/// so without a registry none does.
+/// so without a registry none does, nor under `[policy] signing = "approvals"` (N-21), where no
+/// producer key signs.
 ///
 /// # Errors
 ///
@@ -64,7 +65,7 @@ pub fn confirmed(
     registry: Option<&Registry>,
     commit: &str,
 ) -> Result<Confirmed, String> {
-    let Some(registry) = registry else {
+    let Some(registry) = Registry::signing(registry) else {
         return Ok(Confirmed::default());
     };
     let runtime: Vec<EvidenceRecord> = records
@@ -126,7 +127,10 @@ fn refusal(
         return Some("its id is not under its producer's name".to_owned());
     }
     match producers {
-        None => Some("no registry: only a producer-signed runtime record counts".to_owned()),
+        None => Some(
+            "no registry signs producer records: only a producer-signed runtime record counts"
+                .to_owned(),
+        ),
         Some(file) if !record.verifies(file) => {
             Some("not signed by a producer key under its producer's name".to_owned())
         }
@@ -194,7 +198,7 @@ pub fn observe(
         ));
     }
     let records = parse(&stdout)?;
-    let producers = registry
+    let producers = Registry::signing(registry)
         .map(|registry| registry.class_file(&repo.git, crate::registry::KeyClass::Producer))
         .transpose()?;
     let mut observed = Observed::default();

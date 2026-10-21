@@ -47,6 +47,18 @@ pub struct StartRequest {
     /// The changes this one lands only after (`start --after`, repeatable, G273). Each must be a
     /// change the remote holds, other than this one; none need have landed yet.
     pub after: Vec<String>,
+    /// The main checkout's edits this change takes in (`bay save`, G279): merged onto the base
+    /// as the change's first draft.
+    pub saved: Option<Saved>,
+}
+
+/// The edits made in the main checkout that `bay save` takes in (G279).
+pub struct Saved {
+    /// A commit of the edits on the main checkout's `HEAD`, which is on trunk's history, so its
+    /// merge onto the base has that `HEAD` as its merge base.
+    pub commit: String,
+    /// The first draft's commit message (`bay save --message`).
+    pub message: String,
 }
 
 /// How long a start whose claim push met a held remote ref lock waits before it re-reads.
@@ -343,10 +355,15 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
     // G264: the most live changes one actor may hold, as the policy at the base sets it.
     let limit = crate::policy::max_live_changes_at(&repo.git, &base)?;
     // G268: the outside branch is resolved, judged against the declared paths and merged onto
-    // the base before any claim is written, so a refusal creates nothing.
-    let taken_in = match &request.from {
-        None => None,
-        Some(reference) => match take_in(repo, reference, &base, &request.paths)? {
+    // the base before any claim is written, so a refusal creates nothing. G279: so are the
+    // main checkout's edits a save takes in.
+    let taken_in = match (&request.from, &request.saved) {
+        (None, None) => None,
+        (Some(reference), _) => match take_in(repo, reference, &base, &request.paths)? {
+            Ok(taken_in) => Some(taken_in),
+            Err(refusal) => return Ok(refusal),
+        },
+        (None, Some(saved)) => match take_saved(repo, saved, &base)? {
             Ok(taken_in) => Some(taken_in),
             Err(refusal) => return Ok(refusal),
         },
@@ -624,9 +641,10 @@ fn compacted_claims(
 }
 
 /// An outside branch a start takes in (`start --from`, G268): what the record keeps of it, and
-/// the draft on the base that holds its net change.
+/// the draft on the base that holds its net change. The main checkout's edits a save takes in
+/// (G279) keep no `from`.
 struct TakenIn {
-    from: StartedFrom,
+    from: Option<StartedFrom>,
     draft: String,
 }
 
@@ -696,7 +714,37 @@ fn take_in(
         Merge::Clean(tree) => {
             let draft = commit_on(&repo.git, &tree, base, &format!("start --from {reference}"))
                 .map_err(|error| error.message())?;
-            Ok(Ok(TakenIn { from, draft }))
+            Ok(Ok(TakenIn {
+                from: Some(from),
+                draft,
+            }))
+        }
+    }
+}
+
+/// Takes in the main checkout's edits (`bay save`, G279): `saved.commit` holds them on the
+/// checkout's `HEAD`, which is on trunk's history, so the three-way merge onto `base`
+/// (`merge_onto`, the merge a candidate is built with) has that `HEAD` as its merge base. The
+/// merge, committed on `base` with the save's message, is the change's first draft. A conflict
+/// with newer trunk is the `MERGE_CONFLICT` refusal; nothing is written but objects no ref
+/// names, and the main checkout is never touched.
+fn take_saved(
+    repo: &Repo,
+    saved: &Saved,
+    base: &str,
+) -> Result<Result<TakenIn, BayResult>, String> {
+    match merge_onto(&repo.git, base, &saved.commit).map_err(|error| error.message())? {
+        Merge::Conflict(conflicts, _) => Ok(Err(BayResult::blocked(Reason::MergeConflict)
+            .with_detail(json!({
+                "conflicts": conflicts,
+                "trunk": base,
+                "next": "trunk changed the same lines since the main checkout's HEAD: bring \
+                    those files up to trunk, redo the edits there, then save again",
+            })))),
+        Merge::Clean(tree) => {
+            let draft = commit_on(&repo.git, &tree, base, &saved.message)
+                .map_err(|error| error.message())?;
+            Ok(Ok(TakenIn { from: None, draft }))
         }
     }
 }
@@ -831,7 +879,7 @@ fn create(
         retention_cut: false,
         receipts: Vec::new(),
         lane: request.lane.clone(),
-        from: taken_in.map(|taken_in| taken_in.from.clone()),
+        from: taken_in.and_then(|taken_in| taken_in.from.clone()),
         after: dedup(&request.after),
     };
     let draft = taken_in.map_or(base, |taken_in| taken_in.draft.as_str());
@@ -1429,10 +1477,14 @@ fn dedup(after: &[String]) -> Vec<String> {
 }
 
 /// The agent's signer when the repository has a key registry (§ 10a): this machine's agent
-/// key under the actor's name. Without a registry bay runs unsigned.
+/// key under the actor's name. Without a registry, or under `[policy] signing = "approvals"`
+/// (N-21), bay runs unsigned.
 fn agent_signer(repo: &Repo, actor: &str) -> Result<Option<Signer>, String> {
     repo.fetch_registry();
-    if Registry::current(&repo.git)?.is_none() {
+    if Registry::current(&repo.git)?
+        .as_ref()
+        .is_none_or(|registry| !registry.signs_all())
+    {
         return Ok(None);
     }
     let key = Keys::load(&repo.git).agent.ok_or(

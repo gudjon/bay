@@ -36,6 +36,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Try work that must never merge, in a sandbox lane the config declares | `bay start <intent> --paths <paths> --lane <lane>` (`bay land` runs its checks; it never merges) |
 | Take in a branch made outside bay (a bot's or a person's) as one change | `bay start <intent> --paths <paths> --from <branch>` (the remote's tip when the remote has the branch; `--paths` must cover every file it changes; then `bay land`) |
 | Merge a change only after another change merged | `bay start <intent> --paths <paths> --after <change>` (repeatable; land it now, it merges once each one merged) |
+| Save edits made in the main checkout (non-developers) | `bay save <intent>` |
 | Give the change up, so another agent may adopt it | `bay land --abandon` |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
 | Read state, and main commits that did not merge through bay (`unattributed`) | `bay status` |
@@ -138,6 +139,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    get a `[[check]]` with `kind = "approval"` and `when_paths`, and no command; each approver is
    enrolled in the registry's `approver` file and records with
    `bay evidence record --kind approval --check <id> --verdict pass --commit <candidate>`.
+   A small team with no executor host sets `[policy] signing = "approvals"`: only approvals are
+   signed, and no machine needs an executor, producer or agent key.
 3. Before you commit an adapter (a `[[check]]` command, `[wake] command` or `[notify] command`),
    prove it: `bay adapter test check|wake|notify -- <command>`. It runs bay's contract cases the
    way bay runs that adapter, changes nothing, and exits 0 only when every case passes.
