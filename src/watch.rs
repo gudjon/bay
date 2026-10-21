@@ -35,6 +35,8 @@
 //! only those whose paths cover the change's declared paths are listed; the cursor carries all.
 //! It also carries what decided each check (G195, [`crate::red::Judged`]), so a watch from it
 //! reads the post answers only of the landings after it and of those whose evidence moved.
+//! A check no landing in the window answers (NEW-6) is listed as `red_pending`, judged at the
+//! cursor's trunk, never as green; it is not an event, and the cursor does not carry it.
 //!
 //! Talks (G47b, `DESIGN` § 11c: watch reads talks, never sends them) are derived the same way:
 //! the cursor's `talks` holds each open talk this actor sent or must answer, by id, as
@@ -45,6 +47,12 @@
 //! with the event's `schema`, `id` and `kind`, the talk's own kind as `talk_kind`. Talks are the
 //! actor's, so a view lists them all. A talk that opens and closes between two watches is
 //! listed by neither: the cursor holds open talks only, so it stays small.
+//!
+//! Promotion targets (NEW-5, [`crate::target`]) are derived the same way: the cursor's
+//! `targets` holds each target's tip, and a watch outside a view lists `target_moved` for a
+//! target that moved to a commit its rule holds for, and `target_unpromotable` for one that
+//! moved to a commit off its source's first-parent line or whose required checks do not pass.
+//! Without a cursor, `target_unpromotable` for each target whose tip fails now.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -85,6 +93,11 @@ pub struct Cursor {
     /// landings after it and those whose evidence moved. Left out when trunk has no post check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judged: Option<crate::red::Judged>,
+    /// The tip of each promotion target at the cursor, by name (NEW-5): a watch from here lists a
+    /// `target_moved` or `target_unpromotable` event for each one that moved. Left out when no
+    /// target had a tip.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub targets: BTreeMap<String, String>,
 }
 
 impl Cursor {
@@ -107,6 +120,7 @@ impl Cursor {
         };
         if !cursor.trunk.as_deref().is_none_or(object_id)
             || !cursor.logs.values().all(|tip| object_id(tip))
+            || !cursor.targets.values().all(|tip| object_id(tip))
             || !cursor.red.iter().all(|red| object_id(&red.landing))
             || !cursor.judged.as_ref().is_none_or(|judged| {
                 object_id(&judged.trunk)
@@ -159,6 +173,10 @@ fn run(dir: &Path, since: Option<&Cursor>, landed_only: bool) -> Result<BayResul
     // `freshness` says so.
     let fetched_at = repo.fetch_trunk().ok().map(|_| now_rfc3339());
     crate::log::fetch(&repo);
+    // NEW-4: the lane refs a landing outside bay is judged against, as the remote holds them.
+    if fetched_at.is_some() {
+        crate::lane::fetch(&repo);
+    }
     // § 11c: a fetching command on the recipient's machine accepts and acks its talks.
     let talk_accept = fetched_at
         .is_some()
@@ -176,6 +194,19 @@ fn run(dir: &Path, since: Option<&Cursor>, landed_only: bool) -> Result<BayResul
             .ok()
             .flatten()
             .is_some_and(|policy| !policy.post.is_empty())
+    {
+        repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
+    }
+    // NEW-5: a target moves by a push elsewhere; its required checks turn on records a runner
+    // elsewhere writes.
+    if !landed_only
+        && fetched_at.is_some()
+        && crate::target::fetch(&repo)
+        && repo
+            .config
+            .targets
+            .iter()
+            .any(|target| !target.requires.is_empty())
     {
         repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
     }
@@ -251,48 +282,36 @@ pub fn collect(
             .iter()
             .filter(|landing| landing["outside_bay"] == true)
             .filter_map(|landing| {
-                Some(crate::unattributed::event(
+                let mut event = crate::unattributed::event(
                     landing["commit"].as_str()?,
                     landing["landed_as"].as_str()?,
                     landing["subject"].as_str().unwrap_or_default(),
-                ))
+                );
+                // NEW-4: a landing that brought a lane's commits onto trunk names them.
+                if landing.get("lane_leak").is_some() {
+                    event["lane"] = landing["lane"].clone();
+                    event["lane_leak"] = landing["lane_leak"].clone();
+                }
+                Some(event)
             })
             .filter(|event| record.as_ref().is_none_or(|record| touches(record, event))),
     );
-    // A registry that cannot be read never reads as none: evidence would then count unsigned,
-    // so the red is not judged, the cursor keeps what it held, and the result says why.
-    let (reds, judged, red_unread) = match crate::registry::Registry::current(git) {
-        Ok(registry) => {
-            // G195: from a cursor, only the landings after it and the notes that moved are read.
-            let (reds, judged) = crate::red::judge(
-                git,
-                &reached,
-                registry.as_ref(),
-                since.and_then(|cursor| cursor.judged.as_ref()),
-            )?;
-            events.extend(red_events(
-                since
-                    .map(|cursor| cursor.red.as_slice())
-                    .unwrap_or_default(),
-                &reds,
-                record.as_ref(),
-            ));
-            (reds, judged, None)
-        }
-        Err(why) => (
-            since.map(|cursor| cursor.red.clone()).unwrap_or_default(),
-            since.and_then(|cursor| cursor.judged.clone()),
-            Some(why),
-        ),
-    };
+    let (reds, pending, judged, red_unread) =
+        red_judged(git, &reached, since, record.as_ref(), &mut events)?;
     let (said, talks, talks_unread) = talk_events(git, since);
     events.extend(said);
+    // NEW-5: promotions are about the trunk's targets, not one change, so a view lists none.
+    let (said, targets, targets_unread) = target_events(repo, &reached, since);
+    if record.is_none() {
+        events.extend(said);
+    }
     let next = Cursor {
         trunk: Some(reached),
         logs: read.tips,
         talks,
         red: reds,
         judged,
+        targets,
     };
     let mut out = json!({
         "trunk": trunk,
@@ -302,14 +321,71 @@ pub fn collect(
         "invalidations": inputs::to_json(invalidations.iter()),
         "more": stopped_at.is_some() || read.more,
         "cursor": next.encode()?,
+        "red_pending": pending,
     });
-    if let Some(why) = red_unread {
-        out["red_unread"] = json!(why);
-    }
-    if let Some(why) = talks_unread {
-        out["talks_unread"] = json!(why);
+    for (name, why) in [
+        ("red_unread", red_unread),
+        ("talks_unread", talks_unread),
+        ("targets_unread", targets_unread),
+    ] {
+        if let Some(why) = why {
+            out[name] = json!(why);
+        }
     }
     Ok(out)
+}
+
+/// What [`red_judged`] returns: the red checks, the pending ones as JSON, what decided them
+/// for the next cursor, and why no judgement was made.
+type RedJudged = (
+    Vec<crate::red::Red>,
+    Value,
+    Option<crate::red::Judged>,
+    Option<String>,
+);
+
+/// The red judgement a watch makes at `reached` (G244, G195, NEW-6), its events pushed onto
+/// `events`: the red checks, the pending ones, what decided them for the next cursor, and why
+/// no judgement was made when the registry cannot be read.
+fn red_judged(
+    git: &Git,
+    reached: &str,
+    since: Option<&Cursor>,
+    record: Option<&ChangeRecord>,
+    events: &mut Vec<Value>,
+) -> Result<RedJudged, String> {
+    // A registry that cannot be read never reads as none: evidence would then count unsigned,
+    // so the red is not judged, the cursor keeps what it held, and the result says why.
+    Ok(match crate::registry::Registry::current(git) {
+        Ok(registry) => {
+            // G195: from a cursor, only the landings after it and the notes that moved are read.
+            let (judgement, judged) = crate::red::judge(
+                git,
+                reached,
+                registry.as_ref(),
+                since.and_then(|cursor| cursor.judged.as_ref()),
+            )?;
+            events.extend(red_events(
+                since
+                    .map(|cursor| cursor.red.as_slice())
+                    .unwrap_or_default(),
+                &judgement.red,
+                record,
+            ));
+            let pending: Value = judgement
+                .pending
+                .iter()
+                .map(crate::red::Pending::to_json)
+                .collect();
+            (judgement.red, pending, judged, None)
+        }
+        Err(why) => (
+            since.map(|cursor| cursor.red.clone()).unwrap_or_default(),
+            json!({"unread": why}),
+            since.and_then(|cursor| cursor.judged.clone()),
+            Some(why),
+        ),
+    })
 }
 
 /// `bay watch --landed` (G73): the landings of [`collect`] after `since`, the count of
@@ -346,6 +422,9 @@ pub fn collect_landed(
         talks: since.map(|cursor| cursor.talks.clone()).unwrap_or_default(),
         red: since.map(|cursor| cursor.red.clone()).unwrap_or_default(),
         judged: since.and_then(|cursor| cursor.judged.clone()),
+        targets: since
+            .map(|cursor| cursor.targets.clone())
+            .unwrap_or_default(),
     };
     Ok(json!({
         "trunk": trunk,
@@ -439,6 +518,66 @@ fn red_events(
         .filter(listed)
         .map(|then| event("trunk_red_cleared", then));
     turned.chain(cleared).collect()
+}
+
+/// NEW-5: a `target_moved` event for each target whose tip moved since `since` to a commit its
+/// rule holds for, and a `target_unpromotable` event for one that moved to a commit it fails
+/// (off its source's first-parent line, or a required check not passing: detected, as G85 is
+/// for trunk). Without a cursor, a `target_unpromotable` event for each target whose tip fails
+/// now. Also the targets the next cursor holds. A target judgement that cannot be made lists no
+/// event, the cursor keeps the tips it held, and the third value says why.
+fn target_events(
+    repo: &Repo,
+    trunk: &str,
+    since: Option<&Cursor>,
+) -> (Vec<Value>, BTreeMap<String, String>, Option<String>) {
+    let held = since
+        .map(|cursor| cursor.targets.clone())
+        .unwrap_or_default();
+    if repo.config.targets.is_empty() {
+        return (Vec::new(), held, None);
+    }
+    let rows = crate::registry::Registry::current(&repo.git).and_then(|registry| {
+        crate::target::rows(
+            &repo.git,
+            &repo.config,
+            trunk,
+            registry.as_ref(),
+            crate::live::unix_now(),
+        )
+    });
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(why) => return (Vec::new(), held, Some(why)),
+    };
+    let mut events = Vec::new();
+    let mut tips = BTreeMap::new();
+    for row in &rows {
+        let Some(name) = row["name"].as_str() else {
+            continue;
+        };
+        if row.get("unread").is_some() {
+            // Not judged: the tip it held stays, so the move is listed once it can be.
+            if let Some(then) = held.get(name) {
+                tips.insert(name.to_owned(), then.clone());
+            }
+            continue;
+        }
+        let Some(tip) = row["tip"].as_str() else {
+            continue;
+        };
+        tips.insert(name.to_owned(), tip.to_owned());
+        let moved = match since {
+            Some(_) => held.get(name).map(String::as_str) != Some(tip),
+            None => row["tip_failures"]
+                .as_array()
+                .is_some_and(|failed| !failed.is_empty()),
+        };
+        if moved && let Some(event) = crate::target::event(row) {
+            events.push(event);
+        }
+    }
+    (events, tips, None)
 }
 
 /// G47b: the talk events after `since` (the module doc), and the talks the next cursor holds. A
@@ -562,6 +701,8 @@ fn landings(
     }
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let log = repo.git.run(&args).map_err(|error| error.message())?;
+    // NEW-4: the lane tips a landing outside bay is judged against; no lane, no read.
+    let (_, tips, _) = crate::lane::tips_at(&repo.git, trunk)?;
     let mut out = Vec::new();
     for entry in log.split('\u{1e}') {
         let fields: Vec<&str> = entry.trim().split('\u{1f}').map(str::trim).collect();
@@ -597,7 +738,7 @@ fn landings(
             registry_id,
             committer,
         );
-        out.push(json!({
+        let mut landing = json!({
             "commit": commit,
             "change": (!outside_bay).then(|| (*change).to_owned()),
             "outside_bay": outside_bay,
@@ -606,7 +747,16 @@ fn landings(
             "actor": some(actor),
             "at": time.parse().ok().map(crate::clock::rfc3339_of),
             "subject": subject,
-        }));
+        });
+        if outside_bay {
+            let leaks = crate::lane::of_landing(&repo.git, &tips, commit, parents)?;
+            if !leaks.is_empty() {
+                let (lane, named) = crate::lane::row(&leaks);
+                landing["lane"] = lane;
+                landing["lane_leak"] = named;
+            }
+        }
+        out.push(landing);
     }
     Ok((out, None))
 }
@@ -665,6 +815,7 @@ mod tests {
                 paths: Some(vec!["src/**".to_owned()]),
                 landing: "c".repeat(40),
                 change: None,
+                suspect: None,
             }],
             judged: Some(crate::red::Judged {
                 trunk: "a".repeat(40),
@@ -677,6 +828,7 @@ mod tests {
                     failed: true,
                 }],
             }),
+            targets: [("staging".to_owned(), "e".repeat(40))].into(),
         };
         let text = cursor.encode().unwrap();
         assert!(
@@ -694,6 +846,7 @@ mod tests {
             encode(r#"{"trunk":null,"logs":{"x":"HEAD"}}"#),
             encode(r#"{"trunk":null,"logs":{},"extra":1}"#),
             encode(r#"{"trunk":null,"logs":{},"talks":{"t1":"arrived/0"}}"#),
+            encode(r#"{"trunk":null,"logs":{},"targets":{"staging":"HEAD"}}"#),
             encode(
                 r#"{"trunk":null,"logs":{},"red":[{"check":"s","environment":"e","paths":null,"landing":"HEAD","change":null}]}"#,
             ),

@@ -37,6 +37,9 @@ pub struct StartRequest {
     /// The landed change this one fixes (`start --fixes`, G161); it becomes the `Fixes:` trailer.
     /// Unlike `--new`, it claims no generation of that change's intent.
     pub fixes: Option<String>,
+    /// The sandbox lane of `.bay/config.toml` this change works in (`start --lane`, NEW-4): its
+    /// checks run against the current trunk and it never lands.
+    pub lane: Option<String>,
 }
 
 /// How long a start whose claim push met a held remote ref lock waits before it re-reads.
@@ -53,6 +56,10 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         None => open(&repo, request),
     };
     let mut result = result.unwrap_or_else(BayResult::failed);
+    // NEW-8: a change opened or adopted hears of the live changes that declare its files.
+    if request.resume.is_none() {
+        list_overlaps(&repo, &mut result);
+    }
     // G175: the opt-in warm-up of the view's history, once the view is made.
     if repo.config.warm_history() {
         warm_history(&repo, &mut result);
@@ -70,6 +77,37 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
     // G80: every result says which trunk it reflects, and when that trunk was fetched.
     result.freshness = result.freshness.or_else(|| repo.freshness());
     result
+}
+
+/// NEW-8: a start that opened or adopted a change lists, in its detail, the live changes whose
+/// declared paths overlap the change's own (`overlaps`, `crate::overlap`), from the chains this
+/// repository already holds, or why they could not be read (`overlaps_unread`). It never
+/// refuses: the listing is what the work may meet.
+fn list_overlaps(repo: &Repo, result: &mut BayResult) {
+    if result.decision != Decision::Ok {
+        return;
+    }
+    let Some(id) = result.change.clone() else {
+        return;
+    };
+    let Some(detail) = result
+        .detail
+        .as_mut()
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    let listed = Chain::new(&repo.git)
+        .read(&id)
+        .map_err(|error| error.message())
+        .and_then(|(_, record)| {
+            crate::overlap::overlaps(repo, &id, &inputs::paths(&record.declared_inputs))
+        });
+    let (key, value) = match listed {
+        Ok(overlaps) => ("overlaps", json!(overlaps)),
+        Err(why) => ("overlaps_unread", json!(why)),
+    };
+    detail.insert(key.to_owned(), value);
 }
 
 /// G175: with `[view] warm_history`, a start that made or kept a view fetches the history of
@@ -124,10 +162,25 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
             return None;
         }
         let (head, record) = chain.read(id).ok()?;
-        let ended = matches!(
-            record.state,
-            ChangeState::Landed | ChangeState::Abandoned | ChangeState::NoEffect
-        );
+        // NEW-4: a lane change never lands. Once refused `LANE_NEVER_LANDS` its work is done,
+        // and its view goes after the lane's shorter window; one of a lane the config no longer
+        // declares keeps the retention window.
+        let lane_window = record.lane.as_deref().map(|lane| {
+            repo.config.lane(lane).map_or_else(
+                || repo.config.retention_window(),
+                |lane| repo.config.lane_window(lane),
+            )
+        });
+        let never_lands = lane_window.is_some()
+            && record
+                .operations
+                .last()
+                .is_some_and(|op| op.outcome.as_deref() == Some(Reason::LaneNeverLands.code()));
+        let ended = never_lands
+            || matches!(
+                record.state,
+                ChangeState::Landed | ChangeState::Abandoned | ChangeState::NoEffect
+            );
         if !ended {
             return None;
         }
@@ -147,6 +200,7 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
             revision,
             at_unix,
             placed,
+            window: lane_window,
         })
     };
     view::release_ended(repo, repo.config.retention_window(), &ended)
@@ -170,6 +224,21 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
             "base": base,
             "recovery": "set BAY_ACTOR to this session's own actor name and start again",
         })));
+    }
+    // NEW-4: a lane is one the config at trunk declares, or nothing is created.
+    if let Some(lane) = &request.lane
+        && repo.config.lane(lane).is_none()
+    {
+        let declared: Vec<&str> = repo
+            .config
+            .lanes
+            .iter()
+            .map(|lane| lane.name.as_str())
+            .collect();
+        return Err(format!(
+            "--lane {lane}: the {} at trunk declares no such [[lane]] (it declares {declared:?})",
+            crate::config::CONFIG_PATH
+        ));
     }
     // G161: a fix names a change on trunk, or nothing is created.
     if let Some(fixed) = &request.fixes {
@@ -376,6 +445,7 @@ fn create(
         operations: Vec::new(),
         retention_cut: false,
         receipts: Vec::new(),
+        lane: request.lane.clone(),
     };
     // § 8: the view is of `base`, so what the actor reads there is what it observed.
     record.observed_versions = inputs::observe(repo, &record, base);
@@ -427,6 +497,7 @@ fn create(
             "actor": record.actor,
             "actor_source": record.actor_source,
             "fixes": record.fixes,
+            "lane": record.lane,
             "pushed": true,
         }))
         .with_change(id),

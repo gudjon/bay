@@ -55,6 +55,8 @@ pub struct Keys {
     pub producer_name: String,
     /// `bay.reviewerName`, when this machine records reviews (G75).
     pub reviewer_name: Option<String>,
+    /// `bay.approverName`, when a person approves from this machine (G245).
+    pub approver_name: Option<String>,
 }
 
 fn config(git: &Git, key: &str) -> Option<String> {
@@ -92,15 +94,17 @@ impl Keys {
             executor_name: config(git, "bay.executorName").unwrap_or_else(|| "local".to_owned()),
             producer_name: config(git, "bay.producerName").unwrap_or_else(|| "local".to_owned()),
             reviewer_name: config(git, "bay.reviewerName"),
+            approver_name: config(git, "bay.approverName"),
         }
     }
 
-    /// Every name this machine writes evidence as: its producer and, when set, its reviewer.
-    /// Only this machine writes their notes refs, so no fetch overwrites them.
+    /// Every name this machine writes evidence as: its producer and, when set, its reviewer and
+    /// its approver. Only this machine writes their notes refs, so no fetch overwrites them.
     #[must_use]
     pub fn own_names(&self) -> Vec<&str> {
         std::iter::once(self.producer_name.as_str())
             .chain(self.reviewer_name.as_deref())
+            .chain(self.approver_name.as_deref())
             .collect()
     }
 }

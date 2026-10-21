@@ -616,6 +616,21 @@ pub type SummaryRead = Result<Option<Value>, String>;
 ///
 /// A git fault.
 pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<SummaryRead>, String> {
+    files_at(git, commits, LIVE_FILE, LIVE_MAX_BYTES)
+}
+
+/// [`summaries_at`] for any one-file record: the JSON file `file` of each commit, read only
+/// when it is at most `max` bytes (an executor's presence, G67, is read this way too).
+///
+/// # Errors
+///
+/// A git fault.
+pub fn files_at(
+    git: &Git,
+    commits: &[String],
+    file: &str,
+    max: u64,
+) -> Result<Vec<SummaryRead>, String> {
     if commits.is_empty() {
         return Ok(Vec::new());
     }
@@ -623,7 +638,7 @@ pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<SummaryRead>, S
     for commit in commits {
         input.push_str(commit);
         input.push(':');
-        input.push_str(LIVE_FILE);
+        input.push_str(file);
         input.push('\n');
     }
     let checked = git
@@ -648,14 +663,14 @@ pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<SummaryRead>, S
     let mut wanted: Vec<Result<Option<String>, String>> = Vec::with_capacity(lines.len());
     for (commit, line) in commits.iter().zip(&lines) {
         wanted.push(if line.ends_with(" missing") {
-            let spec = format!("{commit}:{LIVE_FILE}");
+            let spec = format!("{commit}:{file}");
             match git.run(&["rev-parse", "--verify", "-q", &spec]) {
                 Ok(_) => Err(unreadable(&spec)),
                 Err(GitError::Failed { .. }) => Ok(None),
                 Err(error) => return Err(error.message()),
             }
         } else {
-            Ok(small_blob(line))
+            Ok(small_blob(line, max))
         });
     }
     let mut blobs = String::new();
@@ -681,7 +696,7 @@ pub fn summaries_at(git: &Git, commits: &[String]) -> Result<Vec<SummaryRead>, S
                 Some(oid) => bodies
                     .get(&oid)
                     .cloned()
-                    .ok_or_else(|| unreadable(&format!("{commit}:{LIVE_FILE}"))),
+                    .ok_or_else(|| unreadable(&format!("{commit}:{file}"))),
             }
         })
         .collect())
@@ -693,8 +708,8 @@ fn unreadable(spec: &str) -> String {
     format!("{spec} is named by its tree, but its blob cannot be read from this store or fetched")
 }
 
-/// The object id of a `--batch-check` line naming a blob of at most [`LIVE_MAX_BYTES`].
-fn small_blob(line: &str) -> Option<String> {
+/// The object id of a `--batch-check` line naming a blob of at most `max` bytes.
+fn small_blob(line: &str, max: u64) -> Option<String> {
     let mut words = line.split(' ');
     let (Some(oid), Some("blob"), Some(size), None) =
         (words.next(), words.next(), words.next(), words.next())
@@ -702,7 +717,7 @@ fn small_blob(line: &str) -> Option<String> {
         return None;
     };
     size.parse::<u64>()
-        .is_ok_and(|size| size <= LIVE_MAX_BYTES)
+        .is_ok_and(|size| size <= max)
         .then(|| oid.to_owned())
 }
 

@@ -67,6 +67,7 @@
         "CHANGE_HELD",
         "ABANDON_REFUSED",
         "ACTOR_UNNAMED",
+        "ACTOR_UNPROVEN",
         "COVERAGE_UNKNOWN",
         "HOOK_INPUT_INVALID",
         "SHELL_DENIED",
@@ -94,7 +95,11 @@
         "TALK_SENDER_NOT_ACTOR",
         "TALK_BACKLOG",
         "UNATTRIBUTED_LANDING",
-        "EVIDENCE_WITHDRAWN"
+        "EVIDENCE_WITHDRAWN",
+        "PROMOTION_REFUSED",
+        "LANE_NEVER_LANDS",
+        "LANE_LEAK",
+        "APPROVAL_PENDING"
       ]
     },
     "change": {
@@ -141,6 +146,7 @@
         "holder_session_ended_or_heartbeat_past_takeover_window",
         "current_actor_abandons_or_adopt_rules_apply",
         "bay_actor_set",
+        "actor_key_on_hardware_or_own_account",
         "coordination_data_reachable",
         "hook_payload_readable_by_this_bay",
         "holder_session_stopped_or_claim_past_deadline",
@@ -165,7 +171,10 @@
         "sender_or_decides_supersedes",
         "answer_supersedes_the_standing_answer",
         "sent_with_the_senders_agent_key",
-        "an_open_talk_closed_or_superseded"
+        "an_open_talk_closed_or_superseded",
+        "pushed_commit_promotable",
+        "view_reaches_no_lane_commit",
+        "approved"
       ]
     },
     "waiting_for": {

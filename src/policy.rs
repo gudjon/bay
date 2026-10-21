@@ -48,12 +48,17 @@ struct PolicyFile {
 }
 
 /// The `[agent]` table: `require_actor = true` makes `bay start` refuse `ACTOR_UNNAMED` while
-/// the actor's name comes from a default (G152).
+/// the actor's name comes from a default (G152). `require_actor_proof = true` makes `bay land`
+/// refuse `ACTOR_UNPROVEN` while the agent key cannot prove which actor signs: several actors
+/// run sessions under this OS account, which can read a file-based agent key (G243b). Neither
+/// refuses anything by default.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
     #[serde(default)]
     pub require_actor: bool,
+    #[serde(default)]
+    pub require_actor_proof: bool,
 }
 
 /// One check set aside for a stated time (`DESIGN` § 7, ruling 8c): while the entry is in the
@@ -67,6 +72,13 @@ pub struct Quarantine {
     pub reason: String,
     /// A date (`YYYY-MM-DD`), or the `Change-Id` whose landing ends it.
     pub end: String,
+    /// Who answers for the quarantine until it ends: shown by `bay status` and `bay doctor`, so
+    /// a set-aside check has a name beside it. Absent on entries written before the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// The date (`YYYY-MM-DD`) the check was set aside, from which `bay status` counts its age.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
 }
 
 impl Quarantine {
@@ -77,9 +89,24 @@ impl Quarantine {
         is_date(&self.end) && self.end.as_str() < today
     }
 
+    /// Whole days from `since` to `today` (both `YYYY-MM-DD`); `None` without a `since`.
+    #[must_use]
+    pub fn age_days(&self, today: &str) -> Option<i64> {
+        days_between(self.since.as_deref()?, today)
+    }
+
     fn sets_aside(&self, entry: &CheckEntry) -> bool {
         self.id == entry.id && self.environment == entry.environment
     }
+}
+
+/// Whole days from date `from` to date `to` (`YYYY-MM-DD`), negative when `to` is earlier.
+fn days_between(from: &str, to: &str) -> Option<i64> {
+    let day = |date: &str| {
+        let secs = crate::clock::unix_of(&format!("{date}T00:00:00Z"))?;
+        i64::try_from(secs / 86_400).ok()
+    };
+    Some(day(to)? - day(from)?)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -87,10 +114,24 @@ impl Quarantine {
 pub struct CheckEntry {
     pub id: String,
     pub environment: String,
+    /// What answers the check (G245): `check`, the default, a run of `command` whose record bay
+    /// writes; `approval`, a person's signed `approval` record for the exact candidate tree,
+    /// never run. Judged at the base; `approval` enters the definition digest, and the default
+    /// is left out of the canonical entry (the G26 vector).
+    #[serde(default, skip_serializing_if = "CheckKind::is_check")]
+    pub kind: CheckKind,
+    /// Required of a `check`, refused on an `approval`. Left out of the canonical entry when
+    /// empty, which only an approval's is, so a run check keeps its digest.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub command: String,
+    /// Required of a `check` (its command is in it), refused on an `approval`; left out of the
+    /// canonical entry when empty, like `command`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub adapter: Vec<String>,
-    /// Required, no default: the minimum number of tests the check must collect.
-    pub expected_minimum: u64,
+    /// Required of a `check`, no default: the minimum number of tests the check must collect.
+    /// Refused on an `approval`, which collects none. Read through [`CheckEntry::minimum`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_minimum: Option<u64>,
     #[serde(default = "default_timeout")]
     pub timeout_s: u64,
     /// Declared inputs beyond the tree. `commit` keys the check's evidence by subject commit
@@ -156,6 +197,65 @@ pub struct CheckEntry {
     /// left out of the canonical entry when absent. An empty list makes the policy invalid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub producers: Option<Vec<String>>,
+    /// NEW-10 (`crate::throughput`): the check's verdict depends on nothing but the content of
+    /// its read set ([`CheckEntry::read_set`]) in the candidate's tree and in its base's, so a
+    /// record of it holds for a later candidate whose read set is the same, byte for byte, and
+    /// is carried onto it. An opt-in: a check that reads outside its `when_paths` would be
+    /// carried onto a tree it never judged. Judged at the base; `true` enters the definition
+    /// digest, and the default is left out of the canonical entry (the G26 vector). It needs
+    /// `paths` or `when_paths`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub footprint: bool,
+    /// How many times the executor runs the check again on the identical tree after a
+    /// `product_failure`, at most [`MAX_RETRY_ON_FAILURE`]; 0, the default, runs it once. Only a
+    /// `product_failure` is run again: an `unknown` or `infra_failure` is no answer and never
+    /// cancels a pass (`DESIGN` § 7), so a rerun could not tell a flake from it. Every run is a
+    /// record on the tree, so a failure and a later pass combine to `flaky`, never `pass`.
+    /// Judged at the base and in the definition digest; left out of the canonical entry at 0.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub retry_on_failure: u32,
+    /// Whether a `flaky` verdict of this check (a pass and a `product_failure` on one tree) lets
+    /// the landing proceed. False, the default, refuses it `CHECK_FLAKY`. A flaky landing is
+    /// named in the land result's `coverage_gaps` with every run, never as a plain pass. Judged
+    /// at the base and in the definition digest; left out of the canonical entry when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_flaky: bool,
+}
+
+/// The most reruns a `[[check]]` may ask for with `retry_on_failure`: a check that fails every
+/// run is run this many times more, so the bound keeps a typo from holding the executor.
+pub const MAX_RETRY_ON_FAILURE: u32 = 5;
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_zero(count: &u32) -> bool {
+    *count == 0
+}
+
+/// A check's `kind` (G245).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CheckKind {
+    /// Bay runs the check's command and writes its record.
+    #[default]
+    Check,
+    /// A person answers: an enrolled approver's signed `approval` record for the candidate tree.
+    Approval,
+}
+
+impl CheckKind {
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    fn is_check(&self) -> bool {
+        *self == Self::Check
+    }
+
+    /// The evidence record kind that answers a check of this kind.
+    #[must_use]
+    pub const fn record_kind(self) -> &'static str {
+        match self {
+            Self::Check => crate::evidence::KIND_CHECK,
+            Self::Approval => crate::evidence::KIND_APPROVAL,
+        }
+    }
 }
 
 /// A check's `stage` (G91).
@@ -175,6 +275,19 @@ impl Stage {
 }
 
 impl CheckEntry {
+    /// The minimum number of tests the check must collect: its `expected_minimum`, which a valid
+    /// run check always states; zero for an approval, which runs nothing.
+    #[must_use]
+    pub fn minimum(&self) -> u64 {
+        self.expected_minimum.unwrap_or(0)
+    }
+
+    /// Whether a person answers the check rather than a run (G245).
+    #[must_use]
+    pub fn is_approval(&self) -> bool {
+        self.kind == CheckKind::Approval
+    }
+
     /// Whether `changed`, the paths the candidate's diff against its base changes, wakes this
     /// check (G146): always without `when_paths`, else when a glob matches one of them.
     #[must_use]
@@ -184,6 +297,17 @@ impl CheckEntry {
                 .iter()
                 .any(|path| globs.iter().any(|glob| glob_matches(glob, path)))
         })
+    }
+
+    /// NEW-10: what a check with `footprint = true` reads, its verdict's whole input besides
+    /// its definition: its `paths` (the only part of the tree its materialization holds) when it
+    /// has them, else its `when_paths`. `None` for a check without `footprint = true`.
+    #[must_use]
+    pub fn read_set(&self) -> Option<&[String]> {
+        if !self.footprint {
+            return None;
+        }
+        self.paths.as_deref().or(self.when_paths.as_deref())
     }
 }
 
@@ -234,6 +358,36 @@ impl Policy {
         self.quarantined.iter().any(|q| q.sets_aside(entry))
     }
 
+    /// Whether a `flaky` verdict of check `id` lets a landing proceed (`allow_flaky`).
+    #[must_use]
+    pub fn allows_flaky(&self, id: &crate::evidence::CheckId) -> bool {
+        self.check(id).is_some_and(|check| check.allow_flaky)
+    }
+
+    /// The checks of `required` that `records` do not pass for `commit` (G30), with their
+    /// combined verdicts, less each `flaky` one whose entry says `allow_flaky`. The executor and
+    /// the host hook judge a landing by this one rule.
+    #[must_use]
+    pub fn gaps(
+        &self,
+        records: &[crate::evidence::EvidenceRecord],
+        required: &[ManifestEntry],
+        commit: &str,
+    ) -> Vec<(crate::evidence::CheckId, crate::evidence::Combined)> {
+        crate::evidence::aggregate(
+            records,
+            required,
+            &self.manifest_digest,
+            &|id| self.commit_keyed(id),
+            commit,
+        )
+        .into_iter()
+        .filter(|(id, combined)| {
+            *combined != crate::evidence::Combined::Flaky || !self.allows_flaky(id)
+        })
+        .collect()
+    }
+
     /// Whether check `id` is keyed by subject commit.
     #[must_use]
     pub fn commit_keyed(&self, id: &crate::evidence::CheckId) -> bool {
@@ -250,6 +404,14 @@ impl Policy {
             .iter()
             .any(|m| m.id == entry.id && m.environment == entry.environment)
             && self.unwoken(entry, changed).is_none()
+    }
+
+    /// Whether bay runs check `entry` for a candidate whose diff against its base changes
+    /// `changed`: it is required ([`Policy::requires`]) and no approval, which a person's
+    /// record answers and nothing runs (G245).
+    #[must_use]
+    pub fn runs(&self, entry: &CheckEntry, changed: &[String]) -> bool {
+        !entry.is_approval() && self.requires(entry, changed)
     }
 
     /// The manifest entries required of a candidate whose diff against its base changes
@@ -292,6 +454,17 @@ impl Policy {
         })
     }
 
+    /// Whether `changed` holds this policy's file or one of its adapter paths: a change that
+    /// is judged twice, and that every check after it is judged by another policy than this
+    /// one (§ 7; `crate::throughput` predicts nothing past it).
+    #[must_use]
+    pub fn touches_policy(&self, changed: &[String]) -> bool {
+        let paths = self.paths();
+        changed
+            .iter()
+            .any(|file| paths.iter().any(|path| covers(path, file)))
+    }
+
     /// The `[[check]]` entry for `id`.
     #[must_use]
     pub fn check(&self, id: &crate::evidence::CheckId) -> Option<&CheckEntry> {
@@ -302,12 +475,18 @@ impl Policy {
 
     /// Whether `record`'s producer may answer the check it names (G163): the check has no
     /// `producers` list, or the list names it. Applied to a check's records before they
-    /// combine, under each policy that judges, so the base's list binds a candidate.
+    /// combine, under each policy that judges, so the base's list binds a candidate. G245: a
+    /// record answers only a check of its own kind, so a producer's `check` pass never answers an
+    /// approval check, and an approval never answers a check bay runs.
     #[must_use]
     pub fn listed(&self, record: &crate::evidence::EvidenceRecord) -> bool {
-        self.check(&record.check)
-            .and_then(|check| check.producers.as_ref())
-            .is_none_or(|names| names.contains(&record.producer.name))
+        self.check(&record.check).is_none_or(|check| {
+            check.kind.record_kind() == record.kind
+                && check
+                    .producers
+                    .as_ref()
+                    .is_none_or(|names| names.contains(&record.producer.name))
+        })
     }
 
     /// `records` without those whose producer the check's `producers` list leaves out.
@@ -594,8 +773,9 @@ impl From<LoadError> for String {
 /// no check or whose `end` is neither a date nor a `Change-Id`, has a `[profile.<name>]` that
 /// requires nothing, an unknown dimension or one twice, declares `unchecked = true` beside a
 /// `[[check]]`, puts one check id in both stages, has a bad `when_paths` or `producers` list,
-/// or, not unchecked, has no required pre-publication check whose `expected_minimum` is above
-/// zero.
+/// has a run check without its `command` or `expected_minimum`, or an approval check that names
+/// what only a run uses, is `post`, or has no `when_paths` (G245), or, not unchecked, has no
+/// required pre-publication check whose `expected_minimum` is above zero.
 /// [`LoadError::Git`] on a git fault, or a policy file the tree names whose blob cannot be read
 /// (G104b): unreadable is never "no policy".
 pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
@@ -653,8 +833,12 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
             .and_then(|()| validate_materialization(entry))
             .and_then(|()| validate_when_paths(entry))
             .and_then(|()| validate_producers(entry))
+            .and_then(|()| validate_kind(entry))
+            .and_then(|()| validate_footprint(entry))
+            .and_then(|()| validate_retry(entry))
             .map_err(invalid)?;
-        if !entry.adapter.iter().any(|path| covers(path, executable)) {
+        // G245: an approval runs nothing, so it names no executable and no adapter.
+        if !entry.is_approval() && !entry.adapter.iter().any(|path| covers(path, executable)) {
             return Err(invalid(format!(
                 "check {} runs {executable}, which is not in its adapter list",
                 entry.id
@@ -711,14 +895,37 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
 ///
 /// A git fault.
 pub fn requires_actor_at(git: &Git, commit: &str) -> Result<bool, String> {
+    agent_flag_at(git, commit, "require_actor", |agent| agent.require_actor)
+}
+
+/// Whether the policy at `commit` requires actor proof (`[agent] require_actor_proof`, G243b),
+/// judged at the base as [`requires_actor_at`] is: a change never lifts it for its own landing.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn requires_actor_proof_at(git: &Git, commit: &str) -> Result<bool, String> {
+    agent_flag_at(git, commit, "require_actor_proof", |agent| {
+        agent.require_actor_proof
+    })
+}
+
+/// The `[agent]` flag `key` of the policy at `commit`, read by `flag`. No policy sets none. An
+/// invalid policy still sets it when its text says so: a typo elsewhere never lifts it.
+fn agent_flag_at(
+    git: &Git,
+    commit: &str,
+    key: &str,
+    flag: fn(&AgentPolicy) -> bool,
+) -> Result<bool, String> {
     match load_at(git, commit) {
-        Ok(policy) => Ok(policy.is_some_and(|policy| policy.agent.require_actor)),
+        Ok(policy) => Ok(policy.is_some_and(|policy| flag(&policy.agent))),
         Err(LoadError::Git(why)) => Err(why),
         Err(LoadError::Invalid(_)) => Ok(git
             .file_at(commit, POLICY_PATH)
             .map_err(|error| error.message())?
             .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
-            .and_then(|table| table.get("agent")?.get("require_actor")?.as_bool())
+            .and_then(|table| table.get("agent")?.get(key)?.as_bool())
             .unwrap_or(false)),
     }
 }
@@ -781,6 +988,22 @@ fn validate_shape(file: &PolicyFile) -> Result<(), String> {
                 quarantine.id, quarantine.environment, quarantine.end
             ));
         }
+        if let Some(since) = quarantine.since.as_deref().filter(|since| !is_date(since)) {
+            return Err(format!(
+                "[[quarantine]] ({}, {}) has since = {since:?}, which is not a date (YYYY-MM-DD)",
+                quarantine.id, quarantine.environment
+            ));
+        }
+        if quarantine
+            .owner
+            .as_deref()
+            .is_some_and(|owner| owner.trim().is_empty())
+        {
+            return Err(format!(
+                "[[quarantine]] ({}, {}) has an empty owner; name who answers for it, or leave owner out",
+                quarantine.id, quarantine.environment
+            ));
+        }
     }
     let quarantined = |entry: &CheckEntry| file.quarantine.iter().any(|q| q.sets_aside(entry));
     // The missing-policy ruling: `unchecked = true` says no check runs, so a check beside it
@@ -805,10 +1028,12 @@ fn validate_shape(file: &PolicyFile) -> Result<(), String> {
         ));
     }
     // A post-publication check never judges a landing, so it never counts here.
+    // G245: an approval collects no test, so it never counts here either.
     if !file.unchecked
-        && !file.check.iter().any(|entry| {
-            entry.expected_minimum > 0 && !quarantined(entry) && entry.stage == Stage::Pre
-        })
+        && !file
+            .check
+            .iter()
+            .any(|entry| entry.minimum() > 0 && !quarantined(entry) && entry.stage == Stage::Pre)
     {
         return Err("no required check has an expected_minimum above zero".to_owned());
     }
@@ -911,6 +1136,18 @@ fn validate_materialization(entry: &CheckEntry) -> Result<(), String> {
     Ok(())
 }
 
+/// NEW-10: a check with `footprint = true` names what it reads, in `paths` or `when_paths`; a
+/// footprint of the whole tree would carry nothing, and an empty one everything.
+fn validate_footprint(entry: &CheckEntry) -> Result<(), String> {
+    if entry.footprint && entry.paths.is_none() && entry.when_paths.is_none() {
+        return Err(format!(
+            "check {} declares footprint = true with neither paths nor when_paths; a footprint names what the check reads",
+            entry.id
+        ));
+    }
+    Ok(())
+}
+
 /// The `when_paths` rules of one `[[check]]` (G146): when present, at least one glob, each a
 /// relative path pattern without `.`, `..` or empty parts (a trailing `/` names a directory),
 /// once. A list that could match nothing is a typo, never silent.
@@ -943,6 +1180,61 @@ fn validate_when_paths(entry: &CheckEntry) -> Result<(), String> {
     Ok(())
 }
 
+/// The `kind` rules of one `[[check]]` (G245). A run check states its `command`, its `adapter`
+/// list and its `expected_minimum`. An approval check is answered by a person's signed record,
+/// never run, so it states none of them, nor anything that shapes a run (`env`, `inputs`,
+/// `fixtures`, `paths`, `network`); it judges a landing, so it is never `post`; and it names
+/// the paths that need the approval in `when_paths`, which it requires: an approval on every
+/// change is stated as `when_paths = ["**"]`, never by leaving the list out.
+fn validate_kind(entry: &CheckEntry) -> Result<(), String> {
+    if !entry.is_approval() {
+        if entry.command.trim().is_empty() {
+            return Err(format!(
+                "check {} has no command; a check bay runs names its command (or is kind = \"approval\")",
+                entry.id
+            ));
+        }
+        if entry.expected_minimum.is_none() {
+            return Err(format!(
+                "check {} has no expected_minimum; a check bay runs states the minimum number of tests it must collect",
+                entry.id
+            ));
+        }
+        return Ok(());
+    }
+    let stated = [
+        ("command", !entry.command.is_empty()),
+        ("adapter", !entry.adapter.is_empty()),
+        ("expected_minimum", entry.expected_minimum.is_some()),
+        ("env", !entry.env.is_empty()),
+        ("inputs", !entry.inputs.is_empty()),
+        ("fixtures", !entry.fixtures.is_empty()),
+        ("paths", entry.paths.is_some()),
+        ("network", entry.network),
+        ("retry_on_failure", entry.retry_on_failure > 0),
+        ("allow_flaky", entry.allow_flaky),
+    ];
+    if let Some((key, _)) = stated.iter().find(|(_, set)| *set) {
+        return Err(format!(
+            "check {} is kind = \"approval\" and names {key}; an approval is answered by an approver's signed record, never run, so it names no {key}",
+            entry.id
+        ));
+    }
+    if entry.stage == Stage::Post {
+        return Err(format!(
+            "check {} is kind = \"approval\" and stage = \"post\"; an approval is given before a landing, never after it",
+            entry.id
+        ));
+    }
+    if entry.when_paths.is_none() {
+        return Err(format!(
+            "check {} is kind = \"approval\" and has no when_paths; name the paths that need an approval (when_paths = [\"**\"] for every change)",
+            entry.id
+        ));
+    }
+    Ok(())
+}
+
 /// The `producers` list of one `[[check]]` (G163): when present, at least one producer name,
 /// each a valid operator name, once. An empty list would let no record answer the check, which
 /// is a typo, never silent.
@@ -966,6 +1258,25 @@ fn validate_producers(entry: &CheckEntry) -> Result<(), String> {
                 entry.id
             ));
         }
+    }
+    Ok(())
+}
+
+/// The flake keys of one `[[check]]`: `retry_on_failure` at most [`MAX_RETRY_ON_FAILURE`], and
+/// neither key on a post-publication check, which bay never runs or judges for a landing: a
+/// key there would change nothing, and a typo is never silent.
+fn validate_retry(entry: &CheckEntry) -> Result<(), String> {
+    if entry.retry_on_failure > MAX_RETRY_ON_FAILURE {
+        return Err(format!(
+            "check {} asks retry_on_failure = {}; at most {MAX_RETRY_ON_FAILURE} reruns are allowed",
+            entry.id, entry.retry_on_failure
+        ));
+    }
+    if entry.stage == Stage::Post && (entry.retry_on_failure > 0 || entry.allow_flaky) {
+        return Err(format!(
+            "check {} runs after publication; retry_on_failure and allow_flaky apply only to a pre-publication check",
+            entry.id
+        ));
     }
     Ok(())
 }
@@ -1083,7 +1394,39 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{CheckEntry, covers, manifest_digest, manifest_entry};
+    use super::{CheckEntry, Quarantine, covers, manifest_digest, manifest_entry};
+
+    /// A quarantine's age counts whole days from `since`; without `since` it has none.
+    #[test]
+    fn a_quarantine_counts_its_age_from_since() {
+        let mut quarantine: Quarantine = toml::from_str(
+            "id = \"lint\"\nenvironment = \"local\"\nreason = \"red\"\nend = \"2026-03-01\"\nowner = \"platform\"\nsince = \"2026-02-27\"\n",
+        )
+        .unwrap();
+        assert_eq!(quarantine.age_days("2026-03-02"), Some(3));
+        assert!(quarantine.overdue("2026-03-02"));
+        assert!(!quarantine.overdue("2026-03-01"));
+        quarantine.since = None;
+        assert_eq!(quarantine.age_days("2026-03-02"), None);
+    }
+
+    /// The flake keys stay out of the canonical entry at their defaults, so a policy without
+    /// them keeps its definition digest (the G26 vector), and enter it when set.
+    #[test]
+    fn the_flake_keys_enter_the_digest_only_when_set() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let plain: CheckEntry = toml::from_str(text).unwrap();
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("retry_on_failure").is_none(), "{json}");
+        assert!(json.get("allow_flaky").is_none(), "{json}");
+        let set: CheckEntry =
+            toml::from_str(&format!("{text}retry_on_failure = 2\nallow_flaky = true\n")).unwrap();
+        let ids = BTreeMap::new();
+        assert_ne!(
+            manifest_entry(&plain, &ids).unwrap().definition_digest,
+            manifest_entry(&set, &ids).unwrap().definition_digest
+        );
+    }
 
     /// An executable that climbs out of its adapter directory is not in it.
     #[test]
@@ -1219,6 +1562,89 @@ mod tests {
             studio,
             digest_of("when_paths = [\"studio/\", \"shared/\"]\n")
         );
+    }
+
+    /// G245: an approval check is answered by records, so it names nothing a run uses, is
+    /// never `post`, and names its paths; a run check states its command and minimum. `kind =
+    /// "approval"` is in the canonical entry, and what an approval lacks is left out of it.
+    #[test]
+    fn an_approval_check_names_its_paths_and_nothing_a_run_uses() {
+        let approval = "id = \"billing-approval\"\nenvironment = \"people\"\nkind = \"approval\"\nwhen_paths = [\"billing/\"]\n";
+        let entry =
+            |extra: &str| -> CheckEntry { toml::from_str(&format!("{approval}{extra}")).unwrap() };
+        assert!(super::validate_kind(&entry("")).is_ok());
+        for bad in [
+            "command = \"scripts/bay-check\"\n",
+            "adapter = [\"scripts/bay-check\"]\n",
+            "expected_minimum = 0\n",
+            "stage = \"post\"\n",
+            "env = [\"TOKEN\"]\n",
+            "inputs = [\"commit\"]\n",
+            "paths = [\"billing/\"]\n",
+            "network = true\n",
+        ] {
+            assert!(super::validate_kind(&entry(bad)).is_err(), "{bad}");
+        }
+        let unscoped: CheckEntry =
+            toml::from_str("id = \"a\"\nenvironment = \"people\"\nkind = \"approval\"\n").unwrap();
+        assert!(super::validate_kind(&unscoped).is_err());
+        for run in [
+            "id = \"tests\"\nenvironment = \"local\"\nadapter = [\"x\"]\nexpected_minimum = 1\n",
+            "id = \"tests\"\nenvironment = \"local\"\ncommand = \"x\"\nadapter = [\"x\"]\n",
+        ] {
+            let entry: CheckEntry = toml::from_str(run).unwrap();
+            assert!(super::validate_kind(&entry).is_err(), "{run}");
+        }
+        let canonical = serde_json::to_value(entry("")).unwrap();
+        assert_eq!(canonical["kind"], "approval");
+        for absent in ["command", "adapter", "expected_minimum"] {
+            assert!(canonical.get(absent).is_none(), "{absent}");
+        }
+        let ids = BTreeMap::new();
+        let unchanged: CheckEntry = toml::from_str(
+            "id = \"tests\"\nenvironment = \"local\"\ncommand = \"x\"\nadapter = [\"x\"]\nexpected_minimum = 1\n",
+        )
+        .unwrap();
+        let stated: CheckEntry = toml::from_str(
+            "id = \"tests\"\nenvironment = \"local\"\nkind = \"check\"\ncommand = \"x\"\nadapter = [\"x\"]\nexpected_minimum = 1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest_entry(&unchanged, &ids).unwrap().definition_digest,
+            manifest_entry(&stated, &ids).unwrap().definition_digest,
+            "the default kind leaves the digest as it was"
+        );
+    }
+
+    /// NEW-10: `footprint = true` is a field of the entry, in its definition digest, so no
+    /// record made before it was declared is carried; the default leaves the digest as it was
+    /// (the G26 vector). Its read set is `paths` when present, else `when_paths`, and a check
+    /// without `footprint = true` has none.
+    #[test]
+    fn a_footprint_enters_the_definition_digest_and_names_its_read_set() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\nwhen_paths = [\"api/\"]\n";
+        let ids = BTreeMap::new();
+        let entry =
+            |extra: &str| -> CheckEntry { toml::from_str(&format!("{text}{extra}")).unwrap() };
+        let digest_of = |extra: &str| {
+            manifest_entry(&entry(extra), &ids)
+                .unwrap()
+                .definition_digest
+        };
+        assert_eq!(digest_of(""), digest_of("footprint = false\n"));
+        assert_ne!(digest_of(""), digest_of("footprint = true\n"));
+        assert_eq!(entry("").read_set(), None);
+        let when = ["api/".to_owned()];
+        assert_eq!(entry("footprint = true\n").read_set(), Some(&when[..]));
+        let paths = ["api/".to_owned(), "lib/".to_owned()];
+        assert_eq!(
+            entry("footprint = true\npaths = [\"api/\", \"lib/\"]\n").read_set(),
+            Some(&paths[..])
+        );
+        let mut bare = entry("footprint = true\n");
+        bare.when_paths = None;
+        assert!(super::validate_footprint(&bare).is_err());
+        assert!(super::validate_footprint(&entry("footprint = true\n")).is_ok());
     }
 
     /// G146: the `when_paths` globs.

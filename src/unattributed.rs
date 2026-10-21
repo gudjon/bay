@@ -5,7 +5,8 @@
 //! did not land through bay: it is an `unattributed_landing` (`INTERFACES` § 5). It is derived
 //! from trunk on each read, never stored:
 //!
-//! - Over the newest [`WINDOW`] first-parent commits of trunk after bay's adoption (the newest
+//! - Over the newest `[red] window` first-parent commits of trunk ([`crate::red::window`],
+//!   default [`crate::red::DEFAULT_WINDOW`]) after bay's adoption (the newest
 //!   first-parent commit that added `.bay/config.toml`; it and what it stands on predate bay),
 //!   each commit that is not a bay publication is named, `landed_as` `merge` when it has more
 //!   than one parent and `outside` otherwise.
@@ -16,6 +17,11 @@
 //!   [`MAX_MERGED`] of them) and counts them all, so a commit behind a merge is never silent
 //!   (review K12). `off_first_parent` is their sum.
 //!
+//! - NEW-4: under a config at trunk that declares `[[lane]]`s, each landing also names the lane
+//!   commits it brought onto trunk (`lane_leak`, [`crate::lane::of_landing`]): the commits a
+//!   merge's other parents reach that a lane ref this clone holds reaches too; `lane` is the
+//!   first lane named, and `lane_leaks` counts the landings that name one.
+//!
 //! `bay status` lists them under `detail.unattributed`, `bay status --fleet` the same from the
 //! local cache, and `bay watch` names each listed landing outside bay as an
 //! `unattributed_landing` event ([`event`]).
@@ -23,9 +29,6 @@
 use serde_json::{Value, json};
 
 use crate::git::Git;
-
-/// How many first-parent trunk commits the scan reads back, as a red judgement does.
-pub const WINDOW: usize = crate::red::WINDOW;
 
 /// The most commits one merge names; `merged_count` counts them all.
 pub const MAX_MERGED: usize = 20;
@@ -80,14 +83,16 @@ pub fn event(commit: &str, landed_as: &str, subject: &str) -> Value {
 /// `{"window", "count", "off_first_parent", "landings": [{"commit", "landed_as", "base",
 /// "at", "subject", "merged", "merged_count"}]}`.
 ///
-/// The cost is bounded: one log for the adoption, one log of [`WINDOW`] commits, one
+/// The cost is bounded: one log for the adoption, one log of the window's commits, one
 /// signature check per commit that carries a `Change-Id` under a registry, and two
-/// `rev-list` calls per merge.
+/// `rev-list` calls per merge; under lanes, one ref listing and [`crate::lane::reached`]'s
+/// bounded calls per landing.
 ///
 /// # Errors
 ///
-/// A git fault.
+/// A git fault, or a committed config bay cannot read.
 pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
+    let window = crate::red::window(git, trunk)?;
     let adoption = git
         .run(&[
             "log",
@@ -105,12 +110,11 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
         .ref_target(crate::registry::REGISTRY_REF)
         .map_err(|error| error.message())?
         .is_some();
-    let window = WINDOW.to_string();
     let mut args = vec![
         "log".to_owned(),
         "--first-parent".to_owned(),
         "-n".to_owned(),
-        window,
+        window.to_string(),
         "--format=%H%x1f%P%x1f%ct%x1f%cn%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%s%x1e".to_owned(),
         trunk.to_owned(),
     ];
@@ -119,8 +123,10 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
     }
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let log = git.run(&args).map_err(|error| error.message())?;
+    let (lanes, tips, _) = crate::lane::tips_at(git, trunk)?;
     let mut landings = Vec::new();
     let mut off_first_parent: u64 = 0;
+    let mut lane_leaks: u64 = 0;
     for entry in log.split('\u{1e}') {
         let fields: Vec<&str> = entry.trim().split('\u{1f}').map(str::trim).collect();
         let [
@@ -147,7 +153,7 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
             (Vec::new(), 0)
         };
         off_first_parent += merged_count;
-        landings.push(json!({
+        let mut landing = json!({
             "commit": commit,
             "landed_as": landed_as,
             "base": parents.split_whitespace().next(),
@@ -155,14 +161,26 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
             "subject": subject,
             "merged": merged,
             "merged_count": merged_count,
-        }));
+        });
+        if !lanes.is_empty() {
+            let leaks = crate::lane::of_landing(git, &tips, commit, parents)?;
+            lane_leaks += u64::from(!leaks.is_empty());
+            let (lane, named) = crate::lane::row(&leaks);
+            landing["lane"] = lane;
+            landing["lane_leak"] = named;
+        }
+        landings.push(landing);
     }
-    Ok(json!({
-        "window": WINDOW,
+    let mut scanned = json!({
+        "window": window,
         "count": landings.len(),
         "off_first_parent": off_first_parent,
         "landings": landings,
-    }))
+    });
+    if !lanes.is_empty() {
+        scanned["lane_leaks"] = json!(lane_leaks);
+    }
+    Ok(scanned)
 }
 
 /// The commits merge `commit` reaches only through its other parents: at most [`MAX_MERGED`]

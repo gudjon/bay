@@ -8,6 +8,7 @@
 //! marker; every other outcome of the head creates its release at once.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 
 use serde_json::{Value, json};
 
@@ -34,12 +35,14 @@ pub struct Entry {
 }
 
 /// The queue as the remote holds it.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Queue {
     pub entries: BTreeMap<u64, Entry>,
     pub released: BTreeSet<u64>,
     /// The reason each release names (`published`, `deadline`, `check_failed`, …).
     pub release_reasons: BTreeMap<u64, String>,
+    /// Each release's commit and its committer time in Unix seconds, for retention (§ 10a).
+    pub release_commits: BTreeMap<u64, (String, u64)>,
 }
 
 /// The JSON `file` at `commit`: `None` when the commit holds none or it is not JSON. G104b: a
@@ -49,6 +52,24 @@ fn entry_json(git: &Git, commit: &str, file: &str) -> Result<Option<Value>, Stri
         .file_at(commit, file)
         .map_err(|error| error.message())?
         .and_then(|text| serde_json::from_str(&text).ok()))
+}
+
+/// One queue ref as `for-each-ref` lists it.
+struct Listed {
+    seq: u64,
+    commit: String,
+    committed: u64,
+    release: bool,
+}
+
+impl Listed {
+    const fn file(&self) -> &'static str {
+        if self.release {
+            "release.json"
+        } else {
+            "entry.json"
+        }
+    }
 }
 
 impl Queue {
@@ -70,7 +91,10 @@ impl Queue {
         Self::local(&repo.git)
     }
 
-    /// Reads the queue refs this repository holds.
+    /// Reads the queue refs this repository holds. G200b: one `for-each-ref` lists them and
+    /// one `git cat-file --batch` reads every entry and release, however long the queue's
+    /// history; a file the batch cannot give is read on its own ([`Git::file_at`]), which
+    /// tells a commit that holds none from a blob that cannot be read.
     ///
     /// # Errors
     ///
@@ -80,38 +104,60 @@ impl Queue {
         let refs = git
             .run(&[
                 "for-each-ref",
-                "--format=%(objectname) %(refname)",
+                "--format=%(objectname) %(committerdate:unix) %(refname)",
                 QUEUE_PREFIX,
                 DONE_PREFIX,
             ])
             .map_err(|error| error.message())?;
-        for line in refs.lines() {
-            let Some((commit, name)) = line.split_once(' ') else {
-                continue;
+        let listed: Vec<Listed> = refs
+            .lines()
+            .filter_map(|line| {
+                let mut words = line.splitn(3, ' ');
+                let commit = words.next()?.to_owned();
+                let committed: u64 = words.next()?.parse().unwrap_or(0);
+                let name = words.next()?;
+                let (release, seq) = match name.strip_prefix(QUEUE_PREFIX) {
+                    Some(seq) => (false, seq),
+                    None => (true, name.strip_prefix(DONE_PREFIX)?),
+                };
+                Some(Listed {
+                    seq: seq.parse().ok()?,
+                    commit,
+                    committed,
+                    release,
+                })
+            })
+            .collect();
+        let names: Vec<String> = listed
+            .iter()
+            .map(|one| format!("{}:{}", one.commit, one.file()))
+            .collect();
+        let texts = git.objects(&names).map_err(|error| error.message())?;
+        for (one, text) in listed.iter().zip(texts) {
+            let json = match text {
+                Some(text) => serde_json::from_slice(&text).ok(),
+                None => entry_json(git, &one.commit, one.file())?,
             };
-            if let Some(seq) = name
-                .strip_prefix(QUEUE_PREFIX)
-                .and_then(|seq| seq.parse().ok())
-            {
-                let entry = entry_json(git, commit, "entry.json")?.unwrap_or(Value::Null);
+            if one.release {
+                queue.released.insert(one.seq);
+                let reason = json
+                    .and_then(|release: Value| release["reason"].as_str().map(str::to_owned))
+                    .unwrap_or_default();
+                queue.release_reasons.insert(one.seq, reason);
+                queue
+                    .release_commits
+                    .insert(one.seq, (one.commit.clone(), one.committed));
+            } else {
+                let entry = json.unwrap_or(Value::Null);
                 queue.entries.insert(
-                    seq,
+                    one.seq,
                     Entry {
-                        seq,
-                        commit: commit.to_owned(),
+                        seq: one.seq,
+                        commit: one.commit.clone(),
                         op_id: entry["op_id"].as_str().unwrap_or_default().to_owned(),
                         change: entry["change"].as_str().unwrap_or_default().to_owned(),
                     },
                 );
-            } else if let Some(seq) = name
-                .strip_prefix(DONE_PREFIX)
-                .and_then(|seq| seq.parse().ok())
-            {
-                queue.released.insert(seq);
-                let reason = entry_json(git, commit, "release.json")?
-                    .and_then(|release| release["reason"].as_str().map(str::to_owned))
-                    .unwrap_or_default();
-                queue.release_reasons.insert(seq, reason);
             }
         }
         Ok(queue)
@@ -139,6 +185,32 @@ impl Queue {
         self.entries
             .values()
             .find(|entry| entry.change == change && !self.released.contains(&entry.seq))
+    }
+
+    /// The live reservations ahead of place `seq`, head first (`crate::throughput`).
+    #[must_use]
+    pub fn ahead_of(&self, seq: u64) -> Vec<&Entry> {
+        self.entries
+            .values()
+            .filter(|entry| entry.seq < seq && !self.released.contains(&entry.seq))
+            .collect()
+    }
+
+    /// The live reservations behind place `seq`, nearest first (`crate::throughput`).
+    #[must_use]
+    pub fn behind(&self, seq: u64) -> Vec<&Entry> {
+        self.entries
+            .values()
+            .filter(|entry| entry.seq > seq && !self.released.contains(&entry.seq))
+            .collect()
+    }
+
+    /// The released places, newest first, each with the reason its release names.
+    pub fn releases_newest_first(&self) -> impl Iterator<Item = (&Entry, &str)> + '_ {
+        self.release_reasons
+            .iter()
+            .rev()
+            .filter_map(|(seq, reason)| Some((self.entries.get(seq)?, reason.as_str())))
     }
 
     /// 1 for the head, 2 for the next, … among live reservations.
@@ -183,6 +255,87 @@ impl Queue {
                     .is_some_and(|released| released == reason)
         })
     }
+}
+
+/// The most (reservation, release) pairs one retention push removes, so the host's judgement
+/// of it stays bounded (§ 10a); a longer history is pruned over later passes.
+pub const PRUNE_MAX: usize = 64;
+
+impl Queue {
+    /// The places retention may remove (§ 10a): whole (reservation, release) pairs below the
+    /// head, never the highest pair, each one whose operation is `finished` and whose release
+    /// is at `cutoff` (Unix seconds) or older, lowest first, at most [`PRUNE_MAX`]. A finished
+    /// operation is never run or counted again, so its places hold nothing a later judgement
+    /// reads: a deadline release of an operation still waiting keeps counting.
+    #[must_use]
+    pub fn prunable(&self, finished: impl Fn(&Entry) -> bool, cutoff: u64) -> Vec<u64> {
+        let head = self.head().map_or(u64::MAX, |head| head.seq);
+        let highest = self
+            .entries
+            .keys()
+            .filter(|seq| self.released.contains(seq))
+            .max()
+            .copied();
+        self.entries
+            .values()
+            .filter(|entry| entry.seq < head && Some(entry.seq) != highest)
+            .filter(|entry| {
+                self.release_commits
+                    .get(&entry.seq)
+                    .is_some_and(|(_, released)| *released <= cutoff)
+            })
+            .filter(|entry| finished(entry))
+            .map(|entry| entry.seq)
+            .take(PRUNE_MAX)
+            .collect()
+    }
+}
+
+/// Removes the pairs `seqs` of `queue` from the remote in one atomic push, each ref under a
+/// lease on the commit `queue` read, then from this repository. Returns the places removed;
+/// none when `seqs` is empty.
+///
+/// # Errors
+///
+/// The remote refused the push (a lease that no longer holds, or its hook), or a git fault.
+pub fn prune(repo: &Repo, queue: &Queue, seqs: &[u64]) -> Result<Vec<u64>, String> {
+    let mut leases = Vec::new();
+    let mut refspecs = Vec::new();
+    let mut local = String::new();
+    let mut pruned = Vec::new();
+    for seq in seqs {
+        let (Some(entry), Some((release, _))) =
+            (queue.entries.get(seq), queue.release_commits.get(seq))
+        else {
+            continue;
+        };
+        for (name, commit) in [
+            (format!("{QUEUE_PREFIX}{seq}"), &entry.commit),
+            (format!("{DONE_PREFIX}{seq}"), release),
+        ] {
+            leases.push(format!("--force-with-lease={name}:{commit}"));
+            refspecs.push(format!(":{name}"));
+            let _ = writeln!(local, "delete {name} {commit}");
+        }
+        pruned.push(*seq);
+    }
+    if pruned.is_empty() {
+        return Ok(pruned);
+    }
+    let mut args = vec!["push", "-q", "--atomic"];
+    args.extend(leases.iter().map(String::as_str));
+    args.push(repo.remote());
+    args.extend(refspecs.iter().map(String::as_str));
+    repo.git.run(&args).map_err(|error| {
+        format!(
+            "the retention of queue places could not be pushed: {}",
+            error.message()
+        )
+    })?;
+    let _ = repo
+        .git
+        .run_with(&["update-ref", "--stdin"], &[], Some(local.as_bytes()));
+    Ok(pruned)
 }
 
 fn commit(
@@ -391,4 +544,43 @@ pub fn release(
     Err(format!(
         "the release of queue entry {seq} could not be pushed"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Entry, Queue};
+
+    /// Places `1..=places`, the first `released` of them released at time 10.
+    fn queue(places: u64, released: u64) -> Queue {
+        let mut queue = Queue::default();
+        for seq in 1..=places {
+            queue.entries.insert(
+                seq,
+                Entry {
+                    seq,
+                    commit: format!("r{seq}"),
+                    op_id: format!("c{seq}.1"),
+                    change: format!("c{seq}"),
+                },
+            );
+            if seq <= released {
+                queue.released.insert(seq);
+                queue.release_commits.insert(seq, (format!("d{seq}"), 10));
+            }
+        }
+        queue
+    }
+
+    /// § 10a: retention takes whole pairs below the head, never the highest pair, only of a
+    /// finished operation, and only once its release is old enough.
+    #[test]
+    fn retention_keeps_the_highest_pair_the_head_and_what_is_not_finished() {
+        let held = queue(6, 4);
+        assert_eq!(held.head().map(|head| head.seq), Some(5));
+        assert_eq!(held.prunable(|_| true, 10), vec![1, 2, 3]);
+        assert_eq!(held.prunable(|entry| entry.seq != 2, 10), vec![1, 3]);
+        assert_eq!(held.prunable(|_| true, 9).len(), 0);
+        // With no head, every pair but the highest.
+        assert_eq!(queue(3, 3).prunable(|_| true, 10), vec![1, 2]);
+    }
 }

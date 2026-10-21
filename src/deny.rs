@@ -10,6 +10,14 @@
 //! tokenizer, and in a shell wrapper inside that one. bay never evaluates a shell: no
 //! expansion, no aliases, no `eval`. A script nested deeper than [`MAX_DEPTH`] is not read, and
 //! is denied when it mentions Git (fail closed).
+//!
+//! NEW-4: in the view of a change of no lane, the shapes that copy a sandbox lane's work into
+//! the view are denied too ([`denied_lane`]): `git merge` and `git cherry-pick` of a lane ref,
+//! `git checkout <lane ref> -- <paths>` and `git restore --source <lane ref>`. The list is
+//! conservative: it names the lane ref in a word of the command, as a full ref name or as Git
+//! would complete a short one. Other ways to copy bytes (`git show <ref>:<path>`, a patch, an
+//! editor) are not judged here; a merge or cherry-pick that made it into the view's history is
+//! refused at land (`LANE_LEAK`), and content copied by hand cannot be detected.
 
 /// One denial: the deny-list shape the command matched, the shell wrapper it was found in, and
 /// the line the agent is told. `shape` and `wrapped` come from fixed lists, never from the
@@ -322,6 +330,170 @@ fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option
     )
 }
 
+/// NEW-4: why a shell command that copies from a lane ref is denied, or `None`. `lane_refs` are
+/// the lane ref patterns as this clone holds them (`crate::lane::local_patterns`).
+#[must_use]
+pub fn denied_lane(command: &str, lane_refs: &[String]) -> Option<Denial> {
+    if lane_refs.is_empty() {
+        return None;
+    }
+    let mut commands = Vec::new();
+    lane_commands(command, 0, &mut commands);
+    commands.iter().find_map(|(words, wrapped)| {
+        denied_lane_git(words, lane_refs).map(|denial| Denial {
+            wrapped: *wrapped,
+            ..denial
+        })
+    })
+}
+
+/// The simple commands of `command` and of the shell `-c` scripts among them, [`MAX_DEPTH`]
+/// scripts deep, each with its outermost wrapper.
+fn lane_commands(command: &str, depth: usize, out: &mut Vec<(Vec<String>, Option<&'static str>)>) {
+    for words in simple_commands(command) {
+        if depth < MAX_DEPTH {
+            for (wrapper, script) in shell_scripts(&words) {
+                let mut inner = Vec::new();
+                lane_commands(script, depth + 1, &mut inner);
+                out.extend(inner.into_iter().map(|(words, _)| (words, Some(wrapper))));
+            }
+        }
+        out.push((words, None));
+    }
+}
+
+/// Whether `word`, a revision a Git command was given, names a ref of `lane_refs`: as a full
+/// ref name, or as Git completes a short one (`refs/<word>`, `refs/tags/<word>`,
+/// `refs/heads/<word>`, `refs/remotes/<word>`). A range names both its ends; a suffix
+/// (`~1`, `^2`, `@{…}`) is not part of the name.
+fn names_lane(word: &str, lane_refs: &[String]) -> bool {
+    word.split("..")
+        .map(|end| end.trim_start_matches('.').trim_start_matches('^'))
+        .filter(|end| !end.is_empty())
+        .any(|end| {
+            let name = end.split(['~', '^', ':']).next().unwrap_or(end);
+            let name = name.split("@{").next().unwrap_or(name);
+            let candidates = [
+                name.to_owned(),
+                format!("refs/{name}"),
+                format!("refs/tags/{name}"),
+                format!("refs/heads/{name}"),
+                format!("refs/remotes/{name}"),
+            ];
+            candidates.iter().any(|candidate| {
+                lane_refs
+                    .iter()
+                    .any(|pattern| crate::lane::matches(pattern, candidate))
+            })
+        })
+}
+
+/// The positional words of `args` before `--`, past the options in `valued`, which take a value
+/// of their own.
+fn positional<'a>(args: &[&'a str], valued: &[&str]) -> Vec<&'a str> {
+    let mut out = Vec::new();
+    let mut words = args.iter().copied();
+    while let Some(word) = words.next() {
+        if word == "--" {
+            break;
+        }
+        if valued.contains(&word) {
+            words.next();
+        } else if !word.starts_with('-') {
+            out.push(word);
+        }
+    }
+    out
+}
+
+fn denied_lane_git(words: &[String], lane_refs: &[String]) -> Option<Denial> {
+    let git = words.iter().position(|word| is_git(word))?;
+    let mut rest = words[git + 1..].iter();
+    let mut subcommand = None;
+    while let Some(word) = rest.next() {
+        if word == "-C" || word == "-c" {
+            rest.next();
+        } else if !word.starts_with('-') {
+            subcommand = Some(word.as_str());
+            break;
+        }
+    }
+    let args: Vec<&str> = rest.map(String::as_str).collect();
+    let deny = |shape: &'static str| {
+        Some(Denial {
+            shape,
+            wrapped: None,
+            reason: format!(
+                "bay denies `{shape}` in the view of a change of no lane: a sandbox lane's work never reaches trunk (start the work with bay start --lane <lane>)"
+            ),
+        })
+    };
+    let lane = |word: &str| names_lane(word, lane_refs);
+    let shape = match subcommand? {
+        "merge" => positional(
+            &args,
+            &[
+                "-m",
+                "-F",
+                "-s",
+                "-X",
+                "--file",
+                "--strategy",
+                "--strategy-option",
+            ],
+        )
+        .into_iter()
+        .any(lane)
+        .then_some("git merge of a lane ref"),
+        "cherry-pick" => positional(
+            &args,
+            &[
+                "-m",
+                "-s",
+                "-X",
+                "--mainline",
+                "--strategy",
+                "--strategy-option",
+            ],
+        )
+        .into_iter()
+        .any(lane)
+        .then_some("git cherry-pick of a lane ref"),
+        "checkout" => {
+            // `git checkout <lane ref> -- <paths>` (or `<lane ref> <paths>`): files of the lane.
+            // A plain switch to a lane branch moves the view's `HEAD`, which land refuses.
+            let named = positional(&args, &["-b", "-B", "--orphan", "--conflict"]);
+            let paths_follow = args.contains(&"--") || named.len() > 1;
+            (paths_follow && named.first().is_some_and(|first| lane(first)))
+                .then_some("git checkout <lane ref> --")
+        }
+        "restore" => {
+            let mut words = args.iter().copied();
+            let mut source = None;
+            while let Some(word) = words.next() {
+                if word == "--" {
+                    break;
+                }
+                if word == "--source" || word == "-s" {
+                    source = words.next();
+                } else if let Some(value) = word.strip_prefix("--source=") {
+                    source = Some(value);
+                } else if let Some(value) = word
+                    .strip_prefix("-s")
+                    .filter(|value| !value.is_empty() && !word.starts_with("--"))
+                {
+                    source = Some(value);
+                }
+            }
+            source
+                .is_some_and(lane)
+                .then_some("git restore --source <lane ref>")
+        }
+        _ => None,
+    }?;
+    deny(shape)
+}
+
 /// `bay hook <event>` for the shell deny list: a `pre-tool` event on Claude Code's `Bash` tool.
 /// Returns the denial, or `None` to allow. The payload was read by the caller (G59): one this
 /// cannot read is never judged here.
@@ -344,11 +516,45 @@ pub fn judge_hook(event: &str, input: &str, dir: &std::path::Path) -> Option<Den
     // The trunk is the one every bay command uses (ruling: config location): the bootstrap of
     // this repository's own git config or its remote's default branch, never a file in the
     // agent's work tree. Outside a repository a push fails anyway; `main` keeps the shape.
-    match crate::repo::Bootstrap::of(&cwd) {
+    let denial = match crate::repo::Bootstrap::of(&cwd) {
         None => denied(command, "main", current.as_deref()),
         Some(Ok(bootstrap)) => denied(command, &bootstrap.trunk, current.as_deref()),
         Some(Err(_)) => denied_with(command, Trunk::Unknown, current.as_deref()),
+    };
+    denial.or_else(|| denied_lane(command, &view_lane_refs(command, &cwd)))
+}
+
+/// NEW-4: the lane ref patterns to judge `command` by in `cwd`: none unless it names one of the
+/// Git commands [`denied_lane`] judges, `cwd` is the view of a change of no lane, and the
+/// config at trunk declares lanes. Only such a command pays for the reads.
+fn view_lane_refs(command: &str, cwd: &std::path::Path) -> Vec<String> {
+    if !["merge", "cherry-pick", "checkout", "restore"]
+        .iter()
+        .any(|word| command.contains(word))
+    {
+        return Vec::new();
     }
+    let Ok(repo) = crate::repo::Repo::open(cwd) else {
+        return Vec::new();
+    };
+    if repo.config.lanes.is_empty() {
+        return Vec::new();
+    }
+    let Some(id) = repo.view_change(cwd) else {
+        return Vec::new();
+    };
+    let in_lane = crate::change::Chain::new(&repo.git)
+        .read(&id)
+        .is_ok_and(|(_, record)| record.lane.is_some());
+    if in_lane {
+        return Vec::new();
+    }
+    repo.config
+        .lanes
+        .iter()
+        .flat_map(|lane| lane.refs.iter())
+        .flat_map(|pattern| crate::lane::local_patterns(pattern, repo.remote()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -498,6 +704,93 @@ mod tests {
         assert_eq!(denial.shape, "nested too deep");
         assert_eq!(denial.wrapped, Some("bash -c"));
         assert!(denied("bash -c \"sh -c 'bash -c ls'\"", "main", Some("topic")).is_none());
+    }
+
+    /// NEW-4: in a view of no lane, the shapes that copy from a lane ref are denied; the same
+    /// commands of other refs run.
+    #[test]
+    fn copying_from_a_lane_ref_is_denied() {
+        let lanes: Vec<String> = crate::lane::local_patterns("refs/heads/research/*", "origin");
+        for (command, shape, wrapped) in [
+            ("git merge research/x", "git merge of a lane ref", None),
+            (
+                "git merge --no-ff -m 'take it' origin/research/x",
+                "git merge of a lane ref",
+                None,
+            ),
+            (
+                "git merge refs/remotes/origin/research/x~1",
+                "git merge of a lane ref",
+                None,
+            ),
+            (
+                "git cherry-pick research/x",
+                "git cherry-pick of a lane ref",
+                None,
+            ),
+            (
+                "git cherry-pick main..research/x",
+                "git cherry-pick of a lane ref",
+                None,
+            ),
+            (
+                "git cherry-pick -m 1 research/x^2",
+                "git cherry-pick of a lane ref",
+                None,
+            ),
+            (
+                "git checkout research/x -- src/a.rs",
+                "git checkout <lane ref> --",
+                None,
+            ),
+            (
+                "git checkout origin/research/x src/a.rs",
+                "git checkout <lane ref> --",
+                None,
+            ),
+            (
+                "git restore --source research/x src/a.rs",
+                "git restore --source <lane ref>",
+                None,
+            ),
+            (
+                "git restore --source=origin/research/x .",
+                "git restore --source <lane ref>",
+                None,
+            ),
+            (
+                "git restore -sresearch/x src/a.rs",
+                "git restore --source <lane ref>",
+                None,
+            ),
+            (
+                "bash -c 'git merge research/x'",
+                "git merge of a lane ref",
+                Some("bash -c"),
+            ),
+        ] {
+            let denial = super::denied_lane(command, &lanes)
+                .unwrap_or_else(|| panic!("{command} was allowed"));
+            assert_eq!(denial.shape, shape, "{command}");
+            assert_eq!(denial.wrapped, wrapped, "{command}");
+        }
+        for command in [
+            "git merge topic",
+            "git merge -m research/x topic",
+            "git cherry-pick abc123",
+            "git checkout research/x",
+            "git checkout -b research/new",
+            "git checkout main -- src/a.rs",
+            "git restore --source main src/a.rs",
+            "git restore src/a.rs",
+            "git log research/x",
+            "git diff research/x",
+            "echo 'git merge research/x' > notes.txt",
+            "git merge researchers/x",
+        ] {
+            assert!(super::denied_lane(command, &lanes).is_none(), "{command}");
+        }
+        assert!(super::denied_lane("git merge research/x", &[]).is_none());
     }
 
     /// Plan W1: a Windows shell runs Git as `git`, `git.exe` or `git.cmd`, by any case and by a

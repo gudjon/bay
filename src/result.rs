@@ -120,6 +120,10 @@ reasons! {
     // G152; not yet in INTERFACES § 2: the policy at the base sets `[agent] require_actor` and
     // the actor's name came from a default, not `BAY_ACTOR`.
     ActorUnnamed => "ACTOR_UNNAMED", ["read"], "bay_actor_set", false;
+    // G243b; not yet in INTERFACES § 2: the policy at the base sets `[agent]
+    // require_actor_proof` and the agent key cannot prove which actor signs: several actors run
+    // sessions under this OS account, which can read a file-based agent key.
+    ActorUnproven => "ACTOR_UNPROVEN", ["read"], "actor_key_on_hardware_or_own_account", false;
     CoverageUnknown => "COVERAGE_UNKNOWN", ["edit_locally"], "coordination_data_reachable", false;
     // Ruling R-H1 (AGENT-HOOKS-0.1 § 6.3, `context_invalid`); not yet in INTERFACES § 2: a
     // `pre-tool` payload bay cannot read is denied.
@@ -166,6 +170,21 @@ reasons! {
     // G159 (owner ruling Q1); not yet in INTERFACES § 2: the host hook refuses a push of an
     // evidence notes ref whose note drops or changes a record the old note held.
     EvidenceWithdrawn => "EVIDENCE_WITHDRAWN", ["read"], "never", false;
+    // NEW-5, NEW-9 (owner ruling 2026-10-20); not yet in INTERFACES § 2: the host hook refuses a
+    // push that moves a promotion target to a commit that is not promotable (off its source's
+    // first-parent line, not a fast-forward, a required check not passing, inside its soak, or
+    // frozen without Fixes:/Reverts:). `bay status` names the promotable commit.
+    PromotionRefused => "PROMOTION_REFUSED", ["read", "wait", "repair"], "pushed_commit_promotable", false;
+    // NEW-4 (owner ruling 2026-10-20); not yet in INTERFACES § 2: a lane change (`bay start
+    // --lane`) ran its checks against the current trunk, and never lands.
+    LaneNeverLands => "LANE_NEVER_LANDS", ["read"], "never", false;
+    // NEW-4; not yet in INTERFACES § 2: a change of no lane whose view reaches commits of a lane
+    // ref that are not on trunk.
+    LaneLeak => "LANE_LEAK", ["read", "repair"], "view_reaches_no_lane_commit", false;
+    // G245 (owner ruling 2026-10-20); not yet in INTERFACES § 2: every other required check
+    // passed, and an approval check the candidate's paths wake has no pass yet from an enrolled
+    // approver's key for this exact tree.
+    ApprovalPending => "APPROVAL_PENDING", ["wait"], "approved", false;
 }
 
 impl Reason {
@@ -444,7 +463,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 54);
+        assert_eq!(Reason::ALL.len(), 59);
     }
 
     #[test]

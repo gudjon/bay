@@ -662,6 +662,53 @@ impl Git {
         }
     }
 
+    /// G200b: the contents of each object `names` names (an object id, or `<commit>:<path>`),
+    /// in their order, read by one `git cat-file --batch`: `None` for a name Git answers
+    /// `missing` (or `ambiguous`). No spawn when `names` is empty. A caller that must tell a
+    /// path its tree lacks from a blob it cannot read asks [`Git::file_at`] for a `None` name.
+    ///
+    /// # Errors
+    ///
+    /// A git fault, a name that holds a newline, or an answer this cannot read.
+    pub fn objects(&self, names: &[String]) -> Result<Vec<Option<Vec<u8>>>, GitError> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        let unreadable = |why: String| GitError::Failed {
+            args: "cat-file --batch".to_owned(),
+            stderr: why,
+        };
+        if names.iter().any(|name| name.contains('\n')) {
+            return Err(unreadable("an object name holds a newline".to_owned()));
+        }
+        let mut input = names.join("\n");
+        input.push('\n');
+        let out = self.run_bytes(&["cat-file", "--batch"], &[], Some(input.as_bytes()))?;
+        let mut rest = out.as_slice();
+        let mut read = Vec::with_capacity(names.len());
+        for name in names {
+            let end = rest
+                .iter()
+                .position(|&byte| byte == b'\n')
+                .ok_or_else(|| unreadable(format!("no answer for {name}")))?;
+            let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+            rest = &rest[end + 1..];
+            if header.ends_with(" missing") || header.ends_with(" ambiguous") {
+                read.push(None);
+                continue;
+            }
+            let size = header
+                .rsplit(' ')
+                .next()
+                .and_then(|size| size.parse::<usize>().ok())
+                .filter(|size| rest.len() > *size && rest[*size] == b'\n')
+                .ok_or_else(|| unreadable(format!("a malformed answer for {name}: {header}")))?;
+            read.push(Some(rest[..size].to_vec()));
+            rest = &rest[size + 1..];
+        }
+        Ok(read)
+    }
+
     /// # Errors
     ///
     /// See [`Git::run`].

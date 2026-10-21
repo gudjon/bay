@@ -159,6 +159,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
         if executor && !info.bare {
             check_env_row(&git, &config, &mut report);
             executor_keys_row(&git, &keys, &mut report);
+            presence_row(&git, &config, &keys, &mut report);
         }
     } else {
         let note = "not in a git repository";
@@ -172,7 +173,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     }
 
     skill_row(&config, &mut report)?;
-    custody_row(&git, info.as_ref(), &mut report);
+    custody_row(&git, &config, info.as_ref(), &mut report);
     if info.is_none() {
         // § 15.2: with no configured remote the box is not ready, and outside a repository no
         // remote is configured. A red machine row names the reason first, since those rows are
@@ -708,14 +709,39 @@ fn live_row(git: &Git, report: &mut Report) {
 }
 
 /// The `key-custody` row (G145, `crate::custody`), on every box. In a work repository its
-/// session records are this machine's evidence of which account runs agent sessions.
-fn custody_row(git: &Git, info: Option<&RepoInfo>, report: &mut Report) {
+/// session records are this machine's evidence of which account runs agent sessions, and the
+/// row names whether the policy at trunk requires actor proof (G243b): `true`, `false`, or the
+/// reason it could not be read.
+fn custody_row(git: &Git, config: &Config, info: Option<&RepoInfo>, report: &mut Report) {
     let sessions = info.filter(|info| !info.bare).and_then(|_| {
         git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
             .ok()
             .map(|common| Path::new(&common).join("bay").join("sessions"))
     });
-    let custody = crate::custody::row(git, sessions.as_deref());
+    let mut custody = crate::custody::row(git, sessions.as_deref());
+    if let Some(info) = info {
+        let trunk = if info.bare {
+            let name = git
+                .run(&["config", "--get", host::TRUNK_KEY])
+                .unwrap_or_else(|_| config.trunk().to_owned());
+            format!("refs/heads/{name}")
+        } else {
+            format!("refs/remotes/{}/{}", config.remote(), config.trunk())
+        };
+        let required = match crate::policy::requires_actor_proof_at(git, &trunk) {
+            Ok(required) => json!(required),
+            Err(why) => json!({"unread": why}),
+        };
+        // The judgement land makes (`crate::custody::actor_proof`), so the two never disagree.
+        let refused = required == json!(true)
+            && crate::custody::actor_proof(git, sessions.as_deref()).unproven();
+        custody.row["require_actor_proof"] = required;
+        if refused {
+            custody.row["actor_refusal"] = json!(
+                "the policy at trunk sets [agent] require_actor_proof: land is refused ACTOR_UNPROVEN on this box"
+            );
+        }
+    }
     if custody.exposed {
         report.red(
             Reason::KeyExposed,
@@ -741,7 +767,7 @@ fn environments_row(git: &Git, config: &Config, executor: bool, report: &mut Rep
             policy
                 .checks
                 .iter()
-                .filter(|entry| !policy.is_quarantined(entry))
+                .filter(|entry| !policy.is_quarantined(entry) && !entry.is_approval())
                 .map(|entry| entry.environment.clone())
                 .collect()
         })
@@ -884,6 +910,58 @@ fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report
         row["recovery"] = json!(
             "set bay.executorKey and bay.producerKey, under the names bay.executorName and bay.producerName that the registry enrols"
         );
+    }
+    report.rows.push(row);
+}
+
+/// G67, for a stated executor: its own presence as its last pass wrote it (the local
+/// `refs/bay/executor/<executor>`, `crate::presence`), with its age on this box's clock, whether
+/// it is stale, and how its last push went. Never red: an executor that has not run yet has
+/// published none, and its first pass publishes it.
+fn presence_row(git: &Git, config: &Config, keys: &crate::signing::Keys, report: &mut Report) {
+    let name = crate::presence::presence_ref(&keys.executor_name);
+    let record = git
+        .ref_target(&name)
+        .ok()
+        .flatten()
+        .and_then(|tip| crate::presence::record_at(git, &tip).ok().flatten());
+    let mut row = json!({"name": "presence", "required": false,
+        "executor": keys.executor_name, "ref": name});
+    match record {
+        None => {
+            row["state"] = json!("none");
+            row["note"] = json!(
+                "this executor has published no presence here yet; each pass of bay executor run publishes it"
+            );
+        }
+        Some(record) => {
+            // One box's own record: its time and this clock are the same machine's.
+            let at = crate::live::unix_at(&record).unwrap_or(0);
+            let judged = crate::presence::age(
+                &record,
+                at,
+                crate::presence::reader_now(),
+                config.takeover().as_secs(),
+                config.progress_deadline().as_secs(),
+            );
+            row["state"] = json!(if judged.stale { "stale" } else { "green" });
+            row["at"] = record["at"].clone();
+            row["age_s"] = json!(judged.age_s);
+            row["stale_after_s"] = json!(judged.stale_after_s);
+            row["bay"] = record["bay"].clone();
+            row["environments"] = record["environments"].clone();
+            row["holding"] = record["holding"].clone();
+            row["queue_depth"] = record["queue_depth"].clone();
+        }
+    }
+    let common = git
+        .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .ok();
+    if let Some(last) = common
+        .as_deref()
+        .and_then(|common| crate::presence::last_push(Path::new(common)))
+    {
+        row["last_push"] = last;
     }
     report.rows.push(row);
 }

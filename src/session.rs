@@ -8,7 +8,9 @@
 //! blocks the session, so it always exits 0. It reads the local cache only (`status::cached`):
 //! no fetch, no receipt push, no journal write, so a slow remote never delays a session and
 //! sessions that start together never race; the trunk line says it is the local cache, and
-//! `bay status` is what synchronizes (`DESIGN` § 11). Overlapping changes are a later item.
+//! `bay status` is what synchronizes (`DESIGN` § 11). It names the live changes whose declared
+//! paths overlap the view's change's (NEW-8, `crate::overlap`), from the chains held here, and
+//! the early merge conflict its queued operation was noted with (G177).
 //! Every probed hook event in a repository but pre-tool also appends to the session's work
 //! record (`record`), with the files each step wrote in a view, and gives the session's agent
 //! the notices of its change it was not yet told (`crate::notice`).
@@ -178,7 +180,7 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
     let event = payload.event;
     if event == Event::SessionStart && payload.agent.is_none() {
         bind_env(&state_dir, session);
-        crate::notice::begin(&repo, &state_dir);
+        crate::notice::begin(&repo, &state_dir, change.as_deref());
     }
     let actor_link = actor_link(&state_dir);
     let mut line = serde_json::json!({
@@ -550,7 +552,8 @@ fn stop_refusal(id: &str) -> String {
 /// state of the view's change when the session runs in a view, then each other local change
 /// of the same actor that holds an open refusal (`INTERFACES` § 2: a refusal reached after the
 /// agent left goes "to a later session of the same actor at `SessionStart`"), wherever in the
-/// repository that session starts. Empty when there is neither.
+/// repository that session starts. The view's change also names the live changes whose declared
+/// paths overlap its own (NEW-8). Empty when there is none of these.
 #[must_use]
 pub fn session_start(dir: &Path, input: &str) -> String {
     let payload: Value = serde_json::from_str(input).unwrap_or(Value::Null);
@@ -576,6 +579,9 @@ pub fn session_start(dir: &Path, input: &str) -> String {
         .as_deref()
         .map(|id| compact(id, &json))
         .unwrap_or_default();
+    if let Some(id) = view.as_deref() {
+        out.push_str(&overlap_lines(&repo, id));
+    }
     for change in json["detail"]["changes"].as_array().into_iter().flatten() {
         let Some(id) = change["change"].as_str() else {
             continue;
@@ -583,6 +589,47 @@ pub fn session_start(dir: &Path, input: &str) -> String {
         if view.as_deref() != Some(id) && open_refusal(change).is_some() {
             out.push_str(&compact(id, &json));
         }
+    }
+    out
+}
+
+/// The most characters of an overlap line.
+const MAX_OVERLAP_LINE: usize = 300;
+
+/// NEW-8: one line for each live change whose declared paths overlap those of change `id`, from
+/// the chains this repository holds (`crate::overlap`), or one line saying they could not be
+/// read. Each line has no control character and at most [`MAX_OVERLAP_LINE`] characters.
+fn overlap_lines(repo: &Repo, id: &str) -> String {
+    let listed = crate::change::Chain::new(&repo.git)
+        .read(id)
+        .map_err(|error| error.message())
+        .and_then(|(_, record)| {
+            crate::overlap::overlaps(repo, id, &crate::inputs::paths(&record.declared_inputs))
+        });
+    let Ok(overlaps) = listed else {
+        return format!("bay: change {id}: overlapping changes unread\n");
+    };
+    let mut out = String::new();
+    for overlap in &overlaps {
+        let paths: Vec<&str> = overlap["paths"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        let text = format!(
+            "bay: change {id} overlaps live change {} (intent {}, actor {}) on {}",
+            overlap["change"].as_str().unwrap_or("?"),
+            overlap["intent"].as_str().unwrap_or("?"),
+            overlap["actor"]["name"].as_str().unwrap_or("?"),
+            paths.join(", ")
+        );
+        out.extend(
+            text.chars()
+                .filter(|char| !char.is_control())
+                .take(MAX_OVERLAP_LINE),
+        );
+        out.push('\n');
     }
     out
 }
@@ -665,8 +712,32 @@ fn compact(id: &str, status: &Value) -> String {
         if let Some(refusal) = open_refusal(change) {
             out.push_str(&refusal);
         }
+        if let Some(conflict) = early_conflict(operation) {
+            out.push_str(&conflict);
+        }
     }
     out
+}
+
+/// G177: the early merge conflict a queued operation was noted with (`operation.conflict` in
+/// `bay status`), as one line with its paths.
+fn early_conflict(operation: &Value) -> Option<String> {
+    let conflict = operation.get("conflict")?;
+    let reason = conflict["reason"].as_str().and_then(Reason::from_code)?;
+    let paths: Vec<&str> = conflict["conflicts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|path| !path.chars().any(char::is_control))
+        .collect();
+    Some(format!(
+        "bay: {} with trunk while it waits in the queue, on {}: allowed {}; retry when {}\n",
+        reason.code(),
+        paths.join(", "),
+        reason.allowed().join(", "),
+        reason.retry_when()
+    ))
 }
 
 #[cfg(test)]

@@ -18,17 +18,30 @@ pub const KIND_CHECK: &str = "check";
 /// The kind of an outside review record. It verifies only against the reviewer class file, and
 /// it never combines into a verdict (ruled 2026-10-19, rulings-open-questions.md Q12).
 pub const KIND_REVIEW: &str = "review";
+/// The kind of a person's yes or no on one exact candidate tree (G245): the only kind an
+/// approval check combines from. It verifies only against the approver class file, so no
+/// producer, reviewer or agent key ever signs one that counts.
+pub const KIND_APPROVAL: &str = "approval";
 
-/// The key class a record of `kind` must be signed by (Q12): the reviewer class for a `review`
-/// record, the producer class for every other kind. A reviewer key therefore never signs a
-/// record that counts toward a check, and a producer key's `review` is unverifiable.
+/// The key class a record of `kind` must be signed by (Q12, G245): the reviewer class for a
+/// `review` record, the approver class for an `approval`, the producer class for every other
+/// kind. A reviewer or approver key therefore never signs a record that counts toward a run
+/// check, and a producer key's `review` or `approval` is unverifiable.
 #[must_use]
 pub fn signer_class(kind: &str) -> KeyClass {
-    if kind == KIND_REVIEW {
-        KeyClass::Reviewer
-    } else {
-        KeyClass::Producer
+    match kind {
+        KIND_REVIEW => KeyClass::Reviewer,
+        KIND_APPROVAL => KeyClass::Approver,
+        _ => KeyClass::Producer,
     }
+}
+
+/// Whether a record of `kind` may combine into a check's verdict: a `check` record for a check
+/// bay runs, an `approval` for an approval check. Which of the two answers which check is the
+/// policy's to say ([`crate::policy::Policy::listed`]).
+#[must_use]
+pub fn combines(kind: &str) -> bool {
+    kind == KIND_CHECK || kind == KIND_APPROVAL
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,7 +258,8 @@ impl EvidenceRecord {
     }
 
     /// Signs the record with `key`, under the namespace of the class its kind needs
-    /// ([`signer_class`]): `bay-reviewer` for a `review`, `bay-producer` otherwise.
+    /// ([`signer_class`]): `bay-reviewer` for a `review`, `bay-approver` for an `approval`,
+    /// `bay-producer` otherwise.
     ///
     /// # Errors
     ///
@@ -645,7 +659,9 @@ pub enum Combined {
 /// and `infra_failure` never cancel a `pass`. Records made under another manifest do not count.
 /// A check keyed by commit (`subject_commit`) counts only records for that commit, so a
 /// failure on one commit is never charged to another that shares its tree. Only records of
-/// kind `check` combine: a runtime or review record that names the check is never its pass.
+/// kind `check` or `approval` combine ([`combines`]): a runtime or review record that names the
+/// check is never its pass. The policy keeps an approval from answering a run check and a check
+/// record from answering an approval check before records reach here.
 #[must_use]
 pub fn combine(
     records: &[EvidenceRecord],
@@ -654,7 +670,7 @@ pub fn combine(
     subject_commit: Option<&str>,
 ) -> Combined {
     let relevant = records.iter().filter(|record| {
-        record.kind == KIND_CHECK
+        combines(&record.kind)
             && &record.check == check
             && record.manifest_digest == manifest_digest
             && subject_commit.is_none_or(|commit| record.subject.commit == commit)

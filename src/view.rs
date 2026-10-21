@@ -160,9 +160,13 @@ pub struct Ended {
     /// The commits bay itself leaves a view's `HEAD` at: the change's drafts and bases. Any
     /// other `HEAD` but `revision` is a commit made in the view.
     pub placed: Vec<String>,
+    /// The change's own retention window, in place of the one [`release_ended`] is given: a
+    /// lane change's shorter one (NEW-4, `[[lane]] window_s`).
+    pub window: Option<std::time::Duration>,
 }
 
-/// G97: removes this machine's views of ended changes whose end is `window` or more ago.
+/// G97: removes this machine's views of ended changes whose end is `window` (or the change's
+/// own [`Ended::window`]) or more ago.
 /// `ended` names each such change, and `None` for one that has not ended or whose view is in
 /// use. Right before each removal it checks that the view holds nothing newer than the revision
 /// the change ended with: its `HEAD` is the revision or a commit bay placed, its files equal the
@@ -184,7 +188,7 @@ pub fn release_ended(
         .into_iter()
         .filter(|id| {
             ended(id).is_some_and(|change| {
-                now.saturating_sub(change.at_unix) >= window.as_secs()
+                now.saturating_sub(change.at_unix) >= change.window.unwrap_or(window).as_secs()
                     && release(repo, id, &change).unwrap_or(false)
             })
         })

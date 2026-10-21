@@ -24,6 +24,14 @@
 //! G52): it is told with `EXPIRED` before the rest of the line, and owes no backbrief. A talk
 //! with no ack yet is read again at the next hook: the ack is what makes it arrived.
 //!
+//! NEW-8: an early merge conflict on the latest operation of the view's change (G177: the
+//! executor's probe of a queued operation against trunk, `early_conflict` in its chain, shown as
+//! `operation.conflict` by `bay status`) is one notice too, given once per note, at the same
+//! events and within the same budget, from the chain this repository holds (one local read per
+//! hook in a view; a fetching command brings the note). The cursor keeps the notes it passed
+//! (`conflicts`, `<op id> <trunk>`); `session-start` passes the notes that stand, since its
+//! compact state names them. No log event is written for it.
+//!
 //! A log entry is data, not text for the agent: any process on the box can write a ref under
 //! `refs/bay/log/`, and nothing here verifies its signer. A notice line is bay's own words; from
 //! the event it takes only the kind (one of three), a reason code bay knows, and an operation id
@@ -92,6 +100,8 @@ struct Cursor {
     over_budget: u64,
     /// The ids of the talks to the session's actor already told or passed, newest last (G147).
     talks: Vec<String>,
+    /// The early conflict notes already told or passed, `<op id> <trunk>`, newest last (NEW-8).
+    conflicts: Vec<String>,
 }
 
 /// Whose notices a hook gives: the view's change, if the session is in a view, and the
@@ -118,6 +128,8 @@ pub struct Delivery {
     pub told: Vec<String>,
     /// The ids of the talks told (G147).
     pub talks: Vec<String>,
+    /// The operations whose early conflict was told (NEW-8).
+    pub conflicts: Vec<String>,
     /// The ids of the events and talks counted over the budget.
     pub over_budget: Vec<String>,
     /// Why the cursor started at this hook rather than at session start, or why it could not be
@@ -135,6 +147,12 @@ impl Delivery {
         }
         if !self.talks.is_empty() {
             fields.insert("talk_notices".to_owned(), serde_json::json!(self.talks));
+        }
+        if !self.conflicts.is_empty() {
+            fields.insert(
+                "conflict_notices".to_owned(),
+                serde_json::json!(self.conflicts),
+            );
         }
         if !self.over_budget.is_empty() {
             fields.insert(
@@ -159,10 +177,17 @@ fn cursor_path(state_dir: &Path) -> PathBuf {
     state_dir.join(STATE_FILE)
 }
 
-/// A cursor that holds nothing yet: the tips this repository holds now.
-fn fresh(repo: &Repo) -> Cursor {
+/// A cursor that holds nothing yet: the tips this repository holds now, and the early conflict
+/// notes that stand on the view's `change`.
+fn fresh(repo: &Repo, change: Option<&str>) -> Cursor {
     Cursor {
         logs: crate::log::tips(&repo.git).unwrap_or_default(),
+        conflicts: change
+            .map(|change| conflicts(repo, change))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|conflict| conflict.key)
+            .collect(),
         ..Cursor::default()
     }
 }
@@ -192,24 +217,25 @@ fn write(state_dir: &Path, cursor: &Cursor) -> std::io::Result<()> {
     })
 }
 
-/// At the session's start: the cursor begins at the tips this repository holds, unless the
-/// session already has one (a resumed or compacted session keeps what it was told).
-pub fn begin(repo: &Repo, state_dir: &Path) {
+/// At the session's start: the cursor begins at the tips this repository holds and the early
+/// conflict notes on the view's `change`, unless the session already has one (a resumed or
+/// compacted session keeps what it was told).
+pub fn begin(repo: &Repo, state_dir: &Path, change: Option<&str>) {
     if read(state_dir).is_err() {
-        let _ = write(state_dir, &fresh(repo));
+        let _ = write(state_dir, &fresh(repo, change));
     }
 }
 
 /// The notices for `scope` since the session's cursor in `state_dir`, from the executor logs
-/// and the talks to the scope's actor this repository holds, within the session's budget; the
-/// cursor moves past every event and talk read. When nothing moved, the cost is two
-/// `for-each-ref`.
+/// and the talks to the scope's actor this repository holds, and the early conflict notes on the
+/// view's change, within the session's budget; the cursor moves past every event, talk and note
+/// read. When nothing moved, the cost is two `for-each-ref`, and in a view one chain read.
 #[must_use]
 pub fn deliver(repo: &Repo, scope: Scope<'_>, state_dir: &Path) -> Delivery {
     let mut cursor = match read(state_dir) {
         Ok(cursor) => cursor,
         Err(why) => {
-            let kept = write(state_dir, &fresh(repo));
+            let kept = write(state_dir, &fresh(repo, scope.change));
             return Delivery {
                 cursor: Some(if kept.is_ok() { why } else { "unwritable" }),
                 ..Delivery::default()
@@ -243,6 +269,17 @@ pub fn deliver(repo: &Repo, scope: Scope<'_>, state_dir: &Path) -> Delivery {
             now,
             &mut delivery,
         );
+        moved = true;
+    }
+    let noted: Vec<Conflict> = scope
+        .change
+        .map(|change| conflicts(repo, change))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|conflict| !cursor.conflicts.contains(&conflict.key))
+        .collect();
+    if !noted.is_empty() {
+        tell_conflicts(&mut cursor, &noted, budget, now, &mut delivery);
         moved = true;
     }
     if !moved {
@@ -366,6 +403,109 @@ fn arrived(repo: &Repo, actor: &str, cursor: &Cursor) -> Vec<Arrived> {
             }
         })
         .collect()
+}
+
+/// One early conflict note on the latest operation of a change (NEW-8, G177).
+#[derive(Debug)]
+struct Conflict {
+    /// `<op id> <trunk>`: one note, once.
+    key: String,
+    op_id: String,
+    line: String,
+}
+
+/// The early conflict note on the latest operation of `change`, from the chain this repository
+/// holds, while that operation waits: not ended and not blocked (`bay status` shows it then).
+/// None when the chain cannot be read or there is no note.
+fn conflicts(repo: &Repo, change: &str) -> Vec<Conflict> {
+    let Ok((_, record)) = crate::change::Chain::new(&repo.git).read(change) else {
+        return Vec::new();
+    };
+    record
+        .operations
+        .last()
+        .filter(|op| !op.state.is_terminal() && op.state != crate::change::OpState::Blocked)
+        .and_then(|op| {
+            let found = op.early_conflict.as_ref()?;
+            Some(Conflict {
+                key: format!("{} {}", op.op_id, found.trunk),
+                op_id: op.op_id.clone(),
+                line: conflict_line(change, &op.op_id, found),
+            })
+        })
+        .into_iter()
+        .collect()
+}
+
+/// Moves `cursor` past `noted`: each note is told once, within the budget (NEW-8).
+fn tell_conflicts(
+    cursor: &mut Cursor,
+    noted: &[Conflict],
+    budget: u64,
+    now: u64,
+    delivery: &mut Delivery,
+) {
+    let mut withheld = false;
+    for conflict in noted {
+        if cursor.conflicts.contains(&conflict.key) {
+            continue;
+        }
+        cursor.conflicts.push(conflict.key.clone());
+        if offer(
+            cursor,
+            delivery,
+            (&conflict.op_id, &conflict.line),
+            budget,
+            now,
+        ) {
+            delivery.conflicts.push(conflict.op_id.clone());
+        } else {
+            withheld = true;
+        }
+    }
+    over_budget_line(cursor, delivery, withheld);
+    let excess = cursor.conflicts.len().saturating_sub(MAX_TOLD);
+    cursor.conflicts.drain(..excess);
+}
+
+/// The one line for an early conflict of operation `op` of `change` (G177): `MERGE_CONFLICT`,
+/// the trunk it was found on, the conflicting paths, what is allowed and when a retry helps. An
+/// operation id of another form is a fixed word, a trunk that is not hex is left out, and a
+/// path with a control character is dropped; at most [`MAX_LINE`] characters.
+fn conflict_line(change: &str, op: &str, found: &crate::change::EarlyConflict) -> String {
+    let reason = Reason::MergeConflict;
+    let trunk: String = found.trunk.chars().take(12).collect();
+    let trunk = if !trunk.is_empty() && trunk.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        format!(" {trunk}")
+    } else {
+        String::new()
+    };
+    let paths: Vec<&str> = found
+        .paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !path.chars().any(char::is_control))
+        .collect();
+    let text = format!(
+        "bay: change {change}: {} with trunk{trunk} on {} while it waits in the queue, on {}: \
+         allowed {}; retry when {}",
+        reason.code(),
+        plain_op(change, op).unwrap_or("an operation"),
+        if paths.is_empty() {
+            "paths `bay status` lists".to_owned()
+        } else {
+            paths.join(", ")
+        },
+        reason.allowed().join(", "),
+        reason.retry_when()
+    );
+    let mut out: String = text
+        .chars()
+        .filter(|char| !char.is_control())
+        .take(MAX_LINE)
+        .collect();
+    out.push('\n');
+    out
 }
 
 /// The talk kinds a notice names; any other is a fixed word.
@@ -527,7 +667,11 @@ pub fn instructions(repo: &Repo, tree: &Path, state_dir: &Path) -> Option<(Strin
 
 /// The operation id of `event` when it has the form bay gives one, `<change>.<n>`.
 fn op_id<'a>(change: &str, event: &'a Value) -> Option<&'a str> {
-    let op = event["op_id"].as_str()?;
+    plain_op(change, event["op_id"].as_str()?)
+}
+
+/// `op` when it has the form bay gives an operation id of `change`, `<change>.<n>`.
+fn plain_op<'a>(change: &str, op: &'a str) -> Option<&'a str> {
     let n = op.strip_prefix(change)?.strip_prefix('.')?;
     (!n.is_empty() && n.bytes().all(|byte| byte.is_ascii_digit())).then_some(op)
 }

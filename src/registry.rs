@@ -1,15 +1,16 @@
 //! The key registry (`DESIGN` § 10a, Registry encoding).
 //!
 //! `refs/bay/registry` is an append-only chain whose tree holds one OpenSSH `allowed_signers`
-//! file per key class: `agent`, `executor`, `producer`, `reviewer`, `registry`. The class is
-//! the file: a verification names the file of the class it requires, so a key only in the
-//! agent file never verifies as an executor, and a `review` record verifies only against the
-//! reviewer file (ruled 2026-10-19, rulings-open-questions.md Q12). A public key appears in
-//! exactly one file, each line has exactly one principal, and options or `cert-authority`
-//! lines are refused. A reviewer name is neither a producer name (both write
-//! `refs/notes/bay/evidence/<name>`) nor an agent name (an author never reviews its own
-//! landing under one name, Q7). Enrolment is plain Git: whoever runs the repository commits
-//! the files with a registry key and pushes.
+//! file per key class: `agent`, `executor`, `producer`, `reviewer`, `approver`, `registry`. The
+//! class is the file: a verification names the file of the class it requires, so a key only in
+//! the agent file never verifies as an executor, a `review` record verifies only against the
+//! reviewer file (ruled 2026-10-19, rulings-open-questions.md Q12), and an `approval` record only
+//! against the approver file (G245). A public key appears in exactly one file, each line has
+//! exactly one principal, and options or `cert-authority` lines are refused. A reviewer or an
+//! approver name is neither a producer name (they all write `refs/notes/bay/evidence/<name>`)
+//! nor an agent name (an author never reviews or approves its own landing under one name, Q7),
+//! and no name is both a reviewer and an approver. Enrolment is plain Git: whoever runs the
+//! repository commits the files with a registry key and pushes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -24,15 +25,19 @@ pub enum KeyClass {
     Executor,
     Producer,
     Reviewer,
+    /// A person whose signed `approval` record lets a change through an approval check (G245):
+    /// it signs `approval` records only.
+    Approver,
     Registry,
 }
 
 impl KeyClass {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Agent,
         Self::Executor,
         Self::Producer,
         Self::Reviewer,
+        Self::Approver,
         Self::Registry,
     ];
 
@@ -43,6 +48,7 @@ impl KeyClass {
             Self::Executor => "executor",
             Self::Producer => "producer",
             Self::Reviewer => "reviewer",
+            Self::Approver => "approver",
             Self::Registry => "registry",
         }
     }
@@ -55,6 +61,7 @@ impl KeyClass {
             Self::Executor => "bay-executor",
             Self::Producer => "bay-producer",
             Self::Reviewer => "bay-reviewer",
+            Self::Approver => "bay-approver",
             Self::Registry => "bay-registry",
         }
     }
@@ -194,6 +201,18 @@ impl Registry {
                         }
                     }
                 }
+                // G245: an approver writes `refs/notes/bay/evidence/<name>` like a producer or a
+                // reviewer, and an agent that approved under its own name would let itself land.
+                if class == KeyClass::Approver {
+                    for other in [KeyClass::Producer, KeyClass::Reviewer, KeyClass::Agent] {
+                        if self.enrols(other, principal) {
+                            return Err(format!(
+                                "{where_}: approver {principal} is also enrolled in {}; an approver name is never a producer, a reviewer or an agent name",
+                                other.file()
+                            ));
+                        }
+                    }
+                }
             }
         }
         Ok(())
@@ -290,6 +309,23 @@ impl Registry {
             1 => Ok(None),
             _ => Err(format!("merge-base --is-ancestor: {stderr}")),
         }
+    }
+
+    /// The principals `class`'s file enrols, each once, in the file's order.
+    #[must_use]
+    pub fn principals(&self, class: KeyClass) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for line in self.files[&class].lines().map(str::trim) {
+            if line.starts_with('#') {
+                continue;
+            }
+            if let Some(name) = line.split_whitespace().next()
+                && !names.iter().any(|known| known == name)
+            {
+                names.push(name.to_owned());
+            }
+        }
+        names
     }
 
     /// Whether `class`'s file enrols `principal` under any key: a registry actor of that class.

@@ -1,0 +1,154 @@
+//! Overlapping changes (NEW-8): the live changes whose declared paths share files with a
+//! change's own.
+//!
+//! `bay start` lists them in its detail (`overlaps`), and the agent hook's `session-start`
+//! names them for the session's change, so two agents that declare the same files hear of each
+//! other before either lands. A listing never refuses: it is what the work may meet, not a
+//! claim. It reads the chains this repository already holds (`crate::change::Chain::read_all`,
+//! one `for-each-ref` and one `cat-file --batch`) and the landed markers it holds: no fetch, so
+//! a change another clone opened is listed once a fetching command (`bay status`, `bay start`,
+//! `land`) brought its chain.
+//!
+//! A change is live while its chain says it is open, invalidated, repairing or ready, it holds
+//! no landed marker here, and it is in no sandbox lane (a lane change never lands, NEW-4). Two
+//! declared paths overlap when one holds the other (`crate::inputs::within`); a change that
+//! declares none covers the whole tree, named `.`. Each overlap names the narrower path.
+
+use std::collections::{BTreeSet, HashSet};
+
+use serde_json::{Value, json};
+
+use crate::change::{Chain, ChangeState};
+use crate::repo::Repo;
+
+/// The live changes other than `id` this repository holds whose declared paths overlap
+/// `declared`, in ref order: each its change id, intent, actor and the overlapping paths.
+///
+/// # Errors
+///
+/// The chains or the landed markers cannot be listed.
+pub fn overlaps(repo: &Repo, id: &str, declared: &[String]) -> Result<Vec<Value>, String> {
+    let chains = Chain::new(&repo.git)
+        .read_all()
+        .map_err(|error| error.message())?;
+    let landed: HashSet<String> = repo
+        .git
+        .run(&["for-each-ref", "--format=%(refname)", crate::names::LANDED])
+        .map_err(|error| error.message())?
+        .lines()
+        .filter_map(|name| name.strip_prefix(crate::names::LANDED))
+        .map(str::to_owned)
+        .collect();
+    Ok(chains
+        .iter()
+        .filter(|held| {
+            held.id != id
+                && live(held.record.state)
+                && held.record.lane.is_none()
+                && !landed.contains(&held.id)
+        })
+        .filter_map(|held| {
+            let theirs = crate::inputs::paths(&held.record.declared_inputs);
+            let paths = shared(declared, &theirs);
+            (!paths.is_empty()).then(|| {
+                json!({
+                    "change": held.id,
+                    "intent": held.record.intent.reference,
+                    "actor": held.record.actor,
+                    "paths": paths,
+                })
+            })
+        })
+        .collect())
+}
+
+/// A change that has not ended by its chain.
+fn live(state: ChangeState) -> bool {
+    matches!(
+        state,
+        ChangeState::Open | ChangeState::Invalidated | ChangeState::Repairing | ChangeState::Ready
+    )
+}
+
+/// A declared path without a leading `./` or `/`; the whole tree is empty.
+fn plain(path: &str) -> &str {
+    path.trim_start_matches("./").trim_start_matches('/')
+}
+
+/// The declared paths, or the whole tree when there are none.
+fn whole_or(declared: &[String]) -> Vec<&str> {
+    if declared.is_empty() {
+        vec![""]
+    } else {
+        declared.iter().map(String::as_str).map(plain).collect()
+    }
+}
+
+/// Whether `outer` holds `inner`; the whole tree holds every path.
+fn holds(outer: &str, inner: &str) -> bool {
+    outer.is_empty() || crate::inputs::within(outer, inner)
+}
+
+/// The paths two declarations share: for each pair where one holds the other, the narrower one,
+/// sorted and once; `.` for the whole tree.
+fn shared(mine: &[String], theirs: &[String]) -> Vec<String> {
+    let (mine, theirs) = (whole_or(mine), whole_or(theirs));
+    let mut out = BTreeSet::new();
+    for a in &mine {
+        for b in &theirs {
+            let narrower = if holds(a, b) {
+                b
+            } else if holds(b, a) {
+                a
+            } else {
+                continue;
+            };
+            out.insert(if narrower.is_empty() {
+                ".".to_owned()
+            } else {
+                (*narrower).to_owned()
+            });
+        }
+    }
+    out.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shared;
+
+    fn paths(list: &[&str]) -> Vec<String> {
+        list.iter().map(|path| (*path).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_directory_overlaps_the_files_under_it_and_names_the_narrower() {
+        assert_eq!(
+            shared(&paths(&["src/"]), &paths(&["src/a.rs", "docs/"])),
+            ["src/a.rs"]
+        );
+        assert_eq!(
+            shared(&paths(&["src/a.rs"]), &paths(&["src"])),
+            ["src/a.rs"]
+        );
+        assert_eq!(shared(&paths(&["./src/"]), &paths(&["src/"])), ["src/"]);
+    }
+
+    #[test]
+    fn disjoint_paths_and_a_shared_prefix_do_not_overlap() {
+        assert_eq!(
+            shared(&paths(&["src/"]), &paths(&["docs/"])),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            shared(&paths(&["src/a"]), &paths(&["src/ab.rs"])),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn no_declared_path_is_the_whole_tree() {
+        assert_eq!(shared(&[], &paths(&["docs/"])), ["docs/"]);
+        assert_eq!(shared(&[], &[]), ["."]);
+    }
+}

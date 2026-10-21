@@ -16,8 +16,14 @@
 //! - **Size:** a record whose JSON exceeds [`RECORD_MAX_BYTES`] is refused with the limit
 //!   named, never cut.
 //! - **Signer:** a `review` record is signed by the box's reviewer key (`bay.reviewerName`,
-//!   `bay.reviewerKey`), every other kind by its producer key (`bay.producerName`,
-//!   `bay.producerKey`), as the readers verify them (Q12).
+//!   `bay.reviewerKey`), an `approval` by its approver key (`bay.approverName`,
+//!   `bay.approverKey`), every other kind by its producer key (`bay.producerName`,
+//!   `bay.producerKey`), as the readers verify them (Q12, G245).
+//! - **An approval** (G245) is about a candidate, not a landing: `--commit` names the candidate
+//!   commit a land refused with `APPROVAL_PENDING` (its first parent is the trunk it was merged
+//!   onto), and `--check` an approval check of the policy there, whose environment it takes when
+//!   `--environment` is not named. A candidate that changes the policy is judged by its own new
+//!   policy too (§ 7), so it gets one approval record under each policy that has the check.
 
 use std::path::{Path, PathBuf};
 
@@ -91,28 +97,29 @@ fn run(dir: &Path, request: &Record) -> Result<BayResult, String> {
     // record anywhere writes nothing.
     let mut built = Vec::new();
     for commit in &request.commits {
-        let mut record = build(git, request, &common, commit)?;
-        record.sign(&key)?;
-        let size = serde_json::to_vec(&record)
-            .map_err(|error| error.to_string())?
-            .len();
-        if size > RECORD_MAX_BYTES {
-            return Err(format!(
-                "the record about {commit} is {size} bytes; the limit is {RECORD_MAX_BYTES}, and a record is never cut"
-            ));
-        }
-        let existing = evidence::producer_records(git, &name, &record.subject.tree)?
-            .into_iter()
-            .find(|held| held.id == record.id);
-        match existing {
-            Some(held) if same_content(&held, &record) => built.push((held, false)),
-            Some(_) => {
+        for mut record in build(git, request, &common, commit)? {
+            record.sign(&key)?;
+            let size = serde_json::to_vec(&record)
+                .map_err(|error| error.to_string())?
+                .len();
+            if size > RECORD_MAX_BYTES {
                 return Err(format!(
-                    "{} already holds a different record; one id is one record (rerun only with the same content, or under a new --version)",
-                    record.id
+                    "the record about {commit} is {size} bytes; the limit is {RECORD_MAX_BYTES}, and a record is never cut"
                 ));
             }
-            None => built.push((record, true)),
+            let existing = evidence::producer_records(git, &name, &record.subject.tree)?
+                .into_iter()
+                .find(|held| held.id == record.id);
+            match existing {
+                Some(held) if same_content(&held, &record) => built.push((held, false)),
+                Some(_) => {
+                    return Err(format!(
+                        "{} already holds a different record; one id is one record (rerun only with the same content, or under a new --version)",
+                        record.id
+                    ));
+                }
+                None => built.push((record, true)),
+            }
         }
     }
     let mut written = 0;
@@ -185,13 +192,13 @@ fn refresh_own(repo: &Repo, name: &str) -> Result<(), String> {
     update(&local)
 }
 
-/// The name and key that sign a record of `kind`: the reviewer's for `review`, the
-/// producer's for every other kind.
+/// The name and key that sign a record of `kind`: the reviewer's for `review`, the approver's
+/// for `approval`, the producer's for every other kind.
 fn writer(git: &Git, kind: &str) -> Result<(String, PathBuf), String> {
-    let (name_key, key_key) = if kind == evidence::KIND_REVIEW {
-        ("bay.reviewerName", "bay.reviewerKey")
-    } else {
-        ("bay.producerName", "bay.producerKey")
+    let (name_key, key_key) = match kind {
+        evidence::KIND_REVIEW => ("bay.reviewerName", "bay.reviewerKey"),
+        evidence::KIND_APPROVAL => ("bay.approverName", "bay.approverKey"),
+        _ => ("bay.producerName", "bay.producerKey"),
     };
     let get = |key: &str| {
         git.config_get(key)
@@ -298,13 +305,16 @@ struct Common {
     body: Map<String, Value>,
 }
 
-/// One record about `commit`.
+/// The records about `commit`: one, judged by the policy at its first parent. G245: an
+/// approval is one record per policy that judges the candidate and has the approval check, so a
+/// candidate that changes the policy, which its own new policy judges too (§ 7), is approved
+/// under both.
 fn build(
     git: &Git,
     request: &Record,
     common: &Common,
     commit: &str,
-) -> Result<EvidenceRecord, String> {
+) -> Result<Vec<EvidenceRecord>, String> {
     let resolve = |rev: &str| {
         git.run(&["rev-parse", "--verify", "-q", rev])
             .map_err(|_| format!("{commit} is not a commit here"))
@@ -314,50 +324,125 @@ fn build(
         .map_err(|_| format!("{commit} has no parent, so no accepted base to judge it from"))?;
     let tree = resolve(&format!("{commit}^{{tree}}"))?;
     let base_tree = resolve(&format!("{base}^{{tree}}"))?;
-    let policy = crate::policy::load_at(git, &base).map_err(String::from)?;
-    let (policy_revision, manifest_digest) = policy
-        .map(|policy| (policy.revision, policy.manifest_digest))
-        .unwrap_or_default();
-    let digest =
-        crate::canonical::digest(&json!({"inputs": common.inputs, "version": common.version}))?;
-    let short = digest
-        .trim_start_matches("sha256:")
-        .get(..12)
-        .unwrap_or_default();
     let check = request
         .check
         .clone()
         .unwrap_or_else(|| request.kind.clone());
-    Ok(EvidenceRecord {
-        schema: EVIDENCE_SCHEMA.to_owned(),
-        id: format!("{}/{}-{}-{short}", common.name, request.kind, &commit[..12]),
-        kind: request.kind.clone(),
-        subject: Subject {
-            tree,
-            commit,
-            base_tree,
-            unknown: Map::new(),
-        },
-        inputs: common.inputs.clone(),
-        check: CheckId::new(&check, request.environment.as_deref().unwrap_or("any")),
-        policy_revision,
-        manifest_digest,
-        policy_provenance: None,
-        producer: Producer {
-            name: common.name.clone(),
-            version: common.version.clone(),
-            unknown: Map::new(),
-        },
-        verdict: common.verdict,
-        at: now_rfc3339(),
-        why: None,
-        units: Vec::new(),
-        selection: None,
-        sandbox: None,
-        seconds: None,
-        signature: None,
-        unknown: common.body.clone(),
-    })
+    let judged = if request.kind == evidence::KIND_APPROVAL {
+        approval_policies(git, &base, &commit, &check, request.environment.as_deref())?
+    } else {
+        let policy = crate::policy::load_at(git, &base).map_err(String::from)?;
+        let (revision, digest) = policy
+            .map(|policy| (policy.revision, policy.manifest_digest))
+            .unwrap_or_default();
+        let environment = request.environment.as_deref().unwrap_or("any");
+        vec![(revision, digest, environment.to_owned())]
+    };
+    let mut records = Vec::new();
+    for (policy_revision, manifest_digest, environment) in judged {
+        let mut named = json!({"inputs": common.inputs, "version": common.version});
+        // Two approvals of one candidate under two policies are two records, never one id.
+        if request.kind == evidence::KIND_APPROVAL {
+            named["manifest_digest"] = json!(manifest_digest);
+        }
+        let digest = crate::canonical::digest(&named)?;
+        let short = digest
+            .trim_start_matches("sha256:")
+            .get(..12)
+            .unwrap_or_default();
+        records.push(EvidenceRecord {
+            schema: EVIDENCE_SCHEMA.to_owned(),
+            id: format!("{}/{}-{}-{short}", common.name, request.kind, &commit[..12]),
+            kind: request.kind.clone(),
+            subject: Subject {
+                tree: tree.clone(),
+                commit: commit.clone(),
+                base_tree: base_tree.clone(),
+                unknown: Map::new(),
+            },
+            inputs: common.inputs.clone(),
+            check: CheckId::new(&check, &environment),
+            policy_revision,
+            manifest_digest,
+            policy_provenance: None,
+            producer: Producer {
+                name: common.name.clone(),
+                version: common.version.clone(),
+                unknown: Map::new(),
+            },
+            verdict: common.verdict,
+            at: now_rfc3339(),
+            why: None,
+            units: Vec::new(),
+            selection: None,
+            sandbox: None,
+            seconds: None,
+            signature: None,
+            unknown: common.body.clone(),
+        });
+    }
+    Ok(records)
+}
+
+/// G245: each policy that judges candidate `commit` (the one at `base`, and its own when it
+/// differs) with approval check `check` (on `environment`, when named), as its revision,
+/// manifest digest and the check's environment. An approval that would answer no approval
+/// check never counts, so none is refused before anything is written.
+fn approval_policies(
+    git: &Git,
+    base: &str,
+    commit: &str,
+    check: &str,
+    environment: Option<&str>,
+) -> Result<Vec<(u64, String, String)>, String> {
+    let mut judged: Vec<(u64, String, String)> = Vec::new();
+    for at in [base, commit] {
+        let loaded = crate::policy::load_at(git, at);
+        // A candidate's own invalid policy is its land's refusal; the base still judges.
+        if at == commit && matches!(loaded, Err(crate::policy::LoadError::Invalid(_))) {
+            continue;
+        }
+        let Some(policy) = loaded.map_err(String::from)? else {
+            continue;
+        };
+        if judged
+            .iter()
+            .any(|(_, digest, _)| *digest == policy.manifest_digest)
+        {
+            continue;
+        }
+        let found: Vec<&crate::policy::CheckEntry> = policy
+            .checks
+            .iter()
+            .filter(|entry| {
+                entry.is_approval()
+                    && entry.id == check
+                    && environment.is_none_or(|named| named == entry.environment)
+            })
+            .collect();
+        match found.as_slice() {
+            [entry] => judged.push((
+                policy.revision,
+                policy.manifest_digest.clone(),
+                entry.environment.clone(),
+            )),
+            [] => {}
+            _ => {
+                return Err(format!(
+                    "approval check {check} has more than one environment at {at}; name one with --environment"
+                ));
+            }
+        }
+    }
+    if judged.is_empty() {
+        return Err(format!(
+            "no policy that judges {commit} has an approval check {check}{}; an approval answers a [[check]] with kind = \"approval\"",
+            environment
+                .map(|named| format!(" on {named}"))
+                .unwrap_or_default()
+        ));
+    }
+    Ok(judged)
 }
 
 /// Whether two records under one id say the same thing: every field but the time and the

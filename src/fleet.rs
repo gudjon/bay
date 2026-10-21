@@ -10,6 +10,10 @@
 //! else of the network: it opens no SSH, fetches nothing and starts no session. Without the
 //! record it fails closed with `REMOTE_NOT_FETCHED` (G49).
 //!
+//! The same fetch copies the remote's executor presences, `refs/bay/executor/*`, into
+//! [`FLEET_EXECUTOR_PREFIX`] and records them beside the machines (G67, `crate::presence`): the
+//! map lists every executor with its version, environments, age and whether it is `stale`.
+//!
 //! A row's age never compares two machines' clocks (ruling R-A2-3): it is the summary's age on
 //! this machine's clock (now, against the fetch that first brought that summary commit) plus
 //! the row's age inside the summary (the summary's `at` against the row's `at`, both the
@@ -31,6 +35,8 @@ use crate::result::{BayResult, Freshness, Reason};
 
 /// Where `bay status` keeps its copy of the remote's live refs, one ref per machine.
 pub const FLEET_PREFIX: &str = crate::names::FLEET;
+/// Where `bay status` keeps its copy of the remote's executor presences (G67).
+pub const FLEET_EXECUTOR_PREFIX: &str = crate::names::FLEET_EXECUTOR;
 /// The most live summaries the map reads; the host refuses more (`crate::hook`).
 const FLEET_MAX_MACHINES: usize = 256;
 
@@ -91,6 +97,8 @@ struct Fetched {
     /// Per machine: the summary commit fetched, and the Unix time (this machine's clock) of the
     /// fetch that first brought it.
     tips: BTreeMap<String, (String, u64)>,
+    /// Per executor, the same for its presence commit (G67).
+    executors: BTreeMap<String, (String, u64)>,
 }
 
 /// Where bay records a fetch of the remote's live refs: a local file beside the views, never
@@ -121,20 +129,24 @@ fn recorded(repo: &Repo, remote: &str, url: &str) -> Result<Option<Fetched>, Str
     let Some(at) = record["at"].as_str() else {
         return Ok(None);
     };
-    let tips = record["tips"]
-        .as_object()
-        .map(|tips| {
-            tips.iter()
-                .filter_map(|(machine, tip)| {
-                    let commit = tip["commit"].as_str()?.to_owned();
-                    Some((machine.clone(), (commit, tip["since"].as_u64()?)))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // A record an older bay wrote names no executors: none was fetched.
+    let tips_of = |field: &str| -> BTreeMap<String, (String, u64)> {
+        record[field]
+            .as_object()
+            .map(|tips| {
+                tips.iter()
+                    .filter_map(|(name, tip)| {
+                        let commit = tip["commit"].as_str()?.to_owned();
+                        Some((name.clone(), (commit, tip["since"].as_u64()?)))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     Ok(Some(Fetched {
         at: at.to_owned(),
-        tips,
+        tips: tips_of("tips"),
+        executors: tips_of("executors"),
     }))
 }
 
@@ -150,12 +162,17 @@ pub fn fetch(repo: &Repo) {
     let Some(began) = unix_of(&at) else {
         return;
     };
-    let earlier = recorded(repo, repo.remote(), &url)
+    let (earlier, earlier_executors) = recorded(repo, repo.remote(), &url)
         .ok()
         .flatten()
-        .map(|fetched| fetched.tips)
+        .map(|fetched| (fetched.tips, fetched.executors))
         .unwrap_or_default();
+    // One fetch and one listing for both namespaces (G67 adds no spawn).
     let refspec = format!("+{}*:{FLEET_PREFIX}*", live::LIVE_PREFIX);
+    let presences = format!(
+        "+{}*:{FLEET_EXECUTOR_PREFIX}*",
+        crate::presence::PRESENCE_PREFIX
+    );
     let git = &repo.git;
     if git
         .run(&[
@@ -165,6 +182,7 @@ pub fn fetch(repo: &Repo) {
             "--prune",
             repo.remote(),
             &refspec,
+            &presences,
         ])
         .is_err()
     {
@@ -174,26 +192,29 @@ pub fn fetch(repo: &Repo) {
         "for-each-ref",
         "--format=%(refname) %(objectname)",
         FLEET_PREFIX,
+        FLEET_EXECUTOR_PREFIX,
     ]) else {
         return;
     };
-    let tips: serde_json::Map<String, Value> = listed
-        .lines()
-        .filter_map(|line| line.split_once(' '))
-        .map(|(name, commit)| {
-            let machine = name.trim_start_matches(FLEET_PREFIX);
-            let since = earlier
-                .get(machine)
-                .filter(|(held, _)| held == commit)
-                .map_or(began, |(_, since)| *since);
-            (
-                machine.to_owned(),
-                json!({"commit": commit, "since": since}),
-            )
-        })
-        .collect();
+    let tips_of = |prefix: &str, earlier: &BTreeMap<String, (String, u64)>| {
+        listed
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .filter_map(|(name, commit)| Some((name.strip_prefix(prefix)?, commit)))
+            .map(|(name, commit)| {
+                let since = earlier
+                    .get(name)
+                    .filter(|(held, _)| held == commit)
+                    .map_or(began, |(_, since)| *since);
+                (name.to_owned(), json!({"commit": commit, "since": since}))
+            })
+            .collect::<serde_json::Map<String, Value>>()
+    };
+    let tips = tips_of(FLEET_PREFIX, &earlier);
+    let executors = tips_of(FLEET_EXECUTOR_PREFIX, &earlier_executors);
     let path = record_path(repo);
-    let record = json!({"remote": repo.remote(), "url": url, "at": at, "tips": tips});
+    let record = json!({"remote": repo.remote(), "url": url, "at": at, "tips": tips,
+        "executors": executors});
     let tmp = path.with_extension("tmp");
     if path
         .parent()
@@ -403,6 +424,41 @@ fn verified(
     }
 }
 
+/// G67: the executor presences of the recorded fetch, as [`crate::presence::rows`] shows them
+/// at `now`.
+fn executor_rows(repo: &Repo, fetched: &Fetched, now: u64) -> Result<Vec<Value>, String> {
+    let held: Vec<crate::presence::Held> = fetched
+        .executors
+        .iter()
+        .map(|(executor, (commit, since))| crate::presence::Held {
+            executor: executor.clone(),
+            commit: commit.clone(),
+            since: *since,
+        })
+        .collect();
+    crate::presence::rows(&repo.git, &repo.config, &held, now)
+}
+
+/// G67, for `bay status`: the executor presences of the remote as the last recorded fetch of
+/// the fleet refs holds them; `None` when this cache records no such fetch.
+///
+/// # Errors
+///
+/// The record cannot be read, a git fault, or a registry that does not load.
+pub fn executors(repo: &Repo) -> Result<Option<Vec<Value>>, String> {
+    let Some(url) = repo
+        .git
+        .remote_url(repo.remote())
+        .map_err(|error| error.message())?
+    else {
+        return Ok(None);
+    };
+    let Some(fetched) = recorded(repo, repo.remote(), &url)? else {
+        return Ok(None);
+    };
+    executor_rows(repo, &fetched, crate::presence::reader_now()).map(Some)
+}
+
 /// The other machines' summaries of the recorded fetch, at most [`FLEET_MAX_MACHINES`] of them
 /// read in two `cat-file` calls, each checked against the agent keys when a registry exists. A
 /// summary that cannot be read or does not verify lists no sessions. Returns whether machines
@@ -602,15 +658,34 @@ fn talks(git: &Git, map: &mut Map) -> Value {
     Value::from(rows)
 }
 
+/// NEW-5: the promotion targets as `bay status` reads them, from the target refs and evidence
+/// this cache holds; a read that fails says why.
+fn target_rows(repo: &Repo, trunk: &str) -> Value {
+    crate::registry::Registry::current(&repo.git)
+        .and_then(|registry| {
+            crate::target::rows(
+                &repo.git,
+                &repo.config,
+                trunk,
+                registry.as_ref(),
+                live::unix_now(),
+            )
+        })
+        .map_or_else(|why| json!({"unread": why}), Value::from)
+}
+
 /// The fleet map from the recorded fetch (`DESIGN` § 11a, `INTERFACES` § 5a): one entry per
 /// fresh session row, this machine's from its records, each with how many commits its view's
 /// base is behind trunk (`behind_commits`) and the session's age (`session_age_s`, G166); an entry per held change no session
 /// names ([`unheld`]); every machine and actor the cache knows, each with `age_s`, the actors of
 /// open talks among them; every open talk the cache holds ([`talks`], G47b); and
 /// `default_actor_sessions`, the fresh sessions whose actor's name came from a default rather
-/// than `BAY_ACTOR` (G152). `red` lists the post checks trunk is red on,
-/// as `bay status` does, and each entry's `on_red` names those whose paths cover its change's
-/// declared paths or the files its session last wrote (G244b).
+/// than `BAY_ACTOR` (G152). `red` lists the post checks trunk is red on, and `red_pending`
+/// those no landing in the window answers (NEW-6), as `bay status` does, and each entry's
+/// `on_red` names those whose paths cover its change's declared paths or the files its session
+/// last wrote (G244b).
+/// `targets` lists the promotion targets as `bay status` does (NEW-5), from the copies of the
+/// target refs its last fetch made.
 ///
 /// `detail.behind` is never a known `false`: whether the remote moved since the fetch cannot
 /// be known without the network, which the map never touches. It is `true` once the fetch is a
@@ -620,7 +695,7 @@ fn talks(git: &Git, map: &mut Map) -> Value {
 /// [`FLEET_MAX_MACHINES`] summaries of at most `live::LIVE_MAX_BYTES` read in two `cat-file`
 /// calls, one signature check per summary under a registry, one bounded tail per session
 /// record of this machine, one trunk log per held change no session names, one red
-/// judgement over [`crate::red::WINDOW`] trunk commits, and one scan of the same window for
+/// judgement over the `[red] window` of trunk commits, and one scan of the same window for
 /// unattributed landings ([`crate::unattributed::scan`]), and one read of the talk refs this
 /// cache holds ([`talks`]).
 fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
@@ -632,12 +707,12 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     // says why (G104b), never read as not red.
     let judged = trunk.as_deref().map(|trunk| {
         crate::registry::Registry::current(git)
-            .and_then(|registry| crate::red::red(git, trunk, registry.as_ref()))
+            .and_then(|registry| crate::red::state(git, trunk, registry.as_ref()))
     });
     let red_unread = judged
         .as_ref()
         .and_then(|judged| judged.as_ref().err().cloned());
-    let red = judged.and_then(Result::ok).unwrap_or_default();
+    let crate::red::Judgement { red, pending } = judged.and_then(Result::ok).unwrap_or_default();
     let mut map = Map {
         now: live::unix_now(),
         window: repo.config.takeover().as_secs(),
@@ -669,6 +744,9 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     let unheld = unheld(repo, &map, lines.as_deref().unwrap_or_default())?;
     map.sessions.extend(unheld);
     let talks = talks(git, &mut map);
+    // G67: an unreadable presence is named in its row; a read that fails says why, never `[]`.
+    let executors = executor_rows(repo, fetched, crate::presence::reader_now())
+        .map_or_else(|why| json!({"unread": why}), Value::from);
 
     let fetch_age = unix_of(&fetched.at).map(|at| map.now.saturating_sub(at));
     let behind = if fetch_age.is_none_or(|age| age >= map.window) {
@@ -676,14 +754,20 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     } else {
         Value::Null
     };
-    let red: Value = red_unread.map_or_else(
-        || map.red.iter().map(crate::red::Red::to_json).collect(),
-        |why| json!({"unread": why}),
+    let (red, red_pending): (Value, Value) = red_unread.map_or_else(
+        || {
+            (
+                map.red.iter().map(crate::red::Red::to_json).collect(),
+                pending.iter().map(crate::red::Pending::to_json).collect(),
+            )
+        },
+        |why| (json!({"unread": why}), json!({"unread": why})),
     );
     // G85: as `bay status` reads it, from the trunk this cache holds.
     let unattributed = map.trunk.as_deref().map(|trunk| {
         crate::unattributed::scan(git, trunk).unwrap_or_else(|why| json!({"unread": why}))
     });
+    let targets = map.trunk.as_deref().map(|trunk| target_rows(repo, trunk));
     let mut result = BayResult::ok(json!({
         "remote": repo.remote(),
         "fetched_at": fetched.at,
@@ -694,12 +778,15 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         "trunk": map.trunk,
         "machines": map.machines.into_values().collect::<Vec<_>>(),
         "machines_truncated": truncated,
+        "executors": executors,
         "actors": map.actors.into_iter().map(|(actor, (age, on))| json!({
             "actor": actor, "machines": on, "age_s": age,
         })).collect::<Vec<_>>(),
         "talks": talks,
         "red": red,
+        "red_pending": red_pending,
         "unattributed": unattributed,
+        "targets": targets,
         "default_actor_sessions": default_actor,
         "sessions": map.sessions,
     }));

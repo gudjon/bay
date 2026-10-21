@@ -1,10 +1,89 @@
 # Changelog
 
+## 0.2.0
+
+Scale
+- An executor pass costs the same however many closed changes and finished queue places the repository holds.
+- After the retention window, the executor removes finished queue places below the head, always keeping the highest.
+- Terminal records and `bay status` show an operation's submit, queue, head, check and publish times.
+
+Red trunk
+- `[red] window = N` in `.bay/config.toml` sets how many trunk commits red and unattributed judgements read.
+- A post check unanswered in that window shows as `red_pending`, never as clear; it refuses no landing.
+- A red post check names its `suspect` range: the last pass, the first failure, and the landings between.
+- `[executor] bisect_post = true` bisects a red post check's suspect range, recording each run as post evidence.
+- The bisect reruns the suspect once to rule out a flake, in at most log2(n) + 1 runs.
+- A red pinned to one landing names it `culprit`, with the verdicts tested; it owns the red and `TRUNK_RED`.
+
+Promotion
+- `[[target]]` in `.bay/config.toml` names promotion targets such as `staging`, with required checks and a soak.
+- `[[freeze]]` holds a target until its end; meanwhile only a `Fixes:` or `Reverts:` landing is promoted.
+- `bay status` lists each target's tip, drift, lag, checks, freeze and newest promotable commit under `detail.targets`.
+- `bay watch` names a target that moves as `target_moved`, or `target_unpromotable` when the commit fails its rule.
+- A bay host refuses a push that moves a target to an unpromotable commit, with `PROMOTION_REFUSED`.
+
+Lanes
+- `[[lane]]` in `.bay/config.toml` names sandbox lane refs, such as `refs/heads/research/*`.
+- `bay start --lane <name>` opens a lane change: its checks run against trunk, and it never lands.
+- A lane change's land is refused `LANE_NEVER_LANDS`, carrying its check verdicts; the host hook refuses it too.
+- A change whose view reaches a lane's commits off trunk is refused `LANE_LEAK`, naming lane and commits.
+- The agent hook denies merge, cherry-pick, checkout and restore from a lane ref in other views.
+- `bay status`, the fleet map and `bay watch` name a forge merge of lane work as `lane_leak`.
+- A lane change's view is released after the lane's shorter `window_s`.
+
+Approval
+- A `[[check]]` with `kind = "approval"` and `when_paths` needs a person's signed yes for those paths.
+- A new `approver` key class in the registry signs `approval` records, and nothing else.
+- An approver runs `bay evidence record --kind approval` on the exact candidate commit a land names.
+- A change on those paths is held with `APPROVAL_PENDING` until an enrolled approver's record arrives.
+- `bay status` and the refusal name who can approve and the candidate commit to approve.
+- A rejection blocks the change as `CHECK_FAILED`, naming the approver.
+- An approval signed by any other key never counts, and the host refuses it.
+- Without a key registry, no approval counts, and the refusal says so.
+- A change elsewhere lands without an approval; quarantine sets an approval check aside like any check.
+
+Actor proof
+- `[agent] require_actor_proof = true` in `.bay/policy.toml` refuses land `ACTOR_UNPROVEN` when actors share an agent key.
+- The remedy is a hardware agent key, or one OS account per actor. Off by default.
+- `bay doctor`'s key-custody row shows `require_actor_proof`, and whether land is refused on this box.
+
+Overlaps
+- `bay start` lists live changes declaring overlapping paths in `detail.overlaps`, with intent, actor and paths.
+- Session start names the same overlaps for the view's change; neither refuses.
+- A queued change's early merge conflict reaches its session's agent once, with the paths.
+
+Throughput
+- `[executor] ahead = N` checks queued entries ahead of their turn, on the bases the entries before them predict.
+- An entry whose prediction held lands on that evidence with no new check run; a missed prediction is ignored.
+- `footprint = true` on a policy check carries its record to a later candidate whose read set is byte-identical.
+- `[executor] footprint_lanes = true` checks a queued entry beside the head when their paths are disjoint.
+- Landings stay in queue order; a carried record names the record it was carried from.
+- `[executor] batch = { min, max, max_failure_rate }` checks the queue head and entries behind it as one tree.
+- A passing batch lands in one push; each member keeps its own commit, `Change-Id` and `Bay-Batch` trailer.
+- A failing batch bisects on the same tip, lands its passing prefix, and checks the culprit alone.
+- No batch forms while the lane's recent failure rate is above `max_failure_rate`, default 0.3.
+- A bay host admits a `Bay-Batch` commit only within a whole batch under a config that sets `batch`.
+
+Flaky checks
+- `retry_on_failure = N` in a `[[check]]` reruns a failed check on the same tree, up to N times.
+- A failure then a pass is `flaky`: every run stays in evidence, never a plain pass.
+- `allow_flaky = true` lets a flaky check land, named in `coverage_gaps` with its runs; otherwise `CHECK_FLAKY`.
+- `[[quarantine]]` takes `owner` and `since`; `bay status` lists each with owner, age and overdue.
+- `bay status` counts each check's flaky landings over the red window under `detail.flakes`.
+
+Executor presence
+- Each executor pass publishes its presence: version, machine, environments, last pass, operation held and queue depth.
+- `bay status --fleet` lists `executors`, each with its age and whether it is `stale`.
+- `bay status` warns `no_live_executor` when operations are queued and no executor presence is fresh.
+- `bay doctor --role executor` shows the executor's own presence and how its last push went.
+
 ## 0.1.15
 
 - `bay land --wait` waits for another process's run of its operation and returns its outcome, not an early `ok`.
 - `bay help --json` lists every command, flag and reason code, read from the binary itself.
 - It includes the JSON Schema of `bay.result/1`, also kept as `schemas/bay.result.schema.json`.
+- An executor pass costs the same however many closed changes and finished queue places the repository holds.
+- After the retention window, the executor removes finished queue places below the head, always keeping the highest.
 
 ## 0.1.14
 

@@ -4,7 +4,8 @@
 //! (`[check] command`, `[update]`) are accepted and ignored, and doctor names them
 //! ([`Config::ignored`]). `[runtime] command` (the runtime adapter, `INTERFACES` § 4) is
 //! not in § 7's list yet. `[executor]` and `[retention]` are read by built features but are
-//! not in § 7's list yet (BACKLOG 18), nor is `[view]` (G175). A key or table bay does not know is a config error that
+//! not in § 7's list yet (BACKLOG 18), nor is `[view]` (G175), nor `[red]` (NEW-6), nor are
+//! `[[target]]` and `[[freeze]]` (NEW-5, NEW-9, `crate::target`), nor `[[lane]]` (NEW-4, [`Lane`]). A key or table bay does not know is a config error that
 //! names it, as is `evidence_reuse` set to anything but `"off"` or `"exact-inputs"`: a misspelled
 //! setting never loads as a silent default. A config written for a later bay is refused by
 //! this one, and the recovery is `bay update`.
@@ -22,6 +23,13 @@ const EVIDENCE_REUSE: [&str; 2] = ["off", "exact-inputs"];
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub trunk: Option<String>,
+    /// `[[target]]`: the promotion targets (NEW-5, `crate::target`). A promotion moves a ref
+    /// such as `refs/heads/staging` to a commit already on its source; it is not a landing.
+    #[serde(default, rename = "target")]
+    pub targets: Vec<Target>,
+    /// `[[freeze]]`: the freeze windows of the targets (NEW-9, `crate::target`).
+    #[serde(default, rename = "freeze")]
+    pub freezes: Vec<Freeze>,
     pub remote: Option<String>,
     pub agent: Option<Agent>,
     pub trailers: Option<Trailers>,
@@ -39,10 +47,76 @@ pub struct Config {
     pub policy: Option<PolicyProfile>,
     pub hooks: Option<Hooks>,
     pub view: Option<View>,
+    pub red: Option<Red>,
+    /// `[[lane]]` (NEW-4): the sandbox lanes, whose changes run their checks and never land.
+    #[serde(default, rename = "lane")]
+    pub lanes: Vec<Lane>,
     /// `[update]` is accepted and ignored: the update pin and switch are the box's
     /// (`git config --global bay.update*`, `DESIGN` § 15.6), never a repository's, and an older
     /// config that still carries the table must keep loading.
     update: Option<toml::Table>,
+}
+
+/// One `[[target]]` (NEW-5): a ref bay judges promotions to, never one it lands on.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Target {
+    /// The target's name, an operator name (`staging`, `production`).
+    pub name: String,
+    /// The ref it names; `refs/heads/<name>` unless set.
+    #[serde(rename = "ref")]
+    pub reference: Option<String>,
+    /// What it is promoted from: the trunk (the default, or the trunk's name), or another
+    /// target's name.
+    pub from: Option<String>,
+    /// The check ids of `.bay/policy.toml` whose evidence must be green for a commit the
+    /// target moves to: post checks, or checks run only for this target.
+    #[serde(default)]
+    pub requires: Vec<String>,
+    /// The minimum age, in seconds of the commit's committer time, before a promotion.
+    pub soak_s: Option<u64>,
+}
+
+impl Target {
+    /// The ref this target names.
+    #[must_use]
+    pub fn reference(&self) -> String {
+        self.reference
+            .clone()
+            .unwrap_or_else(|| format!("refs/heads/{}", self.name))
+    }
+
+    /// The target this one is promoted from, or `None` for the trunk.
+    #[must_use]
+    pub fn from_target(&self, trunk: &str) -> Option<&str> {
+        self.from.as_deref().filter(|from| *from != trunk)
+    }
+
+    /// The soak in seconds; none unless set.
+    #[must_use]
+    pub fn soak(&self) -> u64 {
+        self.soak_s.unwrap_or(0)
+    }
+}
+
+/// One `[[freeze]]` (NEW-9): until `end`, a target takes only a commit whose landing carries
+/// `Fixes:` or `Reverts:`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Freeze {
+    pub target: String,
+    /// The end, in RFC 3339 UTC to the second (`2026-12-24T00:00:00Z`).
+    pub end: String,
+    pub reason: String,
+}
+
+impl Freeze {
+    /// Whether the freeze is in force at Unix time `now`. An end bay cannot read never loads
+    /// ([`Config::parse`]), so here it reads as in force.
+    #[must_use]
+    pub fn active(&self, now: u64) -> bool {
+        crate::clock::unix_of(&self.end).is_none_or(|end| now < end)
+    }
 }
 
 /// `[notify] command`: the notify adapter (`INTERFACES` § 4), called once after each event is
@@ -100,6 +174,20 @@ pub struct View {
     pub warm_history: Option<bool>,
 }
 
+/// `[red] window` (NEW-6): how many first-parent trunk commits a red judgement (G244) and the
+/// unattributed scan (G85) read back. Default [`crate::red::DEFAULT_WINDOW`]; at most
+/// [`MAX_RED_WINDOW`]. Read from the config committed at trunk, so the window is the landed
+/// one. A post check no commit in the window answers is pending, never green: a trunk that
+/// lands faster than its post checks answer needs a window as deep as their lag.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Red {
+    pub window: Option<usize>,
+}
+
+/// The deepest `[red] window`: each commit in it may cost one read of its evidence notes.
+pub const MAX_RED_WINDOW: usize = 10_000;
+
 /// How long a closed change keeps its drafts before the retention cut (§ 5), and the bay ref
 /// count past which an executor compacts markers (§ 10a ref-growth budget, `crate::compact`).
 #[derive(Debug, Deserialize)]
@@ -108,6 +196,25 @@ pub struct Retention {
     pub window_s: Option<u64>,
     pub ref_budget: Option<u64>,
 }
+
+/// `[[lane]]` (NEW-4): a sandbox lane. `refs` are the ref names its work lives under, as the
+/// remote names them (`refs/heads/research/*`); each is a full ref name under `refs/`, outside
+/// `refs/bay/`, with at most one `*`, which matches any run of characters, slashes too. A change
+/// started with `bay start --lane <name>` runs its checks and never lands (`LANE_NEVER_LANDS`); a
+/// change of no lane whose view reaches a lane ref's commits off trunk is refused (`LANE_LEAK`).
+/// `window_s` is how long an ended lane change keeps its view, shorter than the retention
+/// window (`[retention] window_s`); by default [`DEFAULT_LANE_WINDOW_S`], or the retention
+/// window when that is shorter.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lane {
+    pub name: String,
+    pub refs: Vec<String>,
+    pub window_s: Option<u64>,
+}
+
+/// A lane's retention window when it names none: one day.
+pub const DEFAULT_LANE_WINDOW_S: u64 = 24 * 3600;
 
 /// An external executor implementing the contract of `INTERFACES` § 3a.
 #[derive(Debug, Deserialize)]
@@ -128,9 +235,36 @@ pub struct Executor {
     pub takeover_s: Option<u64>,
     /// The publish window added to the execution budget for a queue head's progress deadline.
     pub publish_window_s: Option<u64>,
+    /// Culprit finding (`crate::bisect`): when a post check is red over more than one landing,
+    /// an executor that serves its environment runs it on the range's midpoints. Default off.
+    pub bisect_post: Option<bool>,
     /// Never a repository's setting (ruling R14): whether checks run with no sandbox is the
     /// box's choice, global Git config `bay.executorSandbox = none`. Read only to refuse it.
     pub sandbox: Option<toml::Value>,
+    /// NEW-2 (`crate::throughput`): how many queue entries behind the head an executor that is
+    /// not running the head checks ahead of their turn, each on the base the entries before it
+    /// predict. Default 0, off; at most [`crate::throughput::MAX_AHEAD`].
+    pub ahead: Option<usize>,
+    /// NEW-10 (`crate::throughput`): an entry whose footprint is disjoint from every entry's
+    /// ahead of it is checked ahead of its turn on the current tip, and a record of a check with
+    /// `footprint = true` is carried onto a later candidate whose read set is the same. Default
+    /// off.
+    pub footprint_lanes: Option<bool>,
+    /// Batching with bisection (`crate::throughput`): `batch = { min, max, max_failure_rate }`.
+    /// Absent, off.
+    pub batch: Option<Batch>,
+}
+
+/// `[executor] batch` (`crate::throughput`): at least `min` members (default 1; a batch always
+/// has two), at most `max` (default [`crate::throughput::DEFAULT_BATCH_MAX`]), and none while the
+/// lane's recent failure rate is above `max_failure_rate` (default
+/// [`crate::throughput::DEFAULT_MAX_FAILURE_RATE`]).
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Batch {
+    pub min: Option<usize>,
+    pub max: Option<usize>,
+    pub max_failure_rate: Option<f64>,
 }
 
 /// The configurable trailer keys. `Change-Id`, `Revision-Id`, `Request-Id`, `Candidate-Id`,
@@ -265,6 +399,17 @@ impl Config {
                     .to_owned(),
             );
         }
+        // NEW-6: an empty window would judge nothing, and read every post check as pending.
+        if let Some(window) = config.red.as_ref().and_then(|red| red.window)
+            && !(1..=MAX_RED_WINDOW).contains(&window)
+        {
+            return Err(format!(
+                "[red] window = {window}: the window is 1 to {MAX_RED_WINDOW} trunk commits"
+            ));
+        }
+        config.validate_targets()?;
+        config.validate_lanes()?;
+        config.validate_throughput()?;
         // § 4: the takeover window is longer than the executor lease.
         if config.takeover() <= config.lease() {
             return Err(format!(
@@ -275,6 +420,215 @@ impl Config {
             ));
         }
         Ok(config)
+    }
+
+    /// The throughput levers (`crate::throughput`): each in its bounds, and each a rule of
+    /// evidence reuse, so none is on without `[policy] evidence_reuse = "exact-inputs"`.
+    fn validate_throughput(&self) -> Result<(), String> {
+        let ahead = self.ahead();
+        if ahead > crate::throughput::MAX_AHEAD {
+            return Err(format!(
+                "[executor] ahead = {ahead}: at most {} entries are checked ahead of their turn",
+                crate::throughput::MAX_AHEAD
+            ));
+        }
+        if let Some(batch) = self.batch() {
+            if batch.min < 1 || batch.min > batch.max || batch.max > crate::throughput::MAX_BATCH {
+                return Err(format!(
+                    "[executor] batch = {{ min = {}, max = {} }}: 1 <= min <= max <= {}",
+                    batch.min,
+                    batch.max,
+                    crate::throughput::MAX_BATCH
+                ));
+            }
+            if !(0.0..=1.0).contains(&batch.max_failure_rate) {
+                return Err(format!(
+                    "[executor] batch max_failure_rate = {}: a rate is 0 to 1",
+                    batch.max_failure_rate
+                ));
+            }
+        }
+        let on: Vec<&str> = [
+            (ahead > 0, "ahead"),
+            (self.footprint_lanes(), "footprint_lanes"),
+            (self.batch().is_some(), "batch"),
+        ]
+        .into_iter()
+        .filter_map(|(on, key)| on.then_some(key))
+        .collect();
+        if !on.is_empty() && !self.evidence_reuse() {
+            return Err(format!(
+                "[executor] {}: each throughput lever counts evidence only through reuse; \
+                 set [policy] evidence_reuse = \"exact-inputs\"",
+                on.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// NEW-5, NEW-9: each target has an operator name, used once and never the trunk's; a ref
+    /// of its own outside bay's namespaces and never the trunk; a source that is the trunk or
+    /// another target, with no cycle; and named checks. Each freeze names a target, an end bay
+    /// can read and a reason.
+    fn validate_targets(&self) -> Result<(), String> {
+        let trunk = self.trunk();
+        let trunk_ref = format!("refs/heads/{trunk}");
+        for (at, target) in self.targets.iter().enumerate() {
+            let named = |why: String| format!("[[target]] {:?}: {why}", target.name);
+            crate::names::operator_name(&target.name).map_err(named)?;
+            if target.name == trunk {
+                return Err(named(format!(
+                    "a target is never named as the trunk {trunk:?}"
+                )));
+            }
+            let reference = target.reference();
+            if !is_target_ref(&reference) || reference == trunk_ref {
+                return Err(named(format!(
+                    "ref = {reference:?}: a target's ref is a full ref name under refs/, \
+                     never the trunk's and never under {} or {}",
+                    crate::names::BAY,
+                    crate::names::NOTES
+                )));
+            }
+            if let Some(other) = self.targets[..at]
+                .iter()
+                .find(|other| other.name == target.name || other.reference() == reference)
+            {
+                return Err(named(format!(
+                    "two [[target]] entries name {:?} or {reference:?}",
+                    other.name
+                )));
+            }
+            if let Some(from) = target.from_target(trunk)
+                && !self.targets.iter().any(|other| other.name == from)
+            {
+                return Err(named(format!(
+                    "from = {from:?} is neither the trunk {trunk:?} nor a [[target]]"
+                )));
+            }
+            if target.requires.iter().any(String::is_empty) {
+                return Err(named("requires names an empty check id".to_owned()));
+            }
+            // A source chain longer than the targets has a cycle.
+            let mut source = target;
+            for _ in 0..=self.targets.len() {
+                match source
+                    .from_target(trunk)
+                    .and_then(|from| self.targets.iter().find(|other| other.name == from))
+                {
+                    Some(next) => source = next,
+                    None => break,
+                }
+            }
+            if source.from_target(trunk).is_some() {
+                return Err(named(
+                    "its from chain never reaches the trunk: a cycle".to_owned(),
+                ));
+            }
+        }
+        for freeze in &self.freezes {
+            if !self
+                .targets
+                .iter()
+                .any(|target| target.name == freeze.target)
+            {
+                return Err(format!(
+                    "[[freeze]] target = {:?} names no [[target]]",
+                    freeze.target
+                ));
+            }
+            if crate::clock::unix_of(&freeze.end).is_none() {
+                return Err(format!(
+                    "[[freeze]] of {:?}: end = {:?} is not an RFC 3339 UTC time to the second \
+                     (2026-12-24T00:00:00Z)",
+                    freeze.target, freeze.end
+                ));
+            }
+            if freeze.reason.trim().is_empty() {
+                return Err(format!("[[freeze]] of {:?} has no reason", freeze.target));
+            }
+        }
+        Ok(())
+    }
+
+    /// NEW-4: each `[[lane]]` has a name of its own, short and lower-case, at least one ref
+    /// pattern, no pattern that could name trunk or a bay ref, and a window shorter than the
+    /// retention window.
+    fn validate_lanes(&self) -> Result<(), String> {
+        let trunk = format!("refs/heads/{}", self.trunk());
+        let retention = self.retention_window().as_secs();
+        for (at, lane) in self.lanes.iter().enumerate() {
+            let name = &lane.name;
+            let named = !name.is_empty()
+                && name.len() <= 64
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+            if !named {
+                return Err(format!(
+                    "[[lane]] name = \"{name}\": a lane name is 1 to 64 of a-z, 0-9 and -"
+                ));
+            }
+            if self.lanes[..at].iter().any(|other| other.name == *name) {
+                return Err(format!("[[lane]] name = \"{name}\" is declared twice"));
+            }
+            if lane.refs.is_empty() {
+                return Err(format!("[[lane]] {name}: refs lists no ref pattern"));
+            }
+            for pattern in &lane.refs {
+                let shaped = pattern.starts_with("refs/")
+                    && !pattern.starts_with(crate::names::BAY)
+                    && pattern.matches('*').count() <= 1
+                    && !pattern.ends_with('/')
+                    && !pattern.chars().any(|ch| {
+                        ch.is_whitespace() || matches!(ch, ':' | '+' | '^' | '~' | '?' | '[' | '\\')
+                    });
+                if !shaped {
+                    return Err(format!(
+                        "[[lane]] {name}: ref pattern \"{pattern}\" is not a full ref name under refs/, outside {}, with at most one *",
+                        crate::names::BAY
+                    ));
+                }
+                if crate::lane::matches(pattern, &trunk) {
+                    return Err(format!(
+                        "[[lane]] {name}: ref pattern \"{pattern}\" matches trunk ({trunk})"
+                    ));
+                }
+            }
+            if let Some(window) = lane.window_s
+                && window >= retention
+            {
+                return Err(format!(
+                    "[[lane]] {name}: window_s = {window} must be shorter than the retention window ([retention] window_s = {retention})"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The `[[target]]` named `name`.
+    #[must_use]
+    pub fn target(&self, name: &str) -> Option<&Target> {
+        self.targets.iter().find(|target| target.name == name)
+    }
+
+    /// The `[[lane]]` named `name`.
+    #[must_use]
+    pub fn lane(&self, name: &str) -> Option<&Lane> {
+        self.lanes.iter().find(|lane| lane.name == name)
+    }
+
+    /// How long an ended change of `lane` keeps its view and journal (NEW-4): the lane's
+    /// `window_s`, else [`DEFAULT_LANE_WINDOW_S`] or the retention window, whichever is shorter.
+    #[must_use]
+    pub fn lane_window(&self, lane: &Lane) -> std::time::Duration {
+        lane.window_s.map_or_else(
+            || {
+                self.retention_window()
+                    .min(std::time::Duration::from_secs(DEFAULT_LANE_WINDOW_S))
+            },
+            std::time::Duration::from_secs,
+        )
     }
 
     /// Whether `[policy] evidence_reuse = "exact-inputs"`: a producer-signed record whose tree,
@@ -340,6 +694,15 @@ impl Config {
             .as_ref()
             .and_then(|view| view.warm_history)
             .unwrap_or(false)
+    }
+
+    /// How many first-parent trunk commits a red judgement reads back (`[red] window`, NEW-6).
+    #[must_use]
+    pub fn red_window(&self) -> usize {
+        self.red
+            .as_ref()
+            .and_then(|red| red.window)
+            .unwrap_or(crate::red::DEFAULT_WINDOW)
     }
 
     /// The instruction files (`[agent] instructions`, G155), paths relative to the top level.
@@ -450,12 +813,53 @@ impl Config {
         )
     }
 
+    /// Whether the executor finds the culprit of a red post check (`[executor] bisect_post`).
+    #[must_use]
+    pub fn bisect_post(&self) -> bool {
+        self.executor
+            .as_ref()
+            .and_then(|executor| executor.bisect_post)
+            .unwrap_or(false)
+    }
+
     #[must_use]
     pub fn execution_budget(&self) -> Option<std::time::Duration> {
         self.executor
             .as_ref()
             .and_then(|executor| executor.execution_budget_s)
             .map(std::time::Duration::from_secs)
+    }
+
+    /// `[executor] ahead` (NEW-2, `crate::throughput`): how many entries behind the queue's
+    /// head are checked ahead of their turn. Default 0, off.
+    #[must_use]
+    pub fn ahead(&self) -> usize {
+        self.executor
+            .as_ref()
+            .and_then(|executor| executor.ahead)
+            .unwrap_or(0)
+    }
+
+    /// `[executor] footprint_lanes` (NEW-10, `crate::throughput`). Default off.
+    #[must_use]
+    pub fn footprint_lanes(&self) -> bool {
+        self.executor
+            .as_ref()
+            .and_then(|executor| executor.footprint_lanes)
+            .unwrap_or(false)
+    }
+
+    /// `[executor] batch` (`crate::throughput`), with its defaults; `None` when batching is off.
+    #[must_use]
+    pub fn batch(&self) -> Option<crate::throughput::Bounds> {
+        let batch = self.executor.as_ref()?.batch?;
+        Some(crate::throughput::Bounds {
+            min: batch.min.unwrap_or(1),
+            max: batch.max.unwrap_or(crate::throughput::DEFAULT_BATCH_MAX),
+            max_failure_rate: batch
+                .max_failure_rate
+                .unwrap_or(crate::throughput::DEFAULT_MAX_FAILURE_RATE),
+        })
     }
 
     /// The Claude adapter is configured by `[agent] product = "claude"` (`DESIGN` § 15.2).
@@ -484,6 +888,24 @@ impl Config {
             })
             .collect()
     }
+}
+
+/// Whether `name` can be a target's ref: a full ref name under `refs/`, outside bay's own
+/// namespaces, in the characters Git takes in every ref, with no empty or dot-led component.
+fn is_target_ref(name: &str) -> bool {
+    name.starts_with("refs/")
+        && !name.starts_with(crate::names::BAY)
+        && !name.starts_with(crate::names::NOTES)
+        && !std::path::Path::new(name)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("lock"))
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.'))
+        && name
+            .split('/')
+            .all(|part| !part.is_empty() && !part.starts_with('.'))
+        && !name.contains("..")
 }
 
 #[cfg(test)]
@@ -570,6 +992,25 @@ product = "claude"                 # leave this table out when the box does not 
     }
 
     #[test]
+    fn the_red_window_is_50_commits_unless_configured() {
+        // NEW-6.
+        assert_eq!(Config::default().red_window(), 50);
+        assert_eq!(
+            Config::parse("[red]\nwindow = 3\n").unwrap().red_window(),
+            3
+        );
+        for text in [
+            "[red]\nwindow = 0\n",
+            "[red]\nwindow = 10001\n",
+            "[red]\nwindow = -1\n",
+            "[red]\nwindow = \"50\"\n",
+            "[red]\nwidth = 50\n",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
     fn a_key_bay_does_not_know_does_not_load() {
         // A misspelled key is an error that names it, never a silent default.
         let error = Config::parse("[hooks]\ncache_max_age = 30\n").unwrap_err();
@@ -634,6 +1075,145 @@ product = "claude"                 # leave this table out when the box does not 
     }
 
     #[test]
+    fn targets_and_freezes_are_read_and_checked() {
+        // NEW-5, NEW-9.
+        let config = Config::parse(
+            "[[target]]\nname = \"staging\"\nrequires = [\"suite\"]\n\
+             [[target]]\nname = \"production\"\nfrom = \"staging\"\nsoak_s = 3600\n\
+             ref = \"refs/heads/prod\"\n\
+             [[freeze]]\ntarget = \"production\"\nend = \"2026-12-24T00:00:00Z\"\n\
+             reason = \"holiday\"\n",
+        )
+        .unwrap();
+        let staging = config.target("staging").unwrap();
+        assert_eq!(staging.reference(), "refs/heads/staging");
+        assert_eq!(staging.from_target("main"), None);
+        assert_eq!(staging.requires, ["suite"]);
+        let production = config.target("production").unwrap();
+        assert_eq!(production.reference(), "refs/heads/prod");
+        assert_eq!(production.from_target("main"), Some("staging"));
+        assert_eq!(production.soak(), 3600);
+        let end = crate::clock::unix_of("2026-12-24T00:00:00Z").unwrap();
+        assert!(config.freezes[0].active(end - 1));
+        assert!(!config.freezes[0].active(end));
+        assert!(
+            Config::parse("[[target]]\nname = \"staging\"\nfrom = \"main\"\n").is_ok(),
+            "the trunk by name"
+        );
+        for (text, named) in [
+            ("[[target]]\nname = \"Staging\"\n", "Staging"),
+            ("[[target]]\nname = \"main\"\n", "main"),
+            (
+                "[[target]]\nname = \"staging\"\nref = \"refs/heads/main\"\n",
+                "ref",
+            ),
+            (
+                "[[target]]\nname = \"staging\"\nref = \"refs/bay/x\"\n",
+                "ref",
+            ),
+            (
+                "[[target]]\nname = \"staging\"\nref = \"heads/staging\"\n",
+                "ref",
+            ),
+            (
+                "[[target]]\nname = \"staging\"\n[[target]]\nname = \"staging\"\n",
+                "two",
+            ),
+            ("[[target]]\nname = \"staging\"\nfrom = \"dev\"\n", "dev"),
+            (
+                "[[target]]\nname = \"a\"\nfrom = \"b\"\n[[target]]\nname = \"b\"\nfrom = \"a\"\n",
+                "cycle",
+            ),
+            ("[[target]]\nname = \"staging\"\nsoak = 5\n", "soak"),
+            (
+                "[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"r\"\n",
+                "names no",
+            ),
+            (
+                "[[target]]\nname = \"staging\"\n[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24\"\nreason = \"r\"\n",
+                "end",
+            ),
+            (
+                "[[target]]\nname = \"staging\"\n[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \" \"\n",
+                "reason",
+            ),
+        ] {
+            let error = Config::parse(text).unwrap_err();
+            assert!(error.contains(named), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_lane_is_named_once_with_ref_patterns_and_a_shorter_window() {
+        // NEW-4.
+        assert!(Config::default().lanes.is_empty());
+        let config = Config::parse(
+            "[[lane]]\nname = \"research\"\nrefs = [\"refs/heads/research/*\"]\n\
+             [[lane]]\nname = \"prototype\"\nrefs = [\"refs/heads/proto-*\", \"refs/sandbox/x\"]\nwindow_s = 60\n",
+        )
+        .unwrap();
+        assert_eq!(config.lanes.len(), 2);
+        let research = config.lane("research").unwrap();
+        assert_eq!(config.lane_window(research).as_secs(), 24 * 3600);
+        let prototype = config.lane("prototype").unwrap();
+        assert_eq!(config.lane_window(prototype).as_secs(), 60);
+        assert!(config.lane("other").is_none());
+        // Under a retention window shorter than a day, an unnamed lane window is that window.
+        let short = Config::parse(
+            "[retention]\nwindow_s = 600\n[[lane]]\nname = \"research\"\nrefs = [\"refs/heads/research/*\"]\n",
+        )
+        .unwrap();
+        assert_eq!(short.lane_window(&short.lanes[0]).as_secs(), 600);
+        for (text, named) in [
+            (
+                "[[lane]]\nname = \"Research\"\nrefs = [\"refs/heads/r/*\"]\n",
+                "name",
+            ),
+            (
+                "[[lane]]\nname = \"\"\nrefs = [\"refs/heads/r/*\"]\n",
+                "name",
+            ),
+            (
+                "[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/a/*\"]\n[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/b/*\"]\n",
+                "twice",
+            ),
+            ("[[lane]]\nname = \"r\"\nrefs = []\n", "refs"),
+            (
+                "[[lane]]\nname = \"r\"\nrefs = [\"research/*\"]\n",
+                "research/*",
+            ),
+            (
+                "[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/*/*\"]\n",
+                "at most one",
+            ),
+            (
+                "[[lane]]\nname = \"r\"\nrefs = [\"refs/bay/changes/*\"]\n",
+                "refs/bay/",
+            ),
+            (
+                "[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/*\"]\n",
+                "trunk",
+            ),
+            (
+                "[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/main\"]\n",
+                "trunk",
+            ),
+            (
+                "[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/r/*\"]\nwindow_s = 604800\n",
+                "shorter",
+            ),
+            (
+                "[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/r/*\"]\nwindow = 5\n",
+                "window",
+            ),
+            ("[[lane]]\nrefs = [\"refs/heads/r/*\"]\n", "name"),
+        ] {
+            let error = Config::parse(text).unwrap_err();
+            assert!(error.contains(named), "{text}: {error}");
+        }
+    }
+
+    #[test]
     fn the_executor_and_retention_keys_built_features_use_are_read() {
         let config: Config = toml::from_str(
             "[executor]\nlease_s = 5\nheartbeat_s = 2\n[retention]\nwindow_s = 0\nref_budget = 7\n",
@@ -644,5 +1224,45 @@ product = "claude"                 # leave this table out when the box does not 
         assert_eq!(config.retention_window().as_secs(), 0);
         assert_eq!(config.ref_budget(), 7);
         assert_eq!(Config::default().ref_budget(), 100_000);
+    }
+
+    /// `crate::throughput`: every lever is off by default, in its bounds, and on only with
+    /// exact-inputs reuse, since a check made ahead of its turn counts only through reuse.
+    #[test]
+    fn the_throughput_levers_are_off_bounded_and_rest_on_reuse() {
+        const REUSE: &str = "[policy]\nevidence_reuse = \"exact-inputs\"\n";
+        assert_eq!(Config::default().ahead(), 0);
+        let on = Config::parse(&format!("{REUSE}[executor]\nahead = 2\n")).unwrap();
+        assert_eq!(on.ahead(), 2);
+        let error = Config::parse("[executor]\nahead = 2\n").unwrap_err();
+        assert!(error.contains("evidence_reuse"), "{error}");
+        let error = Config::parse(&format!("{REUSE}[executor]\nahead = 17\n")).unwrap_err();
+        assert!(error.contains("at most 16"), "{error}");
+        assert!(Config::parse("[executor]\nahead = 0\n").is_ok());
+        assert!(!Config::default().footprint_lanes());
+        let lanes = Config::parse(&format!("{REUSE}[executor]\nfootprint_lanes = true\n")).unwrap();
+        assert!(lanes.footprint_lanes());
+        let error = Config::parse("[executor]\nfootprint_lanes = true\n").unwrap_err();
+        assert!(error.contains("footprint_lanes"), "{error}");
+        assert_eq!(Config::default().batch(), None);
+        let batch = Config::parse(&format!("{REUSE}[executor]\nbatch = {{ max = 4 }}\n"))
+            .unwrap()
+            .batch()
+            .unwrap();
+        assert_eq!((batch.min, batch.max), (1, 4));
+        assert!((batch.max_failure_rate - 0.3).abs() < f64::EPSILON);
+        for bad in [
+            "batch = { min = 0 }",
+            "batch = { min = 5, max = 4 }",
+            "batch = { max = 65 }",
+            "batch = { max_failure_rate = 1.5 }",
+            "batch = { size = 2 }",
+        ] {
+            assert!(
+                Config::parse(&format!("{REUSE}[executor]\n{bad}\n")).is_err(),
+                "{bad}"
+            );
+        }
+        assert!(Config::parse("[executor]\nbatch = { max = 4 }\n").is_err());
     }
 }

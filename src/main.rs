@@ -46,6 +46,9 @@ enum Command {
         /// The landed change this one fixes; its landing carries a Fixes: trailer
         #[arg(long, value_name = "CHANGE", conflicts_with = "resume")]
         fixes: Option<String>,
+        /// A sandbox lane of the config: the change's checks run, and it never lands
+        #[arg(long, value_name = "LANE", conflicts_with = "resume")]
+        lane: Option<String>,
     },
     /// Freeze the draft, build the candidate, check it, publish it
     Land {
@@ -308,23 +311,26 @@ enum EvidenceAction {
         #[arg(long, value_name = "REV")]
         since: Option<String>,
     },
-    /// Write a signed record about trunk landings, as an outside producer or reviewer: one
-    /// record per --commit, pushed once (a rerun with the same content writes nothing)
+    /// Write a signed record about trunk landings, as an outside producer or reviewer, or about
+    /// a candidate, as an approver: one record per --commit, pushed once (a rerun with the same
+    /// content writes nothing)
     Record {
-        /// The record kind, for example `review`; a `review` is signed by bay.reviewerKey
+        /// The record kind, for example `review` or `approval`; a `review` is signed by
+        /// bay.reviewerKey, an `approval` by bay.approverKey
         #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         kind: String,
         /// `pass`, `product_failure`, `infra_failure` or `unknown`; there is no default
         #[arg(long)]
         verdict: String,
-        /// A landing the record is about; repeat for a range review
+        /// A landing the record is about (for an approval, the candidate commit the land names);
+        /// repeat for a range review
         #[arg(long = "commit", value_name = "COMMIT", required = true)]
         commits: Vec<String>,
         /// The check id the record answers; the kind when not named
         #[arg(long)]
         check: Option<String>,
         /// The environment of that check, as the policy names it (for a post check's record);
-        /// `any` when not named
+        /// an approval takes its approval check's, and any other record `any`, when not named
         #[arg(long)]
         environment: Option<String>,
         /// A `key=value` the record keeps as its inputs; repeatable
@@ -452,6 +458,7 @@ fn main() -> ExitCode {
             resume,
             new,
             fixes,
+            lane,
         } => bay::start::start(
             &cli.dir,
             &bay::start::StartRequest {
@@ -463,6 +470,7 @@ fn main() -> ExitCode {
                 resume,
                 reverts: None,
                 fixes,
+                lane,
             },
         ),
         Command::Undo { change, wait } => bay::undo::undo(&cli.dir, &change, wait),

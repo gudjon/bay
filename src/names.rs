@@ -34,10 +34,18 @@ pub const QUEUE_DONE: &str = "refs/bay/queue-done/";
 pub const LIVE: &str = "refs/bay/live/";
 /// `refs/bay/log/<name>`: an event log.
 pub const LOG: &str = "refs/bay/log/";
+/// `refs/bay/executor/<executor>`: an executor's presence (G67, `crate::presence`).
+pub const EXECUTOR: &str = "refs/bay/executor/";
 /// `refs/bay/talk/<agent>/<id>`: talks.
 pub const TALK: &str = "refs/bay/talk/";
 /// `refs/bay/fleet/<machine>`: `bay status`'s copy of the remote's live refs.
 pub const FLEET: &str = "refs/bay/fleet/";
+/// `refs/bay/fleet-executor/<executor>`: `bay status`'s copy of the remote's executor
+/// presences (G67), local only.
+pub const FLEET_EXECUTOR: &str = "refs/bay/fleet-executor/";
+/// `refs/bay/target/<name>`: `bay status`'s copy of the remote's promotion target refs
+/// (NEW-5, `crate::target`), local only.
+pub const TARGET: &str = "refs/bay/target/";
 /// `refs/bay/fetch/<Change-Id>`: a fetched remote chain, local only.
 pub const FETCH: &str = "refs/bay/fetch/";
 /// `refs/bay/fetch-evidence/<writer>`: the remote's copy of this machine's own evidence notes
@@ -136,7 +144,7 @@ pub fn bay_ref(name: &str) -> Result<(), String> {
                 refuse("a talk id is 16 characters of lower-case base32")
             }
         }
-        ["live" | "log", operator] => {
+        ["live" | "log" | "executor", operator] => {
             operator_name(operator).map_err(|why| format!("{name}: {why}"))
         }
         _ => refuse("unknown namespace"),
@@ -212,6 +220,10 @@ mod tests {
         assert!(bay_ref("refs/bay/talk/Agent/abcdefghijklmnop").is_err());
         // An in-flight ref is local only: as a pushed name it is an unknown namespace.
         assert!(bay_ref("refs/bay/inflight/abcd2345.1").is_err());
+        // G67: an executor's presence is named by its executor; the fleet's copy is local only.
+        assert!(bay_ref("refs/bay/executor/ci-linux-2").is_ok());
+        assert!(bay_ref("refs/bay/executor/ci/linux").is_err());
+        assert!(bay_ref("refs/bay/fleet-executor/ci-linux-2").is_err());
     }
 
     #[test]

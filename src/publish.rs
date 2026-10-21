@@ -11,6 +11,7 @@
 //! landed-intent marker (item 19e).
 
 use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -18,8 +19,8 @@ use serde_json::json;
 
 use crate::canonical::digest;
 use crate::change::{
-    Attempt, Chain, ChainError, ChangeRecord, ChangeState, OpState, Operation, Unavailable,
-    change_ref, freeze_draft,
+    Attempt, Chain, ChainError, ChangeRecord, ChangeState, HeldChain, OpState, Operation, Precheck,
+    Unavailable, change_ref, freeze_draft,
 };
 use crate::check::{self, Candidate};
 use crate::evidence::{self, Combined};
@@ -32,6 +33,7 @@ use crate::registry::{KeyClass, REGISTRY_REF, Registry};
 use crate::repo::Repo;
 use crate::result::{BayResult, Decision, Reason};
 use crate::signing::{self, Keys, Signer};
+use crate::throughput;
 use crate::view;
 
 /// The producer name of the built-in local executor's evidence.
@@ -429,6 +431,9 @@ struct Ctx<'a> {
     /// that takes no write (a held reftable lock) never records them, and a retry it never
     /// records must still exhaust (G128).
     retries_here: u32,
+    /// A check of this operation runs ahead of its turn (`crate::throughput`): this process
+    /// does not hold it, so no heartbeat renews a lease on its chain.
+    ahead_of_turn: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -453,6 +458,7 @@ impl<'a> Ctx<'a> {
             beat_pushed: std::cell::RefCell::new(None),
             deferred: std::cell::RefCell::new(Vec::new()),
             retries_here: 0,
+            ahead_of_turn: false,
         })
     }
 
@@ -713,6 +719,9 @@ fn submit_land(
             .with_change(id)
             .with_detail(json!({"event": "adopted", "adopted_by": ctx.record.actor})));
     }
+    if let Some(refusal) = actor_unproven(repo, id, &trunk)? {
+        return Ok(refusal);
+    }
     let agent = ctx.agent_signer()?;
     ctx.chain.sign_with(agent);
 
@@ -725,6 +734,12 @@ fn submit_land(
 
     if let Some(result) = scanned(&mut ctx, &trunk, &revision)? {
         return Ok(result);
+    }
+    // NEW-4: a change of no lane whose view reaches a lane's commits off trunk never lands them.
+    if ctx.record.lane.is_none()
+        && let Some(refusal) = lane_leak(&ctx, &trunk, &revision)?
+    {
+        return Ok(refusal);
     }
 
     let op_id = match ctx
@@ -766,6 +781,33 @@ fn submit_land(
     result.published = Some(false);
     result.waiting_for = Some(if online { "executor" } else { "remote" }.to_owned());
     Ok(with_progress(&ctx.repo.git, ctx.op(&op_id), result))
+}
+
+/// G243b: under a policy at the base that sets `[agent] require_actor_proof`, a request whose
+/// agent key cannot prove the actor is refused `ACTOR_UNPROVEN` before anything is signed or
+/// written: several actors run sessions under this OS account, which can read the file-based
+/// agent key, so any of them could sign as this one. Judged as doctor's `key-custody` row
+/// judges it, at the trunk, so a change never lifts it for itself. Off by default.
+fn actor_unproven(repo: &Repo, id: &str, trunk: &str) -> Result<Option<BayResult>, String> {
+    if !policy::requires_actor_proof_at(&repo.git, trunk)? {
+        return Ok(None);
+    }
+    let sessions = repo.common_dir.join("bay").join("sessions");
+    let proof = crate::custody::actor_proof(&repo.git, Some(&sessions));
+    if !proof.unproven() {
+        return Ok(None);
+    }
+    Ok(Some(
+        BayResult::blocked(Reason::ActorUnproven)
+            .with_change(id)
+            .with_detail(json!({
+                "actor_proof": proof.proof,
+                "actors": proof.actors,
+                "policy": policy::POLICY_PATH,
+                "base": trunk,
+                "recovery": "give each actor its own OS account, or a hardware agent key (ssh-keygen -t ed25519-sk, which signs only with a touch), enrol it, then land again",
+            })),
+    ))
 }
 
 /// How far operation `op` has come (G80, `INTERFACES` § 1): seconds since its request was
@@ -1002,9 +1044,16 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     if let Some(waiting) = waits_for_worker(ctx, op_id) {
         return Ok(waiting);
     }
-    // § 6: while a queue is live only its head runs; anyone else holds a place and no check.
-    let mut seq = match queue_gate(ctx, op_id)? {
-        Gate::Wait(result) => return Ok(*result),
+    // § 6: while a queue is live only its head runs; anyone else holds a place and publishes
+    // nothing. With a throughput lever on, it is checked ahead of its turn (`crate::throughput`).
+    // NEW-4: a lane change only checks, so it never reserves a place, and never waits for one.
+    let gate = if ctx.record.lane.is_some() {
+        Gate::Free
+    } else {
+        queue_gate(ctx, op_id)?
+    };
+    let mut seq = match gate {
+        Gate::Wait(result) => return Ok(ahead_of_turn(ctx, op_id, &trunk, *result)),
         Gate::Head(seq) => Some(seq),
         Gate::Free => None,
     };
@@ -1109,18 +1158,37 @@ fn run_attempts(
     let id = ctx.id.clone();
     loop {
         // A candidate checked and persisted on this very trunk is published without a rebuild.
+        // A batch member's candidate never lands alone (`crate::throughput`).
         let ready = ctx.op(op_id).attempts.last().filter(|attempt| {
             ctx.op(op_id).state == OpState::Checked
                 && attempt.base == trunk
                 && attempt.epoch == ctx.my_epoch
+                && attempt.batch.is_none()
         });
-        let attempt = match ready {
-            Some(attempt) => attempt.clone(),
-            None => match build_and_check(ctx, op_id, &revision, &trunk)? {
+        let attempt = if let Some(attempt) = ready {
+            attempt.clone()
+        } else {
+            // Batching (`crate::throughput`): the head may land together with the entries
+            // behind it, on one check of their combined tree.
+            if let Some(at) = *seq
+                && ctx.record.lane.is_none()
+                && let Some(landed) = batch(ctx, op_id, &revision, &trunk, at)?
+            {
+                return Ok(landed);
+            }
+            match build_and_check(ctx, op_id, &revision, &trunk)? {
                 Ok(attempt) => attempt,
+                Err(refusal) if ctx.record.lane.is_some() => {
+                    return lane_never_lands(ctx, op_id, &revision, Some(refusal));
+                }
                 Err(refusal) => return Ok(refusal),
-            },
+            }
         };
+        // NEW-4: a lane change's checked candidate is never published, by this guard and by the
+        // host hook's (`crate::hook`). This one stands before every publishing push.
+        if ctx.record.lane.is_some() {
+            return lane_never_lands(ctx, op_id, &revision, None);
+        }
 
         ctx.step.set("publish");
         if let Some(report) = still_owner(ctx, op_id, &revision)? {
@@ -1164,6 +1232,485 @@ fn run_attempts(
             }
         }
     }
+}
+
+/// Batching with bisection (`crate::throughput`): the head `op_id`, at queue place `at`, and
+/// the live entries behind it that fold onto it, checked once as one tree on `trunk`. On a pass
+/// they land together; on a failure the bisection finds the largest passing prefix, which lands
+/// together when it holds two members or more, and notes the first failing member. `None` when
+/// no batch forms or none lands: the head runs its ordinary path, on the records of its own
+/// prefix when the bisection checked it, since that prefix is its own candidate's tree on its
+/// own base.
+fn batch(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+    at: u64,
+) -> Result<Option<BayResult>, String> {
+    let repo = ctx.repo;
+    let Some((policy, members)) = batch_plan(ctx, op_id, revision, trunk, at)? else {
+        return Ok(None);
+    };
+    if let Some(red) = red_gate(ctx, op_id, revision, trunk)? {
+        return Ok(Some(red));
+    }
+    ctx.step.set("check");
+    let id = throughput::batch_id(op_id, trunk)?;
+    let Some((search, checks)) = bisect_batch(ctx, op_id, trunk, &policy, &members, &id)? else {
+        return Ok(None);
+    };
+    if let Some(culprit) = search.culprit().filter(|culprit| *culprit >= 2) {
+        let member = &members[culprit - 1];
+        let _ = note_culprit(repo, &member.change, &member.op_id, &id);
+    }
+    if search.passed() < 2 {
+        return Ok(None);
+    }
+    let landing = &members[..search.passed()];
+    let mut others = Vec::new();
+    for member in &landing[1..] {
+        if let Ok(Some(other)) = joined(ctx, member, trunk) {
+            others.push(other);
+        } else {
+            give_back(&mut others, landing);
+            return Ok(None);
+        }
+    }
+    match land_batch(ctx, &mut others, landing, trunk, &id) {
+        Ok(Some(mut result)) => {
+            if let Some(detail) = result.detail.as_mut() {
+                detail["batch"]["checks"] = json!(checks);
+                detail["batch"]["members"] = json!(
+                    landing
+                        .iter()
+                        .map(|member| json!({"change": member.change, "op_id": member.op_id}))
+                        .collect::<Vec<_>>()
+                );
+            }
+            Ok(Some(result))
+        }
+        other => {
+            give_back(&mut others, landing);
+            other
+        }
+    }
+}
+
+/// The batch the head `op_id` at place `at` would form on `trunk`, with the policy at
+/// `trunk`: `None` when batching is off, reuse cannot stand for a run (§ 7), the head is a
+/// repair, a culprit or names inputs, a check is keyed by commit (the tip's own commit was
+/// never checked), fewer members than `max(min, 2)` fold, or the lane's recent failure rate is
+/// above `max_failure_rate`.
+fn batch_plan(
+    ctx: &Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+    at: u64,
+) -> Result<Option<(policy::Policy, Vec<throughput::Member>)>, String> {
+    let repo = ctx.repo;
+    let git = &repo.git;
+    let Some(bounds) = repo.config.batch() else {
+        return Ok(None);
+    };
+    if ctx.registry.is_none()
+        || !repo.config.evidence_reuse()
+        || ctx.repair.is_some()
+        || ctx.op(op_id).batch_culprit.is_some()
+        || !inputs::names(&ctx.record.declared_inputs).is_empty()
+    {
+        return Ok(None);
+    }
+    let Ok(Some(policy)) = policy::load_at(git, trunk) else {
+        return Ok(None);
+    };
+    let commit_keyed = policy
+        .checks
+        .iter()
+        .any(|check| check.inputs.iter().any(|input| input == "commit"));
+    if policy.unchecked || commit_keyed {
+        return Ok(None);
+    }
+    let queue = crate::queue::Queue::local(git)?;
+    let head = throughput::Queued {
+        seq: at,
+        change: ctx.id.clone(),
+        op_id: op_id.to_owned(),
+        revision: revision.to_owned(),
+        live: true,
+        batchable: true,
+        checked: None,
+    };
+    let behind: Vec<throughput::Queued> = queue
+        .behind(at)
+        .into_iter()
+        .map_while(|entry| throughput::Queued::read(git, entry))
+        .collect();
+    let by_lane = repo.config.footprint_lanes();
+    let members = throughput::plan_batch(git, &policy, trunk, &head, &behind, bounds.max, by_lane)?;
+    if members.len() < bounds.min.max(2) {
+        return Ok(None);
+    }
+    // NEW-10: the lane is the places whose footprint overlaps the head's.
+    let lane = if by_lane {
+        let changed = check::changed_paths(git, trunk, &members[0].tree)?;
+        Some(throughput::Footprint::of(&policy, &changed))
+    } else {
+        None
+    };
+    if lane_failure_rate(git, &queue, &policy, lane.as_ref()) > bounds.max_failure_rate {
+        return Ok(None);
+    }
+    Ok(Some((policy, members)))
+}
+
+/// The failure rate of the last [`throughput::RATE_WINDOW`] check outcomes of released queue
+/// places in `lane` (every place without footprint lanes). A place whose footprint cannot be
+/// read counts in every lane.
+fn lane_failure_rate(
+    git: &Git,
+    queue: &crate::queue::Queue,
+    policy: &policy::Policy,
+    lane: Option<&throughput::Footprint>,
+) -> f64 {
+    let outcomes: Vec<&str> = queue
+        .releases_newest_first()
+        .filter(|(_, reason)| throughput::is_check_outcome(reason))
+        .filter(|(entry, _)| {
+            lane.is_none_or(|lane| {
+                throughput::place_footprint(git, policy, entry)
+                    .is_none_or(|footprint| footprint.overlaps(lane))
+            })
+        })
+        .take(throughput::RATE_WINDOW)
+        .map(|(_, reason)| reason)
+        .collect();
+    throughput::failure_rate(outcomes)
+}
+
+/// Checks the batch `members` on `trunk` as the head's (heartbeats and producer), the whole
+/// first and then the bisection's prefixes, each its predicted tip, and pushes the evidence.
+/// Returns the search and what each check found; `None` when no worker answered.
+fn bisect_batch(
+    ctx: &mut Ctx,
+    op_id: &str,
+    trunk: &str,
+    policy: &policy::Policy,
+    members: &[throughput::Member],
+    id: &str,
+) -> Result<Option<(throughput::Bisect, Vec<serde_json::Value>)>, String> {
+    let mut search = throughput::Bisect::new(members.len());
+    let mut checks = Vec::new();
+    while let Some(prefix) = search.next_prefix() {
+        let tip = &members[prefix - 1];
+        let (verdict, refusal) = run_policy(
+            ctx,
+            op_id,
+            &format!("batch-{id}-{prefix}"),
+            &tip.commit,
+            &tip.tree,
+            trunk,
+            policy,
+            trunk,
+            &[],
+        )?;
+        if refusal
+            .as_ref()
+            .is_some_and(|refusal| refusal.reason == Some(Reason::CheckUnavailable))
+        {
+            return Ok(None);
+        }
+        search.record(prefix, refusal.is_none());
+        checks.push(json!({"members": prefix, "tree": tip.tree, "verdict": verdict}));
+    }
+    // Heartbeats moved the head's chain while the checks ran; continue from the last one.
+    if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
+        ctx.head.clone_from(&beat);
+        ctx.pushed_head = Some(beat);
+    }
+    push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0)?;
+    Ok(Some((search, checks)))
+}
+
+/// A batch member other than the head, loaded, verified and claimed by this executor (§ 9a),
+/// or `None` when it cannot join: its request no longer verifies, or it is not this
+/// executor's to run.
+fn joined<'a>(
+    ctx: &Ctx<'a>,
+    member: &throughput::Member,
+    trunk: &str,
+) -> Result<Option<Ctx<'a>>, String> {
+    let mut other = Ctx::load(ctx.repo, ctx.step, &member.change)?;
+    other.registry.clone_from(&ctx.registry);
+    let signer = other.executor_signer()?;
+    other.chain.sign_with(signer);
+    // A repair is judged by its own policy alone, never in a batch (§ 7).
+    if verify_request(&mut other, &member.op_id)?.is_some()
+        || other.repair.is_some()
+        || claim(&mut other, &member.op_id, &member.revision, trunk)?.is_some()
+    {
+        return Ok(None);
+    }
+    Ok(Some(other))
+}
+
+/// The claims of a batch's other members (`others`, for `members` after the head) go back, so
+/// each runs as its own head with no lease to wait out (§ 9a).
+fn give_back(others: &mut [Ctx], members: &[throughput::Member]) {
+    for (other, member) in others.iter_mut().zip(&members[1..]) {
+        release_after_fault(other, &member.op_id, &member.revision);
+    }
+}
+
+/// A batch member's candidate, as [`land_batch`] builds it: its id, the commit it is parented
+/// on, and the commit.
+struct Built {
+    candidate_id: String,
+    base: String,
+    commit: String,
+}
+
+/// Lands `members` (the head first, then the claimed `others`) as batch `id`, checked on
+/// `trunk` as their last member's tree: each member's candidate is built ([`build_batch`]) and
+/// persisted as checked in its own chain ([`persist_batch`]), then one atomic push moves trunk
+/// to the last member with every member's landed marker, intent marker and queue release, and
+/// each landing is derived from trunk. `None` when a member is no longer this executor's:
+/// nothing was pushed.
+fn land_batch<'a>(
+    ctx: &mut Ctx<'a>,
+    others: &mut [Ctx<'a>],
+    members: &[throughput::Member],
+    trunk: &str,
+    id: &str,
+) -> Result<Option<BayResult>, String> {
+    let repo = ctx.repo;
+    let git = &repo.git;
+    let (built, anchors) = build_batch(ctx, others, members, trunk, id)?;
+    if !persist_batch(ctx, others, members, &built, trunk, id)? {
+        return Ok(None);
+    }
+    ctx.step.set("publish");
+    let signer = ctx.executor_signer().ok().flatten();
+    let mut pushes = Vec::new();
+    for (index, member) in members.iter().enumerate() {
+        let owner: &mut Ctx = if index == 0 {
+            &mut *ctx
+        } else {
+            &mut others[index - 1]
+        };
+        if still_owner(owner, &member.op_id, &member.revision)?.is_some() {
+            return Ok(None);
+        }
+        let release = crate::queue::release_commit(
+            git,
+            signer.as_ref(),
+            member.seq,
+            &member.op_id,
+            "published",
+        )?;
+        pushes.push(BatchPush {
+            change: member.change.clone(),
+            commit: built[index].commit.clone(),
+            release: (member.seq, release),
+            claim: owner.record.claim.clone(),
+        });
+    }
+    let tip = &built[members.len() - 1].commit;
+    kill_point("before-publish");
+    publish_batch_push(repo, tip, &pushes)
+        .map_err(|error| format!("batch {id} was refused: {error}"))?;
+    kill_point("after-publish");
+    drop(anchors);
+    for (index, member) in members.iter().enumerate().skip(1) {
+        let other = &mut others[index - 1];
+        // A landing whose record could not be written now is derived from trunk on a later run.
+        let _ = derive_landed(other, &member.op_id, &member.revision, &built[index].commit);
+        other.tell_deferred();
+    }
+    derive_landed(
+        ctx,
+        &members[0].op_id,
+        &members[0].revision,
+        &built[0].commit,
+    )
+    .map(Some)
+}
+
+/// Step 5 for a batch: each member's candidate linked into its own chain as checked, with the
+/// batch it belongs to and what the batch checked, the others' first: the head's is persisted
+/// only once every other member's is, so no partial batch is ever the head's to publish.
+/// Returns whether every write reached the remote under this executor's epoch.
+fn persist_batch<'a>(
+    ctx: &mut Ctx<'a>,
+    others: &mut [Ctx<'a>],
+    members: &[throughput::Member],
+    built: &[Built],
+    trunk: &str,
+    id: &str,
+) -> Result<bool, String> {
+    let size = members.len();
+    for index in (1..size).chain(std::iter::once(0)) {
+        let owner: &mut Ctx = if index == 0 {
+            &mut *ctx
+        } else {
+            &mut others[index - 1]
+        };
+        let attempt = Attempt {
+            candidate_id: built[index].candidate_id.clone(),
+            base: built[index].base.clone(),
+            commit: built[index].commit.clone(),
+            tree: members[index].tree.clone(),
+            verdict: "pass".to_owned(),
+            epoch: owner.my_epoch,
+            batch: Some(crate::change::BatchMember {
+                id: id.to_owned(),
+                position: index + 1,
+                size,
+                tip: built[size - 1].commit.clone(),
+                tree: members[size - 1].tree.clone(),
+                base: trunk.to_owned(),
+            }),
+        };
+        let member = &members[index];
+        let message = format!("checked {} in batch {id}", attempt.candidate_id);
+        let persisted = persist_owned(
+            owner,
+            &member.op_id,
+            &member.revision,
+            &attempt.commit,
+            &message,
+            |op| {
+                op.attempts.push(attempt.clone());
+                op.unavailable = None;
+                op.state = OpState::Checked;
+                op.outcome = None;
+                op.blocked_on = None;
+            },
+        )?;
+        if !matches!(persisted, Persisted::Pushed) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Step 3 for a batch: each member's executor-signed candidate of its predicted tree, parented
+/// on the member before it (the first on `trunk`), with its own trailers and `Bay-Batch`, each
+/// anchored (G173). The tree is the one the batch checked: the real merge onto the member
+/// before it is that tree, as `crate::throughput` shows.
+fn build_batch<'a>(
+    ctx: &Ctx<'a>,
+    others: &[Ctx<'a>],
+    members: &[throughput::Member],
+    trunk: &str,
+    id: &str,
+) -> Result<(Vec<Built>, Vec<Anchored<'a>>), String> {
+    let repo: &'a Repo = ctx.repo;
+    let git = &repo.git;
+    let registry_id = ctx
+        .registry
+        .as_ref()
+        .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
+    let mut parent = trunk.to_owned();
+    let mut built = Vec::new();
+    let mut anchors = Vec::new();
+    for (index, member) in members.iter().enumerate() {
+        let owner: &Ctx = if index == 0 { ctx } else { &others[index - 1] };
+        let op = owner.op(&member.op_id);
+        let candidate_id = format!("{}.{}", member.op_id, op.attempts.len() + 1);
+        let request_id = op.request_id.clone().unwrap_or_default();
+        let mut message = candidate_message(
+            owner,
+            &member.revision,
+            &request_id,
+            &candidate_id,
+            &registry_id,
+        );
+        let tag = throughput::BatchTag {
+            id: id.to_owned(),
+            position: index + 1,
+            size: members.len(),
+        };
+        message.push_str(&tag.trailer());
+        let commit = commit_candidate(owner, &member.tree, &parent, &message)?;
+        // The head's anchor is its operation's; each other member's goes with this run.
+        if index > 0 {
+            anchors.push(Anchored::new(git, &member.op_id)?);
+        }
+        anchor(git, &member.op_id, &commit)?;
+        built.push(Built {
+            candidate_id,
+            base: parent,
+            commit: commit.clone(),
+        });
+        parent = commit;
+    }
+    Ok((built, anchors))
+}
+
+/// One batch member's part of the publishing push.
+struct BatchPush {
+    change: String,
+    commit: String,
+    release: (u64, String),
+    claim: Option<crate::change::IntentClaim>,
+}
+
+/// Step 6 for a batch (`crate::throughput`): one atomic push moves trunk to `tip`, the last
+/// member, and creates every member's landed marker, intent marker and queue release. Never
+/// forced; each marker and release is create-only.
+fn publish_batch_push(repo: &Repo, tip: &str, members: &[BatchPush]) -> Result<(), String> {
+    let mut leases = Vec::new();
+    let mut refspecs = vec![format!("{tip}:refs/heads/{}", repo.trunk())];
+    for member in members {
+        let landed = format!("{}{}", crate::names::LANDED, member.change);
+        leases.push(format!("--force-with-lease={landed}:"));
+        refspecs.push(format!("{}:{landed}", member.commit));
+        let (seq, release) = &member.release;
+        let done = format!("{}{seq}", crate::queue::DONE_PREFIX);
+        leases.push(format!("--force-with-lease={done}:"));
+        refspecs.push(format!("{release}:{done}"));
+        if let Some(claim) = &member.claim {
+            let intent = claim.landed_ref();
+            leases.push(format!("--force-with-lease={intent}:"));
+            refspecs.push(format!("{}:{intent}", member.commit));
+        }
+    }
+    let mut args = vec!["push", "-q", "--atomic"];
+    args.extend(leases.iter().map(String::as_str));
+    args.push(repo.remote());
+    args.extend(refspecs.iter().map(String::as_str));
+    repo.git
+        .run(&args)
+        .map(|_| ())
+        .map_err(|error| error.message())
+}
+
+/// Batching (`crate::throughput`): notes on the queued operation `op_id` of change `id` that
+/// batch `batch` found it the first member that fails, so it runs alone when it is head. Like
+/// the early-conflict note (G177) it takes no ownership and moves neither the operation's
+/// state nor its place. Returns whether the chain was pushed.
+fn note_culprit(repo: &Repo, id: &str, op_id: &str, batch: &str) -> Result<bool, String> {
+    let step = Cell::new("batch");
+    let mut ctx = Ctx::load(repo, &step, id)?;
+    let Some(op) = ctx.record.operations.iter().find(|op| op.op_id == op_id) else {
+        return Ok(false);
+    };
+    if op.state.is_terminal() || op.state == OpState::Blocked || op.batch_culprit.is_some() {
+        return Ok(false);
+    }
+    let revision = op.revision.clone();
+    ctx.registry = Registry::current(&repo.git)?;
+    let executor = ctx.executor_signer()?;
+    ctx.chain.sign_with(executor);
+    ctx.op_mut(op_id).batch_culprit = Some(batch.to_owned());
+    ctx.save(
+        &revision,
+        None,
+        &format!("{op_id} is the first member of batch {batch} that fails"),
+    )?;
+    Ok(ctx.push_chain())
 }
 
 /// A publishing push was refused (§ 6): reports the existing landing, retries the same
@@ -1649,6 +2196,143 @@ fn enqueue(
     Ok(result)
 }
 
+/// NEW-2, NEW-10 (`crate::throughput`): an operation that holds a place behind the queue's head
+/// is checked now, ahead of its turn, by this executor, which is not running the head. Nothing is
+/// published, no attempt is recorded and no ownership is taken; the operation's chain lists the
+/// check under `prechecks`, and its records count only through reuse once the operation's own
+/// candidate has the same inputs. A fault is reported in `detail.precheck`, never as the
+/// operation's outcome, which stays its place in the queue.
+fn ahead_of_turn(ctx: &mut Ctx, op_id: &str, trunk: &str, mut result: BayResult) -> BayResult {
+    let repo = ctx.repo;
+    let config = &repo.config;
+    if result.decision != Decision::Queued || (config.ahead() == 0 && !config.footprint_lanes()) {
+        return result;
+    }
+    let precheck = match precheck(ctx, op_id, trunk) {
+        Ok(None) => return result,
+        Ok(Some(precheck)) => precheck,
+        Err(error) => json!({"error": error}),
+    };
+    if let Some(detail) = result.detail.as_mut() {
+        detail["precheck"] = precheck;
+    }
+    result
+}
+
+/// The check [`ahead_of_turn`] makes, or `None` when there is none to make: the operation is
+/// further behind the head than `[executor] ahead` and shares a footprint with an entry ahead
+/// (or footprint lanes are off), an entry ahead cannot be read or changes the policy, its own
+/// merge onto the base conflicts, ends `no_effect` or changes the policy, it names inputs, or
+/// that base and tree were checked already. The base is what the live entries ahead predict
+/// ([`throughput::predict`]), or, beyond `ahead` and with `[executor] footprint_lanes`, the
+/// trunk tip for an operation whose footprint is disjoint from every entry's ahead of it
+/// ([`throughput::disjoint`]). The operation's merge onto it is checked as an unsigned
+/// predicted commit under the policy at that base, with the adapter from it, by this
+/// executor's producer, and the evidence is pushed and read back.
+fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json::Value>, String> {
+    let repo = ctx.repo;
+    let git = &repo.git;
+    // § 7: only a producer-signed record stands for a run, and no record shows named inputs.
+    if ctx.registry.is_none()
+        || !repo.config.evidence_reuse()
+        || !inputs::names(&ctx.record.declared_inputs).is_empty()
+    {
+        return Ok(None);
+    }
+    let queue = crate::queue::Queue::local(git)?;
+    let Some(place) = queue.of(op_id).map(|entry| entry.seq) else {
+        return Ok(None);
+    };
+    let mut ahead = Vec::new();
+    for entry in queue.ahead_of(place) {
+        let Some(queued) = throughput::Queued::read(git, entry) else {
+            return Ok(None);
+        };
+        ahead.push(queued);
+    }
+    let Ok(Some(at_trunk)) = policy::load_at(git, trunk) else {
+        return Ok(None);
+    };
+    if ahead.is_empty() {
+        return Ok(None);
+    }
+    let revision = ctx.op(op_id).revision.clone();
+    // Within `ahead` of the head: on the base the entries ahead predict. Further behind, with
+    // footprint lanes, an entry disjoint from every entry ahead: on the tip, for its footprint.
+    let (kind, base) = if ahead.len() <= repo.config.ahead() {
+        match throughput::predict(git, &at_trunk, trunk, &ahead)? {
+            Some(base) => ("predicted", base),
+            None => return Ok(None),
+        }
+    } else if repo.config.footprint_lanes()
+        && throughput::disjoint(git, &at_trunk, trunk, &revision, &ahead)?
+    {
+        ("tip", trunk.to_owned())
+    } else {
+        return Ok(None);
+    };
+    let Ok(Some(policy)) = policy::load_at(git, &base) else {
+        return Ok(None);
+    };
+    let throughput::Fold::Applied { commit, tree, .. } =
+        throughput::fold(git, &policy, &base, &revision)?
+    else {
+        return Ok(None);
+    };
+    let base_tree = tree_of(git, &base)?;
+    let done = |precheck: &Precheck| precheck.tree == tree && precheck.base_tree == base_tree;
+    if policy.unchecked || ctx.op(op_id).prechecks.iter().any(done) {
+        return Ok(None);
+    }
+    let candidate_id = format!("pre-{op_id}-{}", now_ms());
+    ctx.ahead_of_turn = true;
+    let ran = run_policy(
+        ctx,
+        op_id,
+        &candidate_id,
+        &commit,
+        &tree,
+        &base,
+        &policy,
+        &base,
+        &[],
+    );
+    ctx.ahead_of_turn = false;
+    let (verdict, refusal) = ran?;
+    // No worker answered: nothing was observed, so nothing is recorded.
+    if refusal
+        .as_ref()
+        .is_some_and(|refusal| refusal.reason == Some(Reason::CheckUnavailable))
+    {
+        return Ok(None);
+    }
+    push_and_read_back_evidence(repo, &ctx.producer()?.0)?;
+    let op = ctx.op_mut(op_id);
+    op.prechecks.push(Precheck {
+        base: base.clone(),
+        base_tree: base_tree.clone(),
+        tree: tree.clone(),
+        verdict: verdict.to_owned(),
+        at_ms: now_ms(),
+    });
+    let excess = op
+        .prechecks
+        .len()
+        .saturating_sub(throughput::PRECHECKS_KEPT);
+    if excess > 0 {
+        op.prechecks = op.prechecks.split_off(excess);
+    }
+    ctx.save(&revision, None, &format!("prechecked {op_id} on {base}"))?;
+    ctx.push_chain();
+    Ok(Some(json!({
+        "on": kind,
+        "base": base,
+        "base_tree": base_tree,
+        "tree": tree,
+        "verdict": verdict,
+    })))
+}
+
 /// G177: records on the queued operation `op_id` of change `id` the conflict the executor's
 /// early probe found against trunk, or clears it with `None`, as one executor-signed chain
 /// state. It never takes ownership, moves the operation's state or touches its queue place.
@@ -1881,6 +2565,11 @@ fn retry_blocked(
     let reason = op.outcome.as_deref().and_then(Reason::from_code);
     let tree = op.attempts.last().map(|attempt| attempt.tree.clone());
     let then = op.blocked_on.clone();
+    // G245: the approval it waits on is written on another machine and reaches this one only
+    // through the remote, so the retry reads the remote's records before it judges the change.
+    if reason == Some(Reason::ApprovalPending) && ctx.online {
+        ctx.repo.fetch_evidence(&ctx.keys);
+    }
     let now = condition(
         &ctx.repo.git,
         revision,
@@ -2081,6 +2770,8 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         mid_publish_releases: Vec::new(),
         unavailable: None,
         early_conflict: None,
+        prechecks: Vec::new(),
+        batch_culprit: None,
     });
     // The request: an agent-signed commit on the revision, linked into the chain. Appending it
     // allocates the op id by compare-and-swap; `refs/bay/requests/<id>` moves with it.
@@ -2251,9 +2942,138 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// NEW-4: the outcome of a lane change's land request, a check-only operation. Its candidate
+/// was built on the current trunk and checked like any other (`refusal` is how the check ended
+/// when it did not pass); it is never published. The operation is blocked `LANE_NEVER_LANDS` on
+/// the condition of that candidate, and the result carries the verdicts so the agent learns
+/// them. A refusal that is not a check's verdict (a conflict, a check no worker could run, an
+/// operation another executor holds) is returned as it is: no check ran to an answer.
+fn lane_never_lands(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    refusal: Option<BayResult>,
+) -> Result<BayResult, String> {
+    const VERDICTS: [Reason; 4] = [
+        Reason::CheckFailed,
+        Reason::CheckFlaky,
+        Reason::CheckUnknown,
+        Reason::InputChanged,
+    ];
+    let refusal = match refusal {
+        Some(refusal)
+            if !refusal
+                .reason
+                .is_some_and(|reason| VERDICTS.contains(&reason)) =>
+        {
+            return Ok(refusal);
+        }
+        refusal => refusal,
+    };
+    let Some(attempt) = ctx
+        .find_op(op_id)
+        .and_then(|op| op.attempts.last())
+        .cloned()
+    else {
+        return Ok(refusal.unwrap_or_else(|| {
+            BayResult::failed(format!("operation {op_id} has no checked candidate"))
+        }));
+    };
+    let git = &ctx.repo.git;
+    let checks: Vec<serde_json::Value> = evidence::records_for(git, &attempt.tree)?
+        .into_iter()
+        .filter(|record| record.subject.commit == attempt.commit)
+        .map(|record| {
+            json!({"check": record.check.id, "verdict": record.verdict,
+                "producer": record.producer.name, "why": record.why})
+        })
+        .collect();
+    let blocked_on = condition(
+        git,
+        revision,
+        &attempt.base,
+        Some(&attempt.tree),
+        &ctx.record.observed_versions,
+    )?;
+    let lane = ctx.record.lane.clone();
+    if let Some(op) = ctx.find_op_mut(op_id) {
+        op.state = OpState::Blocked;
+        op.outcome = Some(Reason::LaneNeverLands.code().to_owned());
+        op.blocked_on = Some(blocked_on);
+        ctx.save(
+            revision,
+            None,
+            &format!("blocked {op_id}: a lane change never lands"),
+        )?;
+        ctx.push_chain();
+    }
+    let mut result = BayResult::blocked(Reason::LaneNeverLands)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(json!({
+            "lane": lane,
+            "trunk": attempt.base,
+            "candidate": attempt.candidate_id,
+            "verdict": attempt.verdict,
+            "checks": checks,
+            "check_refusal": refusal.as_ref().and_then(|refusal| refusal.reason),
+            "refused_checks": refusal
+                .as_ref()
+                .and_then(|refusal| refusal.detail.as_ref())
+                .map(|detail| detail["checks"].clone()),
+            "why": "a lane change runs its checks against the current trunk and never lands",
+        }));
+    result.published = Some(false);
+    Ok(result)
+}
+
+/// NEW-4: `LANE_LEAK` for a change of no lane whose history reaches commits of a lane ref that
+/// are not on `trunk`: its frozen `revision`, its view's `HEAD`, and a merge or cherry-pick under
+/// way there (`MERGE_HEAD`, `CHERRY_PICK_HEAD`). The lane refs are fetched first, best effort.
+/// Bytes copied into the view by hand carry no history, so they are never found here.
+fn lane_leak(ctx: &Ctx, trunk: &str, revision: &str) -> Result<Option<BayResult>, String> {
+    let repo = ctx.repo;
+    if repo.config.lanes.is_empty() {
+        return Ok(None);
+    }
+    crate::lane::fetch(repo);
+    let (tips, truncated) = crate::lane::tips(&repo.git, &repo.config.lanes, repo.remote())?;
+    if tips.is_empty() {
+        return Ok(None);
+    }
+    let view = Git::new(repo.view_path(&ctx.id));
+    let mut heads = vec![revision.to_owned()];
+    for name in ["HEAD", "MERGE_HEAD", "CHERRY_PICK_HEAD"] {
+        if let Ok(commit) =
+            view.run(&["rev-parse", "--verify", "-q", &format!("{name}^{{commit}}")])
+            && !heads.contains(&commit)
+        {
+            heads.push(commit);
+        }
+    }
+    let heads: Vec<&str> = heads.iter().map(String::as_str).collect();
+    let leaks = crate::lane::reached(&repo.git, &tips, &heads, Some(trunk))?;
+    if leaks.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        BayResult::blocked(Reason::LaneLeak)
+            .with_change(ctx.id.clone())
+            .with_detail(json!({
+                "lane": leaks[0].lane,
+                "leaks": leaks.iter().map(crate::lane::Leak::to_json).collect::<Vec<_>>(),
+                "trunk": trunk,
+                "tips_truncated": truncated,
+                "repair": "take the lane's commits out of the view (reset it to the change's base and redo the work there), then bay land again; or start the work in the lane: bay start <intent> --lane <lane>",
+            })),
+    ))
+}
+
 /// G244: trunk is red on paths this change touches, and the change does not name the landing
 /// that made it red (by `--fixes`, an undo, or a supersede): `TRUNK_RED`, naming the owner and
-/// the ways out. The operation is blocked on trunk's state, never failed.
+/// the ways out. The operation is blocked on trunk's state, never failed. A check no landing
+/// in the window answers (NEW-6, [`crate::red::Pending`]) is unknown, not red: it refuses
+/// nothing here, and `bay status` lists it as `red_pending`, never as clear.
 fn red_gate(
     ctx: &mut Ctx,
     op_id: &str,
@@ -2392,7 +3212,10 @@ fn build_and_check(
         Ok(judged) => judged,
         Err(refusal) => return Ok(Err(refusal)),
     };
-    if let Some(red) = red_gate(ctx, op_id, revision, trunk)? {
+    // NEW-4: a red trunk holds landings; a lane change never lands, so its checks run.
+    if ctx.record.lane.is_none()
+        && let Some(red) = red_gate(ctx, op_id, revision, trunk)?
+    {
         return Ok(Err(red));
     }
     let tree = match merged(ctx, op_id, revision, trunk)? {
@@ -2450,6 +3273,7 @@ fn build_and_check(
         tree,
         verdict: verdict.to_owned(),
         epoch: ctx.my_epoch,
+        batch: None,
     };
     persist_attempt(ctx, op_id, revision, attempt, refusal, has_policy)
 }
@@ -2965,6 +3789,7 @@ fn run_policy(
         op_id,
         policy,
         &Judged {
+            candidate: candidate_id,
             tree,
             commit,
             base_tree: &base_tree,
@@ -3034,24 +3859,179 @@ fn run_policy(
     )?;
     // What to repair: this run's records and the ones reused in place of a run (§ 8).
     let named: Vec<&evidence::EvidenceRecord> = records.iter().chain(&reused).collect();
-    let (required, _) = policy.required(&changed);
-    let Some((code, word, why)) = verdict(policy, &required, &all, &named, commit) else {
-        return Ok(("pass", None));
+    Ok(judge_seen(
+        ctx,
+        op_id,
+        policy,
+        &Seen {
+            candidate_id,
+            adapter_from,
+            commit,
+            tree,
+            changed: &changed,
+            all: &all,
+            named: &named,
+        },
+    ))
+}
+
+/// What one run of a policy's checks saw on a candidate, for its verdict (§ 7).
+struct Seen<'a> {
+    candidate_id: &'a str,
+    adapter_from: &'a str,
+    commit: &'a str,
+    tree: &'a str,
+    /// The paths the candidate's diff against its base changes (G146).
+    changed: &'a [String],
+    /// Every counted record on the candidate's tree.
+    all: &'a [evidence::EvidenceRecord],
+    /// What to repair: this run's records and the ones reused in place of a run (§ 8).
+    named: &'a [&'a evidence::EvidenceRecord],
+}
+
+/// The verdict of `policy` on what `seen` saw: `pass`, or the verdict word and the refusal
+/// that names each gap, with the approvals still owed (G245).
+fn judge_seen(
+    ctx: &Ctx,
+    op_id: &str,
+    policy: &policy::Policy,
+    seen: &Seen,
+) -> (&'static str, Option<BayResult>) {
+    let (required, _) = policy.required(seen.changed);
+    let registry = ctx.registry.as_ref();
+    let Some((code, word, why)) = verdict(
+        policy,
+        &required,
+        seen.all,
+        seen.named,
+        seen.commit,
+        registry.is_some(),
+    ) else {
+        return ("pass", None);
     };
-    Ok((
+    let mut detail = json!({
+        "candidate": seen.candidate_id,
+        "adapter_from": seen.adapter_from,
+        "checks": why,
+        "trust": evidence::trust(registry),
+    });
+    // G245: the approvals still owed, who can give them, and the exact candidate to name.
+    let owed = approval_rows(policy, seen.changed, registry, seen.all, seen.commit);
+    if !owed.is_empty() {
+        detail["approval"] = approval_detail(&owed, seen.commit, seen.tree, registry);
+    }
+    (
         word,
         Some(
             BayResult::blocked(code)
                 .with_change(ctx.id.clone())
                 .with_op(op_id)
-                .with_detail(json!({
-                    "candidate": candidate_id,
-                    "adapter_from": adapter_from,
-                    "checks": why,
-                    "trust": evidence::trust(ctx.registry.as_ref()),
-                })),
+                .with_detail(detail),
         ),
-    ))
+    )
+}
+
+/// G245: without a registry no approver key can be verified, so no `approval` record counts
+/// (an unsigned yes proves nobody said it); with one, the records are already counted.
+fn approvals_counted(
+    records: &[evidence::EvidenceRecord],
+    signed: bool,
+) -> Vec<evidence::EvidenceRecord> {
+    records
+        .iter()
+        .filter(|record| signed || record.kind != evidence::KIND_APPROVAL)
+        .cloned()
+        .collect()
+}
+
+/// G245: each approval check `policy` requires of a candidate whose diff changes `changed`
+/// that the counted `records` on its tree do not pass: its state (`pending`, or `rejected` by a
+/// `product_failure`), the enrolled approvers who may answer it (the registry's approver file,
+/// narrowed by the check's `producers` list), and the command that records the answer for
+/// `commit`, the candidate.
+fn approval_rows(
+    policy: &policy::Policy,
+    changed: &[String],
+    registry: Option<&Registry>,
+    records: &[evidence::EvidenceRecord],
+    commit: &str,
+) -> Vec<serde_json::Value> {
+    let listed = policy.answering(approvals_counted(records, registry.is_some()));
+    let enrolled = registry
+        .map(|registry| registry.principals(KeyClass::Approver))
+        .unwrap_or_default();
+    policy
+        .checks
+        .iter()
+        .filter(|entry| entry.is_approval() && policy.requires(entry, changed))
+        .filter_map(|entry| {
+            let id = evidence::CheckId::new(&entry.id, &entry.environment);
+            let state = match evidence::combine(&listed, &id, &policy.manifest_digest, None) {
+                Combined::Pass => return None,
+                Combined::Unknown => "pending",
+                Combined::ProductFailure | Combined::Flaky => "rejected",
+            };
+            let approvers: Vec<&String> = enrolled
+                .iter()
+                .filter(|name| {
+                    entry
+                        .producers
+                        .as_ref()
+                        .is_none_or(|names| names.contains(*name))
+                })
+                .collect();
+            Some(json!({
+                "check": entry.id,
+                "environment": entry.environment,
+                "state": state,
+                "approvers": approvers,
+                "record": format!(
+                    "bay evidence record --kind approval --check {} --verdict pass --commit {commit}",
+                    entry.id
+                ),
+            }))
+        })
+        .collect()
+}
+
+/// The `approval` detail of a refusal or a status (G245): the owed `rows`, the candidate's
+/// commit and tree an approval must name, and, without a registry, why none can pass.
+fn approval_detail(
+    rows: &[serde_json::Value],
+    commit: &str,
+    tree: &str,
+    registry: Option<&Registry>,
+) -> serde_json::Value {
+    let mut detail = json!({"checks": rows, "commit": commit, "tree": tree});
+    if registry.is_none() {
+        detail["why"] = json!(format!(
+            "this repository has no key registry ({REGISTRY_REF}), so no approver key can be verified and an approval check cannot pass; enrol each approver in the registry's approver file"
+        ));
+    }
+    detail
+}
+
+/// G245: the approvals the candidate `commit` (tree `tree`, merged onto `base`) still waits
+/// on, as `bay status` names them, judged by the policy at `base` like its land; `None` when it
+/// waits on none.
+///
+/// # Errors
+///
+/// A git fault, an unreadable policy or note, or a class file that cannot be written.
+pub fn pending_approval(
+    git: &Git,
+    base: &str,
+    commit: &str,
+    tree: &str,
+    registry: Option<&Registry>,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(policy) = policy::load_at(git, base).map_err(String::from)? else {
+        return Ok(None);
+    };
+    let changed = check::changed_paths(git, base, commit)?;
+    let records = evidence::counted(git, evidence::records_for(git, tree)?, registry)?;
+    let rows = approval_rows(&policy, &changed, registry, &records, commit);
+    Ok((!rows.is_empty()).then(|| approval_detail(&rows, commit, tree, registry)))
 }
 
 /// `CHECK_UNAVAILABLE` (§ 7): no worker answered for `environments`. With `adapter`, the check
@@ -3175,43 +4155,56 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str) -> Option<BayResult> {
 
 /// The verdict of `policy` over every counted record on the tree (`all`): `None` for a pass,
 /// else its refusal code and word, and what `named` say about each gap. `required` is the part
-/// of its manifest the candidate's diff requires (G146).
+/// of its manifest the candidate's diff requires (G146). `signed` says a registry verified
+/// `all`: without one no approval counts (G245).
 fn verdict(
     policy: &policy::Policy,
     required: &[policy::ManifestEntry],
     all: &[evidence::EvidenceRecord],
     named: &[&evidence::EvidenceRecord],
     commit: &str,
+    signed: bool,
 ) -> Option<(Reason, &'static str, Vec<serde_json::Value>)> {
-    // G163: a record from a producer the check's list leaves out never answers it.
-    let listed: Vec<evidence::EvidenceRecord> = policy.answering(all.to_vec());
+    // G163: a record from a producer the check's list leaves out never answers it. G245: nor
+    // does a record of the other kind, or an approval no registry verified.
+    let listed: Vec<evidence::EvidenceRecord> = policy.answering(approvals_counted(all, signed));
+    let approval = |id: &evidence::CheckId| {
+        policy
+            .check(id)
+            .is_some_and(policy::CheckEntry::is_approval)
+    };
     // G30: coverage is judged against the frozen manifest, never against counts.
-    let gaps: Vec<(String, Combined)> = evidence::aggregate(
-        &listed,
-        required,
-        &policy.manifest_digest,
-        &|id| policy.commit_keyed(id),
-        commit,
-    )
-    .into_iter()
-    .map(|(id, combined)| (id.id, combined))
-    .collect();
-    // No gap is a pass.
-    let (_, worst) = gaps
+    // A flaky check whose entry says `allow_flaky` is no gap: the landing names it instead.
+    let gaps: Vec<(evidence::CheckId, Combined)> = policy
+        .gaps(&listed, required, commit)
+        .into_iter()
+        // G245: approvers who disagree on one tree are a rejection, never a flaky check.
+        .map(|(id, combined)| match combined {
+            Combined::Flaky if approval(&id) => (id, Combined::ProductFailure),
+            _ => (id, combined),
+        })
+        .collect();
+    // No gap is a pass. G245: an approval is asked for only once every other check passed, so
+    // a check bay runs that is still unknown is named first.
+    let (worst_id, worst) = gaps
         .iter()
         .find(|(_, combined)| *combined == Combined::Flaky)
         .or_else(|| {
             gaps.iter()
                 .find(|(_, combined)| *combined == Combined::ProductFailure)
         })
+        .or_else(|| gaps.iter().find(|(id, _)| !approval(id)))
         .or_else(|| gaps.first())?;
     let (code, word) = match worst {
         Combined::Flaky => (Reason::CheckFlaky, "flaky"),
         Combined::ProductFailure => (Reason::CheckFailed, "product_failure"),
+        Combined::Unknown | Combined::Pass if approval(worst_id) => {
+            (Reason::ApprovalPending, "unknown")
+        }
         Combined::Unknown | Combined::Pass => (Reason::CheckUnknown, "unknown"),
     };
     let in_gap =
-        |record: &evidence::EvidenceRecord| gaps.iter().any(|(id, _)| *id == record.check.id);
+        |record: &evidence::EvidenceRecord| gaps.iter().any(|(id, _)| id.id == record.check.id);
     let mut why: Vec<serde_json::Value> = named
         .iter()
         .filter(|record| in_gap(record) && policy.listed(record))
@@ -3220,18 +4213,42 @@ fn verdict(
                 "reasons": evidence::reasons(&record.units)})
         })
         .collect();
+    // G245: each approver who said no to this tree, by name.
+    why.extend(
+        listed
+            .iter()
+            .filter(|record| {
+                record.kind == evidence::KIND_APPROVAL
+                    && record.manifest_digest == policy.manifest_digest
+                    && record.verdict == evidence::Verdict::ProductFailure
+                    && in_gap(record)
+            })
+            .map(|record| {
+                json!({"check": record.check.id, "verdict": record.verdict,
+                    "approver": record.producer.name, "why": record.why})
+            }),
+    );
     // G163: each record that would have answered a gap but for the check's producers list.
+    // G245: or but for its kind: a check record never answers an approval, nor the reverse.
     why.extend(
         all.iter()
             .filter(|record| {
-                record.kind == evidence::KIND_CHECK
+                evidence::combines(&record.kind)
                     && record.manifest_digest == policy.manifest_digest
                     && in_gap(record)
                     && !policy.listed(record)
             })
             .map(|record| {
+                let kind_answers = policy
+                    .check(&record.check)
+                    .is_none_or(|check| check.kind.record_kind() == record.kind);
+                let why = if kind_answers {
+                    "unlisted_producer"
+                } else {
+                    "wrong_kind"
+                };
                 json!({"check": record.check.id, "producer": record.producer.name,
-                    "verdict": record.verdict, "why": "unlisted_producer"})
+                    "verdict": record.verdict, "why": why})
             }),
     );
     Some((code, word, why))
@@ -3346,6 +4363,9 @@ fn landed_markers(repo: &Repo) -> Result<std::collections::HashMap<String, Strin
 /// signed by the executor, pushed under the lease of the head this executor last pushed. A
 /// push that fails means the chain moved (a takeover); the persist step then finds out.
 fn heartbeat(ctx: &Ctx, op_id: &str) {
+    if ctx.ahead_of_turn {
+        return;
+    }
     let git = &ctx.repo.git;
     let mut chain = Chain::new(git);
     chain.sign_with(ctx.executor_signer().ok().flatten());
@@ -3411,6 +4431,8 @@ fn hidden_paths(ctx: &Ctx) -> Vec<std::path::PathBuf> {
 
 /// What a policy's checks judge: the candidate, its base and the request's named inputs.
 struct Judged<'a> {
+    /// The candidate id its records are named by.
+    candidate: &'a str,
     tree: &'a str,
     commit: &'a str,
     base_tree: &'a str,
@@ -3484,9 +4506,97 @@ fn finished_checks(
         if answered(&candidates, &id, digest, subject) {
             reused.extend(candidates.into_iter().filter(|record| record.check == id));
             finished.push(id);
+            continue;
+        }
+        // NEW-10: a check keyed by its read set carries the record of an earlier candidate of
+        // this operation whose read set is the same, byte for byte (`crate::throughput`).
+        if subject.is_none() && ctx.repo.config.footprint_lanes() {
+            let carried = carry_over(ctx, op_id, policy, judged, check)?;
+            if answered(&carried, &id, digest, None) {
+                reused.extend(carried);
+                finished.push(id);
+            }
         }
     }
     Ok((finished, reused))
+}
+
+/// NEW-10 footprint-keyed evidence (`crate::throughput`): the records of check `entry`, which
+/// declares `footprint = true`, on this operation's earlier candidates and pre-checks whose
+/// stamp is the candidate's (the same read set, byte for byte, in its tree and in its base's),
+/// under the same policy revision, provenance, manifest and fixtures. Each is carried onto the
+/// candidate's tree as a record of this executor's producer that names the record it carries,
+/// so evidence still names exactly the tree it covers, and the hook judges it as any other.
+/// Returns the carried records; none for a check without `footprint = true`.
+fn carry_over(
+    ctx: &Ctx,
+    op_id: &str,
+    policy: &policy::Policy,
+    judged: &Judged,
+    entry: &policy::CheckEntry,
+) -> Result<Vec<evidence::EvidenceRecord>, String> {
+    let git = &ctx.repo.git;
+    let op = ctx.op(op_id);
+    let trees: BTreeSet<&str> = op
+        .attempts
+        .iter()
+        .map(|attempt| attempt.tree.as_str())
+        .chain(op.prechecks.iter().map(|precheck| precheck.tree.as_str()))
+        .filter(|tree| *tree != judged.tree)
+        .collect();
+    if trees.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(stamp) = throughput::stamp(git, entry, judged.tree, judged.base_tree) else {
+        return Ok(Vec::new());
+    };
+    let id = evidence::CheckId::new(&entry.id, &entry.environment);
+    let index = policy
+        .checks
+        .iter()
+        .position(|check| check.id == entry.id && check.environment == entry.environment)
+        .map_or(0, |at| at + 1);
+    let holds = |record: &&evidence::EvidenceRecord| {
+        record.kind == evidence::KIND_CHECK
+            && record.check == id
+            && record.manifest_digest == policy.manifest_digest
+            && record.policy_revision == policy.revision
+            && record.policy_provenance.as_deref() == Some(judged.provenance.as_str())
+            && record.fixtures().as_deref() == Some(entry.fixtures.as_slice())
+            && throughput::same_stamp(record, &stamp)
+    };
+    let onto = throughput::Onto {
+        tree: judged.tree,
+        commit: judged.commit,
+        base_tree: judged.base_tree,
+    };
+    let (producer, signer) = ctx.producer()?;
+    let mut carried = Vec::new();
+    for tree in trees {
+        let records = policy.answering(evidence::counted(
+            git,
+            evidence::records_for(git, tree)?,
+            ctx.registry.as_ref(),
+        )?);
+        for record in records.iter().filter(holds) {
+            let name = format!(
+                "{producer}/{}-carried-{index}-{}",
+                judged.candidate,
+                carried.len() + 1
+            );
+            let mut next = throughput::carry(record, &producer, name, &onto, &stamp);
+            // G163: a producer the check's list leaves out never answers it, carried or not.
+            if !policy.listed(&next) {
+                continue;
+            }
+            if let Some(signer) = &signer {
+                next.sign(&signer.key)?;
+            }
+            evidence::append(git, &producer, &next)?;
+            carried.push(next);
+        }
+    }
+    Ok(carried)
 }
 
 /// Whether evidence reuse applies to this judgement (G7): `[policy] evidence_reuse =
@@ -3758,6 +4868,17 @@ fn derive_landed(
     if let (Some(detail), Some(why)) = (result.detail.as_mut(), unchecked) {
         detail["unchecked"] = json!(why);
     }
+    // A batch member names the batch whose tip was checked: its own tree was not checked alone.
+    let batch = ctx
+        .op(op_id)
+        .attempts
+        .iter()
+        .rev()
+        .find(|attempt| attempt.commit == commit)
+        .and_then(|attempt| attempt.batch.clone());
+    if let (Some(detail), Some(batch)) = (result.detail.as_mut(), batch) {
+        detail["batch"] = json!(batch);
+    }
     // The change is published: a fault while reading its gaps or its inputs never turns the
     // landing into an error. The result says what could not be read, so none is hidden.
     let gaps = match coverage_gaps(ctx, op_id) {
@@ -3806,8 +4927,9 @@ fn derive_landed(
 }
 
 /// G30: the checks the landing passed without testing code, each a coverage gap: a check
-/// that passed on a `declared_empty` selection under a policy that judged it (§ 7), and each
-/// quarantined check that no policy judging the landing required (ruling 8c).
+/// that passed on a `declared_empty` selection under a policy that judged it (§ 7), a check
+/// whose runs on the tree were `flaky` and whose entry says `allow_flaky`, with every run, and
+/// each quarantined check that no policy judging the landing required (ruling 8c).
 ///
 /// The judging policies are read from the base and the candidate, never from the request, so
 /// a replay gives the same answer: the base's policy when it is valid, and the candidate's own
@@ -3836,9 +4958,14 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
     if judged.is_empty() {
         return Ok(Vec::new());
     }
+    // A batch member's evidence is about the batch tip's tree (`crate::throughput`).
+    let tree = attempt
+        .batch
+        .as_ref()
+        .map_or(&attempt.tree, |batch| &batch.tree);
     let records = evidence::counted(
         git,
-        evidence::records_for(git, &attempt.tree)?,
+        evidence::records_for(git, tree)?,
         ctx.registry.as_ref(),
     )?;
     let mut gaps: Vec<serde_json::Value> = Vec::new();
@@ -3862,6 +4989,15 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
             }
         }
     }
+    // A flaky check that landed under `allow_flaky` is named with every run, never as a pass.
+    for gap in judged
+        .iter()
+        .flat_map(|policy| flaky_gaps(policy, &records, &attempt.commit))
+    {
+        if !gaps.contains(&gap) {
+            gaps.push(gap);
+        }
+    }
     // Ruling 8c: a quarantined check that no judging policy required was never tested.
     for quarantine in judged.iter().flat_map(|policy| policy.quarantined.iter()) {
         let required = judged.iter().any(|policy| {
@@ -3872,13 +5008,50 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
         let gap = json!({
             "check": quarantine.id,
             "environment": quarantine.environment,
-            "quarantine": {"reason": quarantine.reason, "end": quarantine.end},
+            "quarantine": {"reason": quarantine.reason, "end": quarantine.end,
+                "owner": quarantine.owner},
         });
         if !required && !gaps.contains(&gap) {
             gaps.push(gap);
         }
     }
     Ok(gaps)
+}
+
+/// The required checks of `policy` whose counted `records` on the landed tree combine to
+/// `flaky` and whose entry says `allow_flaky`, each with every run that answered it.
+fn flaky_gaps(
+    policy: &policy::Policy,
+    records: &[evidence::EvidenceRecord],
+    commit: &str,
+) -> Vec<serde_json::Value> {
+    let listed = policy.answering(records.to_vec());
+    let mut gaps = Vec::new();
+    for entry in &policy.manifest {
+        let id = evidence::CheckId::new(&entry.id, &entry.environment);
+        let subject = policy.commit_keyed(&id).then_some(commit);
+        if !policy.allows_flaky(&id)
+            || evidence::combine(&listed, &id, &policy.manifest_digest, subject) != Combined::Flaky
+        {
+            continue;
+        }
+        let runs: Vec<serde_json::Value> = listed
+            .iter()
+            .filter(|record| {
+                record.kind == evidence::KIND_CHECK
+                    && record.check == id
+                    && record.manifest_digest == policy.manifest_digest
+                    && subject.is_none_or(|commit| record.subject.commit == commit)
+            })
+            .map(|record| json!({"id": record.id, "verdict": record.verdict, "at": record.at}))
+            .collect();
+        gaps.push(json!({
+            "check": entry.id,
+            "environment": entry.environment,
+            "flaky": {"allowed": true, "runs": runs},
+        }));
+    }
+    gaps
 }
 
 /// G146: the checks that no policy judging the landing required, because the landing's diff
@@ -3934,7 +5107,8 @@ pub fn post_checks(
 
 /// [`post_checks`], and with `recorded` the answers on `commit` whatever its diff: a recorded
 /// run of a check its `when_paths` did not require still says what that commit's tree does
-/// (G244: a later pass on trunk turns it green).
+/// (G244: a later pass on trunk turns it green). Each such row also says whether the diff
+/// `required` the check (NEW-6).
 ///
 /// # Errors
 ///
@@ -3962,11 +5136,13 @@ pub fn post_answers(
     for entry in &policy.post {
         let id = evidence::CheckId::new(&entry.id, &entry.environment);
         let mut row = json!({"check": entry.id, "environment": entry.environment});
-        if let Some(skipped) = policy
+        let skipped = policy
             .check(&id)
-            .and_then(|check| policy.unwoken(check, &changed))
-            .filter(|_| !recorded)
-        {
+            .and_then(|check| policy.unwoken(check, &changed));
+        if recorded {
+            // NEW-6: whether this landing requires the check, which no answer may yet say.
+            row["required"] = json!(skipped.is_none());
+        } else if let Some(skipped) = skipped {
             row["state"] = json!("not_required");
             row["reason"] = json!(skipped.reason);
             out.push(row);
@@ -4021,11 +5197,24 @@ fn write_terminal(
         "revision": op.revision,
         "outcome": outcome,
         "published": published,
-        "evidence_tree": attempt.map(|attempt| attempt.tree.clone()),
+        // A batch member's evidence is about the batch tip's tree.
+        "evidence_tree": attempt.map(|attempt| {
+            attempt
+                .batch
+                .as_ref()
+                .map_or_else(|| attempt.tree.clone(), |batch| batch.tree.clone())
+        }),
         "candidate": attempt.map(|attempt| attempt.candidate_id.clone()),
         "executor": executor,
         "policy_repair": ctx.repair,
     });
+    if let Some(batch) = attempt.and_then(|attempt| attempt.batch.as_ref()) {
+        record["batch"] = json!(batch);
+    }
+    // ROADMAP § 3: queue wait and check time, from the commit times of the chain's own states.
+    if let Some(fields) = record.as_object_mut() {
+        fields.extend(crate::timing::of(&ctx.repo.git, &ctx.head, op, outcome));
+    }
     if let Some(why) = published
         .filter(|_| outcome == "published")
         .and_then(|commit| unchecked_landing(ctx, op_id, commit))
@@ -4205,6 +5394,75 @@ fn abandoned_keeps(ctx: &Ctx) -> Result<Option<Kept>, String> {
         links,
         terminal: None,
     }))
+}
+
+/// The published commit a landed change's retention cut keeps, as [`landed_keeps`] finds it.
+fn published_commit(record: &ChangeRecord) -> Option<&str> {
+    record
+        .operations
+        .iter()
+        .rev()
+        .find(|op| op.state == OpState::Published)?
+        .attempts
+        .last()
+        .map(|attempt| attempt.commit.as_str())
+}
+
+/// The committer time of a commit object's text, in Unix seconds.
+fn committer_time(commit: &[u8]) -> Option<u64> {
+    let text = std::str::from_utf8(commit).ok()?;
+    let line = text
+        .lines()
+        .take_while(|line| !line.is_empty())
+        .find(|line| line.starts_with("committer "))?;
+    line.rsplit(' ').nth(1)?.parse().ok()
+}
+
+/// G200b: the ids of `chains` whose retention cut may be due (§ 5), so an executor pass costs
+/// what its live work costs, not what its history holds: a chain already cut, one neither
+/// landed nor abandoned, and one closed less than the retention window ago are left out
+/// before any fetch. An abandoned change is closed since its chain head (`committed`), a
+/// landed one since its published commit, whose times one `git cat-file --batch` reads. A
+/// time that cannot be read leaves the chain in, and [`retain`] decides it on the chain it
+/// fetches again.
+#[must_use]
+pub fn retention_due(repo: &Repo, chains: &[HeldChain]) -> BTreeSet<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let window = repo.config.retention_window().as_secs();
+    let closed: Vec<&HeldChain> = chains
+        .iter()
+        .filter(|held| !held.record.retention_cut)
+        .filter(|held| {
+            held.record.state == ChangeState::Abandoned
+                || (held.record.state == ChangeState::Landed
+                    && published_commit(&held.record).is_some())
+        })
+        .collect();
+    // One time per landed chain, in `closed`'s order, as the filter below takes them.
+    let published: Vec<String> = closed
+        .iter()
+        .filter(|held| held.record.state == ChangeState::Landed)
+        .filter_map(|held| published_commit(&held.record).map(str::to_owned))
+        .collect();
+    let mut times = repo
+        .git
+        .objects(&published)
+        .unwrap_or_else(|_| vec![None; published.len()])
+        .into_iter();
+    closed
+        .into_iter()
+        .filter(|held| {
+            let since = if held.record.state == ChangeState::Landed {
+                times.next().flatten().as_deref().and_then(committer_time)
+            } else {
+                Some(held.committed).filter(|committed| *committed > 0)
+            };
+            since.is_none_or(|since| now.saturating_sub(since) >= window)
+        })
+        .map(|held| held.id.clone())
+        .collect()
 }
 
 /// The retention cut (§ 5): once a landed or abandoned change is older than the retention

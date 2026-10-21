@@ -506,6 +506,7 @@ fn other_class(push: &Push, commit: &str) -> Result<Option<&'static str>, String
         KeyClass::Executor,
         KeyClass::Producer,
         KeyClass::Reviewer,
+        KeyClass::Approver,
         KeyClass::Registry,
     ] {
         let file = push.registry.class_file(push.git, class)?;

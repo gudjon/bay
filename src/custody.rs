@@ -32,6 +32,7 @@ const SETTINGS: &[(&str, &str)] = &[
     ("bay.gateProducerKey", "producer"),
     ("bay.producerKey", "producer"),
     ("bay.reviewerKey", "reviewer"),
+    ("bay.approverKey", "approver"),
     ("bay.executorKey", "executor"),
     ("bay.registryKey", "registry"),
     ("bay.agentKey", "agent"),
@@ -89,18 +90,8 @@ pub fn row(git: &Git, sessions: Option<&Path>) -> Custody {
     // sessions under this one account, any of them can sign as any other: bay cannot prove
     // which actor signed. Advisory, never red: the box works, and the remedy is the site's.
     let actors = sessions.map(|dir| account.actors(dir)).unwrap_or_default();
-    let agent_key_here = keys.iter().any(|key| {
-        key.class == "agent" && !key.hardware && key.file.is_some_and(|(_, _, readable)| readable)
-    });
-    let shared = agent_key_here && actors.len() > 1;
-    let agent_key = keys.iter().any(|key| key.class == "agent");
-    let actor_proof = if shared {
-        "account"
-    } else if agent_key {
-        "key"
-    } else {
-        "none"
-    };
+    let actor_proof = proof_of(keys.iter().find(|key| key.class == "agent"), actors.len());
+    let shared = actor_proof == ACCOUNT;
     let state = if exposed {
         "red"
     } else if shared {
@@ -129,6 +120,89 @@ pub fn row(git: &Git, sessions: Option<&Path>) -> Custody {
         row["note"] = json!("no private key is configured on this box");
     }
     Custody { row, exposed }
+}
+
+/// `actor_proof` when several actors' sessions run under this one OS account, which can read
+/// the file-based agent key: any of them can sign as any other (G243).
+pub const ACCOUNT: &str = "account";
+
+/// What proves which actor signs this box's agent requests (G243, G243b).
+pub struct ActorProof {
+    /// `key` (the agent key proves it), `account` (several actors share an account that can
+    /// read the agent key), `none` (no agent key is configured) or `unknown` (not judged here).
+    pub proof: &'static str,
+    /// The actors this machine's session records under this account name.
+    pub actors: Vec<String>,
+}
+
+impl ActorProof {
+    /// Whether the agent key cannot prove the actor: `account`, or `unknown`, since a proof bay
+    /// cannot judge is no proof. `none` is not judged here: with no agent key nothing is signed,
+    /// and a repository with a key registry refuses an unsigned request already.
+    #[must_use]
+    pub fn unproven(&self) -> bool {
+        matches!(self.proof, ACCOUNT | "unknown")
+    }
+}
+
+/// [`ActorProof`] for the agent key `git`'s config names, judged against the session records
+/// in `sessions` as the `key-custody` row judges it: the same reading, so a refusal and the
+/// row never disagree.
+#[cfg(unix)]
+#[must_use]
+pub fn actor_proof(git: &Git, sessions: Option<&Path>) -> ActorProof {
+    let Some(account) = Account::here() else {
+        return ActorProof {
+            proof: "unknown",
+            actors: Vec::new(),
+        };
+    };
+    let agent = git
+        .run(&["config", "--type=path", "--get", "bay.agentKey"])
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(|path| Key::judge("bay.agentKey", "agent", PathBuf::from(path), &account));
+    let actors = sessions.map(|dir| account.actors(dir)).unwrap_or_default();
+    ActorProof {
+        proof: proof_of(agent.as_ref(), actors.len()),
+        actors: actors.into_iter().collect(),
+    }
+}
+
+/// Off Unix file modes are not judged: a hardware agent key still proves the actor, and a
+/// file-based one is `unknown`.
+#[cfg(not(unix))]
+#[must_use]
+pub fn actor_proof(git: &Git, _sessions: Option<&Path>) -> ActorProof {
+    let agent = git
+        .run(&["config", "--type=path", "--get", "bay.agentKey"])
+        .ok()
+        .filter(|value| !value.is_empty());
+    let proof = match agent {
+        None => "none",
+        Some(path) if is_hardware(Path::new(&path)) => "key",
+        Some(_) => "unknown",
+    };
+    ActorProof {
+        proof,
+        actors: Vec::new(),
+    }
+}
+
+/// The proof `agent` (the configured agent key) gives when `actors` actors run sessions under
+/// this account: none without a key; the account alone when a file-based key this account can
+/// read serves more than one actor; else the key.
+#[cfg(unix)]
+fn proof_of(agent: Option<&Key>, actors: usize) -> &'static str {
+    match agent {
+        None => "none",
+        Some(key)
+            if !key.hardware && key.file.is_some_and(|(_, _, readable)| readable) && actors > 1 =>
+        {
+            ACCOUNT
+        }
+        Some(_) => "key",
+    }
 }
 
 /// Not judged off Unix: modes and owners are Unix's.
@@ -287,7 +361,6 @@ impl Key {
 
 /// Whether the key's public half (`<path>.pub`) names a hardware key type (`sk-…`). Only the
 /// public half is read, and only its first bytes.
-#[cfg(unix)]
 fn is_hardware(path: &Path) -> bool {
     use std::io::Read as _;
     let mut public = path.as_os_str().to_owned();

@@ -21,6 +21,10 @@
 //! Between operations, an executor whose binary changed since it started moves to the new one:
 //! on Unix its result names the move (`detail.reexec`) and the process execs the new binary
 //! with the same arguments; elsewhere it says so and keeps running until it is restarted.
+//!
+//! Beside that box-local file, each pass publishes the executor's presence to the remote
+//! (`crate::presence`, G67), so a box that runs no executor, or one that stopped, can be seen
+//! from every other box; `--once` names the write in `detail.presence`.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -30,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, EarlyConflict, OpState};
+use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, EarlyConflict, HeldChain, OpState};
 use crate::publish;
 use crate::queue::Queue;
 use crate::receipts;
@@ -40,9 +44,15 @@ use crate::signing::Keys;
 
 #[must_use]
 pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
-    if let Some(refusal) = below_floor(dir) {
+    let git = crate::git::Git::new(dir).version().ok();
+    if let Some(refusal) = git.as_deref().and_then(below_floor) {
         return refusal;
     }
+    // G67: the presence this executor publishes each pass, at most once per heartbeat.
+    let mut beat = crate::presence::Beat::new(
+        git.map(|line| crate::version::Version::parse(&line).to_string()),
+        interval,
+    );
     // Named before it pins its binary, so an update between the two keeps this version's file.
     let _presence = Presence::hold();
     crate::update::pin_own_binary();
@@ -60,9 +70,10 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         };
         // A release that could not be pushed never stops the supervisor, which every queued
         // operation depends on: it is reported and tried again on the next pass (§ 6, § 9a).
-        let unreleased = deadlines(&repo, &mut heads).err();
+        let mut seen = Seen::default();
+        let unreleased = deadlines(&repo, &mut heads, &mut seen).err();
         let mut notes = Vec::new();
-        let ran = match pass(&repo, moves.then_some(&binary), &mut notes) {
+        let ran = match pass(&repo, moves.then_some(&binary), &mut notes, seen, &mut beat) {
             Ok(ran) => ran,
             Err(message) => return BayResult::failed(message),
         };
@@ -86,6 +97,9 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             if let Some(message) = &unreleased {
                 detail["unreleased"] = json!(message);
             }
+            if let Some(presence) = beat.outcome.take() {
+                detail["presence"] = presence;
+            }
             return BayResult::ok(detail);
         }
         if let Some(message) = &unreleased {
@@ -99,12 +113,12 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
 }
 
 /// The executor's Git floor (`GIT-FEATURES` § 1, G68): below it the executor refuses with
-/// `GIT_BELOW_FLOOR` before it fetches or claims anything. A Git that cannot report its version
-/// is left to the first Git call, which fails with its own message.
-fn below_floor(dir: &Path) -> Option<BayResult> {
+/// `GIT_BELOW_FLOOR` before it fetches or claims anything. `line` is what `git --version`
+/// printed; a Git that cannot report its version is left to the first Git call, which fails
+/// with its own message.
+fn below_floor(line: &str) -> Option<BayResult> {
     use crate::version::{GIT_FLOOR_EXECUTOR, Version};
-    let line = crate::git::Git::new(dir).version().ok()?;
-    let version = Version::parse(&line);
+    let version = Version::parse(line);
     (version < Version::parse(GIT_FLOOR_EXECUTOR)).then(|| {
         BayResult::blocked(crate::result::Reason::GitBelowFloor).with_detail(json!({
             "role": "executor",
@@ -276,11 +290,25 @@ fn alive(pid: u32) -> bool {
     })
 }
 
+/// The queue as one pass's [`deadlines`] read it, so the pass reads it once (G200b):
+/// `before` as it found it, `after` as it left it (`None` once a release made it stale).
+#[derive(Default)]
+struct Seen {
+    before: Option<Queue>,
+    after: Option<Queue>,
+}
+
 /// Releases a queue head that made no progress within its deadline, measured from this
 /// supervisor's first sighting of it as head; a late observer or a restart only delays it.
 /// An error is a release the remote refused or did not take; the next pass tries it again.
-fn deadlines(repo: &Repo, heads: &mut HashMap<u64, Instant>) -> Result<(), String> {
+/// What it read of the queue goes to `seen`.
+fn deadlines(
+    repo: &Repo,
+    heads: &mut HashMap<u64, Instant>,
+    seen: &mut Seen,
+) -> Result<(), String> {
     let mut queue = Queue::read(repo)?;
+    seen.before = Some(queue.clone());
     // Heads whose operation already reached an outcome release at once, one after another.
     while let Some(head) = queue.head()
         && let Some(reason) = finished_head(repo, head)
@@ -290,15 +318,18 @@ fn deadlines(repo: &Repo, heads: &mut HashMap<u64, Instant>) -> Result<(), Strin
         queue = Queue::read(repo)?;
     }
     heads.retain(|seq, _| queue.head().is_some_and(|head| head.seq == *seq));
-    let Some(head) = queue.head() else {
+    let Some(head) = queue.head().cloned() else {
+        seen.after = Some(queue);
         return Ok(());
     };
     let first = *heads.entry(head.seq).or_insert_with(Instant::now);
-    if first.elapsed() >= repo.config.progress_deadline() {
-        let signer = Keys::load(&repo.git).executor;
-        crate::queue::release(repo, signer.as_ref(), head.seq, &head.op_id, "deadline")?;
-        heads.remove(&head.seq);
+    if first.elapsed() < repo.config.progress_deadline() {
+        seen.after = Some(queue);
+        return Ok(());
     }
+    let signer = Keys::load(&repo.git).executor;
+    crate::queue::release(repo, signer.as_ref(), head.seq, &head.op_id, "deadline")?;
+    heads.remove(&head.seq);
     Ok(())
 }
 
@@ -348,10 +379,19 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 /// `binary` to watch, it stops between operations once that binary changed. Before the
 /// first operation, and after each landing, the entries behind the queue's head are probed
 /// for a conflict with trunk (G177); what each probe noted goes to `notes`.
+///
+/// G200b: a pass costs what its live work costs, not what its history holds. It reads every
+/// chain in one batch and the queue as [`deadlines`] left it in `seen`; a closed chain costs a
+/// fetch only once its retention cut may be due ([`publish::retention_due`]).
+///
+/// G67: before its first operation the pass publishes this executor's presence through
+/// `beat`, naming the operation it drives first and the live queue depth, at a fixed cost.
 fn pass(
     repo: &Repo,
     binary: Option<&Binary>,
     notes: &mut Vec<Value>,
+    seen: Seen,
+    beat: &mut crate::presence::Beat,
 ) -> Result<Vec<Value>, String> {
     let _ = receipts::sync(repo);
     let refspec = format!("+{CHANGES_PREFIX}*:{CHANGES_PREFIX}*");
@@ -359,23 +399,27 @@ fn pass(
         .run(&["fetch", "-q", "--no-tags", repo.remote(), &refspec])
         .map_err(|error| error.message())?;
     let chain = Chain::new(&repo.git);
-    let names = repo
-        .git
-        .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
-        .map_err(|error| error.message())?;
+    let mut chains = chain.read_all().map_err(|error| error.message())?;
     // Queued changes go first, in queue order, so one pass carries the queue as far as it can:
     // when the head lands, the next entry is head by the time it is reached.
-    let queue = Queue::read(repo)?;
+    let queue = match seen.after {
+        Some(queue) => queue,
+        None => Queue::read(repo)?,
+    };
     let place = |id: &str| queue.of_change(id).map_or(u64::MAX, |entry| entry.seq);
-    let mut ids: Vec<&str> = names
-        .lines()
-        .map(|name| name.trim_start_matches(CHANGES_PREFIX))
-        .collect();
-    ids.sort_by_key(|id| place(id));
-    let records: Vec<ChangeRecord> = ids
+    chains.sort_by_key(|held| place(&held.id));
+    let records: Vec<ChangeRecord> = chains.iter().map(|held| held.record.clone()).collect();
+    let holding = records
         .iter()
-        .filter_map(|id| chain.read(id).ok().map(|(_, record)| record))
-        .collect();
+        .flat_map(|record| &record.operations)
+        .find(|op| !op.state.is_terminal() && op.state != OpState::Blocked)
+        .map(|op| op.op_id.as_str());
+    let depth = queue
+        .entries
+        .keys()
+        .filter(|seq| !queue.released.contains(seq))
+        .count();
+    beat.publish(repo, holding, depth);
     let mut ran = Vec::new();
     // An event a past run lost between the chain and the log is written now (G9), and a log
     // record whose push failed is pushed again.
@@ -386,6 +430,7 @@ fn pass(
     };
     crate::log::push(repo, &Keys::load(&repo.git).executor_name);
     notes.extend(early_conflicts(repo, &queue));
+    let due = publish::retention_due(repo, &chains);
     for record in &records {
         let id = record.id.as_str();
         let queued: Vec<String> = record
@@ -395,7 +440,9 @@ fn pass(
             .map(|op| op.op_id.clone())
             .collect();
         if queued.is_empty() {
-            if let Ok(Some(head)) = publish::retain(repo, id) {
+            if due.contains(id)
+                && let Ok(Some(head)) = publish::retain(repo, id)
+            {
                 ran.push(json!({"change": id, "retention_cut": head}));
             }
             continue;
@@ -424,19 +471,57 @@ fn pass(
             }));
         }
     }
-    ran.extend(compaction(repo, &chain, &ids));
+    ran.extend(
+        seen.before
+            .and_then(|before| queue_retention(repo, &before, &chains)),
+    );
+    ran.extend(compaction(repo, &chain));
     ran.extend(recovered.take());
+    // G244d: after the queue's work, never ahead of it, the culprit of a red post check.
+    if let Some(bisect) = crate::bisect::run(repo) {
+        ran.push(json!({"bisect": bisect}));
+    }
     Ok(ran)
+}
+
+/// The pass's queue retention (§ 10a): the (reservation, release) pairs below the head of the
+/// queue as this pass found it (`before`, read ahead of any release the pass made, so a place
+/// released in this pass stays for one pass more) whose operation the pass's chains show
+/// finished, released at least the retention window ago. `None` when nothing was removed; a
+/// failure is reported and the next pass tries again.
+fn queue_retention(repo: &Repo, before: &Queue, chains: &[HeldChain]) -> Option<Value> {
+    let records: HashMap<&str, &ChangeRecord> = chains
+        .iter()
+        .map(|held| (held.id.as_str(), &held.record))
+        .collect();
+    let finished = |entry: &crate::queue::Entry| {
+        records
+            .get(entry.change.as_str())
+            .is_some_and(|record| record.finished(&entry.op_id))
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    let cutoff = now.saturating_sub(repo.config.retention_window().as_secs());
+    let seqs = before.prunable(finished, cutoff);
+    if seqs.is_empty() {
+        return None;
+    }
+    match crate::queue::prune(repo, before, &seqs) {
+        Ok(pruned) if pruned.is_empty() => None,
+        Ok(pruned) => Some(json!({"queue_pruned": pruned})),
+        Err(error) => Some(json!({"queue_pruned": null, "error": error})),
+    }
 }
 
 /// The pass's marker compaction (§ 10a ref-growth budget, `crate::compact`), over the chains as
 /// this pass left them, so a change it just cut is compacted in the same pass. `None` when
 /// nothing moved; a failure is reported and the next pass tries again.
-fn compaction(repo: &Repo, chain: &Chain, ids: &[&str]) -> Option<Value> {
-    let records: Vec<ChangeRecord> = ids
-        .iter()
-        .filter_map(|id| chain.read(id).ok().map(|(_, record)| record))
-        .collect();
+fn compaction(repo: &Repo, chain: &Chain) -> Option<Value> {
+    let records: Vec<ChangeRecord> = match chain.read_all() {
+        Ok(chains) => chains.into_iter().map(|held| held.record).collect(),
+        Err(error) => return Some(json!({"compacted": null, "error": error.message()})),
+    };
     let signer = Keys::load(&repo.git).executor;
     match crate::compact::run(repo, signer.as_ref(), &records) {
         Ok(moved) if moved.is_empty() => None,

@@ -320,7 +320,8 @@ pub fn unserved(
     let mut missing: Vec<String> = policy
         .checks
         .iter()
-        .filter(|entry| policy.requires(entry, changed))
+        // G245: an approval runs on no worker; a person's record answers it.
+        .filter(|entry| policy.runs(entry, changed))
         .filter(|entry| !finished.contains(&CheckId::new(&entry.id, &entry.environment)))
         .filter(|entry| !served.serves(&entry.environment))
         .map(|entry| entry.environment.clone())
@@ -488,7 +489,7 @@ pub fn run_all(
     limits: &Limits,
     hooks: &mut Hooks,
 ) -> Result<Ran, String> {
-    let (budget, finished) = (limits.budget, limits.finished.as_slice());
+    let finished = limits.finished.as_slice();
     let sandbox = limits.sandbox.kind;
     // The execution budget runs on the monotonic clock from the start of the checks.
     let started = Instant::now();
@@ -496,101 +497,183 @@ pub fn run_all(
     for (index, entry) in policy.checks.iter().enumerate() {
         let id = CheckId::new(&entry.id, &entry.environment);
         // A quarantined check is not required (ruling 8c), a post-publication one runs after
-        // publication (G91), and one whose paths the candidate does not change is not required
-        // of it (G146): none of them runs here.
-        if finished.contains(&id) || !policy.requires(entry, candidate.changed_paths) {
+        // publication (G91), one whose paths the candidate does not change is not required
+        // of it (G146), and an approval is answered by a person's record, never run (G245):
+        // none of them runs here.
+        if finished.contains(&id) || !policy.runs(entry, candidate.changed_paths) {
             continue;
         }
-        let dir = work_dir.join(format!("check-{index}"));
-        let _ = std::fs::remove_dir_all(&dir);
-        let tree_dir = dir.join("candidate");
-        let adapter_dir = dir.join("adapter");
-        // R14: with no sandbox and no choice by the box, nothing of the check runs.
-        let not_run = match &limits.sandbox.refusal {
-            Some(why) => Some(Judged::without_units(
-                Verdict::InfraFailure,
-                Some(why.clone()),
-            )),
-            None => prepare(
+        // Flake-aware retry: a `product_failure` runs again on the identical tree, freshly
+        // materialized, up to `retry_on_failure` times, and stops at the first other answer.
+        // Every run is its own record, so a failure and a later pass combine to `flaky`.
+        for run in 0..=entry.retry_on_failure {
+            let (mut judged, ran) = run_once(
                 git,
-                entry,
-                candidate,
-                (&tree_dir, &adapter_dir),
-                budget.map(|budget| budget.saturating_sub(started.elapsed())),
-                (&mut *hooks.beat, limits.heartbeat),
-            )?,
-        };
-        let place = Place {
-            tree: &tree_dir,
-            adapter: &adapter_dir,
-            scratch: &dir,
-            hidden: &limits.hidden,
-            sandbox,
-        };
-        let remaining = budget.map(|budget| budget.saturating_sub(started.elapsed()));
-        let ran = Instant::now();
-        let judged = match not_run {
-            Some(judged) => judged,
-            None => within_budget(
-                hooks,
-                limits.heartbeat,
-                entry,
                 policy,
                 candidate,
-                &place,
-                remaining,
-            ),
-        };
-        make_writable(&dir);
-        let _ = std::fs::remove_dir_all(&dir);
-        if let Some(reason) = judged.unavailable {
-            return Ok(Ran {
-                records,
-                unavailable: Some((entry.environment.clone(), reason)),
-            });
-        }
-        let mut record = EvidenceRecord {
-            schema: EVIDENCE_SCHEMA.to_owned(),
-            id: format!("{producer}/{}-{}", candidate.id, index + 1),
-            kind: "check".to_owned(),
-            subject: Subject {
-                tree: candidate.tree.to_owned(),
-                commit: candidate.commit.to_owned(),
-                base_tree: candidate.base_tree.to_owned(),
-                unknown: serde_json::Map::new(),
-            },
-            inputs: EvidenceRecord::inputs_for(&entry.fixtures),
-            check: id,
-            policy_revision: policy.revision,
-            manifest_digest: policy.manifest_digest.clone(),
-            policy_provenance: Some(candidate.policy_provenance.as_str().to_owned()),
-            producer: Producer {
-                name: producer.to_owned(),
-                version: crate::version::BAY.to_owned(),
-                unknown: serde_json::Map::new(),
-            },
-            verdict: judged.verdict,
-            at: now_rfc3339(),
-            why: judged.why,
-            units: judged.units,
-            selection: judged.selection,
-            sandbox: Some(sandbox.to_owned()),
-            seconds: Some((ran.elapsed().as_secs_f64() * 1000.0).round() / 1000.0),
-            signature: None,
-            unknown: serde_json::Map::new(),
-        };
-        (hooks.keep)(&mut record)?;
-        records.push(record);
-        if std::env::var("BAY_TEST_KILL_AT")
-            .is_ok_and(|at| at == format!("after-check-{}", index + 1))
-        {
-            std::process::exit(137);
+                limits,
+                hooks,
+                (index, entry),
+                (work_dir, started),
+            )?;
+            if let Some(reason) = judged.unavailable.take() {
+                return Ok(Ran {
+                    records,
+                    unavailable: Some((entry.environment.clone(), reason)),
+                });
+            }
+            let mut record = evidence(
+                candidate,
+                producer,
+                policy,
+                (index, entry, run),
+                judged,
+                ran,
+                sandbox,
+            );
+            // NEW-10: a check with `footprint = true` stamps its read set, so a later candidate
+            // whose read set is the same can carry this record (`crate::throughput`).
+            if let Some(stamp) =
+                crate::throughput::stamp(git, entry, candidate.tree, candidate.base_tree)
+            {
+                record
+                    .unknown
+                    .insert(crate::throughput::FOOTPRINT.to_owned(), stamp);
+            }
+            let verdict = record.verdict;
+            (hooks.keep)(&mut record)?;
+            records.push(record);
+            if std::env::var("BAY_TEST_KILL_AT")
+                .is_ok_and(|at| at == format!("after-check-{}", index + 1))
+            {
+                std::process::exit(137);
+            }
+            if verdict != Verdict::ProductFailure {
+                break;
+            }
         }
     }
     Ok(Ran {
         records,
         unavailable: None,
     })
+}
+
+/// One run of the check `entry`, the `index`th of `policy`, on `candidate`: its tree and adapter
+/// freshly materialized under `work_dir` and removed after, within what is left of the budget
+/// since `started`. Returns the judgement and when the check itself started, after its
+/// materialization.
+///
+/// # Errors
+///
+/// The candidate or the adapter cannot be materialized (a fault of bay's own, not a verdict).
+fn run_once(
+    git: &Git,
+    policy: &Policy,
+    candidate: &Candidate,
+    limits: &Limits,
+    hooks: &mut Hooks,
+    (index, entry): (usize, &CheckEntry),
+    (work_dir, started): (&Path, Instant),
+) -> Result<(Judged, Instant), String> {
+    let budget = limits.budget;
+    let dir = work_dir.join(format!("check-{index}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let tree_dir = dir.join("candidate");
+    let adapter_dir = dir.join("adapter");
+    // R14: with no sandbox and no choice by the box, nothing of the check runs.
+    let not_run = match &limits.sandbox.refusal {
+        Some(why) => Some(Judged::without_units(
+            Verdict::InfraFailure,
+            Some(why.clone()),
+        )),
+        None => prepare(
+            git,
+            entry,
+            candidate,
+            (&tree_dir, &adapter_dir),
+            budget.map(|budget| budget.saturating_sub(started.elapsed())),
+            (&mut *hooks.beat, limits.heartbeat),
+        )?,
+    };
+    let place = Place {
+        tree: &tree_dir,
+        adapter: &adapter_dir,
+        scratch: &dir,
+        hidden: &limits.hidden,
+        sandbox: limits.sandbox.kind,
+    };
+    let remaining = budget.map(|budget| budget.saturating_sub(started.elapsed()));
+    let ran = Instant::now();
+    let judged = match not_run {
+        Some(judged) => judged,
+        None => within_budget(
+            hooks,
+            limits.heartbeat,
+            entry,
+            policy,
+            candidate,
+            &place,
+            remaining,
+        ),
+    };
+    make_writable(&dir);
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok((judged, ran))
+}
+
+/// The evidence record of run `run` of the check `entry`, the `index`th of `policy`, judged
+/// `judged` on `candidate` by `producer` in a run that started at `ran` under `sandbox`.
+fn evidence(
+    candidate: &Candidate,
+    producer: &str,
+    policy: &Policy,
+    (index, entry, run): (usize, &CheckEntry, u32),
+    judged: Judged,
+    ran: Instant,
+    sandbox: &str,
+) -> EvidenceRecord {
+    EvidenceRecord {
+        schema: EVIDENCE_SCHEMA.to_owned(),
+        id: run_id(producer, candidate.id, index, run),
+        kind: "check".to_owned(),
+        subject: Subject {
+            tree: candidate.tree.to_owned(),
+            commit: candidate.commit.to_owned(),
+            base_tree: candidate.base_tree.to_owned(),
+            unknown: serde_json::Map::new(),
+        },
+        inputs: EvidenceRecord::inputs_for(&entry.fixtures),
+        check: CheckId::new(&entry.id, &entry.environment),
+        policy_revision: policy.revision,
+        manifest_digest: policy.manifest_digest.clone(),
+        policy_provenance: Some(candidate.policy_provenance.as_str().to_owned()),
+        producer: Producer {
+            name: producer.to_owned(),
+            version: crate::version::BAY.to_owned(),
+            unknown: serde_json::Map::new(),
+        },
+        verdict: judged.verdict,
+        at: now_rfc3339(),
+        why: judged.why,
+        units: judged.units,
+        selection: judged.selection,
+        sandbox: Some(sandbox.to_owned()),
+        seconds: Some((ran.elapsed().as_secs_f64() * 1000.0).round() / 1000.0),
+        signature: None,
+        unknown: serde_json::Map::new(),
+    }
+}
+
+/// The evidence id of run `run` of the check at `index` of the policy on `candidate`: the first
+/// run keeps the id it always had, and each rerun after a `product_failure` gets its own, so no
+/// two runs share an id (G29) and every run stays on the tree.
+fn run_id(producer: &str, candidate: &str, index: usize, run: u32) -> String {
+    if run == 0 {
+        format!("{producer}/{candidate}-{}", index + 1)
+    } else {
+        format!("{producer}/{candidate}-{}-rerun-{run}", index + 1)
+    }
 }
 
 /// What a run calls back into: `keep` takes each record as soon as its check ends; `beat`
@@ -965,13 +1048,14 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
     // other combination is `unknown`.
     let declared = result.plan.selection.as_deref();
     if let Some(selection) = declared
-        && (selection != DECLARED_EMPTY || result.plan.selected > 0 || entry.expected_minimum > 0)
+        && (selection != DECLARED_EMPTY || result.plan.selected > 0 || entry.minimum() > 0)
     {
         return with(
             Verdict::Unknown,
             Some(format!(
                 "selection {selection} with {} selected under the policy's expected_minimum {}; {DECLARED_EMPTY} needs both at zero",
-                result.plan.selected, entry.expected_minimum
+                result.plan.selected,
+                entry.minimum()
             )),
             units,
         );
@@ -989,12 +1073,12 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
             units,
         );
     }
-    if collected < entry.expected_minimum {
+    if collected < entry.minimum() {
         return with(
             Verdict::Unknown,
             Some(format!(
                 "collected {collected} of the policy's expected_minimum {}",
-                entry.expected_minimum
+                entry.minimum()
             )),
             units,
         );

@@ -49,7 +49,7 @@ bay status                           # what every change is doing, what passed, 
 bay status --fleet                   # every machine and session on the repository
 bay watch                            # what changed that affects my work
 bay talk <agent> "<what>" …          # ask another agent for one change, decision or check
-bay undo c7k2m4                      # a new change that undoes one merge; history stays
+bay undo c7k2m4qa                    # a new change that undoes one merge; history stays
 ```
 
 bay's commands call main `trunk` and a checked merge a landing (`bay land`, `landed`). Every command
@@ -57,7 +57,7 @@ prints one JSON result on stdout. A refusal names its reason, what you can still
 when to retry. There is no prompt to answer.
 
 ```json
-{"schema":"bay.result/1","op_id":"c7k2m4.1","candidate":"c7k2m4.1.2","decision":"queued","state":"admitted","published":false,"waiting_for":"executor_capacity"}
+{"schema":"bay.result/1","op_id":"c7k2m4qa.1","candidate":"c7k2m4qa.1.2","decision":"queued","state":"admitted","published":false,"waiting_for":"executor_capacity"}
 ```
 
 bay is free for any team: no paid tier, no account, no sign-up. Version numbers are 0.x, so a minor

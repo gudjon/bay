@@ -31,7 +31,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::change::{CHANGES_PREFIX, Chain, ChangeState};
+use crate::change::{Chain, ChangeState};
 use crate::inputs::{ConsumerKind, InputState, Judgement, Probe};
 use crate::repo::Repo;
 use crate::result::Reason;
@@ -114,19 +114,14 @@ pub fn write(repo: &Repo, at: SystemTime) -> Result<(), String> {
         .git
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
         .map_err(|error| error.message())?;
-    let chain = Chain::new(&repo.git);
-    let ids = repo
-        .git
-        .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
+    // G200b: every chain is read in one batch, so a closed change costs no Git read of its
+    // own; a chain that cannot be read is left out.
+    let chains = Chain::new(&repo.git)
+        .read_all()
         .map_err(|error| error.message())?;
     let mut changes = Vec::new();
-    for id in ids
-        .lines()
-        .map(|name| name.trim_start_matches(CHANGES_PREFIX))
-    {
-        let Ok((_, record)) = chain.read(id) else {
-            continue;
-        };
+    for held in &chains {
+        let (id, record) = (held.id.as_str(), &held.record);
         // A change that is not live, or has landed, is listed with no input: its writes are
         // known to be uncovered, never a gap.
         if !live(record.state)
@@ -142,7 +137,7 @@ pub fn write(repo: &Repo, at: SystemTime) -> Result<(), String> {
         }
         let declared = crate::inputs::paths(&record.declared_inputs);
         // A view the user asked for may run a provider on a miss: this is not a hook.
-        let inputs = match crate::inputs::judge(repo, &record, &trunk, Probe::Run) {
+        let inputs = match crate::inputs::judge(repo, record, &trunk, Probe::Run) {
             Ok(judged) => judged
                 .iter()
                 .map(|judgement| input_of(judgement, &declared))

@@ -11,6 +11,7 @@ use std::process::Command as StdCommand;
 use assert_cmd::Command;
 use tempfile::TempDir;
 
+pub mod queued;
 pub mod relay;
 pub mod talk;
 

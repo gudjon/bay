@@ -3,7 +3,7 @@
 //! Git does not tell a hook which key pushed, so the hook judges a push by the signatures on
 //! what it adds. It runs as `pre-receive`, which sees every ref of the push at once and
 //! rejects the whole push on any refusal. It applies only on a host with a key registry;
-//! without one the host keeps just the append-only trunk (`host.rs`).
+//! without one the host keeps just the append-only trunk (`host.rs`) and the promotion targets.
 //!
 //! Judged here: bay ref names (the fixed alphabet), trunk publications, the landed marker,
 //! change chains (agent, executor and registry signatures; adoption; no deletion; the
@@ -11,6 +11,10 @@
 //! and releases, intent claims, the landed intent, live summary refs, talks (`crate::talk`), and
 //! marker compaction into the shard indexes (`crate::compact`): a compacted name is never created
 //! again, a marker is deleted only by its compaction, and a shard index only appends.
+//!
+//! A push that moves a promotion target (`[[target]]`, NEW-5) is judged on every bay host, with
+//! or without a registry (`targets`, `crate::target`): it is refused with `PROMOTION_REFUSED`
+//! unless the target moves to a promotable commit.
 //!
 //! An adopt of another actor's open change is judged by the host's own clock (ruling R1): the
 //! chain head's age is the age of its newest entry in the host reflog, and the last heartbeat
@@ -30,11 +34,24 @@ use crate::git::{Git, GitError};
 use crate::policy;
 use crate::registry::{KeyClass, REGISTRY_REF, Registry};
 use crate::signing;
+use crate::throughput;
 
 struct Update {
     old: String,
     new: String,
     name: String,
+}
+
+/// How [`Judge::publication`] judges a trunk commit's evidence (`crate::throughput`).
+#[derive(Debug, PartialEq, Eq)]
+enum Judged {
+    /// On its own tree, by the policy at its parent.
+    Parent,
+    /// A batch member before the last: the batch tip's evidence, judged in the same push.
+    InBatch,
+    /// A batch tip: on its own tree, by the policy at the batch's base (this commit), over
+    /// the batch's whole diff.
+    BatchBase(String),
 }
 
 fn is_zero(oid: &str) -> bool {
@@ -50,6 +67,11 @@ const LIVE_REFLOG_MAX: usize = 64;
 /// Whether `git ls-tree -l` of a live commit lists `live.json` alone, a blob of at most
 /// [`crate::live::LIVE_MAX_BYTES`].
 fn live_tree_is_small(tree: &str) -> bool {
+    one_small_file(tree, crate::live::LIVE_FILE, crate::live::LIVE_MAX_BYTES)
+}
+
+/// Whether `git ls-tree -l` of a commit lists `file` alone, a blob of at most `max` bytes.
+fn one_small_file(tree: &str, file: &str, max: u64) -> bool {
     let mut lines = tree.lines();
     let (Some(line), None) = (lines.next(), lines.next()) else {
         return false;
@@ -58,13 +80,11 @@ fn live_tree_is_small(tree: &str) -> bool {
         return false;
     };
     let fields: Vec<&str> = entry.split_whitespace().collect();
-    path == crate::live::LIVE_FILE
+    path == file
         && fields.len() == 4
         && fields[0] == "100644"
         && fields[1] == "blob"
-        && fields[3]
-            .parse::<u64>()
-            .is_ok_and(|size| size <= crate::live::LIVE_MAX_BYTES)
+        && fields[3].parse::<u64>().is_ok_and(|size| size <= max)
 }
 
 /// The deepest fan-out the hook looks for a note at: Git adds a level per 256-fold growth of a
@@ -119,9 +139,7 @@ fn strict(summaries: Vec<crate::live::SummaryRead>) -> Result<Vec<Option<Value>>
 ///
 /// The refusal, naming the ref and the rule.
 pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
-    let Some(registry) = Registry::current(git)? else {
-        return Ok(());
-    };
+    let registry = Registry::current(git)?;
     let updates: Vec<Update> = input
         .lines()
         .filter_map(|line| {
@@ -138,6 +156,12 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
         git.run(&["config", "--get", "bay.trunk"])
             .unwrap_or_else(|_| "main".to_owned())
     );
+    // NEW-5: a promotion target moves only to a promotable commit, on any bay host; without a
+    // registry its evidence counts unsigned, as everywhere else.
+    targets(git, &updates, &trunk, registry.as_ref())?;
+    let Some(registry) = registry else {
+        return Ok(());
+    };
     // § 10a: one push's compaction is bounded, so its judgement stays cheap.
     let compactions = updates
         .iter()
@@ -171,6 +195,7 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             .collect(),
         appended: RefCell::new(HashMap::new()),
         talk_creates: crate::talk::read_created(git, &talk_creates),
+        queue: std::cell::OnceCell::new(),
     };
     for update in &updates {
         let name = update.name.as_str();
@@ -207,6 +232,8 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             judge.landed_intent(update, claim, &trunk)
         } else if let Some(machine) = name.strip_prefix(crate::live::LIVE_PREFIX) {
             judge.live(update, machine)
+        } else if let Some(executor) = name.strip_prefix(crate::presence::PRESENCE_PREFIX) {
+            judge.presence(update, executor)
         } else if let Some(talk) = name.strip_prefix(crate::talk::TALK_PREFIX) {
             judge.talk(update, talk)
         } else {
@@ -215,6 +242,97 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
         verdict.map_err(|why| format!("{name}: {why}"))?;
     }
     Ok(())
+}
+
+/// NEW-5, NEW-9: each update of a `[[target]]` ref (read from the config at trunk's tip) moves
+/// it to a promotable commit (`crate::target`): never a deletion; a fast-forward, or a
+/// creation, to a commit on its source's first-parent line after this push, whose required
+/// checks pass, past its soak and outside a freeze unless its landing carries `Fixes:` or
+/// `Reverts:`. The `requires` and `soak_s` of the config at the target's current tip are added,
+/// so a promoted commit never weakens the criteria it is judged by. A push of no ref outside
+/// bay's namespaces and trunk reads no config.
+fn targets(
+    git: &Git,
+    updates: &[Update],
+    trunk: &str,
+    registry: Option<&Registry>,
+) -> Result<(), String> {
+    let other = |update: &&Update| {
+        update.name != trunk
+            && !update.name.starts_with(crate::names::BAY)
+            && !update.name.starts_with(crate::names::NOTES)
+    };
+    if !updates.iter().any(|update| other(&update)) {
+        return Ok(());
+    }
+    let Some(trunk_tip) = git.ref_target(trunk).map_err(|error| message(&error))? else {
+        return Ok(());
+    };
+    let config = crate::config::Config::at(git, &trunk_tip).map_err(|why| {
+        format!(
+            "the config at {trunk} cannot be read, so whether this push moves a promotion target is unknown: {why}"
+        )
+    })?;
+    if config.targets.is_empty() {
+        return Ok(());
+    }
+    let after = |name: &str| -> Result<Option<String>, String> {
+        if let Some(update) = updates.iter().find(|update| update.name == name) {
+            return Ok((!is_zero(&update.new)).then(|| update.new.clone()));
+        }
+        git.ref_target(name).map_err(|error| message(&error))
+    };
+    let now = crate::live::unix_now();
+    for update in updates.iter().filter(other) {
+        let Some(target) = config
+            .targets
+            .iter()
+            .find(|target| target.reference() == update.name)
+        else {
+            continue;
+        };
+        let refused = |why: String| format!("{}: {why}", update.name);
+        if is_zero(&update.new) {
+            return Err(refused(format!(
+                "{}: a promotion target is never deleted by a push",
+                crate::result::Reason::PromotionRefused.code()
+            )));
+        }
+        let old = (!is_zero(&update.old)).then_some(update.old.as_str());
+        let rule = crate::target::rule_at(git, &config, target, old).map_err(|why| {
+            refused(format!(
+                "the config at the target's tip cannot be read, so its criteria are unknown: {why}"
+            ))
+        })?;
+        let from_tip = after(&rule.from_ref)?;
+        let failed = crate::target::judge(
+            git,
+            &rule,
+            from_tip.as_deref(),
+            old,
+            &update.new,
+            registry,
+            now,
+        )
+        .map_err(refused)?;
+        if !failed.is_empty() {
+            return Err(refused(crate::target::refusal(&rule, &failed)));
+        }
+    }
+    Ok(())
+}
+
+/// NEW-4: a lane change runs its checks and never lands; the executor refuses it too, and this
+/// refuses a publication `commit` of one.
+fn never_a_lane(record: &crate::change::ChangeRecord, commit: &str) -> Result<(), String> {
+    match &record.lane {
+        Some(lane) => Err(format!(
+            "{}: {commit} publishes change {} of lane {lane}; a lane change never lands",
+            crate::result::Reason::LaneNeverLands.code(),
+            record.id
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Whether `record`'s change holds the intent claim `claim` (`<hash>/<generation>`).
@@ -237,6 +355,9 @@ struct Judge<'a> {
     /// Each shard index update's added records, read once per push.
     appended: RefCell<HashMap<String, Result<Appended, String>>>,
     talk_creates: Vec<crate::talk::Talk>,
+    /// The queue as the host holds it before this push, read once for every queue retention
+    /// it judges.
+    queue: std::cell::OnceCell<Result<crate::queue::Queue, String>>,
 }
 
 impl Judge<'_> {
@@ -488,8 +609,28 @@ impl Judge<'_> {
         if is_zero(&update.new) {
             return Ok(()); // the append-only update hook refuses it
         }
+        let range = if is_zero(&update.old) {
+            update.new.clone()
+        } else {
+            format!("{}..{}", update.old, update.new)
+        };
+        let listed = self
+            .git
+            .run(&["rev-list", "--reverse", &range])
+            .map_err(|error| message(&error))?;
+        let commits: Vec<&str> = listed.lines().collect();
+        // `crate::throughput`: a batch lands whole, its members in order, in this one push.
+        let tags = commits
+            .iter()
+            .map(|commit| self.trailer(commit, throughput::BATCH_TRAILER))
+            .collect::<Result<Vec<String>, String>>()?;
+        let tagged: Vec<Option<&str>> = tags
+            .iter()
+            .map(|tag| Some(tag.as_str()).filter(|tag| !tag.is_empty()))
+            .collect();
+        let roles = throughput::roles(&tagged)?;
         // § 6: while a reservation is live only the head publishes, releasing itself in the
-        // same transaction.
+        // same transaction. A batch the head leads lands its members with it.
         let queue = crate::queue::Queue::local(self.git)?;
         if let Some(head) = queue.head() {
             let release = format!("{}{}", crate::queue::DONE_PREFIX, head.seq);
@@ -497,7 +638,14 @@ impl Judge<'_> {
                 .updates
                 .iter()
                 .any(|other| other.name == release && is_zero(&other.old));
-            let change = self.trailer(&update.new, "Change-Id")?;
+            let leads = match roles.last() {
+                Some(throughput::Role::Tip { first }) => commits.get(*first).copied(),
+                _ => Some(update.new.as_str()),
+            };
+            let change = match leads {
+                Some(commit) => self.trailer(commit, "Change-Id")?,
+                None => String::new(),
+            };
             if !releases_head || head.change != change {
                 return Err(format!(
                     "QUEUE_HELD: the publication queue is held by {} (place {})",
@@ -505,17 +653,27 @@ impl Judge<'_> {
                 ));
             }
         }
-        let range = if is_zero(&update.old) {
-            update.new.clone()
-        } else {
-            format!("{}..{}", update.old, update.new)
-        };
-        let commits = self
-            .git
-            .run(&["rev-list", "--reverse", &range])
-            .map_err(|error| message(&error))?;
-        for commit in commits.lines() {
-            self.publication(commit)?;
+        for (commit, role) in commits.iter().zip(&roles) {
+            let judged = match role {
+                throughput::Role::Alone => Judged::Parent,
+                throughput::Role::Member => Judged::InBatch,
+                throughput::Role::Tip { first } => {
+                    let base = self
+                        .git
+                        .run(&["rev-parse", &format!("{}^1", commits[*first])])
+                        .map_err(|error| message(&error))?;
+                    if crate::config::Config::at(self.git, &base)?
+                        .batch()
+                        .is_none()
+                    {
+                        return Err(format!(
+                            "{commit} lands a batch, and the config at its base {base} sets no [executor] batch"
+                        ));
+                    }
+                    Judged::BatchBase(base)
+                }
+            };
+            self.publication(commit, &judged)?;
         }
         Ok(())
     }
@@ -534,9 +692,33 @@ impl Judge<'_> {
             .to_owned())
     }
 
+    /// The landed marker of `change` is created by this very push, at `commit`, and did not
+    /// exist before it.
+    fn creates_marker(&self, commit: &str, change: &str) -> Result<(), String> {
+        let marker = format!("{}{change}", crate::names::LANDED);
+        let creates = self
+            .updates
+            .iter()
+            .any(|update| update.name == marker && is_zero(&update.old) && update.new == commit);
+        if !creates {
+            return Err(format!("{commit} must create {marker} in the same push"));
+        }
+        if self
+            .git
+            .ref_target(&marker)
+            .map_err(|error| message(&error))?
+            .is_some()
+            || self.recorded(&marker)?.is_some()
+        {
+            return Err(format!("change {change} already landed"));
+        }
+        Ok(())
+    }
+
     /// One new trunk commit: an executor-signed publication of a verified, current request,
-    /// with passing producer-signed evidence and its landed marker created in this push.
-    fn publication(&self, commit: &str) -> Result<(), String> {
+    /// with passing producer-signed evidence, judged as `judged` says, and its landed marker
+    /// created in this push.
+    fn publication(&self, commit: &str, judged: &Judged) -> Result<(), String> {
         let change = self.trailer(commit, "Change-Id")?;
         let revision = self.trailer(commit, "Revision-Id")?;
         let registry_id = self.trailer(commit, "Registry-Id")?;
@@ -590,11 +772,12 @@ impl Judge<'_> {
                 "{commit} publishes a revision a newer request superseded"
             ));
         }
-        // The operation is not cancelled.
+        // The operation is not cancelled, and the change is of no lane.
         if let Some(head) = self.after(&format!("{}{change}", crate::names::CHANGES))? {
             let record = Chain::new(self.git)
                 .record_at(&head)
                 .map_err(|error| error.message())?;
+            never_a_lane(&record, commit)?;
             if record
                 .operations
                 .iter()
@@ -607,31 +790,22 @@ impl Judge<'_> {
                 return Err(format!("{commit} publishes a cancelled operation"));
             }
         }
-        // The landed marker is created by this very push, and did not exist.
-        let marker = format!("{}{change}", crate::names::LANDED);
-        let creates = self
-            .updates
-            .iter()
-            .any(|update| update.name == marker && is_zero(&update.old) && update.new == commit);
-        if !creates {
-            return Err(format!("{commit} must create {marker} in the same push"));
-        }
-        if self
-            .git
-            .ref_target(&marker)
-            .map_err(|error| message(&error))?
-            .is_some()
-            || self.recorded(&marker)?.is_some()
-        {
-            return Err(format!("change {change} already landed"));
+        self.creates_marker(commit, &change)?;
+        // `crate::throughput`: a policy repair is judged by its own policy, never in a batch.
+        if request.repair && *judged != Judged::Parent {
+            return Err(format!(
+                "{commit} is a policy repair, which never lands in a batch"
+            ));
         }
         // § 10a, G33: evidence counts only under the current registry. Evidence that passes
         // under the version C names but not under the current one rests on a producer key the
         // registry revoked since: that is `REGISTRY_CHANGED` too, and the executor rechecks.
-        let evidence = self.evidence_passes(commit, request.repair, self.registry);
+        let evidence = self.judged_evidence(commit, request.repair, self.registry, judged);
         let producer_revoked = evidence.is_err()
             && named.commit != self.registry.commit
-            && self.evidence_passes(commit, request.repair, &named).is_ok();
+            && self
+                .judged_evidence(commit, request.repair, &named, judged)
+                .is_ok();
         // Refused for a reason of its own, or accepted: never `REGISTRY_CHANGED`.
         if !producer_revoked && (evidence.is_err() || !key_revoked) {
             return evidence;
@@ -647,18 +821,41 @@ impl Judge<'_> {
         ))
     }
 
+    /// [`Judge::evidence_passes`] as `judged` says (`crate::throughput`): a batch member before
+    /// the last stands on the batch tip's evidence, which the push holds; the tip is judged at
+    /// the batch's base.
+    fn judged_evidence(
+        &self,
+        commit: &str,
+        repair: bool,
+        registry: &Registry,
+        judged: &Judged,
+    ) -> Result<(), String> {
+        match judged {
+            Judged::Parent => self.evidence_passes(commit, repair, registry, None),
+            Judged::InBatch => Ok(()),
+            Judged::BatchBase(base) => {
+                self.evidence_passes(commit, repair, registry, Some(base.as_str()))
+            }
+        }
+    }
+
     /// The producer-signed evidence on the commit's tree, counted under `registry`, passes the
-    /// policy at its parent (or, for a registry-signed repair, the candidate's own policy).
+    /// policy at its parent (or, for a registry-signed repair, the candidate's own policy), for
+    /// the checks its diff against its parent requires. With `base`, a batch tip's, it is judged
+    /// at the batch's base instead, over the batch's whole diff (`crate::throughput`).
     fn evidence_passes(
         &self,
         commit: &str,
         repair: bool,
         registry: &Registry,
+        base: Option<&str>,
     ) -> Result<(), String> {
+        let parent = base.map_or_else(|| format!("{commit}^1"), str::to_owned);
         let judged_by = if repair {
             commit.to_owned()
         } else {
-            format!("{commit}^1")
+            parent.clone()
         };
         // The missing-policy ruling: no policy where the publication is judged is unknown
         // criteria, never a pass. An unchecked policy has an empty manifest, so it needs no
@@ -680,15 +877,10 @@ impl Judge<'_> {
             Some(registry),
         )?);
         // G146: the checks the commit's own diff against its parent requires, as land judged.
-        let changed = crate::check::changed_paths(self.git, &format!("{commit}^1"), commit)?;
+        let changed = crate::check::changed_paths(self.git, &parent, commit)?;
         let (required, _) = policy.required(&changed);
-        let gaps = evidence::aggregate(
-            &records,
-            &required,
-            &policy.manifest_digest,
-            &|id| policy.commit_keyed(id),
-            commit,
-        );
+        // The executor's rule: a flaky check whose entry says `allow_flaky` is no gap.
+        let gaps = policy.gaps(&records, &required, commit);
         if gaps.is_empty() {
             Ok(())
         } else {
@@ -823,10 +1015,17 @@ impl Judge<'_> {
                 .git
                 .run(&["rev-parse", "--verify", "-q", &format!("{commit}^1")])
                 .ok();
-            let before = parent
+            let previous = parent
                 .as_deref()
-                .and_then(|parent| chain.record_at(parent).ok())
-                .filter(|before| before.actor.name != record.actor.name);
+                .and_then(|parent| chain.record_at(parent).ok());
+            // NEW-4: the lane a change was started in is never changed, so no append can turn a
+            // lane change into one that lands.
+            if let Some(previous) = &previous
+                && previous.lane != record.lane
+            {
+                return Err(format!("{commit} changes the lane of change {id}"));
+            }
+            let before = previous.filter(|before| before.actor.name != record.actor.name);
             if let Some(before) = &before {
                 if self
                     .marker(&format!("{}{id}", crate::names::LANDED))?
@@ -1078,6 +1277,64 @@ impl Judge<'_> {
         Ok(())
     }
 
+    /// G67: an executor's presence ref (`crate::presence`): never deleted; one parentless
+    /// commit whose tree is `presence.json` alone, at most
+    /// [`crate::presence::PRESENCE_MAX_BYTES`], a `bay.executor/1` record naming the executor
+    /// the ref is named for and signed by that executor's key, so no executor speaks for another.
+    fn presence(&self, update: &Update, executor: &str) -> Result<(), String> {
+        if is_zero(&update.new) {
+            return Err("an executor presence ref is never deleted".to_owned());
+        }
+        match self.signer(&update.new, &[KeyClass::Executor])? {
+            Some((_, principal)) if principal == executor => {}
+            _ => {
+                return Err(format!(
+                    "{} is not signed by executor {executor}",
+                    update.new
+                ));
+            }
+        }
+        let parents = self
+            .git
+            .run(&["show", "-s", "--format=%P", &update.new])
+            .map_err(|error| message(&error))?;
+        if !parents.trim().is_empty() {
+            return Err(format!(
+                "{} is not a parentless presence commit",
+                update.new
+            ));
+        }
+        let tree = self
+            .git
+            .run(&["ls-tree", "-l", &update.new])
+            .map_err(|error| message(&error))?;
+        if !one_small_file(
+            &tree,
+            crate::presence::PRESENCE_FILE,
+            crate::presence::PRESENCE_MAX_BYTES,
+        ) {
+            return Err(format!(
+                "{} must hold {} alone, at most {} bytes",
+                update.new,
+                crate::presence::PRESENCE_FILE,
+                crate::presence::PRESENCE_MAX_BYTES
+            ));
+        }
+        let record = crate::presence::record_at(self.git, &update.new)?
+            .filter(|record| record["schema"] == crate::presence::PRESENCE_SCHEMA)
+            .ok_or_else(|| {
+                format!(
+                    "{} holds no {}",
+                    update.new,
+                    crate::presence::PRESENCE_SCHEMA
+                )
+            })?;
+        if record["executor"] != executor {
+            return Err(format!("{} names another executor", update.new));
+        }
+        Ok(())
+    }
+
     /// A talk chain (`crate::talk::judge`).
     fn talk(&self, update: &Update, talk: &str) -> Result<(), String> {
         let (who, id) = talk
@@ -1231,18 +1488,20 @@ impl Judge<'_> {
                         record.id, record.subject.tree
                     ));
                 }
-                // Q12: the record's kind names the one class file it verifies against, so a
-                // reviewer key writes only `review` records and a producer key never does.
+                // Q12, G245: the record's kind names the one class file it verifies against, so
+                // a reviewer key writes only `review` records, an approver key only `approval`
+                // records, and a producer key neither.
                 if !record.verifies_in(self.git, self.registry)? {
-                    let class = evidence::signer_class(&record.kind).file();
+                    let class = evidence::signer_class(&record.kind);
+                    let file = class.file();
                     return Err(format!(
-                        "record {} of kind {} is not signed by {class} {producer}'s key; a {class} key signs {}",
+                        "record {} of kind {} is not signed by {file} {producer}'s key; a {file} key signs {}",
                         record.id,
                         record.kind,
-                        if class == "reviewer" {
-                            "only review records"
-                        } else {
-                            "every kind but review"
+                        match class {
+                            KeyClass::Reviewer => "only review records",
+                            KeyClass::Approver => "only approval records",
+                            _ => "every kind but review and approval",
                         }
                     ));
                 }
@@ -1354,7 +1613,7 @@ impl Judge<'_> {
             .parse()
             .map_err(|_| "a queue number is decimal".to_owned())?;
         if is_zero(&update.new) {
-            return Err("a reservation is removed only with its release, by retention".to_owned());
+            return self.queue_retention(update, seq);
         }
         if !matches!(
             self.signer(&update.new, &[KeyClass::Executor])?,
@@ -1478,10 +1737,11 @@ impl Judge<'_> {
         if !is_zero(&update.old) {
             return Err("this generation of the intent already landed".to_owned());
         }
-        let with_trunk = self
-            .by_name
-            .get(trunk)
-            .is_some_and(|other| other.new == update.new);
+        // `crate::throughput`: a batch member's marker names its own commit, which the trunk
+        // update lands as part of its whole batch (`Judge::trunk` judges the batch).
+        let with_trunk = self.by_name.get(trunk).is_some_and(|other| {
+            other.new == update.new || self.lands_in_batch(&update.new, other).unwrap_or(false)
+        });
         if !with_trunk {
             return Err("is created only together with the trunk update that lands it".to_owned());
         }
@@ -1500,8 +1760,28 @@ impl Judge<'_> {
         Ok(())
     }
 
+    /// Whether `commit` carries a `Bay-Batch` trailer and the trunk update `trunk` lands it:
+    /// it is new on trunk with this push.
+    fn lands_in_batch(&self, commit: &str, trunk: &Update) -> Result<bool, String> {
+        if self.trailer(commit, throughput::BATCH_TRAILER)?.is_empty() {
+            return Ok(false);
+        }
+        let ancestor = |of: &str| {
+            self.git
+                .run(&["merge-base", "--is-ancestor", commit, of])
+                .is_ok()
+        };
+        Ok(ancestor(&trunk.new) && (is_zero(&trunk.old) || !ancestor(&trunk.old)))
+    }
+
     /// A release: created once, executor-signed, for a reservation that exists.
     fn queue_release(&self, update: &Update, seq: &str) -> Result<(), String> {
+        if !is_zero(&update.old) && is_zero(&update.new) {
+            let seq: u64 = seq
+                .parse()
+                .map_err(|_| "a queue number is decimal".to_owned())?;
+            return self.queue_retention(update, seq);
+        }
         if !is_zero(&update.old) || is_zero(&update.new) {
             return Err("a release is created once and never moved".to_owned());
         }
@@ -1514,6 +1794,73 @@ impl Judge<'_> {
         let reserved = format!("{}{seq}", crate::queue::QUEUE_PREFIX);
         if self.after(&reserved)?.is_none() {
             return Err("releases no reservation".to_owned());
+        }
+        Ok(())
+    }
+
+    /// § 10a queue retention: a queue ref is removed only with its partner, as one whole
+    /// (reservation, release) pair, below the head, never the highest pair, and only when the
+    /// operation the reservation names is finished in its change chain (terminal, or gone from
+    /// a chain the retention cut closed), so no place a later judgement counts is lost. One
+    /// push removes at most [`crate::queue::PRUNE_MAX`] pairs.
+    fn queue_retention(&self, update: &Update, seq: u64) -> Result<(), String> {
+        use crate::queue::{DONE_PREFIX, PRUNE_MAX, QUEUE_PREFIX};
+        let removed = |name: &str| {
+            self.by_name
+                .get(name)
+                .is_some_and(|other| is_zero(&other.new) && !is_zero(&other.old))
+        };
+        let pair = |seq: u64| {
+            removed(&format!("{QUEUE_PREFIX}{seq}")) && removed(&format!("{DONE_PREFIX}{seq}"))
+        };
+        if is_zero(&update.old) || !pair(seq) {
+            return Err(
+                "a queue ref is removed only with its partner, as one (reservation, release) pair, by retention"
+                    .to_owned(),
+            );
+        }
+        let removing = self
+            .updates
+            .iter()
+            .filter(|other| other.name.starts_with(QUEUE_PREFIX) && is_zero(&other.new))
+            .count();
+        if removing > PRUNE_MAX {
+            return Err(format!(
+                "a push removes at most {PRUNE_MAX} queue pairs; this one removes {removing}"
+            ));
+        }
+        let queue = self
+            .queue
+            .get_or_init(|| crate::queue::Queue::local(self.git))
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let entry = queue
+            .entries
+            .get(&seq)
+            .filter(|_| queue.released.contains(&seq))
+            .ok_or("retention removes only a released reservation")?;
+        if queue.head().is_some_and(|head| head.seq < seq) {
+            return Err("retention removes only pairs below the queue's head".to_owned());
+        }
+        let kept_above = queue
+            .entries
+            .keys()
+            .any(|above| *above > seq && queue.released.contains(above) && !pair(*above));
+        if !kept_above {
+            return Err("retention always keeps the highest queue pair".to_owned());
+        }
+        let (_, record) = Chain::new(self.git).read(&entry.change).map_err(|error| {
+            format!(
+                "the chain of {} cannot be read: {}",
+                entry.change,
+                error.message()
+            )
+        })?;
+        if !record.finished(&entry.op_id) {
+            return Err(format!(
+                "retention removes only the places of a finished operation; {} is not",
+                entry.op_id
+            ));
         }
         Ok(())
     }

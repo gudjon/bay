@@ -19,12 +19,18 @@ pub const RECORD_SCHEMA: &str = "bay.change/1";
 /// major version it does not know). A bay that cannot read `{"input": …}` entries refuses such
 /// a record, instead of rewriting it without its `observed_versions` and `validated_candidate`.
 pub const RECORD_SCHEMA_INPUTS: &str = "bay.change/2";
+/// The schema of a lane change's record (NEW-4), named inputs or not. A bay that does not know
+/// lanes refuses such a record, so it never runs a lane change as one that lands.
+pub const RECORD_SCHEMA_LANE: &str = "bay.change/3";
 
-/// The schema `record` is written under: [`RECORD_SCHEMA_INPUTS`] when it declares a named
-/// input, else [`RECORD_SCHEMA`], so a record without one stays readable by every bay.
+/// The schema `record` is written under: [`RECORD_SCHEMA_LANE`] for a lane change,
+/// [`RECORD_SCHEMA_INPUTS`] when it declares a named input, else [`RECORD_SCHEMA`], so a record
+/// without either stays readable by every bay.
 #[must_use]
 pub fn schema_for(record: &ChangeRecord) -> &'static str {
-    if crate::inputs::names(&record.declared_inputs).is_empty() {
+    if record.lane.is_some() {
+        RECORD_SCHEMA_LANE
+    } else if crate::inputs::names(&record.declared_inputs).is_empty() {
         RECORD_SCHEMA
     } else {
         RECORD_SCHEMA_INPUTS
@@ -240,6 +246,23 @@ pub struct ChangeRecord {
     /// Outcome receipts synchronized from the machines that wrote them (§ 9).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub receipts: Vec<crate::receipts::Receipt>,
+    /// The sandbox lane this change was started in (`bay start --lane`, NEW-4): its checks run,
+    /// and it never lands. Written once at start, never changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+}
+
+impl ChangeRecord {
+    /// Whether operation `op_id` is finished for good: terminal, or gone from a chain the
+    /// retention cut closed (§ 5), so it is never run or counted again. A blocked operation
+    /// may still be repaired, so it is not.
+    #[must_use]
+    pub fn finished(&self, op_id: &str) -> bool {
+        self.operations
+            .iter()
+            .find(|op| op.op_id == op_id)
+            .map_or(self.retention_cut, |op| op.state.is_terminal())
+    }
 }
 
 /// Operation states (`DESIGN` § 9a).
@@ -340,6 +363,28 @@ pub struct Operation {
     /// place; its own merge, once it is head, still decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub early_conflict: Option<EarlyConflict>,
+    /// NEW-2, NEW-10: the checks an executor that was not running this operation made of it
+    /// while it waited behind the queue's head (`crate::throughput`), newest last, at most
+    /// `throughput::PRECHECKS_KEPT`. Their records count only through reuse.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prechecks: Vec<Precheck>,
+    /// Batching (`crate::throughput`): the batch whose bisection found this operation the first
+    /// member that fails. It then runs alone when it is head, judged by its own candidate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch_culprit: Option<String>,
+}
+
+/// One pre-check of a queued operation (`crate::throughput`): the base it was checked on (a
+/// predicted commit or the trunk tip, never published), its tree, the merged tree and the
+/// verdict. Nothing about it is an attempt: it is never published.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Precheck {
+    pub base: String,
+    pub base_tree: String,
+    pub tree: String,
+    pub verdict: String,
+    /// When it was recorded, in Unix milliseconds.
+    pub at_ms: u64,
 }
 
 /// A conflict between a queued operation's revision and trunk, found before it is head (G177).
@@ -381,6 +426,23 @@ pub struct Attempt {
     /// The epoch the candidate was built under; only the current epoch may publish it.
     #[serde(default)]
     pub epoch: u64,
+    /// Set when the candidate lands as a member of a batch (`crate::throughput`): its own tree
+    /// was not checked alone, and its evidence is the batch tip's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<BatchMember>,
+}
+
+/// A batch member's attempt (`crate::throughput`): the batch, the member's place in it, and
+/// what was checked: the tip's candidate and tree, on the batch's base, the trunk commit its
+/// first member was merged onto.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchMember {
+    pub id: String,
+    pub position: usize,
+    pub size: usize,
+    pub tip: String,
+    pub tree: String,
+    pub base: String,
 }
 
 #[derive(Debug)]
@@ -422,6 +484,42 @@ impl ChainError {
 #[must_use]
 pub fn change_ref(id: &str) -> String {
     format!("{CHANGES_PREFIX}{id}")
+}
+
+/// The record a state commit carries, from the text of its record file.
+///
+/// # Errors
+///
+/// A record that does not parse, or one whose schema does not match its fields.
+fn parse_record(text: &str) -> Result<ChangeRecord, ChainError> {
+    let record: ChangeRecord =
+        serde_json::from_str(text).map_err(|error| ChainError::BadRecord(error.to_string()))?;
+    if record.schema != schema_for(&record) {
+        let holds = if record.lane.is_some() {
+            "of a lane change"
+        } else if schema_for(&record) == RECORD_SCHEMA {
+            "without named inputs"
+        } else {
+            "with named inputs"
+        };
+        return Err(ChainError::BadRecord(format!(
+            "schema {} for a record {holds}",
+            record.schema
+        )));
+    }
+    Ok(record)
+}
+
+/// One chain as [`Chain::read_all`] found it.
+#[derive(Clone, Debug)]
+pub struct HeldChain {
+    /// The change id its ref names.
+    pub id: String,
+    /// The chain head.
+    pub head: String,
+    /// The head's committer time, in Unix seconds (0 when Git gave none).
+    pub committed: u64,
+    pub record: ChangeRecord,
 }
 
 /// Operations on change chains in one repository.
@@ -550,20 +648,57 @@ impl<'a> Chain<'a> {
         let text = self
             .git
             .run(&["cat-file", "blob", &format!("{state}:{RECORD_FILE}")])?;
-        let record: ChangeRecord = serde_json::from_str(&text)
-            .map_err(|error| ChainError::BadRecord(error.to_string()))?;
-        if record.schema != schema_for(&record) {
-            return Err(ChainError::BadRecord(format!(
-                "schema {} for a record {} named inputs",
-                record.schema,
-                if schema_for(&record) == RECORD_SCHEMA {
-                    "without"
-                } else {
-                    "with"
-                }
-            )));
-        }
-        Ok(record)
+        parse_record(&text)
+    }
+
+    /// G200b: every chain this repository holds, in ref order, read by one `for-each-ref` and
+    /// one `git cat-file --batch` of their records, however many chains there are. A record
+    /// the batch cannot give is read by [`Chain::read`] on its own, and a chain that cannot be
+    /// read is left out, as a caller of [`Chain::read`] per chain would skip it.
+    ///
+    /// # Errors
+    ///
+    /// A git fault listing the chains or reading the batch.
+    pub fn read_all(&self) -> Result<Vec<HeldChain>, ChainError> {
+        let listed = self.git.run(&[
+            "for-each-ref",
+            "--format=%(objectname) %(committerdate:unix) %(refname)",
+            CHANGES_PREFIX,
+        ])?;
+        let heads: Vec<(String, u64, String)> = listed
+            .lines()
+            .filter_map(|line| {
+                let mut words = line.splitn(3, ' ');
+                let head = words.next()?.to_owned();
+                let committed: u64 = words.next()?.parse().unwrap_or(0);
+                let id = words.next()?.strip_prefix(CHANGES_PREFIX)?.to_owned();
+                Some((head, committed, id))
+            })
+            .collect();
+        let names: Vec<String> = heads
+            .iter()
+            .map(|(head, _, _)| format!("{head}:{RECORD_FILE}"))
+            .collect();
+        let texts = self.git.objects(&names)?;
+        Ok(heads
+            .into_iter()
+            .zip(texts)
+            .filter_map(|((head, committed, id), text)| {
+                let parsed = text
+                    .and_then(|text| String::from_utf8(text).ok())
+                    .and_then(|text| parse_record(&text).ok());
+                let (head, record) = match parsed {
+                    Some(record) => (head, record),
+                    None => self.read(&id).ok()?,
+                };
+                Some(HeldChain {
+                    id,
+                    head,
+                    committed,
+                    record,
+                })
+            })
+            .collect())
     }
 
     /// Every draft the chain links, newest first.

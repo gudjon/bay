@@ -12,7 +12,8 @@
 //! After a fetch it accepts and acks this actor's talks ([`crate::talk::receive`], § 11c), and
 //! says so in `detail.talk_accept`. Trunk commits that did not land through bay (merges and
 //! pushes outside it) are named and counted under `detail.unattributed`
-//! ([`crate::unattributed`], G85).
+//! ([`crate::unattributed`], G85). With operations queued and no fresh executor presence on
+//! record (`crate::presence`, G67), `detail.warnings` names `no_live_executor`.
 
 use std::path::Path;
 
@@ -171,6 +172,10 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     let _ = receipts::sync(&repo);
     let pending = receipts::pending(&repo);
     let (trunk, fetched_at) = synchronize(&repo)?;
+    // NEW-4: the lane refs an unattributed landing is judged against, as the remote holds them.
+    if fetched_at.is_some() {
+        crate::lane::fetch(&repo);
+    }
     // § 11c: a fetching command on the recipient's machine accepts and acks its talks.
     let talk_accept = fetched_at
         .is_some()
@@ -196,8 +201,14 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         ask_runtime: ids.len() == 1 && (change.is_some() || repo.view_change(dir).is_some()),
     };
     let mut changes = Vec::new();
+    let mut queued = 0;
     for id in &ids {
         let (_, record) = chain.read(id).map_err(|error| error.message())?;
+        queued += record
+            .operations
+            .iter()
+            .filter(|op| !op.state.is_terminal() && op.state != crate::change::OpState::Blocked)
+            .count();
         let unsynced: Vec<&Receipt> = pending
             .iter()
             .map(|(_, receipt)| receipt)
@@ -207,17 +218,27 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     }
     let leftovers = leftovers(&repo, &trunk)?;
     let quarantines = quarantines(&repo, &trunk);
+    let flakes = flake_rows(&repo, &trunk, &read);
+    let (red_rows_now, red_pending) = red_rows(&repo, &trunk);
+    let targets = target_rows(&repo, &trunk, fetched_at.is_some(), &read);
     let mut result = BayResult::ok(json!({
         "changes": changes,
+        "flakes": flakes,
         "leftovers": leftovers,
         "quarantines": quarantines,
-        "red": red_rows(&repo, &trunk),
+        "red": red_rows_now,
+        "red_pending": red_pending,
         "talks": talk_rows(&repo),
+        "targets": targets,
         "trunk": trunk,
         "unattributed": unattributed_rows(&repo, &trunk),
     }));
     if let (Some(detail), Some(accept)) = (result.detail.as_mut(), talk_accept) {
         detail["talk_accept"] = accept;
+    }
+    if let (Some(detail), Some(warning)) = (result.detail.as_mut(), no_live_executor(&repo, queued))
+    {
+        detail["warnings"] = json!([warning]);
     }
     if let [only] = ids.as_slice() {
         result = result.with_change(only.clone());
@@ -227,6 +248,43 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         fetched_at: fetched_at.unwrap_or_else(|| "not fetched (remote unreachable)".to_owned()),
     });
     Ok(result)
+}
+
+/// G67: operations are queued and no executor presence on record is fresh. The warning says how
+/// many operations wait, the presences the last fleet fetch recorded, and the age of the
+/// freshest readable one (`seen_s`, `null` when none was seen). Never a refusal: the operations
+/// stay queued and land when an executor comes. `None` with nothing queued or a fresh presence.
+fn no_live_executor(repo: &Repo, queued: usize) -> Option<Value> {
+    if queued == 0 {
+        return None;
+    }
+    let (executors, seen_s) = match crate::fleet::executors(repo) {
+        Ok(Some(rows)) => {
+            if crate::presence::any_fresh(&rows) {
+                return None;
+            }
+            let seen = rows
+                .iter()
+                .filter(|row| row["readable"] == true)
+                .filter_map(|row| row["age_s"].as_u64())
+                .min();
+            (Value::from(rows), seen)
+        }
+        Ok(None) => (json!([]), None),
+        Err(why) => (json!({"unread": why}), None),
+    };
+    let executor = seen_s.map_or_else(
+        || "none seen".to_owned(),
+        |seen| format!("none seen for {seen}s"),
+    );
+    Some(json!({
+        "code": "no_live_executor",
+        "queued": queued,
+        "executor": executor,
+        "seen_s": seen_s,
+        "executors": executors,
+        "note": "operations are queued and no executor presence is fresh: they stay queued and land once an executor runs (bay executor run)",
+    }))
 }
 
 /// G47: the open talks this actor sent or must answer, each with who owes the reply, its ages
@@ -245,24 +303,173 @@ fn unattributed_rows(repo: &Repo, trunk: &str) -> Value {
     crate::unattributed::scan(&repo.git, trunk).unwrap_or_else(|why| json!({"unread": why}))
 }
 
-/// G244: the post checks trunk is red on, each owned by the landing that broke it. A judgement
-/// bay cannot make (a policy or registry it cannot read, G104b) lists none and says why: an
-/// unread trunk is never read as not red.
-fn red_rows(repo: &Repo, trunk: &str) -> Value {
+/// NEW-5: one row per promotion target (`crate::target::rows`), after a fetch of the remote's
+/// target refs and, when a target requires checks, of the other producers' evidence. Offline,
+/// the rows are read from the copies of the last fetch, and say so. A judgement bay cannot make
+/// says why under `unread`, never reads as promotable.
+fn target_rows(repo: &Repo, trunk: &str, fetched: bool, read: &Read) -> Value {
+    if repo.config.targets.is_empty() {
+        return json!([]);
+    }
+    let fetched = fetched && crate::target::fetch(repo);
+    if fetched
+        && repo
+            .config
+            .targets
+            .iter()
+            .any(|target| !target.requires.is_empty())
+    {
+        repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
+    }
+    // An unreadable registry never reads as none: evidence would then count unsigned.
+    let current;
+    let registry = match read {
+        Read::Full { registry, .. } => registry.as_ref(),
+        Read::Cached => match crate::registry::Registry::current(&repo.git) {
+            Ok(registry) => {
+                current = registry;
+                current.as_ref()
+            }
+            Err(why) => return json!({"unread": why}),
+        },
+    };
+    match crate::target::rows(
+        &repo.git,
+        &repo.config,
+        trunk,
+        registry,
+        crate::live::unix_now(),
+    ) {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|mut row| {
+                row["fetched"] = json!(fetched);
+                row
+            })
+            .collect(),
+        Err(why) => json!({"unread": why}),
+    }
+}
+
+/// G244: the post checks trunk is red on, each owned by the landing that broke it and naming
+/// its suspect range; and (NEW-6) those no landing in the window answers, `red_pending`, never
+/// clear. A judgement bay cannot make (a policy, config or registry it cannot read, G104b)
+/// lists none in either and says why: an unread trunk is never read as not red.
+fn red_rows(repo: &Repo, trunk: &str) -> (Value, Value) {
     crate::registry::Registry::current(&repo.git)
-        .and_then(|registry| crate::red::red(&repo.git, trunk, registry.as_ref()))
+        .and_then(|registry| crate::red::state(&repo.git, trunk, registry.as_ref()))
         .map_or_else(
-            |why| json!({"unread": why}),
-            |reds| reds.iter().map(crate::red::Red::to_json).collect(),
+            |why| (json!({"unread": why}), json!({"unread": why})),
+            |judgement| judgement.to_json(),
         )
 }
 
 /// The open quarantines of the policy at trunk (ruling 8c), so a set-aside check is never
-/// silent. One past its end date stays in force and is shown as `overdue`. An invalid policy
+/// silent: each with its `owner`, its age in days from `since`, and whether it is `overdue`.
+/// One past its end date stays in force and is shown as `overdue` (`DESIGN` § 7: an end never
+/// changes a judgement by itself; the policy change that removes the entry does). An invalid policy
 /// lists none here; `land` names it with `POLICY_INVALID`. A policy bay cannot read (G104b)
 /// lists none and says why: an unread policy is never read as no quarantine.
 fn quarantines(repo: &Repo, trunk: &str) -> Value {
     open_quarantines(&repo.git, trunk).map_or_else(|why| json!({"unread": why}), Value::from)
+}
+
+/// Per required check of the policy at trunk, how many of the newest first-parent landings
+/// (the `[red] window`) carry runs of it that combine to `flaky`, read from the evidence
+/// already in this clone: a check that flakes is seen before anyone quarantines it. Each row
+/// names `landings`, how many were read, and the check's `retry_on_failure` and
+/// `allow_flaky`. A policy, config or registry bay cannot read lists none and says why.
+fn flake_rows(repo: &Repo, trunk: &str, read: &Read) -> Value {
+    // An unreadable registry never reads as none: evidence would then count unsigned.
+    let current;
+    let registry = match read {
+        Read::Full { registry, .. } => registry.as_ref(),
+        Read::Cached => match crate::registry::Registry::current(&repo.git) {
+            Ok(registry) => {
+                current = registry;
+                current.as_ref()
+            }
+            Err(why) => return json!({"unread": why}),
+        },
+    };
+    flakes(&repo.git, trunk, registry).map_or_else(|why| json!({"unread": why}), Value::from)
+}
+
+/// The rows of [`flake_rows`].
+///
+/// # Errors
+///
+/// The policy or the config at `trunk` cannot be read (G104b), a note is unreadable, or a git
+/// fault.
+fn flakes(
+    git: &crate::git::Git,
+    trunk: &str,
+    registry: Option<&crate::registry::Registry>,
+) -> Result<Vec<Value>, String> {
+    let policy = match crate::policy::load_at(git, trunk) {
+        Ok(Some(policy)) => policy,
+        Ok(None) | Err(crate::policy::LoadError::Invalid(_)) => return Ok(Vec::new()),
+        Err(crate::policy::LoadError::Git(why)) => return Err(why),
+    };
+    if policy.manifest.is_empty() {
+        return Ok(Vec::new());
+    }
+    let window = crate::red::window(git, trunk)?.to_string();
+    let landings = git
+        .run(&[
+            "log",
+            "--first-parent",
+            "-n",
+            &window,
+            "--format=%H %T",
+            trunk,
+        ])
+        .map_err(|error| error.message())?;
+    let mut counts = vec![0_u64; policy.manifest.len()];
+    let mut read = 0_u64;
+    for (commit, tree) in landings.lines().filter_map(|line| line.split_once(' ')) {
+        read += 1;
+        let records = policy.answering(evidence::counted(
+            git,
+            evidence::records_for(git, tree)?,
+            registry,
+        )?);
+        for (entry, count) in policy.manifest.iter().zip(counts.iter_mut()) {
+            let id = evidence::CheckId::new(&entry.id, &entry.environment);
+            let subject = policy.commit_keyed(&id).then_some(commit);
+            // Each landing was judged under the manifest of its own base: any one of them
+            // under which its runs combine to flaky counts it once.
+            let mut digests: Vec<&str> = records
+                .iter()
+                .filter(|record| record.check == id)
+                .map(|record| record.manifest_digest.as_str())
+                .collect();
+            digests.sort_unstable();
+            digests.dedup();
+            if digests.iter().any(|digest| {
+                evidence::combine(&records, &id, digest, subject) == evidence::Combined::Flaky
+            }) {
+                *count += 1;
+            }
+        }
+    }
+    Ok(policy
+        .manifest
+        .iter()
+        .zip(counts)
+        .map(|(entry, flaky)| {
+            let id = evidence::CheckId::new(&entry.id, &entry.environment);
+            let check = policy.check(&id);
+            json!({
+                "check": entry.id,
+                "environment": entry.environment,
+                "flaky": flaky,
+                "landings": read,
+                "retry_on_failure": check.map_or(0, |check| check.retry_on_failure),
+                "allow_flaky": check.is_some_and(|check| check.allow_flaky),
+            })
+        })
+        .collect())
 }
 
 /// The open quarantines of the policy at `at`, each with whether it is overdue today; none
@@ -288,6 +495,9 @@ pub(crate) fn open_quarantines(git: &crate::git::Git, at: &str) -> Result<Vec<Va
                 "environment": quarantine.environment,
                 "reason": quarantine.reason,
                 "end": quarantine.end,
+                "owner": quarantine.owner,
+                "since": quarantine.since,
+                "age_days": quarantine.age_days(today),
                 "overdue": quarantine.overdue(today),
             })
         })
@@ -906,6 +1116,34 @@ fn post_checks(repo: &Repo, landed: Option<&crate::publish::Found>, read: &Read)
     rows.map_or_else(|why| json!({"unread": why}), Value::from)
 }
 
+/// G245: the approvals the last operation of `record` waits on, when it is held with
+/// `APPROVAL_PENDING` and the read is full: who can approve and the candidate to name, judged
+/// like its land. An approver's clone may hold no registry yet: who can approve is then read
+/// from the remote's, never reported as nobody.
+fn approval_of(repo: &Repo, record: &ChangeRecord, read: &Read) -> Result<Option<Value>, String> {
+    let (Some(op), Read::Full { registry, .. }) = (record.operations.last(), read) else {
+        return Ok(None);
+    };
+    let held = op.outcome.as_deref().and_then(Reason::from_code) == Some(Reason::ApprovalPending);
+    let Some(attempt) = op.attempts.last().filter(|_| held) else {
+        return Ok(None);
+    };
+    let fetched = if registry.is_none() {
+        repo.fetch_registry();
+        crate::registry::Registry::current(&repo.git)?
+    } else {
+        None
+    };
+    Ok(crate::publish::pending_approval(
+        &repo.git,
+        &attempt.base,
+        &attempt.commit,
+        &attempt.tree,
+        registry.as_ref().or(fetched.as_ref()),
+    )
+    .unwrap_or_else(|why| Some(json!({"unread": why}))))
+}
+
 /// What an operation under way waits on, besides its place: § 7, a worker for the
 /// environments no worker answered for; G177, a conflict with trunk the executor found while
 /// the operation waits behind the queue's head, as `MERGE_CONFLICT` with its paths, so its
@@ -924,6 +1162,40 @@ fn waiting(op: &crate::change::Operation, operation: &mut Value) {
             "allowed": reason.allowed(),
             "retry_when": reason.retry_when(),
         });
+    }
+}
+
+/// ROADMAP § 3: an operation that ended shows its terminal record's timing.
+fn timing_of(terminal: &[Value], op_id: &str) -> Option<Value> {
+    terminal
+        .iter()
+        .rev()
+        .filter(|entry| entry["op_id"] == op_id)
+        .find_map(crate::timing::from_terminal)
+}
+
+/// What the record of `op` is: `published`, the id of its newest receipt (synced or in
+/// `unsynced`), an outcome in the chain, or `missing`.
+fn receipt_state(
+    record: &ChangeRecord,
+    unsynced: &[&Receipt],
+    op: &crate::change::Operation,
+    published: bool,
+) -> Value {
+    let receipt = record
+        .receipts
+        .iter()
+        .chain(unsynced.iter().copied())
+        .rev()
+        .find(|receipt| receipt.op_id.as_deref() == Some(op.op_id.as_str()))
+        .map(|receipt| receipt.id.clone());
+    // Never success without proof: an unpublished operation with no outcome and no receipt
+    // has a missing record.
+    match (&receipt, published, &op.outcome) {
+        (_, true, _) => json!("published"),
+        (Some(id), false, _) => json!(id),
+        (None, false, Some(_)) => json!("outcome recorded in the chain"),
+        (None, false, None) => json!("missing"),
     }
 }
 
@@ -951,23 +1223,10 @@ fn describe(
             .and_then(|value| value.as_str().map(str::to_owned))
             .unwrap_or_default()
     };
-    let operation = record.operations.last().map(|op| {
+    let terminal = crate::log::records_for(&repo.git, &record.id)?;
+    let mut operation = record.operations.last().map(|op| {
         let published = landed.is_some_and(|found| found.revision == op.revision);
-        let receipt = record
-            .receipts
-            .iter()
-            .chain(unsynced.iter().copied())
-            .rev()
-            .find(|receipt| receipt.op_id.as_deref() == Some(op.op_id.as_str()))
-            .map(|receipt| receipt.id.clone());
-        // Never success without proof: an unpublished operation with no outcome and no receipt
-        // has a missing record.
-        let record_state = match (&receipt, published, &op.outcome) {
-            (_, true, _) => json!("published"),
-            (Some(id), false, _) => json!(id),
-            (None, false, Some(_)) => json!("outcome recorded in the chain"),
-            (None, false, None) => json!("missing"),
-        };
+        let record_state = receipt_state(record, unsynced, op, published);
         let reason = op.outcome.as_deref().and_then(Reason::from_code);
         let lease = lease(repo, record, op, published);
         let mut operation = json!({
@@ -996,11 +1255,21 @@ fn describe(
         if !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked {
             waiting(op, &mut operation);
         }
+        if let Some(timing) = timing_of(&terminal, &op.op_id) {
+            operation["timing"] = timing;
+        }
         operation
     });
+    // G245: a change held for an approval names who can give it and the candidate to name.
+    if let (Some(operation), Some(approval)) =
+        (operation.as_mut(), approval_of(repo, record, read)?)
+    {
+        operation["approval"] = approval;
+    }
     Ok(json!({
         "change": record.id,
         "intent": record.intent.reference,
+        "lane": record.lane,
         "state": state,
         "recorded_state": record.state,
         "landed": landed.map(|found| &found.commit),
@@ -1017,7 +1286,7 @@ fn describe(
         "evidence": evidence_read(repo, record, landed, read)?,
         "post_checks": post_checks(repo, landed, read),
         "retention_cut": record.retention_cut,
-        "terminal": crate::log::records_for(&repo.git, &record.id)?,
+        "terminal": terminal,
         "receipts": record.receipts.iter().filter(|receipt| {
             // Synced means on the remote: a receipt whose pending file remains is not, even
             // when the local chain already holds it.
