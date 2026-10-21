@@ -614,6 +614,22 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// G298: [`Ctx::save`] for a land's own write before anything runs: a lost compare-and-swap
+    /// is [`CHAIN_MOVED`], which `land` answers by reading the chain again and deciding from
+    /// what it finds, never a fault for a race the agent did nothing wrong in.
+    fn save_or_moved(
+        &mut self,
+        draft: &str,
+        candidate: Option<&str>,
+        message: &str,
+    ) -> Result<(), String> {
+        if self.save_cas(draft, candidate, message)? {
+            Ok(())
+        } else {
+            Err(CHAIN_MOVED.to_owned())
+        }
+    }
+
     /// Pushes the chain. It only appends, so this is a fast-forward and never forced; once this
     /// process has pushed, the push is leased on that head, so it fails when another executor
     /// moved the chain since. It pushes this process's own head, never the local ref: another
@@ -810,6 +826,7 @@ fn submit_land(
     if let Some(refusal) = too_large_at_submit(&ctx, &trunk, &revision)? {
         return Ok(refusal);
     }
+    kill_point("before-submit");
 
     let op_id = match ctx
         .record
@@ -2760,7 +2777,7 @@ fn retry_blocked(
     op.blocked_on = None;
     op.unavailable = None;
     op.trunk_moved = 0;
-    ctx.save(revision, None, &format!("rearmed {op_id}"))?;
+    ctx.save_or_moved(revision, None, &format!("rearmed {op_id}"))?;
     ctx.push_chain();
     // G284: an approval (or a rejection) arrived for the candidate it waited on, or trunk
     // moved: the run that follows checks that same candidate again while trunk stands.
@@ -3072,7 +3089,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         .request_commit(&request, revision, &format!("request {op_id}"))
         .map_err(|error| error.message())?;
     ctx.op_mut(&op_id).request_id = Some(request_id.clone());
-    ctx.save(revision, Some(&request_id), &format!("request {op_id}"))?;
+    ctx.save_or_moved(revision, Some(&request_id), &format!("request {op_id}"))?;
     kill_point("before-request-push");
     if !ctx.push_chain_and_request(&request_id) && ctx.online {
         // The remote chain moved while this request was written (an executor appended): the
@@ -3083,7 +3100,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
     Ok(op_id)
 }
 
-/// `submit` lost a race with another writer of the chain.
+/// `submit` or a rearm lost a race with another writer of the chain (G298).
 const CHAIN_MOVED: &str = "the change chain moved on the remote while the request was written";
 
 /// The abandon request (§ 4, G40): an agent-signed request of kind `abandon` on the change

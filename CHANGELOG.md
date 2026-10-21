@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.12
+
+- A land that loses a race on its change chain reads the chain again; it no longer fails.
+- A resubmit while an executor records an attempt is now queued, with one request, never two.
+
 ## 0.2.11
 
 - A check marked `waivable = true` can be waived on one candidate by an enrolled approver.
