@@ -75,6 +75,11 @@ pub struct Target {
     pub requires: Vec<String>,
     /// The minimum age, in seconds of the commit's committer time, before a promotion.
     pub soak_s: Option<u64>,
+    /// N-7: whether each executor pass fast-forwards the target to the newest commit that is
+    /// promotable to it (`crate::target::advance`); off unless set. Only a target that
+    /// `requires` checks may advance.
+    #[serde(default)]
+    pub advance: bool,
 }
 
 impl Target {
@@ -508,6 +513,13 @@ impl Config {
             }
             if target.requires.iter().any(String::is_empty) {
                 return Err(named("requires names an empty check id".to_owned()));
+            }
+            if target.advance && target.requires.is_empty() {
+                return Err(named(
+                    "advance = true needs requires: with no required check, the ref the \
+                     executor advances would name the last commit, never the last green one"
+                        .to_owned(),
+                ));
             }
             // A source chain longer than the targets has a cycle.
             let mut source = target;
@@ -1093,6 +1105,12 @@ product = "claude"                 # leave this table out when the box does not 
         assert_eq!(production.reference(), "refs/heads/prod");
         assert_eq!(production.from_target("main"), Some("staging"));
         assert_eq!(production.soak(), 3600);
+        assert!(!staging.advance, "a target advances only when it says so");
+        let advancing = Config::parse(
+            "[[target]]\nname = \"staging\"\nrequires = [\"suite\"]\nadvance = true\n",
+        )
+        .unwrap();
+        assert!(advancing.target("staging").unwrap().advance);
         let end = crate::clock::unix_of("2026-12-24T00:00:00Z").unwrap();
         assert!(config.freezes[0].active(end - 1));
         assert!(!config.freezes[0].active(end));
@@ -1125,6 +1143,10 @@ product = "claude"                 # leave this table out when the box does not 
                 "cycle",
             ),
             ("[[target]]\nname = \"staging\"\nsoak = 5\n", "soak"),
+            (
+                "[[target]]\nname = \"staging\"\nadvance = true\n",
+                "advance = true needs requires",
+            ),
             (
                 "[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"r\"\n",
                 "names no",

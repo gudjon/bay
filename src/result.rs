@@ -185,6 +185,12 @@ reasons! {
     // passed, and an approval check the candidate's paths wake has no pass yet from an enrolled
     // approver's key for this exact tree.
     ApprovalPending => "APPROVAL_PENDING", ["wait"], "approved", false;
+    // G264 (N-11); not yet in INTERFACES § 2: the policy at the base sets `[agent]
+    // max_live_changes` and the actor already holds that many live changes.
+    WipLimit => "WIP_LIMIT", ["read"], "a_live_change_lands_or_is_abandoned", false;
+    // G265 (N-13); not yet in INTERFACES § 2: the box's `bay.minFreeMiB` floor is above the free
+    // space of the filesystem a view or a materialized tree would be written to.
+    DiskLow => "DISK_LOW", ["read"], "free_space_above_floor", false;
 }
 
 impl Reason {
@@ -463,7 +469,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 59);
+        assert_eq!(Reason::ALL.len(), 61);
     }
 
     #[test]

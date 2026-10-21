@@ -50,8 +50,9 @@ struct PolicyFile {
 /// The `[agent]` table: `require_actor = true` makes `bay start` refuse `ACTOR_UNNAMED` while
 /// the actor's name comes from a default (G152). `require_actor_proof = true` makes `bay land`
 /// refuse `ACTOR_UNPROVEN` while the agent key cannot prove which actor signs: several actors
-/// run sessions under this OS account, which can read a file-based agent key (G243b). Neither
-/// refuses anything by default.
+/// run sessions under this OS account, which can read a file-based agent key (G243b).
+/// `max_live_changes = N` makes `bay start` refuse `WIP_LIMIT` while the actor already holds N
+/// live changes, a lane change among them (G264). None refuses anything by default.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
@@ -59,6 +60,8 @@ pub struct AgentPolicy {
     pub require_actor: bool,
     #[serde(default)]
     pub require_actor_proof: bool,
+    #[serde(default)]
+    pub max_live_changes: Option<u64>,
 }
 
 /// One check set aside for a stated time (`DESIGN` § 7, ruling 8c): while the entry is in the
@@ -908,6 +911,27 @@ pub fn requires_actor_proof_at(git: &Git, commit: &str) -> Result<bool, String> 
     agent_flag_at(git, commit, "require_actor_proof", |agent| {
         agent.require_actor_proof
     })
+}
+
+/// The most live changes one actor may hold under the policy at `commit`
+/// (`[agent] max_live_changes`, G264), judged at the base as [`requires_actor_at`] is. No policy, or no
+/// key, sets no limit. An invalid policy still sets it when its text says so: a typo elsewhere
+/// never lifts the limit.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn max_live_changes_at(git: &Git, commit: &str) -> Result<Option<u64>, String> {
+    match load_at(git, commit) {
+        Ok(policy) => Ok(policy.and_then(|policy| policy.agent.max_live_changes)),
+        Err(LoadError::Git(why)) => Err(why),
+        Err(LoadError::Invalid(_)) => Ok(git
+            .file_at(commit, POLICY_PATH)
+            .map_err(|error| error.message())?
+            .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+            .and_then(|table| table.get("agent")?.get("max_live_changes")?.as_integer())
+            .and_then(|limit| u64::try_from(limit).ok())),
+    }
 }
 
 /// The `[agent]` flag `key` of the policy at `commit`, read by `flag`. No policy sets none. An

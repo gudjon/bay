@@ -20,6 +20,7 @@ pub mod coord;
 pub mod coverage;
 pub mod custody;
 pub mod deny;
+pub mod disk;
 pub mod doctor;
 pub mod durable;
 pub mod evidence;

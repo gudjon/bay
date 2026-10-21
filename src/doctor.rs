@@ -150,6 +150,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
             report.rows.push(ref_format_row(&info.ref_format));
         }
         report.rows.push(store_row(&git, &config, info));
+        gc_log_row(&git, &mut report);
         quarantine_row(&git, &config, info.bare, &mut report);
         if !info.bare {
             repository_row(&git, &config, &mut report);
@@ -295,6 +296,27 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
         "commit_graph": graph.detail(),
         "fetch_writes_commit_graph": fetch_writes,
         "notes": notes})
+}
+
+/// G265 (N-13): a `gc.log` in the repository's common dir, present only when it is there. Git
+/// leaves it when a background `git gc --auto` failed, and refuses every further auto gc while
+/// it is newer than `gc.logExpiry`, so loose objects pile up on the box's disk unseen. Advisory:
+/// no reason code names it.
+fn gc_log_row(git: &Git, report: &mut Report) {
+    let Ok(common) = git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"]) else {
+        return;
+    };
+    let file = Path::new(common.trim()).join("gc.log");
+    if !file.is_file() {
+        return;
+    }
+    report.rows.push(json!({
+        "name": "gc-log",
+        "state": "degraded",
+        "file": file.display().to_string(),
+        "note": "a background git gc --auto failed, and git runs no auto gc while this file stays",
+        "recovery": "read the file, fix what it names, then remove it",
+    }));
 }
 
 /// G174: the ref backend of a bay-hosted trunk. On `files` a multi-ref update is not one

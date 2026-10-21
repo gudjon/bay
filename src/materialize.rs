@@ -36,6 +36,9 @@ pub enum Unmade {
     Refused(String),
     /// A fault of bay's own or of the object store, never a verdict.
     Failed(String),
+    /// G265: the filesystem the tree would be written to is below the box's disk floor
+    /// (`bay.minFreeMiB`); nothing was written.
+    DiskLow(crate::disk::Low),
 }
 
 /// Replace refs never stand in for an object of the tree: what is written is exactly the
@@ -69,6 +72,10 @@ pub fn materialize(
     tick: &mut dyn FnMut(),
 ) -> Result<(), Unmade> {
     std::fs::create_dir_all(dir).map_err(|error| failed(dir, &error))?;
+    // G265: below the box's disk floor no file of the tree is written.
+    if let Some(low) = crate::disk::below_floor(git, dir).map_err(Unmade::Failed)? {
+        return Err(Unmade::DiskLow(low));
+    }
     tick();
     let entries = list(git, commit, paths, deadline)?;
     tick();
@@ -795,6 +802,34 @@ mod tests {
         ] {
             assert_eq!(out.join(path).exists(), present, "{path}");
         }
+    }
+
+    /// G265: below the box's disk floor (`bay.minFreeMiB`) no file is written, and the refusal
+    /// names the free space, the floor and the path it measured.
+    #[cfg(unix)]
+    #[test]
+    fn below_the_disk_floor_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = repository(&dir.path().join("repo"));
+        add(&git, "a", b"a", "100644");
+        let commit = commit_all(&git);
+        git.run(&["config", "bay.minFreeMiB", "1099511627776"])
+            .unwrap();
+        let out = dir.path().join("out");
+        let made = materialize(&git, &commit, None, &out, far(), &mut || {});
+        match made {
+            Err(super::Unmade::DiskLow(low)) => {
+                assert_eq!(low.floor_mib, 1 << 40);
+                assert!(low.free_mib < low.floor_mib, "{low:?}");
+                assert_eq!(low.path, out);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(!out.join("a").exists());
+        // A floor the filesystem is above writes the tree.
+        git.run(&["config", "bay.minFreeMiB", "0"]).unwrap();
+        materialize(&git, &commit, None, &out, far(), &mut || {}).unwrap();
+        assert!(out.join("a").exists());
     }
 
     /// A deadline already past materializes nothing and says so.

@@ -51,6 +51,17 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         Ok(repo) => repo,
         Err(error) => return error.into_result(),
     };
+    // G265 (N-13): a box below its disk floor (`bay.minFreeMiB`) starts nothing: no change and
+    // no view, measured where the views are made.
+    match crate::disk::below_floor(&repo.git, &repo.views_dir()) {
+        Ok(None) => {}
+        Ok(Some(low)) => {
+            let mut refused = BayResult::blocked(Reason::DiskLow).with_detail(low.detail());
+            refused.freshness = repo.freshness();
+            return refused;
+        }
+        Err(why) => return BayResult::failed(why),
+    }
     let result = match &request.resume {
         Some(id) => resume(&repo, id),
         None => open(&repo, request),
@@ -252,6 +263,8 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
                     "why": "a fix names a change that landed"})));
         }
     }
+    // G264: the most live changes one actor may hold, as the policy at the base sets it.
+    let limit = crate::policy::max_live_changes_at(&repo.git, &base)?;
     let hash = intent_hash(&intent, &request.intent_revision);
     // § 4: one intent, one change, by claim. A lost race re-reads the claims.
     for _ in 0..5 {
@@ -274,10 +287,16 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
                             .with_detail(json!({"intent": intent, "generation": generation,
                                 "why": "the next generation needs this one landed"})));
                     }
-                    (false, false) => return adopt_or_refuse(repo, request, &me, change),
+                    (false, false) => {
+                        return adopt_or_refuse(repo, request, &me, change, &base, limit);
+                    }
                 }
             }
         };
+        // G264: a new change is one more the actor holds; at the limit nothing is created.
+        if let Some(refusal) = wip_limit(repo, &base, limit, &me)? {
+            return Ok(refusal);
+        }
         let claim = IntentClaim {
             hash: hash.clone(),
             generation,
@@ -287,6 +306,47 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         }
     }
     Err(format!("the claim on {intent} kept moving; try again"))
+}
+
+/// `wip_limit` for adopting a change `owner` holds: adopting one's own change adds none.
+fn adopt_limit(
+    repo: &Repo,
+    base: &str,
+    limit: Option<u64>,
+    me: &Actor,
+    owner: &str,
+) -> Result<Option<BayResult>, String> {
+    if owner == me.name {
+        return Ok(None);
+    }
+    wip_limit(repo, base, limit, me)
+}
+
+/// G264 (N-11): under a policy at the base with `[agent] max_live_changes = N`, the refusal
+/// `WIP_LIMIT` when `me` already holds N live changes (not landed, abandoned or superseded; a
+/// lane change counts), by the chains this repository holds. Its detail names each one, its
+/// change id and intent. No limit refuses nothing.
+fn wip_limit(
+    repo: &Repo,
+    base: &str,
+    limit: Option<u64>,
+    me: &Actor,
+) -> Result<Option<BayResult>, String> {
+    let Some(limit) = limit else {
+        return Ok(None);
+    };
+    let live = crate::overlap::held_by(repo, &me.name)?;
+    if u64::try_from(live.len()).unwrap_or(u64::MAX) < limit {
+        return Ok(None);
+    }
+    Ok(Some(BayResult::blocked(Reason::WipLimit).with_detail(json!({
+        "actor": me.name,
+        "max_live_changes": limit,
+        "live_changes": live,
+        "policy": crate::policy::POLICY_PATH,
+        "base": base,
+        "recovery": "land one of the live changes, or give one up with bay land --abandon, then start again",
+    }))))
 }
 
 /// Whether the remote holds a claim on the intent, so a further start claims its next
@@ -507,12 +567,15 @@ fn create(
 /// The intent already has a live change (§ 4): the same actor adopts it, unless another live
 /// session of that name holds it (`CHANGE_HELD`, [`live_holder`]); anyone adopts it once it is
 /// abandoned, superseded without a landing, or idle past the takeover window on this observer's
-/// clock; otherwise `CHANGE_SUPERSEDED` names it.
+/// clock; otherwise `CHANGE_SUPERSEDED` names it. Adopting another actor's change is one more
+/// live change `me` holds, so the policy's `limit` applies to it (G264).
 fn adopt_or_refuse(
     repo: &Repo,
     request: &StartRequest,
     me: &Actor,
     change: &str,
+    base: &str,
+    limit: Option<u64>,
 ) -> Result<BayResult, String> {
     let name = change_ref(change);
     repo.git
@@ -554,6 +617,9 @@ fn adopt_or_refuse(
         return Ok(BayResult::blocked(Reason::ChangeHeld)
             .with_change(change)
             .with_detail(held));
+    }
+    if let Some(refusal) = adopt_limit(repo, base, limit, me, &record.actor.name)? {
+        return Ok(refusal);
     }
     let previous = record.actor.clone();
     let previous_source = record.actor_source;

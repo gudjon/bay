@@ -1261,6 +1261,11 @@ fn prepare(
             Some(format!("{why}; the check did not run")),
         ))),
         Err(Unmade::Failed(why)) => Err(why),
+        // G265: a box below its disk floor runs no check; never a pass.
+        Err(Unmade::DiskLow(low)) => Ok(Some(Judged::without_units(
+            Verdict::InfraFailure,
+            Some(format!("{}; the check did not run", low.message())),
+        ))),
     }
 }
 

@@ -99,7 +99,9 @@
         "PROMOTION_REFUSED",
         "LANE_NEVER_LANDS",
         "LANE_LEAK",
-        "APPROVAL_PENDING"
+        "APPROVAL_PENDING",
+        "WIP_LIMIT",
+        "DISK_LOW"
       ]
     },
     "change": {
@@ -174,7 +176,9 @@
         "an_open_talk_closed_or_superseded",
         "pushed_commit_promotable",
         "view_reaches_no_lane_commit",
-        "approved"
+        "approved",
+        "a_live_change_lands_or_is_abandoned",
+        "free_space_above_floor"
       ]
     },
     "waiting_for": {

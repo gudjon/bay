@@ -2893,53 +2893,84 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
         "candidate": revision,
     });
     let mut words = command.split_whitespace();
-    let program = ctx.repo.work_root.join(words.next().unwrap_or_default());
-    let mut cmd = crate::platform::script(&program)?;
-    cmd.args(words)
-        .arg("submit")
-        .current_dir(&ctx.repo.work_root);
-    let output = match crate::git::run_bounded_for(
-        cmd,
-        "executor submit",
-        Some(request.to_string().as_bytes()),
-        ctx.repo.config.submission_timeout(),
-    ) {
-        Ok(output) => output,
-        Err(crate::git::GitError::Timeout { secs, .. }) => {
-            // The submission timeout ends the operation with a stated outcome (§ 9a).
-            let op = ctx.op_mut(op_id);
-            op.state = OpState::Failed;
-            op.outcome = Some("submission_timeout".to_owned());
-            ctx.save(
-                revision,
-                None,
-                &format!("failed {op_id}: submission timeout"),
-            )?;
-            ctx.push_chain();
-            return Err(format!(
-                "the executor did not admit {op_id} within the submission timeout of {secs}s"
-            ));
-        }
-        Err(error) => return Err(error.message()),
+    let name = words.next().unwrap_or_default();
+    let program = ctx.repo.work_root.join(name);
+    let started = crate::platform::script(&program)
+        .map_err(|why| ("submission_failed", why))
+        .and_then(|mut cmd| {
+            cmd.args(words)
+                .arg("submit")
+                .current_dir(&ctx.repo.work_root);
+            crate::git::run_bounded_for(
+                cmd,
+                "executor submit",
+                Some(request.to_string().as_bytes()),
+                ctx.repo.config.submission_timeout(),
+            )
+            .map_err(|error| match error {
+                crate::git::GitError::Timeout { secs, .. } => (
+                    "submission_timeout",
+                    format!(
+                        "the executor did not admit {op_id} within the submission timeout of {secs}s"
+                    ),
+                ),
+                crate::git::GitError::Spawn(error) => (
+                    "submission_failed",
+                    format!("the executor command {name} could not be started: {error}"),
+                ),
+                other => ("submission_failed", other.message()),
+            })
+        })
+        .and_then(|output| {
+            if output.status.success() {
+                Ok(output)
+            } else {
+                Err((
+                    "submission_refused",
+                    format!(
+                        "the executor refused the submission: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ),
+                ))
+            }
+        })
+        .and_then(|output| {
+            let reply: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+                (
+                    "submission_refused",
+                    format!("the executor's submit reply is not JSON: {error}"),
+                )
+            })?;
+            reply["job"].as_str().map(str::to_owned).ok_or((
+                "submission_refused",
+                "the executor's submit reply has no job".to_owned(),
+            ))
+        });
+    // A submission the executor never took ends the operation with a stated outcome (§ 9a),
+    // so no executor pass lands what this land answered as failed.
+    let job = match started {
+        Ok(job) => job,
+        Err((outcome, why)) => return Err(not_admitted(ctx, op_id, revision, outcome, why)),
     };
-    if !output.status.success() {
-        return Err(format!(
-            "the executor refused the submission: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let reply: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|error| format!("the executor's submit reply is not JSON: {error}"))?;
-    let job = reply["job"]
-        .as_str()
-        .ok_or("the executor's submit reply has no job")?
-        .to_owned();
     let op = ctx.op_mut(op_id);
     op.job = Some(job);
     op.state = OpState::Admitted;
     ctx.save(revision, None, &format!("admitted {op_id}"))?;
     ctx.push_chain();
     Ok(())
+}
+
+/// Ends operation `op_id` `failed` with `outcome` and pushes it; returns `why`.
+fn not_admitted(ctx: &mut Ctx, op_id: &str, revision: &str, outcome: &str, why: String) -> String {
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Failed;
+    op.outcome = Some(outcome.to_owned());
+    let label = outcome.replace('_', " ");
+    if let Err(error) = ctx.save(revision, None, &format!("failed {op_id}: {label}")) {
+        return format!("{why}; recording the failure failed too: {error}");
+    }
+    ctx.push_chain();
+    why
 }
 
 /// NEW-4: the outcome of a lane change's land request, a check-only operation. Its candidate

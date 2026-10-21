@@ -29,6 +29,12 @@
 //! the required checks at its tip, the freeze in force, and the newest commit of the source
 //! that is promotable now. On a bay host the scoped hook (`crate::hook`) refuses a push that
 //! moves a target to a commit that is not promotable, with `PROMOTION_REFUSED`.
+//!
+//! N-7: a target with `advance = true` is moved by the executor as well ([`advance`]): each pass
+//! fast-forwards it to that newest promotable commit, judged again by [`judge`] before the push,
+//! and pushed under a lease on the tip it read, so it never moves backwards, sideways or over
+//! another writer's move. A target promoted from another one advances from that target's tip
+//! as this pass left it. A target without `advance` is only ever moved by an operator.
 
 use std::collections::BTreeMap;
 
@@ -640,6 +646,122 @@ impl Read<'_> {
         }
         Ok(json!({"commit": null, "blocked_by": newest.unwrap_or_default()}))
     }
+}
+
+/// N-7: one executor pass's moves of the targets with `advance = true`, sources first, each a
+/// fast-forward of the remote ref to the newest commit of its source that is promotable now
+/// (`promotable` of [`rows`]), at `now`, with `trunk` the trunk's tip. Each move is a row
+/// `{target, ref, from, to}` (`from` is `null` for a ref the remote did not hold); one the
+/// judgement or the remote refused also names `error`. A target with nothing promotable
+/// above its tip is not named.
+///
+/// # Errors
+///
+/// The remote did not answer for the target refs, a git fault, or a config at a target's tip
+/// that cannot be read.
+pub fn advance(
+    repo: &Repo,
+    trunk: &str,
+    registry: Option<&Registry>,
+    now: u64,
+) -> Result<Vec<Value>, String> {
+    let config = &repo.config;
+    if !config.targets.iter().any(|target| target.advance) {
+        return Ok(Vec::new());
+    }
+    if !fetch(repo) {
+        return Err(format!(
+            "the remote {} did not answer for the target refs, so no target advanced",
+            repo.remote()
+        ));
+    }
+    let git = &repo.git;
+    let mut tips = tips(git, config)?;
+    let mut order: Vec<&Target> = config.targets.iter().collect();
+    order.sort_by_key(|target| depth(config, target));
+    let mut moves = Vec::new();
+    for target in order {
+        if !target.advance {
+            continue;
+        }
+        let tip = tips.get(&target.name).cloned().flatten();
+        let rule = rule_at(git, config, target, tip.as_deref())?;
+        let from_tip = if rule.from == config.trunk() {
+            Some(trunk.to_owned())
+        } else {
+            tips.get(&rule.from).cloned().flatten()
+        };
+        let on_from = match (tip.as_deref(), from_tip.as_deref()) {
+            (Some(tip), Some(from)) => on_first_parent(git, from, tip)?,
+            _ => false,
+        };
+        let read = Read {
+            git,
+            config,
+            trunk,
+            tips: &tips,
+            registry,
+            now,
+        };
+        let promotable = read.promotable(&rule, from_tip.as_deref(), tip.as_deref(), on_from)?;
+        let Some(commit) = promotable["commit"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        if tip.as_deref() == Some(commit.as_str()) {
+            continue;
+        }
+        let reference = target.reference();
+        let mut row = json!({"target": target.name, "ref": reference, "from": tip, "to": commit});
+        // The judgement the hook makes of an operator's push, made again: a fast-forward on the
+        // source's first-parent line, every required check green, soaked, and no freeze.
+        let failed = judge(
+            git,
+            &rule,
+            from_tip.as_deref(),
+            tip.as_deref(),
+            &commit,
+            registry,
+            now,
+        )?;
+        if !failed.is_empty() {
+            row["error"] = json!(refusal(&rule, &failed));
+            moves.push(row);
+            continue;
+        }
+        // A compare-and-swap on the tip this pass read: absent when the remote held none.
+        let lease = format!(
+            "--force-with-lease={reference}:{}",
+            tip.as_deref().unwrap_or_default()
+        );
+        let refspec = format!("{commit}:{reference}");
+        match git.run(&["push", "-q", &lease, repo.remote(), &refspec]) {
+            Ok(_) => {
+                let _ = git.run(&["update-ref", &local_ref(&target.name), &commit]);
+                tips.insert(target.name.clone(), Some(commit));
+            }
+            Err(error) => row["error"] = json!(error.message()),
+        }
+        moves.push(row);
+    }
+    Ok(moves)
+}
+
+/// How many targets lie between `target` and the trunk on its `from` chain, so a source sorts
+/// before the targets promoted from it. [`Config::parse`] refuses a cycle; the count still
+/// stops at the number of targets.
+fn depth(config: &Config, target: &Target) -> usize {
+    let trunk = config.trunk();
+    let mut depth = 0;
+    let mut source = target;
+    while depth < config.targets.len()
+        && let Some(next) = source
+            .from_target(trunk)
+            .and_then(|from| config.target(from))
+    {
+        depth += 1;
+        source = next;
+    }
+    depth
 }
 
 /// G85's detection for targets: the `target_moved` or `target_unpromotable` event of a target

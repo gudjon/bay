@@ -56,6 +56,8 @@ command, flag and reason code, with the JSON Schema of `bay.result/1`.
 - While a change waits in the queue, `bay status <change>` may show `operation.conflict`: main
   moved into a `MERGE_CONFLICT` on the listed paths. It keeps its place; refresh and repair now.
   The agent hook also tells your session once.
+- A `landed_on_your_paths` notice: another change merged on paths you declared. Refresh, re-read
+  the named paths, then go on.
 - `bay status` with `detail.warnings` naming `no_live_executor`: work is queued and no executor has
   been seen recently. Tell the user an executor must run (`bay executor run`). The work stays queued.
 - A `blocked` or `failed` result names a `reason`, the actions still `allowed`, and `retry_when`:
@@ -90,6 +92,8 @@ Common reasons:
 | `LANE_NEVER_LANDS` | A lane change: read the check verdicts in `detail`. It never merges. |
 | `LANE_LEAK` | The view holds a lane's commits (`detail.leaks`). Redo the work without them, or use `--lane`. |
 | `ACTOR_UNPROVEN` | Policy requires proof of who signs, and actors share this OS account. Tell the user: a hardware agent key, or one OS account per actor. |
+| `WIP_LIMIT` | You hold the most live changes policy allows (`detail.live_changes`). Land or abandon one, then start again. |
+| `DISK_LOW` | This box is below its disk floor (`detail.free_mib`, `detail.floor_mib`). Tell the user: free space, or lower `bay.minFreeMiB`. |
 | `CONFIG_MISSING` / `POLICY_MISSING` | The repository is not set up. Tell the user, or set it up if asked. |
 
 Every code: https://getbay.io/docs/results
@@ -128,6 +132,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 ## Never
 
 - Never push main, merge into main, or move main yourself. bay merges.
+- Never push a target such as `staging` (`[[target]]` in the config). bay's hook refuses it.
 - Never run `git reset --hard`, `git clean -f`, `git branch -D`, `git checkout .`, `git restore .`, a force push,
   or a push of `--all` or `--mirror`. bay's hook refuses them, also inside `bash -c`.
 - Never merge, cherry-pick, check out or restore from a lane's refs (`[[lane]]` in the config) in a

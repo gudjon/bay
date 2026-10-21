@@ -46,7 +46,19 @@ const SHELLS: [(&str, &str); 5] = [
 /// name; `current` is the branch checked out where the command runs, if any.
 #[must_use]
 pub fn denied(command: &str, trunk: &str, current: Option<&str>) -> Option<Denial> {
-    denied_with(command, Trunk::Named(trunk), current)
+    denied_with(command, Trunk::Named(trunk), &[], current)
+}
+
+/// [`denied`] where `targets` are the refs of the config's `[[target]]`s (NEW-5): a push to one
+/// is denied too, as a push of trunk is. A target moves only by bay's promotion rules.
+#[must_use]
+pub fn denied_targets(
+    command: &str,
+    trunk: &str,
+    targets: &[String],
+    current: Option<&str>,
+) -> Option<Denial> {
+    denied_with(command, Trunk::Named(trunk), targets, current)
 }
 
 /// The trunk a push is judged against.
@@ -58,20 +70,26 @@ enum Trunk<'a> {
     Unknown,
 }
 
-fn denied_with(command: &str, trunk: Trunk<'_>, current: Option<&str>) -> Option<Denial> {
-    denied_in(command, trunk, current, 0)
+fn denied_with(
+    command: &str,
+    trunk: Trunk<'_>,
+    targets: &[String],
+    current: Option<&str>,
+) -> Option<Denial> {
+    denied_in(command, trunk, targets, current, 0)
 }
 
 /// [`denied_with`] for a command `depth` shell scripts deep.
 fn denied_in(
     command: &str,
     trunk: Trunk<'_>,
+    targets: &[String],
     current: Option<&str>,
     depth: usize,
 ) -> Option<Denial> {
     simple_commands(command)
         .into_iter()
-        .find_map(|words| denied_simple(&words, trunk, current, depth))
+        .find_map(|words| denied_simple(&words, trunk, targets, current, depth))
 }
 
 /// One simple command: its Git, then each shell `-c` script among its words. A denial found in
@@ -79,15 +97,16 @@ fn denied_in(
 fn denied_simple(
     words: &[String],
     trunk: Trunk<'_>,
+    targets: &[String],
     current: Option<&str>,
     depth: usize,
 ) -> Option<Denial> {
-    if let Some(denial) = denied_git(words, trunk, current) {
+    if let Some(denial) = denied_git(words, trunk, targets, current) {
         return Some(denial);
     }
     shell_scripts(words).into_iter().find_map(|(wrapper, script)| {
         let denial = if depth < MAX_DEPTH {
-            denied_in(script, trunk, current, depth + 1)?
+            denied_in(script, trunk, targets, current, depth + 1)?
         } else if script.to_ascii_lowercase().contains("git") {
             Denial {
                 shape: "nested too deep",
@@ -217,7 +236,12 @@ fn is_git(word: &str) -> bool {
     command_stem(word).eq_ignore_ascii_case("git")
 }
 
-fn denied_git(words: &[String], trunk: Trunk<'_>, current: Option<&str>) -> Option<Denial> {
+fn denied_git(
+    words: &[String],
+    trunk: Trunk<'_>,
+    targets: &[String],
+    current: Option<&str>,
+) -> Option<Denial> {
     let git = words.iter().position(|word| is_git(word))?;
     // Skip git's own options (`-C <dir>`, `-c key=value`, `--git-dir=…`) to the subcommand.
     let mut rest = words[git + 1..].iter().peekable();
@@ -252,12 +276,17 @@ fn denied_git(words: &[String], trunk: Trunk<'_>, current: Option<&str>) -> Opti
         "branch" if has("-D") => deny("git branch -D"),
         "checkout" if has(".") => deny("git checkout ."),
         "restore" if has(".") => deny("git restore ."),
-        "push" => denied_push(&args, trunk, current),
+        "push" => denied_push(&args, trunk, targets, current),
         _ => None,
     }
 }
 
-fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option<Denial> {
+fn denied_push(
+    args: &[&str],
+    trunk: Trunk<'_>,
+    targets: &[String],
+    current: Option<&str>,
+) -> Option<Denial> {
     let denial = |shape: &'static str, reason: String| {
         Some(Denial {
             shape,
@@ -265,6 +294,40 @@ fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option
             reason,
         })
     };
+    let positional: Vec<&str> = args
+        .iter()
+        .copied()
+        .filter(|arg| !arg.starts_with('-'))
+        .collect();
+    let refspecs = positional.get(1..).unwrap_or_default();
+    // NEW-5: a target is judged before the force flags, so a force-push or a delete of one
+    // (`--delete staging`, `:staging`) names the target it would move.
+    let is_branch =
+        |branch: &str, reference: &str| reference.strip_prefix("refs/heads/") == Some(branch);
+    let pushes_target = |reference: &str| {
+        if refspecs.is_empty() {
+            return current.is_some_and(|branch| is_branch(branch, reference));
+        }
+        refspecs.iter().copied().any(|refspec| {
+            let destination = refspec.rsplit(':').next().unwrap_or(refspec);
+            let destination = destination.strip_prefix('+').unwrap_or(destination);
+            destination == reference
+                || is_branch(destination, reference)
+                || (destination == "HEAD"
+                    && current.is_some_and(|branch| is_branch(branch, reference)))
+        })
+    };
+    if let Some(target) = targets
+        .iter()
+        .find(|reference| pushes_target(reference.as_str()))
+    {
+        return denial(
+            "git push of a target",
+            format!(
+                "bay denies a push of the promotion target {target} from an agent shell; a target moves only by bay's promotion rules"
+            ),
+        );
+    }
     let force = args.iter().any(|arg| {
         *arg == "-f"
             || *arg == "--force"
@@ -285,12 +348,6 @@ fn denied_push(args: &[&str], trunk: Trunk<'_>, current: Option<&str>) -> Option
             "bay denies pushing every branch, trunk with them, from an agent shell".to_owned(),
         );
     }
-    let positional: Vec<&str> = args
-        .iter()
-        .copied()
-        .filter(|arg| !arg.starts_with('-'))
-        .collect();
-    let refspecs = positional.get(1..).unwrap_or_default();
     let trunk = match trunk {
         Trunk::Named(trunk) => trunk,
         Trunk::Unknown => {
@@ -518,10 +575,33 @@ pub fn judge_hook(event: &str, input: &str, dir: &std::path::Path) -> Option<Den
     // agent's work tree. Outside a repository a push fails anyway; `main` keeps the shape.
     let denial = match crate::repo::Bootstrap::of(&cwd) {
         None => denied(command, "main", current.as_deref()),
-        Some(Ok(bootstrap)) => denied(command, &bootstrap.trunk, current.as_deref()),
-        Some(Err(_)) => denied_with(command, Trunk::Unknown, current.as_deref()),
+        Some(Ok(bootstrap)) => denied_targets(
+            command,
+            &bootstrap.trunk,
+            &target_refs(command, &cwd),
+            current.as_deref(),
+        ),
+        Some(Err(_)) => denied_with(command, Trunk::Unknown, &[], current.as_deref()),
     };
     denial.or_else(|| denied_lane(command, &view_lane_refs(command, &cwd)))
+}
+
+/// NEW-5: the refs of the `[[target]]`s the config at trunk declares, to judge `command` by in
+/// `cwd`: none unless it names `push`, and none when the config cannot be read (the trunk is
+/// still judged). Only such a command pays for the read.
+fn target_refs(command: &str, cwd: &std::path::Path) -> Vec<String> {
+    if !command.contains("push") {
+        return Vec::new();
+    }
+    crate::repo::Repo::open(cwd)
+        .map(|repo| {
+            repo.config
+                .targets
+                .iter()
+                .map(crate::config::Target::reference)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// NEW-4: the lane ref patterns to judge `command` by in `cwd`: none unless it names one of the
@@ -559,7 +639,7 @@ fn view_lane_refs(command: &str, cwd: &std::path::Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::denied;
+    use super::{denied, denied_targets};
 
     #[test]
     fn every_shape_on_the_list_is_denied() {
@@ -612,6 +692,43 @@ mod tests {
     fn a_bare_push_from_trunk_is_a_push_of_trunk() {
         assert!(denied("git push", "main", Some("main")).is_some());
         assert!(denied("git push", "main", Some("topic")).is_none());
+    }
+
+    /// NEW-5: a push to a target's ref is denied in every refspec form and names the target; a
+    /// push of another branch still runs.
+    #[test]
+    fn a_push_of_a_target_is_denied() {
+        let targets = [
+            "refs/heads/staging".to_owned(),
+            "refs/deploy/live".to_owned(),
+        ];
+        for (command, current) in [
+            ("git push origin x:refs/heads/staging", "topic"),
+            ("git push origin x:staging", "topic"),
+            ("git push origin staging", "topic"),
+            ("git push origin HEAD:staging", "topic"),
+            ("git push origin +x:staging", "topic"),
+            ("git push --force origin staging", "topic"),
+            ("git push origin --delete staging", "topic"),
+            ("git push origin :staging", "topic"),
+            ("git push origin HEAD", "staging"),
+            ("git push", "staging"),
+            ("bash -c 'git push origin x:staging'", "topic"),
+        ] {
+            let denial = denied_targets(command, "main", &targets, Some(current))
+                .unwrap_or_else(|| panic!("{command}"));
+            assert_eq!(denial.shape, "git push of a target", "{command}");
+            assert!(denial.reason.contains("refs/heads/staging"), "{command}");
+        }
+        let denial =
+            denied_targets("git push origin x:refs/deploy/live", "main", &targets, None).unwrap();
+        assert!(denial.reason.contains("refs/deploy/live"));
+        for command in ["git push origin topic", "git push origin x:staging-notes"] {
+            assert!(
+                denied_targets(command, "main", &targets, Some("topic")).is_none(),
+                "{command}"
+            );
+        }
     }
 
     /// Plan H2: each wrapper of a shape is the same shape, named with the outermost shell

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1
+
+- A land whose `[executor] command` cannot start or refuses now ends `failed`, and nothing lands it later.
+- That failure names the executor command and its reason, never `git`.
+- The agent hook now denies a `git push` to any promotion target, in every refspec form.
+- A `[[target]]` with `advance = true` is fast-forwarded by the executor to its newest promotable commit.
+- A live change's session hears once when another change lands on its declared paths, and should refresh.
+- `bay start` refuses `WIP_LIMIT` when an actor already holds `[agent] max_live_changes` live changes.
+- Below the box's `bay.minFreeMiB` floor, `bay start` and check materialization refuse `DISK_LOW`.
+- `bay doctor` names a `gc.log` that blocks automatic garbage collection.
+
 ## 0.2.0
 
 Scale

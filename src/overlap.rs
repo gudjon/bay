@@ -31,14 +31,7 @@ pub fn overlaps(repo: &Repo, id: &str, declared: &[String]) -> Result<Vec<Value>
     let chains = Chain::new(&repo.git)
         .read_all()
         .map_err(|error| error.message())?;
-    let landed: HashSet<String> = repo
-        .git
-        .run(&["for-each-ref", "--format=%(refname)", crate::names::LANDED])
-        .map_err(|error| error.message())?
-        .lines()
-        .filter_map(|name| name.strip_prefix(crate::names::LANDED))
-        .map(str::to_owned)
-        .collect();
+    let landed = landed(repo)?;
     Ok(chains
         .iter()
         .filter(|held| {
@@ -62,8 +55,48 @@ pub fn overlaps(repo: &Repo, id: &str, declared: &[String]) -> Result<Vec<Value>
         .collect())
 }
 
+/// G264: the live changes the actor named `actor` holds, by the chains this repository holds,
+/// in ref order: each its change id and intent. A lane change counts: it holds its actor's
+/// attention until it is abandoned, though it never lands. A change with a landed marker here
+/// has ended.
+///
+/// # Errors
+///
+/// The chains or the landed markers cannot be listed.
+pub fn held_by(repo: &Repo, actor: &str) -> Result<Vec<Value>, String> {
+    let chains = Chain::new(&repo.git)
+        .read_all()
+        .map_err(|error| error.message())?;
+    let landed = landed(repo)?;
+    Ok(chains
+        .iter()
+        .filter(|held| {
+            held.record.actor.name == actor && live(held.record.state) && !landed.contains(&held.id)
+        })
+        .map(|held| {
+            json!({
+                "change": held.id,
+                "intent": held.record.intent.reference,
+                "lane": held.record.lane,
+            })
+        })
+        .collect())
+}
+
+/// The change ids whose landed marker this repository holds.
+fn landed(repo: &Repo) -> Result<HashSet<String>, String> {
+    Ok(repo
+        .git
+        .run(&["for-each-ref", "--format=%(refname)", crate::names::LANDED])
+        .map_err(|error| error.message())?
+        .lines()
+        .filter_map(|name| name.strip_prefix(crate::names::LANDED))
+        .map(str::to_owned)
+        .collect())
+}
+
 /// A change that has not ended by its chain.
-fn live(state: ChangeState) -> bool {
+pub(crate) fn live(state: ChangeState) -> bool {
     matches!(
         state,
         ChangeState::Open | ChangeState::Invalidated | ChangeState::Repairing | ChangeState::Ready
@@ -90,8 +123,9 @@ fn holds(outer: &str, inner: &str) -> bool {
 }
 
 /// The paths two declarations share: for each pair where one holds the other, the narrower one,
-/// sorted and once; `.` for the whole tree.
-fn shared(mine: &[String], theirs: &[String]) -> Vec<String> {
+/// sorted and once; `.` for the whole tree. NEW-10's landing notice judges a landing by it
+/// too (`crate::notice`), so the two name the same paths.
+pub(crate) fn shared(mine: &[String], theirs: &[String]) -> Vec<String> {
     let (mine, theirs) = (whole_or(mine), whole_or(theirs));
     let mut out = BTreeSet::new();
     for a in &mine {

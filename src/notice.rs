@@ -32,6 +32,20 @@
 //! (`conflicts`, `<op id> <trunk>`); `session-start` passes the notes that stand, since its
 //! compact state names them. No log event is written for it.
 //!
+//! NEW-10: a landing on trunk on paths the view's change declared (`--paths`) is one notice
+//! too, `landed_on_your_paths`, given once per landed change, at the same events and within the
+//! same budget. It names the landed change, its intent and actor, and the shared paths, judged
+//! as `bay start` judges its overlaps (`crate::overlap::shared`, from the landed change's
+//! chain), and says to refresh. Only trunk's first-parent landings after the change's base and
+//! after the trunk the cursor last read to are walked, at most [`MAX_READ`] of them, newest
+//! first, from the trunk tracking ref as the last fetch left it; when trunk has not moved, the
+//! cost is one `rev-parse`. A landing of the change itself, or of the change it names in
+//! `Fixes:` or `Supersedes:`, a commit that is no bay publication, and a change that declared
+//! no paths are told nothing. A landing whose chain this repository does not hold yet is read
+//! again at the next hook, once a fetching command brought it. The cursor keeps the landed
+//! changes it told (`landed`) and the trunk it read to (`landed_trunk`). No log event is
+//! written for it.
+//!
 //! A log entry is data, not text for the agent: any process on the box can write a ref under
 //! `refs/bay/log/`, and nothing here verifies its signer. A notice line is bay's own words; from
 //! the event it takes only the kind (one of three), a reason code bay knows, and an operation id
@@ -102,6 +116,10 @@ struct Cursor {
     talks: Vec<String>,
     /// The early conflict notes already told or passed, `<op id> <trunk>`, newest last (NEW-8).
     conflicts: Vec<String>,
+    /// The landed changes already told on the view's change's paths, newest last (NEW-10).
+    landed: Vec<String>,
+    /// The trunk commit every landing up to which was read for the view's change (NEW-10).
+    landed_trunk: Option<String>,
 }
 
 /// Whose notices a hook gives: the view's change, if the session is in a view, and the
@@ -130,6 +148,8 @@ pub struct Delivery {
     pub talks: Vec<String>,
     /// The operations whose early conflict was told (NEW-8).
     pub conflicts: Vec<String>,
+    /// The landed changes told as `landed_on_your_paths` (NEW-10).
+    pub landed: Vec<String>,
     /// The ids of the events and talks counted over the budget.
     pub over_budget: Vec<String>,
     /// Why the cursor started at this hook rather than at session start, or why it could not be
@@ -152,6 +172,12 @@ impl Delivery {
             fields.insert(
                 "conflict_notices".to_owned(),
                 serde_json::json!(self.conflicts),
+            );
+        }
+        if !self.landed.is_empty() {
+            fields.insert(
+                "landed_on_your_paths".to_owned(),
+                serde_json::json!(self.landed),
             );
         }
         if !self.over_budget.is_empty() {
@@ -228,8 +254,9 @@ pub fn begin(repo: &Repo, state_dir: &Path, change: Option<&str>) {
 
 /// The notices for `scope` since the session's cursor in `state_dir`, from the executor logs
 /// and the talks to the scope's actor this repository holds, and the early conflict notes on the
-/// view's change, within the session's budget; the cursor moves past every event, talk and note
-/// read. When nothing moved, the cost is two `for-each-ref`, and in a view one chain read.
+/// view's change, and the landings on its declared paths (NEW-10), within the session's budget;
+/// the cursor moves past every event, talk, note and landing read. When nothing moved, the cost
+/// is two `for-each-ref`, and in a view one chain read and one `rev-parse`.
 #[must_use]
 pub fn deliver(repo: &Repo, scope: Scope<'_>, state_dir: &Path) -> Delivery {
     let mut cursor = match read(state_dir) {
@@ -280,6 +307,12 @@ pub fn deliver(repo: &Repo, scope: Scope<'_>, state_dir: &Path) -> Delivery {
         .collect();
     if !noted.is_empty() {
         tell_conflicts(&mut cursor, &noted, budget, now, &mut delivery);
+        moved = true;
+    }
+    if let Some(change) = scope.change
+        && let Some(walked) = landings(repo, change, &cursor)
+    {
+        tell_landings(&mut cursor, &walked, budget, now, &mut delivery);
         moved = true;
     }
     if !moved {
@@ -498,6 +531,179 @@ fn conflict_line(change: &str, op: &str, found: &crate::change::EarlyConflict) -
         },
         reason.allowed().join(", "),
         reason.retry_when()
+    );
+    let mut out: String = text
+        .chars()
+        .filter(|char| !char.is_control())
+        .take(MAX_LINE)
+        .collect();
+    out.push('\n');
+    out
+}
+
+/// One landing on trunk on the paths the view's change declared (NEW-10).
+#[derive(Debug)]
+struct Landing {
+    /// The landed change: one landing, once.
+    change: String,
+    line: String,
+}
+
+/// What one walk of trunk for the view's change found (NEW-10).
+#[derive(Debug, Default)]
+struct Walked {
+    /// The landings to tell, oldest first.
+    found: Vec<Landing>,
+    /// The trunk the walk read every landing up to; none when a landing's chain is not held
+    /// here yet, so the next hook reads it again.
+    read_to: Option<String>,
+}
+
+/// The landings on trunk's first-parent line since the base of `change` and since the trunk
+/// `cursor` read to, whose change declared paths that share a path with those `change` declared
+/// (NEW-10), judged as `bay start` judges its overlaps. None when trunk has not moved since the
+/// cursor read it, or trunk, the change's chain or the walk cannot be read.
+fn landings(repo: &Repo, change: &str, cursor: &Cursor) -> Option<Walked> {
+    let trunk = repo
+        .git
+        .run(&[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{}^{{commit}}", repo.trunk_tracking_ref()),
+        ])
+        .ok()?;
+    if cursor.landed_trunk.as_deref() == Some(trunk.as_str()) {
+        return None;
+    }
+    let chain = crate::change::Chain::new(&repo.git);
+    let (_, record) = chain.read(change).ok()?;
+    let mine = crate::inputs::paths(&record.declared_inputs);
+    let mut walked = Walked::default();
+    if mine.is_empty() || !crate::overlap::live(record.state) {
+        walked.read_to = Some(trunk);
+        return Some(walked);
+    }
+    let max = format!("--max-count={MAX_READ}");
+    let base = format!("^{}", record.base);
+    let read = cursor.landed_trunk.as_ref().map(|read| format!("^{read}"));
+    let mut args = vec![
+        "log",
+        "--first-parent",
+        max.as_str(),
+        "--format=%H%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%cn%x1e",
+        trunk.as_str(),
+        base.as_str(),
+    ];
+    if let Some(read) = &read {
+        args.push(read.as_str());
+    }
+    let log = repo.git.run(&args).ok()?;
+    let signatures = repo
+        .git
+        .ref_target(crate::registry::REGISTRY_REF)
+        .ok()?
+        .is_some();
+    let named = |id: &str| {
+        id == record.id
+            || record.fixes.as_deref() == Some(id)
+            || record.supersedes.as_deref() == Some(id)
+    };
+    let mut held = true;
+    for entry in log.split('\u{1e}') {
+        let fields: Vec<&str> = entry.trim().split('\u{1f}').map(str::trim).collect();
+        let &[commit, landed, registry_id, committer] = fields.as_slice() else {
+            continue;
+        };
+        if commit.is_empty()
+            || !crate::ids::is_change_id(landed)
+            || named(landed)
+            || cursor.landed.iter().any(|told| told == landed)
+            || !crate::unattributed::is_publication(
+                &repo.git,
+                signatures,
+                commit,
+                landed,
+                registry_id,
+                committer,
+            )
+        {
+            continue;
+        }
+        let Ok((_, theirs)) = chain.read(landed) else {
+            held = false;
+            continue;
+        };
+        let paths = crate::overlap::shared(&mine, &crate::inputs::paths(&theirs.declared_inputs));
+        if paths.is_empty() {
+            continue;
+        }
+        walked.found.push(Landing {
+            change: landed.to_owned(),
+            line: landed_line(change, landed, &theirs, &paths),
+        });
+    }
+    walked.found.reverse();
+    walked.read_to = held.then_some(trunk);
+    Some(walked)
+}
+
+/// Moves `cursor` past `walked`: each landing is told once, within the budget, and the cursor
+/// reads trunk from where the walk read to (NEW-10).
+fn tell_landings(
+    cursor: &mut Cursor,
+    walked: &Walked,
+    budget: u64,
+    now: u64,
+    delivery: &mut Delivery,
+) {
+    let mut withheld = false;
+    for landing in &walked.found {
+        if cursor.landed.contains(&landing.change) {
+            continue;
+        }
+        cursor.landed.push(landing.change.clone());
+        if offer(
+            cursor,
+            delivery,
+            (&landing.change, &landing.line),
+            budget,
+            now,
+        ) {
+            delivery.landed.push(landing.change.clone());
+        } else {
+            withheld = true;
+        }
+    }
+    over_budget_line(cursor, delivery, withheld);
+    let excess = cursor.landed.len().saturating_sub(MAX_TOLD);
+    cursor.landed.drain(..excess);
+    if walked.read_to.is_some() {
+        cursor.landed_trunk.clone_from(&walked.read_to);
+    }
+}
+
+/// The one line for change `landed` (its record `theirs`), landed on trunk on `paths` that
+/// change `change` declared too (NEW-10): its intent and actor, and to refresh. A path with a
+/// control character is dropped, and every control character of the line; at most
+/// [`MAX_LINE`] characters.
+fn landed_line(
+    change: &str,
+    landed: &str,
+    theirs: &crate::change::ChangeRecord,
+    paths: &[String],
+) -> String {
+    let paths: Vec<&str> = paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !path.chars().any(char::is_control))
+        .collect();
+    let text = format!(
+        "bay: change {change}: landed_on_your_paths: change {landed} (intent {}, actor {}) \
+         landed on trunk on {}: refresh (`bay start --resume {change}`) and re-read them",
+        theirs.intent.reference,
+        theirs.actor.name,
+        paths.join(", "),
     );
     let mut out: String = text
         .chars()

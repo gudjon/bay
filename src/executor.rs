@@ -73,7 +73,15 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         let mut seen = Seen::default();
         let unreleased = deadlines(&repo, &mut heads, &mut seen).err();
         let mut notes = Vec::new();
-        let ran = match pass(&repo, moves.then_some(&binary), &mut notes, seen, &mut beat) {
+        let mut advanced = Vec::new();
+        let ran = match pass(
+            &repo,
+            moves.then_some(&binary),
+            &mut notes,
+            &mut advanced,
+            seen,
+            &mut beat,
+        ) {
             Ok(ran) => ran,
             Err(message) => return BayResult::failed(message),
         };
@@ -94,6 +102,9 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             if !notes.is_empty() {
                 detail["early_conflicts"] = json!(notes);
             }
+            if !advanced.is_empty() {
+                detail["advanced"] = json!(advanced);
+            }
             if let Some(message) = &unreleased {
                 detail["unreleased"] = json!(message);
             }
@@ -104,6 +115,9 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         }
         if let Some(message) = &unreleased {
             eprintln!("bay executor: {message}");
+        }
+        for row in advanced.iter().filter(|row| row.get("error").is_some()) {
+            eprintln!("bay executor: {row}");
         }
         // A looping supervisor never reaches the end of `main`: a pass that fetched trunk
         // leaves the coordination cache now (`crate::coord`).
@@ -386,10 +400,14 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 ///
 /// G67: before its first operation the pass publishes this executor's presence through
 /// `beat`, naming the operation it drives first and the live queue depth, at a fixed cost.
+///
+/// N-7: after the queue's work, the targets with `advance = true` are fast-forwarded to their
+/// newest promotable commit (`crate::target::advance`); each move goes to `advanced`.
 fn pass(
     repo: &Repo,
     binary: Option<&Binary>,
     notes: &mut Vec<Value>,
+    advanced: &mut Vec<Value>,
     seen: Seen,
     beat: &mut crate::presence::Beat,
 ) -> Result<Vec<Value>, String> {
@@ -481,7 +499,24 @@ fn pass(
     if let Some(bisect) = crate::bisect::run(repo) {
         ran.push(json!({"bisect": bisect}));
     }
+    advanced.extend(advance(repo));
     Ok(ran)
+}
+
+/// N-7: the pass's moves of the targets with `advance = true`, read against the trunk, the
+/// registry and every producer's evidence as the remote holds them now. A fault is reported as
+/// one row, never fatal to the pass: the queue does not wait on a promotion.
+fn advance(repo: &Repo) -> Vec<Value> {
+    if !repo.config.targets.iter().any(|target| target.advance) {
+        return Vec::new();
+    }
+    repo.fetch_registry();
+    repo.fetch_evidence(&Keys::load(&repo.git));
+    let moved = crate::registry::Registry::current(&repo.git).and_then(|registry| {
+        let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
+        crate::target::advance(repo, &trunk, registry.as_ref(), crate::live::unix_now())
+    });
+    moved.unwrap_or_else(|why| vec![json!({"error": why})])
 }
 
 /// The pass's queue retention (§ 10a): the (reservation, release) pairs below the head of the

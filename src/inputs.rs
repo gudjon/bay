@@ -358,6 +358,7 @@ fn run_provider(
             format!("materializing the provider and the tree exceeded {bound}s")
         }
         crate::materialize::Unmade::Refused(why) | crate::materialize::Unmade::Failed(why) => why,
+        crate::materialize::Unmade::DiskLow(low) => low.message(),
     };
     crate::materialize::materialize(
         git,
