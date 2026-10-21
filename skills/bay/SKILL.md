@@ -89,34 +89,15 @@ command, flag and reason code, with the JSON Schema of `bay.result/1`.
 | `repair` | Edit in the view, then `bay land` again. |
 | `wait` | Nothing yet. `bay land --wait`, or `bay status` later. |
 
-Common reasons:
+Every refusal carries `next_step`: do that. `bay help --json` lists every reason with its next step.
 
-| Reason | Do |
+A few reasons need more than their next step:
+
+| Reason | Also |
 | --- | --- |
-| `TRUNK_MOVED` | Nothing. bay retries once more, then joins the queue. |
-| `INPUT_CHANGED` | Read the new version, refresh, repair, then `bay land` again. |
-| `INPUT_UNOBSERVED` | Read the required version, then refresh. |
-| `MERGE_CONFLICT` | Refresh, resolve the listed paths in the view, then `bay land` again. |
-| `CHECK_FAILED` | Repair the change, then `bay land` again. A check with `baseline = "base"` names only new failures; pre-existing ones land as `baseline_failures` in `coverage_gaps`: report them, never as passed. |
-| `CHECK_UNKNOWN` | Wait for a result. Never treat it as a pass. |
-| `CHECK_FLAKY` | Tell the user: the check gives two answers for one tree. A landing may name one flaky in `coverage_gaps`: report it, never as passed. |
-| `TRUNK_RED` | Main is red on these paths. Wait, or fix the owner's change: `bay start --fixes <change>`. |
-| `TRUNK_HELD` | Main is held (`detail.hold`: why, until when). The change stays queued and merges once the hold clears. Only fixes and reverts merge now. |
-| `DEPENDENCY_PENDING` | A change named by `--after` has not merged yet (`detail.pending`). The change stays queued and merges after it. |
-| `DEPENDENCY_ABANDONED` | A change named by `--after` ended unmerged (`detail.ended`). `bay land --abandon`, then `bay start <intent> --new` without it; or restart that change. |
-| `PROMOTION_REFUSED` | The host refused a push to a target such as `staging`. Push the commit `bay status` names promotable, or wait. |
-| `APPROVAL_PENDING` | These paths need a person's yes, which holds while they are unchanged (`checks[].set_aside` names the ones that changed). Tell the user who can approve (`detail.approval.checks[].approvers`). The approver runs `bay approve <change>` (`detail.approval.approve`). The executor lands it once approved; without one, `bay land --wait`. |
-| `COVERAGE_UNKNOWN` | Keep editing; `bay land` when coordination data is reachable. |
-| `LANE_NEVER_LANDS` | A lane change: read the check verdicts in `detail`. It never merges. |
-| `PATHS_UNDECLARED` | The `--from` branch changes paths you did not declare (`detail.uncovered`). Start again with `--paths` covering them. |
-| `LANE_LEAK` | The view holds a lane's commits (`detail.leaks`). Redo the work without them, or use `--lane`. |
-| `ACTOR_UNPROVEN` | Policy requires proof of who signs, and actors share this OS account. Tell the user: a hardware agent key, or one OS account per actor. |
-| `WIP_LIMIT` | You hold the most live changes policy allows (`detail.live_changes`). Land or abandon one, then start again. |
-| `DISK_LOW` | This box is below its disk floor (`detail.free_mib`, `detail.floor_mib`). Tell the user: free space, or lower `bay.minFreeMiB`. |
-| `CHANGE_TOO_LARGE` | The change is over the policy's `[limits]` (`detail.exceeded`: each limit, its value, the largest paths). Keep large files elsewhere, such as a shared drive, or split the change, then `bay land` again. Never raise the limits to get it through. |
-| `CONFIG_MISSING` / `POLICY_MISSING` | The repository is not set up. Tell the user, or set it up if asked. |
-
-Every code: https://getbay.io/docs/results
+| `CHECK_FAILED` | A check with `baseline = "base"` names only new failures; pre-existing ones land as `baseline_failures` in `coverage_gaps`: report them, never as passed. |
+| `CHECK_FLAKY` | A landing may name one flaky in `coverage_gaps`: report it, never as passed. |
+| `APPROVAL_PENDING` | Tell the user who can approve (`detail.approval.checks[].approvers`). An approval holds while its paths are unchanged (`checks[].set_aside` names the ones that changed). Never approve for them. |
 
 ## When the person is not a developer
 

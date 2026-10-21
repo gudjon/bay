@@ -2,9 +2,10 @@
 //!
 //! One `bay.result/1` whose detail lists every command and subcommand with its flags, read at
 //! run time from the command line bay parses; every decision with its exit code, and every
-//! reason code with what it still allows, when a retry can succeed and whether it is transient,
-//! read from the table in `result.rs`; and the JSON Schema of `bay.result/1`, built from the same
-//! table. No list here is a second definition: each one is derived from the one the code uses.
+//! reason code with what it still allows, when a retry can succeed, the agent's next step and
+//! whether it is transient, read from the table in `result.rs`; and the JSON Schema of
+//! `bay.result/1`, built from the same table. No list here is a second definition: each one is
+//! derived from the one the code uses.
 //! `schemas/bay.result.schema.json` is a copy of the schema that G252 holds equal to it.
 
 use clap::{Arg, ArgAction};
@@ -93,9 +94,10 @@ fn decisions() -> Vec<Value> {
         .collect()
 }
 
-/// Every row of the reason-code table. Which decision a refusal carries is the refusing
-/// command's (`blocked`, `failed`, or `queued` while bay acts on its own); the row holds the
-/// rest.
+/// Every row of the reason-code table, with the next step its refusals carry (`Reason::next`),
+/// so a table of reasons and what to do is generated from here. Which decision a refusal
+/// carries is the refusing command's (`blocked`, `failed`, or `queued` while bay acts on its
+/// own); the row holds the rest.
 fn reasons() -> Vec<Value> {
     Reason::ALL
         .iter()
@@ -104,6 +106,7 @@ fn reasons() -> Vec<Value> {
                 "code": reason.code(),
                 "allowed": reason.allowed(),
                 "retry_when": reason.retry_when(),
+                "next_step": reason.next(),
                 "transient": reason.transient(),
             })
         })
@@ -145,7 +148,7 @@ pub fn schema() -> Value {
         // Every result says one plain sentence (owner ruling 2026-10-21, `BayResult::say`).
         "required": ["schema", "decision", "say"],
         "additionalProperties": false,
-        "dependentRequired": {"reason": ["allowed", "retry_when"]},
+        "dependentRequired": {"reason": ["allowed", "retry_when", "next_step"]},
         "properties": {
             "schema": {"const": SCHEMA},
             "op_id": string,
@@ -159,6 +162,7 @@ pub fn schema() -> Value {
             "detail": {},
             "allowed": {"type": "array", "items": {"enum": allowed}},
             "retry_when": {"enum": retry_when},
+            "next_step": string,
             "waiting_for": string,
             "elapsed_s": {"type": "integer", "minimum": 0},
             "receipts": {"type": "array", "items": string},

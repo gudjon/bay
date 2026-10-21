@@ -2,7 +2,9 @@
 //!
 //! Stdout is always this value as JSON. Human text is a rendering of it on stderr.
 //! Exit codes follow `INTERFACES` § 1. Reason codes are the fixed table of
-//! `INTERFACES` § 2 and § 8: every code carries `allowed` and `retry_when`.
+//! `INTERFACES` § 2 and § 8: every code carries `allowed` and `retry_when`, and every refusal
+//! carries the agent's next step (`next_step`, [`Reason::next`]). This file is the one home of
+//! what to do on each reason: the skill and the docs point here, through `bay help --json`.
 
 use serde::{Serialize, Serializer};
 use serde_json::Value;
@@ -289,7 +291,8 @@ pub struct BayResult {
 }
 
 /// `bay.result/1` as it is written: the fields of [`BayResult`] in their order, with `say` after
-/// `reason`. Absent fields are omitted.
+/// `reason`, and a refusal's `next_step` after `retry_when`, both derived from the reason and
+/// never stored. Absent fields are omitted.
 #[derive(Serialize)]
 struct Wire<'a> {
     schema: &'a str,
@@ -313,6 +316,8 @@ struct Wire<'a> {
     allowed: Option<&'a [&'static str]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_when: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_step: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     waiting_for: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -343,6 +348,7 @@ impl Serialize for BayResult {
             detail: self.detail.as_ref(),
             allowed: self.allowed.as_deref(),
             retry_when: self.retry_when,
+            next_step: self.reason.map(Reason::next),
             waiting_for: self.waiting_for.as_deref(),
             elapsed_s: self.elapsed_s,
             receipts: self.receipts.as_deref(),
@@ -461,6 +467,9 @@ impl BayResult {
         }
         if let Some(retry_when) = self.retry_when {
             lines.push(format!("retry when: {retry_when}"));
+        }
+        if let Some(reason) = self.reason {
+            lines.push(format!("next step: {}", reason.next()));
         }
         lines.push(String::new());
         lines.join("\n")
@@ -661,6 +670,211 @@ fn short(detail: Option<&Value>) -> Option<String> {
 }
 
 impl Reason {
+    /// The agent's next step on this reason: one imperative sentence, at most 25 words, every
+    /// command in it written as typed (`` `bay land` ``). Every refusal carries it as
+    /// `next_step`, and `bay help --json` lists it with each code; it is the one home of what to
+    /// do on a reason. Every reason is in this match, so a new one cannot compile without one.
+    #[allow(clippy::too_many_lines)]
+    #[must_use]
+    pub const fn next(self) -> &'static str {
+        match self {
+            Self::InputChanged => {
+                "Read the new version `detail` names, run `bay start --resume <change>`, adjust the view, then `bay land` again."
+            }
+            Self::InputUnobserved => {
+                "Read the required version `detail` names, then run `bay start --resume <change>` and `bay land` again."
+            }
+            Self::MergeConflict => {
+                "Run `bay start --resume <change>`, resolve the listed paths in the view, then `bay land` again."
+            }
+            Self::TrunkMoved => {
+                "Do nothing: bay retries once more, then queues the change. `bay land --wait` shows the outcome."
+            }
+            Self::PublishRetryExhausted => {
+                "Read the cause in `detail` and tell the user; once it is fixed, `bay land` again."
+            }
+            Self::RegistryChanged => {
+                "Do nothing: an executor with a valid key signs it again. `bay status <change>` shows the outcome."
+            }
+            Self::CheckFlaky => {
+                "Tell the user the check gives two answers for one tree; once it is fixed, `bay land` again. Never quarantine it yourself."
+            }
+            Self::ChangeNotLanded => {
+                "Wait until the named change lands; `bay status <change>` shows its state. Then run the command again."
+            }
+            Self::HookTimeout => {
+                "Do nothing: bay retries after a short wait. If it keeps happening, run `bay doctor` and tell the user."
+            }
+            Self::QueueHeld => {
+                "Keep working: the change waits its turn in the queue. `bay land --wait` or `bay status <change>` shows the outcome."
+            }
+            Self::QueueDeadlineExceeded => {
+                "Read `detail`, shrink or split the change in the view, then `bay land` again; or ask the user to raise the budget."
+            }
+            Self::PublicationQueued => {
+                "Wait: the change is queued to land. `bay land --wait` or `bay status <change>` shows the outcome."
+            }
+            Self::CheckFailed => {
+                "Read the failing check in `detail`, repair the change in the view, then `bay land` again."
+            }
+            Self::CheckUnavailable => {
+                "Wait: bay retries once a worker can run the check. If `bay status --fleet` shows no live executor, tell the user."
+            }
+            Self::CheckUnknown => {
+                "Wait for the check's result with `bay land --wait`; never treat it as a pass. Repair the change if the check cannot answer."
+            }
+            Self::PolicyChanged => {
+                "Run `bay start --resume <change>`, then `bay land` again: the change is checked under the current policy."
+            }
+            Self::PolicyInvalid => {
+                "Tell the user `.bay/policy.toml` on main is invalid, as `detail` says; once it is repaired, `bay land` again."
+            }
+            Self::PolicyMissing => {
+                "Tell the user main has no `.bay/policy.toml`, so nothing can land; set it up only if they ask."
+            }
+            Self::WorkspaceIncomplete => {
+                "Run `bay start --resume <change>` to finish the interrupted step, then go on."
+            }
+            Self::PublishOutcomeUnknown => {
+                "Do nothing yet: bay reads main again. Never report it landed; `bay status <change>` shows the outcome."
+            }
+            Self::TrunkRed => {
+                "Wait for the owner's fix to the red paths, or fix it yourself with `bay start <intent> --fixes <change>`."
+            }
+            Self::ChangeAlreadyLanded => {
+                "Do not retry: the change already landed. For more edits, `bay start <intent>` opens the next change."
+            }
+            Self::ChangeSuperseded => {
+                "Read the change that took over in `detail`; work in it, or `bay start` again once it lands or is abandoned."
+            }
+            Self::ChangeHeld => {
+                "Another live session holds this change: wait until it ends, or work on another change. `bay status --fleet` shows the holder."
+            }
+            Self::AbandonRefused => {
+                "Only the change's own actor may abandon it: ask that actor, or leave the change as it is."
+            }
+            Self::ActorUnnamed => "Set `BAY_ACTOR` to your actor name, then run the command again.",
+            Self::ActorUnproven => {
+                "Tell the user policy needs proof of the actor: a hardware agent key, or one OS account per actor."
+            }
+            Self::CoverageUnknown => {
+                "Keep editing; `bay land` again once coordination data is reachable."
+            }
+            Self::HookInputInvalid => {
+                "Tell the user this bay cannot read the agent's hook payload; `bay doctor` names the floors, and `bay update` brings a newer bay."
+            }
+            Self::ShellDenied => {
+                "Do not run that command again; it is never allowed. Ask the user if the work truly needs it."
+            }
+            Self::PathHeld => {
+                "Another session in this tree holds the path: wait until it stops, or edit other paths."
+            }
+            Self::RemoteNotFetched => {
+                "Check the network and the remote, then run the command again; `bay doctor` names what is wrong."
+            }
+            Self::ConfigMissing => {
+                "Tell the user bay is not set up here; commit `.bay/config.toml` to main only if they ask."
+            }
+            Self::GitBelowFloor => {
+                "Tell the user to upgrade Git to the floor `detail` names, then run `bay doctor` again."
+            }
+            Self::ClaudeBelowFloor => {
+                "Tell the user to upgrade Claude Code, or remove its adapter, then run `bay doctor` again."
+            }
+            Self::ClaudeAbsent => {
+                "Tell the user to install Claude Code, or remove its adapter, then run `bay doctor` again."
+            }
+            Self::RemoteUnreachable => {
+                "Check the network and this box's key for the remote, then run `bay doctor` again."
+            }
+            Self::HooksMissing => {
+                "Run `bay install` to write the hook entries, then `bay doctor` again."
+            }
+            Self::SkillMismatch => {
+                "Run `bay install` to copy this version's skill, then `bay doctor` again."
+            }
+            Self::SandboxAbsent => {
+                "Tell the user to install the sandbox `detail` names, or set the executor's sandbox to none."
+            }
+            Self::CheckEnvUnset => {
+                "Tell the user to set the variables `detail` names for the executor, then run `bay doctor --role executor` again."
+            }
+            Self::ExecutorKeyMissing => {
+                "Tell the user to set and enroll the executor and producer keys, then run `bay doctor --role executor` again."
+            }
+            Self::KeyExposed => {
+                "Tell the user to move the key `detail` names onto hardware, or out of the account agent sessions run as."
+            }
+            Self::UpdateUnavailable => "Run `bay update` again later, once a release is reachable.",
+            Self::UpdateUnverified => {
+                "Keep the installed bay and tell the user; run `bay update` again once the release is republished."
+            }
+            Self::UpdatePinned => {
+                "Keep this version: `bay update` moves only after the box's pin moves."
+            }
+            Self::TalkInvalid => {
+                "Correct the talk as `detail` says, then `bay talk` again; `bay talk --help` lists each kind's fields."
+            }
+            Self::TalkBodyConflict => {
+                "Read the talk already sent under this id; send a changed ask with `bay talk`, or supersede it."
+            }
+            Self::TalkClosed => {
+                "Read the closed talk; if it is still needed, send a new `bay talk` with a changed follow-up."
+            }
+            Self::TalkSupersedeRefused => {
+                "Only the sender or the one who decides may supersede that talk: ask them, or send a new `bay talk`."
+            }
+            Self::TalkAnswerConflict => {
+                "Read the standing answer; answer again only to supersede it, with `bay talk --answer <id> --value <v>`."
+            }
+            Self::TalkSenderNotActor => {
+                "Send the talk as its sender, signed with that actor's own agent key."
+            }
+            Self::TalkBacklog => {
+                "Close or supersede one of your open talks, then `bay talk` again; `bay status --fleet` lists them."
+            }
+            Self::UnattributedLanding => {
+                "Do not retry: that commit did not land through bay, so it names no lander. Ask its author directly."
+            }
+            Self::EvidenceWithdrawn => {
+                "Do not retry: an evidence record is never removed or changed. Push notes that keep every record."
+            }
+            Self::PromotionRefused => {
+                "Push the commit `bay status` names promotable for that target, or wait until one is."
+            }
+            Self::LaneNeverLands => {
+                "Read the check verdicts in `detail`; a lane change never lands. To land the work, start a change without `--lane`."
+            }
+            Self::LaneLeak => {
+                "Redo the work without the lane commits `detail` names, or start it as a lane change: `bay start <intent> --paths <paths> --lane <lane>`."
+            }
+            Self::ApprovalPending => {
+                "Tell the user who can approve (`detail.approval`); the approver runs `bay approve <change>`. Then the executor lands it, or `bay land --wait`."
+            }
+            Self::WipLimit => {
+                "Land or abandon one of your live changes (`detail.live_changes`), then `bay start` again."
+            }
+            Self::DiskLow => {
+                "Tell the user to free disk space on this box, or lower `bay.minFreeMiB`, then run the command again."
+            }
+            Self::TrunkHeld => {
+                "Wait: the change stays queued and lands once the hold clears; `bay status` shows the hold. Only fixes and reverts land now."
+            }
+            Self::PathsUndeclared => {
+                "Run `bay start <intent> --from <branch>` again, with `--paths` covering every path in `detail.uncovered`."
+            }
+            Self::DependencyPending => {
+                "Wait: the change lands after each change it names with `--after` lands; `bay status <change>` shows them."
+            }
+            Self::DependencyAbandoned => {
+                "Run `bay land --abandon`, then `bay start <intent> --new` without that `--after`; or restart the dropped change."
+            }
+            Self::ChangeTooLarge => {
+                "Keep large files elsewhere or split the change, then `bay land` again. Never raise the limits to get it through."
+            }
+        }
+    }
+
     /// The plain sentence of this reason that names nothing from a detail; `None` for a reason
     /// whose sentence does ([`Reason::say`]). Every reason is in this match, so a new one must
     /// be given a sentence.
@@ -1033,6 +1247,37 @@ mod tests {
             assert_eq!(value["reason"], reason.code());
             assert!(value["allowed"].is_array(), "{}", reason.code());
             assert!(value["retry_when"].is_string(), "{}", reason.code());
+            assert_eq!(value["next_step"], reason.next(), "{}", reason.code());
+        }
+    }
+
+    /// bay's top-level commands, as `src/main.rs` names them (the library cannot see the
+    /// binary's command line; G295 checks each `next` against `bay help --json` itself).
+    const COMMANDS: &[&str] = &[
+        "start", "land", "save", "waiting", "approve", "undo", "status", "watch", "talk", "doctor",
+        "install", "host", "executor", "live", "share", "evidence", "update", "adapter", "hook",
+        "help",
+    ];
+
+    #[test]
+    fn every_reason_names_a_short_next_step_with_real_commands() {
+        for &reason in Reason::ALL {
+            let next = reason.next();
+            let code = reason.code();
+            assert!(!next.trim().is_empty(), "{code}: no next step");
+            let count = next.split_whitespace().count();
+            assert!(count <= 25, "{code}: {count} words: {next}");
+            // Every command is written as typed, in backticks: `bay <command> ...`.
+            for (at, _) in next.match_indices("`bay ") {
+                let word: String = next[at + "`bay ".len()..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_lowercase() || *c == '-')
+                    .collect();
+                assert!(
+                    COMMANDS.contains(&word.as_str()),
+                    "{code}: `bay {word}` is no bay command: {next}"
+                );
+            }
         }
     }
 

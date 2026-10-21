@@ -12,7 +12,8 @@
   "dependentRequired": {
     "reason": [
       "allowed",
-      "retry_when"
+      "retry_when",
+      "next_step"
     ]
   },
   "properties": {
@@ -192,6 +193,9 @@
         "dependency_dropped_or_restarted",
         "change_within_limits"
       ]
+    },
+    "next_step": {
+      "type": "string"
     },
     "waiting_for": {
       "type": "string"

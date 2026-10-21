@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.9
+
+- Every refusal names its next step in `next_step`; `bay help --json` lists each reason's next step.
+- `bay status` names the next step of a blocked operation.
+
 ## 0.2.8
 
 - Reading a change's chain from the remote never moves local work back; no command forces it.

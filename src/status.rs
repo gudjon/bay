@@ -1151,6 +1151,7 @@ fn waiting(op: &crate::change::Operation, operation: &mut Value) {
             "trunk": conflict.trunk,
             "allowed": reason.allowed(),
             "retry_when": reason.retry_when(),
+            "next_step": reason.next(),
         });
     }
 }
@@ -1225,6 +1226,7 @@ fn describe(
             "receipt": record_state,
             "allowed": reason.map(Reason::allowed),
             "retry_when": reason.map(Reason::retry_when),
+            "next_step": reason.map(Reason::next),
             "op_id": op.op_id,
             "state": if landed.is_some_and(|found| found.revision == op.revision) { json!("published") } else { json!(op.state) },
             "outcome": op.outcome,
