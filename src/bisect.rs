@@ -99,7 +99,7 @@ fn all(repo: &Repo) -> Result<Vec<Value>, String> {
             ));
             continue;
         }
-        let writer = Writer::of(&keys, registry.as_ref())?;
+        let writer = Writer::of(&repo.git, &keys, registry.as_ref())?;
         reports.push(bisect(repo, &keys, &writer, red, suspect)?);
     }
     Ok(reports)
@@ -112,9 +112,15 @@ struct Writer {
 }
 
 impl Writer {
-    fn of(keys: &Keys, registry: Option<&Registry>) -> Result<Self, String> {
+    fn of(git: &Git, keys: &Keys, registry: Option<&Registry>) -> Result<Self, String> {
         let signer = match (Registry::signing(registry), &keys.producer) {
-            (None, _) => None,
+            (None, _) => {
+                // G297: unsigned evidence goes under this clone's own name.
+                return Ok(Self {
+                    name: crate::signing::own_producer_name(git),
+                    signer: None,
+                });
+            }
             (Some(_), Some(signer)) => Some(signer.clone()),
             (Some(_), None) => {
                 return Err(

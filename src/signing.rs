@@ -50,7 +50,9 @@ pub struct Keys {
     pub executor: Option<Signer>,
     pub producer: Option<Signer>,
     /// The operator-chosen names, with or without keys. Every executor needs its own producer
-    /// name: one producer name used by two executors collides on one notes ref.
+    /// name: one producer name used by two executors collides on one notes ref. A clone that
+    /// names no producer takes one of its own when it first writes unsigned evidence (G297,
+    /// [`own_producer_name`]).
     pub executor_name: String,
     pub producer_name: String,
     /// `bay.reviewerName`, when this machine records reviews (G75).
@@ -64,6 +66,27 @@ fn config(git: &Git, key: &str) -> Option<String> {
         .ok()
         .flatten()
         .filter(|value| !value.is_empty())
+}
+
+/// G297: the producer name this clone writes unsigned evidence under. One name has one writer,
+/// so a clone that set no `bay.producerName` takes a name of its own, `local-<id>`, the first
+/// time it writes, and keeps it in its own Git config: two machines of a team under
+/// `signing = "approvals"` never write one evidence ref. Until that first write the clone holds
+/// no record under the new name, and a read names it `local` ([`Keys::load`]); a command that
+/// only reads writes no config. A clone whose config cannot be written keeps `local`.
+#[must_use]
+pub fn own_producer_name(git: &Git) -> String {
+    if let Some(name) = config(git, "bay.producerName") {
+        return name;
+    }
+    let Ok(id) = crate::ids::new_change_id() else {
+        return "local".to_owned();
+    };
+    let name = format!("local-{id}");
+    match git.run(&["config", "--local", "bay.producerName", &name]) {
+        Ok(_) => name,
+        Err(_) => "local".to_owned(),
+    }
 }
 
 impl Keys {

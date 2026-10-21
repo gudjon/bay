@@ -144,8 +144,10 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    enrolled in the registry's `approver` file and approves with `bay approve <change>`.
    It records a signed approval record of the exact candidate.
    A small team with no executor host sets `[policy] signing = "approvals"`: only approvals are
-   signed, and no machine needs an executor, producer or agent key. To keep changes small, add
-   `[limits]` with `max_file_mib`, `max_files` or `max_added_lines` (positive integers; each optional).
+   signed, and no machine needs an executor, producer or agent key. Each clone takes its own
+   producer name (`local-<id>` in its git config); set `bay.producerName` only to choose one.
+   To keep changes small, add `[limits]` with `max_file_mib`, `max_files` or `max_added_lines`
+   (positive integers; each optional).
 3. Before you commit an adapter (a `[[check]]` command, `[wake] command` or `[notify] command`),
    prove it: `bay adapter test check|wake|notify -- <command>`. It runs bay's contract cases the
    way bay runs that adapter, changes nothing, and exits 0 only when every case passes.

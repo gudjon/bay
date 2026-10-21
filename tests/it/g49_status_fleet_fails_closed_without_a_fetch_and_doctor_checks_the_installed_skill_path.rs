@@ -10,7 +10,7 @@ use crate::support;
 
 use std::path::{Path, PathBuf};
 
-use support::{TestBox, UNSANDBOXED_CHOICE, result_json, row};
+use support::{BOX_CONFIG, TestBox, result_json, row};
 
 const CLAUDE_ADAPTER: &str = "[agent]\nproduct = \"claude\"\n";
 
@@ -132,7 +132,7 @@ fn a_missing_copy_is_red_only_with_the_claude_adapter() {
     assert!(!test_box.home.join(".claude/settings.json").exists());
     assert_eq!(
         std::fs::read_to_string(&test_box.global_config).unwrap(),
-        UNSANDBOXED_CHOICE
+        BOX_CONFIG
     );
 }
 

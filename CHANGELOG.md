@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.10
+
+- Under `signing = "approvals"`, a second machine now lands; it no longer fails with "producer local collides".
+- A clone with no `bay.producerName` takes its own, `local-<id>`, and keeps it in its git config.
+
 ## 0.2.9
 
 - Every refusal names its next step in `next_step`; `bay help --json` lists each reason's next step.

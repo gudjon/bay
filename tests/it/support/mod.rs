@@ -19,6 +19,11 @@ pub mod talk;
 /// What a new test box's global Git config holds: the box's choice of no check sandbox.
 pub const UNSANDBOXED_CHOICE: &str = "[bay]\n\texecutorSandbox = none\n";
 
+/// The box's global Git config: [`UNSANDBOXED_CHOICE`], and the producer name `local` every
+/// clone of the box writes evidence under, as an operator names one (G297 clears it to see a
+/// clone take its own).
+pub const BOX_CONFIG: &str = "[bay]\n\texecutorSandbox = none\n\tproducerName = local\n";
+
 /// The config a new work repository starts with.
 pub const MINIMAL_CONFIG: &str = "trunk = \"main\"\n";
 
@@ -43,7 +48,7 @@ impl TestBox {
         let global_config = root.path().join("global.gitconfig");
         // The box's choice to run checks with no sandbox where it has none (ruling R14), so
         // the suite runs on a machine without one; a sandbox case clears it.
-        std::fs::write(&global_config, UNSANDBOXED_CHOICE).unwrap();
+        std::fs::write(&global_config, BOX_CONFIG).unwrap();
         let out = StdCommand::new("sh")
             .args(["-c", "command -v git"])
             .output()

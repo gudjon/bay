@@ -520,10 +520,10 @@ impl<'a> Ctx<'a> {
     /// The producer name evidence is recorded under, and its signer when signing is on for
     /// everything (N-21: check evidence is unsigned under `signing = "approvals"`).
     fn producer(&self) -> Result<(String, Option<Signer>), String> {
-        let name = self.keys.producer_name.clone();
         if self.signing().is_none() {
-            return Ok((name, None));
+            return Ok((crate::signing::own_producer_name(&self.repo.git), None));
         }
+        let name = self.keys.producer_name.clone();
         let signer = self.keys.producer.clone().ok_or(
             "the repository has a key registry and this machine has no producer key (git config bay.producerKey)",
         )?;
