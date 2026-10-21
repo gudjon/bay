@@ -418,10 +418,6 @@ struct Ctx<'a> {
     /// The chain head this process last pushed: later pushes are leased on it, so a chain
     /// another executor moved is never overwritten.
     pushed_head: Option<String>,
-    /// The head this process's first write not yet on the remote went on; `None` once every
-    /// write it made is pushed or withdrawn. [`Ctx::refetch`] takes those writes off the local
-    /// chain ref, and only those: any other local work the remote lacks is kept (G289).
-    unpushed_from: Option<String>,
     /// The epoch this process claimed, when it acts as the executor.
     my_epoch: u64,
     /// The registry principal that signed the request, when it is a policy repair (§ 7).
@@ -463,7 +459,6 @@ impl<'a> Ctx<'a> {
             registry: None,
             keys,
             pushed_head: None,
-            unpushed_from: None,
             my_epoch: 0,
             repair: None,
             online: true,
@@ -575,18 +570,11 @@ impl<'a> Ctx<'a> {
     }
 
     fn save(&mut self, draft: &str, candidate: Option<&str>, message: &str) -> Result<(), String> {
-        let head = self
+        self.head = self
             .chain
             .append_linking(&self.head, &self.record, draft, candidate, message)
             .map_err(|error| error.message())?;
-        self.wrote(head);
         Ok(())
-    }
-
-    /// This process wrote `head` on its head: until a push takes it, it is unpushed.
-    fn wrote(&mut self, head: String) {
-        let before = std::mem::replace(&mut self.head, head);
-        self.unpushed_from.get_or_insert(before);
     }
 
     /// [`Ctx::save`] that tells a lost compare-and-swap from a fault: `false` when the local
@@ -603,7 +591,7 @@ impl<'a> Ctx<'a> {
             .append_linking(&self.head, &self.record, draft, candidate, message)
         {
             Ok(head) => {
-                self.wrote(head);
+                self.head = head;
                 Ok(true)
             }
             Err(ChainError::Moved { .. }) => Ok(false),
@@ -631,7 +619,6 @@ impl<'a> Ctx<'a> {
         let pushed = self.repo.git.run(&args).is_ok();
         if pushed {
             self.pushed_head = Some(self.head.clone());
-            self.unpushed_from = None;
             self.catch_up_local();
         }
         pushed
@@ -658,7 +645,6 @@ impl<'a> Ctx<'a> {
         let pushed = self.repo.git.run(&args).is_ok();
         if pushed {
             self.pushed_head = Some(self.head.clone());
-            self.unpushed_from = None;
             self.catch_up_local();
         }
         pushed
@@ -697,33 +683,24 @@ impl<'a> Ctx<'a> {
             .git
             .run(&["update-ref", &name, before, &self.head]);
         before.clone_into(&mut self.head);
-        if self.unpushed_from.as_deref() == Some(before) {
-            self.unpushed_from = None;
-        }
     }
 
-    /// Reads the remote's chain ([`Repo::remote_record`]) and goes on from its head. The local
-    /// chain ref is never forced (G289): it moves only forward, and keeps local work the remote
-    /// lacks. This process's own writes the remote never took leave it, as [`Ctx::withdraw`]
-    /// takes them, so no later push of the ref carries them; a local head another process
-    /// wrote stays, and this process's next compare-and-swap on the ref loses until that
-    /// process pushes it. Offline, nothing moves.
+    /// Replaces the local chain with the remote's and reloads it.
     fn refetch(&mut self) -> Result<(), String> {
-        let remote = self.repo.remote_record(&self.id)?;
-        if let Some(from) = self.unpushed_from.take()
-            && remote.kept.as_deref() == Some(self.head.as_str())
-        {
-            let git = &self.repo.git;
-            let name = change_ref(&self.id);
-            if git.run(&["update-ref", &name, &from, &self.head]).is_ok()
-                && from != remote.head
-                && git.is_ancestor(&from, &remote.head).unwrap_or(false)
-            {
-                let _ = git.run(&["update-ref", &name, &remote.head, &from]);
-            }
-        }
-        self.head = remote.head;
-        self.record = remote.record;
+        let name = change_ref(&self.id);
+        self.repo
+            .git
+            .run(&[
+                "fetch",
+                "-q",
+                "--no-tags",
+                self.repo.remote(),
+                &format!("+{name}:{name}"),
+            ])
+            .map_err(|error| error.message())?;
+        let (head, record) = self.chain.read(&self.id).map_err(|error| error.message())?;
+        self.head = head;
+        self.record = record;
         self.pushed_head = Some(self.head.clone());
         Ok(())
     }
@@ -1569,7 +1546,6 @@ fn bisect_batch(
     if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
         ctx.head.clone_from(&beat);
         ctx.pushed_head = Some(beat);
-        ctx.unpushed_from = None;
     }
     push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0)?;
     Ok(Some((search, checks)))
@@ -3060,11 +3036,17 @@ fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<Ba
     )
 }
 
-/// Brings the remote's chain here (§ 9a): the remote holds what executors recorded. The local
-/// chain moves only forward ([`Repo::remote_chain`], G289): local-only work the sync before
-/// this could not push is kept, and this landing carries it.
+/// Makes the remote's chain the local one (§ 9a): the remote holds what executors recorded.
+/// Local-only work was pushed by the sync before this, or is re-made by landing again.
 fn adopt_remote_chain(repo: &Repo, id: &str) {
-    let _ = repo.remote_chain(id);
+    let name = change_ref(id);
+    let _ = repo.git.run(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        repo.remote(),
+        &format!("+{name}:{name}"),
+    ]);
 }
 
 /// § 3a submission order: the request is persisted; then the configured executor's `submit`
@@ -3780,7 +3762,6 @@ fn build_and_check(
     if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
         ctx.head.clone_from(&beat);
         ctx.pushed_head = Some(beat);
-        ctx.unpushed_from = None;
     }
     let refusal = match refusal {
         Some(waiting) if waiting.reason == Some(Reason::CheckUnavailable) => {

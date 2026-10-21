@@ -5,8 +5,6 @@
 - Without a key registry, an approval now blocks promotion and status the same way it already blocks landing.
 - bay stops with an error when Git cannot find a commit, instead of treating it as not an ancestor.
 - Policy reads file names with spaces or non-ASCII characters correctly.
-- No command forces a change's chain from the remote; work not yet pushed is kept.
-- An executor pass fetches chains by fast-forward only, keeping local chain work the remote lacks.
 - A hung adapter is killed with every process it started, never leaving children behind.
 - `say` repeats a message's first sentence whole or not at all, so it never flips meaning.
 - After `bay approve`, with an executor running, bay says the executor's next pass lands it.
