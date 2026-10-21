@@ -1593,8 +1593,9 @@ impl Judge<'_> {
                 }
                 // Q12, G245: the record's kind names the one class file it verifies against, so
                 // a reviewer key writes only `review` records, an approver key only `approval`
-                // records, and a producer key neither. N-21: under `signing = "approvals"` only
-                // an approval is signed; every other record is taken unsigned.
+                // and `waiver` records (N-9), and a producer key none of them. N-21: under
+                // `signing = "approvals"` only an approval or a waiver is signed; every other
+                // record is taken unsigned.
                 if evidence::signed_kind(self.registry, &record.kind)
                     && !record.verifies_in(self.git, self.registry)?
                 {
@@ -1606,8 +1607,8 @@ impl Judge<'_> {
                         record.kind,
                         match class {
                             KeyClass::Reviewer => "only review records",
-                            KeyClass::Approver => "only approval records",
-                            _ => "every kind but review and approval",
+                            KeyClass::Approver => "only approval and waiver records",
+                            _ => "every kind but review, approval and waiver",
                         }
                     ));
                 }

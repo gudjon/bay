@@ -29,6 +29,19 @@ pub struct Trunk {
 /// registrar, and the two clones configured.
 #[must_use]
 pub fn trunk() -> Trunk {
+    trunk_with("")
+}
+
+/// [`trunk`], with `tests` added to the `tests` check's own `[[check]]` entry (for example
+/// `"waivable = true\n"`, N-9).
+#[must_use]
+pub fn trunk_with(tests: &str) -> Trunk {
+    trunk_with_config(tests, "")
+}
+
+/// [`trunk_with`], with `config` as the trunk's `.bay/config.toml` (empty: none).
+#[must_use]
+pub fn trunk_with_config(tests: &str, config: &str) -> Trunk {
     let test_box = TestBox::new();
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
@@ -43,9 +56,14 @@ pub fn trunk() -> Trunk {
     );
     for (path, text) in &mut check {
         if path == ".bay/policy.toml" {
+            // The `tests` entry is the policy's last table so far, so these keys are its own.
+            text.push_str(tests);
             text.push_str(APPROVAL);
             text.push_str(APPROVALS_ONLY);
         }
+    }
+    if !config.is_empty() {
+        check.push((".bay/config.toml".to_owned(), config.to_owned()));
     }
     test_box.seed_with_check(
         &repo,

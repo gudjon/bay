@@ -158,6 +158,7 @@ mod g292_an_approval_holds_while_its_files_are_unchanged;
 mod g293_one_word_per_idea;
 mod g294_a_lost_chain_write_never_livelocks_a_claim;
 mod g295_every_refusal_says_its_next_step;
+mod g296_a_signed_waiver_lets_one_check_through_as_a_gap;
 mod g297_two_machines_land_with_no_names_set;
 mod g29_evidence_is_judged_by_record_never_latest_wins;
 mod g30_coverage_is_judged_against_the_frozen_manifest;

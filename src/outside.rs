@@ -17,13 +17,17 @@
 //!   named, never cut.
 //! - **Signer:** a `review` record is signed by the box's reviewer key (`bay.reviewerName`,
 //!   `bay.reviewerKey`), an `approval` by its approver key (`bay.approverName`,
-//!   `bay.approverKey`), every other kind by its producer key (`bay.producerName`,
+//!   `bay.approverKey`; a `waiver` too), every other kind by its producer key (`bay.producerName`,
 //!   `bay.producerKey`), as the readers verify them (Q12, G245).
 //! - **An approval** (G245) is about a candidate, not a landing: `--commit` names the candidate
 //!   commit a land refused with `APPROVAL_PENDING` (its first parent is the trunk it was merged
 //!   onto), and `--check` an approval check of the policy there, whose environment it takes when
 //!   `--environment` is not named. A candidate that changes the policy is judged by its own new
 //!   policy too (§ 7), so it gets one approval record under each policy that has the check.
+//! - **A waiver** (N-9) is about a candidate too, signed by the approver key: `--check` names a
+//!   check marked `waivable = true` in a policy that judges the candidate, its verdict is
+//!   `unknown` (a waiver is never a pass), and `--why` is required. `bay approve <change>
+//!   --waive <check> --why <text>` writes it.
 
 use std::path::{Path, PathBuf};
 
@@ -79,6 +83,24 @@ fn run(dir: &Path, request: &Record) -> Result<BayResult, String> {
             request.verdict
         )
     })?;
+    // N-9: a waiver says nothing of the product, so it is never a pass, and it names its reason.
+    if request.kind == evidence::KIND_WAIVER {
+        if verdict != Verdict::Unknown {
+            return Err(format!(
+                "a waiver's verdict is unknown, never {}: a waiver lets a check through as a named gap, it never passes it",
+                request.verdict
+            ));
+        }
+        if request
+            .why
+            .as_deref()
+            .is_none_or(|why| why.trim().is_empty())
+        {
+            return Err(
+                "a waiver names its reason: --why <text>, kept in the signed record".to_owned(),
+            );
+        }
+    }
     let common = Common {
         name: name.clone(),
         version: request
@@ -200,7 +222,7 @@ fn refresh_own(repo: &Repo, name: &str) -> Result<(), String> {
 fn writer(git: &Git, kind: &str) -> Result<(String, PathBuf), String> {
     let (name_key, key_key) = match kind {
         evidence::KIND_REVIEW => ("bay.reviewerName", "bay.reviewerKey"),
-        evidence::KIND_APPROVAL => ("bay.approverName", "bay.approverKey"),
+        evidence::KIND_APPROVAL | evidence::KIND_WAIVER => ("bay.approverName", "bay.approverKey"),
         _ => ("bay.producerName", "bay.producerKey"),
     };
     let get = |key: &str| {
@@ -331,12 +353,12 @@ fn build(
         .check
         .clone()
         .unwrap_or_else(|| request.kind.clone());
-    let judged = if request.kind == evidence::KIND_APPROVAL {
+    let judged = if evidence::approver_kind(&request.kind) {
         approval_policies(
             git,
             (base.as_str(), commit.as_str()),
             (tree.as_str(), base_tree.as_str()),
-            &check,
+            (request.kind.as_str(), check.as_str()),
             request.environment.as_deref(),
         )?
     } else {
@@ -356,8 +378,9 @@ fn build(
             unknown.insert(crate::throughput::FOOTPRINT.to_owned(), stamp);
         }
         let mut named = json!({"inputs": common.inputs, "version": common.version});
-        // Two approvals of one candidate under two policies are two records, never one id.
-        if request.kind == evidence::KIND_APPROVAL {
+        // Two approvals (or waivers) of one candidate under two policies are two records,
+        // never one id.
+        if evidence::approver_kind(&request.kind) {
             named["manifest_digest"] = json!(manifest_digest);
         }
         let digest = crate::canonical::digest(&named)?;
@@ -404,15 +427,18 @@ fn build(
 /// manifest digest and the check's environment. An approval that would answer no approval
 /// check never counts, so none is refused before anything is written. G292: with each, the
 /// stamp of what the check covers in the candidate's `tree` and its `base_tree`
-/// (`crate::throughput::stamp`), when the check carries.
+/// (`crate::throughput::stamp`), when the check carries. N-9: for a `waiver` (`kind`), each such
+/// policy whose `check` is a run check marked `waivable = true`, with no stamp: a waiver names
+/// one candidate and never carries.
 #[allow(clippy::type_complexity)]
 fn approval_policies(
     git: &Git,
     (base, commit): (&str, &str),
     (tree, base_tree): (&str, &str),
-    check: &str,
+    (kind, check): (&str, &str),
     environment: Option<&str>,
 ) -> Result<Vec<(u64, String, String, Option<Value>)>, String> {
+    let waiver = kind == evidence::KIND_WAIVER;
     let mut judged: Vec<(u64, String, String, Option<Value>)> = Vec::new();
     for at in [base, commit] {
         let loaded = crate::policy::load_at(git, at);
@@ -433,7 +459,12 @@ fn approval_policies(
             .checks
             .iter()
             .filter(|entry| {
-                entry.is_approval()
+                let answers = if waiver {
+                    entry.waivable && !entry.is_approval()
+                } else {
+                    entry.is_approval()
+                };
+                answers
                     && entry.id == check
                     && environment.is_none_or(|named| named == entry.environment)
             })
@@ -443,15 +474,27 @@ fn approval_policies(
                 policy.revision,
                 policy.manifest_digest.clone(),
                 entry.environment.clone(),
-                crate::throughput::stamp(git, entry, tree, base_tree),
+                if waiver {
+                    None
+                } else {
+                    crate::throughput::stamp(git, entry, tree, base_tree)
+                },
             )),
             [] => {}
             _ => {
                 return Err(format!(
-                    "approval check {check} has more than one environment at {at}; name one with --environment"
+                    "{kind} check {check} has more than one environment at {at}; name one with --environment"
                 ));
             }
         }
+    }
+    if judged.is_empty() && waiver {
+        return Err(format!(
+            "no policy that judges {commit} has a waivable check {check}{}; a waiver answers only a [[check]] with waivable = true",
+            environment
+                .map(|named| format!(" on {named}"))
+                .unwrap_or_default()
+        ));
     }
     if judged.is_empty() {
         return Err(format!(

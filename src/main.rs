@@ -86,17 +86,21 @@ enum Command {
     },
     /// The changes waiting for an approval this machine's approver (`bay.approverName`) can give,
     /// each with its candidate, paths and diff; with no approver set, every one, with who can
-    /// approve it
+    /// approve it. Also each held candidate's waivable checks that did not pass
     Waiting,
     /// Approve a change that waits for an approval: this machine's approver signs one
     /// `approval` record of its exact candidate for each approval check it waits on, and
-    /// pushes it
+    /// pushes it; with --waive, one signed waiver of one waivable check instead
     Approve {
         /// The change that waits for the approval
         change: String,
         /// Say no instead: the record's verdict is `product_failure`, and the change is blocked
-        #[arg(long)]
+        #[arg(long, conflicts_with = "waive")]
         reject: bool,
+        /// Waive this one check, marked `waivable = true`, on the pending candidate: a signed
+        /// waiver, never a pass; the landing names it as a coverage gap. Needs --why
+        #[arg(long, value_name = "CHECK")]
+        waive: Option<String>,
         /// Why, in the approver's words: kept in the signed record
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
@@ -390,7 +394,7 @@ enum EvidenceAction {
     /// content writes nothing)
     Record {
         /// The record kind, for example `review` or `approval`; a `review` is signed by
-        /// bay.reviewerKey, an `approval` by bay.approverKey
+        /// bay.reviewerKey, an `approval` or a `waiver` by bay.approverKey
         #[arg(long, value_parser = clap::builder::NonEmptyStringValueParser::new())]
         kind: String,
         /// `pass`, `product_failure`, `infra_failure` or `unknown`; there is no default
@@ -417,6 +421,9 @@ enum EvidenceAction {
         /// The writer's own version, part of the record's id; bay's version when not named
         #[arg(long)]
         version: Option<String>,
+        /// Why, in the writer's words: kept in the signed record; a `waiver` needs one
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
     },
 }
 
@@ -533,6 +540,7 @@ fn approve_change(dir: &std::path::Path, command: Command) -> BayResult {
     let Command::Approve {
         change,
         reject,
+        waive,
         why,
     } = command
     else {
@@ -543,6 +551,7 @@ fn approve_change(dir: &std::path::Path, command: Command) -> BayResult {
         &bay::approve::Approve {
             change,
             reject,
+            waive,
             why,
         },
     )
@@ -781,6 +790,7 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
             inputs,
             body,
             version,
+            why,
         } => bay::outside::record(
             dir,
             &bay::outside::Record {
@@ -792,7 +802,7 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
                 inputs,
                 body,
                 version,
-                why: None,
+                why,
             },
         ),
     }

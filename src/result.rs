@@ -1131,6 +1131,11 @@ impl BayResult {
                 "Saved and added to the shared copy; no checks are set up here, so nothing was checked."
                     .to_owned()
             }
+            // N-9: a waived check did not pass, and the sentence never says it did.
+            Decision::Landed if waived(detail).is_some() => format!(
+                "Saved and added to the shared copy; a check{} did not pass and was waived by a person.",
+                named(waived(detail))
+            ),
             Decision::Landed => "Saved and checked; it is now in the shared copy.".to_owned(),
             Decision::Queued if self.waiting_for.as_deref() == Some("remote") => {
                 "Saved here; it is sent and checked once the shared copy can be reached.".to_owned()
@@ -1148,6 +1153,17 @@ impl BayResult {
             },
         }
     }
+}
+
+/// N-9: the check of the first `coverage_gaps` entry a waiver let through, if any.
+fn waived(detail: Option<&Value>) -> Option<String> {
+    detail?
+        .get("coverage_gaps")?
+        .as_array()?
+        .iter()
+        .find(|gap| gap.get("waived_by").is_some())
+        .and_then(|gap| gap["check"].as_str())
+        .map(str::to_owned)
 }
 
 /// The sentence of an `ok` result with no reason, by what it carries.

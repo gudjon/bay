@@ -220,6 +220,8 @@ fn days_between(from: &str, to: &str) -> Option<i64> {
     Some(day(to)? - day(from)?)
 }
 
+// Each bool is its own policy key, read from TOML; an enum would not read as one.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CheckEntry {
@@ -370,6 +372,15 @@ pub struct CheckEntry {
     /// entry (the G26 vector). Its one value is `"base"`; any other is `POLICY_INVALID`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Baseline>,
+    /// N-9: whether a person may waive this check on one candidate. With `waivable = true`, an
+    /// enrolled approver's signed `waiver` record (`bay approve <change> --waive <check> --why
+    /// <text>`) about the exact candidate commit, with a reason, lets the check through when
+    /// its own records do not pass ([`Policy::waiver`]). A waiver is never a pass: the landing
+    /// names it under `coverage_gaps` with the check's real verdict. Refused on an approval
+    /// check, where a person's approval is the answer. Judged at the base; `true` enters the
+    /// definition digest, and the default is left out of the canonical entry (the G26 vector).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub waivable: bool,
 }
 
 /// A check's `baseline` (N-3): what a failing unit is compared with.
@@ -611,8 +622,9 @@ impl Policy {
     }
 
     /// The checks of `required` that `records` do not pass for `commit` (G30), with their
-    /// combined verdicts, less each `flaky` one whose entry says `allow_flaky`. The executor and
-    /// the host hook judge a landing by this one rule.
+    /// combined verdicts, less each `flaky` one whose entry says `allow_flaky`, and less each
+    /// waivable one that a valid waiver answers on `commit` (N-9, [`Policy::waiver`]). The
+    /// executor and the host hook judge a landing by this one rule.
     #[must_use]
     pub fn gaps(
         &self,
@@ -631,7 +643,40 @@ impl Policy {
         .filter(|(id, combined)| {
             *combined != crate::evidence::Combined::Flaky || !self.allows_flaky(id)
         })
+        // N-9: a waived check is no gap here; the landing names it under `coverage_gaps`.
+        .filter(|(id, _)| self.waiver(records, id, commit).is_none())
         .collect()
+    }
+
+    /// N-9: the waiver among `records` that lets check `id` through on candidate `commit`, if
+    /// any: the check's entry says `waivable = true` (and is no approval check); the record is
+    /// a `waiver` of that check and environment, under this policy's manifest, about exactly
+    /// `commit` (never another candidate, even one with the same tree: a waiver never carries),
+    /// with a non-empty `why`. `records` are counted records ([`crate::evidence::counted`]), so
+    /// only an enrolled approver's signed waiver is among them, and none without a registry.
+    #[must_use]
+    pub fn waiver<'r>(
+        &self,
+        records: &'r [crate::evidence::EvidenceRecord],
+        id: &crate::evidence::CheckId,
+        commit: &str,
+    ) -> Option<&'r crate::evidence::EvidenceRecord> {
+        if !self
+            .check(id)
+            .is_some_and(|entry| entry.waivable && !entry.is_approval())
+        {
+            return None;
+        }
+        records.iter().find(|record| {
+            record.kind == crate::evidence::KIND_WAIVER
+                && record.check == *id
+                && record.manifest_digest == self.manifest_digest
+                && record.subject.commit == commit
+                && record
+                    .why
+                    .as_deref()
+                    .is_some_and(|why| !why.trim().is_empty())
+        })
     }
 
     /// Whether check `id` is keyed by subject commit ([`CheckEntry::commit_keyed`]).
@@ -725,6 +770,13 @@ impl Policy {
     /// approval check, and an approval never answers a check bay runs.
     #[must_use]
     pub fn listed(&self, record: &crate::evidence::EvidenceRecord) -> bool {
+        // N-9: a waiver stands beside a waivable check's records, never in place of them; an
+        // enrolled approver signs it, so the check's `producers` list does not name its writer.
+        if record.kind == crate::evidence::KIND_WAIVER {
+            return self
+                .check(&record.check)
+                .is_some_and(|check| check.waivable && !check.is_approval());
+        }
         self.check(&record.check).is_none_or(|check| {
             check.kind.record_kind() == record.kind
                 && check
@@ -1501,6 +1553,13 @@ fn validate_kind(entry: &CheckEntry) -> Result<(), String> {
         }
         return Ok(());
     }
+    // N-9: an approval is a person's answer; a waiver of it would stand for that answer.
+    if entry.waivable {
+        return Err(format!(
+            "check {} is kind = \"approval\" and waivable = true; an approval is answered by an approver's yes, never waived",
+            entry.id
+        ));
+    }
     let stated = [
         ("command", !entry.command.is_empty()),
         ("adapter", !entry.adapter.is_empty()),
@@ -1783,6 +1842,30 @@ mod tests {
             manifest_entry(&plain, &ids).unwrap().definition_digest,
             manifest_entry(&set, &ids).unwrap().definition_digest
         );
+    }
+
+    /// N-9: `waivable = true` enters the definition digest; absent, it is left out of the
+    /// canonical entry, so a policy without it keeps its digest (the G26 vector). On an approval
+    /// check it is invalid: an approval is a person's answer, never waived.
+    #[test]
+    fn waivable_enters_the_digest_only_when_set_and_never_on_an_approval() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let plain: CheckEntry = toml::from_str(text).unwrap();
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("waivable").is_none(), "{json}");
+        let set: CheckEntry = toml::from_str(&format!("{text}waivable = true\n")).unwrap();
+        assert_eq!(serde_json::to_value(&set).unwrap()["waivable"], true);
+        let ids = BTreeMap::new();
+        assert_ne!(
+            manifest_entry(&plain, &ids).unwrap().definition_digest,
+            manifest_entry(&set, &ids).unwrap().definition_digest
+        );
+        assert!(super::validate_kind(&set).is_ok());
+        let approval: CheckEntry = toml::from_str(
+            "id = \"a\"\nenvironment = \"people\"\nkind = \"approval\"\nwhen_paths = [\"**\"]\nwaivable = true\n",
+        )
+        .unwrap();
+        assert!(super::validate_kind(&approval).is_err());
     }
 
     /// N-3: `baseline = "base"` enters the definition digest; absent, it is left out of the

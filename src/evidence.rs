@@ -22,18 +22,32 @@ pub const KIND_REVIEW: &str = "review";
 /// approval check combines from. It verifies only against the approver class file, so no
 /// producer, reviewer or agent key ever signs one that counts.
 pub const KIND_APPROVAL: &str = "approval";
+/// N-9: the kind of a person's signed waiver of one waivable check on one exact candidate
+/// commit, with a reason. It is never a pass: it never combines into a verdict
+/// ([`combines`]), and a landing it lets through names it under `coverage_gaps` with the
+/// check's real verdict ([`crate::policy::Policy::waiver`]). Like an approval it verifies only
+/// against the approver class file, and without a registry it never counts.
+pub const KIND_WAIVER: &str = "waiver";
 
-/// The key class a record of `kind` must be signed by (Q12, G245): the reviewer class for a
-/// `review` record, the approver class for an `approval`, the producer class for every other
-/// kind. A reviewer or approver key therefore never signs a record that counts toward a run
-/// check, and a producer key's `review` or `approval` is unverifiable.
+/// The key class a record of `kind` must be signed by (Q12, G245, N-9): the reviewer class for
+/// a `review` record, the approver class for an `approval` or a `waiver`, the producer class for
+/// every other kind. A reviewer or approver key therefore never signs a record that counts
+/// toward a run check, and a producer key's `review`, `approval` or `waiver` is unverifiable.
 #[must_use]
 pub fn signer_class(kind: &str) -> KeyClass {
     match kind {
         KIND_REVIEW => KeyClass::Reviewer,
-        KIND_APPROVAL => KeyClass::Approver,
+        KIND_APPROVAL | KIND_WAIVER => KeyClass::Approver,
         _ => KeyClass::Producer,
     }
+}
+
+/// Whether a record of `kind` is a person's word that only a registered approver key can
+/// prove (G245, N-9): an `approval` or a `waiver`. It must verify to count under every signing
+/// mode, and without a registry it never counts.
+#[must_use]
+pub fn approver_kind(kind: &str) -> bool {
+    kind == KIND_APPROVAL || kind == KIND_WAIVER
 }
 
 /// Whether a record of `kind` may combine into a check's verdict: a `check` record for a check
@@ -613,7 +627,8 @@ pub fn trust(registry: Option<&Registry>) -> &'static str {
 /// all, only an `approval` under `signing = "approvals"` (N-21).
 #[must_use]
 pub fn signed_kind(registry: &Registry, kind: &str) -> bool {
-    registry.signs_all() || kind == KIND_APPROVAL
+    // N-9: a waiver, like an approval, is always signed by an approver key.
+    registry.signs_all() || approver_kind(kind)
 }
 
 /// Each record with how it stands: with a registry, verified or unverifiable against the class
@@ -634,9 +649,9 @@ pub fn tagged(
         return Ok(records
             .into_iter()
             .map(|record| {
-                // G245: without a registry no approver key can be verified, so no `approval`
-                // record counts, wherever it is read.
-                let verified = if record.kind == KIND_APPROVAL {
+                // G245, N-9: without a registry no approver key can be verified, so no
+                // `approval` or `waiver` record counts, wherever it is read.
+                let verified = if approver_kind(&record.kind) {
                     Verified::Unverifiable
                 } else {
                     Verified::Unsigned
@@ -946,6 +961,30 @@ mod tests {
                 "{kind}"
             );
         }
+    }
+
+    /// G245, N-9: without a registry no approver key can be verified, so neither an approval
+    /// nor a waiver counts; a check record still counts unsigned. A waiver is signed by the
+    /// approver class.
+    #[test]
+    fn without_a_registry_no_approval_or_waiver_counts() {
+        let git = crate::git::Git::new(".");
+        let records: Vec<EvidenceRecord> = ["check", super::KIND_APPROVAL, super::KIND_WAIVER]
+            .iter()
+            .enumerate()
+            .map(|(n, kind)| {
+                let mut one = record(&format!("ci/{n}"), "x", "c", Verdict::Pass);
+                one.kind = (*kind).to_owned();
+                one
+            })
+            .collect();
+        let kept = super::counted(&git, records, None).unwrap();
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert_eq!(kept[0].kind, "check");
+        assert_eq!(
+            super::signer_class(super::KIND_WAIVER),
+            crate::registry::KeyClass::Approver
+        );
     }
 
     #[test]

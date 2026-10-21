@@ -14,6 +14,12 @@
 //!   names, found as `bay waiting` finds it. It writes through `bay evidence record`
 //!   ([`crate::outside`]), so signing, the key class and the push are that path's. `--why` is
 //!   the record's `why`.
+//! - **N-9 waivers.** `bay waiting` also lists each change blocked on a check the policy at its
+//!   candidate's base marks `waivable = true` that did not pass, with its verdict and the
+//!   command that waives it, when the registry enrols this machine's approver (or none is
+//!   set). `bay approve <change> --waive <check> --why <text>` records one signed `waiver` of
+//!   that one check on that exact candidate, with the reason: never a pass, and never carried
+//!   to another candidate. The landing names it under `coverage_gaps` with the real verdict.
 //!
 //! Neither ever answers for another name: the record's writer is `bay.approverName`, signed by
 //! `bay.approverKey`, and there is no flag that names someone else. Every refusal names its
@@ -43,7 +49,10 @@ pub struct Approve {
     pub change: String,
     /// Say no: the verdict is `product_failure`.
     pub reject: bool,
-    /// The record's `why`.
+    /// N-9: waive this one check, marked `waivable = true`, on the pending candidate, instead
+    /// of approving: a signed `waiver` record, never a pass.
+    pub waive: Option<String>,
+    /// The record's `why`; a waiver needs one.
     pub why: Option<String>,
 }
 
@@ -340,10 +349,24 @@ fn waiting_in(repo: &Repo) -> Result<BayResult, String> {
     let mut items = Vec::new();
     let mut unread = Vec::new();
     let mut others = 0_usize;
+    // N-9: a waiver counts only from an approver the registry enrols, so without a registry,
+    // or for a name it does not enrol, no waivable check is listed.
+    let waives = registry
+        .as_ref()
+        .is_some_and(|registry| name.as_deref().is_none_or(|name| enrolled(registry, name)));
     for record in records(repo, None)? {
         let found = match held(repo, &record, registry.as_ref()) {
             Ok(Some(found)) => found,
-            Ok(None) => continue,
+            Ok(None) => {
+                match waivable(repo, &record, registry.as_ref()) {
+                    Ok(Some(found)) if waives && !found.rows.is_empty() => {
+                        items.push(waiver_item(&repo.git, &found)?);
+                    }
+                    Ok(_) => {}
+                    Err(why) => unread.push(json!({"change": record.id, "why": why})),
+                }
+                continue;
+            }
             Err(why) => {
                 unread.push(json!({"change": record.id, "why": why}));
                 continue;
@@ -493,6 +516,10 @@ fn approve_in(dir: &Path, repo: &Repo, request: &Approve) -> Result<BayResult, S
             None,
         ));
     };
+    // N-9: a waiver is the same person's word through the same command, about one check.
+    if let Some(check) = request.waive.as_deref() {
+        return waive_in(dir, repo, request, &name, check);
+    }
     synchronize(repo)?;
     let registry = Registry::current(&repo.git)?;
     let Some(record) = records(repo, Some(id))?.into_iter().next() else {
@@ -545,7 +572,7 @@ fn approve_in(dir: &Path, repo: &Repo, request: &Approve) -> Result<BayResult, S
     // The change is read again: an operation that replaced the candidate while the record was
     // written is named. The answer still holds for the new candidate while the files its check
     // covers are unchanged (G292); `bay waiting` shows whether the new one still waits.
-    if let Some(now) = records_now(repo, id).filter(|now| moved(now, &found)) {
+    if let Some(now) = records_now(repo, id).filter(|now| moved(now, &found.op_id, &found.commit)) {
         let newer = now
             .operations
             .last()
@@ -615,15 +642,293 @@ fn write(
     Ok(records)
 }
 
-/// Whether `now`'s last operation, or its candidate, is another than the one `found` held.
-fn moved(now: &ChangeRecord, found: &Held) -> bool {
+/// Whether `now`'s last operation, or its candidate, is another than operation `op_id` and its
+/// candidate `commit`, the ones that were held.
+fn moved(now: &ChangeRecord, op_id: &str, commit: &str) -> bool {
     now.operations.last().is_some_and(|op| {
-        op.op_id != found.op_id
+        op.op_id != op_id
             || op
                 .attempts
                 .last()
-                .is_some_and(|attempt| attempt.commit != found.commit)
+                .is_some_and(|attempt| attempt.commit != commit)
     })
+}
+
+/// N-9: one change whose last operation is blocked on a failed, flaky or unanswered check, as
+/// `bay waiting` and `bay approve --waive` read it.
+struct Waivable {
+    record: ChangeRecord,
+    op_id: String,
+    base: String,
+    commit: String,
+    tree: String,
+    /// The blocking reason's code.
+    reason: String,
+    /// The waivable checks of the candidate that do not pass and no waiver answers yet
+    /// ([`crate::publish::waivable_gaps`]).
+    rows: Vec<Value>,
+}
+
+/// N-9: `record` when its last operation is blocked `CHECK_FAILED`, `CHECK_FLAKY` or
+/// `CHECK_UNKNOWN` on a candidate of its own (no batch's), with the waivable checks of that
+/// candidate that do not pass, judged by the policy at its base as its land judged it.
+///
+/// # Errors
+///
+/// A git fault, an unreadable policy or note, or a class file that cannot be written.
+fn waivable(
+    repo: &Repo,
+    record: &ChangeRecord,
+    registry: Option<&Registry>,
+) -> Result<Option<Waivable>, String> {
+    let Some(op) = record.operations.last() else {
+        return Ok(None);
+    };
+    let reason = op.outcome.as_deref().and_then(Reason::from_code);
+    let blocked = op.state == crate::change::OpState::Blocked
+        && matches!(
+            reason,
+            Some(Reason::CheckFailed | Reason::CheckFlaky | Reason::CheckUnknown)
+        );
+    let Some(attempt) = op
+        .attempts
+        .last()
+        .filter(|attempt| blocked && attempt.batch.is_none())
+    else {
+        return Ok(None);
+    };
+    let rows = crate::publish::waivable_gaps(
+        &repo.git,
+        (
+            attempt.base.as_str(),
+            attempt.commit.as_str(),
+            attempt.tree.as_str(),
+        ),
+        registry,
+    )?;
+    Ok(Some(Waivable {
+        record: record.clone(),
+        op_id: op.op_id.clone(),
+        base: attempt.base.clone(),
+        commit: attempt.commit.clone(),
+        tree: attempt.tree.clone(),
+        reason: op.outcome.clone().unwrap_or_default(),
+        rows,
+    }))
+}
+
+/// N-9: the one command that waives `check` of change `id`.
+fn waive_command(id: &str, check: &str) -> String {
+    format!("bay approve {id} --waive {check} --why <text>")
+}
+
+/// N-9: one item of `detail.waiting` for a change held on checks a waiver may answer: the
+/// change, its intent and actor, each waivable check that did not pass with its verdict and
+/// the command that waives it, the candidate, and its diff.
+fn waiver_item(git: &Git, found: &Waivable) -> Result<Value, String> {
+    let id = &found.record.id;
+    let rows: Vec<Value> = found
+        .rows
+        .iter()
+        .map(|row| {
+            let mut row = row.clone();
+            let check = row["check"].as_str().unwrap_or_default().to_owned();
+            row["waive"] = json!(waive_command(id, &check));
+            row
+        })
+        .collect();
+    Ok(json!({
+        "change": id,
+        "intent": found.record.intent.reference,
+        "actor": found.record.actor.name,
+        "op_id": found.op_id,
+        "reason": found.reason,
+        "waivable": rows,
+        "commit": found.commit,
+        "tree": found.tree,
+        "diff": diff_summary(git, &found.base, &found.commit)?,
+        "note": "a waiver is never a pass: the check lands as a named coverage gap, on this candidate only",
+    }))
+}
+
+/// Whether `name` is enrolled in `registry`'s approver file.
+fn enrolled(registry: &Registry, name: &str) -> bool {
+    registry
+        .principals(crate::registry::KeyClass::Approver)
+        .iter()
+        .any(|enrolled| enrolled == name)
+}
+
+/// N-9: `bay approve <change> --waive <check> --why <text>`: this machine's approver's signed
+/// `waiver` record of `check`, a check the policy at the candidate's base marks `waivable =
+/// true` and that did not pass, about exactly the pending candidate commit, with the reason.
+/// It writes through `bay evidence record` ([`crate::outside`]). It refuses, writing nothing,
+/// without a reason, without a registry (no waiver could count), for a name the registry does
+/// not enrol as an approver, on a change held on no check, for a check that is not waivable,
+/// and for one that has nothing to waive.
+#[allow(clippy::too_many_lines)]
+fn waive_in(
+    dir: &Path,
+    repo: &Repo,
+    request: &Approve,
+    name: &str,
+    check: &str,
+) -> Result<BayResult, String> {
+    let id = request.change.as_str();
+    if request.reject {
+        return Ok(refused(
+            id,
+            "--waive and --reject ask two things: a waiver lets one check through, a rejection blocks the change",
+            &waive_command(id, check),
+            None,
+        ));
+    }
+    let Some(why) = request.why.as_deref().filter(|why| !why.trim().is_empty()) else {
+        return Ok(refused(
+            id,
+            &format!("a waiver names its reason, and no --why was given for check {check}"),
+            &waive_command(id, check),
+            None,
+        ));
+    };
+    synchronize(repo)?;
+    let Some(registry) = Registry::current(&repo.git)? else {
+        return Ok(refused(
+            id,
+            &format!(
+                "this repository has no key registry ({}), so no approver key can be verified and no waiver can count",
+                crate::registry::REGISTRY_REF
+            ),
+            "enrol each approver in the registry's approver file, then waive again",
+            None,
+        ));
+    };
+    // N-9: only an enrolled approver's waiver counts; never one another name must give.
+    if !enrolled(&registry, name) {
+        return Ok(refused(
+            id,
+            &format!("{name} is not an enrolled approver, and only an approver's waiver counts"),
+            "an enrolled approver waives it, or the registry's approver file enrols this name",
+            Some(json!({"approver": name})),
+        ));
+    }
+    let Some(record) = records(repo, Some(id))?.into_iter().next() else {
+        return Ok(refused(
+            id,
+            &format!("change {id} is not on {} or on this machine", repo.remote()),
+            READ_WAITING,
+            None,
+        ));
+    };
+    let Some(found) = waivable(repo, &record, Some(&registry))? else {
+        let state = record.operations.last().map_or("never submitted", |op| {
+            op.outcome.as_deref().unwrap_or(op_state(op))
+        });
+        return Ok(refused(
+            id,
+            &format!(
+                "change {id} is held on no check a waiver can answer: its last operation is {state}"
+            ),
+            READ_WAITING,
+            None,
+        ));
+    };
+    // N-9: only a check the policy at the candidate's base marks waivable takes a waiver.
+    let marked = match crate::policy::load_at(&repo.git, &found.base) {
+        Ok(Some(policy)) => policy
+            .checks
+            .iter()
+            .any(|entry| entry.id == check && entry.waivable && !entry.is_approval()),
+        Ok(None) | Err(crate::policy::LoadError::Invalid(_)) => false,
+        Err(crate::policy::LoadError::Git(why)) => return Err(why),
+    };
+    if !marked {
+        return Ok(refused(
+            id,
+            &format!(
+                "check {check} is not waivable: the policy at the base of candidate {} does not mark it waivable = true",
+                found.commit
+            ),
+            "repair the change and land it again; a waiver answers only a [[check]] with waivable = true at the base",
+            None,
+        ));
+    }
+    let Some(row) = found.rows.iter().find(|row| row["check"] == check) else {
+        return Ok(refused(
+            id,
+            &format!(
+                "check {check} has nothing to waive on candidate {}: it passes, a waiver answers it already, or the candidate's diff does not require it",
+                found.commit
+            ),
+            READ_WAITING,
+            Some(json!({"waivable": found.rows})),
+        ));
+    };
+    let written = outside::record(
+        dir,
+        &outside::Record {
+            kind: evidence::KIND_WAIVER.to_owned(),
+            // A waiver says nothing of the product: it is never a pass.
+            verdict: "unknown".to_owned(),
+            commits: vec![found.commit.clone()],
+            check: Some(check.to_owned()),
+            environment: row["environment"].as_str().map(str::to_owned),
+            inputs: Vec::new(),
+            body: None,
+            version: None,
+            why: Some(why.to_owned()),
+        },
+    );
+    if written.decision != Decision::Ok {
+        return Ok(written.with_change(id.to_owned()));
+    }
+    let records = written
+        .detail
+        .as_ref()
+        .and_then(|detail| detail["records"].as_array().cloned())
+        .unwrap_or_default();
+    // A waiver never carries: a candidate that moved while it was written is not waived.
+    if let Some(now) = records_now(repo, id).filter(|now| moved(now, &found.op_id, &found.commit)) {
+        let newer = now
+            .operations
+            .last()
+            .map(|op| op.op_id.clone())
+            .unwrap_or_default();
+        return Ok(refused(
+            id,
+            &format!(
+                "the candidate moved: {name}'s waiver of {check} is recorded on candidate {}, and change {id} has a newer operation {newer} since",
+                found.commit
+            ),
+            "read it again with bay waiting: a waiver names one candidate and never carries, so the new one is waived anew if it needs it",
+            Some(json!({"records": records, "commit": found.commit})),
+        ));
+    }
+    let view = repo.view_path(id);
+    let actor = &found.record.actor.name;
+    let next = if view.is_dir() {
+        format!(
+            "this machine holds the change's view ({}): bay land --wait there lands it, naming the waiver as a coverage gap",
+            view.display()
+        )
+    } else {
+        format!(
+            "{actor}, the change's author, runs bay land --wait, and the change lands with the waiver named as a coverage gap"
+        )
+    };
+    Ok(BayResult::ok(json!({
+        "approver": name,
+        "waived": check,
+        "environment": row["environment"],
+        "verdict": row["verdict"],
+        "commit": found.commit,
+        "tree": found.tree,
+        "records": records,
+        "why": why,
+        "next": next,
+    }))
+    .with_change(id.to_owned())
+    .with_op(found.op_id.clone()))
 }
 
 /// The change record as the remote holds it now; `None` when it cannot be read.

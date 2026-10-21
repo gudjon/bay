@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.11
+
+- A check marked `waivable = true` can be waived on one candidate by an enrolled approver.
+- `bay approve <change> --waive <check> --why <text>` records a signed waiver; a reason is required.
+- `bay waiting` lists each waivable failed check with its real verdict and the command that waives it.
+- A waiver is never a pass: the landing names it in `coverage_gaps` with the real verdict.
+- Targets such as `staging` never count a waiver toward promotion.
+- A refused check now shares its evidence, so an approver on another machine reads the real verdict.
+
 ## 0.2.10
 
 - Under `signing = "approvals"`, a second machine now lands; it no longer fails with "producer local collides".

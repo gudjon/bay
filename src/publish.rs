@@ -2728,9 +2728,12 @@ fn retry_blocked(
     let reason = op.outcome.as_deref().and_then(Reason::from_code);
     let tree = op.attempts.last().map(|attempt| attempt.tree.clone());
     let then = op.blocked_on.clone();
+    // N-9: a failed or unanswered check of a policy with a waivable check may get a waiver.
+    let waivable = waivable_block(ctx, op_id, reason)?;
     // G245: the approval it waits on is written on another machine and reaches this one only
     // through the remote, so the retry reads the remote's records before it judges the change.
-    if reason == Some(Reason::ApprovalPending) && ctx.online {
+    // N-9: so is a waiver.
+    if (reason == Some(Reason::ApprovalPending) || waivable) && ctx.online {
         ctx.repo.fetch_evidence(&ctx.keys);
     }
     let now = condition(
@@ -2767,6 +2770,63 @@ fn retry_blocked(
     Ok(None)
 }
 
+/// N-9: whether `op_id`, blocked for `reason`, may be answered by a waiver: the reason is a
+/// failed, flaky or unanswered check, its last candidate is no batch member's, and the policy
+/// at that candidate's base marks some check `waivable = true` ([`waivable_policy`]).
+fn waivable_block(ctx: &Ctx, op_id: &str, reason: Option<Reason>) -> Result<bool, String> {
+    if !matches!(
+        reason,
+        Some(Reason::CheckFailed | Reason::CheckFlaky | Reason::CheckUnknown)
+    ) {
+        return Ok(false);
+    }
+    waivable_policy(ctx, op_id)
+}
+
+/// N-9: whether the last candidate of `op_id` is no batch member's and the policy at its base
+/// marks some check `waivable = true`.
+fn waivable_policy(ctx: &Ctx, op_id: &str) -> Result<bool, String> {
+    let Some(attempt) = ctx
+        .op(op_id)
+        .attempts
+        .last()
+        .filter(|attempt| attempt.batch.is_none())
+    else {
+        return Ok(false);
+    };
+    match policy::load_at(&ctx.repo.git, &attempt.base) {
+        Ok(Some(policy)) => Ok(policy.checks.iter().any(|entry| entry.waivable)),
+        Ok(None) | Err(policy::LoadError::Invalid(_)) => Ok(false),
+        Err(policy::LoadError::Git(why)) => Err(why),
+    }
+}
+
+/// N-9: whether the counted records on the last candidate of `op_id`, read after a fetch of
+/// the remote's evidence, hold a waiver about that exact candidate commit, under a policy with
+/// a waivable check. Whether it lets a check through is the judgement's to say
+/// ([`policy::Policy::waiver`]); this only keeps the candidate it names. Nothing is read for a
+/// policy that marks no check waivable.
+fn waiver_answers(ctx: &Ctx, op_id: &str) -> Result<bool, String> {
+    if !waivable_policy(ctx, op_id)? {
+        return Ok(false);
+    }
+    let Some(attempt) = ctx.op(op_id).attempts.last() else {
+        return Ok(false);
+    };
+    // The waiver is written on the approver's machine and reaches this one through the remote.
+    if ctx.online {
+        ctx.repo.fetch_evidence(&ctx.keys);
+    }
+    let git = &ctx.repo.git;
+    Ok(evidence::counted(
+        git,
+        evidence::records_for(git, &attempt.tree)?,
+        ctx.registry.as_ref(),
+    )?
+    .iter()
+    .any(|record| record.kind == evidence::KIND_WAIVER && record.subject.commit == attempt.commit))
+}
+
 /// G284: whether `op` waits for a person's approval: blocked `APPROVAL_PENDING`. That is a
 /// wait, not an end. It holds no queue place (its place was released as `approval_pending`,
 /// which counts toward no limit, § 6), and every executor pass asks it again ([`execute`]):
@@ -2780,12 +2840,13 @@ pub fn awaits_approval(op: &Operation) -> bool {
 
 /// G284: the candidate an approval arrived for, checked again rather than rebuilt: the last
 /// attempt of `op_id`, when this process re-armed it from `APPROVAL_PENDING`
-/// ([`retry_blocked`]), it was merged onto `trunk` (trunk has not moved since), it is no batch
+/// ([`retry_blocked`]) or, N-9, a counted waiver names that exact candidate
+/// ([`waiver_answers`]), it was merged onto `trunk` (trunk has not moved since), it is no batch
 /// member's, and this process would commit it as it stands, under its own executor identity
 /// and the registry the candidate names. Otherwise `None`: the operation builds a new
-/// candidate, and an approval must name that one.
+/// candidate, and an approval or a waiver must name that one.
 fn approved_candidate(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<Attempt>, String> {
-    if ctx.approved.as_deref() != Some(op_id) || ctx.record.lane.is_some() {
+    if ctx.record.lane.is_some() {
         return Ok(None);
     }
     let Some(attempt) = ctx
@@ -2796,6 +2857,12 @@ fn approved_candidate(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<Atte
     else {
         return Ok(None);
     };
+    // N-9: a waiver names one exact candidate, so a candidate a waiver arrived for is checked
+    // again as it is, by whichever process runs it, never rebuilt into a commit it does not
+    // name.
+    if ctx.approved.as_deref() != Some(op_id) && !waiver_answers(ctx, op_id)? {
+        return Ok(None);
+    }
     let registry_id = ctx
         .signing()
         .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
@@ -3845,6 +3912,19 @@ fn persist_attempt(
     // The evidence is on the remote before the chain names the candidate checked.
     if refusal.is_none() && has_policy {
         push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0)?;
+    }
+    // N-9: a check's refusal shares its evidence too, so the approver who may waive the check
+    // reads its real verdict. The refusal stands when that push fails; the approver then
+    // reads `unknown`, never a pass.
+    if has_policy
+        && refusal.as_ref().is_some_and(|refusal| {
+            matches!(
+                refusal.reason,
+                Some(Reason::CheckFailed | Reason::CheckFlaky | Reason::CheckUnknown)
+            )
+        })
+    {
+        let _ = push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0);
     }
     let (state, word) = if refusal.is_some() {
         (OpState::Blocked, "blocked")
@@ -5734,6 +5814,17 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
             gaps.push(gap);
         }
     }
+    // N-9: a waivable check that landed on a person's waiver is named with the waiver and its
+    // real verdict, never as a pass.
+    let changed = check::changed_paths(git, &attempt.base, &attempt.commit)?;
+    for gap in judged
+        .iter()
+        .flat_map(|policy| waiver_gaps(policy, &records, &changed, &attempt.commit))
+    {
+        if !gaps.contains(&gap) {
+            gaps.push(gap);
+        }
+    }
     // Ruling 8c: a quarantined check that no judging policy required was never tested.
     for quarantine in judged.iter().flat_map(|policy| policy.quarantined.iter()) {
         let required = judged.iter().any(|policy| {
@@ -5807,6 +5898,82 @@ fn baseline_gaps(
         }));
     }
     gaps
+}
+
+/// N-9: the checks `policy` requires of a candidate whose diff changes `changed` that its
+/// counted `records` do not pass for `commit` and that a valid waiver answers
+/// ([`policy::Policy::waiver`]): each with its real verdict and the waiver, `waived_by` (the
+/// approver), `why` and `record` (the waiver's id). A waiver is never a pass.
+fn waiver_gaps(
+    policy: &policy::Policy,
+    records: &[evidence::EvidenceRecord],
+    changed: &[String],
+    commit: &str,
+) -> Vec<serde_json::Value> {
+    let listed = policy.answering(records.to_vec());
+    let (required, _) = policy.required(changed);
+    required
+        .iter()
+        .filter_map(|entry| {
+            let id = evidence::CheckId::new(&entry.id, &entry.environment);
+            let subject = policy.commit_keyed(&id).then_some(commit);
+            let verdict = match evidence::combine(&listed, &id, &policy.manifest_digest, subject) {
+                Combined::Pass => return None,
+                Combined::ProductFailure => "product_failure",
+                Combined::Flaky => "flaky",
+                Combined::Unknown => "unknown",
+            };
+            let waiver = policy.waiver(&listed, &id, commit)?;
+            Some(json!({
+                "check": entry.id,
+                "environment": entry.environment,
+                "verdict": verdict,
+                "waived_by": waiver.producer.name,
+                "why": waiver.why,
+                "record": waiver.id,
+            }))
+        })
+        .collect()
+}
+
+/// N-9: the waivable checks the policy at `base` requires of candidate `commit` (tree `tree`)
+/// that its counted records do not pass and no valid waiver answers yet, judged as its land
+/// judges them: each `{"check", "environment", "verdict"}`, the verdict its records combine
+/// to. What `bay waiting` lists and `bay approve --waive` answers. None without a valid policy.
+///
+/// # Errors
+///
+/// A git fault, an unreadable note, or a class file that cannot be written.
+pub fn waivable_gaps(
+    git: &Git,
+    (base, commit, tree): (&str, &str, &str),
+    registry: Option<&Registry>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let policy = match policy::load_at(git, base) {
+        Ok(Some(policy)) if policy.checks.iter().any(|entry| entry.waivable) => policy,
+        Ok(_) | Err(policy::LoadError::Invalid(_)) => return Ok(Vec::new()),
+        Err(policy::LoadError::Git(why)) => return Err(why),
+    };
+    let changed = check::changed_paths(git, base, commit)?;
+    let (required, _) = policy.required(&changed);
+    let records = policy.answering(evidence::counted(
+        git,
+        evidence::records_for(git, tree)?,
+        registry,
+    )?);
+    Ok(policy
+        .gaps(&records, &required, commit)
+        .into_iter()
+        .filter(|(id, _)| policy.check(id).is_some_and(|entry| entry.waivable))
+        .map(|(id, combined)| {
+            let verdict = match combined {
+                Combined::ProductFailure => "product_failure",
+                Combined::Flaky => "flaky",
+                Combined::Unknown | Combined::Pass => "unknown",
+            };
+            json!({"check": id.id, "environment": id.environment, "verdict": verdict})
+        })
+        .collect())
 }
 
 /// The required checks of `policy` whose counted `records` on the landed tree combine to

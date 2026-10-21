@@ -39,6 +39,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Save edits made in the main checkout (non-developers) | `bay save <intent>` |
 | See the changes waiting for this machine's approver: candidate, paths, diff summary | `bay waiting` (`detail.waiting`) |
 | Approve one, or say no, when the approver asks you to | `bay approve <change> [--reject] [--why <text>]` |
+| Waive one failed check marked `waivable`, when the approver asks you to | `bay approve <change> --waive <check> --why <text>` (that candidate only; never a pass) |
 | Give the change up, so another agent may adopt it | `bay land --abandon` |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
 | Read state, and main commits that did not merge through bay (`unattributed`) | `bay status` |
@@ -95,7 +96,7 @@ A few reasons need more than their next step:
 
 | Reason | Also |
 | --- | --- |
-| `CHECK_FAILED` | A check with `baseline = "base"` names only new failures; pre-existing ones land as `baseline_failures` in `coverage_gaps`: report them, never as passed. |
+| `CHECK_FAILED` | A check with `baseline = "base"` names only new failures; pre-existing ones land as `baseline_failures` in `coverage_gaps`: report them, never as passed. A check with `waivable = true` may instead get an approver's waiver (`bay waiting` lists it); then `bay land --wait`. The waiver lands in `coverage_gaps` with the real verdict: report it, never as passed. |
 | `CHECK_FLAKY` | A landing may name one flaky in `coverage_gaps`: report it, never as passed. |
 | `APPROVAL_PENDING` | Tell the user who can approve (`detail.approval.checks[].approvers`). An approval holds while its paths are unchanged (`checks[].set_aside` names the ones that changed). Never approve for them. |
 
@@ -143,6 +144,9 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    get a `[[check]]` with `kind = "approval"` and `when_paths`, and no command; each approver is
    enrolled in the registry's `approver` file and approves with `bay approve <change>`.
    It records a signed approval record of the exact candidate.
+   A run check may say `waivable = true` (never an approval check): an enrolled approver may then
+   waive it on one candidate with `bay approve <change> --waive <check> --why <text>`. A waiver
+   is never a pass; the merge names it in `coverage_gaps`. Without a registry no waiver counts.
    A small team with no executor host sets `[policy] signing = "approvals"`: only approvals are
    signed, and no machine needs an executor, producer or agent key. Each clone takes its own
    producer name (`local-<id>` in its git config); set `bay.producerName` only to choose one.
