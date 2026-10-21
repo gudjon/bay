@@ -205,6 +205,10 @@ reasons! {
     // G273 (N-16); not yet in INTERFACES § 2: a change this one was started `--after` ended
     // without landing (abandoned, superseded or no effect), so this one can never publish.
     DependencyAbandoned => "DEPENDENCY_ABANDONED", ["read", "repair"], "dependency_dropped_or_restarted", false;
+    // Owner ruling 2026-10-21; not yet in INTERFACES § 2: the change is over a `[limits]` size
+    // limit of the policy at the base (`crate::limits`), refused at submit and at candidate
+    // build, before any check runs.
+    ChangeTooLarge => "CHANGE_TOO_LARGE", ["read", "repair"], "change_within_limits", false;
 }
 
 impl Reason {
@@ -253,47 +257,100 @@ pub struct Freshness {
     pub fetched_at: String,
 }
 
-/// Fields appear in the order of `INTERFACES` § 1. Absent fields are omitted.
-#[derive(Debug, Serialize)]
+/// Fields appear in the order of `INTERFACES` § 1. Absent fields are omitted. The JSON also
+/// carries `say` after `reason` (owner ruling 2026-10-21): one plain sentence, made from the
+/// decision, the reason and the detail by [`BayResult::say`], never stored, so no call site
+/// writes one.
+#[derive(Debug)]
 pub struct BayResult {
     pub schema: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub op_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate: Option<String>,
     pub decision: Decision,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub published: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<Reason>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub change: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub allowed: Option<Vec<&'static str>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_when: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub waiting_for: Option<String>,
     /// Seconds since the operation's request, for an operation still under way (G80).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_s: Option<u64>,
     /// The evidence records the operation has so far (G80).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub receipts: Option<Vec<String>>,
     /// The state the operation moves to next, when it is under way (G80).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub next: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub receipt: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub freshness: Option<Freshness>,
     /// A command's own human rendering, when it has one (doctor's status line).
-    #[serde(skip)]
     pub human: Option<String>,
+}
+
+/// `bay.result/1` as it is written: the fields of [`BayResult`] in their order, with `say` after
+/// `reason`. Absent fields are omitted.
+#[derive(Serialize)]
+struct Wire<'a> {
+    schema: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    op_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    candidate: Option<&'a str>,
+    decision: Decision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    published: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<Reason>,
+    say: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    change: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<&'a Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed: Option<&'a [&'static str]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_when: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    waiting_for: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed_s: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receipts: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    receipt: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    freshness: Option<&'a Freshness>,
+}
+
+impl Serialize for BayResult {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let say = self.say();
+        Wire {
+            schema: self.schema,
+            op_id: self.op_id.as_deref(),
+            candidate: self.candidate.as_deref(),
+            decision: self.decision,
+            state: self.state.as_deref(),
+            published: self.published,
+            reason: self.reason,
+            say: &say,
+            change: self.change.as_deref(),
+            detail: self.detail.as_ref(),
+            allowed: self.allowed.as_deref(),
+            retry_when: self.retry_when,
+            waiting_for: self.waiting_for.as_deref(),
+            elapsed_s: self.elapsed_s,
+            receipts: self.receipts.as_deref(),
+            next: self.next,
+            receipt: self.receipt.as_deref(),
+            freshness: self.freshness.as_ref(),
+        }
+        .serialize(serializer)
+    }
 }
 
 impl BayResult {
@@ -379,7 +436,8 @@ impl BayResult {
         if let Some(line) = &self.human {
             return format!("{line}\n");
         }
-        let mut lines = vec![format!("decision: {}", self.decision.word())];
+        // The plain sentence first (owner ruling 2026-10-21), then the fields.
+        let mut lines = vec![self.say(), format!("decision: {}", self.decision.word())];
         if let Some(reason) = self.reason {
             lines.push(format!("reason:   {}", reason.code()));
         }
@@ -424,9 +482,483 @@ fn push_detail(lines: &mut Vec<String>, detail: &Value) {
     }
 }
 
+/// The words a person who does not know Git need not know (owner ruling 2026-10-21): no `say`
+/// sentence holds one, nor an inflection of one ([`unplain`]).
+pub const UNPLAIN: &[&str] = &["branch", "commit", "merge", "trunk", "rebase", "ref"];
+
+/// Whether `word` is one of [`UNPLAIN`] or an inflection of one (`commits`, `merged`,
+/// `committing`), compared without case.
+#[must_use]
+pub fn unplain(word: &str) -> bool {
+    let word = word.to_ascii_lowercase();
+    UNPLAIN.iter().any(|&stem| {
+        let bare = stem.strip_suffix('e').unwrap_or(stem);
+        let rest = word.strip_prefix(stem).or_else(|| word.strip_prefix(bare));
+        rest.is_some_and(|rest| ["", "s", "es", "d", "ed", "ing", "ted", "ting"].contains(&rest))
+    })
+}
+
+/// `text` with each [`unplain`] word put plainly: for a message bay did not write as a
+/// sentence, such as a fault's.
+fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    for c in text.chars() {
+        if c.is_ascii_alphabetic() {
+            word.push(c);
+        } else {
+            out.push_str(plain_word(&word));
+            word.clear();
+            out.push(c);
+        }
+    }
+    out.push_str(plain_word(&word));
+    out
+}
+
+/// `word`, or its plain stand-in when it is [`unplain`].
+fn plain_word(word: &str) -> &str {
+    if !unplain(word) {
+        return word;
+    }
+    match word.to_ascii_lowercase().as_str() {
+        "trunk" | "trunks" => "main",
+        "commit" => "saved version",
+        "commits" => "saved versions",
+        "committed" => "saved",
+        "committing" => "saving",
+        "merge" => "combine",
+        "merges" => "combines",
+        "merged" => "combined",
+        "merging" => "combining",
+        "branch" => "copy",
+        "branches" => "copies",
+        "rebase" => "update",
+        "rebases" => "updates",
+        "rebased" => "updated",
+        "rebasing" => "updating",
+        "ref" => "name",
+        "refs" => "names",
+        _ => "that",
+    }
+}
+
+/// How many words of a fault's message `say` repeats.
+const SHORT_WORDS: usize = 12;
+
+/// The string at the first of `pointers` in `detail` that holds a non-empty one.
+fn text_at<'v>(detail: Option<&'v Value>, pointers: &[&str]) -> Option<&'v str> {
+    let detail = detail?;
+    pointers.iter().find_map(|pointer| {
+        detail
+            .pointer(pointer)?
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+    })
+}
+
+/// The strings of the array `detail[key]`, for the first of `keys` that holds any.
+fn strings(detail: Option<&Value>, keys: &[&str]) -> Vec<String> {
+    let Some(detail) = detail else {
+        return Vec::new();
+    };
+    keys.iter()
+        .find_map(|key| {
+            let found: Vec<String> = detail
+                .get(*key)?
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+            (!found.is_empty()).then_some(found)
+        })
+        .unwrap_or_default()
+}
+
+/// `items` as a short list a person reads: `a`, `a and b`, or `a, b and 3 more`.
+fn listed(items: &[String]) -> Option<String> {
+    match items {
+        [] => None,
+        [one] => Some(one.clone()),
+        [one, two] => Some(format!("{one} and {two}")),
+        [one, two, rest @ ..] => Some(format!("{one}, {two} and {} more", rest.len())),
+    }
+}
+
+/// ` ({what})` when there is something to name, else nothing.
+fn named(what: Option<String>) -> String {
+    match what {
+        Some(what) => format!(" ({what})"),
+        None => String::new(),
+    }
+}
+
+/// Who may give an approval the detail says is owed (G245), once each, in order.
+fn approvers(detail: Option<&Value>) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let checks = detail
+        .and_then(|detail| detail.pointer("/approval/checks"))
+        .and_then(Value::as_array);
+    for check in checks.into_iter().flatten() {
+        let given = check["approvers"].as_array().into_iter().flatten();
+        for name in given.filter_map(Value::as_str) {
+            if !names.iter().any(|known| known == name) {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// `bytes` in MiB to one decimal, rounded up, so a file over a limit never reads as at it.
+fn mib(bytes: u64) -> String {
+    let tenths = bytes.saturating_mul(10).div_ceil(1024 * 1024);
+    format!("{}.{} MiB", tenths / 10, tenths % 10)
+}
+
+/// What a `CHANGE_TOO_LARGE` detail says is over its limit: the first limit exceeded, and how
+/// many more are.
+fn too_large(detail: Option<&Value>) -> Option<String> {
+    let rows = detail?.get("exceeded")?.as_array()?;
+    let first = rows.first()?;
+    let max = first["max"].as_u64()?;
+    let value = first["value"].as_u64()?;
+    let what = match first["limit"].as_str()? {
+        "max_file_mib" => {
+            let path = first["paths"][0].as_str().unwrap_or("a file");
+            format!("{path} is {}, over {max} MiB", mib(value))
+        }
+        "max_files" => format!("{value} files, over {max}"),
+        "max_added_lines" => format!("{value} added lines, over {max}"),
+        _ => return None,
+    };
+    Some(match rows.len() - 1 {
+        0 => what,
+        1 => format!("{what}, and one more limit"),
+        more => format!("{what}, and {more} more limits"),
+    })
+}
+
+/// The first words of a fault's message, put plainly.
+fn short(detail: Option<&Value>) -> Option<String> {
+    let text = match detail? {
+        Value::String(text) => text.as_str(),
+        other => text_at(Some(other), &["/why", "/error", "/message"])?,
+    };
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let words: Vec<&str> = line.split_whitespace().take(SHORT_WORDS).collect();
+    let short = words.join(" ");
+    let short = plain(short.trim_end_matches(['.', ':', ';', ',']));
+    (!short.is_empty()).then_some(short)
+}
+
+impl Reason {
+    /// The plain sentence of this reason that names nothing from a detail; `None` for a reason
+    /// whose sentence does ([`Reason::say`]). Every reason is in this match, so a new one must
+    /// be given a sentence.
+    #[allow(clippy::too_many_lines)]
+    const fn fixed_say(self) -> Option<&'static str> {
+        Some(match self {
+            Self::InputChanged
+            | Self::InputUnobserved
+            | Self::MergeConflict
+            | Self::CheckFlaky
+            | Self::CheckFailed
+            | Self::CheckUnknown
+            | Self::TrunkRed
+            | Self::PathHeld
+            | Self::LaneLeak
+            | Self::ApprovalPending
+            | Self::TrunkHeld
+            | Self::PathsUndeclared
+            | Self::ChangeTooLarge => return None,
+            Self::TrunkMoved => {
+                "The shared copy moved on while saving; bay tries once more on its own, nothing to do."
+            }
+            Self::PublishRetryExhausted => {
+                "Adding the change kept failing, so nothing was added; ask whoever runs bay here to look."
+            }
+            Self::RegistryChanged => {
+                "The list of trusted keys changed while saving; bay tries again once it is signed, nothing to do."
+            }
+            Self::ChangeNotLanded => {
+                "That change is not in the shared copy yet; wait until it is added."
+            }
+            Self::HookTimeout => {
+                "bay took too long to answer and tries again shortly; nothing to do."
+            }
+            Self::QueueHeld => {
+                "Saved; it waits in line behind other changes, so keep working meanwhile."
+            }
+            Self::QueueDeadlineExceeded => {
+                "This change waited in line too long and was stopped; make it smaller or ask for more time."
+            }
+            Self::PublicationQueued => {
+                "Saved; it is in line and will be checked and added shortly."
+            }
+            Self::CheckUnavailable => {
+                "Saved; it waits for a machine that can run its checks, nothing to do."
+            }
+            Self::PolicyChanged => {
+                "The rules changed while this was checked; it is checked again under the new rules."
+            }
+            Self::PolicyInvalid => {
+                "The project's rules file (.bay/policy.toml) has a mistake; nothing is added until it is fixed."
+            }
+            Self::PolicyMissing => {
+                "This project has no rules file (.bay/policy.toml) yet, so nothing can be added; ask whoever set it up."
+            }
+            Self::WorkspaceIncomplete => {
+                "An earlier step was interrupted; resume it before going on."
+            }
+            Self::PublishOutcomeUnknown => {
+                "bay cannot tell yet whether the change was added; it looks again, so do not report it as saved."
+            }
+            Self::ChangeAlreadyLanded => {
+                "This change is already in the shared copy; start a new one for more edits."
+            }
+            Self::ChangeSuperseded => {
+                "Someone else's change took over this work; read it before going on."
+            }
+            Self::ChangeHeld => {
+                "Another session is working on this change right now; wait for it to finish."
+            }
+            Self::AbandonRefused => "Only the person who owns this change can give it up.",
+            Self::ActorUnnamed => {
+                "bay needs to know who you are; set your name in BAY_ACTOR, then try again."
+            }
+            Self::ActorUnproven => {
+                "bay cannot prove who is saving on this computer; ask for a separate account or a hardware key."
+            }
+            Self::CoverageUnknown => {
+                "bay cannot reach its shared notes right now; keep working and save again later."
+            }
+            Self::HookInputInvalid => {
+                "bay could not read what the assistant asked to do, so it stopped it."
+            }
+            Self::ShellDenied => {
+                "That command could lose work, so bay stopped it; it is never allowed."
+            }
+            Self::RemoteNotFetched => {
+                "bay could not get the latest shared copy; check the network, then try again."
+            }
+            Self::ConfigMissing => {
+                "bay is not set up in this project yet; ask whoever runs it, or set it up."
+            }
+            Self::GitBelowFloor => {
+                "The Git program on this computer is too old; update it, then try again."
+            }
+            Self::ClaudeBelowFloor => "Claude Code on this computer is too old for bay; update it.",
+            Self::ClaudeAbsent => {
+                "Claude Code is not installed here, but bay expects it; install it."
+            }
+            Self::RemoteUnreachable => {
+                "bay cannot reach the shared copy from here; check the network and the access key."
+            }
+            Self::HooksMissing => "bay's safety settings are missing here; run bay install.",
+            Self::SkillMismatch => "The bay guide installed here is out of date; run bay install.",
+            Self::SandboxAbsent => {
+                "The safe space bay runs checks in is missing on this computer; ask whoever runs bay."
+            }
+            Self::CheckEnvUnset => {
+                "This checking machine lacks settings its checks need; ask whoever runs it."
+            }
+            Self::ExecutorKeyMissing => {
+                "This checking machine has no key to sign with; ask whoever runs it."
+            }
+            Self::KeyExposed => {
+                "A secret key here can be read by the assistant's account; ask whoever runs bay to move it."
+            }
+            Self::UpdateUnavailable => "No bay update could be reached right now; try again later.",
+            Self::UpdateUnverified => {
+                "The bay update could not be verified, so it was not installed."
+            }
+            Self::UpdatePinned => {
+                "This project keeps bay at a fixed version, so it was not updated."
+            }
+            Self::TalkInvalid => "That message is missing something; fix it and send it again.",
+            Self::TalkBodyConflict => {
+                "A different message with the same name was already sent; read it first."
+            }
+            Self::TalkClosed => "That conversation is already closed; start a new one if needed.",
+            Self::TalkSupersedeRefused => "Only the sender can replace that message.",
+            Self::TalkAnswerConflict => {
+                "That question already has a different answer; read it first."
+            }
+            Self::TalkSenderNotActor => "That message must be sent with the sender's own key.",
+            Self::TalkBacklog => {
+                "Too many conversations are open; close one before starting another."
+            }
+            Self::UnattributedLanding => {
+                "That change did not come through bay, so bay cannot say who made it."
+            }
+            Self::EvidenceWithdrawn => "A saved record of checks can never be removed or changed.",
+            Self::PromotionRefused => {
+                "That version is not ready for the next stage yet; use the one bay status names, or wait."
+            }
+            Self::LaneNeverLands => {
+                "This was a try-out: its checks ran, and it is never added to the shared copy."
+            }
+            Self::WipLimit => {
+                "You already have the most open changes allowed; finish or give one up, then start again."
+            }
+            Self::DiskLow => {
+                "This computer is almost out of disk space; free some, then try again."
+            }
+            Self::DependencyPending => "Saved; it waits until the change it depends on is added.",
+            Self::DependencyAbandoned => {
+                "A change this one depends on was dropped, so this one cannot be added; start it again without it."
+            }
+        })
+    }
+
+    /// One plain sentence for a person who does not know Git (owner ruling 2026-10-21): what
+    /// happened and the one next step, with what `detail` names when it is there.
+    #[must_use]
+    pub fn say(self, detail: Option<&Value>) -> String {
+        if let Some(fixed) = self.fixed_say() {
+            return fixed.to_owned();
+        }
+        let paths = || {
+            named(listed(&strings(
+                detail,
+                &["conflicts", "uncovered", "paths"],
+            )))
+        };
+        let check = || named(text_at(detail, &["/checks/0/check", "/check"]).map(str::to_owned));
+        let input = || named(text_at(detail, &["/input", "/inputs/0/input"]).map(str::to_owned));
+        match self {
+            Self::InputChanged => format!(
+                "Something this change relies on was updated{}; read the new version, adjust, then save again.",
+                input()
+            ),
+            Self::InputUnobserved => format!(
+                "This change must first read the latest version of something it relies on{}, then save again.",
+                input()
+            ),
+            Self::MergeConflict => format!(
+                "Someone changed the same lines{}; the changes must be combined first.",
+                paths()
+            ),
+            Self::CheckFlaky => format!(
+                "A check{} gave two answers for the same change; ask a developer to fix that check.",
+                check()
+            ),
+            Self::CheckFailed => format!(
+                "A check failed{}; nothing was added. Fix it and save again.",
+                check()
+            ),
+            Self::CheckUnknown => format!(
+                "A check gave no clear answer{}; nothing was added yet, so wait for it.",
+                check()
+            ),
+            Self::TrunkRed => format!(
+                "The shared copy is broken on these files{}; wait for the fix, or help fix it.",
+                paths()
+            ),
+            Self::PathHeld => format!(
+                "Another session is editing these files{}; wait for it to finish.",
+                paths()
+            ),
+            Self::LaneLeak => format!(
+                "This change holds try-out work that must not be added{}; redo it without that work.",
+                paths()
+            ),
+            Self::ApprovalPending => {
+                let who = match approvers(detail).as_slice() {
+                    [] => "a person's OK".to_owned(),
+                    [one] => format!("{one}'s OK"),
+                    [one, two] => format!("an OK from {one} or {two}"),
+                    [one, two, ..] => format!("an OK from {one}, {two} or another approver"),
+                };
+                let because = match listed(&strings(detail, &["paths"])) {
+                    Some(paths) => format!(" because it changes {paths}"),
+                    None => String::new(),
+                };
+                format!("Saved, but it waits for {who}{because}.")
+            }
+            Self::TrunkHeld => format!(
+                "The shared copy is on hold{}; your change waits.",
+                named(text_at(detail, &["/hold/reason"]).map(plain))
+            ),
+            Self::PathsUndeclared => format!(
+                "The work touches files it did not list{}; start again listing them.",
+                paths()
+            ),
+            Self::ChangeTooLarge => format!(
+                "This change is too big to save here{}; keep large files elsewhere, such as a shared drive.",
+                named(too_large(detail))
+            ),
+            _ => "Not done yet; read the detail for what is needed, then try again.".to_owned(),
+        }
+    }
+}
+
+impl BayResult {
+    /// One plain sentence for a person who does not know Git (owner ruling 2026-10-21): what
+    /// happened and the one next step, at most about 25 words, with none of [`UNPLAIN`]. Made
+    /// here from the decision, the reason and a few detail fields, never at a call site.
+    #[must_use]
+    pub fn say(&self) -> String {
+        let detail = self.detail.as_ref();
+        if let Some(reason) = self.reason {
+            return reason.say(detail);
+        }
+        match self.decision {
+            Decision::Landed if text_at(detail, &["/unchecked"]).is_some() => {
+                "Saved and added to the shared copy; no checks are set up here, so nothing was checked."
+                    .to_owned()
+            }
+            Decision::Landed => "Saved and checked; it is now in the shared copy.".to_owned(),
+            Decision::Queued if self.waiting_for.as_deref() == Some("remote") => {
+                "Saved here; it is sent and checked once the shared copy can be reached.".to_owned()
+            }
+            Decision::Queued => {
+                "Saved; it is in line and will be checked and added shortly.".to_owned()
+            }
+            Decision::Ok => ok_say(self).to_owned(),
+            Decision::Blocked => {
+                "Not done yet; read the detail for what is needed, then try again.".to_owned()
+            }
+            Decision::Failed => match short(detail) {
+                Some(short) => format!("Something went wrong: {short}. Nothing was changed."),
+                None => "Something went wrong. Nothing was changed.".to_owned(),
+            },
+        }
+    }
+}
+
+/// The sentence of an `ok` result with no reason, by what it carries.
+fn ok_say(result: &BayResult) -> &'static str {
+    let detail = result.detail.as_ref();
+    // The publication's `no_effect` and `superseded` states (`crate::publish`).
+    match result.state.as_deref() {
+        Some("no_effect") => {
+            return "Nothing new to add; the shared copy already has these edits.";
+        }
+        Some("superseded") => {
+            return "A newer save of this change took over; nothing else to do here.";
+        }
+        _ => {}
+    }
+    let view = detail.is_some_and(|detail| detail.get("view").is_some());
+    let nothing_saved = detail
+        .and_then(|detail| detail.get("saved"))
+        .and_then(Value::as_array)
+        .is_some_and(Vec::is_empty);
+    if view {
+        "Ready; make your edits in the folder shown, then save them."
+    } else if nothing_saved {
+        "Nothing to save; no files were changed."
+    } else {
+        "Done; nothing else is needed."
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BayResult, Decision, Freshness, Reason, SCHEMA};
+    use super::{BayResult, Decision, Freshness, Reason, SCHEMA, plain, unplain};
     use serde_json::json;
     use std::collections::HashSet;
 
@@ -483,7 +1015,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 65);
+        assert_eq!(Reason::ALL.len(), 66);
     }
 
     #[test]
@@ -552,5 +1084,99 @@ mod tests {
             include_str!("../tests/golden/blocked_trunk_moved.json")
         );
         assert!(result.to_human().contains("allowed:  none needed"));
+    }
+
+    /// The words of `sentence`, split on everything but letters.
+    fn words(sentence: &str) -> Vec<&str> {
+        sentence
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .filter(|word| !word.is_empty())
+            .collect()
+    }
+
+    /// `sentence` is one plain sentence: not empty, about 25 words at most, none [`unplain`].
+    fn assert_plain(sentence: &str, what: &str) {
+        assert!(!sentence.trim().is_empty(), "{what}: no sentence");
+        let count = sentence.split_whitespace().count();
+        assert!(count <= 25, "{what}: {count} words: {sentence}");
+        for word in words(sentence) {
+            assert!(!unplain(word), "{what}: {word:?} in {sentence:?}");
+        }
+    }
+
+    #[test]
+    fn every_reason_says_one_plain_sentence() {
+        for &reason in Reason::ALL {
+            assert_plain(&reason.say(None), reason.code());
+            assert_plain(&BayResult::blocked(reason).say(), reason.code());
+            let value: serde_json::Value =
+                serde_json::from_str(&BayResult::blocked(reason).to_json().unwrap()).unwrap();
+            assert_eq!(value["say"], reason.say(None), "{}", reason.code());
+        }
+        for &decision in Decision::ALL {
+            assert_plain(&BayResult::new(decision).say(), decision.word());
+        }
+    }
+
+    #[test]
+    fn a_sentence_names_what_its_detail_holds() {
+        let failed = BayResult::blocked(Reason::CheckFailed)
+            .with_detail(json!({"checks": [{"check": "tests", "verdict": "product_failure"}]}));
+        assert_eq!(
+            failed.say(),
+            "A check failed (tests); nothing was added. Fix it and save again."
+        );
+        let conflict = BayResult::blocked(Reason::MergeConflict)
+            .with_detail(json!({"conflicts": ["src/a.rs", "src/b.rs", "src/c.rs"]}));
+        assert_eq!(
+            conflict.say(),
+            "Someone changed the same lines (src/a.rs, src/b.rs and 1 more); the changes must be combined first."
+        );
+        let approval = BayResult::blocked(Reason::ApprovalPending)
+            .with_detail(json!({"approval": {"checks": [{"approvers": ["alice"]}]}}));
+        assert_eq!(approval.say(), "Saved, but it waits for alice's OK.");
+        assert_eq!(
+            BayResult::blocked(Reason::ApprovalPending).say(),
+            "Saved, but it waits for a person's OK."
+        );
+        let held = BayResult::blocked(Reason::TrunkHeld)
+            .with_detail(json!({"hold": {"reason": "trunk migration"}}));
+        assert_eq!(
+            held.say(),
+            "The shared copy is on hold (main migration); your change waits."
+        );
+        let large = BayResult::blocked(Reason::ChangeTooLarge).with_detail(json!({"exceeded": [
+            {"limit": "max_file_mib", "max": 1, "value": 3 * 1024 * 1024, "paths": ["a.bin"]},
+            {"limit": "max_files", "max": 2, "value": 3, "paths": []},
+        ]}));
+        assert_eq!(
+            large.say(),
+            "This change is too big to save here (a.bin is 3.0 MiB, over 1 MiB, and one more limit); keep large files elsewhere, such as a shared drive."
+        );
+        let fault = BayResult::failed("could not read the trunk commit\nmore");
+        assert_eq!(
+            fault.say(),
+            "Something went wrong: could not read the main saved version. Nothing was changed."
+        );
+        assert_plain(&fault.say(), "failed");
+    }
+
+    #[test]
+    fn plain_puts_each_unplain_word_plainly() {
+        assert_eq!(
+            plain("merged onto trunk's branch"),
+            "combined onto main's copy"
+        );
+        assert!(unplain("Commits") && unplain("rebasing") && unplain("refs"));
+        assert!(!unplain("refused") && !unplain("refresh") && !unplain("committee"));
+    }
+
+    #[test]
+    fn the_human_rendering_says_its_sentence_first() {
+        let human = BayResult::blocked(Reason::TrunkMoved).to_human();
+        assert_eq!(
+            human.lines().next(),
+            Some(Reason::TrunkMoved.say(None).as_str())
+        );
     }
 }

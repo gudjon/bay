@@ -187,6 +187,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     // repository.
     let runs_checks = executor || keys.executor.is_some() || keys.producer.is_some();
     sandbox_row(&crate::check::Sandbox::here(), runs_checks, &mut report);
+    read_paths_row(&git, &mut report);
 
     let ready = report.first_red.is_none();
     let line = status_line(
@@ -1038,6 +1039,43 @@ fn sandbox_row(sandbox: &crate::check::Sandbox, runs_checks: bool, report: &mut 
             json!({"name": "sandbox", "kind": sandbox.kind, "required": true, "state": "red",
                 "note": why, "recovery": recovery})
         }
+    };
+    report.rows.push(row);
+}
+
+/// G285: the `check-read-paths` row: the box's read-only paths for checks
+/// (`bay.checkReadPath`), each with whether it exists. A path that does not exist, or a value
+/// that is not absolute (every check is then refused, naming it), is degraded. No row when
+/// the box sets none.
+fn read_paths_row(git: &Git, report: &mut Report) {
+    let key = crate::check::READ_PATH_KEY;
+    let row = match crate::check::read_paths(git) {
+        Ok(paths) if paths.is_empty() => return,
+        Ok(paths) => {
+            let missing: Vec<String> = paths
+                .iter()
+                .filter(|path| !path.exists())
+                .map(|path| path.display().to_string())
+                .collect();
+            let listed: Vec<Value> = paths
+                .iter()
+                .map(|path| json!({"path": path.display().to_string(), "exists": path.exists()}))
+                .collect();
+            let mut row = json!({"name": "check-read-paths", "key": key, "paths": listed,
+                "state": if missing.is_empty() { "green" } else { "degraded" }});
+            if !missing.is_empty() {
+                row["missing"] = json!(missing);
+                row["note"] =
+                    json!("a read path that does not exist is not bound: a check cannot read it");
+                row["recovery"] = json!(format!(
+                    "create the path, or remove it: git config --global --unset {key} <path>"
+                ));
+            }
+            row
+        }
+        Err(why) => json!({"name": "check-read-paths", "key": key, "state": "degraded",
+            "note": why,
+            "recovery": format!("set each value to an absolute path or one starting with ~/: git config --global --replace-all {key} <path>")}),
     };
     report.rows.push(row);
 }

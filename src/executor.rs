@@ -39,7 +39,7 @@ use crate::publish;
 use crate::queue::Queue;
 use crate::receipts;
 use crate::repo::Repo;
-use crate::result::{BayResult, Decision};
+use crate::result::{BayResult, Decision, Reason};
 use crate::signing::Keys;
 
 #[must_use]
@@ -389,7 +389,8 @@ fn word(state: impl serde::Serialize) -> Option<String> {
         .and_then(|state| state.as_str().map(str::to_owned))
 }
 
-/// One pass: every operation that is neither terminal nor blocked runs to an outcome. With a
+/// One pass: every operation that is neither terminal nor blocked runs to an outcome, and
+/// one blocked `APPROVAL_PENDING` is asked again (G284, [`publish::awaits_approval`]). With a
 /// `binary` to watch, it stops between operations once that binary changed. Before the
 /// first operation, and after each landing, the entries behind the queue's head are probed
 /// for a conflict with trunk (G177); what each probe noted goes to `notes`.
@@ -454,7 +455,7 @@ fn pass(
         let queued: Vec<String> = record
             .operations
             .iter()
-            .filter(|op| !op.state.is_terminal() && op.state != OpState::Blocked)
+            .filter(|op| runs(op))
             .map(|op| op.op_id.clone())
             .collect();
         if queued.is_empty() {
@@ -473,7 +474,7 @@ fn pass(
             let step = Cell::new("read");
             let result =
                 publish::execute(repo, id, &op_id, &step).unwrap_or_else(BayResult::failed);
-            let result = publish::with_receipt(repo, id, step.get(), result).with_op(op_id.clone());
+            let result = receipted(repo, id, step.get(), result).with_op(op_id.clone());
             // Trunk moved: what waits behind the new head hears of a conflict now (G177).
             if result.decision == Decision::Landed
                 && let Ok(queue) = Queue::read(repo)
@@ -501,6 +502,29 @@ fn pass(
     }
     advanced.extend(advance(repo));
     Ok(ran)
+}
+
+/// Whether a pass runs `op`: it is neither terminal nor blocked, or, G284, it waits for a
+/// person's approval ([`publish::awaits_approval`]), which the pass asks again, so the approval
+/// lands it and nobody lands it a second time.
+fn runs(op: &crate::change::Operation) -> bool {
+    !op.state.is_terminal() && (op.state != OpState::Blocked || publish::awaits_approval(op))
+}
+
+/// `result`, the outcome a pass reached at `step` for change `id`, with its receipt
+/// ([`publish::with_receipt`]). G284: a wait for approval that nothing changed was told when it
+/// began, so a pass that finds it unchanged writes no receipt of its own.
+fn receipted(repo: &Repo, id: &str, step: &str, result: BayResult) -> BayResult {
+    let unchanged = result.reason == Some(Reason::ApprovalPending)
+        && result
+            .detail
+            .as_ref()
+            .is_some_and(|detail| detail["unchanged"] == true);
+    if unchanged {
+        result.with_change(id)
+    } else {
+        publish::with_receipt(repo, id, step, result)
+    }
 }
 
 /// N-7: the pass's moves of the targets with `advance = true`, read against the trunk, the

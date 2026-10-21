@@ -56,6 +56,9 @@ pub struct Record {
     pub body: Option<PathBuf>,
     /// The writer's own version; bay's when not named.
     pub version: Option<String>,
+    /// The record's `why`, in the writer's words (`bay approve --why`, G281); none when not
+    /// named. Signed with the record, and outside its id.
+    pub why: Option<String>,
 }
 
 #[must_use]
@@ -372,7 +375,7 @@ fn build(
             },
             verdict: common.verdict,
             at: now_rfc3339(),
-            why: None,
+            why: request.why.clone(),
             units: Vec::new(),
             selection: None,
             sandbox: None,

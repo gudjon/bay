@@ -142,7 +142,8 @@ pub fn schema() -> Value {
         "title": SCHEMA,
         "description": "The one result every bay command prints on stdout.",
         "type": "object",
-        "required": ["schema", "decision"],
+        // Every result says one plain sentence (owner ruling 2026-10-21, `BayResult::say`).
+        "required": ["schema", "decision", "say"],
         "additionalProperties": false,
         "dependentRequired": {"reason": ["allowed", "retry_when"]},
         "properties": {
@@ -153,6 +154,7 @@ pub fn schema() -> Value {
             "state": string,
             "published": {"type": "boolean"},
             "reason": {"enum": codes},
+            "say": string,
             "change": string,
             "detail": {},
             "allowed": {"type": "array", "items": {"enum": allowed}},

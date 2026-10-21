@@ -1,12 +1,29 @@
 # Changelog
 
+## 0.2.5
+
+- `bay waiting` lists the changes waiting for your approval, with candidate, paths and a diff summary.
+- `bay approve <change>` signs and pushes your approval of the exact pending candidate.
+- `bay approve --reject --why <text>` records a signed no; the change is blocked, naming you.
+- Once a person approves a change, the executor's next pass lands it; nobody runs `bay land` again.
+- If main moved after the approval, the change is rebuilt and waits for approval of the new candidate.
+- Every result now carries `say`: one plain sentence saying what happened and what to do next.
+- A policy `[limits]` table caps file size, files touched and added lines per change.
+- A change over a limit is refused `CHANGE_TOO_LARGE` before any check runs.
+- Checks can read box directories named with `bay.checkReadPath`, read-only; `bay doctor` lists them.
+- `bay executor install` writes a launchd agent or systemd user unit for the executor, and starts nothing.
+- Agents hear once when changes are queued and no executor is running.
+- The skill tells agents how to work with people who are not developers: save, waiting, approve, undo.
+- A replaced evidence record, such as an unsigned copy followed by the signed one, now counts as a change.
+
 ## 0.2.4
 
 - `bay save <intent>` lands the edits made in the main checkout as one change.
-- After a save lands, the main checkout fast-forwards to the new main, losing no edit.
-- A refused save leaves the main checkout's files exactly as they were and names the change.
-- `[policy] signing = "approvals"` signs only approvals, so small teams land without executor or producer keys.
+- After a save lands, the main checkout fast-forwards to the new main when nothing is in the way.
+- A refused save leaves the main checkout's files exactly as they were, and names the change if one opened.
+- `[policy] signing = "approvals"` signs only approvals: small teams land without agent, executor or producer keys.
 - Under approvals-only signing, landings and check evidence run unsigned and results say `trust: "approvals"`.
+- Under approvals-only signing, evidence reuse and batching are off, because no producer signs.
 - An approval still counts only when an enrolled approver's key signed it.
 - `bay doctor` shows the signing mode.
 - A dependency that ends `no_effect` is met: its dependent lands, never `DEPENDENCY_ABANDONED`.

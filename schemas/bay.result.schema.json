@@ -5,7 +5,8 @@
   "type": "object",
   "required": [
     "schema",
-    "decision"
+    "decision",
+    "say"
   ],
   "additionalProperties": false,
   "dependentRequired": {
@@ -105,8 +106,12 @@
         "TRUNK_HELD",
         "PATHS_UNDECLARED",
         "DEPENDENCY_PENDING",
-        "DEPENDENCY_ABANDONED"
+        "DEPENDENCY_ABANDONED",
+        "CHANGE_TOO_LARGE"
       ]
+    },
+    "say": {
+      "type": "string"
     },
     "change": {
       "type": "string"
@@ -186,7 +191,8 @@
         "hold_cleared",
         "paths_declared",
         "dependencies_landed",
-        "dependency_dropped_or_restarted"
+        "dependency_dropped_or_restarted",
+        "change_within_limits"
       ]
     },
     "waiting_for": {

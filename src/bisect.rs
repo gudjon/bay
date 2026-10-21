@@ -270,7 +270,7 @@ fn run_at(
             finished: Vec::new(),
             heartbeat: None,
             hidden: check::hidden_for(repo, keys),
-            sandbox: check::Sandbox::here(),
+            sandbox: check::Sandbox::here().reading(git),
             // Bisection asks whether each commit fails, whole: no base excuses a failure.
             baseline: None,
             parallel: 1,

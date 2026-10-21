@@ -451,6 +451,10 @@ pub struct Sandbox {
     pub kind: &'static str,
     /// Set when no check may run: each one is then `infra_failure` with this reason.
     pub refusal: Option<String>,
+    /// G285: the box's read-only paths for checks (`bay.checkReadPath`), absolute. Box facts:
+    /// they never enter the definition digest, and each record of a sandboxed run lists them
+    /// ([`SANDBOX_READ`]). Empty until [`Sandbox::reading`] reads them.
+    pub read: Vec<PathBuf>,
 }
 
 impl Sandbox {
@@ -479,8 +483,110 @@ impl Sandbox {
         } else {
             None
         };
-        Self { kind, refusal }
+        Self {
+            kind,
+            refusal,
+            read: Vec::new(),
+        }
     }
+
+    /// G285: the sandbox with the box's read paths, as `git` reads `bay.checkReadPath`. A value
+    /// that is not absolute once a leading `~/` is expanded refuses every check, naming it.
+    #[must_use]
+    pub fn reading(mut self, git: &Git) -> Self {
+        match read_paths(git) {
+            Ok(paths) => self.read = paths,
+            Err(why) => {
+                self.refusal.get_or_insert(why);
+            }
+        }
+        self
+    }
+}
+
+/// G285: the box's read-only paths for checks: Git config, multi-valued, global or for one
+/// clone, read in the clone that runs the check, as [`ENVIRONMENT_KEY`] is. A repository never
+/// declares one. Each value is an absolute path, or starts with `~/` for the box's `HOME`.
+pub const READ_PATH_KEY: &str = "bay.checkReadPath";
+
+/// G285: the record field, next to `sandbox`, that lists the box's read paths of a sandboxed
+/// run. Kept in [`EvidenceRecord::unknown`], so a record without it reads as before.
+pub const SANDBOX_READ: &str = "sandbox_read";
+
+/// G285: `value` of [`READ_PATH_KEY`] as a path: a leading `~/` (or `~` alone) is `home`.
+///
+/// # Errors
+///
+/// The value is not absolute after that, or starts with `~` and there is no `HOME`.
+pub fn read_path(value: &str, home: Option<&Path>) -> Result<PathBuf, String> {
+    let tilde = value == "~" || value.starts_with("~/");
+    let path = match (tilde, home) {
+        (true, Some(home)) => match value.trim_start_matches('~').trim_start_matches('/') {
+            "" => home.to_path_buf(),
+            rest => home.join(rest),
+        },
+        (true, None) => {
+            return Err(format!(
+                "{READ_PATH_KEY} = \"{value}\" starts with ~ and HOME is not set"
+            ));
+        }
+        (false, _) => PathBuf::from(value),
+    };
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "{READ_PATH_KEY} = \"{value}\" is not an absolute path; each value is absolute or \
+             starts with ~/"
+        ))
+    }
+}
+
+/// G285: every value of [`READ_PATH_KEY`] as `git config --get-all` reads it in `git`'s clone,
+/// each made a path by [`read_path`]. Unset is none.
+///
+/// # Errors
+///
+/// A value that is not absolute, or a `git config` that fails.
+pub fn read_paths(git: &Git) -> Result<Vec<PathBuf>, String> {
+    let home = crate::platform::home().map(PathBuf::from);
+    match git.run_status(&["config", "--get-all", READ_PATH_KEY]) {
+        // `git config --get-all` exits 1 for a key that is not set.
+        Ok((1, _, _)) => Ok(Vec::new()),
+        Ok((0, values, _)) => values
+            .lines()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| read_path(value, home.as_deref()))
+            .collect(),
+        Ok((_, _, stderr)) => Err(format!("{READ_PATH_KEY} could not be read: {stderr}")),
+        Err(error) => Err(format!(
+            "{READ_PATH_KEY} could not be read: {}",
+            error.message()
+        )),
+    }
+}
+
+/// G285: why a box read path is not bound: it lies inside a path a check never reads (the
+/// repository, a view, a key), or holds one, so binding it would show what is hidden.
+fn read_path_overlap(read: &[PathBuf], hidden: &[PathBuf]) -> Option<String> {
+    read.iter().find_map(|path| {
+        let path_real = real(path);
+        hidden
+            .iter()
+            .find(|hidden| {
+                let hidden = real(hidden);
+                path_real.starts_with(&hidden) || hidden.starts_with(&path_real)
+            })
+            .map(|hidden| {
+                format!(
+                    "{READ_PATH_KEY} = \"{}\" overlaps {}, which a check never reads (the \
+                     repository, a view or a key)",
+                    path.display(),
+                    hidden.display()
+                )
+            })
+    })
 }
 
 /// Whether this box chose to run checks with no sandbox: `bay.executorSandbox` in global Git
@@ -938,7 +1044,7 @@ fn run_in_slot(shared: Shared, (index, entry): (usize, &CheckEntry)) -> Result<S
             (index, entry, run),
             judged,
             ran,
-            shared.limits.sandbox.kind,
+            &shared.limits.sandbox,
         );
         let verdict = record.verdict;
         runs.push(record);
@@ -1166,7 +1272,7 @@ fn run_serial(
             (index, entry, run),
             judged,
             ran,
-            limits.sandbox.kind,
+            &limits.sandbox,
         );
         // N-3: the record names the base record it was judged against, and each unit that
         // failed on both, so its verdict is auditable.
@@ -1205,12 +1311,14 @@ fn run_once(
     let _ = std::fs::remove_dir_all(&dir);
     let tree_dir = dir.join("candidate");
     let adapter_dir = dir.join("adapter");
-    // R14: with no sandbox and no choice by the box, nothing of the check runs.
-    let not_run = match &limits.sandbox.refusal {
-        Some(why) => Some(Judged::without_units(
-            Verdict::InfraFailure,
-            Some(why.clone()),
-        )),
+    // R14: with no sandbox and no choice by the box, nothing of the check runs. G285: nor
+    // when a box read path would show the repository or a key.
+    let refusal = limits.sandbox.refusal.clone().or_else(|| {
+        read_path_overlap(&limits.sandbox.read, &limits.hidden)
+            .filter(|_| limits.sandbox.kind != "none")
+    });
+    let not_run = match refusal {
+        Some(why) => Some(Judged::without_units(Verdict::InfraFailure, Some(why))),
         None => prepare(
             git,
             entry,
@@ -1233,6 +1341,7 @@ fn run_once(
         scratch: &dir,
         hidden: &limits.hidden,
         sandbox: limits.sandbox.kind,
+        read: &limits.sandbox.read,
         about,
         history: history.as_ref(),
     };
@@ -1256,7 +1365,9 @@ fn run_once(
 }
 
 /// The evidence record of run `run` of the check `entry`, the `index`th of `policy`, judged
-/// `judged` on `candidate` by `producer` in a run that started at `ran` under `sandbox`.
+/// `judged` on `candidate` by `producer` in a run that started at `ran` under `sandbox`. A
+/// sandboxed run lists the box's read paths in [`SANDBOX_READ`] (G285); with no sandbox
+/// nothing is read-only, so it lists none.
 fn evidence(
     candidate: &Candidate,
     producer: &str,
@@ -1264,8 +1375,21 @@ fn evidence(
     (index, entry, run): (usize, &CheckEntry, u32),
     judged: Judged,
     ran: Instant,
-    sandbox: &str,
+    sandbox: &Sandbox,
 ) -> EvidenceRecord {
+    let mut unknown = serde_json::Map::new();
+    if sandbox.kind != "none" && !sandbox.read.is_empty() {
+        unknown.insert(
+            SANDBOX_READ.to_owned(),
+            json!(
+                sandbox
+                    .read
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
     EvidenceRecord {
         schema: EVIDENCE_SCHEMA.to_owned(),
         id: run_id(producer, candidate.id, index, run),
@@ -1291,10 +1415,10 @@ fn evidence(
         why: judged.why,
         units: judged.units,
         selection: judged.selection,
-        sandbox: Some(sandbox.to_owned()),
+        sandbox: Some(sandbox.kind.to_owned()),
         seconds: Some((ran.elapsed().as_secs_f64() * 1000.0).round() / 1000.0),
         signature: None,
-        unknown: serde_json::Map::new(),
+        unknown,
     }
 }
 
@@ -1419,7 +1543,7 @@ fn base_answer(
         (index, entry, 0),
         judged,
         ran,
-        limits.sandbox.kind,
+        &limits.sandbox,
     );
     record.unknown.insert(
         "baseline_for".to_owned(),
@@ -1590,6 +1714,8 @@ struct Place<'a> {
     scratch: &'a Path,
     hidden: &'a [PathBuf],
     sandbox: &'a str,
+    /// G285: the box's read paths (`bay.checkReadPath`), bound read-only where they exist.
+    read: &'a [PathBuf],
     /// The request's `base`, `change` and `messages` ([`about`]).
     about: &'a serde_json::Map<String, serde_json::Value>,
     /// The read-only history of a check with `inputs = ["history"]`.
@@ -1682,7 +1808,10 @@ fn run_one(
     let scratch_home = place.scratch.join("home");
     let _ = std::fs::create_dir_all(&scratch_tmp);
     let _ = std::fs::create_dir_all(&scratch_home);
-    let read_only = place.history.map(History::read_only).unwrap_or_default();
+    // G285: the box's read paths join the history's, read-only; one that does not exist on
+    // this box is not bound (`bwrap` refuses to bind a missing path; `bay doctor` names it).
+    let mut read_only = place.history.map(History::read_only).unwrap_or_default();
+    read_only.extend(place.read.iter().filter(|path| path.exists()).cloned());
     let mut cmd = match sandboxed(
         place.sandbox,
         &executable,
@@ -2250,6 +2379,43 @@ mod tests {
         /// `materialize_timeout_s` is a millisecond (see `materialize_bound`).
         pub(super) static MILLISECOND_BOUNDS: std::cell::Cell<bool> =
             const { std::cell::Cell::new(false) };
+    }
+
+    /// G285: a box read path is absolute, or `~/` under HOME; anything else is refused by name,
+    /// and one that would show a hidden path (the repository, a key) is refused too.
+    #[test]
+    fn a_box_read_path_is_absolute_and_never_overlaps_a_hidden_path() {
+        use std::path::{Path, PathBuf};
+        let home = Some(Path::new("/home/me"));
+        assert_eq!(
+            super::read_path("~/.store", home).unwrap(),
+            PathBuf::from("/home/me/.store")
+        );
+        assert_eq!(
+            super::read_path("~", home).unwrap(),
+            PathBuf::from("/home/me")
+        );
+        assert_eq!(
+            super::read_path("/opt/store", None).unwrap(),
+            PathBuf::from("/opt/store")
+        );
+        let refused = super::read_path("store", home).unwrap_err();
+        assert!(
+            refused.contains("\"store\" is not an absolute path"),
+            "{refused}"
+        );
+        assert!(super::read_path("~other/store", home).is_err());
+        assert!(super::read_path("~/.store", None).is_err());
+        let hidden = [
+            PathBuf::from("/nonexistent/repo"),
+            PathBuf::from("/nonexistent/home/.ssh/key"),
+        ];
+        let inside = [PathBuf::from("/nonexistent/repo/node_modules")];
+        assert!(super::read_path_overlap(&inside, &hidden).is_some());
+        let holds = [PathBuf::from("/nonexistent/home")];
+        assert!(super::read_path_overlap(&holds, &hidden).is_some());
+        let apart = [PathBuf::from("/nonexistent/store")];
+        assert!(super::read_path_overlap(&apart, &hidden).is_none());
     }
 
     /// The `AppArmor` remedy is named only for an installed bwrap under the restriction, and

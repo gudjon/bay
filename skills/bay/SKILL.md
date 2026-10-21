@@ -37,6 +37,8 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Take in a branch made outside bay (a bot's or a person's) as one change | `bay start <intent> --paths <paths> --from <branch>` (the remote's tip when the remote has the branch; `--paths` must cover every file it changes; then `bay land`) |
 | Merge a change only after another change merged | `bay start <intent> --paths <paths> --after <change>` (repeatable; land it now, it merges once each one merged) |
 | Save edits made in the main checkout (non-developers) | `bay save <intent>` |
+| See the changes waiting for this machine's approver: candidate, paths, diff summary | `bay waiting` (`detail.waiting`) |
+| Approve one, or say no, when the approver asks you to | `bay approve <change> [--reject] [--why <text>]` |
 | Give the change up, so another agent may adopt it | `bay land --abandon` |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
 | Read state, and main commits that did not merge through bay (`unattributed`) | `bay status` |
@@ -54,6 +56,8 @@ command, flag and reason code, with the JSON Schema of `bay.result/1`.
 
 - stdout is one `bay.result/1` JSON document. Text on stderr is not the result. Add `--json` to
   print the document alone. bay never prompts.
+- `say` is one plain sentence for a person who does not know Git: what happened and the next
+  step. Tell it to such a user as it stands.
 - `decision`: `landed`, `queued` and `ok` exit 0; `blocked` exits 10; `failed` exits 20; a usage
   error exits 2.
 - `queued` with `"published": false` means the merge has not happened yet. `waiting_for` says
@@ -64,7 +68,9 @@ command, flag and reason code, with the JSON Schema of `bay.result/1`.
 - A `landed_on_your_paths` notice: another change merged on paths you declared. Refresh, re-read
   the named paths, then go on.
 - `bay status` with `detail.warnings` naming `no_live_executor`: work is queued and no executor has
-  been seen recently. Tell the user an executor must run (`bay executor run`). The work stays queued.
+  been seen recently. Tell the user an executor must run (`bay executor run`, or
+  `bay executor install` to keep one running). The work stays queued. The agent hook says the
+  same once, at session start or a prompt: "bay: no executor is running for this repository".
 - `bay status` with `detail.warnings` naming `trunk_not_linear`: a merge pushed outside bay put
   landings off main's first-parent line. bay still finds them. Tell the user to require linear
   history on the host.
@@ -98,7 +104,7 @@ Common reasons:
 | `DEPENDENCY_PENDING` | A change named by `--after` has not merged yet (`detail.pending`). The change stays queued and merges after it. |
 | `DEPENDENCY_ABANDONED` | A change named by `--after` ended unmerged (`detail.ended`). `bay land --abandon`, then `bay start <intent> --new` without it; or restart that change. |
 | `PROMOTION_REFUSED` | The host refused a push to a target such as `staging`. Push the commit `bay status` names promotable, or wait. |
-| `APPROVAL_PENDING` | These paths need a person's yes. Tell the user who can approve (`detail.approval.checks[].approvers`) and the candidate commit to approve (`detail.approval.commit`). Wait, then `bay land --wait` again. |
+| `APPROVAL_PENDING` | These paths need a person's yes. Tell the user who can approve (`detail.approval.checks[].approvers`). The approver runs `bay approve <change>` (`detail.approval.approve`). The executor lands it once approved; without one, `bay land --wait`. |
 | `COVERAGE_UNKNOWN` | Keep editing; `bay land` when coordination data is reachable. |
 | `LANE_NEVER_LANDS` | A lane change: read the check verdicts in `detail`. It never merges. |
 | `PATHS_UNDECLARED` | The `--from` branch changes paths you did not declare (`detail.uncovered`). Start again with `--paths` covering them. |
@@ -106,9 +112,25 @@ Common reasons:
 | `ACTOR_UNPROVEN` | Policy requires proof of who signs, and actors share this OS account. Tell the user: a hardware agent key, or one OS account per actor. |
 | `WIP_LIMIT` | You hold the most live changes policy allows (`detail.live_changes`). Land or abandon one, then start again. |
 | `DISK_LOW` | This box is below its disk floor (`detail.free_mib`, `detail.floor_mib`). Tell the user: free space, or lower `bay.minFreeMiB`. |
+| `CHANGE_TOO_LARGE` | The change is over the policy's `[limits]` (`detail.exceeded`: each limit, its value, the largest paths). Keep large files elsewhere, such as a shared drive, or split the change, then `bay land` again. Never raise the limits to get it through. |
 | `CONFIG_MISSING` / `POLICY_MISSING` | The repository is not set up. Tell the user, or set it up if asked. |
 
 Every code: https://getbay.io/docs/results
+
+## When the person is not a developer
+
+Many people who edit with you have never used Git. Keep bay invisible to them:
+- **Speak their four words:** save, waiting, approve, undo.
+  - "Save my work": `bay save <what it is>`.
+  - "What's waiting for me?": `bay waiting`.
+  - "Approve it": `bay approve <change>`. Their own Touch ID or key is the confirmation; never approve for them.
+  - "Undo that": `bay undo <change>`.
+- **Tell them `say`.** Every result carries `say`, one plain sentence. Read it to them as it is, then add at most
+  one next step. Never say branch, commit, merge, trunk, rebase, ref or view to them.
+- **Show before they approve.** Before `bay approve`, show what changes: the files and a short plain summary of the
+  diff from `bay waiting`. Ask yes or no.
+- **One place.** Everything happens in this conversation. Don't send them to a web page, a dashboard or a
+  terminal command they would have to type themselves.
 
 ## Work with other agents
 
@@ -137,16 +159,21 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 2. `.bay/policy.toml` lists the required checks. Each `[[check]]` needs `expected_minimum`. A
    repository that wants no checks says `unchecked = true`. Paths that need a person's approval
    get a `[[check]]` with `kind = "approval"` and `when_paths`, and no command; each approver is
-   enrolled in the registry's `approver` file and records with
-   `bay evidence record --kind approval --check <id> --verdict pass --commit <candidate>`.
+   enrolled in the registry's `approver` file and approves with `bay approve <change>`.
+   It records a signed approval record of the exact candidate.
    A small team with no executor host sets `[policy] signing = "approvals"`: only approvals are
-   signed, and no machine needs an executor, producer or agent key.
+   signed, and no machine needs an executor, producer or agent key. To keep changes small, add
+   `[limits]` with `max_file_mib`, `max_files` or `max_added_lines` (positive integers; each optional).
 3. Before you commit an adapter (a `[[check]]` command, `[wake] command` or `[notify] command`),
    prove it: `bay adapter test check|wake|notify -- <command>`. It runs bay's contract cases the
    way bay runs that adapter, changes nothing, and exits 0 only when every case passes.
    `detail.cases` names each failing case and why.
 4. In each clone: `bay install --trunk <name> --remote <name>`.
-5. Run an executor: `bay executor run`, under a supervisor.
+5. Run an executor: `bay executor run`, under a supervisor. `bay executor install` writes one for
+   this repository (a launchd agent on macOS, a systemd user unit on Linux) and prints the one
+   command that starts it; it starts nothing. Tell the user that command. `--print` only shows it.
+6. A check that must read a directory outside its tree (a package store) needs it named on the
+   box that runs checks: `git config --global --add bay.checkReadPath ~/<dir>`. It is read-only.
 
 ## Never
 
@@ -157,7 +184,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 - Never merge, cherry-pick, check out or restore from a lane's refs (`[[lane]]` in the config) in a
   view that is not of that lane. bay's hook refuses those commands, and `bay land` refuses lane commits.
 - Never grant a key, widen the policy, or quarantine a check to get a change through.
-- Never record an approval yourself, or ask for an approver's key. Only the person approves.
+- Never approve on your own, or ask for an approver's key. Only the person approves: run
+  `bay approve` only when they ask, on their machine, where their key signs it.
 - Never grant a key, widen the policy, quarantine a check, or set `allow_flaky` to get a change through.
 - Never run `bay install` to merge work. It sets up a machine or a clone.
 - Never report a change as merged until the result says `landed`.

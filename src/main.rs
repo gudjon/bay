@@ -80,6 +80,23 @@ enum Command {
         #[arg(long)]
         message: Option<String>,
     },
+    /// The changes waiting for an approval this machine's approver (`bay.approverName`) can give,
+    /// each with its candidate, paths and diff; with no approver set, every one, with who can
+    /// approve it
+    Waiting,
+    /// Approve a change that waits for an approval: this machine's approver signs one
+    /// `approval` record of its exact candidate for each approval check it waits on, and
+    /// pushes it
+    Approve {
+        /// The change that waits for the approval
+        change: String,
+        /// Say no instead: the record's verdict is `product_failure`, and the change is blocked
+        #[arg(long)]
+        reject: bool,
+        /// Why, in the approver's words: kept in the signed record
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+    },
     /// A new change that undoes one landing, checked and landed like any other; never a rewrite
     Undo {
         /// The landed change to undo
@@ -420,6 +437,16 @@ enum ExecutorAction {
         #[arg(long, default_value = "10")]
         interval_s: u64,
     },
+    /// Write a service that keeps `bay executor run` running for this repository (a launchd
+    /// agent on macOS, a systemd user unit on Linux), and print the one command that starts it
+    Install {
+        /// Show the service file and write nothing
+        #[arg(long)]
+        print: bool,
+        /// Replace a service file that is already there
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 /// The `CONFIG_MISSING` refusal of a command that needs the trunk or policy, so needs the
@@ -473,6 +500,26 @@ fn executor_run(dir: &std::path::Path, json: bool, once: bool, interval_s: u64) 
     code
 }
 
+/// `bay approve`: the approval its arguments ask for.
+fn approve_change(dir: &std::path::Path, command: Command) -> BayResult {
+    let Command::Approve {
+        change,
+        reject,
+        why,
+    } = command
+    else {
+        unreachable!("approve_change takes an approve command");
+    };
+    bay::approve::approve(
+        dir,
+        &bay::approve::Approve {
+            change,
+            reject,
+            why,
+        },
+    )
+}
+
 /// `bay start`: the request its arguments make.
 fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
     let Command::Start {
@@ -519,6 +566,8 @@ fn main() -> ExitCode {
         Command::Save { intent, message } => {
             bay::save::save(&cli.dir, &bay::save::SaveRequest { intent, message })
         }
+        Command::Waiting => bay::approve::waiting(&cli.dir),
+        approve @ Command::Approve { .. } => approve_change(&cli.dir, approve),
         Command::Undo { change, wait } => bay::undo::undo(&cli.dir, &change, wait),
         Command::Share {
             change,
@@ -551,6 +600,9 @@ fn main() -> ExitCode {
         Command::Executor {
             action: ExecutorAction::Run { once, interval_s },
         } => return executor_run(&cli.dir, cli.json, once, interval_s),
+        Command::Executor {
+            action: ExecutorAction::Install { print, force },
+        } => bay::service::install(&cli.dir, &bay::service::Request { print, force }),
         Command::Live { action } => live(&cli.dir, action),
         Command::Status {
             heads: true,
@@ -706,6 +758,7 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
                 inputs,
                 body,
                 version,
+                why: None,
             },
         ),
     }

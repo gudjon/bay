@@ -56,6 +56,9 @@ struct PolicyFile {
     /// The `[policy]` table (N-21): what a key registry signs.
     #[serde(default)]
     policy: PolicyTable,
+    /// The `[limits]` table (owner ruling 2026-10-21): how big one change may be.
+    #[serde(default)]
+    limits: crate::limits::Limits,
 }
 
 /// The `[policy]` table: `signing = "all"` (the default) or `"approvals"` (N-21). Any other value
@@ -501,6 +504,21 @@ impl CheckEntry {
         })
     }
 
+    /// The paths of `changed` this check's `when_paths` match, in their order; every one of
+    /// them without `when_paths`. What a person approves (G280).
+    #[must_use]
+    pub fn woken_paths(&self, changed: &[String]) -> Vec<String> {
+        changed
+            .iter()
+            .filter(|path| {
+                self.when_paths
+                    .as_ref()
+                    .is_none_or(|globs| globs.iter().any(|glob| glob_matches(glob, path.as_str())))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// NEW-10: what a check with `footprint = true` reads, its verdict's whole input besides
     /// its definition: its `paths` (the only part of the tree its materialization holds) when it
     /// has them, else its `when_paths`. `None` for a check without `footprint = true`.
@@ -943,6 +961,8 @@ pub struct Policy {
     pub agent: AgentPolicy,
     /// `[policy] signing` (N-21): what a key registry signs.
     pub signing: Signing,
+    /// `[limits]` (owner ruling 2026-10-21): how big one change may be.
+    pub limits: crate::limits::Limits,
 }
 
 /// Why a policy could not be loaded.
@@ -1088,6 +1108,7 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
         manifest_digest,
         agent: file.agent,
         signing: file.policy.signing,
+        limits: file.limits,
     }))
 }
 
@@ -1132,6 +1153,21 @@ pub fn max_live_changes_at(git: &Git, commit: &str) -> Result<Option<u64>, Strin
             .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
             .and_then(|table| table.get("agent")?.get("max_live_changes")?.as_integer())
             .and_then(|limit| u64::try_from(limit).ok())),
+    }
+}
+
+/// The size limits of the policy at `commit` (`[limits]`, owner ruling 2026-10-21), judged at
+/// the base like every other policy key. No policy, or no key, sets no limit. An invalid policy
+/// sets none here: it lands nothing, and its refusal is `POLICY_INVALID`.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn limits_at(git: &Git, commit: &str) -> Result<crate::limits::Limits, String> {
+    match load_at(git, commit) {
+        Ok(Some(policy)) => Ok(policy.limits),
+        Ok(None) | Err(LoadError::Invalid(_)) => Ok(crate::limits::Limits::default()),
+        Err(LoadError::Git(why)) => Err(why),
     }
 }
 
@@ -1198,6 +1234,8 @@ fn parse_error(text: &str, error: &toml::de::Error) -> String {
 
 /// The rules on the file's shape: its quarantines, `unchecked` and the minimum of its checks.
 fn validate_shape(file: &PolicyFile) -> Result<(), String> {
+    // Owner ruling 2026-10-21: each `[limits]` key is a positive integer.
+    file.limits.validate()?;
     // Ruling 8c: a quarantine that names no check, or whose end is neither a date nor a
     // Change-Id, would set nothing aside or never show as overdue: a typo is never silent.
     for quarantine in &file.quarantine {

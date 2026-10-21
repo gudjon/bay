@@ -120,6 +120,9 @@ struct Cursor {
     landed: Vec<String>,
     /// The trunk commit every landing up to which was read for the view's change (NEW-10).
     landed_trunk: Option<String>,
+    /// G287: the session was told that no executor is live while operations wait, and that
+    /// state has not changed since.
+    no_executor: bool,
 }
 
 /// Whose notices a hook gives: the view's change, if the session is in a view, and the
@@ -869,6 +872,29 @@ pub fn instructions(repo: &Repo, tree: &Path, state_dir: &Path) -> Option<(Strin
         named.join(", ")
     );
     Some((text, serde_json::json!({"trunk": trunk, "files": files})))
+}
+
+/// G287: the line a session is told when the repository has operations queued and no executor
+/// presence is fresh, the rule of `bay status`'s `no_live_executor`
+/// ([`crate::presence::no_live_executor`]).
+pub const NO_EXECUTOR: &str = "bay: no executor is running for this repository; queued changes wait. Start one with `bay executor run`, or install it with `bay executor install`.\n";
+
+/// G287: at `session-start` and `user-prompt-submit`, [`NO_EXECUTOR`] when the repository has
+/// operations queued and no fresh executor presence, at most once per change of that state: the
+/// session's cursor in `state_dir` keeps whether it was told (`no_executor`), and a state that
+/// clears (an executor came, or nothing waits) arms it again. Local refs only, outside the
+/// notice budget. A session with no cursor, or one that cannot be written, is told nothing,
+/// since a line it could not mark told would repeat at every prompt.
+#[must_use]
+pub fn no_executor(repo: &Repo, state_dir: &Path) -> Option<&'static str> {
+    let mut cursor = read(state_dir).ok()?;
+    let waiting = crate::presence::no_live_executor(repo, crate::presence::queued(repo)).is_some();
+    if waiting == cursor.no_executor {
+        return None;
+    }
+    cursor.no_executor = waiting;
+    write(state_dir, &cursor).ok()?;
+    waiting.then_some(NO_EXECUTOR)
 }
 
 /// The operation id of `event` when it has the form bay gives one, `<change>.<n>`.

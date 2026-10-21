@@ -348,6 +348,67 @@ pub fn any_fresh(rows: &[Value]) -> bool {
         .any(|row| row["readable"] == true && row["stale"] == false)
 }
 
+/// The operations of `record` that wait for an executor: neither ended nor blocked.
+#[must_use]
+pub fn waiting(record: &crate::change::ChangeRecord) -> usize {
+    record
+        .operations
+        .iter()
+        .filter(|op| !op.state.is_terminal() && op.state != crate::change::OpState::Blocked)
+        .count()
+}
+
+/// G287: the operations of every change this repository holds that wait for an executor
+/// ([`waiting`]), read by one `for-each-ref` and one `cat-file --batch`; none when the chains
+/// cannot be read.
+#[must_use]
+pub fn queued(repo: &Repo) -> usize {
+    crate::change::Chain::new(&repo.git)
+        .read_all()
+        .map_or(0, |chains| {
+            chains.iter().map(|held| waiting(&held.record)).sum()
+        })
+}
+
+/// G67: operations are queued and no executor presence on record is fresh. The warning says how
+/// many operations wait, the presences the last fleet fetch recorded, and the age of the
+/// freshest readable one (`seen_s`, `null` when none was seen). Never a refusal: the operations
+/// stay queued and land when an executor comes. `None` with nothing queued or a fresh presence.
+/// `bay status` names it in `detail.warnings`; the agent hook tells a session of it (G287).
+#[must_use]
+pub fn no_live_executor(repo: &Repo, queued: usize) -> Option<Value> {
+    if queued == 0 {
+        return None;
+    }
+    let (executors, seen_s) = match crate::fleet::executors(repo) {
+        Ok(Some(rows)) => {
+            if any_fresh(&rows) {
+                return None;
+            }
+            let seen = rows
+                .iter()
+                .filter(|row| row["readable"] == true)
+                .filter_map(|row| row["age_s"].as_u64())
+                .min();
+            (Value::from(rows), seen)
+        }
+        Ok(None) => (json!([]), None),
+        Err(why) => (json!({"unread": why}), None),
+    };
+    let executor = seen_s.map_or_else(
+        || "none seen".to_owned(),
+        |seen| format!("none seen for {seen}s"),
+    );
+    Some(json!({
+        "code": "no_live_executor",
+        "queued": queued,
+        "executor": executor,
+        "seen_s": seen_s,
+        "executors": executors,
+        "note": "operations are queued and no executor presence is fresh: they stay queued and land once an executor runs (bay executor run)",
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::age;

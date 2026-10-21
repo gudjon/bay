@@ -450,11 +450,12 @@ fn notices(
     line: &mut Value,
 ) -> String {
     if payload.event == Event::SessionStart && payload.agent.is_none() {
-        let Some((text, behind)) = crate::notice::instructions(repo, &payload.cwd, state_dir)
-        else {
-            return String::new();
-        };
-        line["instructions_behind"] = behind;
+        let mut text = String::new();
+        if let Some((told, behind)) = crate::notice::instructions(repo, &payload.cwd, state_dir) {
+            line["instructions_behind"] = behind;
+            text = told;
+        }
+        no_executor(repo, state_dir, line, &mut text);
         return text;
     }
     if payload.agent.is_some()
@@ -469,7 +470,20 @@ fn notices(
     for (key, value) in delivery.fields() {
         line[key] = value;
     }
-    delivery.text
+    let mut text = delivery.text;
+    if payload.event == Event::UserPromptSubmit {
+        no_executor(repo, state_dir, line, &mut text);
+    }
+    text
+}
+
+/// G287: the no-executor line ([`crate::notice::no_executor`]) after `text`, once per change
+/// of that state; the session's line says it was told (`no_executor_notice`).
+fn no_executor(repo: &Repo, state_dir: &Path, line: &mut Value, text: &mut String) {
+    if let Some(told) = crate::notice::no_executor(repo, state_dir) {
+        line["no_executor_notice"] = Value::Bool(true);
+        text.push_str(told);
+    }
 }
 
 /// The session's own stop in a view: the change's state commit and whether it is a retention

@@ -206,11 +206,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     let mut queued = 0;
     for id in &ids {
         let (_, record) = chain.read(id).map_err(|error| error.message())?;
-        queued += record
-            .operations
-            .iter()
-            .filter(|op| !op.state.is_terminal() && op.state != crate::change::OpState::Blocked)
-            .count();
+        queued += crate::presence::waiting(&record);
         let unsynced: Vec<&Receipt> = pending
             .iter()
             .map(|(_, receipt)| receipt)
@@ -242,7 +238,9 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     if let (Some(detail), Some(hold)) = (result.detail.as_mut(), crate::hold::held(&repo, &trunk)) {
         detail["hold"] = hold.to_json();
     }
-    let mut warnings: Vec<Value> = no_live_executor(&repo, queued).into_iter().collect();
+    let mut warnings: Vec<Value> = crate::presence::no_live_executor(&repo, queued)
+        .into_iter()
+        .collect();
     // N-20: each outside merge in the red window that pushed bay landings off the line.
     warnings.extend(not_linear(&repo.git, &trunk));
     if let Some(detail) = result.detail.as_mut()
@@ -275,43 +273,6 @@ fn not_linear(git: &crate::git::Git, trunk: &str) -> Vec<Value> {
                 .collect()
         })
         .unwrap_or_default()
-}
-
-/// G67: operations are queued and no executor presence on record is fresh. The warning says how
-/// many operations wait, the presences the last fleet fetch recorded, and the age of the
-/// freshest readable one (`seen_s`, `null` when none was seen). Never a refusal: the operations
-/// stay queued and land when an executor comes. `None` with nothing queued or a fresh presence.
-fn no_live_executor(repo: &Repo, queued: usize) -> Option<Value> {
-    if queued == 0 {
-        return None;
-    }
-    let (executors, seen_s) = match crate::fleet::executors(repo) {
-        Ok(Some(rows)) => {
-            if crate::presence::any_fresh(&rows) {
-                return None;
-            }
-            let seen = rows
-                .iter()
-                .filter(|row| row["readable"] == true)
-                .filter_map(|row| row["age_s"].as_u64())
-                .min();
-            (Value::from(rows), seen)
-        }
-        Ok(None) => (json!([]), None),
-        Err(why) => (json!({"unread": why}), None),
-    };
-    let executor = seen_s.map_or_else(
-        || "none seen".to_owned(),
-        |seen| format!("none seen for {seen}s"),
-    );
-    Some(json!({
-        "code": "no_live_executor",
-        "queued": queued,
-        "executor": executor,
-        "seen_s": seen_s,
-        "executors": executors,
-        "note": "operations are queued and no executor presence is fresh: they stay queued and land once an executor runs (bay executor run)",
-    }))
 }
 
 /// G47: the open talks this actor sent or must answer, each with who owes the reply, its ages
@@ -1155,7 +1116,27 @@ fn post_checks(repo: &Repo, landed: Option<&crate::publish::Found>, read: &Read)
 /// like its land. An approver's clone may hold no registry yet: who can approve is then read
 /// from the remote's, never reported as nobody.
 fn approval_of(repo: &Repo, record: &ChangeRecord, read: &Read) -> Result<Option<Value>, String> {
-    let (Some(op), Read::Full { registry, .. }) = (record.operations.last(), read) else {
+    let Read::Full { registry, .. } = read else {
+        return Ok(None);
+    };
+    approval_pending(repo, record, registry.as_ref())
+}
+
+/// G245: the `operation.approval` of `bay status` for `record`, read with `registry` (the
+/// repository's, when it holds one): each approval check still owed, who can give it, the paths
+/// it covers, and the candidate to name; `None` when the last operation is not held with
+/// `APPROVAL_PENDING`. `bay waiting` and `bay approve` (G280, G281) read it here, so all three
+/// name one candidate.
+///
+/// # Errors
+///
+/// A git fault reading the registry.
+pub fn approval_pending(
+    repo: &Repo,
+    record: &ChangeRecord,
+    registry: Option<&crate::registry::Registry>,
+) -> Result<Option<Value>, String> {
+    let Some(op) = record.operations.last() else {
         return Ok(None);
     };
     let held = op.outcome.as_deref().and_then(Reason::from_code) == Some(Reason::ApprovalPending);
@@ -1168,14 +1149,20 @@ fn approval_of(repo: &Repo, record: &ChangeRecord, read: &Read) -> Result<Option
     } else {
         None
     };
-    Ok(crate::publish::pending_approval(
+    let mut approval = match crate::publish::pending_approval(
         &repo.git,
         &attempt.base,
         &attempt.commit,
         &attempt.tree,
-        registry.as_ref().or(fetched.as_ref()),
-    )
-    .unwrap_or_else(|why| Some(json!({"unread": why}))))
+        registry.or(fetched.as_ref()),
+    ) {
+        Ok(Some(approval)) => approval,
+        Ok(None) => return Ok(None),
+        Err(why) => return Ok(Some(json!({"unread": why}))),
+    };
+    // G281: the one command an approver runs to answer it.
+    approval["approve"] = json!(format!("bay approve {}", record.id));
+    Ok(Some(approval))
 }
 
 /// What an operation under way waits on, besides its place: § 7, a worker for the

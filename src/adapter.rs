@@ -646,6 +646,11 @@ fn check_in(dir: &Path, command: &str, test: &Test, scratch: &Path) -> Result<Ba
     std::fs::create_dir_all(&work).map_err(|error| format!("{}: {error}", work.display()))?;
     let git = Git::new(&work);
     git_ok(&git, &["init", "-q"])?;
+    // G285: the box's read paths, as an executor of this box binds them.
+    let sandbox = sandbox.reading(&git);
+    if let Some(why) = &sandbox.refusal {
+        return Err(why.clone());
+    }
     write(
         &work,
         "README.md",

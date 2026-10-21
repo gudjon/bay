@@ -436,6 +436,11 @@ struct Ctx<'a> {
     /// A check of this operation runs ahead of its turn (`crate::throughput`): this process
     /// does not hold it, so no heartbeat renews a lease on its chain.
     ahead_of_turn: bool,
+    /// G284: the operation this process re-armed from `APPROVAL_PENDING` because the evidence
+    /// on its candidate, or trunk, changed ([`retry_blocked`]): that candidate is checked
+    /// again, never rebuilt, while trunk stands where it was merged onto
+    /// ([`approved_candidate`]).
+    approved: Option<String>,
 }
 
 impl<'a> Ctx<'a> {
@@ -461,6 +466,7 @@ impl<'a> Ctx<'a> {
             deferred: std::cell::RefCell::new(Vec::new()),
             retries_here: 0,
             ahead_of_turn: false,
+            approved: None,
         })
     }
 
@@ -752,6 +758,11 @@ fn submit_land(
     {
         return Ok(refusal);
     }
+    // Owner ruling 2026-10-21: a change over the size limits of the policy at the base is
+    // refused here, before anything is submitted and before any check.
+    if let Some(refusal) = too_large_at_submit(&ctx, &trunk, &revision)? {
+        return Ok(refusal);
+    }
 
     let op_id = match ctx
         .record
@@ -800,6 +811,32 @@ fn submit_land(
     result.published = Some(false);
     result.waiting_for = Some(if online { "executor" } else { "remote" }.to_owned());
     Ok(with_progress(&ctx.repo.git, ctx.op(&op_id), result))
+}
+
+/// `CHANGE_TOO_LARGE` at submit (owner ruling 2026-10-21): the change's own edits, from where
+/// `revision` meets `trunk` to `revision`, over a `[limits]` limit of the policy at `trunk`.
+/// Nothing is written: no operation, no request.
+fn too_large_at_submit(
+    ctx: &Ctx,
+    trunk: &str,
+    revision: &str,
+) -> Result<Option<BayResult>, String> {
+    let git = &ctx.repo.git;
+    let limits = policy::limits_at(git, trunk)?;
+    if !limits.is_set() {
+        return Ok(None);
+    }
+    // Histories with no common commit are judged against trunk itself.
+    let from = git
+        .run(&["merge-base", trunk, revision])
+        .unwrap_or_else(|_| trunk.to_owned());
+    let exceeded = crate::limits::exceeded(git, &limits, &from, revision)?;
+    if exceeded.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        crate::limits::refusal(&limits, &exceeded, trunk, "submit").with_change(ctx.id.clone()),
+    ))
 }
 
 /// G243b: under a policy at the base that sets `[agent] require_actor_proof`, a request whose
@@ -903,6 +940,16 @@ pub fn execute(
     let revision = ctx.op(op_id).revision.clone();
     if let Some(result) = scanned(&mut ctx, &trunk, &revision)? {
         return Ok(existing(result));
+    }
+    // G284: an operation waiting for a person's approval is asked again on every pass, as its
+    // author's retry asks it: once the evidence on its candidate, or trunk, changed it is
+    // re-armed and run below; unchanged, it keeps waiting, with nothing written and no event.
+    if awaits_approval(ctx.op(op_id)) {
+        let executor = ctx.executor_signer()?;
+        ctx.chain.sign_with(executor);
+        if let Some(waiting) = retry_blocked(&mut ctx, op_id, &revision, &trunk)? {
+            return Ok(waiting);
+        }
     }
     let result = execute_op(&mut ctx, op_id, trunk);
     ctx.tell_deferred();
@@ -1202,15 +1249,19 @@ fn run_attempts(
         let attempt = if let Some(attempt) = ready {
             attempt.clone()
         } else {
+            // G284: the candidate an approval arrived for is checked again as it is; no batch
+            // folds it into a tree no one approved.
+            let approved = approved_candidate(ctx, op_id, &trunk)?;
             // Batching (`crate::throughput`): the head may land together with the entries
             // behind it, on one check of their combined tree.
             if let Some(at) = *seq
                 && ctx.record.lane.is_none()
+                && approved.is_none()
                 && let Some(landed) = batch(ctx, op_id, &revision, &trunk, at)?
             {
                 return Ok(landed);
             }
-            match build_and_check(ctx, op_id, &revision, &trunk)? {
+            match build_and_check(ctx, op_id, &revision, &trunk, approved)? {
                 Ok(attempt) => attempt,
                 Err(refusal) if ctx.record.lane.is_some() => {
                     return lane_never_lands(ctx, op_id, &revision, Some(refusal));
@@ -1390,7 +1441,22 @@ fn batch_plan(
         .map_while(|entry| throughput::Queued::read(git, entry))
         .collect();
     let by_lane = repo.config.footprint_lanes();
-    let members = throughput::plan_batch(git, &policy, trunk, &head, &behind, bounds.max, by_lane)?;
+    let mut members =
+        throughput::plan_batch(git, &policy, trunk, &head, &behind, bounds.max, by_lane)?;
+    // Owner ruling 2026-10-21: a member over the size limits never lands in a batch; the batch
+    // ends before it, and it is refused at its own candidate build.
+    if policy.limits.is_set() {
+        let mut from = trunk.to_owned();
+        let mut within = 0;
+        for member in &members {
+            if !crate::limits::exceeded(git, &policy.limits, &from, &member.tree)?.is_empty() {
+                break;
+            }
+            from.clone_from(&member.tree);
+            within += 1;
+        }
+        members.truncate(within);
+    }
     if members.len() < bounds.min.max(2) {
         return Ok(None);
     }
@@ -2582,10 +2648,15 @@ fn condition(
     observed: &std::collections::BTreeMap<String, String>,
 ) -> Result<String, String> {
     let mut evidence: Vec<String> = match tree {
+        // Each record by its id and its whole content: a record replaced under the same id
+        // (an unsigned copy, then the signed one) is a changed condition.
         Some(tree) => evidence::records_for(git, tree)?
             .into_iter()
-            .map(|record| record.id)
-            .collect(),
+            .map(|record| {
+                let content = serde_json::to_value(&record).map_err(|error| error.to_string())?;
+                Ok(format!("{}:{}", record.id, digest(&content)?))
+            })
+            .collect::<Result<_, String>>()?,
         None => Vec::new(),
     };
     evidence.sort();
@@ -2640,7 +2711,59 @@ fn retry_blocked(
     op.trunk_moved = 0;
     ctx.save(revision, None, &format!("rearmed {op_id}"))?;
     ctx.push_chain();
+    // G284: an approval (or a rejection) arrived for the candidate it waited on, or trunk
+    // moved: the run that follows checks that same candidate again while trunk stands.
+    if reason == Some(Reason::ApprovalPending) {
+        ctx.approved = Some(op_id.to_owned());
+    }
     Ok(None)
+}
+
+/// G284: whether `op` waits for a person's approval: blocked `APPROVAL_PENDING`. That is a
+/// wait, not an end. It holds no queue place (its place was released as `approval_pending`,
+/// which counts toward no limit, § 6), and every executor pass asks it again ([`execute`]):
+/// an approval for its exact candidate lands that candidate, a rejection ends it
+/// `CHECK_FAILED`, and a moved trunk rebuilds it, so the approval must name the new one.
+#[must_use]
+pub fn awaits_approval(op: &Operation) -> bool {
+    op.state == OpState::Blocked
+        && op.outcome.as_deref().and_then(Reason::from_code) == Some(Reason::ApprovalPending)
+}
+
+/// G284: the candidate an approval arrived for, checked again rather than rebuilt: the last
+/// attempt of `op_id`, when this process re-armed it from `APPROVAL_PENDING`
+/// ([`retry_blocked`]), it was merged onto `trunk` (trunk has not moved since), it is no batch
+/// member's, and this process would commit it as it stands, under its own executor identity
+/// and the registry the candidate names. Otherwise `None`: the operation builds a new
+/// candidate, and an approval must name that one.
+fn approved_candidate(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<Attempt>, String> {
+    if ctx.approved.as_deref() != Some(op_id) || ctx.record.lane.is_some() {
+        return Ok(None);
+    }
+    let Some(attempt) = ctx
+        .op(op_id)
+        .attempts
+        .last()
+        .filter(|attempt| attempt.base == trunk && attempt.batch.is_none())
+    else {
+        return Ok(None);
+    };
+    let registry_id = ctx
+        .signing()
+        .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
+    let committer = ctx
+        .executor_signer()?
+        .map_or_else(|| EXECUTOR_IDENTITY[2].1.to_owned(), |signer| signer.name);
+    let shown = ctx
+        .repo
+        .git
+        .run(&["show", "-s", "--format=%cn%n%B", &attempt.commit])
+        .map_err(|error| error.message())?;
+    let mut lines = shown.lines();
+    let same_committer = lines.next() == Some(committer.as_str());
+    let named = format!("Registry-Id: {registry_id}");
+    let same_registry = lines.any(|line| line.trim() == named);
+    Ok((same_committer && same_registry).then(|| attempt.clone()))
 }
 
 /// G28: the request commit must name this op id, revision and request digest, and the digest
@@ -3482,6 +3605,37 @@ fn merged(
     }
 }
 
+/// `CHANGE_TOO_LARGE` at candidate build (owner ruling 2026-10-21): the merged `tree` changes
+/// `trunk` past a `[limits]` limit of the policy at `trunk`. The operation is blocked on the
+/// limit, as on a conflict; no candidate is committed and no check runs.
+fn too_large(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+    tree: &str,
+) -> Result<Option<BayResult>, String> {
+    let repo = ctx.repo;
+    let git = &repo.git;
+    let limits = policy::limits_at(git, trunk)?;
+    let exceeded = crate::limits::exceeded(git, &limits, trunk, tree)?;
+    if exceeded.is_empty() {
+        return Ok(None);
+    }
+    let condition = condition(git, revision, trunk, None, &ctx.record.observed_versions)?;
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Blocked;
+    op.outcome = Some(Reason::ChangeTooLarge.code().to_owned());
+    op.blocked_on = Some(condition);
+    ctx.save(revision, None, "blocked: change too large")?;
+    ctx.push_chain();
+    Ok(Some(
+        crate::limits::refusal(&limits, &exceeded, trunk, "candidate")
+            .with_change(ctx.id.clone())
+            .with_op(op_id),
+    ))
+}
+
 /// G213: a merged `tree` equal to `trunk`'s own tree is work already on trunk, whether another
 /// change landed the same bytes or the change's edits cancel out. Nothing is published and no
 /// check runs; the operation ends `no_effect`, naming the trunk commit that holds the work.
@@ -3530,6 +3684,7 @@ fn build_and_check(
     op_id: &str,
     revision: &str,
     trunk: &str,
+    approved: Option<Attempt>,
 ) -> Result<Result<Attempt, BayResult>, String> {
     let judged = match input_gate(ctx, op_id, revision, trunk)? {
         Ok(judged) => judged,
@@ -3541,26 +3696,39 @@ fn build_and_check(
     {
         return Ok(Err(red));
     }
-    let tree = match merged(ctx, op_id, revision, trunk)? {
-        Ok(tree) => tree,
-        Err(refusal) => return Ok(Err(refusal)),
-    };
-    let git = &ctx.repo.git;
-    if let Some(no_effect) = no_effect(ctx, op_id, revision, trunk, &tree)? {
-        return Ok(Err(no_effect));
-    }
-    anchor(git, op_id, &tree)?;
+    let again = approved.is_some();
+    // G284: the candidate an approval arrived for, on the trunk it was merged onto: that same
+    // commit is checked again, so the evidence it already has answers its checks.
+    let (candidate_id, commit, tree) = if let Some(attempt) = approved {
+        anchor(&ctx.repo.git, op_id, &attempt.commit)?;
+        (attempt.candidate_id, attempt.commit, attempt.tree)
+    } else {
+        let tree = match merged(ctx, op_id, revision, trunk)? {
+            Ok(tree) => tree,
+            Err(refusal) => return Ok(Err(refusal)),
+        };
+        // Owner ruling 2026-10-21: the candidate's change to trunk, over a size limit of the
+        // policy at trunk, is refused before it is committed or checked.
+        if let Some(refusal) = too_large(ctx, op_id, revision, trunk, &tree)? {
+            return Ok(Err(refusal));
+        }
+        if let Some(no_effect) = no_effect(ctx, op_id, revision, trunk, &tree)? {
+            return Ok(Err(no_effect));
+        }
+        anchor(&ctx.repo.git, op_id, &tree)?;
 
-    let candidate_id = format!("{op_id}.{}", ctx.op(op_id).attempts.len() + 1);
-    let request_id = ctx.op(op_id).request_id.clone().unwrap_or_default();
-    // N-21: an unsigned landing (no registry, or `signing = "approvals"`) names none.
-    let registry_id = ctx
-        .signing()
-        .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
-    let message = candidate_message(ctx, revision, &request_id, &candidate_id, &registry_id);
-    let commit = commit_candidate(ctx, &tree, trunk, &message)?;
-    anchor(&ctx.repo.git, op_id, &commit)?;
-    kill_point("after-commit");
+        let candidate_id = format!("{op_id}.{}", ctx.op(op_id).attempts.len() + 1);
+        let request_id = ctx.op(op_id).request_id.clone().unwrap_or_default();
+        // N-21: an unsigned landing (no registry, or `signing = "approvals"`) names none.
+        let registry_id = ctx
+            .signing()
+            .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
+        let message = candidate_message(ctx, revision, &request_id, &candidate_id, &registry_id);
+        let commit = commit_candidate(ctx, &tree, trunk, &message)?;
+        anchor(&ctx.repo.git, op_id, &commit)?;
+        kill_point("after-commit");
+        (candidate_id, commit, tree)
+    };
 
     // Step 4: check the exact candidate under the policy at its base.
     ctx.step.set("check");
@@ -3597,11 +3765,13 @@ fn build_and_check(
         epoch: ctx.my_epoch,
         batch: None,
     };
-    persist_attempt(ctx, op_id, revision, attempt, refusal, has_policy)
+    persist_attempt(ctx, op_id, revision, attempt, refusal, has_policy, again)
 }
 
 /// Step 5 for a checked `attempt`: its evidence is pushed and read back from the remote, then
-/// the candidate is linked into the chain as checked, or as blocked on `refusal`.
+/// the candidate is linked into the chain as checked, or as blocked on `refusal`. With `again`
+/// (G284) the attempt is the operation's last candidate checked once more, and it takes that
+/// attempt's place: one candidate, one attempt.
 fn persist_attempt(
     ctx: &mut Ctx,
     op_id: &str,
@@ -3609,6 +3779,7 @@ fn persist_attempt(
     attempt: Attempt,
     refusal: Option<BayResult>,
     has_policy: bool,
+    again: bool,
 ) -> Result<Result<Attempt, BayResult>, String> {
     let blocked_on = if refusal.is_some() {
         Some(condition(
@@ -3636,6 +3807,14 @@ fn persist_attempt(
         .map(|reason| reason.code().to_owned());
     let message = format!("{word} {}", attempt.candidate_id);
     let persisted = persist_owned(ctx, op_id, revision, &attempt.commit, &message, |op| {
+        if again
+            && op
+                .attempts
+                .last()
+                .is_some_and(|last| last.candidate_id == attempt.candidate_id)
+        {
+            op.attempts.pop();
+        }
         op.attempts.push(attempt.clone());
         op.unavailable = None;
         op.state = state;
@@ -4193,7 +4372,7 @@ fn run_policy(
             finished,
             heartbeat: Some(ctx.repo.config.heartbeat()),
             hidden: hidden_paths(ctx),
-            sandbox: check::Sandbox::here(),
+            sandbox: check::Sandbox::here().reading(git),
             baseline: baseline_of(ctx, policy, trunk, &base_tree)?,
             parallel: ctx.repo.config.parallel_checks(),
         },
@@ -4309,6 +4488,8 @@ fn judge_seen(
     let owed = approval_rows(policy, seen.changed, registry, seen.all, seen.commit);
     if !owed.is_empty() {
         detail["approval"] = approval_detail(&owed, seen.commit, seen.tree, registry);
+        // G281: the one command an approver runs to answer it.
+        detail["approval"]["approve"] = json!(format!("bay approve {}", ctx.id));
     }
     (
         word,
@@ -4337,8 +4518,8 @@ fn approvals_counted(
 /// G245: each approval check `policy` requires of a candidate whose diff changes `changed`
 /// that the counted `records` on its tree do not pass: its state (`pending`, or `rejected` by a
 /// `product_failure`), the enrolled approvers who may answer it (the registry's approver file,
-/// narrowed by the check's `producers` list), and the command that records the answer for
-/// `commit`, the candidate.
+/// narrowed by the check's `producers` list), the changed paths its `when_paths` cover (G280),
+/// and the command that records the answer for `commit`, the candidate.
 fn approval_rows(
     policy: &policy::Policy,
     changed: &[String],
@@ -4375,6 +4556,8 @@ fn approval_rows(
                 "environment": entry.environment,
                 "state": state,
                 "approvers": approvers,
+                // G280: the changed paths this check's `when_paths` cover, what is approved.
+                "paths": entry.woken_paths(changed),
                 "record": format!(
                     "bay evidence record --kind approval --check {} --verdict pass --commit {commit}",
                     entry.id
@@ -4393,6 +4576,10 @@ fn approval_detail(
     registry: Option<&Registry>,
 ) -> serde_json::Value {
     let mut detail = json!({"checks": rows, "commit": commit, "tree": tree});
+    // G284: what lands it once an approver said yes; nothing else asks the change again.
+    detail["once_approved"] = json!(
+        "an executor's next pass lands this candidate; without an executor, the author's bay land --wait lands it"
+    );
     if registry.is_none() {
         detail["why"] = json!(format!(
             "this repository has no key registry ({REGISTRY_REF}), so no approver key can be verified and an approval check cannot pass; enrol each approver in the registry's approver file"
