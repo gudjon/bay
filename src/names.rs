@@ -48,6 +48,9 @@ pub const FLEET_EXECUTOR: &str = "refs/bay/fleet-executor/";
 pub const TARGET: &str = "refs/bay/target/";
 /// `refs/bay/fetch/<Change-Id>`: a fetched remote chain, local only.
 pub const FETCH: &str = "refs/bay/fetch/";
+/// `refs/bay/kept/<Change-Id>/<sha>`: a local chain head the remote's chain moved apart from,
+/// set aside before the chain ref moves to the remote's head (G294), local only.
+pub const KEPT: &str = "refs/bay/kept/";
 /// `refs/bay/fetch-evidence/<writer>`: the remote's copy of this machine's own evidence notes
 /// ref, local only, while `bay evidence record` compares the two.
 pub const FETCH_EVIDENCE: &str = "refs/bay/fetch-evidence/";

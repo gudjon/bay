@@ -418,6 +418,13 @@ struct Ctx<'a> {
     /// The chain head this process last pushed: later pushes are leased on it, so a chain
     /// another executor moved is never overwritten.
     pushed_head: Option<String>,
+    /// The head this process's first write not yet on the remote went on; `None` once every
+    /// write it made is pushed or withdrawn. [`Ctx::take_back`] takes those writes off the
+    /// local chain ref, and only those, at every re-read of the remote chain and when the
+    /// context ends, whichever path wrote them: claims and state saves alike (G294). A
+    /// heartbeat takes its own back at once ([`heartbeat`]). Any other local work the remote
+    /// lacks is kept (G289).
+    unpushed_from: Option<String>,
     /// The epoch this process claimed, when it acts as the executor.
     my_epoch: u64,
     /// The registry principal that signed the request, when it is a policy repair (§ 7).
@@ -459,6 +466,7 @@ impl<'a> Ctx<'a> {
             registry: None,
             keys,
             pushed_head: None,
+            unpushed_from: None,
             my_epoch: 0,
             repair: None,
             online: true,
@@ -570,11 +578,18 @@ impl<'a> Ctx<'a> {
     }
 
     fn save(&mut self, draft: &str, candidate: Option<&str>, message: &str) -> Result<(), String> {
-        self.head = self
+        let head = self
             .chain
             .append_linking(&self.head, &self.record, draft, candidate, message)
             .map_err(|error| error.message())?;
+        self.wrote(head);
         Ok(())
+    }
+
+    /// This process wrote `head` on its head: until a push takes it, it is unpushed.
+    fn wrote(&mut self, head: String) {
+        let before = std::mem::replace(&mut self.head, head);
+        self.unpushed_from.get_or_insert(before);
     }
 
     /// [`Ctx::save`] that tells a lost compare-and-swap from a fault: `false` when the local
@@ -591,7 +606,7 @@ impl<'a> Ctx<'a> {
             .append_linking(&self.head, &self.record, draft, candidate, message)
         {
             Ok(head) => {
-                self.head = head;
+                self.wrote(head);
                 Ok(true)
             }
             Err(ChainError::Moved { .. }) => Ok(false),
@@ -619,6 +634,7 @@ impl<'a> Ctx<'a> {
         let pushed = self.repo.git.run(&args).is_ok();
         if pushed {
             self.pushed_head = Some(self.head.clone());
+            self.unpushed_from = None;
             self.catch_up_local();
         }
         pushed
@@ -645,6 +661,7 @@ impl<'a> Ctx<'a> {
         let pushed = self.repo.git.run(&args).is_ok();
         if pushed {
             self.pushed_head = Some(self.head.clone());
+            self.unpushed_from = None;
             self.catch_up_local();
         }
         pushed
@@ -683,30 +700,50 @@ impl<'a> Ctx<'a> {
             .git
             .run(&["update-ref", &name, before, &self.head]);
         before.clone_into(&mut self.head);
+        if self.unpushed_from.as_deref() == Some(before) {
+            self.unpushed_from = None;
+        }
     }
 
-    /// Replaces the local chain with the remote's and reloads it.
+    /// Takes back every write of this process the remote never took ([`Ctx::withdraw`] to
+    /// [`Ctx::unpushed_from`]), unless this run is offline work (`online` is false), which a
+    /// later push carries. A write that lost the remote's compare-and-swap then never stays on
+    /// this box's chain ref, where every later compare-and-swap on the ref would lose to it
+    /// (G294). Local work any other process wrote is never touched (G289).
+    fn take_back(&mut self) {
+        if !self.online {
+            return;
+        }
+        if let Some(from) = self.unpushed_from.clone() {
+            self.withdraw(&from);
+        }
+    }
+
+    /// Reads the remote's chain ([`Repo::remote_record`]) and goes on from its head. This
+    /// process's own unpushed writes are taken back first ([`Ctx::take_back`]); the local
+    /// chain ref is then never forced (G289): it moves only forward, and keeps local work the
+    /// remote lacks.
     fn refetch(&mut self) -> Result<(), String> {
-        let name = change_ref(&self.id);
-        self.repo
-            .git
-            .run(&[
-                "fetch",
-                "-q",
-                "--no-tags",
-                self.repo.remote(),
-                &format!("+{name}:{name}"),
-            ])
-            .map_err(|error| error.message())?;
-        let (head, record) = self.chain.read(&self.id).map_err(|error| error.message())?;
-        self.head = head;
-        self.record = record;
+        self.take_back();
+        let remote = self.repo.remote_record(&self.id)?;
+        self.head = remote.head;
+        self.record = remote.record;
         self.pushed_head = Some(self.head.clone());
         Ok(())
     }
 
     fn executor_name(&self) -> String {
         self.keys.executor_name.clone()
+    }
+}
+
+/// G294: a context that ends with writes the remote never took takes them back, on every path
+/// out of it: an early return, an error, a push whose result its caller ignores. Every later
+/// compare-and-swap on this box's chain ref, by this process or the next, starts from what the
+/// remote holds.
+impl Drop for Ctx<'_> {
+    fn drop(&mut self) {
+        self.take_back();
     }
 }
 
@@ -1546,6 +1583,7 @@ fn bisect_batch(
     if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
         ctx.head.clone_from(&beat);
         ctx.pushed_head = Some(beat);
+        ctx.unpushed_from = None;
     }
     push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0)?;
     Ok(Some((search, checks)))
@@ -3036,17 +3074,11 @@ fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<Ba
     )
 }
 
-/// Makes the remote's chain the local one (§ 9a): the remote holds what executors recorded.
-/// Local-only work was pushed by the sync before this, or is re-made by landing again.
+/// Brings the remote's chain here (§ 9a): the remote holds what executors recorded. The local
+/// chain moves only forward ([`Repo::remote_chain`], G289): local-only work the sync before
+/// this could not push is kept, and this landing carries it.
 fn adopt_remote_chain(repo: &Repo, id: &str) {
-    let name = change_ref(id);
-    let _ = repo.git.run(&[
-        "fetch",
-        "-q",
-        "--no-tags",
-        repo.remote(),
-        &format!("+{name}:{name}"),
-    ]);
+    let _ = repo.remote_chain(id);
 }
 
 /// § 3a submission order: the request is persisted; then the configured executor's `submit`
@@ -3762,6 +3794,7 @@ fn build_and_check(
     if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
         ctx.head.clone_from(&beat);
         ctx.pushed_head = Some(beat);
+        ctx.unpushed_from = None;
     }
     let refusal = match refusal {
         Some(waiting) if waiting.reason == Some(Reason::CheckUnavailable) => {
@@ -6252,7 +6285,8 @@ pub fn retain(repo: &Repo, id: &str) -> Result<Option<String>, String> {
         .chain
         .cut(&ctx.head, &record, &links, &format!("retention cut {id}"))
         .map_err(|error| error.message())?;
-    ctx.head.clone_from(&head);
+    // A cut the remote never takes leaves this box's chain ref with the context (G294).
+    ctx.wrote(head.clone());
     ctx.record = record;
     if !ctx.push_chain() {
         return Err(format!("the retention cut of {id} could not be pushed"));

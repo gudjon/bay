@@ -111,48 +111,13 @@ fn synchronize(repo: &Repo) -> Result<(String, Option<String>), String> {
     }
 }
 
-/// Reads each change of `ids` fresh from the remote: a fast-forward brings what an executor
-/// recorded elsewhere, and a retention cut replaces the local chain.
+/// Reads each change of `ids` fresh from the remote ([`Repo::remote_chain`]): a fast-forward
+/// brings what an executor recorded elsewhere, a retention cut replaces the local chain, and
+/// local work the remote lacks is kept (G289).
 fn refresh_chains(repo: &Repo, chain: &Chain, ids: &[String]) -> Result<(), String> {
     for id in ids {
-        // The chain is read fresh: a fast-forward from the remote brings what an executor
-        // recorded elsewhere. Local work the remote lacks was pushed by the sync above.
-        let name = change_ref(id);
-        if repo
-            .git
-            .run(&[
-                "fetch",
-                "-q",
-                "--no-tags",
-                repo.remote(),
-                &format!("{name}:{name}"),
-            ])
-            .is_err()
-        {
-            // Not a fast-forward: the one rewrite of a chain is the retention cut, which
-            // replaces the local chain. The remote chain is fetched into a ref of its own, never
-            // read from FETCH_HEAD: a fetch that fails can leave FETCH_HEAD holding another
-            // change's chain.
-            let fetched_ref = format!("{}{id}", crate::names::FETCH);
-            if repo
-                .git
-                .run(&[
-                    "fetch",
-                    "-q",
-                    "--no-tags",
-                    repo.remote(),
-                    &format!("+{name}:{fetched_ref}"),
-                ])
-                .is_ok()
-                && let Ok(fetched) = repo.git.run(&["rev-parse", "--verify", &fetched_ref])
-                && chain
-                    .record_at(&fetched)
-                    .is_ok_and(|record| record.retention_cut && record.id == *id)
-            {
-                let _ = repo.git.run(&["update-ref", &name, &fetched]);
-            }
-            let _ = repo.git.run(&["update-ref", "-d", &fetched_ref]);
-        }
+        // Local work the remote lacks was pushed by the sync above, or is kept here.
+        let _ = repo.remote_chain(id);
         // A change named here but not local is read from the remote.
         if chain.head(id).map_err(|error| error.message())?.is_none() {
             repo.fetch_refs(&[change_ref(id)]).map_err(|error| {

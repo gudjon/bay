@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, EarlyConflict, HeldChain, OpState};
+use crate::change::{Chain, ChangeRecord, EarlyConflict, HeldChain, OpState};
 use crate::publish;
 use crate::queue::Queue;
 use crate::receipts;
@@ -355,17 +355,8 @@ fn deadlines(
 /// too and is released with the change's state. Returns the release reason, the operation's
 /// outcome, or `None` while the operation can still run (or its chain cannot be read).
 fn finished_head(repo: &Repo, head: &crate::queue::Entry) -> Option<String> {
-    let name = crate::change::change_ref(&head.change);
-    repo.git
-        .run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            repo.remote(),
-            &format!("+{name}:{name}"),
-        ])
-        .ok()?;
-    let (_, record) = Chain::new(&repo.git).read(&head.change).ok()?;
+    // The remote's record, never moving this store's chain back (G289).
+    let record = repo.remote_record(&head.change).ok()?.record;
     let Some(op) = record.operations.iter().find(|op| op.op_id == head.op_id) else {
         return if record.retention_cut {
             word(record.state)
@@ -413,10 +404,9 @@ fn pass(
     beat: &mut crate::presence::Beat,
 ) -> Result<Vec<Value>, String> {
     let _ = receipts::sync(repo);
-    let refspec = format!("+{CHANGES_PREFIX}*:{CHANGES_PREFIX}*");
-    repo.git
-        .run(&["fetch", "-q", "--no-tags", repo.remote(), &refspec])
-        .map_err(|error| error.message())?;
+    // G289, G294: never forced; a chain ahead of the remote keeps its work, one apart from it
+    // is set aside.
+    repo.fetch_chains().map_err(|error| error.message())?;
     let chain = Chain::new(&repo.git);
     let mut chains = chain.read_all().map_err(|error| error.message())?;
     // Queued changes go first, in queue order, so one pass carries the queue as far as it can:

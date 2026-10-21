@@ -543,7 +543,8 @@ fn approve_in(dir: &Path, repo: &Repo, request: &Approve) -> Result<BayResult, S
         Err(refusal) => return Ok((*refusal).with_change(id.to_owned())),
     };
     // The change is read again: an operation that replaced the candidate while the record was
-    // written is named, so the approver knows this answer is about the old candidate only.
+    // written is named. The answer still holds for the new candidate while the files its check
+    // covers are unchanged (G292); `bay waiting` shows whether the new one still waits.
     if let Some(now) = records_now(repo, id).filter(|now| moved(now, &found)) {
         let newer = now
             .operations
@@ -556,7 +557,7 @@ fn approve_in(dir: &Path, repo: &Repo, request: &Approve) -> Result<BayResult, S
                 "the candidate moved: {name}'s {verdict} is recorded on candidate {}, and change {id} has a newer operation {newer} since",
                 found.commit
             ),
-            "read it again with bay waiting, and approve the new candidate once it waits",
+            "read it again with bay waiting: your answer carries to the new candidate while the files it covers are unchanged, and the new one waits only if they changed",
             Some(json!({"records": records, "commit": found.commit})),
         ));
     }

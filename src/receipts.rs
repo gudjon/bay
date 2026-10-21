@@ -142,22 +142,21 @@ pub fn sync(repo: &Repo) -> usize {
             });
             chain.sign_with(signer);
         }
+        let mut appended = None;
         if !record.receipts.iter().any(|kept| kept.id == receipt.id) {
             let Ok(drafts) = chain.drafts(&receipt.change) else {
                 continue;
             };
             record.receipts.push(receipt.clone());
-            if chain
-                .append(
-                    &head,
-                    &record,
-                    &drafts[0],
-                    &format!("receipt {}", receipt.id),
-                )
-                .is_err()
-            {
+            let Ok(commit) = chain.append(
+                &head,
+                &record,
+                &drafts[0],
+                &format!("receipt {}", receipt.id),
+            ) else {
                 continue;
-            }
+            };
+            appended = Some(commit);
         }
         let name = change_ref(&receipt.change);
         if repo
@@ -167,6 +166,11 @@ pub fn sync(repo: &Repo) -> usize {
         {
             let _ = std::fs::remove_file(&path);
             synced += 1;
+        } else if let Some(commit) = appended {
+            // G294: the receipt stays pending and is appended again by the next sync; its
+            // commit the remote refused leaves the chain ref, so no compare-and-swap on the ref
+            // keeps losing to it.
+            let _ = repo.git.run(&["update-ref", &name, &head, &commit]);
         }
     }
     synced

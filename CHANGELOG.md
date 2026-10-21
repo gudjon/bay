@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.8
+
+- Reading a change's chain from the remote never moves local work back; no command forces it.
+- Several executors on one queue no longer fail with "the change chain kept moving".
+- A local chain head the remote moved apart from is set aside under `refs/bay/kept/`, never lost.
+- A process's own chain writes the remote never took are taken back when it finishes.
+- After a candidate moves, `bay approve` says the answer still holds while the approved files are unchanged.
+- `--wait=SECONDS` watches only while the land waits in the queue for an executor; other results return at once.
+
 ## 0.2.7
 
 - An approval now holds while the files it covers are unchanged; unrelated landings no longer ask again.

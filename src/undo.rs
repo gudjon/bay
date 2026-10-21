@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::change::{Chain, change_ref};
+use crate::change::Chain;
 use crate::git::Git;
 use crate::ids::is_change_id;
 use crate::merge::{Merge, revert_onto};
@@ -188,7 +188,8 @@ pub(crate) fn landed_commit(
     if !matches!(repo.git.is_ancestor(&landed, trunk), Ok(true)) {
         return Ok(None);
     }
-    let remote = fetch_chain(repo, change).map_err(unreadable)?;
+    // G199: the remote's chain, read beside this store's copy, which only ever moves forward.
+    let remote = repo.remote_chain(change).map_err(unreadable)?;
     let record = Chain::new(&repo.git)
         .record_at(&remote)
         .map_err(|error| error.message())?;
@@ -198,33 +199,4 @@ pub(crate) fn landed_commit(
         .into_iter()
         .any(|found| found.commit == landed)
         .then_some(landed))
-}
-
-/// The remote head of `change`'s chain, read without moving this store's copy back (G199): it
-/// is fetched into `refs/bay/fetch/<id>`, and the local chain is created at it, or moved to it
-/// only when it descends from the local head, each by compare-and-swap. A local chain that is
-/// ahead of the remote, or apart from it, is left where it is.
-pub(crate) fn fetch_chain(repo: &Repo, change: &str) -> Result<String, crate::git::GitError> {
-    let git = &repo.git;
-    let name = change_ref(change);
-    let fetched = format!("{}{change}", crate::names::FETCH);
-    git.run(&[
-        "fetch",
-        "-q",
-        "--no-tags",
-        repo.remote(),
-        &format!("+{name}:{fetched}"),
-    ])?;
-    let remote = git.run(&["rev-parse", "--verify", &fetched])?;
-    let _ = git.run(&["update-ref", "-d", &fetched, &remote]);
-    match git.ref_target(&name)? {
-        None => {
-            let _ = git.run(&["update-ref", &name, &remote, ""]);
-        }
-        Some(local) if local != remote && git.is_ancestor(&local, &remote).unwrap_or(false) => {
-            let _ = git.run(&["update-ref", &name, &remote, &local]);
-        }
-        Some(_) => {}
-    }
-    Ok(remote)
 }

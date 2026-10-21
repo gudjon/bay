@@ -98,7 +98,7 @@ pub fn standing(repo: &Repo, after: &[String], trunk: &str) -> Result<Vec<Depend
 
 /// The standing of `change`, which is not on trunk: its record's state, read from the remote.
 fn unlanded(repo: &Repo, change: &str) -> Standing {
-    let head = match crate::undo::fetch_chain(repo, change) {
+    let head = match repo.remote_chain(change) {
         Ok(head) => head,
         Err(error) => {
             return Standing::Pending(format!(

@@ -307,14 +307,7 @@ fn after_itself(repo: &Repo, request: &StartRequest, change: &str) -> Option<Str
         }
         seen.push(dependency.clone());
         // Read at the remote's head, never moving a local copy of the chain back (G199).
-        let Ok(record) = crate::undo::fetch_chain(repo, &dependency)
-            .map_err(|error| error.message())
-            .and_then(|head| {
-                Chain::new(&repo.git)
-                    .record_at(&head)
-                    .map_err(|error| error.message())
-            })
-        else {
+        let Ok(crate::repo::RemoteRecord { record, .. }) = repo.remote_record(&dependency) else {
             continue;
         };
         if record.after.iter().any(|named| named == change) {
@@ -522,28 +515,10 @@ fn ended_unlanded(state: ChangeState) -> bool {
     )
 }
 
-/// Fetches `change`'s chain ref from the remote, over any local copy.
-fn fetch_change(repo: &Repo, change: &str) -> Result<(), String> {
-    let name = change_ref(change);
-    repo.git
-        .run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            repo.remote(),
-            &format!("+{name}:{name}"),
-        ])
-        .map_err(|error| error.message())?;
-    Ok(())
-}
-
-/// The current record of `change`'s chain, after fetching its change ref from the remote.
+/// The current record of `change`'s chain as the remote holds it ([`Repo::remote_record`]):
+/// this store's chain moves only forward, and keeps local work the remote lacks (G289).
 fn fetched_record(repo: &Repo, change: &str) -> Result<ChangeRecord, String> {
-    fetch_change(repo, change)?;
-    let (_, record) = Chain::new(&repo.git)
-        .read(change)
-        .map_err(|error| error.message())?;
-    Ok(record)
+    Ok(repo.remote_record(change)?.record)
 }
 
 /// G272: the newer generation of `record`'s intent that the remote claims, when `record` ended
@@ -997,7 +972,9 @@ fn adopt_or_refuse(
     limit: Option<u64>,
 ) -> Result<BayResult, String> {
     let name = change_ref(change);
-    fetch_change(repo, change)?;
+    // G289: this store's chain moves only forward; local work the remote lacks is kept, and an
+    // adoption's push carries it.
+    let remote = repo.remote_chain(change).map_err(|error| error.message())?;
     let mut chain = Chain::new(&repo.git);
     let (mut head, mut record) = chain.read(change).map_err(|error| error.message())?;
     same_from(request, &record, change)?;
@@ -1011,7 +988,7 @@ fn adopt_or_refuse(
             ChangeState::Abandoned | ChangeState::Superseded | ChangeState::NoEffect
         );
     if !free {
-        if let Some(why) = holder_works(repo, &chain, change, &head, &record.actor.name)? {
+        if let Some(why) = holder_works(repo, change, &remote, &record.actor.name)? {
             return Ok(BayResult::blocked(Reason::ChangeSuperseded)
                 .with_change(change)
                 .with_detail(json!({"held_by": record.actor,
@@ -1188,44 +1165,35 @@ fn live_holder(repo: &Repo, change: &str, me: &Actor) -> Result<Option<serde_jso
     Ok(None)
 }
 
-/// Watches the chain and the live refs for the takeover window (§ 4): a chain that moves, or a
-/// new heartbeat naming the change signed by `actor`, its current actor, means that actor is
-/// working, and the answer says why. A heartbeat signed by anyone else is not that actor's
-/// activity, so no session keeps a dead peer's change un-adoptable.
+/// Watches the chain and the live refs for the takeover window (§ 4): a remote chain that
+/// moves on from `head`, its remote head, or a new heartbeat naming the change signed by
+/// `actor`, its current actor, means that actor is working, and the answer says why. A
+/// heartbeat signed by anyone else is not that actor's activity, so no session keeps a dead
+/// peer's change un-adoptable. The chain is read by [`Repo::remote_chain`], never over this
+/// store's copy (G289).
 fn holder_works(
     repo: &Repo,
-    chain: &Chain,
     change: &str,
     head: &str,
     actor: &str,
 ) -> Result<Option<String>, String> {
-    let name = change_ref(change);
     let window = repo.config.takeover();
     let live = format!("+{p}*:{p}*", p = crate::live::LIVE_PREFIX);
-    let fetch = || {
-        let _ = repo.git.run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            repo.remote(),
-            &format!("+{name}:{name}"),
-            &live,
-        ]);
+    let fetch_live = || {
+        let _ = repo
+            .git
+            .run(&["fetch", "-q", "--no-tags", repo.remote(), &live]);
     };
-    fetch();
+    fetch_live();
     repo.fetch_registry();
     let agents = crate::live::agents_file(&repo.git)?;
     let mut tips = crate::live::tips(&repo.git)?;
     let seen = std::time::Instant::now();
     while seen.elapsed() < window {
         std::thread::sleep(std::time::Duration::from_millis(200).min(window));
-        fetch();
-        if chain
-            .head(change)
-            .map_err(|error| error.message())?
-            .as_deref()
-            != Some(head)
-        {
+        let moved = repo.remote_chain(change).is_ok_and(|remote| remote != head);
+        fetch_live();
+        if moved {
             return Ok(Some("its actor is working on it".to_owned()));
         }
         let now = crate::live::tips(&repo.git)?;
