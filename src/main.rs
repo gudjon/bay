@@ -52,6 +52,9 @@ enum Command {
         /// A branch made outside bay (a branch name or a full ref): its net change is the draft
         #[arg(long, value_name = "REF", conflicts_with = "resume")]
         from: Option<String>,
+        /// A change this one lands only after (repeatable): it publishes once that change landed
+        #[arg(long, value_name = "CHANGE", conflicts_with = "resume")]
+        after: Vec<String>,
     },
     /// Freeze the draft, build the candidate, check it, publish it
     Land {
@@ -98,7 +101,8 @@ enum Command {
         heads: bool,
         /// With --heads: delete the branches landed by ancestor or patch, each under a lease of
         /// the tip judged, after archiving the tip on the remote and logging the push that
-        /// restores it to bay/pruned-heads.log in the repository's common directory
+        /// restores it to bay/pruned-heads.log in the repository's common directory; then runs
+        /// the config's `[heads] on_prune` adapter, when set, once per deleted branch
         #[arg(long, requires = "heads")]
         prune: bool,
         /// With --heads: a branch with commits off trunk whose tip is older than this is stale
@@ -472,6 +476,7 @@ fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
         fixes,
         lane,
         from,
+        after,
     } = command
     else {
         unreachable!("start_change takes a start command");
@@ -489,6 +494,7 @@ fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
             fixes,
             lane,
             from,
+            after,
         },
     )
 }

@@ -195,6 +195,16 @@ reasons! {
     // hold adapter (`crate::hold`), and the change carries neither `Fixes:` nor `Reverts:`. The
     // operation stays queued, publishes nothing, and is tried again once the hold clears.
     TrunkHeld => "TRUNK_HELD", ["wait"], "hold_cleared", false;
+    // N-5; not yet in INTERFACES § 2: `bay start --from <branch>` names a branch that changes
+    // paths `--paths` does not declare. Nothing is created; a start whose paths cover them can.
+    PathsUndeclared => "PATHS_UNDECLARED", ["read", "repair"], "paths_declared", false;
+    // G273 (N-16); not yet in INTERFACES § 2: the change was started `--after` a change that has
+    // not landed on trunk yet. The operation stays queued, publishes nothing, holds no queue
+    // place, and is tried again once every change it names has landed.
+    DependencyPending => "DEPENDENCY_PENDING", ["wait"], "dependencies_landed", false;
+    // G273 (N-16); not yet in INTERFACES § 2: a change this one was started `--after` ended
+    // without landing (abandoned, superseded or no effect), so this one can never publish.
+    DependencyAbandoned => "DEPENDENCY_ABANDONED", ["read", "repair"], "dependency_dropped_or_restarted", false;
 }
 
 impl Reason {
@@ -473,7 +483,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 62);
+        assert_eq!(Reason::ALL.len(), 65);
     }
 
     #[test]

@@ -44,6 +44,9 @@ pub struct StartRequest {
     /// A branch made outside bay this change takes in (`start --from`, G268): a branch name or a
     /// full ref. Its net change since its merge base with trunk is the change's first draft.
     pub from: Option<String>,
+    /// The changes this one lands only after (`start --after`, repeatable, G273). Each must be a
+    /// change the remote holds, other than this one; none need have landed yet.
+    pub after: Vec<String>,
 }
 
 /// How long a start whose claim push met a held remote ref lock waits before it re-reads.
@@ -221,8 +224,9 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
     view::release_ended(repo, repo.config.retention_window(), &ended)
 }
 
-/// The refusal of a start whose `--lane` the config at trunk does not declare, or whose
-/// `--fixes` names no change on trunk at `base`; nothing is created then.
+/// The refusal of a start whose `--lane` the config at trunk does not declare, whose `--fixes`
+/// names no change on trunk at `base`, or whose `--after` names no change; nothing is created
+/// then.
 fn named_or_refused(
     repo: &Repo,
     request: &StartRequest,
@@ -257,8 +261,62 @@ fn named_or_refused(
             ));
         }
     }
+    // G273: a dependency is a change the remote holds; it need not have landed.
+    for dependency in &request.after {
+        if !is_change_id(dependency) {
+            return Err(format!("--after {dependency} is not a change id"));
+        }
+        let landed = format!("{}{dependency}", crate::names::LANDED);
+        if !remote_has(repo, &change_ref(dependency))? && !remote_has(repo, &landed)? {
+            return Err(format!(
+                "--after {dependency}: the remote holds no such change"
+            ));
+        }
+    }
     Ok(None)
 }
+
+/// G273: `request`'s `--after` names `change` itself, or a change that lands only after
+/// `change` (directly or through others), so neither could ever land: the refusal, with nothing
+/// written. The walk reads each named change's record from the remote, at most
+/// [`AFTER_WALK_MAX`] of them.
+fn after_itself(repo: &Repo, request: &StartRequest, change: &str) -> Option<String> {
+    if request.after.iter().any(|dependency| dependency == change) {
+        return Some(format!(
+            "--after {change} names the change itself: a change cannot land after itself"
+        ));
+    }
+    let mut seen: Vec<String> = Vec::new();
+    let mut next: Vec<String> = request.after.clone();
+    while let Some(dependency) = next.pop() {
+        if seen.contains(&dependency) || seen.len() >= AFTER_WALK_MAX {
+            continue;
+        }
+        seen.push(dependency.clone());
+        // Read at the remote's head, never moving a local copy of the chain back (G199).
+        let Ok(record) = crate::undo::fetch_chain(repo, &dependency)
+            .map_err(|error| error.message())
+            .and_then(|head| {
+                Chain::new(&repo.git)
+                    .record_at(&head)
+                    .map_err(|error| error.message())
+            })
+        else {
+            continue;
+        };
+        if record.after.iter().any(|named| named == change) {
+            return Some(format!(
+                "--after {dependency}: change {dependency} lands only after {change}, so \
+                 neither could land"
+            ));
+        }
+        next.extend(record.after);
+    }
+    None
+}
+
+/// The most dependency records [`after_itself`] reads.
+const AFTER_WALK_MAX: usize = 64;
 
 fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
     let intent = request
@@ -572,22 +630,24 @@ struct TakenIn {
     draft: String,
 }
 
-/// Takes in the branch made outside bay that `reference` names (G268): the commit it names
-/// here, or on the remote when this repository does not hold it; every path it changes since
-/// its merge base with trunk, which the declared `paths` must cover; and the three-way merge of
-/// it onto `base` (`merge_onto`, the merge a candidate is built with), committed on `base` as
-/// the change's first draft. A conflict is the `MERGE_CONFLICT` refusal; nothing is written
-/// but objects no ref names.
+/// Takes in the branch made outside bay that `reference` names (G268): the commit the remote's
+/// branch or ref of that name holds, or this repository's only when the remote has none
+/// ([`resolve_from`]); every path it changes since its merge base with trunk, which the
+/// declared `paths` must cover, or the start is the `PATHS_UNDECLARED` refusal; and the
+/// three-way merge of it onto `base` (`merge_onto`, the merge a candidate is built with),
+/// committed on `base` as the change's first draft. A conflict is the `MERGE_CONFLICT` refusal;
+/// nothing is written but objects no ref names.
 fn take_in(
     repo: &Repo,
     reference: &str,
     base: &str,
     paths: &[String],
 ) -> Result<Result<TakenIn, BayResult>, String> {
-    let commit = resolve_from(repo, reference)?;
+    let (commit, source) = resolve_from(repo, reference)?;
     let from = StartedFrom {
         reference: reference.to_owned(),
         commit: commit.clone(),
+        source: Some(source.to_owned()),
     };
     let merge_base = repo
         .git
@@ -613,11 +673,17 @@ fn take_in(
             !paths.is_empty() && !paths.iter().any(|declared| inputs::within(declared, path))
         })
         .collect();
+    // N-5: a branch that changes a path the change does not declare is refused, never taken
+    // in whole: nothing is created, and a start whose `--paths` cover them can succeed.
     if !uncovered.is_empty() {
-        return Err(format!(
-            "--from {reference} changes paths --paths does not declare: {uncovered:?}; declare \
-             them with --paths and start again"
-        ));
+        return Ok(Err(BayResult::blocked(Reason::PathsUndeclared)
+            .with_detail(json!({
+                "uncovered": uncovered,
+                "declared": paths,
+                "from": from,
+                "why": format!("--from {reference} changes paths --paths does not declare"),
+                "recovery": "start again with --paths covering them",
+            }))));
     }
     match merge_onto(&repo.git, base, &commit).map_err(|error| error.message())? {
         Merge::Conflict(conflicts, _) => Ok(Err(BayResult::blocked(Reason::MergeConflict)
@@ -635,47 +701,78 @@ fn take_in(
     }
 }
 
-/// The commit `reference` names (G268): here, as a full ref, a branch or any revision this
-/// repository holds; otherwise fetched from the remote, a branch name or a full ref, into a
-/// ref of bay's own that is deleted once read.
-fn resolve_from(repo: &Repo, reference: &str) -> Result<String, String> {
+/// The commit `reference` names (G268), and where it was read (N-5): `remote` when the remote
+/// has that branch (`<name>` is `refs/heads/<name>`) or full ref, fetched into a ref of bay's
+/// own that is deleted once read, even when this repository holds a branch of the same name,
+/// which may be stale; `local` only when the remote has none, as a full ref, a branch or any
+/// revision this repository holds. A remote bay cannot list is an error, never a fall back to
+/// a local copy.
+fn resolve_from(repo: &Repo, reference: &str) -> Result<(String, &'static str), String> {
     if reference.is_empty() || reference.starts_with('-') {
         return Err(format!("--from {reference:?} names no branch or ref"));
     }
-    if let Ok(commit) = repo.git.run(&[
-        "rev-parse",
-        "--verify",
-        "-q",
-        &format!("{reference}^{{commit}}"),
-    ]) {
-        return Ok(commit);
-    }
-    let fetched = format!("{}from-{}", crate::names::FETCH, std::process::id());
-    let commit = repo
+    let remote = repo.remote();
+    let full = if reference.starts_with("refs/") {
+        reference.to_owned()
+    } else {
+        format!("refs/heads/{reference}")
+    };
+    let listed = repo
         .git
-        .run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            repo.remote(),
-            &format!("+{reference}:{fetched}"),
-        ])
-        .and_then(|_| {
-            repo.git.run(&[
-                "rev-parse",
-                "--verify",
+        .run(&["ls-remote", remote, &full])
+        .map_err(|error| {
+            format!(
+                "--from {reference}: the remote {remote} cannot be listed: {}",
+                error.message()
+            )
+        })?;
+    // `ls-remote` matches a pattern's tail: only the exact name is the remote's.
+    let on_remote = listed.lines().any(|line| {
+        line.split_once('\t')
+            .is_some_and(|(_, name)| name.trim() == full)
+    });
+    if on_remote {
+        let fetched = format!("{}from-{}", crate::names::FETCH, std::process::id());
+        let commit = repo
+            .git
+            .run(&[
+                "fetch",
                 "-q",
-                &format!("{fetched}^{{commit}}"),
+                "--no-tags",
+                remote,
+                &format!("+{full}:{fetched}"),
             ])
+            .and_then(|_| {
+                repo.git.run(&[
+                    "rev-parse",
+                    "--verify",
+                    "-q",
+                    &format!("{fetched}^{{commit}}"),
+                ])
+            });
+        let _ = repo.git.run(&["update-ref", "-d", &fetched]);
+        return commit.map(|commit| (commit, "remote")).map_err(|error| {
+            format!(
+                "--from {reference}: the remote {remote} has {full}, and it cannot be \
+                     fetched: {}",
+                error.message()
+            )
         });
-    let _ = repo.git.run(&["update-ref", "-d", &fetched]);
-    commit.map_err(|error| {
-        format!(
-            "--from {reference} is not held here, and the remote {} has no such branch or ref: {}",
-            repo.remote(),
-            error.message()
-        )
-    })
+    }
+    repo.git
+        .run(&[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{reference}^{{commit}}"),
+        ])
+        .map(|commit| (commit, "local"))
+        .map_err(|_| {
+            format!(
+                "--from {reference}: the remote {remote} has no {full}, and this repository holds \
+                 no such branch, ref or commit"
+            )
+        })
 }
 
 /// Creates the change and its claim in one atomic push (§ 4), so a crash never leaves a claim
@@ -735,6 +832,7 @@ fn create(
         receipts: Vec::new(),
         lane: request.lane.clone(),
         from: taken_in.map(|taken_in| taken_in.from.clone()),
+        after: dedup(&request.after),
     };
     let draft = taken_in.map_or(base, |taken_in| taken_in.draft.as_str());
     // § 8: the view is of `base`, so what the actor reads there is what it observed.
@@ -789,10 +887,53 @@ fn create(
             "fixes": record.fixes,
             "lane": record.lane,
             "from": record.from,
+            "after": record.after,
             "pushed": true,
         }))
         .with_change(id),
     ))
+}
+
+/// G273: an adoption's `--after` adds the changes it names to the change's dependencies, in
+/// one state commit on `head`, pushed; nothing is appended when it adds none.
+fn add_dependencies(
+    repo: &Repo,
+    request: &StartRequest,
+    me: &Actor,
+    change: &str,
+    (chain, head): (&mut Chain, &str),
+    record: &mut ChangeRecord,
+) -> Result<(), String> {
+    let name = change_ref(change);
+    let added: Vec<String> = dedup(&request.after)
+        .into_iter()
+        .filter(|dependency| !record.after.contains(dependency))
+        .collect();
+    if !added.is_empty() {
+        record.after.extend(added.iter().cloned());
+        chain.sign_with(agent_signer(repo, &me.name)?);
+        let draft = chain.drafts(change).map_err(|error| error.message())?[0].clone();
+        let before = head.to_owned();
+        let head = chain
+            .append(
+                head,
+                record,
+                &draft,
+                &format!("{change} lands after {}", added.join(", ")),
+            )
+            .map_err(|error| error.message())?;
+        if let Err(error) = repo
+            .git
+            .run(&["push", "-q", repo.remote(), &format!("{name}:{name}")])
+        {
+            let _ = repo.git.run(&["update-ref", &name, &before, &head]);
+            return Err(format!(
+                "the dependencies could not be pushed: {}",
+                error.message()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The intent already has a live change (§ 4): the same actor adopts it, unless another live
@@ -813,6 +954,10 @@ fn adopt_or_refuse(
     let mut chain = Chain::new(&repo.git);
     let (mut head, mut record) = chain.read(change).map_err(|error| error.message())?;
     same_from(request, &record, change)?;
+    // G273: a change never lands after itself.
+    if let Some(why) = after_itself(repo, request, change) {
+        return Err(why);
+    }
     let free = record.actor.name == me.name
         || matches!(
             record.state,
@@ -885,7 +1030,7 @@ fn adopt_or_refuse(
             return Err(format!("the adoption could not be pushed: {why}"));
         }
     }
-    let _ = head;
+    add_dependencies(repo, request, me, change, (&mut chain, &head), &mut record)?;
     let path = repo.view_path(change);
     if !view::exists(&path) {
         let draft = chain.drafts(change).map_err(|error| error.message())?[0].clone();
@@ -904,6 +1049,7 @@ fn adopt_or_refuse(
         "actor": record.actor,
         "actor_source": record.actor_source,
         "paths": request.paths,
+        "after": record.after,
     });
     add_behind(repo, &mut detail, change, &record.base, base)?;
     Ok(BayResult::ok(detail).with_change(change))
@@ -1269,6 +1415,17 @@ fn bring_in_trunk(
             Ok(Ok(changed))
         }
     }
+}
+
+/// `after` in the order given, each change once.
+fn dedup(after: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for change in after {
+        if !out.contains(change) {
+            out.push(change.clone());
+        }
+    }
+    out
 }
 
 /// The agent's signer when the repository has a key registry (§ 10a): this machine's agent

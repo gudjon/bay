@@ -273,6 +273,7 @@ fn run_at(
             sandbox: check::Sandbox::here(),
             // Bisection asks whether each commit fails, whole: no base excuses a failure.
             baseline: None,
+            parallel: 1,
         },
         &mut check::Hooks {
             keep: &mut keep,

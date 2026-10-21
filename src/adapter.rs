@@ -805,6 +805,7 @@ fn run_check(
         sandbox: sandbox.clone(),
         // The conformance kit judges one exchange whole: it has no base to compare with.
         baseline: None,
+        parallel: 1,
     };
     let mut seen = None;
     let mut keep = |_: &mut EvidenceRecord| Ok(());

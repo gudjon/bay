@@ -22,14 +22,21 @@ pub const RECORD_SCHEMA_INPUTS: &str = "bay.change/2";
 /// The schema of a lane change's record (NEW-4), named inputs or not. A bay that does not know
 /// lanes refuses such a record, so it never runs a lane change as one that lands.
 pub const RECORD_SCHEMA_LANE: &str = "bay.change/3";
+/// The schema of a record that lands only after other changes (`bay start --after`, G273),
+/// named inputs or not. A bay that does not know dependencies refuses such a record, so it
+/// never publishes the change before the changes it names.
+pub const RECORD_SCHEMA_AFTER: &str = "bay.change/4";
 
 /// The schema `record` is written under: [`RECORD_SCHEMA_LANE`] for a lane change,
-/// [`RECORD_SCHEMA_INPUTS`] when it declares a named input, else [`RECORD_SCHEMA`], so a record
-/// without either stays readable by every bay.
+/// [`RECORD_SCHEMA_AFTER`] when it lands after other changes, [`RECORD_SCHEMA_INPUTS`] when it
+/// declares a named input, else [`RECORD_SCHEMA`], so a record without any of them stays
+/// readable by every bay. A lane change never lands, so its dependencies never hold it.
 #[must_use]
 pub fn schema_for(record: &ChangeRecord) -> &'static str {
     if record.lane.is_some() {
         RECORD_SCHEMA_LANE
+    } else if !record.after.is_empty() {
+        RECORD_SCHEMA_AFTER
     } else if crate::inputs::names(&record.declared_inputs).is_empty() {
         RECORD_SCHEMA
     } else {
@@ -254,6 +261,11 @@ pub struct ChangeRecord {
     /// its first draft is that branch's net change on the base. Written once at start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<StartedFrom>,
+    /// The changes this one lands only after (`bay start --after`, G273): the executor publishes
+    /// it once every one of them has landed on trunk, and its landing carries one `Bay-After:`
+    /// trailer per change. Written at start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
 }
 
 /// The branch made outside bay a change took in (`bay start --from`, G268): the ref as the
@@ -263,6 +275,11 @@ pub struct StartedFrom {
     #[serde(rename = "ref")]
     pub reference: String,
     pub commit: String,
+    /// Where `commit` was read (N-5): `remote`, the remote's tip of that branch or ref, which is
+    /// taken whenever the remote has one; or `local`, this repository's, only when it has none.
+    /// Absent in a record written before bay 0.2.3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 impl ChangeRecord {
@@ -510,6 +527,8 @@ fn parse_record(text: &str) -> Result<ChangeRecord, ChainError> {
     if record.schema != schema_for(&record) {
         let holds = if record.lane.is_some() {
             "of a lane change"
+        } else if !record.after.is_empty() {
+            "that lands after other changes"
         } else if schema_for(&record) == RECORD_SCHEMA {
             "without named inputs"
         } else {

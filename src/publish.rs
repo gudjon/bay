@@ -766,6 +766,14 @@ fn submit_land(
     }
     kill_point("after-freeze");
 
+    // G273: a land that does not run the operation says at once that it waits on a change it
+    // lands after; the executor's pass records it (`dependency_gate`).
+    if !wait
+        && online
+        && let Some(waiting) = dependency_unrun(&ctx, &op_id, &trunk)?
+    {
+        return Ok(waiting);
+    }
     if wait && online {
         let result = execute_op(&mut ctx, &op_id, trunk);
         ctx.tell_deferred();
@@ -1042,6 +1050,13 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
         return Ok(refusal);
     }
     if let Some(waiting) = waits_for_worker(ctx, op_id) {
+        return Ok(waiting);
+    }
+    // G273: a change publishes only after every change it names has landed (`crate::after`).
+    // Until then it holds no queue place, so whatever is behind it reaches the head.
+    if ctx.record.lane.is_none()
+        && let Some(waiting) = dependency_gate(ctx, op_id, &revision, &trunk)?
+    {
         return Ok(waiting);
     }
     // N-8: while trunk is held only a fix or a revert publishes (`crate::hold`). A lane change
@@ -1460,9 +1475,11 @@ fn joined<'a>(
     other.registry.clone_from(&ctx.registry);
     let signer = other.executor_signer()?;
     other.chain.sign_with(signer);
-    // A repair is judged by its own policy alone, never in a batch (§ 7).
+    // A repair is judged by its own policy alone, never in a batch (§ 7). G273: a member that
+    // lands after a change not yet on trunk never joins one.
     if verify_request(&mut other, &member.op_id)?.is_some()
         || other.repair.is_some()
+        || dependency_waiting(&other, &member.op_id, trunk)?.is_some()
         || claim(&mut other, &member.op_id, &member.revision, trunk)?.is_some()
     {
         return Ok(None);
@@ -3200,42 +3217,14 @@ fn hold_gate(
     let Some(hold) = crate::hold::held(ctx.repo, trunk) else {
         return Ok(None);
     };
-    let name = ctx.executor_name();
-    let op = ctx.op(op_id);
-    let elsewhere = op.owner.as_ref().is_some_and(|owner| *owner != name)
-        && matches!(op.state, OpState::Running | OpState::Checked);
-    if !elsewhere {
-        let queue = crate::queue::Queue::read(ctx.repo)?;
-        if let Some(entry) = queue.of(op_id).cloned() {
-            let signer = ctx.executor_signer().ok().flatten();
-            crate::queue::release(
-                ctx.repo,
-                signer.as_ref(),
-                entry.seq,
-                op_id,
-                crate::hold::RELEASE,
-            )?;
-        }
-        let code = Reason::TrunkHeld.code();
-        let op = ctx.op_mut(op_id);
-        if op.outcome.as_deref() != Some(code) || op.owner.is_some() {
-            op.outcome = Some(code.to_owned());
-            op.owner = None;
-            if op.state == OpState::Running {
-                op.state = if op.job.is_some() {
-                    OpState::Admitted
-                } else {
-                    OpState::Submitted
-                };
-            }
-            ctx.save(
-                revision,
-                None,
-                &format!("held {op_id}: trunk is held ({})", hold.source),
-            )?;
-            ctx.push_chain();
-        }
-    }
+    wait_unplaced(
+        ctx,
+        op_id,
+        revision,
+        Reason::TrunkHeld,
+        crate::hold::RELEASE,
+        &format!("held {op_id}: trunk is held ({})", hold.source),
+    )?;
     let why = match &hold.end {
         Some(end) => format!(
             "trunk is held until {end} ({}), and this change carries no Fixes: or Reverts:",
@@ -3260,6 +3249,195 @@ fn hold_gate(
         }));
     result.published = Some(false);
     result.waiting_for = Some("hold".to_owned());
+    Ok(Some(result))
+}
+
+/// Whether another executor holds `op_id` (it runs it, or has checked it): a gate then leaves
+/// the operation as it is.
+fn held_elsewhere(ctx: &Ctx, op_id: &str) -> bool {
+    let name = ctx.executor_name();
+    let op = ctx.op(op_id);
+    op.owner.as_ref().is_some_and(|owner| *owner != name)
+        && matches!(op.state, OpState::Running | OpState::Checked)
+}
+
+/// Gives back the queue place `op_id` holds, if any, released as `release`.
+fn give_back_place(ctx: &Ctx, op_id: &str, release: &str) -> Result<(), String> {
+    let queue = crate::queue::Queue::read(ctx.repo)?;
+    if let Some(entry) = queue.of(op_id).cloned() {
+        let signer = ctx.executor_signer().ok().flatten();
+        crate::queue::release(ctx.repo, signer.as_ref(), entry.seq, op_id, release)?;
+    }
+    Ok(())
+}
+
+/// N-8, G273: `op_id` waits, as `reason`, on a condition outside its own work (a held trunk,
+/// a dependency that has not landed), and holds no queue place meanwhile, so the operations
+/// behind it reach the head. A place it holds is released as `release`, a reason that counts
+/// toward neither `QUEUE_DEADLINE_EXCEEDED` nor `PUBLISH_RETRY_EXHAUSTED` (§ 6). A claim this
+/// executor holds is given back (a running operation returns to admitted or submitted) and the
+/// outcome names `reason`, written once with the chain message `message`; a later pass tries
+/// the operation again. An operation another executor holds is left as it is.
+fn wait_unplaced(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    reason: Reason,
+    release: &str,
+    message: &str,
+) -> Result<(), String> {
+    if held_elsewhere(ctx, op_id) {
+        return Ok(());
+    }
+    give_back_place(ctx, op_id, release)?;
+    let code = reason.code();
+    let op = ctx.op_mut(op_id);
+    if op.outcome.as_deref() != Some(code) || op.owner.is_some() {
+        op.outcome = Some(code.to_owned());
+        op.owner = None;
+        if op.state == OpState::Running {
+            op.state = if op.job.is_some() {
+                OpState::Admitted
+            } else {
+                OpState::Submitted
+            };
+        }
+        ctx.save(revision, None, message)?;
+        ctx.push_chain();
+    }
+    Ok(())
+}
+
+/// G273 (`crate::after`): the change lands only after the changes its record names. While one
+/// of them has not landed on trunk at `trunk`, the operation waits with `DEPENDENCY_PENDING`,
+/// publishes nothing and holds no queue place, released as `dependency_pending`
+/// ([`wait_unplaced`]); a later pass tries it again. Once one of them ended without landing,
+/// the operation is blocked `DEPENDENCY_ABANDONED`, naming it. `None` when the change names no
+/// dependency, or every one has landed.
+fn dependency_gate(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Option<BayResult>, String> {
+    if ctx.record.after.is_empty() {
+        return Ok(None);
+    }
+    let op = ctx.op(op_id);
+    if op.state.is_terminal() || op.state == OpState::Blocked {
+        return Ok(None);
+    }
+    let Some(result) = dependency_waiting(ctx, op_id, trunk)? else {
+        return Ok(None);
+    };
+    if result.reason == Some(Reason::DependencyAbandoned) {
+        if !held_elsewhere(ctx, op_id) {
+            give_back_place(ctx, op_id, "dependency_abandoned")?;
+            let op = ctx.op_mut(op_id);
+            op.state = OpState::Blocked;
+            op.outcome = Some(Reason::DependencyAbandoned.code().to_owned());
+            op.owner = None;
+            ctx.save(
+                revision,
+                None,
+                &format!("blocked {op_id}: a change it lands after ended without landing"),
+            )?;
+            ctx.push_chain();
+        }
+        return Ok(Some(result));
+    }
+    let waiting_on = ctx.record.after.join(", ");
+    wait_unplaced(
+        ctx,
+        op_id,
+        revision,
+        Reason::DependencyPending,
+        crate::after::RELEASE,
+        &format!("waits {op_id}: it lands after {waiting_on}"),
+    )?;
+    Ok(Some(result))
+}
+
+/// G273: what a land that does not run `op_id` answers while a change it lands after is not on
+/// trunk at `trunk` ([`dependency_waiting`]), with the operation's progress; nothing is written.
+/// `None` for a lane change, one that names no dependency, or an operation that has ended or is
+/// blocked.
+fn dependency_unrun(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayResult>, String> {
+    let op = ctx.op(op_id);
+    if ctx.record.lane.is_some()
+        || ctx.record.after.is_empty()
+        || op.state.is_terminal()
+        || op.state == OpState::Blocked
+    {
+        return Ok(None);
+    }
+    Ok(dependency_waiting(ctx, op_id, trunk)?
+        .map(|waiting| with_progress(&ctx.repo.git, op, waiting)))
+}
+
+/// G273: the result of `op_id` while a change it lands after is not on trunk at `trunk`, read
+/// with no write: `DEPENDENCY_ABANDONED` (blocked) when one ended without landing, else
+/// `DEPENDENCY_PENDING` (queued) when one has not landed yet, else `None`.
+fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayResult>, String> {
+    use crate::after::Standing;
+    let standing = crate::after::standing(ctx.repo, &ctx.record.after, trunk)?;
+    let after: Vec<serde_json::Value> = standing
+        .iter()
+        .map(crate::after::Dependency::to_json)
+        .collect();
+    let ended: Vec<&crate::after::Dependency> = standing
+        .iter()
+        .filter(|dependency| matches!(dependency.standing, Standing::Ended(_)))
+        .collect();
+    if let Some(first) = ended.first() {
+        let intent = &ctx.record.intent.reference;
+        let named = &first.change;
+        let mut result = BayResult::blocked(Reason::DependencyAbandoned)
+            .with_change(ctx.id.clone())
+            .with_op(op_id)
+            .with_detail(json!({
+                "ended": ended.iter().copied().map(crate::after::Dependency::to_json).collect::<Vec<_>>(),
+                "after": after,
+                "why": format!(
+                    "this change lands only after {named}, which ended without landing, so it can never publish"
+                ),
+                "trunk": trunk,
+                "recovery": format!(
+                    "drop the dependency: bay land --abandon here, then bay start {intent} --new without --after {named}; or restart {named} (bay start of its intent adopts it), land it, then bay land again"
+                ),
+            }));
+        result.published = Some(false);
+        return Ok(Some(result));
+    }
+    let pending: Vec<&crate::after::Dependency> = standing
+        .iter()
+        .filter(|dependency| matches!(dependency.standing, Standing::Pending(_)))
+        .collect();
+    if pending.is_empty() {
+        return Ok(None);
+    }
+    let names: Vec<&str> = pending
+        .iter()
+        .map(|dependency| dependency.change.as_str())
+        .collect();
+    let mut result = BayResult::refused(Decision::Queued, Reason::DependencyPending)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(json!({
+            "pending": pending.iter().copied().map(crate::after::Dependency::to_json).collect::<Vec<_>>(),
+            "after": after,
+            "why": format!(
+                "this change lands only after {}, not yet landed on trunk",
+                names.join(", ")
+            ),
+            "trunk": trunk,
+            "ways_out": [
+                "wait: the operation stays queued and lands once every change it names has landed (bay land --wait again, or an executor pass)",
+                "land the changes it names first",
+            ],
+        }));
+    result.published = Some(false);
+    result.waiting_for = Some("dependencies".to_owned());
     Ok(Some(result))
 }
 
@@ -4004,6 +4182,7 @@ fn run_policy(
             hidden: hidden_paths(ctx),
             sandbox: check::Sandbox::here(),
             baseline: baseline_of(ctx, policy, trunk, &base_tree)?,
+            parallel: ctx.repo.config.parallel_checks(),
         },
         &mut check::Hooks {
             keep: &mut keep,
@@ -4920,7 +5099,7 @@ fn candidate_message(
     let config = &ctx.repo.config;
     let record = &ctx.record;
     format!(
-        "{reference}: change {id}\n\nChange-Id: {id}\nRevision-Id: {revision}\nRequest-Id: {request_id}\nCandidate-Id: {candidate_id}\nRegistry-Id: {registry_id}\nBay-Epoch: {epoch}\n{intent_key}: {reference}@{intent_revision}\n{actor_key}: {actor}\nBay-Session: {session}\n{supersedes}{reverts}{fixes}",
+        "{reference}: change {id}\n\nChange-Id: {id}\nRevision-Id: {revision}\nRequest-Id: {request_id}\nCandidate-Id: {candidate_id}\nRegistry-Id: {registry_id}\nBay-Epoch: {epoch}\n{intent_key}: {reference}@{intent_revision}\n{actor_key}: {actor}\nBay-Session: {session}\n{supersedes}{reverts}{fixes}{after}",
         reference = record.intent.reference,
         id = ctx.id,
         intent_key = config.intent_trailer(),
@@ -4939,6 +5118,7 @@ fn candidate_message(
             .fixes
             .as_ref()
             .map_or_else(String::new, |fixed| format!("Fixes: {fixed}\n")),
+        after = crate::after::trailers(&record.after),
         actor = record.actor.name,
         session = record.actor.session,
     )

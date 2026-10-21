@@ -40,7 +40,17 @@
 //!    alone;
 //! 3. it deletes the branch under a lease of the tip the census judged
 //!    (`--force-with-lease=refs/heads/<name>:<sha>`), so a branch someone moved since is
-//!    refused by the remote, not deleted.
+//!    refused by the remote, not deleted;
+//! 4. when the config at the trunk's tip sets `[heads] on_prune` (N-19), it runs that prune
+//!    adapter once for the branch it deleted: `<on_prune> pruned <name> <sha> <archive ref>`,
+//!    its program materialized from the trunk's tip the way the hold adapter's is
+//!    (`crate::hold::run_from_trunk`), never taken from this machine's work tree, within
+//!    `[heads] timeout_s` (30 s unless set). The adapter is where a team reaches outside the
+//!    repository, to close the branch's open pull request on its host for example; bay itself
+//!    never does. Its outcome is recorded on the branch's `pruned` row as `on_prune: {ok, why}`
+//!    (`why`: the exit status and the first line of its stderr, or why it did not run). A
+//!    failing adapter never undoes the delete and never stops the loop: the next branch is
+//!    judged and pruned as if it had passed.
 //!
 //! Every branch not deleted is reported with its reason. A bay host accepts an archive ref as a
 //! creation only (`crate::hook`).
@@ -49,6 +59,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -62,6 +73,12 @@ pub const DEFAULT_STALE_DAYS: u64 = 30;
 
 /// The file under `<common dir>/bay/` that holds one restore line per pruned branch.
 pub const LOG_FILE: &str = "pruned-heads.log";
+
+/// How long the prune adapter may take when `[heads] timeout_s` is not set (N-19).
+pub const DEFAULT_ON_PRUNE_TIMEOUT_S: u64 = 30;
+
+/// The first argument the prune adapter is run with (N-19).
+pub const PRUNED: &str = "pruned";
 
 /// What `bay status --heads` was asked.
 pub struct Request {
@@ -263,7 +280,7 @@ fn run(dir: &Path, request: &Request) -> Result<BayResult, String> {
     });
     if request.prune {
         let log = repo.common_dir.join("bay").join(LOG_FILE);
-        let (pruned, skipped) = prune(git, &remote, &rows, &log);
+        let (pruned, skipped) = prune(&repo, &remote, &trunk_tip, &rows, &log);
         detail["pruned"] = json!(pruned);
         detail["skipped"] = json!(skipped);
         detail["log"] = json!(log.display().to_string());
@@ -554,8 +571,21 @@ fn archive(
 
 /// Deletes each `landed` branch of `rows` proven by `ancestor` or `patch` on `remote`: after
 /// archiving its tip on the remote and appending its restore line to `log`, under a lease of the
-/// tip the census judged. Returns the pruned and the skipped rows.
-fn prune(git: &Git, remote: &str, rows: &[Head], log: &Path) -> (Vec<Value>, Vec<Value>) {
+/// tip the census judged; then runs the prune adapter for it, when the config sets one, from
+/// `trunk_tip`. Returns the pruned and the skipped rows.
+fn prune(
+    repo: &Repo,
+    remote: &str,
+    trunk_tip: &str,
+    rows: &[Head],
+    log: &Path,
+) -> (Vec<Value>, Vec<Value>) {
+    let git = &repo.git;
+    let adapter = repo.config.heads.as_ref().and_then(|heads| {
+        let command = heads.on_prune.as_deref()?;
+        let timeout = heads.timeout_s.unwrap_or(DEFAULT_ON_PRUNE_TIMEOUT_S);
+        Some((command, Duration::from_secs(timeout)))
+    });
     let mut pruned = Vec::new();
     let mut skipped = Vec::new();
     let prunable = |row: &Head| row.class.kept().is_none() && row.proof != Some(Proof::Change);
@@ -622,13 +652,27 @@ fn prune(git: &Git, remote: &str, rows: &[Head], log: &Path) -> (Vec<Value>, Vec
         let lease = format!("--force-with-lease=refs/heads/{}:{}", row.name, row.sha);
         let branch = format!("refs/heads/{}", row.name);
         match git.run_status(&["push", "-q", "--delete", &lease, remote, &branch]) {
-            Ok((0, _, _)) => pruned.push(json!({
-                "name": row.name,
-                "sha": row.sha,
-                "proof": row.proof.map(Proof::name),
-                "archive": archived,
-                "restore": restore,
-            })),
+            Ok((0, _, _)) => {
+                let mut done = json!({
+                    "name": row.name,
+                    "sha": row.sha,
+                    "proof": row.proof.map(Proof::name),
+                    "archive": archived,
+                    "restore": restore,
+                });
+                // N-19: after the delete, never before; its outcome is recorded and never
+                // undoes the delete or stops the loop.
+                if let Some((command, timeout)) = adapter {
+                    done["on_prune"] = on_prune(
+                        repo,
+                        trunk_tip,
+                        command,
+                        timeout,
+                        [row.name.as_str(), row.sha.as_str(), archived.as_str()],
+                    );
+                }
+                pruned.push(done);
+            }
             Ok((_, _, stderr)) => skipped.push(skip(format!(
                 "the remote refused the delete (the branch may have moved since the census): {stderr}"
             ))),
@@ -639,6 +683,41 @@ fn prune(git: &Git, remote: &str, rows: &[Head], log: &Path) -> (Vec<Value>, Vec
         }
     }
     (pruned, skipped)
+}
+
+/// Runs the prune adapter `command` once for a branch just deleted (N-19), as
+/// `<command> pruned <name> <sha> <archive ref>` (`branch`), its program materialized from
+/// `trunk_tip`, within `timeout`. Returns `{ok, why}`: `ok` when it exited 0; `why` the exit
+/// status and the first line of its stderr when it did not, or why it did not run.
+fn on_prune(
+    repo: &Repo,
+    trunk_tip: &str,
+    command: &str,
+    timeout: Duration,
+    branch: [&str; 3],
+) -> Value {
+    let [name, sha, archive] = branch;
+    match crate::hold::run_from_trunk(
+        repo,
+        trunk_tip,
+        "[heads] on_prune",
+        command,
+        &[PRUNED, name, sha, archive],
+        timeout,
+        "prune-run",
+    ) {
+        Ok((status, _, _)) if status.success() => json!({"ok": true, "why": null}),
+        Ok((status, _, stderr)) => {
+            let stderr = String::from_utf8_lossy(&stderr);
+            let first = stderr
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or_default();
+            json!({"ok": false, "why": format!("it exited with {status}: {first}")})
+        }
+        Err(fault) => json!({"ok": false, "why": format!("it did not run: {fault}")}),
+    }
 }
 
 /// Appends `line` to `path`, creating it and its folder, and syncs it before returning.

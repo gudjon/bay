@@ -138,6 +138,7 @@ fn run_with(
         hidden: Vec::new(),
         sandbox: Sandbox::judge("none", Ok(true)),
         baseline: None,
+        parallel: 1,
     };
     let mut keep = |_: &mut EvidenceRecord| Ok(());
     let mut records = run_all(

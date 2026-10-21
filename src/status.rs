@@ -13,7 +13,9 @@
 //! says so in `detail.talk_accept`. Trunk commits that did not land through bay (merges and
 //! pushes outside it) are named and counted under `detail.unattributed`
 //! ([`crate::unattributed`], G85). With operations queued and no fresh executor presence on
-//! record (`crate::presence`, G67), `detail.warnings` names `no_live_executor`.
+//! record (`crate::presence`, G67), `detail.warnings` names `no_live_executor`. N-20: each merge
+//! outside bay in the red window that pushed bay landings off trunk's first-parent line is named
+//! there as `trunk_not_linear` ([`crate::trunkline`]).
 
 use std::path::Path;
 
@@ -240,9 +242,13 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     if let (Some(detail), Some(hold)) = (result.detail.as_mut(), crate::hold::held(&repo, &trunk)) {
         detail["hold"] = hold.to_json();
     }
-    if let (Some(detail), Some(warning)) = (result.detail.as_mut(), no_live_executor(&repo, queued))
+    let mut warnings: Vec<Value> = no_live_executor(&repo, queued).into_iter().collect();
+    // N-20: each outside merge in the red window that pushed bay landings off the line.
+    warnings.extend(not_linear(&repo.git, &trunk));
+    if let Some(detail) = result.detail.as_mut()
+        && !warnings.is_empty()
     {
-        detail["warnings"] = json!([warning]);
+        detail["warnings"] = Value::from(warnings);
     }
     if let [only] = ids.as_slice() {
         result = result.with_change(only.clone());
@@ -252,6 +258,23 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         fetched_at: fetched_at.unwrap_or_else(|| "not fetched (remote unreachable)".to_owned()),
     });
     Ok(result)
+}
+
+/// N-20: a `trunk_not_linear` warning for each merge outside bay among the newest `[red] window`
+/// first-parent commits of trunk that put bay landings off the first-parent line: the merge,
+/// its parents, how many landings it pushed off (and which), and the recovery hint. Those
+/// landings are still found ([`crate::trunkline`]); the warning says the host let the merge in.
+/// A config bay cannot read names none: `red` and `unattributed` say why already.
+fn not_linear(git: &crate::git::Git, trunk: &str) -> Vec<Value> {
+    crate::red::window(git, trunk)
+        .and_then(|window| crate::trunkline::walk(git, trunk, window, None, ""))
+        .map(|line| {
+            line.merges
+                .iter()
+                .map(crate::trunkline::ForeignMerge::to_json)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// G67: operations are queued and no executor presence on record is fresh. The warning says how

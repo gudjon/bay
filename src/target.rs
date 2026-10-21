@@ -9,8 +9,9 @@
 //!
 //! A commit is promotable to a target now when:
 //!
-//! - it is on the first-parent line of the source's tip, and moves the target by a
-//!   fast-forward;
+//! - it is on the first-parent line of the source's tip, or (N-20) a bay landing an outside
+//!   merge on that line pushed off it ([`crate::trunkline::on_line`]), and moves the target by
+//!   a fast-forward;
 //! - every `[[check]]` of `.bay/policy.toml` whose id the target `requires` combines to `pass`
 //!   for it, judged as a post check is (`crate::publish::post_answers`): its records on the
 //!   commit's tree, counted under the registry, under the manifest of the policy at its first
@@ -149,6 +150,41 @@ fn candidates(git: &Git, args: &[&str]) -> Result<Vec<Candidate>, String> {
             })
         })
         .collect())
+}
+
+/// N-20: the commits of `from_tip`'s landing line ([`crate::trunkline`]) above `tip`, newest
+/// first, within [`WINDOW`] first-parent commits: a bay landing an outside merge pushed off
+/// the first-parent line is a candidate at that merge, when it fast-forwards `tip`.
+fn line_candidates(git: &Git, from_tip: &str, tip: Option<&str>) -> Result<Vec<Candidate>, String> {
+    let line = crate::trunkline::walk(
+        git,
+        from_tip,
+        WINDOW,
+        tip,
+        "%ct%x1f%(trailers:key=Fixes,valueonly,separator=%x2c)%x1f%(trailers:key=Reverts,valueonly,separator=%x2c)",
+    )?;
+    let mut out = Vec::new();
+    for entry in line.entries {
+        if entry.via.is_some()
+            && let Some(tip) = tip
+            && !is_ancestor(git, tip, &entry.commit)?
+        {
+            continue;
+        }
+        let [committed, lineage @ ..] = entry.extra.as_slice() else {
+            continue;
+        };
+        let Ok(committed) = committed.parse::<u64>() else {
+            continue;
+        };
+        let fixes = lineage.iter().any(|value| !value.is_empty());
+        out.push(Candidate {
+            commit: entry.commit,
+            committed,
+            fixes,
+        });
+    }
+    Ok(out)
 }
 
 /// Whether `commit` (a full object id) is on the first-parent line of `tip`: following first
@@ -379,7 +415,7 @@ pub fn judge(
     let mut failed = Vec::new();
     let reference = rule.target.reference();
     match from_tip {
-        Some(tip) if on_first_parent(git, tip, commit)? => {}
+        Some(tip) if crate::trunkline::on_line(git, tip, commit)? => {}
         _ => failed.push(off_source(rule, commit)),
     }
     if let Some(old) = old
@@ -567,7 +603,7 @@ impl Read<'_> {
         });
         let mut on_from = false;
         if let (Some(tip), Some(from)) = (tip, from_tip.as_deref()) {
-            on_from = on_first_parent(git, from, tip)?;
+            on_from = crate::trunkline::on_line(git, from, tip)?;
             let range = format!("{from}..{tip}");
             let drift = count(git, &[&range])?;
             let named: Vec<String> = if drift == 0 {
@@ -630,12 +666,8 @@ impl Read<'_> {
                 json!({"commit": null, "blocked_by": [{"rule": "not_fast_forward", "why": why}]}),
             );
         }
-        let window = format!("--max-count={WINDOW}");
-        let mut args = vec!["--first-parent", window.as_str(), from_tip];
-        let exclude = tip.map(|tip| format!("^{tip}"));
-        args.extend(exclude.as_deref());
         let mut newest = None;
-        for (behind, candidate) in candidates(self.git, &args)?.iter().enumerate() {
+        for (behind, candidate) in line_candidates(self.git, from_tip, tip)?.iter().enumerate() {
             let failed = time_and_checks(self.git, rule, candidate, self.registry, self.now)?;
             if failed.is_empty() {
                 return Ok(json!({"commit": candidate.commit, "behind_from": behind}));
@@ -692,7 +724,7 @@ pub fn advance(
             tips.get(&rule.from).cloned().flatten()
         };
         let on_from = match (tip.as_deref(), from_tip.as_deref()) {
-            (Some(tip), Some(from)) => on_first_parent(git, from, tip)?,
+            (Some(tip), Some(from)) => crate::trunkline::on_line(git, from, tip)?,
             _ => false,
         };
         let read = Read {

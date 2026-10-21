@@ -1,20 +1,24 @@
 //! G268. A branch made outside bay lands as one change.
 //!
 //! `bay start <intent> --paths <paths> --from <ref>` takes in a branch bay did not make (a
-//! dependency bot's branch, a person's branch): a branch name or a full ref, fetched from the
-//! remote when this repository does not hold it. The change's view starts at its base, and its
+//! dependency bot's branch, a person's branch): a branch name or a full ref. When the remote has
+//! that branch, its tip is fetched and taken, even over a stale local branch of the same name;
+//! only a ref the remote lacks is read here (N-5). The change's view starts at its base, and its
 //! first draft is the branch's net change since its merge base with trunk, merged onto the base
-//! by the merge a candidate is built with. The record keeps `from: {ref, commit}`, which
-//! `bay start` and `bay status` show. `bay land` publishes it as one trunk commit with bay's
-//! trailers, so `bay status` lists no unattributed landing. A branch that conflicts with trunk
-//! is `MERGE_CONFLICT`, and one that changes a path `--paths` does not declare is refused; in
+//! by the merge a candidate is built with. The record keeps `from: {ref, commit, source}`
+//! (`source` is `remote` or `local`), which `bay start` and `bay status` show. `bay land`
+//! publishes it as one trunk commit with bay's trailers, so `bay status` lists no unattributed
+//! landing. A branch that conflicts with trunk is `MERGE_CONFLICT`, and one that changes a path
+//! `--paths` does not declare is the blocked `PATHS_UNDECLARED`, naming the uncovered paths; in
 //! both cases nothing is created.
 //!
 //! The guards to mutate, in `src/start.rs`: the draft the new change starts from in `create`,
 //! `let draft = taken_in.map_or(base, |taken_in| taken_in.draft.as_str());` (make it
 //! `let draft = base;` and the first case fails: the view and the landing lack the branch's
-//! edits); the `Merge::Conflict` arm of `take_in` (the second case); and its
-//! `if !uncovered.is_empty()` refusal (the third case).
+//! edits); the `Merge::Conflict` arm of `take_in` (the second case); its
+//! `if !uncovered.is_empty()` refusal (the third case); and in `resolve_from`, the
+//! `if on_remote {` branch that fetches the remote's tip (make it `if false {` and the fourth
+//! case fails: the stale local branch is taken in, with `source` `local`).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -116,6 +120,7 @@ fn a_two_commit_outside_branch_lands_as_one_attributed_trunk_commit() {
         tip.as_str(),
         "{started}"
     );
+    assert_eq!(started["detail"]["from"]["source"], "remote", "{started}");
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     // The view holds the branch's net change on the base, beside what trunk landed since.
     assert_eq!(
@@ -220,12 +225,31 @@ fn an_outside_branch_that_changes_an_undeclared_path_is_refused_and_creates_noth
         "--from",
         "outside",
     ]));
-    assert_ne!(code, 0, "{refused}");
-    let why = refused["detail"].as_str().unwrap_or_default();
-    assert!(why.contains("docs/notes.md"), "names the path: {refused}");
+    // N-5: a blocked refusal with its own reason, never a plain failure.
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["decision"], "blocked", "{refused}");
+    assert_eq!(refused["reason"], "PATHS_UNDECLARED", "{refused}");
+    assert_eq!(refused["retry_when"], "paths_declared", "{refused}");
+    assert_eq!(
+        refused["allowed"],
+        serde_json::json!(["read", "repair"]),
+        "{refused}"
+    );
+    // Only the uncovered path is named, beside what was declared.
+    assert_eq!(
+        refused["detail"]["uncovered"],
+        serde_json::json!(["docs/notes.md"]),
+        "{refused}"
+    );
+    let declared = refused["detail"]["declared"].as_array().unwrap();
+    assert_eq!(declared.len(), 1, "{refused}");
     assert!(
-        !why.contains("src/x.rs"),
-        "names only the uncovered: {refused}"
+        declared[0].as_str().unwrap().starts_with("src"),
+        "{refused}"
+    );
+    assert_eq!(
+        refused["detail"]["recovery"], "start again with --paths covering them",
+        "{refused}"
     );
     assert_eq!(refs(&test_box, &remote, "refs/bay/changes/"), changes);
     assert_eq!(refs(&test_box, &remote, "refs/bay/intent/"), claims);
@@ -248,4 +272,56 @@ fn an_outside_branch_that_changes_an_undeclared_path_is_refused_and_creates_noth
         std::fs::read_to_string(view.join("docs/notes.md")).unwrap(),
         "notes\n"
     );
+}
+
+#[test]
+fn the_remotes_tip_is_taken_over_a_stale_local_branch_of_the_same_name() {
+    // N-5.
+    let (test_box, repo, _remote) = trunk();
+    let tip = outside_branch(
+        &test_box,
+        &repo,
+        &[&[("src/x.rs", "ONE\ntwo\n")], &[("src/x.rs", "ONE\nTWO\n")]],
+    );
+    // This repository holds `outside` one commit behind the remote's.
+    let stale = test_box.git_ok(&repo, &["rev-parse", &format!("{tip}^")]);
+    test_box.git_ok(&repo, &["branch", "-q", "outside", &stale]);
+
+    let started = test_box.bay_ok(
+        &repo,
+        &[
+            "start",
+            "CARD-outside",
+            "--paths",
+            "src/",
+            "--from",
+            "outside",
+        ],
+    );
+    let from = &started["detail"]["from"];
+    assert_eq!(from["ref"], "outside", "{started}");
+    assert_eq!(from["commit"], tip.as_str(), "the remote's tip: {started}");
+    assert_eq!(from["source"], "remote", "{started}");
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(view.join("src/x.rs")).unwrap(),
+        "ONE\nTWO\n"
+    );
+
+    // A branch only this repository holds is read here, and says so.
+    test_box.git_ok(&repo, &["branch", "-q", "only-here", &stale]);
+    let started = test_box.bay_ok(
+        &repo,
+        &[
+            "start",
+            "CARD-only-here",
+            "--paths",
+            "src/",
+            "--from",
+            "only-here",
+        ],
+    );
+    let from = &started["detail"]["from"];
+    assert_eq!(from["commit"], stale.as_str(), "{started}");
+    assert_eq!(from["source"], "local", "{started}");
 }

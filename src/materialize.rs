@@ -340,26 +340,49 @@ fn from_git(error: &GitError) -> Unmade {
     }
 }
 
-/// Whether `entry` (a tree path) is one `paths` keeps: a directory entry (ending in `/`) keeps
-/// what lies under it, a file entry keeps that file.
-fn kept(paths: &[String], path: &[u8]) -> bool {
-    paths.iter().any(|keep| {
-        let keep = keep.as_bytes();
-        if keep.ends_with(b"/") {
-            path.starts_with(keep)
-        } else {
-            path == keep
-        }
-    })
+/// The most paths one `git ls-tree` names as pathspecs. A longer list (a changed-only check's
+/// changed paths, N-18) lists the whole tree's entries instead, and [`Keep`] filters them, so no
+/// command line outgrows what the system passes.
+const PATHSPEC_MAX: usize = 1_000;
+
+/// What a path list keeps: a directory entry (ending in `/`) keeps what lies under it, a file
+/// entry keeps that file. Files are looked up by name, so a list of many changed paths filters
+/// a large tree in one pass.
+struct Keep<'a> {
+    files: std::collections::HashSet<&'a [u8]>,
+    dirs: Vec<&'a [u8]>,
 }
 
-/// The blob and submodule entries of `commit`'s tree that `paths` keeps, in tree order.
+impl<'a> Keep<'a> {
+    fn new(paths: &'a [String]) -> Self {
+        let (dirs, files): (Vec<&[u8]>, Vec<&[u8]>) = paths
+            .iter()
+            .map(String::as_bytes)
+            .partition(|keep| keep.ends_with(b"/"));
+        Self {
+            files: files.into_iter().collect(),
+            dirs,
+        }
+    }
+
+    /// Whether `path` (a tree path) is one the list keeps.
+    fn keeps(&self, path: &[u8]) -> bool {
+        self.files.contains(path) || self.dirs.iter().any(|dir| path.starts_with(dir))
+    }
+}
+
+/// The blob and submodule entries of `commit`'s tree that `paths` keeps, in tree order. An
+/// empty list keeps nothing, and Git is not asked.
 fn list(
     git: &Git,
     commit: &str,
     paths: Option<&[String]>,
     deadline: Instant,
 ) -> Result<Vec<Entry>, Unmade> {
+    if paths.is_some_and(<[String]>::is_empty) {
+        return Ok(Vec::new());
+    }
+    let keep = paths.map(Keep::new);
     // Literal pathspecs: a policy path is a name, never a pattern; the listing is filtered
     // again below, so a prefix never stands for a sibling (`board` for `board2/`).
     let mut args = vec![
@@ -370,7 +393,7 @@ fn list(
         "--full-tree",
         commit,
     ];
-    if let Some(paths) = paths {
+    if let Some(paths) = paths.filter(|paths| paths.len() <= PATHSPEC_MAX) {
         args.push("--");
         args.extend(paths.iter().map(|path| path.trim_end_matches('/')));
     }
@@ -388,6 +411,9 @@ fn list(
                 String::from_utf8_lossy(record)
             ))
         })?;
+        if keep.as_ref().is_some_and(|keep| !keep.keeps(&entry.path)) {
+            continue;
+        }
         // A name that is not UTF-8 cannot be written where file names are UTF-16.
         if !cfg!(unix) && std::str::from_utf8(&entry.path).is_err() {
             return Err(Unmade::Refused(format!(
@@ -395,9 +421,7 @@ fn list(
                 String::from_utf8_lossy(&entry.path)
             )));
         }
-        if paths.is_none_or(|paths| kept(paths, &entry.path)) {
-            entries.push(entry);
-        }
+        entries.push(entry);
     }
     Ok(entries)
 }
@@ -799,6 +823,46 @@ mod tests {
             ("board.md", false),
             ("notes", false),
             ("other", false),
+        ] {
+            assert_eq!(out.join(path).exists(), present, "{path}");
+        }
+    }
+
+    /// N-18: an empty path list (a changed-only check on a deletion) writes nothing, and a list
+    /// longer than one command line names keeps exactly what it covers, by a whole listing.
+    #[test]
+    fn an_empty_list_writes_nothing_and_a_long_one_keeps_what_it_covers() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = repository(&dir.path().join("repo"));
+        for path in ["a/one", "a/two", "b/three", "top.md"] {
+            add(&git, path, path.as_bytes(), "100644");
+        }
+        let commit = commit_all(&git);
+        let empty = dir.path().join("empty");
+        let none: [String; 0] = [];
+        materialize(&git, &commit, Some(&none), &empty, far(), &mut || {}).unwrap();
+        assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0);
+        // Absent names pad the list past what one listing names; they keep nothing.
+        let mut paths: Vec<String> = (0..=super::PATHSPEC_MAX)
+            .map(|n| format!("gone/{n}"))
+            .collect();
+        paths.extend(["a/one", "b/"].map(str::to_owned));
+        let out = dir.path().join("out");
+        materialize(
+            &git,
+            &commit,
+            Some(paths.as_slice()),
+            &out,
+            far(),
+            &mut || {},
+        )
+        .unwrap();
+        for (path, present) in [
+            ("a/one", true),
+            ("a/two", false),
+            ("b/three", true),
+            ("top.md", false),
+            ("gone", false),
         ] {
             assert_eq!(out.join(path).exists(), present, "{path}");
         }

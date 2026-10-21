@@ -16,6 +16,10 @@
 //! - A merge also names the commits reached only through its other parents (at most
 //!   [`MAX_MERGED`] of them) and counts them all, so a commit behind a merge is never silent
 //!   (review K12). `off_first_parent` is their sum.
+//! - N-20: the window is read as the landing line ([`crate::trunkline`]): a bay landing that an
+//!   outside merge pushed off the first-parent line is a landing, never unattributed, and that
+//!   merge names `landings_off_first_parent`, how many it pushed off (the top-level
+//!   `landings_off_first_parent` is their sum).
 //!
 //! - NEW-4: under a config at trunk that declares `[[lane]]`s, each landing also names the lane
 //!   commits it brought onto trunk (`lane_leak`, [`crate::lane::of_landing`]): the commits a
@@ -106,46 +110,39 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
             crate::config::CONFIG_PATH,
         ])
         .map_err(|error| error.message())?;
-    let signatures = git
-        .ref_target(crate::registry::REGISTRY_REF)
-        .map_err(|error| error.message())?
-        .is_some();
-    let mut args = vec![
-        "log".to_owned(),
-        "--first-parent".to_owned(),
-        "-n".to_owned(),
-        window.to_string(),
-        "--format=%H%x1f%P%x1f%ct%x1f%cn%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%s%x1e".to_owned(),
-        trunk.to_owned(),
-    ];
-    if !adoption.is_empty() {
-        args.push(format!("^{adoption}"));
-    }
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let log = git.run(&args).map_err(|error| error.message())?;
+    let signatures = crate::trunkline::signatures(git)?;
+    // N-20: the landing line, so a bay landing an outside merge pushed off the first-parent
+    // line is known as one, and the merge names how many it pushed off.
+    let line = crate::trunkline::walk(
+        git,
+        trunk,
+        window,
+        (!adoption.is_empty()).then_some(adoption.as_str()),
+        "%ct%x1f%s",
+    )?;
     let (lanes, tips, _) = crate::lane::tips_at(git, trunk)?;
     let mut landings = Vec::new();
     let mut off_first_parent: u64 = 0;
+    let mut pushed_off: u64 = 0;
     let mut lane_leaks: u64 = 0;
-    for entry in log.split('\u{1e}') {
-        let fields: Vec<&str> = entry.trim().split('\u{1f}').map(str::trim).collect();
-        let [
-            commit,
-            parents,
-            time,
-            committer,
-            change,
-            registry_id,
-            subject,
-        ] = fields.as_slice()
-        else {
+    for entry in &line.entries {
+        let [time, subject] = entry.extra.as_slice() else {
             continue;
         };
-        if commit.is_empty()
-            || is_publication(git, signatures, commit, change, registry_id, committer)
+        let (commit, parents) = (entry.commit.as_str(), entry.parents.as_str());
+        if entry.via.is_some()
+            || is_publication(
+                git,
+                signatures,
+                commit,
+                &entry.change,
+                &entry.registry_id,
+                &entry.committer,
+            )
         {
             continue;
         }
+        let foreign = line.merges.iter().find(|merge| merge.commit == commit);
         let landed_as = landed_as(parents);
         let (merged, merged_count) = if landed_as == "merge" {
             behind_merge(git, commit)?
@@ -162,11 +159,17 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
             "merged": merged,
             "merged_count": merged_count,
         });
+        if let Some(foreign) = foreign {
+            // N-20: of the commits behind it, the bay landings it pushed off the line.
+            pushed_off += foreign.landings.len() as u64;
+            landing["landings_off_first_parent"] = json!(foreign.landings.len());
+            landing["landings_off_first_parent_capped"] = json!(foreign.capped);
+        }
         if !lanes.is_empty() {
             let leaks = crate::lane::of_landing(git, &tips, commit, parents)?;
             lane_leaks += u64::from(!leaks.is_empty());
-            let (lane, named) = crate::lane::row(&leaks);
-            landing["lane"] = lane;
+            let (leaked, named) = crate::lane::row(&leaks);
+            landing["lane"] = leaked;
             landing["lane_leak"] = named;
         }
         landings.push(landing);
@@ -175,6 +178,7 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
         "window": window,
         "count": landings.len(),
         "off_first_parent": off_first_parent,
+        "landings_off_first_parent": pushed_off,
         "landings": landings,
     });
     if !lanes.is_empty() {

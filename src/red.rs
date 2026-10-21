@@ -8,7 +8,9 @@
 //!
 //! - Over the newest `[red] window` first-parent commits (`.bay/config.toml` at trunk, default
 //!   [`DEFAULT_WINDOW`]), the newest commit with an answered record of the check decides. A
-//!   pass there, or above it, is green.
+//!   pass there, or above it, is green. N-20: the window is the landing line of those commits
+//!   ([`crate::trunkline`]): a bay landing an outside merge pushed off the first-parent line is
+//!   judged at that merge, so its suspect range and culprit still name it.
 //! - NEW-6: a check no commit in the window answers is never green. When the window is full,
 //!   its answer, if any, is older than the window: it is `pending_beyond_window`. When the window
 //!   holds all of trunk and a landing in it requires the check, it is `pending`. Either is listed
@@ -301,8 +303,8 @@ pub fn state(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Judg
         return Ok(Judgement::default());
     };
     let window = window(git, trunk)?;
-    let landings = landings(git, trunk, window)?;
-    Ok(decide(git, &policy, &landings, window, registry, None)?.0)
+    let (landings, full) = landings(git, trunk, window)?;
+    Ok(decide(git, &policy, &landings, (window, full), registry, None)?.0)
 }
 
 /// The red and pending checks of `trunk`, as [`state`] judges them, and what decided them
@@ -327,11 +329,18 @@ pub fn judge(
     let window = window(git, trunk)?;
     // The tips before the answers: a record written in between reads as moved next time.
     let evidence = evidence_tips(git)?;
-    let landings = landings(git, trunk, window)?;
+    let (landings, full) = landings(git, trunk, window)?;
     let known = before.and_then(|before| {
         moved(git, before, &evidence, registry, &landings).map(|moved| (before, moved))
     });
-    let (judgement, decided) = decide(git, &policy, &landings, window, registry, known.as_ref())?;
+    let (judgement, decided) = decide(
+        git,
+        &policy,
+        &landings,
+        (window, full),
+        registry,
+        known.as_ref(),
+    )?;
     Ok((
         judgement,
         Some(Judged {
@@ -352,14 +361,15 @@ fn post_policy(git: &Git, trunk: &str) -> Result<Option<crate::policy::Policy>, 
     }
 }
 
-/// The red and pending checks over `landings`, the newest `window` of trunk, and how each
+/// The red and pending checks over `landings`, the landing line of the newest `window`
+/// first-parent commits of trunk (`full` when the window held that many), and how each
 /// check was decided. With `known`, a check `known` decided is judged from what moved; any
 /// other check is judged over the window.
 fn decide(
     git: &Git,
     policy: &crate::policy::Policy,
     landings: &[Landing],
-    window: usize,
+    (window, full): (usize, bool),
     registry: Option<&Registry>,
     known: Option<&(&Judged, Moved)>,
 ) -> Result<(Judgement, Vec<Decided>), String> {
@@ -367,6 +377,7 @@ fn decide(
         git,
         registry,
         landings,
+        full,
         rows: vec![None; landings.len()],
     };
     let mut out = Judgement::default();
@@ -398,7 +409,7 @@ fn decide(
         });
         let Some((at, failed)) = answer else {
             // NEW-6: no answer in the window is never green.
-            if let Some(state) = answers.unanswered(post, window)? {
+            if let Some(state) = answers.unanswered(post)? {
                 out.pending.push(Pending {
                     check: post.id.clone(),
                     environment: post.environment.clone(),
@@ -447,6 +458,9 @@ struct Answers<'a> {
     git: &'a Git,
     registry: Option<&'a Registry>,
     landings: &'a [Landing],
+    /// Whether the window read as many first-parent commits as it holds: trunk may go on
+    /// below it.
+    full: bool,
     rows: Vec<Option<Vec<Value>>>,
 }
 
@@ -499,9 +513,8 @@ impl Answers<'_> {
     fn unanswered(
         &mut self,
         post: &crate::policy::ManifestEntry,
-        window: usize,
     ) -> Result<Option<&'static str>, String> {
-        if self.landings.len() >= window {
+        if self.full {
             return Ok(Some(PENDING_BEYOND_WINDOW));
         }
         for at in 0..self.landings.len() {
@@ -682,25 +695,24 @@ fn moved(
     Some(Moved { new, trees })
 }
 
-/// The newest `window` first-parent commits of `trunk`, newest first.
-fn landings(git: &Git, trunk: &str, window: usize) -> Result<Vec<Landing>, String> {
-    let window = window.to_string();
-    let out = git
-        .run(&[
-            "log",
-            "--first-parent",
-            "-n",
-            &window,
-            "--format=%H%x1f%T%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Fixes,valueonly,separator=%x2c)%x1f%(trailers:key=Reverts,valueonly,separator=%x2c)%x1f%(trailers:key=Supersedes,valueonly,separator=%x2c)",
-            trunk,
-        ])
-        .map_err(|error| error.message())?;
-    Ok(out
-        .lines()
-        .filter_map(|line| {
-            let fields: Vec<&str> = line.split('\u{1f}').map(str::trim).collect();
-            let (commit, tree, change) = (fields.first()?, fields.get(1)?, fields.get(2)?);
-            let names = fields[3..]
+/// N-20: the landing line ([`crate::trunkline`]) of the newest `window` first-parent commits
+/// of `trunk`, newest first, with each bay landing an outside merge pushed off the first-parent
+/// line placed at that merge; and whether the window was full.
+fn landings(git: &Git, trunk: &str, window: usize) -> Result<(Vec<Landing>, bool), String> {
+    let line = crate::trunkline::walk(
+        git,
+        trunk,
+        window,
+        None,
+        "%T%x1f%(trailers:key=Fixes,valueonly,separator=%x2c)%x1f%(trailers:key=Reverts,valueonly,separator=%x2c)%x1f%(trailers:key=Supersedes,valueonly,separator=%x2c)",
+    )?;
+    let full = line.first_parent >= window;
+    let landings = line
+        .entries
+        .into_iter()
+        .filter_map(|entry| {
+            let (tree, lineage) = entry.extra.split_first()?;
+            let names = lineage
                 .iter()
                 .flat_map(|field| field.split(','))
                 .map(str::trim)
@@ -708,11 +720,12 @@ fn landings(git: &Git, trunk: &str, window: usize) -> Result<Vec<Landing>, Strin
                 .map(str::to_owned)
                 .collect();
             Some(Landing {
-                commit: (*commit).to_owned(),
-                tree: (*tree).to_owned(),
-                change: (!change.is_empty()).then(|| (*change).to_owned()),
+                tree: tree.clone(),
+                change: (!entry.change.is_empty()).then(|| entry.change.clone()),
+                commit: entry.commit,
                 names,
             })
         })
-        .collect())
+        .collect();
+    Ok((landings, full))
 }

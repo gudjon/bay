@@ -26,7 +26,10 @@
 //! [`crate::unattributed`]); a full watch also lists an `unattributed_landing` event for each
 //! such landing it lists, outside a view (G85). `off_first_parent` counts the
 //! commits in the same range reached only through a merge's other parent: they are never
-//! listed, and the count says so.
+//! listed, and the count says so. N-20: the exception is a bay landing an outside merge pushed
+//! off the first-parent line ([`crate::trunkline`]): one not reached from the cursor is listed
+//! right before that merge, with `via` naming it, and a full watch names the merge once as a
+//! `trunk_not_linear` event (its parents, how many landings it pushed off, the recovery hint).
 //!
 //! A red trunk (G244, G244b) is derived, not logged: the cursor carries the red checks it saw,
 //! and a watch lists a `trunk_red` event for each red one it did not, and a `trunk_red_cleared`
@@ -296,6 +299,14 @@ pub fn collect(
             })
             .filter(|event| record.as_ref().is_none_or(|record| touches(record, event))),
     );
+    // N-20: a merge outside bay that put bay landings off the first-parent line is named once,
+    // when it is listed, as `trunk_not_linear`.
+    events.extend(
+        landings
+            .iter()
+            .filter_map(not_linear_event)
+            .filter(|event| record.as_ref().is_none_or(|record| touches(record, event))),
+    );
     let (reds, pending, judged, red_unread) =
         red_judged(git, &reached, since, record.as_ref(), &mut events)?;
     let (said, talks, talks_unread) = talk_events(git, since);
@@ -333,6 +344,26 @@ pub fn collect(
         }
     }
     Ok(out)
+}
+
+/// N-20: the `trunk_not_linear` event of a listed landing that is a merge outside bay which put
+/// bay landings off the first-parent line: the merge, its parents, how many landings, which,
+/// and the recovery hint. Its id names the merge, so the same merge reads as the same event.
+fn not_linear_event(landing: &Value) -> Option<Value> {
+    let pushed_off = landing.get("landings_off_first_parent")?.as_array()?;
+    let commit = landing["commit"].as_str()?;
+    Some(json!({
+        "schema": crate::log::EVENT_SCHEMA,
+        "id": format!("{}:{commit}", crate::trunkline::NOT_LINEAR),
+        "kind": crate::trunkline::NOT_LINEAR,
+        "commit": commit,
+        "parents": landing["parents"],
+        "landings": pushed_off.len(),
+        "landing_commits": pushed_off,
+        "capped": landing["landings_off_first_parent_capped"],
+        "note": crate::trunkline::HINT,
+        "recurrence_key": format!("{}/{commit}", crate::trunkline::NOT_LINEAR),
+    }))
 }
 
 /// What [`red_judged`] returns: the red checks, the pending ones as JSON, what decided them
@@ -670,6 +701,56 @@ fn touches(record: &ChangeRecord, event: &Value) -> bool {
         .any(|name| declared.iter().any(|declared| declared.as_str() == name))
 }
 
+/// N-20: for `merge`, a merge outside bay that put bay landings off the first-parent line, the
+/// landings it brought in that `from` had not listed, pushed onto `out` oldest first (so they come
+/// right before it), and on `landing` how many it pushed off and its parents.
+fn brought_in(
+    repo: &Repo,
+    from: Option<&str>,
+    signatures: bool,
+    merge: &crate::trunkline::Entry,
+    landing: &mut Value,
+    out: &mut Vec<Value>,
+) -> Result<(), String> {
+    let some = |text: &str| (!text.is_empty()).then(|| text.to_owned());
+    let extra = format!(
+        "%ct%x1f%(trailers:key={},valueonly,separator=%x2c)%x1f%s",
+        repo.config.actor_trailer()
+    );
+    let all = crate::trunkline::expand(&repo.git, merge, &[], signatures, &extra)?;
+    if !all.landings.is_empty() {
+        let unseen = match from {
+            Some(from) => crate::trunkline::expand(&repo.git, merge, &[from], signatures, &extra)?,
+            None => all.clone(),
+        };
+        for brought in unseen.landings.iter().rev() {
+            let [time, actor, subject] = brought.extra.as_slice() else {
+                continue;
+            };
+            out.push(json!({
+                "commit": brought.commit,
+                "change": brought.change,
+                "outside_bay": false,
+                "landed_as": null,
+                "base": brought.parents.split_whitespace().next(),
+                "actor": some(actor.as_str()),
+                "at": time.parse().ok().map(crate::clock::rfc3339_of),
+                "subject": subject,
+                "via": merge.commit,
+            }));
+        }
+        landing["landings_off_first_parent"] = json!(
+            all.landings
+                .iter()
+                .map(|brought| brought.commit.as_str())
+                .collect::<Vec<_>>()
+        );
+        landing["landings_off_first_parent_capped"] = json!(all.capped);
+        landing["parents"] = json!(merge.parents.split_whitespace().collect::<Vec<_>>());
+    }
+    Ok(())
+}
+
 /// Trunk's first-parent commits after `from` (all of trunk when `None`), oldest first, at most
 /// [`MAX_LANDINGS`], and the last one listed when more follow it. Each names its base (the
 /// first parent; `null` for a root) and its committer time. A landing outside bay has no
@@ -722,7 +803,7 @@ fn landings(
         if commit.is_empty() {
             continue;
         }
-        if out.len() == MAX_LANDINGS {
+        if out.len() >= MAX_LANDINGS {
             let last = out
                 .last()
                 .and_then(|landing: &Value| landing["commit"].as_str())
@@ -748,6 +829,21 @@ fn landings(
             "at": time.parse().ok().map(crate::clock::rfc3339_of),
             "subject": subject,
         });
+        if outside_bay && crate::unattributed::landed_as(parents) == "merge" {
+            // N-20: a merge outside bay that put bay landings off the first-parent line names
+            // how many (and is named once as `trunk_not_linear`), and those landings not
+            // listed before are listed here, oldest first, right before it.
+            let merge = crate::trunkline::Entry {
+                commit: (*commit).to_owned(),
+                parents: (*parents).to_owned(),
+                committer: (*committer).to_owned(),
+                change: (*change).to_owned(),
+                registry_id: (*registry_id).to_owned(),
+                via: None,
+                extra: Vec::new(),
+            };
+            brought_in(repo, from, signatures, &merge, &mut landing, &mut out)?;
+        }
         if outside_bay {
             let leaks = crate::lane::of_landing(&repo.git, &tips, commit, parents)?;
             if !leaks.is_empty() {

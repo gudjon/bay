@@ -335,6 +335,9 @@ pub struct Limits {
     /// N-3: what a check with `baseline = "base"` is judged against. `None` judges every check
     /// whole-green, as a run with no base to compare with does (the conformance kit, bisection).
     pub baseline: Option<Baseline>,
+    /// N-17: how many of the candidate's checks run at once (`[executor] parallel_checks`):
+    /// 1 runs them one after another, as every run but a candidate's does.
+    pub parallel: usize,
 }
 
 /// N-3: the base a check with `baseline = "base"` is judged against: the trunk commit the
@@ -756,10 +759,25 @@ struct ResultUnit {
     reason: Option<String>,
 }
 
+/// The most checks of one candidate `[executor] parallel_checks` may run at once.
+pub const MAX_PARALLEL_CHECKS: usize = 16;
+
+/// How often the main thread of a parallel run looks for a finished check and renews the lease.
+const PARALLEL_POLL: Duration = Duration::from_millis(50);
+
 /// Runs every required check of `policy` on `candidate` that is not in `finished`, hands each
 /// record to `keep` as soon as its check ends (so a finished unit survives a worker that dies
 /// in a later one, § 7), and returns the records of this run. A check the adapter answers
 /// `unavailable` for gets no record, and the run stops there: no worker answers for it.
+///
+/// N-17: with `limits.parallel` above 1, up to that many checks run at once, each on its own
+/// thread in its own `check-{index}` directory ([`run_parallel`]). What is observed stays what
+/// a serial run observes: records reach `keep` on this thread, one at a time, in the policy's
+/// check order, each as soon as every check before it is kept; the budget runs from the first
+/// check's start for all of them; a check's reruns stay on its own thread; and an `unavailable`
+/// answer stops the run at the same check, with no record kept for any check after it. A check
+/// judged against the base (N-3 `baseline = "base"`) shares this run's base records, so it
+/// never runs on a thread: it runs here, serially, after the checks before it are kept.
 ///
 /// # Errors
 ///
@@ -775,109 +793,393 @@ pub fn run_all(
     hooks: &mut Hooks,
 ) -> Result<Ran, String> {
     let finished = limits.finished.as_slice();
-    let sandbox = limits.sandbox.kind;
     // The execution budget runs on the monotonic clock from the start of the checks.
     let started = Instant::now();
     let mut records = Vec::new();
     // N-3: the base runs this run made, so a rerun of a check compares with the same record.
     let mut on_base: Vec<EvidenceRecord> = Vec::new();
-    // The request's `base`, `change` and `messages`, read once for every check of the run.
-    let mut about_run: Option<serde_json::Map<String, serde_json::Value>> = None;
-    for (index, entry) in policy.checks.iter().enumerate() {
-        let id = CheckId::new(&entry.id, &entry.environment);
-        // A quarantined check is not required (ruling 8c), a post-publication one runs after
-        // publication (G91), one whose paths the candidate does not change is not required
-        // of it (G146), and an approval is answered by a person's record, never run (G245):
-        // none of them runs here.
-        if finished.contains(&id) || !policy.runs(entry, candidate.changed_paths) {
-            continue;
-        }
-        if about_run.is_none() {
-            about_run = Some(about(git, candidate)?);
-        }
-        let Some(told) = about_run.as_ref() else {
-            continue;
+    // A quarantined check is not required (ruling 8c), a post-publication one runs after
+    // publication (G91), one whose paths the candidate does not change is not required of it
+    // (G146), and an approval is answered by a person's record, never run (G245): none of them
+    // runs here.
+    let required: Vec<(usize, &CheckEntry)> = policy
+        .checks
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| {
+            !finished.contains(&CheckId::new(&entry.id, &entry.environment))
+                && policy.runs(entry, candidate.changed_paths)
+        })
+        .collect();
+    if required.is_empty() {
+        return Ok(Ran {
+            records,
+            unavailable: None,
+        });
+    }
+    // The request's `base`, `change` and `messages`, read once for every check of the run, and
+    // only read by them.
+    let told = about(git, candidate)?;
+    let shared = Shared {
+        git,
+        policy,
+        candidate,
+        producer,
+        limits,
+        work_dir,
+        started,
+        about: &told,
+        shows: hooks.seen.is_some(),
+    };
+    // What the parallel phase ran, by position in `required`, and how many of them are kept.
+    let mut slots: Vec<Option<Result<Slot, String>>> = required.iter().map(|_| None).collect();
+    let mut kept = 0;
+    let width = limits.parallel.clamp(1, MAX_PARALLEL_CHECKS);
+    if width > 1
+        && let Some(unavailable) = run_parallel(
+            shared,
+            width,
+            &required,
+            hooks,
+            (slots.as_mut_slice(), &mut kept, &mut records),
+        )?
+    {
+        return Ok(Ran {
+            records,
+            unavailable: Some(unavailable),
+        });
+    }
+    // The checks left, in order: what the parallel phase ran and is not yet kept, and each check
+    // it did not run (every check of a serial run, a check judged against the base), run here.
+    for (position, &(index, entry)) in required.iter().enumerate().skip(kept) {
+        let unavailable = match slots.get_mut(position).and_then(Option::take) {
+            Some(slot) => keep_slot(shared, (index, entry), slot?, hooks, &mut records)?,
+            None => run_serial(shared, (index, entry), hooks, (&mut records, &mut on_base))?,
         };
-        // Flake-aware retry: a `product_failure` runs again on the identical tree, freshly
-        // materialized, up to `retry_on_failure` times, and stops at the first other answer.
-        // Every run is its own record, so a failure and a later pass combine to `flaky`.
-        for run in 0..=entry.retry_on_failure {
-            let (mut judged, ran) = run_once(
-                git,
-                policy,
-                candidate,
-                limits,
-                hooks,
-                (index, entry),
-                (work_dir, started, told),
-            )?;
-            if let Some(reason) = judged.unavailable.take() {
-                return Ok(Ran {
-                    records,
-                    unavailable: Some((entry.environment.clone(), reason)),
-                });
-            }
-            // N-3: a check with `baseline = "base"` that failed is judged against the base: only
-            // a unit the base did not fail is a failure. A run that did not fail needs no base.
-            let mut compared = None;
-            if let Some(base) = limits
-                .baseline
-                .as_ref()
-                .filter(|_| entry.baseline.is_some() && judged.verdict == Verdict::ProductFailure)
-            {
-                let answer = base_answer(
-                    git,
-                    policy,
-                    candidate,
-                    producer,
-                    limits,
-                    hooks,
-                    (index, entry),
-                    (work_dir, started),
-                    (base, &mut on_base),
-                )?;
-                compared = Some(against_base(&mut judged, answer, &base.commit));
-            }
-            let mut record = evidence(
-                candidate,
-                producer,
-                policy,
-                (index, entry, run),
-                judged,
-                ran,
-                sandbox,
-            );
-            // N-3: the record names the base record it was judged against, and each unit that
-            // failed on both, so its verdict is auditable.
-            if let Some(compared) = compared {
-                record.unknown.insert(BASELINE.to_owned(), compared);
-            }
-            // NEW-10: a check with `footprint = true` stamps its read set, so a later candidate
-            // whose read set is the same can carry this record (`crate::throughput`).
-            if let Some(stamp) =
-                crate::throughput::stamp(git, entry, candidate.tree, candidate.base_tree)
-            {
-                record
-                    .unknown
-                    .insert(crate::throughput::FOOTPRINT.to_owned(), stamp);
-            }
-            let verdict = record.verdict;
-            (hooks.keep)(&mut record)?;
-            records.push(record);
-            if std::env::var("BAY_TEST_KILL_AT")
-                .is_ok_and(|at| at == format!("after-check-{}", index + 1))
-            {
-                std::process::exit(137);
-            }
-            if verdict != Verdict::ProductFailure {
-                break;
-            }
+        if let Some(reason) = unavailable {
+            return Ok(Ran {
+                records,
+                unavailable: Some((entry.environment.clone(), reason)),
+            });
         }
     }
     Ok(Ran {
         records,
         unavailable: None,
     })
+}
+
+/// What every check of one run reads and none writes, shared read-only by the checks a
+/// parallel run runs at once.
+#[derive(Clone, Copy)]
+struct Shared<'a> {
+    git: &'a Git,
+    policy: &'a Policy,
+    candidate: &'a Candidate<'a>,
+    producer: &'a str,
+    limits: &'a Limits,
+    work_dir: &'a Path,
+    /// When the first check started: the execution budget runs from here for every check.
+    started: Instant,
+    /// The request's `base`, `change` and `messages` ([`about`]), computed once.
+    about: &'a serde_json::Map<String, serde_json::Value>,
+    /// The run's `hooks.seen` is set: a check on a thread keeps its exchanges to show.
+    shows: bool,
+}
+
+/// What one check run on a thread returns ([`run_in_slot`]): the record of each of its runs, in
+/// order, unsigned and not yet kept; the adapter's `unavailable` answer that ended it, if one
+/// did; and its exchanges with the adapter, to show on the main thread.
+struct Slot {
+    runs: Vec<EvidenceRecord>,
+    unavailable: Option<String>,
+    exchanges: Vec<Exchange>,
+}
+
+/// N-17: the check `entry`, the `index`th of `policy`, with its reruns, as one thread runs it:
+/// the body of a parallel run. It calls no hook of the run: the main thread renews the lease
+/// while it runs, and keeps its records and shows its exchanges once every check before it is
+/// kept. A check judged against the base never runs here ([`run_parallel`]).
+///
+/// # Errors
+///
+/// As [`run_once`].
+fn run_in_slot(shared: Shared, (index, entry): (usize, &CheckEntry)) -> Result<Slot, String> {
+    let mut exchanges = Vec::new();
+    let mut keep = |_: &mut EvidenceRecord| -> Result<(), String> { Ok(()) };
+    let mut beat = || {};
+    let mut look = |exchange: &Exchange| exchanges.push(exchange.clone());
+    let look: &mut dyn FnMut(&Exchange) = &mut look;
+    let mut hooks = Hooks {
+        keep: &mut keep,
+        beat: &mut beat,
+        seen: if shared.shows { Some(look) } else { None },
+    };
+    let (mut runs, mut unavailable) = (Vec::new(), None);
+    // Flake-aware retry, as [`run_serial`]: every rerun stays in this check's own slot.
+    for run in 0..=entry.retry_on_failure {
+        let (mut judged, ran) = run_once(
+            shared.git,
+            shared.policy,
+            shared.candidate,
+            shared.limits,
+            &mut hooks,
+            (index, entry),
+            (shared.work_dir, shared.started, shared.about),
+        )?;
+        if let Some(reason) = judged.unavailable.take() {
+            unavailable = Some(reason);
+            break;
+        }
+        let record = evidence(
+            shared.candidate,
+            shared.producer,
+            shared.policy,
+            (index, entry, run),
+            judged,
+            ran,
+            shared.limits.sandbox.kind,
+        );
+        let verdict = record.verdict;
+        runs.push(record);
+        if verdict != Verdict::ProductFailure {
+            break;
+        }
+    }
+    Ok(Slot {
+        runs,
+        unavailable,
+        exchanges,
+    })
+}
+
+/// N-17: runs the checks of `required` that are not judged against the base, up to `width` at
+/// once, each on a scoped thread ([`run_in_slot`]), started in order. This thread alone calls
+/// `hooks`: it renews the lease every heartbeat while checks run, and keeps each finished
+/// check's records in order as soon as every check before it is kept, advancing `kept`; what
+/// it cannot keep yet stays in `slots` for [`run_all`]. A check that ends `unavailable` or in
+/// a fault of bay's own starts no further check; those already started finish. Returns the
+/// environment and reason of an `unavailable` answer once every check before it is kept.
+///
+/// N-3's base comparison is not run here: a check with `baseline = "base"` (when the run has a
+/// base) reads and adds to the run's records on the base and keeps the base's own record, so
+/// it runs serially in [`run_all`] after the checks before it are kept.
+///
+/// # Errors
+///
+/// A check's fault of bay's own, once every check before it is kept, or `keep` fails.
+#[allow(clippy::type_complexity)]
+fn run_parallel(
+    shared: Shared,
+    width: usize,
+    required: &[(usize, &CheckEntry)],
+    hooks: &mut Hooks,
+    (slots, kept, records): (
+        &mut [Option<Result<Slot, String>>],
+        &mut usize,
+        &mut Vec<EvidenceRecord>,
+    ),
+) -> Result<Option<(String, String)>, String> {
+    let compares =
+        |entry: &CheckEntry| shared.limits.baseline.is_some() && entry.baseline.is_some();
+    std::thread::scope(|scope| -> Result<Option<(String, String)>, String> {
+        let (send, receive) = std::sync::mpsc::channel();
+        let mut queue = required
+            .iter()
+            .enumerate()
+            .filter(|&(_, &(_, entry))| !compares(entry));
+        let (mut active, mut stop) = (0_usize, false);
+        let mut last_beat = Instant::now();
+        loop {
+            while !stop && active < width {
+                let Some((position, &(index, entry))) = queue.next() else {
+                    break;
+                };
+                let send = send.clone();
+                scope.spawn(move || {
+                    let slot = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        run_in_slot(shared, (index, entry))
+                    }))
+                    .unwrap_or_else(|_| Err(format!("the run of the check {} failed", entry.id)));
+                    let _ = send.send((position, slot));
+                });
+                active += 1;
+            }
+            if active == 0 {
+                break;
+            }
+            if let Ok((position, slot)) = receive.recv_timeout(PARALLEL_POLL) {
+                active -= 1;
+                stop |= !slot
+                    .as_ref()
+                    .is_ok_and(|slot: &Slot| slot.unavailable.is_none());
+                if let Some(place) = slots.get_mut(position) {
+                    *place = Some(slot);
+                }
+            }
+            if shared
+                .limits
+                .heartbeat
+                .is_some_and(|every| last_beat.elapsed() >= every)
+            {
+                (hooks.beat)();
+                last_beat = Instant::now();
+            }
+            // Keep, in order, every finished check whose predecessors are all kept.
+            while let Some(slot) = slots.get_mut(*kept).and_then(Option::take) {
+                let Some(&(index, entry)) = required.get(*kept) else {
+                    break;
+                };
+                *kept += 1;
+                if let Some(reason) = keep_slot(shared, (index, entry), slot?, hooks, records)? {
+                    return Ok(Some((entry.environment.clone(), reason)));
+                }
+            }
+        }
+        Ok(None)
+    })
+}
+
+/// Shows and keeps what the check `entry`, the `index`th, ran on a thread, in order, and
+/// returns the `unavailable` answer that ended it, if one did.
+///
+/// # Errors
+///
+/// `keep` fails.
+fn keep_slot(
+    shared: Shared,
+    (index, entry): (usize, &CheckEntry),
+    slot: Slot,
+    hooks: &mut Hooks,
+    records: &mut Vec<EvidenceRecord>,
+) -> Result<Option<String>, String> {
+    if let Some(seen) = hooks.seen.as_deref_mut() {
+        for exchange in &slot.exchanges {
+            seen(exchange);
+        }
+    }
+    for record in slot.runs {
+        keep_record(shared, (index, entry), record, hooks, records)?;
+    }
+    Ok(slot.unavailable)
+}
+
+/// Stamps `record`, of the check `entry`, the `index`th, with its footprint, hands it to
+/// `hooks.keep` and adds it to `records`.
+///
+/// # Errors
+///
+/// `keep` fails.
+fn keep_record(
+    shared: Shared,
+    (index, entry): (usize, &CheckEntry),
+    mut record: EvidenceRecord,
+    hooks: &mut Hooks,
+    records: &mut Vec<EvidenceRecord>,
+) -> Result<(), String> {
+    // NEW-10: a check with `footprint = true` stamps its read set, so a later candidate whose
+    // read set is the same can carry this record (`crate::throughput`).
+    if let Some(stamp) = crate::throughput::stamp(
+        shared.git,
+        entry,
+        shared.candidate.tree,
+        shared.candidate.base_tree,
+    ) {
+        record
+            .unknown
+            .insert(crate::throughput::FOOTPRINT.to_owned(), stamp);
+    }
+    (hooks.keep)(&mut record)?;
+    records.push(record);
+    if std::env::var("BAY_TEST_KILL_AT").is_ok_and(|at| at == format!("after-check-{}", index + 1))
+    {
+        std::process::exit(137);
+    }
+    Ok(())
+}
+
+/// The check `entry`, the `index`th of `policy`, with its reruns, run and kept on this thread:
+/// every check of a serial run, and a check judged against the base in a parallel one. Returns
+/// the adapter's `unavailable` answer that ended it, if one did.
+///
+/// # Errors
+///
+/// As [`run_once`] and [`base_answer`], or `keep` fails.
+fn run_serial(
+    shared: Shared,
+    (index, entry): (usize, &CheckEntry),
+    hooks: &mut Hooks,
+    (records, on_base): (&mut Vec<EvidenceRecord>, &mut Vec<EvidenceRecord>),
+) -> Result<Option<String>, String> {
+    let Shared {
+        git,
+        policy,
+        candidate,
+        producer,
+        limits,
+        work_dir,
+        started,
+        about: told,
+        ..
+    } = shared;
+    // Flake-aware retry: a `product_failure` runs again on the identical tree, freshly
+    // materialized, up to `retry_on_failure` times, and stops at the first other answer.
+    // Every run is its own record, so a failure and a later pass combine to `flaky`.
+    for run in 0..=entry.retry_on_failure {
+        let (mut judged, ran) = run_once(
+            git,
+            policy,
+            candidate,
+            limits,
+            hooks,
+            (index, entry),
+            (work_dir, started, told),
+        )?;
+        if let Some(reason) = judged.unavailable.take() {
+            return Ok(Some(reason));
+        }
+        // N-3: a check with `baseline = "base"` that failed is judged against the base: only
+        // a unit the base did not fail is a failure. A run that did not fail needs no base.
+        let mut compared = None;
+        if let Some(base) = limits
+            .baseline
+            .as_ref()
+            .filter(|_| entry.baseline.is_some() && judged.verdict == Verdict::ProductFailure)
+        {
+            let answer = base_answer(
+                git,
+                policy,
+                candidate,
+                producer,
+                limits,
+                hooks,
+                (index, entry),
+                (work_dir, started),
+                (base, &mut *on_base),
+            )?;
+            compared = Some(against_base(&mut judged, answer, &base.commit));
+        }
+        let mut record = evidence(
+            candidate,
+            producer,
+            policy,
+            (index, entry, run),
+            judged,
+            ran,
+            limits.sandbox.kind,
+        );
+        // N-3: the record names the base record it was judged against, and each unit that
+        // failed on both, so its verdict is auditable.
+        if let Some(compared) = compared {
+            record.unknown.insert(BASELINE.to_owned(), compared);
+        }
+        let verdict = record.verdict;
+        keep_record(shared, (index, entry), record, hooks, records)?;
+        if verdict != Verdict::ProductFailure {
+            break;
+        }
+    }
+    Ok(None)
 }
 
 /// One run of the check `entry`, the `index`th of `policy`, on `candidate`: its tree and adapter
@@ -1020,7 +1322,8 @@ fn answers_on_base(
     entry: &CheckEntry,
     base: &str,
 ) -> bool {
-    let commit_keyed = entry.inputs.iter().any(|input| input == "commit");
+    // N-18: a changed-only check's base record is the base's own, on its own first parent.
+    let commit_keyed = entry.inputs.iter().any(|input| input == "commit") || entry.changed_only();
     record.kind == crate::evidence::KIND_CHECK
         && record.check == CheckId::new(&entry.id, &entry.environment)
         && record.subject.tree == candidate.base_tree
@@ -1295,7 +1598,11 @@ struct Place<'a> {
 
 /// The `bay.check.request/1` bay sends for `entry` on `candidate` (`INTERFACES` § 3). Fields
 /// are only ever added to a request of one schema, and an adapter ignores a field it does not
-/// know, so `base`, `change`, `messages`, `messages_truncated` and `git` keep it at `/1`:
+/// know, so `base`, `change`, `messages`, `messages_truncated`, `git` and `materialized` keep
+/// it at `/1`:
+/// - `materialized`: `"changed"`, only for a check with `materialize = "changed"` (N-18): its
+///   tree holds only the request's `changed_paths` that the candidate still has, and the
+///   entry's `paths`.
 /// - `base`: `{"commit", "tree"}`, the accepted base the candidate was merged onto.
 /// - `change`: `{"id", "intent": {"reference", "revision"}, "actor", "revision"}`, and
 ///   `messages`: the change's own commits between the base and its revision, oldest first,
@@ -1329,6 +1636,11 @@ fn request(
         "timeout_s": entry.timeout_s,
         "inputs": candidate.inputs,
     });
+    // N-18: the tree holds only `changed_paths` (and the entry's `paths`), so an adapter knows
+    // that a file absent from it may still be in the candidate.
+    if entry.changed_only() {
+        request["materialized"] = json!("changed");
+    }
     if let Some(fields) = request.as_object_mut() {
         fields.extend(place.about.clone());
         if let Some(history) = place.history {
@@ -1805,10 +2117,13 @@ fn prepare(
             last_beat = Instant::now();
         }
     };
+    // N-18: a changed-only check gets the candidate's changed paths and its `paths`, never the
+    // rest of the tree; its adapter paths still come from the base, as for any check.
+    let kept = entry.materialized(candidate.changed_paths);
     let made = materialize(
         git,
         candidate.commit,
-        entry.paths.as_deref(),
+        kept.as_deref(),
         tree_dir,
         deadline,
         &mut tick,
@@ -2140,6 +2455,7 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
                 hidden: Vec::new(),
                 sandbox,
                 baseline: None,
+                parallel: 1,
             };
             let mut keep = |_: &mut EvidenceRecord| Ok(());
             let mut records = run_all(

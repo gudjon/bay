@@ -97,6 +97,7 @@ fn undo_in(dir: &Path, repo: &Repo, change: &str, wait: bool) -> Result<BayResul
         fixes: None,
         lane: None,
         from: None,
+        after: Vec::new(),
     };
     let started = start::start(dir, &request);
     if started.decision != Decision::Ok {
@@ -142,8 +143,9 @@ fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
 }
 
 /// The trunk commit that published `change`: the remote's `refs/bay/landed/<change>`, or the
-/// shard index record that stands in for it (§ 10a), names it and the trunk scan from the
-/// change's `base_first` finds it (§ 6). `None` when the change is not on trunk.
+/// shard index record that stands in for it (§ 10a), names it, trunk reaches it (by ancestry,
+/// never by first-parent position: N-20), and the trunk scan from the change's `base_first`
+/// finds it (§ 6). `None` when the change is not on trunk.
 pub(crate) fn landed_commit(
     repo: &Repo,
     change: &str,
@@ -165,6 +167,15 @@ pub(crate) fn landed_commit(
     else {
         return Ok(None);
     };
+    // N-20: the marker's commit is on trunk when trunk reaches it, wherever it sits: a merge
+    // pushed outside bay may have put it off the first-parent line, and it is undone all the
+    // same, on the tip. A marker naming a commit this clone's trunk does not hold is not on it.
+    if !matches!(
+        crate::trunkline::is_ancestor(&repo.git, &landed, trunk),
+        Ok(true)
+    ) {
+        return Ok(None);
+    }
     let remote = fetch_chain(repo, change).map_err(unreadable)?;
     let record = Chain::new(&repo.git)
         .record_at(&remote)
@@ -181,7 +192,7 @@ pub(crate) fn landed_commit(
 /// is fetched into `refs/bay/fetch/<id>`, and the local chain is created at it, or moved to it
 /// only when it descends from the local head, each by compare-and-swap. A local chain that is
 /// ahead of the remote, or apart from it, is left where it is.
-fn fetch_chain(repo: &Repo, change: &str) -> Result<String, crate::git::GitError> {
+pub(crate) fn fetch_chain(repo: &Repo, change: &str) -> Result<String, crate::git::GitError> {
     let git = &repo.git;
     let name = change_ref(change);
     let fetched = format!("{}{change}", crate::names::FETCH);

@@ -34,7 +34,8 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | A follow-up after your change merged | `bay start <intent> --new` |
 | Fix a change that already merged | `bay start <intent> --fixes <change>` (the merge names it in a `Fixes:` trailer) |
 | Try work that must never merge, in a sandbox lane the config declares | `bay start <intent> --paths <paths> --lane <lane>` (`bay land` runs its checks; it never merges) |
-| Take in a branch made outside bay (a bot's or a person's) as one change | `bay start <intent> --paths <paths> --from <branch>` (`--paths` must cover every file it changes; then `bay land`) |
+| Take in a branch made outside bay (a bot's or a person's) as one change | `bay start <intent> --paths <paths> --from <branch>` (the remote's tip when the remote has the branch; `--paths` must cover every file it changes; then `bay land`) |
+| Merge a change only after another change merged | `bay start <intent> --paths <paths> --after <change>` (repeatable; land it now, it merges once each one merged) |
 | Give the change up, so another agent may adopt it | `bay land --abandon` |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
 | Read state, and main commits that did not merge through bay (`unattributed`) | `bay status` |
@@ -63,6 +64,9 @@ command, flag and reason code, with the JSON Schema of `bay.result/1`.
   the named paths, then go on.
 - `bay status` with `detail.warnings` naming `no_live_executor`: work is queued and no executor has
   been seen recently. Tell the user an executor must run (`bay executor run`). The work stays queued.
+- `bay status` with `detail.warnings` naming `trunk_not_linear`: a merge pushed outside bay put
+  landings off main's first-parent line. bay still finds them. Tell the user to require linear
+  history on the host.
 - A `blocked` or `failed` result names a `reason`, the actions still `allowed`, and `retry_when`:
   the condition under which a retry can succeed. bay refuses an unchanged retry, except for a few
   transient reasons that it retries itself.
@@ -90,10 +94,13 @@ Common reasons:
 | `CHECK_FLAKY` | Tell the user: the check gives two answers for one tree. A landing may name one flaky in `coverage_gaps`: report it, never as passed. |
 | `TRUNK_RED` | Main is red on these paths. Wait, or fix the owner's change: `bay start --fixes <change>`. |
 | `TRUNK_HELD` | Main is held (`detail.hold`: why, until when). The change stays queued and merges once the hold clears. Only fixes and reverts merge now. |
+| `DEPENDENCY_PENDING` | A change named by `--after` has not merged yet (`detail.pending`). The change stays queued and merges after it. |
+| `DEPENDENCY_ABANDONED` | A change named by `--after` ended unmerged (`detail.ended`). `bay land --abandon`, then `bay start <intent> --new` without it; or restart that change. |
 | `PROMOTION_REFUSED` | The host refused a push to a target such as `staging`. Push the commit `bay status` names promotable, or wait. |
 | `APPROVAL_PENDING` | These paths need a person's yes. Tell the user who can approve (`detail.approval.checks[].approvers`) and the candidate commit to approve (`detail.approval.commit`). Wait, then `bay land --wait` again. |
 | `COVERAGE_UNKNOWN` | Keep editing; `bay land` when coordination data is reachable. |
 | `LANE_NEVER_LANDS` | A lane change: read the check verdicts in `detail`. It never merges. |
+| `PATHS_UNDECLARED` | The `--from` branch changes paths you did not declare (`detail.uncovered`). Start again with `--paths` covering them. |
 | `LANE_LEAK` | The view holds a lane's commits (`detail.leaks`). Redo the work without them, or use `--lane`. |
 | `ACTOR_UNPROVEN` | Policy requires proof of who signs, and actors share this OS account. Tell the user: a hardware agent key, or one OS account per actor. |
 | `WIP_LIMIT` | You hold the most live changes policy allows (`detail.live_changes`). Land or abandon one, then start again. |
@@ -107,8 +114,8 @@ Every code: https://getbay.io/docs/results
 | When | Run |
 | --- | --- |
 | See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the executors with their age (`executors`; `stale`) | `bay status --fleet` |
-| See every branch on the remote, classed `trunk`, `target`, `lane`, `landed`, `stale` or `unique`; delete only those `landed` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log` | `bay status --heads [--stale-days <n>] [--prune]` |
-| See merges, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
+| See every branch on the remote, classed `trunk`, `target`, `lane`, `landed`, `stale` or `unique`; delete only those `landed` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[heads] on_prune` adapter runs after each delete (`detail.pruned[].on_prune`) | `bay status --heads [--stale-days <n>] [--prune]` |
+| See merges, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`, `trunk_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
 
@@ -124,6 +131,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    main. https://getbay.io/docs/configuration lists every key. To hold main (an incident, a
    migration), add a `[[freeze]]` whose `target` is main's name, with `end` and `reason`, or a
    `[hold] command` that answers `{"held": true|false, "reason": "..."}` to `<command> status`.
+   To act on the host when `bay status --heads --prune` deletes a branch (close its pull request,
+   say), add `[heads] on_prune`: it runs as `<command> pruned <branch> <sha> <archive ref>`.
 2. `.bay/policy.toml` lists the required checks. Each `[[check]]` needs `expected_minimum`. A
    repository that wants no checks says `unchecked = true`. Paths that need a person's approval
    get a `[[check]]` with `kind = "approval"` and `when_paths`, and no command; each approver is

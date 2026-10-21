@@ -3,6 +3,7 @@
 //! The design is `DESIGN`; the contracts are `INTERFACES`.
 
 pub mod adapter;
+pub mod after;
 pub mod agent_hook;
 pub mod agent_settings;
 pub mod bisect;
@@ -68,6 +69,7 @@ pub mod talk;
 pub mod target;
 pub mod throughput;
 pub mod timing;
+pub mod trunkline;
 pub mod unattributed;
 pub mod undo;
 pub mod update;

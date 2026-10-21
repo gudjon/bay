@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.3
+
+- `bay start --after <change>` lands a change only after the named changes landed on main.
+- A dependent change waits queued with `DEPENDENCY_PENDING` and holds no queue place meanwhile.
+- A dependency that ends without landing refuses its dependent with `DEPENDENCY_ABANDONED`.
+- The dependent's main commit names each dependency in a `Bay-After:` trailer.
+- `[executor] parallel_checks = N` runs up to N of a candidate's checks at once; default 1.
+- A check may set `materialize = "changed"` to see only the files a change touched, plus its `paths`.
+- Such a check's request says `"materialized": "changed"`, and its evidence is keyed by commit.
+- `bay status --heads --prune` runs an optional `[heads] on_prune` adapter after each delete, from trunk's copy.
+- A failing prune adapter never undoes the prune or stops it; each branch records the adapter's outcome.
+- `bay start --from <branch>` takes the remote's tip when the remote has it, even over a local branch.
+- A `--from` branch touching undeclared paths is refused as `PATHS_UNDECLARED`, naming them.
+- bay finds landings that an outside merge pushed off trunk's first-parent line, by ancestry.
+- Red judgement, culprits, targets and undo read that landing line, including landings behind outside merges.
+- `bay status` and `bay watch` warn `trunk_not_linear` for each such merge; require linear history on the host.
+
 ## 0.2.2
 
 - A check request now names its base commit, the change, its actor and the change's commit messages.
@@ -42,7 +59,7 @@ Red trunk
 - A red post check names its `suspect` range: the last pass, the first failure, and the landings between.
 - `[executor] bisect_post = true` bisects a red post check's suspect range, recording each run as post evidence.
 - The bisect reruns the suspect once to rule out a flake, in at most log2(n) + 1 runs.
-- A red pinned to one landing names it `culprit`, with the verdicts tested; it owns the red and `TRUNK_RED`.
+- A red pinned to one landing names it `culprit`, with the verdict of each run; it owns the red and `TRUNK_RED`.
 
 Promotion
 - `[[target]]` in `.bay/config.toml` names promotion targets such as `staging`, with required checks and a soak.

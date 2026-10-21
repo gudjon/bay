@@ -102,7 +102,10 @@
         "APPROVAL_PENDING",
         "WIP_LIMIT",
         "DISK_LOW",
-        "TRUNK_HELD"
+        "TRUNK_HELD",
+        "PATHS_UNDECLARED",
+        "DEPENDENCY_PENDING",
+        "DEPENDENCY_ABANDONED"
       ]
     },
     "change": {
@@ -180,7 +183,10 @@
         "approved",
         "a_live_change_lands_or_is_abandoned",
         "free_space_above_floor",
-        "hold_cleared"
+        "hold_cleared",
+        "paths_declared",
+        "dependencies_landed",
+        "dependency_dropped_or_restarted"
       ]
     },
     "waiting_for": {

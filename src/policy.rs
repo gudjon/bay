@@ -174,12 +174,25 @@ pub struct CheckEntry {
     pub env: Vec<String>,
     /// The only paths of the candidate's tree the check sees, each a file or a directory
     /// ending in `/`, matched as an `adapter` entry is: the rest of the tree is absent from
-    /// its materialization. Absent, the check gets the whole tree. A field of the entry, so it
-    /// is judged at the base and enters the definition digest; left out of the canonical entry
-    /// when absent, so a policy without it keeps its digest (the G26 vector). An empty list
-    /// makes the policy invalid.
+    /// its materialization. Absent, the check gets the whole tree. With `materialize =
+    /// "changed"`, the check sees these paths and the candidate's changed paths. A field of the
+    /// entry, so it is judged at the base and enters the definition digest; left out of the
+    /// canonical entry when absent, so a policy without it keeps its digest (the G26 vector).
+    /// An empty list makes the policy invalid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
+    /// N-18: what of the candidate's tree is materialized for the check. Absent, the whole
+    /// tree (or its `paths`). `"changed"`: only the paths the candidate's diff against its base
+    /// changes (the request's `changed_paths`; a deleted path is simply absent), together with
+    /// the entry's `paths` when it lists them, and the request says `"materialized":
+    /// "changed"`. What such a check sees depends on the base as well as the tree, so its
+    /// evidence is keyed by subject commit, as `inputs = ["commit"]` keys it
+    /// ([`CheckEntry::commit_keyed`]): the candidate commit names its base, so a record never
+    /// answers another changed set. Refused with `footprint = true`, which carries a record
+    /// onto another changed set, and on an approval. Judged at the base; `"changed"` enters the
+    /// definition digest, and absent is left out of the canonical entry (the G26 vector).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub materialize: Option<Materialize>,
     /// The bound on materializing the candidate and the adapter for this check, in seconds,
     /// apart from the bound on one Git call: exceeding it is `infra_failure` that names it,
     /// never a pass. Left out of the canonical entry at its default, so a policy without it
@@ -258,6 +271,14 @@ pub enum Baseline {
     Base,
 }
 
+/// A check's `materialize` (N-18): what of the candidate's tree its run gets.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Materialize {
+    /// Only the paths the candidate changes against its base, and the entry's `paths`.
+    Changed,
+}
+
 /// The most reruns a `[[check]]` may ask for with `retry_on_failure`: a check that fails every
 /// run is run this many times more, so the bound keeps a typo from holding the executor.
 pub const MAX_RETRY_ON_FAILURE: u32 = 5;
@@ -319,13 +340,44 @@ impl CheckEntry {
     }
 
     /// Whether the check's evidence is keyed by subject commit: it declares the input `commit`
-    /// or `history`, so its verdict reads more than the tree, and a result for one commit never
-    /// stands for another with the same tree.
+    /// or `history`, or sees only its changed paths (`materialize = "changed"`, N-18), so its
+    /// verdict reads more than the tree, and a result for one commit never stands for another
+    /// with the same tree. A changed-only check sees what the candidate changes against its
+    /// base; the candidate commit names that base, so its record never answers a candidate on
+    /// another base, whose changed set differs.
     #[must_use]
     pub fn commit_keyed(&self) -> bool {
-        self.inputs
+        self.changed_only()
+            || self
+                .inputs
+                .iter()
+                .any(|input| input == INPUT_COMMIT || input == INPUT_HISTORY)
+    }
+
+    /// Whether the check sees only the candidate's changed paths and its `paths`
+    /// (`materialize = "changed"`, N-18).
+    #[must_use]
+    pub fn changed_only(&self) -> bool {
+        self.materialize == Some(Materialize::Changed)
+    }
+
+    /// What of the candidate's tree a run of the check gets, for a candidate whose diff
+    /// against its base changes `changed`: `None` for the whole tree, else the paths its
+    /// materialization keeps. A changed-only check (N-18) keeps `changed` and its `paths`,
+    /// sorted and once each; any other keeps its `paths`, or the whole tree without them.
+    #[must_use]
+    pub fn materialized(&self, changed: &[String]) -> Option<Vec<String>> {
+        if !self.changed_only() {
+            return self.paths.clone();
+        }
+        let mut kept: Vec<String> = changed
             .iter()
-            .any(|input| input == INPUT_COMMIT || input == INPUT_HISTORY)
+            .chain(self.paths.iter().flatten())
+            .cloned()
+            .collect();
+        kept.sort();
+        kept.dedup();
+        Some(kept)
     }
 
     /// Whether the check reads history: it declares the input `history`, so its request
@@ -1224,6 +1276,14 @@ fn validate_footprint(entry: &CheckEntry) -> Result<(), String> {
             entry.id
         ));
     }
+    // N-18: a footprint carries a record onto a candidate with another changed set, and a
+    // changed-only check sees exactly its own changed set.
+    if entry.footprint && entry.changed_only() {
+        return Err(format!(
+            "check {} declares footprint = true and materialize = \"changed\"; a footprint carries a record onto another changed set, and this check sees only its own",
+            entry.id
+        ));
+    }
     Ok(())
 }
 
@@ -1262,7 +1322,7 @@ fn validate_when_paths(entry: &CheckEntry) -> Result<(), String> {
 /// The `kind` rules of one `[[check]]` (G245). A run check states its `command`, its `adapter`
 /// list and its `expected_minimum`. An approval check is answered by a person's signed record,
 /// never run, so it states none of them, nor anything that shapes a run (`env`, `inputs`,
-/// `fixtures`, `paths`, `network`); it judges a landing, so it is never `post`; and it names
+/// `fixtures`, `paths`, `materialize`, `network`); it judges a landing, so it is never `post`; and it names
 /// the paths that need the approval in `when_paths`, which it requires: an approval on every
 /// change is stated as `when_paths = ["**"]`, never by leaving the list out.
 fn validate_kind(entry: &CheckEntry) -> Result<(), String> {
@@ -1289,6 +1349,7 @@ fn validate_kind(entry: &CheckEntry) -> Result<(), String> {
         ("inputs", !entry.inputs.is_empty()),
         ("fixtures", !entry.fixtures.is_empty()),
         ("paths", entry.paths.is_some()),
+        ("materialize", entry.materialize.is_some()),
         ("network", entry.network),
         ("retry_on_failure", entry.retry_on_failure > 0),
         ("allow_flaky", entry.allow_flaky),
@@ -1538,6 +1599,69 @@ mod tests {
         assert!(super::validate_retry(&post).is_err());
         let approval: CheckEntry = toml::from_str(
             "id = \"a\"\nenvironment = \"people\"\nkind = \"approval\"\nwhen_paths = [\"**\"]\nbaseline = \"base\"\n",
+        )
+        .unwrap();
+        assert!(super::validate_kind(&approval).is_err());
+    }
+
+    /// N-18: `materialize = "changed"` enters the definition digest; absent, it is left out of
+    /// the canonical entry (the G26 vector). It keys the check's evidence by commit, keeps the
+    /// changed paths and the entry's `paths`, and is invalid with `footprint = true` or on an
+    /// approval. Its one value is `"changed"`.
+    #[test]
+    fn a_changed_only_check_enters_the_digest_and_keeps_its_changed_paths() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let entry =
+            |extra: &str| -> CheckEntry { toml::from_str(&format!("{text}{extra}")).unwrap() };
+        let plain = entry("");
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("materialize").is_none(), "{json}");
+        let set = entry("materialize = \"changed\"\n");
+        assert_eq!(
+            serde_json::to_value(&set).unwrap()["materialize"],
+            "changed"
+        );
+        let ids = BTreeMap::new();
+        assert_ne!(
+            manifest_entry(&plain, &ids).unwrap().definition_digest,
+            manifest_entry(&set, &ids).unwrap().definition_digest
+        );
+        assert!(toml::from_str::<CheckEntry>(&format!("{text}materialize = \"all\"\n")).is_err());
+        assert!(!plain.commit_keyed() && set.commit_keyed());
+        let changed = ["src/b.rs", "src/a.rs"].map(str::to_owned);
+        assert_eq!(plain.materialized(&changed), None);
+        assert_eq!(
+            set.materialized(&changed),
+            Some(["src/a.rs", "src/b.rs"].map(str::to_owned).to_vec())
+        );
+        let extras = entry("materialize = \"changed\"\npaths = [\".bay/\", \"src/a.rs\"]\n");
+        assert_eq!(
+            extras.materialized(&changed),
+            Some(
+                [".bay/", "src/a.rs", "src/b.rs"]
+                    .map(str::to_owned)
+                    .to_vec()
+            )
+        );
+        assert_eq!(
+            extras.materialized(&[]),
+            Some([".bay/", "src/a.rs"].map(str::to_owned).to_vec())
+        );
+        assert_eq!(set.materialized(&[]), Some(Vec::new()));
+        assert!(
+            super::validate_footprint(&entry(
+                "materialize = \"changed\"\nwhen_paths = [\"src/**\"]\n"
+            ))
+            .is_ok()
+        );
+        assert!(
+            super::validate_footprint(&entry(
+                "materialize = \"changed\"\nwhen_paths = [\"src/**\"]\nfootprint = true\n"
+            ))
+            .is_err()
+        );
+        let approval: CheckEntry = toml::from_str(
+            "id = \"a\"\nenvironment = \"people\"\nkind = \"approval\"\nwhen_paths = [\"**\"]\nmaterialize = \"changed\"\n",
         )
         .unwrap();
         assert!(super::validate_kind(&approval).is_err());

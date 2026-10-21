@@ -49,6 +49,7 @@ fn record(id: &str, base: &str) -> ChangeRecord {
         receipts: Vec::new(),
         lane: None,
         from: None,
+        after: Vec::new(),
     }
 }
 

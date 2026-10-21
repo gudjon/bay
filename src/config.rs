@@ -6,8 +6,8 @@
 //! not in § 7's list yet. `[executor]` and `[retention]` are read by built features but are
 //! not in § 7's list yet (BACKLOG 18), nor is `[view]` (G175), nor `[red]` (NEW-6), nor are
 //! `[[target]]` and `[[freeze]]` (NEW-5, NEW-9, `crate::target`), nor `[hold]` (N-8,
-//! `crate::hold`), nor `[[lane]]` (NEW-4, [`Lane`]). A key or table bay does not know is a config error that
-//! names it, as is `evidence_reuse` set to anything but `"off"` or `"exact-inputs"`: a misspelled
+//! `crate::hold`), nor `[[lane]]` (NEW-4, [`Lane`]), nor `[heads]` (N-19, `crate::heads`). A
+//! key or table bay does not know is a config error that names it, as is `evidence_reuse` set to anything but `"off"` or `"exact-inputs"`: a misspelled
 //! setting never loads as a silent default. A config written for a later bay is refused by
 //! this one, and the recovery is `bay update`.
 
@@ -47,6 +47,9 @@ pub struct Config {
     pub wake: Option<Wake>,
     /// `[hold] command`: the hold adapter (N-8, `crate::hold`), asked before each publication.
     pub hold: Option<HoldAdapter>,
+    /// `[heads] on_prune`: the prune adapter (N-19, `crate::heads`), run after each branch
+    /// `bay status --heads --prune` deletes.
+    pub heads: Option<Heads>,
     pub runtime: Option<Runtime>,
     pub policy: Option<PolicyProfile>,
     pub hooks: Option<Hooks>,
@@ -145,6 +148,22 @@ pub struct HoldAdapter {
     pub command: Option<String>,
     pub timeout_s: Option<u64>,
 }
+
+/// `[heads]` (N-19, `crate::heads`): `on_prune`, the prune adapter, a program path relative to
+/// the work tree, then its arguments. After each branch `bay status --heads --prune` deletes,
+/// bay runs it, materialized from the trunk's tip, as `<on_prune> pruned <branch> <sha>
+/// <archive ref>`, within `timeout_s` (30 s unless set). It is where a team reaches outside
+/// the repository, to close the branch's open pull request on its host for example; bay
+/// itself never does.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Heads {
+    pub on_prune: Option<String>,
+    pub timeout_s: Option<u64>,
+}
+
+/// The longest `[heads] timeout_s` (N-19): the prune adapter runs once per pruned branch.
+pub const MAX_HEADS_TIMEOUT_S: u64 = 600;
 
 /// `[wake] command`: the wake adapter (G58, `crate::talk::wake`).
 #[derive(Debug, Deserialize)]
@@ -275,6 +294,10 @@ pub struct Executor {
     /// Batching with bisection (`crate::throughput`): `batch = { min, max, max_failure_rate }`.
     /// Absent, off.
     pub batch: Option<Batch>,
+    /// N-17 (`crate::check::run_all`): how many of a candidate's checks run at once, each in
+    /// its own work directory. Default 1, one after another; at most
+    /// [`crate::check::MAX_PARALLEL_CHECKS`].
+    pub parallel_checks: Option<usize>,
 }
 
 /// `[executor] batch` (`crate::throughput`): at least `min` members (default 1; a batch always
@@ -290,8 +313,8 @@ pub struct Batch {
 }
 
 /// The configurable trailer keys. `Change-Id`, `Revision-Id`, `Request-Id`, `Candidate-Id`,
-/// `Registry-Id`, `Bay-Epoch` and `Bay-Session` are fixed names. The actor trailer carries
-/// the actor's bare name; its session goes in `Bay-Session`.
+/// `Registry-Id`, `Bay-Epoch`, `Bay-Session`, `Bay-Batch` and `Bay-After` are fixed names. The
+/// actor trailer carries the actor's bare name; its session goes in `Bay-Session`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Trailers {
@@ -448,8 +471,33 @@ impl Config {
                 ));
             }
         }
+        if let Some(heads) = &config.heads {
+            if heads
+                .on_prune
+                .as_deref()
+                .is_some_and(|command| command.trim().is_empty())
+            {
+                return Err("[heads] on_prune is empty".to_owned());
+            }
+            if let Some(timeout) = heads.timeout_s
+                && !(1..=MAX_HEADS_TIMEOUT_S).contains(&timeout)
+            {
+                return Err(format!(
+                    "[heads] timeout_s = {timeout}: the prune adapter's bound is 1 to \
+                     {MAX_HEADS_TIMEOUT_S} s"
+                ));
+            }
+        }
         config.validate_lanes()?;
         config.validate_throughput()?;
+        let parallel = config.parallel_checks();
+        if !(1..=crate::check::MAX_PARALLEL_CHECKS).contains(&parallel) {
+            return Err(format!(
+                "[executor] parallel_checks = {parallel}: 1 to {} of a candidate's checks run at \
+                 once",
+                crate::check::MAX_PARALLEL_CHECKS
+            ));
+        }
         // § 4: the takeover window is longer than the executor lease.
         if config.takeover() <= config.lease() {
             return Err(format!(
@@ -879,6 +927,16 @@ impl Config {
             .map(std::time::Duration::from_secs)
     }
 
+    /// `[executor] parallel_checks` (N-17, `crate::check::run_all`): how many of a candidate's
+    /// checks run at once. Default 1, one after another.
+    #[must_use]
+    pub fn parallel_checks(&self) -> usize {
+        self.executor
+            .as_ref()
+            .and_then(|executor| executor.parallel_checks)
+            .unwrap_or(1)
+    }
+
     /// `[executor] ahead` (NEW-2, `crate::throughput`): how many entries behind the queue's
     /// head are checked ahead of their turn. Default 0, off.
     #[must_use]
@@ -1233,6 +1291,28 @@ product = "claude"                 # leave this table out when the box does not 
     }
 
     #[test]
+    fn the_prune_adapter_is_read_and_checked() {
+        // N-19.
+        assert!(Config::default().heads.is_none());
+        let config =
+            Config::parse("[heads]\non_prune = \"scripts/on-prune\"\ntimeout_s = 5\n").unwrap();
+        let heads = config.heads.as_ref().unwrap();
+        assert_eq!(heads.on_prune.as_deref(), Some("scripts/on-prune"));
+        assert_eq!(heads.timeout_s, Some(5));
+        for (text, named) in [
+            ("[heads]\non_prune = \" \"\n", "empty"),
+            ("[heads]\non_prune = \"x\"\ntimeout_s = 0\n", "timeout_s"),
+            (
+                "[heads]\non_prune = \"x\"\non_delete = \"y\"\n",
+                "on_delete",
+            ),
+        ] {
+            let error = Config::parse(text).unwrap_err();
+            assert!(error.contains(named), "{text}: {error}");
+        }
+    }
+
+    #[test]
     fn a_lane_is_named_once_with_ref_patterns_and_a_shorter_window() {
         // NEW-4.
         assert!(Config::default().lanes.is_empty());
@@ -1313,6 +1393,21 @@ product = "claude"                 # leave this table out when the box does not 
         assert_eq!(config.retention_window().as_secs(), 0);
         assert_eq!(config.ref_budget(), 7);
         assert_eq!(Config::default().ref_budget(), 100_000);
+    }
+
+    /// N-17: a candidate's checks run one after another by default, and at most
+    /// `MAX_PARALLEL_CHECKS` at once.
+    #[test]
+    fn parallel_checks_default_to_one_and_are_bounded() {
+        assert_eq!(Config::default().parallel_checks(), 1);
+        let on = Config::parse("[executor]\nparallel_checks = 3\n").unwrap();
+        assert_eq!(on.parallel_checks(), 3);
+        for bad in [0, crate::check::MAX_PARALLEL_CHECKS + 1] {
+            let error =
+                Config::parse(&format!("[executor]\nparallel_checks = {bad}\n")).unwrap_err();
+            assert!(error.contains("parallel_checks"), "{error}");
+        }
+        assert!(Config::parse("[executor]\nparallel_checks = 16\n").is_ok());
     }
 
     /// `crate::throughput`: every lever is off by default, in its bounds, and on only with

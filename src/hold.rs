@@ -18,6 +18,7 @@
 //! start, exits non-zero, runs past its bound or prints anything but that answer each reads as
 //! held, with a reason that names the fault.
 
+use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -118,29 +119,70 @@ pub fn frozen(config: &Config, trunk_name: &str, now: u64) -> Option<Hold> {
 /// What kept the answer from being read: the program is not at the trunk's tip, it did not
 /// start, it ran past `timeout`, it exited non-zero, or it printed no answer.
 fn ask(repo: &Repo, trunk: &str, command: &str, timeout: Duration) -> Result<Option<Hold>, String> {
+    let (status, stdout, stderr) = run_from_trunk(
+        repo,
+        trunk,
+        "[hold] command",
+        command,
+        &[STATUS],
+        timeout,
+        "hold-run",
+    )?;
+    if !status.success() {
+        return Err(format!(
+            "it exited with {status}: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        ));
+    }
+    read_answer(&stdout)
+}
+
+/// Runs the adapter `command` (a program path relative to the work tree, then its arguments)
+/// once, with `args` after its own: its program materialized from the commit `trunk` into a
+/// scratch of its own under `<common dir>/bay/<runs>/`, never taken from this machine's work
+/// tree, and run there with only `PATH` and `HOME` of bay's environment, materializing and
+/// running together within `timeout`. The scratch is removed once it ends. `what` names the
+/// setting in an error (`[hold] command`). The hold adapter and the prune adapter
+/// (`crate::heads`) both run this way.
+///
+/// # Errors
+///
+/// The program is not at `trunk`, it could not be materialized or did not start, or it ran
+/// past `timeout`. An exit status, zero or not, is the caller's to read.
+pub(crate) fn run_from_trunk(
+    repo: &Repo,
+    trunk: &str,
+    what: &str,
+    command: &str,
+    args: &[&str],
+    timeout: Duration,
+    runs: &str,
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), String> {
     let program = command
         .split_whitespace()
         .next()
-        .ok_or("[hold] command is empty")?;
-    let runs = repo.common_dir.join("bay").join("hold-run");
-    let scratch = runs.join(format!(
+        .ok_or_else(|| format!("{what} is empty"))?;
+    let scratch = repo.common_dir.join("bay").join(runs).join(format!(
         "run-{}-{}",
         std::process::id(),
         crate::ids::new_change_id().map_err(|error| error.to_string())?
     ));
-    let answer = ask_in(repo, trunk, command, program, &scratch, timeout);
+    let ran = run_in(repo, trunk, what, command, program, args, &scratch, timeout);
     let _ = std::fs::remove_dir_all(&scratch);
-    answer
+    ran
 }
 
-fn ask_in(
+#[allow(clippy::too_many_arguments)]
+fn run_in(
     repo: &Repo,
     trunk: &str,
+    what: &str,
     command: &str,
     program: &str,
+    args: &[&str],
     scratch: &std::path::Path,
     timeout: Duration,
-) -> Result<Option<Hold>, String> {
+) -> Result<(ExitStatus, Vec<u8>, Vec<u8>), String> {
     let deadline = Instant::now() + timeout;
     let paths = [program.to_owned()];
     crate::materialize::materialize(
@@ -164,18 +206,11 @@ fn ask_in(
     if !scratch.join(program).is_file() {
         return Err(format!("{program} is not in trunk {trunk}"));
     }
-    let mut cmd = crate::notify::command_at(scratch, command).ok_or("[hold] command is empty")?;
-    cmd.arg(STATUS);
+    let mut cmd =
+        crate::notify::command_at(scratch, command).ok_or_else(|| format!("{what} is empty"))?;
+    cmd.args(args);
     let left = deadline.saturating_duration_since(Instant::now());
-    let (status, stdout, stderr) =
-        crate::inputs::run_bounded(cmd, &[], left.max(Duration::from_millis(1)))?;
-    if !status.success() {
-        return Err(format!(
-            "it exited with {status}: {}",
-            String::from_utf8_lossy(&stderr).trim()
-        ));
-    }
-    read_answer(&stdout)
+    crate::inputs::run_bounded(cmd, &[], left.max(Duration::from_millis(1)))
 }
 
 /// The adapter's answer on stdout: `{"held": true|false, "reason": "..."}`, and an `end` it
