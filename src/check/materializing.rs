@@ -124,6 +124,8 @@ fn run_with(
         tree: &tree,
         base,
         base_tree: &base_tree,
+        onto: base,
+        change: None,
         changed_paths: &changed,
         id: "op.1",
         policy_provenance: crate::policy::Provenance::Bay,
@@ -135,6 +137,7 @@ fn run_with(
         heartbeat,
         hidden: Vec::new(),
         sandbox: Sandbox::judge("none", Ok(true)),
+        baseline: None,
     };
     let mut keep = |_: &mut EvidenceRecord| Ok(());
     let mut records = run_all(

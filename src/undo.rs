@@ -96,6 +96,7 @@ fn undo_in(dir: &Path, repo: &Repo, change: &str, wait: bool) -> Result<BayResul
         reverts: Some(change.to_owned()),
         fixes: None,
         lane: None,
+        from: None,
     };
     let started = start::start(dir, &request);
     if started.decision != Decision::Ok {

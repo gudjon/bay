@@ -803,6 +803,8 @@ fn run_check(
         heartbeat: None,
         hidden: vec![work.to_path_buf(), git_dir.clone()],
         sandbox: sandbox.clone(),
+        // The conformance kit judges one exchange whole: it has no base to compare with.
+        baseline: None,
     };
     let mut seen = None;
     let mut keep = |_: &mut EvidenceRecord| Ok(());
@@ -817,6 +819,8 @@ fn run_check(
             tree: &tree,
             base,
             base_tree: &base_tree,
+            onto: base,
+            change: None,
             changed_paths: &changed,
             id: CANDIDATE_ID,
             policy_provenance: crate::policy::Provenance::Bay,

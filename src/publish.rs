@@ -1044,6 +1044,13 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     if let Some(waiting) = waits_for_worker(ctx, op_id) {
         return Ok(waiting);
     }
+    // N-8: while trunk is held only a fix or a revert publishes (`crate::hold`). A lane change
+    // never publishes, so no hold holds it.
+    if ctx.record.lane.is_none()
+        && let Some(waiting) = hold_gate(ctx, op_id, &revision, &trunk)?
+    {
+        return Ok(waiting);
+    }
     // § 6: while a queue is live only its head runs; anyone else holds a place and publishes
     // nothing. With a throughput lever on, it is checked ahead of its turn (`crate::throughput`).
     // NEW-4: a lane change only checks, so it never reserves a place, and never waits for one.
@@ -1189,6 +1196,12 @@ fn run_attempts(
         if ctx.record.lane.is_some() {
             return lane_never_lands(ctx, op_id, &revision, None);
         }
+        // N-8: the hold is asked again before each publishing push, so one that began while
+        // the candidate was checked holds it too. The head's place is then released as
+        // `trunk_held` (`execute_op`), which counts toward no limit.
+        if let Some(waiting) = hold_gate(ctx, op_id, &revision, &trunk)? {
+            return Ok(waiting);
+        }
 
         ctx.step.set("publish");
         if let Some(report) = still_owner(ctx, op_id, &revision)? {
@@ -1252,6 +1265,11 @@ fn batch(
     let Some((policy, members)) = batch_plan(ctx, op_id, revision, trunk, at)? else {
         return Ok(None);
     };
+    // N-8: a held trunk publishes no batch, whose members need not all be fixes; the head
+    // runs its ordinary path, judged by the hold alone.
+    if crate::hold::held(repo, trunk).is_some() {
+        return Ok(None);
+    }
     if let Some(red) = red_gate(ctx, op_id, revision, trunk)? {
         return Ok(Some(red));
     }
@@ -1325,10 +1343,7 @@ fn batch_plan(
     let Ok(Some(policy)) = policy::load_at(git, trunk) else {
         return Ok(None);
     };
-    let commit_keyed = policy
-        .checks
-        .iter()
-        .any(|check| check.inputs.iter().any(|input| input == "commit"));
+    let commit_keyed = policy.checks.iter().any(policy::CheckEntry::commit_keyed);
     if policy.unchecked || commit_keyed {
         return Ok(None);
     }
@@ -1408,8 +1423,8 @@ fn bisect_batch(
             ctx,
             op_id,
             &format!("batch-{id}-{prefix}"),
-            &tip.commit,
-            &tip.tree,
+            // A batch's tip lands several changes, so its request names none of them.
+            (tip.commit.as_str(), tip.tree.as_str(), None),
             trunk,
             policy,
             trunk,
@@ -2285,13 +2300,13 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
         return Ok(None);
     }
     let candidate_id = format!("pre-{op_id}-{}", now_ms());
+    let facts = change_facts(ctx, &revision);
     ctx.ahead_of_turn = true;
     let ran = run_policy(
         ctx,
         op_id,
         &candidate_id,
-        &commit,
-        &tree,
+        (commit.as_str(), tree.as_str(), Some(&facts)),
         &base,
         &policy,
         &base,
@@ -3162,6 +3177,92 @@ fn red_gate(
     ))
 }
 
+/// N-8 (`crate::hold`): trunk is held, and this change carries neither `Fixes:` nor `Reverts:`:
+/// `TRUNK_HELD`, naming the hold. Nothing is published and no limit is counted. The operation
+/// stays queued and holds no queue place, so a fix behind it reaches the head: a place it holds
+/// is released as `trunk_held`, which counts toward neither `QUEUE_DEADLINE_EXCEEDED` nor
+/// `PUBLISH_RETRY_EXHAUSTED` (§ 6). A claim this executor holds is given back, and a later
+/// pass tries the operation again; once the hold clears it rejoins the queue. An operation
+/// another executor holds is left as it is. `None` when trunk is clear or the change passes.
+fn hold_gate(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Option<BayResult>, String> {
+    let op = ctx.op(op_id);
+    if op.state.is_terminal() || op.state == OpState::Blocked {
+        return Ok(None);
+    }
+    if crate::hold::passes(ctx.record.fixes.as_ref(), ctx.record.reverts.as_ref()) {
+        return Ok(None);
+    }
+    let Some(hold) = crate::hold::held(ctx.repo, trunk) else {
+        return Ok(None);
+    };
+    let name = ctx.executor_name();
+    let op = ctx.op(op_id);
+    let elsewhere = op.owner.as_ref().is_some_and(|owner| *owner != name)
+        && matches!(op.state, OpState::Running | OpState::Checked);
+    if !elsewhere {
+        let queue = crate::queue::Queue::read(ctx.repo)?;
+        if let Some(entry) = queue.of(op_id).cloned() {
+            let signer = ctx.executor_signer().ok().flatten();
+            crate::queue::release(
+                ctx.repo,
+                signer.as_ref(),
+                entry.seq,
+                op_id,
+                crate::hold::RELEASE,
+            )?;
+        }
+        let code = Reason::TrunkHeld.code();
+        let op = ctx.op_mut(op_id);
+        if op.outcome.as_deref() != Some(code) || op.owner.is_some() {
+            op.outcome = Some(code.to_owned());
+            op.owner = None;
+            if op.state == OpState::Running {
+                op.state = if op.job.is_some() {
+                    OpState::Admitted
+                } else {
+                    OpState::Submitted
+                };
+            }
+            ctx.save(
+                revision,
+                None,
+                &format!("held {op_id}: trunk is held ({})", hold.source),
+            )?;
+            ctx.push_chain();
+        }
+    }
+    let why = match &hold.end {
+        Some(end) => format!(
+            "trunk is held until {end} ({}), and this change carries no Fixes: or Reverts:",
+            hold.reason
+        ),
+        None => format!(
+            "trunk is held ({}), and this change carries no Fixes: or Reverts:",
+            hold.reason
+        ),
+    };
+    let mut result = BayResult::refused(Decision::Queued, Reason::TrunkHeld)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(json!({
+            "hold": hold.to_json(),
+            "why": why,
+            "trunk": trunk,
+            "ways_out": [
+                "wait: the operation stays queued and lands once the hold clears (bay land --wait again, or an executor pass)",
+                "land a fix or a revert: bay start --fixes <change>, or bay undo <change>",
+            ],
+        }));
+    result.published = Some(false);
+    result.waiting_for = Some("hold".to_owned());
+    Ok(Some(result))
+}
+
 /// Step 2: the merged tree of `revision` onto `trunk`, or the `MERGE_CONFLICT` refusal, with the
 /// operation blocked on the condition that lifts it.
 fn merged(
@@ -3276,8 +3377,7 @@ fn build_and_check(
         ctx,
         op_id,
         &candidate_id,
-        &commit,
-        &tree,
+        (commit.as_str(), tree.as_str(), revision),
         trunk,
         &inputs::request_inputs(&judged),
     )?;
@@ -3556,6 +3656,30 @@ fn input_refusal(
         .with_detail(detail)
 }
 
+/// Why a candidate that edits the policy or an adapter path does not raise the revision of the
+/// policy at `trunk` (§ 7), or that revision's read fault; `None` when it raises it. An invalid
+/// base policy still states its revision, and a repair must raise it too.
+fn unraised(
+    git: &Git,
+    trunk: &str,
+    base_policy: Option<&policy::Policy>,
+    own_policy: &policy::Policy,
+) -> Option<String> {
+    let base_revision = match base_policy {
+        Some(policy) => policy.revision,
+        None => match policy::revision_at(git, trunk) {
+            Ok(revision) => revision.unwrap_or(0),
+            Err(why) => return Some(why),
+        },
+    };
+    (own_policy.revision <= base_revision).then(|| {
+        format!(
+            "this change edits the policy or an adapter path, so it must raise revision above {base_revision}; it has {}",
+            own_policy.revision
+        )
+    })
+}
+
 /// Step 4: runs the base policy's checks on the candidate and combines the evidence on its
 /// tree. Returns whether a judging policy ran checks (so there is evidence to push), the
 /// attempt's verdict word ([`UNCHECKED`] when the policy that judges it is unchecked), and the
@@ -3564,12 +3688,12 @@ fn check_candidate(
     ctx: &Ctx,
     op_id: &str,
     candidate_id: &str,
-    commit: &str,
-    tree: &str,
+    (commit, tree, revision): (&str, &str, &str),
     trunk: &str,
     inputs: &[String],
 ) -> Result<(bool, &'static str, Option<BayResult>), String> {
     let git = &ctx.repo.git;
+    let facts = change_facts(ctx, revision);
     let refuse = |why: String| {
         Ok((
             true,
@@ -3605,7 +3729,16 @@ fn check_candidate(
         if policy.unchecked {
             return Ok((UNCHECKED, None));
         }
-        run_policy(ctx, op_id, id, commit, tree, trunk, policy, from, inputs)
+        run_policy(
+            ctx,
+            op_id,
+            id,
+            (commit, tree, Some(&facts)),
+            trunk,
+            policy,
+            from,
+            inputs,
+        )
     };
     let changed = policy_changed(git, trunk, commit, base_policy.as_ref())?;
     if !changed {
@@ -3637,19 +3770,8 @@ fn check_candidate(
         }
         Err(policy::LoadError::Git(why)) => return refuse(why),
     };
-    // An invalid base policy still states its revision; a repair must raise it too.
-    let base_revision = match &base_policy {
-        Some(policy) => policy.revision,
-        None => match policy::revision_at(git, trunk) {
-            Ok(revision) => revision.unwrap_or(0),
-            Err(why) => return refuse(why),
-        },
-    };
-    if own_policy.revision <= base_revision {
-        return refuse(format!(
-            "this change edits the policy or an adapter path, so it must raise revision above {base_revision}; it has {}",
-            own_policy.revision
-        ));
+    if let Some(why) = unraised(git, trunk, base_policy.as_ref(), &own_policy) {
+        return refuse(why);
     }
     if let Some(principal) = &ctx.repair {
         if !only_policy_paths(git, trunk, commit, base_policy.as_ref(), &own_policy)? {
@@ -3782,15 +3904,26 @@ fn only_policy_paths(
     }))
 }
 
+/// The change `ctx` lands at `revision`, as a check request names it (`INTERFACES` § 3).
+fn change_facts(ctx: &Ctx, revision: &str) -> check::ChangeFacts {
+    check::ChangeFacts {
+        id: ctx.id.clone(),
+        intent_reference: ctx.record.intent.reference.clone(),
+        intent_revision: ctx.record.intent.revision.clone(),
+        actor: ctx.record.actor.name.clone(),
+        revision: revision.to_owned(),
+    }
+}
+
 /// Runs `policy`'s checks on the candidate with the adapter materialized from `adapter_from`,
-/// and combines the evidence on its tree under that policy's manifest.
+/// and combines the evidence on its tree under that policy's manifest. `change` is the change
+/// the candidate lands, when it lands one (a batch's lands several).
 #[allow(clippy::too_many_arguments)]
 fn run_policy(
     ctx: &Ctx,
     op_id: &str,
     candidate_id: &str,
-    commit: &str,
-    tree: &str,
+    (commit, tree, change): (&str, &str, Option<&check::ChangeFacts>),
     trunk: &str,
     policy: &policy::Policy,
     adapter_from: &str,
@@ -3856,6 +3989,8 @@ fn run_policy(
             tree,
             base: adapter_from,
             base_tree: &base_tree,
+            onto: trunk,
+            change,
             changed_paths: &changed,
             id: candidate_id,
             policy_provenance,
@@ -3868,6 +4003,7 @@ fn run_policy(
             heartbeat: Some(ctx.repo.config.heartbeat()),
             hidden: hidden_paths(ctx),
             sandbox: check::Sandbox::here(),
+            baseline: baseline_of(ctx, policy, trunk, &base_tree)?,
         },
         &mut check::Hooks {
             keep: &mut keep,
@@ -3904,6 +4040,37 @@ fn run_policy(
             named: &named,
         },
     ))
+}
+
+/// N-3: what a check of `policy` with `baseline = "base"` is judged against: `trunk`, the
+/// commit the candidate was merged onto, and the counted records on its tree (`base_tree`) that
+/// answer the policy's checks, read from every producer after a fetch, so the base's own
+/// record, or a base run another candidate made, is reused rather than run again. `None` when no
+/// check of `policy` asks for a baseline: nothing is read.
+///
+/// # Errors
+///
+/// A git fault, an unreadable note, or a class file that cannot be written.
+fn baseline_of(
+    ctx: &Ctx,
+    policy: &policy::Policy,
+    trunk: &str,
+    base_tree: &str,
+) -> Result<Option<check::Baseline>, String> {
+    if !policy.checks.iter().any(|entry| entry.baseline.is_some()) {
+        return Ok(None);
+    }
+    let git = &ctx.repo.git;
+    ctx.repo.fetch_evidence(&ctx.keys);
+    let records = policy.answering(evidence::counted(
+        git,
+        evidence::records_for(git, base_tree)?,
+        ctx.registry.as_ref(),
+    )?);
+    Ok(Some(check::Baseline {
+        commit: trunk.to_owned(),
+        records,
+    }))
 }
 
 /// What one run of a policy's checks saw on a candidate, for its verdict (§ 7).
@@ -4239,10 +4406,7 @@ fn verdict(
     let mut why: Vec<serde_json::Value> = named
         .iter()
         .filter(|record| in_gap(record) && policy.listed(record))
-        .map(|record| {
-            json!({"check": record.check.id, "verdict": record.verdict, "why": record.why,
-                "reasons": evidence::reasons(&record.units)})
-        })
+        .map(|record| gap_row(record))
         .collect();
     // G245: each approver who said no to this tree, by name.
     why.extend(
@@ -4283,6 +4447,27 @@ fn verdict(
             }),
     );
     Some((code, word, why))
+}
+
+/// What a refusal says of `record`, a run of a check in a gap: its verdict, why, and the reason
+/// of each unit that did not pass. N-3: a unit that failed on the base too is no failure of
+/// this candidate, so only the new ones are named under `reasons`; the pre-existing ones are
+/// listed apart under `baseline_failures`, with the base record they were compared with.
+fn gap_row(record: &evidence::EvidenceRecord) -> serde_json::Value {
+    let preexisting = record.baseline_failures();
+    let new: Vec<evidence::Unit> = record
+        .units
+        .iter()
+        .filter(|unit| !preexisting.contains(&unit.id))
+        .cloned()
+        .collect();
+    let mut row = json!({"check": record.check.id, "verdict": record.verdict, "why": record.why,
+        "reasons": evidence::reasons(&new)});
+    if let Some(baseline) = record.unknown.get(evidence::BASELINE) {
+        row["baseline"] = baseline.clone();
+        row["baseline_failures"] = json!(preexisting);
+    }
+    row
 }
 
 /// How the policy at `trunk` reached trunk (`DESIGN` § 10a, `INTERFACES` § 6). Each edit
@@ -4361,7 +4546,9 @@ fn is_publication(
 /// names, in one `ls-remote`, and those the shard indexes record (§ 10a, one fetch of them).
 /// A remote that cannot be read is an error, never "no marker":
 /// an unread provenance is never taken for either answer.
-fn landed_markers(repo: &Repo) -> Result<std::collections::HashMap<String, String>, String> {
+pub(crate) fn landed_markers(
+    repo: &Repo,
+) -> Result<std::collections::HashMap<String, String>, String> {
     let listed = repo
         .git
         .run(&[
@@ -4959,8 +5146,10 @@ fn derive_landed(
 
 /// G30: the checks the landing passed without testing code, each a coverage gap: a check
 /// that passed on a `declared_empty` selection under a policy that judged it (§ 7), a check
-/// whose runs on the tree were `flaky` and whose entry says `allow_flaky`, with every run, and
-/// each quarantined check that no policy judging the landing required (ruling 8c).
+/// whose runs on the tree were `flaky` and whose entry says `allow_flaky`, with every run, a
+/// check with `baseline = "base"` that passed with units failing on the base too (N-3), with
+/// those units, and each quarantined check that no policy judging the landing required
+/// (ruling 8c).
 ///
 /// The judging policies are read from the base and the candidate, never from the request, so
 /// a replay gives the same answer: the base's policy when it is valid, and the candidate's own
@@ -5020,6 +5209,16 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
             }
         }
     }
+    // N-3: a check judged against its base passed with units that failed on both: each is a
+    // pre-existing failure, named with the base record it was compared with, never a pass.
+    for gap in judged
+        .iter()
+        .flat_map(|policy| baseline_gaps(policy, &records, &attempt.commit))
+    {
+        if !gaps.contains(&gap) {
+            gaps.push(gap);
+        }
+    }
     // A flaky check that landed under `allow_flaky` is named with every run, never as a pass.
     for gap in judged
         .iter()
@@ -5047,6 +5246,61 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
         }
     }
     Ok(gaps)
+}
+
+/// N-3: the required checks of `policy` with `baseline = "base"` whose passing counted
+/// `records` on the landed tree name units that failed on the candidate and on its base: each
+/// with those units (`baseline_failures`) and what each record was compared with (`baseline`).
+fn baseline_gaps(
+    policy: &policy::Policy,
+    records: &[evidence::EvidenceRecord],
+    commit: &str,
+) -> Vec<serde_json::Value> {
+    let listed = policy.answering(records.to_vec());
+    let mut gaps = Vec::new();
+    for entry in &policy.manifest {
+        let id = evidence::CheckId::new(&entry.id, &entry.environment);
+        if policy
+            .check(&id)
+            .is_none_or(|check| check.baseline.is_none())
+        {
+            continue;
+        }
+        let subject = policy.commit_keyed(&id).then_some(commit);
+        let mut failures: Vec<String> = Vec::new();
+        let mut compared: Vec<serde_json::Value> = Vec::new();
+        for record in listed.iter().filter(|record| {
+            record.kind == evidence::KIND_CHECK
+                && record.check == id
+                && record.manifest_digest == policy.manifest_digest
+                && record.verdict == evidence::Verdict::Pass
+                && subject.is_none_or(|commit| record.subject.commit == commit)
+        }) {
+            let preexisting = record.baseline_failures();
+            if preexisting.is_empty() {
+                continue;
+            }
+            for unit in preexisting {
+                if !failures.contains(&unit) {
+                    failures.push(unit);
+                }
+            }
+            if let Some(baseline) = record.unknown.get(evidence::BASELINE) {
+                compared.push(baseline.clone());
+            }
+        }
+        if failures.is_empty() {
+            continue;
+        }
+        failures.sort();
+        gaps.push(json!({
+            "check": entry.id,
+            "environment": entry.environment,
+            "baseline_failures": failures,
+            "baseline": compared,
+        }));
+    }
+    gaps
 }
 
 /// The required checks of `policy` whose counted `records` on the landed tree combine to

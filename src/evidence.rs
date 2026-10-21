@@ -123,6 +123,13 @@ pub struct Unit {
     pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
+/// N-3: the record field of a check with `baseline = "base"` that names what its run was
+/// judged against: `{"commit": <base>, "record": <the base record's id>, "failures": [<unit
+/// id>, ...]}`, each unit that failed on the candidate and on the base. Kept in
+/// [`EvidenceRecord::unknown`], so it is signed as written and a record without it reads as
+/// before.
+pub const BASELINE: &str = "baseline";
+
 /// The longest unit `reason` an adapter may send, in bytes of UTF-8 (G240). A longer one makes
 /// the run `infra_failure`; bay never cuts it.
 pub const REASON_MAX_BYTES: usize = 2048;
@@ -242,6 +249,23 @@ impl EvidenceRecord {
             })
             .collect::<Option<_>>()?;
         (!digests.is_empty()).then_some(digests)
+    }
+
+    /// N-3: the units of the record that failed on its base too ([`BASELINE`]): pre-existing,
+    /// so no failure of this candidate. Empty on a record judged whole-green.
+    #[must_use]
+    pub fn baseline_failures(&self) -> Vec<String> {
+        self.unknown
+            .get(BASELINE)
+            .and_then(|baseline| baseline.get("failures"))
+            .and_then(serde_json::Value::as_array)
+            .map(|failures| {
+                failures
+                    .iter()
+                    .filter_map(|unit| unit.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The bytes a producer signs: the canonical JSON of the record without its signature.

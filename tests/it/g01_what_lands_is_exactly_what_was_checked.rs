@@ -122,9 +122,13 @@ fn the_check_request_names_exactly_the_paths_the_candidate_changes() {
     assert_eq!(
         keys,
         [
+            "base",
             "candidate",
+            "change",
             "changed_paths",
             "inputs",
+            "messages",
+            "messages_truncated",
             "plan",
             "requires",
             "schema",

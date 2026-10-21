@@ -40,7 +40,7 @@ enum Command {
         /// Restore an existing change: checkpoint its draft, bring in newer trunk
         #[arg(long, value_name = "CHANGE", conflicts_with = "intent")]
         resume: Option<String>,
-        /// A follow-up after the intent's change landed: claim its next generation
+        /// A follow-up after the intent's change landed or was abandoned: claim its next generation
         #[arg(long)]
         new: bool,
         /// The landed change this one fixes; its landing carries a Fixes: trailer
@@ -49,6 +49,9 @@ enum Command {
         /// A sandbox lane of the config: the change's checks run, and it never lands
         #[arg(long, value_name = "LANE", conflicts_with = "resume")]
         lane: Option<String>,
+        /// A branch made outside bay (a branch name or a full ref): its net change is the draft
+        #[arg(long, value_name = "REF", conflicts_with = "resume")]
+        from: Option<String>,
     },
     /// Freeze the draft, build the candidate, check it, publish it
     Land {
@@ -89,6 +92,19 @@ enum Command {
         #[arg(long, value_name = "RANGE", num_args = 0..=1, default_missing_value = "",
             conflicts_with_all = ["change", "fleet", "stranded"])]
         lineage: Option<String>,
+        /// Every branch on the remote, classed trunk, target, lane, landed (with its proof),
+        /// stale or unique; one ls-remote and one fetch, nothing deleted
+        #[arg(long, conflicts_with_all = ["change", "fleet", "stranded", "lineage"])]
+        heads: bool,
+        /// With --heads: delete the branches landed by ancestor or patch, each under a lease of
+        /// the tip judged, after archiving the tip on the remote and logging the push that
+        /// restores it to bay/pruned-heads.log in the repository's common directory
+        #[arg(long, requires = "heads")]
+        prune: bool,
+        /// With --heads: a branch with commits off trunk whose tip is older than this is stale
+        /// (default 30)
+        #[arg(long, value_name = "DAYS", requires = "heads")]
+        stale_days: Option<u64>,
     },
     /// What happened after a cursor: trunk landings, log events, new invalidations of the
     /// view's change
@@ -444,35 +460,46 @@ fn executor_run(dir: &std::path::Path, json: bool, once: bool, interval_s: u64) 
     code
 }
 
+/// `bay start`: the request its arguments make.
+fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
+    let Command::Start {
+        intent,
+        intent_revision,
+        paths,
+        inputs,
+        resume,
+        new,
+        fixes,
+        lane,
+        from,
+    } = command
+    else {
+        unreachable!("start_change takes a start command");
+    };
+    bay::start::start(
+        dir,
+        &bay::start::StartRequest {
+            intent,
+            new,
+            intent_revision,
+            paths,
+            inputs,
+            resume,
+            reverts: None,
+            fixes,
+            lane,
+            from,
+        },
+    )
+}
+
 fn main() -> ExitCode {
     let cli = parse();
     if let Some(refusal) = config_refusal(&cli) {
         return render(&refusal, cli.json);
     }
     let result = match cli.command {
-        Command::Start {
-            intent,
-            intent_revision,
-            paths,
-            inputs,
-            resume,
-            new,
-            fixes,
-            lane,
-        } => bay::start::start(
-            &cli.dir,
-            &bay::start::StartRequest {
-                intent,
-                new,
-                intent_revision,
-                paths,
-                inputs,
-                resume,
-                reverts: None,
-                fixes,
-                lane,
-            },
-        ),
+        start @ Command::Start { .. } => start_change(&cli.dir, start),
         Command::Undo { change, wait } => bay::undo::undo(&cli.dir, &change, wait),
         Command::Share {
             change,
@@ -507,10 +534,17 @@ fn main() -> ExitCode {
         } => return executor_run(&cli.dir, cli.json, once, interval_s),
         Command::Live { action } => live(&cli.dir, action),
         Command::Status {
+            heads: true,
+            prune,
+            stale_days,
+            ..
+        } => bay::heads::heads(&cli.dir, &bay::heads::Request { prune, stale_days }),
+        Command::Status {
             change,
             fleet,
             stranded,
             lineage,
+            ..
         } => status(
             &cli.dir,
             change.as_deref(),

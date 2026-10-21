@@ -250,6 +250,19 @@ pub struct ChangeRecord {
     /// and it never lands. Written once at start, never changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lane: Option<String>,
+    /// The branch made outside bay this change was started from (`bay start --from`, G268):
+    /// its first draft is that branch's net change on the base. Written once at start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<StartedFrom>,
+}
+
+/// The branch made outside bay a change took in (`bay start --from`, G268): the ref as the
+/// actor named it, and the commit it named then.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StartedFrom {
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub commit: String,
 }
 
 impl ChangeRecord {

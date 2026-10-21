@@ -27,6 +27,8 @@ pub mod evidence;
 pub mod executor;
 pub mod fleet;
 pub mod git;
+pub mod heads;
+pub mod hold;
 pub mod hook;
 pub mod host;
 pub mod ids;

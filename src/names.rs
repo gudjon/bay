@@ -51,8 +51,21 @@ pub const FETCH: &str = "refs/bay/fetch/";
 /// `refs/bay/fetch-evidence/<writer>`: the remote's copy of this machine's own evidence notes
 /// ref, local only, while `bay evidence record` compares the two.
 pub const FETCH_EVIDENCE: &str = "refs/bay/fetch-evidence/";
+/// `refs/bay/census/heads/<branch>`: `bay status --heads`'s copy of the remote's branches,
+/// local only, removed when the census ends.
+pub const CENSUS: &str = "refs/bay/census/";
+/// `refs/bay/archive/heads/<branch>`: the tip of a branch `bay status --heads --prune` deleted,
+/// pushed before the delete so the remote keeps its objects. Create-only on a bay host.
+pub const ARCHIVE_HEADS: &str = "refs/bay/archive/heads/";
 /// The enrolment registry.
 pub const REGISTRY: &str = "refs/bay/registry";
+/// The refs of the temporary history repository a check with `inputs = ["history"]` reads
+/// (G267, `crate::check`): the base the candidate was merged onto, the candidate, and the
+/// change's revision. They exist only in that repository, in the check's scratch, and are never
+/// in the store or pushed.
+pub const CHECK_BASE: &str = "refs/bay/check/base";
+pub const CHECK_CANDIDATE: &str = "refs/bay/check/candidate";
+pub const CHECK_REVISION: &str = "refs/bay/check/revision";
 
 /// Validates a producer, executor or machine name.
 ///
@@ -144,6 +157,8 @@ pub fn bay_ref(name: &str) -> Result<(), String> {
                 refuse("a talk id is 16 characters of lower-case base32")
             }
         }
+        // G269: a pruned branch's archive, named by the branch, slashes too.
+        ["archive", "heads", branch @ ..] if !branch.is_empty() && !branch.contains(&"") => Ok(()),
         ["live" | "log" | "executor", operator] => {
             operator_name(operator).map_err(|why| format!("{name}: {why}"))
         }
@@ -224,6 +239,13 @@ mod tests {
         assert!(bay_ref("refs/bay/executor/ci-linux-2").is_ok());
         assert!(bay_ref("refs/bay/executor/ci/linux").is_err());
         assert!(bay_ref("refs/bay/fleet-executor/ci-linux-2").is_err());
+        // G269: a pruned branch's archive is named by the branch, slashes too.
+        assert!(bay_ref("refs/bay/archive/heads/ff").is_ok());
+        assert!(bay_ref("refs/bay/archive/heads/agent/task-1").is_ok());
+        assert!(bay_ref("refs/bay/archive/heads/").is_err());
+        assert!(bay_ref("refs/bay/archive/ff").is_err());
+        // The census copy is local only.
+        assert!(bay_ref("refs/bay/census/heads/ff").is_err());
     }
 
     #[test]

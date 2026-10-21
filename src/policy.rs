@@ -18,6 +18,14 @@ use crate::inputs::InputEntry;
 pub const POLICY_PATH: &str = ".bay/policy.toml";
 const DEFAULT_TIMEOUT_S: u64 = 1800;
 
+/// The `inputs` value of a check that reads commit metadata: its evidence is keyed by subject
+/// commit (§ 7).
+pub const INPUT_COMMIT: &str = "commit";
+/// The `inputs` value of a check that reads history: keyed by subject commit like
+/// [`INPUT_COMMIT`], and its request carries `git`, read-only access to the repository's objects
+/// (`INTERFACES` § 3).
+pub const INPUT_HISTORY: &str = "history";
+
 /// Every table of the policy refuses a key it does not know (G167): a typo, or a key a newer bay
 /// reads, would otherwise be a criterion nobody applies. `[[input]]` and `[profile.<name>]`
 /// refuse theirs in their own types.
@@ -139,7 +147,11 @@ pub struct CheckEntry {
     pub timeout_s: u64,
     /// Declared inputs beyond the tree. `commit` keys the check's evidence by subject commit
     /// (§ 7): it reads commit metadata, so a result for one commit never stands for another
-    /// with the same tree. Omitted from the definition digest when empty.
+    /// with the same tree. `history` keys it the same way and also gives the check read-only
+    /// access to the repository's objects through the request's `git` (`INTERFACES` § 3): a
+    /// verdict that judges history is no function of the tree alone. A check whose verdict
+    /// reads the request's `base`, `change` or `messages` declares one of the two. Omitted from
+    /// the definition digest when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<String>,
     /// The content-addressed fixtures the check reads, each `<name>@sha256:<64 hex>`
@@ -223,6 +235,27 @@ pub struct CheckEntry {
     /// at the base and in the definition digest; left out of the canonical entry when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_flaky: bool,
+    /// N-3: what a failing unit is judged against. Absent, the check passes only when every unit
+    /// of its result passes (whole-green). `"base"`: a unit that fails on the candidate fails the
+    /// check only when the same unit (by `id`) passed on the base, or the base has no such unit;
+    /// a unit that fails on both is pre-existing, and the landing names it under `coverage_gaps`
+    /// as a `baseline_failures` entry, never as a pass. The base's result comes from its own
+    /// record of this check under the same manifest, or from one run of the check on the base,
+    /// recorded as the base's. A base run that is `unknown` or `infra_failure` makes the
+    /// candidate's run `unknown`. bay cannot know before a run whether a result reports units;
+    /// a result without units has nothing to compare, so every failure in it is new. Judged at
+    /// the base; `"base"` enters the definition digest, and absent is left out of the canonical
+    /// entry (the G26 vector). Its one value is `"base"`; any other is `POLICY_INVALID`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline: Option<Baseline>,
+}
+
+/// A check's `baseline` (N-3): what a failing unit is compared with.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Baseline {
+    /// The same check's result on the trunk commit the candidate was merged onto.
+    Base,
 }
 
 /// The most reruns a `[[check]]` may ask for with `retry_on_failure`: a check that fails every
@@ -283,6 +316,23 @@ impl CheckEntry {
     #[must_use]
     pub fn minimum(&self) -> u64 {
         self.expected_minimum.unwrap_or(0)
+    }
+
+    /// Whether the check's evidence is keyed by subject commit: it declares the input `commit`
+    /// or `history`, so its verdict reads more than the tree, and a result for one commit never
+    /// stands for another with the same tree.
+    #[must_use]
+    pub fn commit_keyed(&self) -> bool {
+        self.inputs
+            .iter()
+            .any(|input| input == INPUT_COMMIT || input == INPUT_HISTORY)
+    }
+
+    /// Whether the check reads history: it declares the input `history`, so its request
+    /// carries `git`, read-only access to the repository's objects (`INTERFACES` § 3).
+    #[must_use]
+    pub fn reads_history(&self) -> bool {
+        self.inputs.iter().any(|input| input == INPUT_HISTORY)
     }
 
     /// Whether a person answers the check rather than a run (G245).
@@ -391,11 +441,10 @@ impl Policy {
         .collect()
     }
 
-    /// Whether check `id` is keyed by subject commit.
+    /// Whether check `id` is keyed by subject commit ([`CheckEntry::commit_keyed`]).
     #[must_use]
     pub fn commit_keyed(&self, id: &crate::evidence::CheckId) -> bool {
-        self.check(id)
-            .is_some_and(|check| check.inputs.iter().any(|input| input == "commit"))
+        self.check(id).is_some_and(CheckEntry::commit_keyed)
     }
 
     /// Whether check `entry` is required of a candidate whose diff against its base changes
@@ -1064,14 +1113,20 @@ fn validate_shape(file: &PolicyFile) -> Result<(), String> {
     Ok(())
 }
 
-/// The one `inputs` value is `commit` (BACKLOG 28, `INTERFACES` § 7): any other is an input bay
-/// cannot identify, and an unknown input is never a pass, so it makes the policy invalid rather
-/// than keying the check's evidence by tree. Each `fixtures` entry is `<name>@sha256:<64 hex>`
-/// (ruling R18), each name once: a fixture without a digest is an input bay cannot identify.
+/// The `inputs` values are `commit` and `history` (BACKLOG 28, `INTERFACES` § 3, § 7): any
+/// other is an input bay cannot identify, and an unknown input is never a pass, so it makes the
+/// policy invalid rather than keying the check's evidence by tree. Each `fixtures` entry is
+/// `<name>@sha256:<64 hex>` (ruling R18), each name once: a fixture without a digest is an input
+/// bay cannot identify.
 fn validate_declared_inputs(entry: &CheckEntry) -> Result<(), String> {
-    if let Some(other) = entry.inputs.iter().find(|input| *input != "commit") {
+    if let Some(other) = entry
+        .inputs
+        .iter()
+        .find(|input| *input != INPUT_COMMIT && *input != INPUT_HISTORY)
+    {
         return Err(format!(
-            "check {} declares the input {other:?}; the one input bay can identify is \"commit\"",
+            "check {} declares the input {other:?}; the inputs bay can identify are \
+             \"{INPUT_COMMIT}\" and \"{INPUT_HISTORY}\"",
             entry.id
         ));
     }
@@ -1237,6 +1292,7 @@ fn validate_kind(entry: &CheckEntry) -> Result<(), String> {
         ("network", entry.network),
         ("retry_on_failure", entry.retry_on_failure > 0),
         ("allow_flaky", entry.allow_flaky),
+        ("baseline", entry.baseline.is_some()),
     ];
     if let Some((key, _)) = stated.iter().find(|(_, set)| *set) {
         return Err(format!(
@@ -1299,6 +1355,14 @@ fn validate_retry(entry: &CheckEntry) -> Result<(), String> {
     if entry.stage == Stage::Post && (entry.retry_on_failure > 0 || entry.allow_flaky) {
         return Err(format!(
             "check {} runs after publication; retry_on_failure and allow_flaky apply only to a pre-publication check",
+            entry.id
+        ));
+    }
+    // N-3: a post-publication check never judges a landing, so a baseline there would change
+    // nothing, and a typo is never silent.
+    if entry.stage == Stage::Post && entry.baseline.is_some() {
+        return Err(format!(
+            "check {} runs after publication; baseline applies only to a pre-publication check",
             entry.id
         ));
     }
@@ -1450,6 +1514,33 @@ mod tests {
             manifest_entry(&plain, &ids).unwrap().definition_digest,
             manifest_entry(&set, &ids).unwrap().definition_digest
         );
+    }
+
+    /// N-3: `baseline = "base"` enters the definition digest; absent, it is left out of the
+    /// canonical entry, so a policy without it keeps its digest (the G26 vector). Its one value
+    /// is `"base"`; on an approval or a post-publication check it is invalid.
+    #[test]
+    fn a_baseline_enters_the_digest_only_when_set() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
+        let plain: CheckEntry = toml::from_str(text).unwrap();
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("baseline").is_none(), "{json}");
+        let set: CheckEntry = toml::from_str(&format!("{text}baseline = \"base\"\n")).unwrap();
+        assert_eq!(serde_json::to_value(&set).unwrap()["baseline"], "base");
+        let ids = BTreeMap::new();
+        assert_ne!(
+            manifest_entry(&plain, &ids).unwrap().definition_digest,
+            manifest_entry(&set, &ids).unwrap().definition_digest
+        );
+        assert!(toml::from_str::<CheckEntry>(&format!("{text}baseline = \"trunk\"\n")).is_err());
+        let post: CheckEntry =
+            toml::from_str(&format!("{text}baseline = \"base\"\nstage = \"post\"\n")).unwrap();
+        assert!(super::validate_retry(&post).is_err());
+        let approval: CheckEntry = toml::from_str(
+            "id = \"a\"\nenvironment = \"people\"\nkind = \"approval\"\nwhen_paths = [\"**\"]\nbaseline = \"base\"\n",
+        )
+        .unwrap();
+        assert!(super::validate_kind(&approval).is_err());
     }
 
     /// An executable that climbs out of its adapter directory is not in it.
@@ -1719,16 +1810,23 @@ mod tests {
         }
     }
 
-    /// BACKLOG 28: `commit` is the one input bay identifies; R18: a fixture names its digest.
+    /// BACKLOG 28: `commit` and `history` are the inputs bay identifies, and both key evidence
+    /// by subject commit; R18: a fixture names its digest.
     #[test]
     fn an_input_or_fixture_bay_cannot_identify_is_invalid() {
         let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
-        let check = |extra: &str| {
-            let entry: CheckEntry = toml::from_str(&format!("{text}{extra}")).unwrap();
-            super::validate_declared_inputs(&entry)
-        };
+        let parse =
+            |extra: &str| -> CheckEntry { toml::from_str(&format!("{text}{extra}")).unwrap() };
+        let check = |extra: &str| super::validate_declared_inputs(&parse(extra));
         let hex = "0123456789abcdef".repeat(4);
         assert!(check("inputs = [\"commit\"]\n").is_ok());
+        assert!(check("inputs = [\"history\"]\n").is_ok());
+        assert!(check("inputs = [\"commit\", \"history\"]\n").is_ok());
+        let history = parse("inputs = [\"history\"]\n");
+        assert!(history.commit_keyed() && history.reads_history());
+        let commit = parse("inputs = [\"commit\"]\n");
+        assert!(commit.commit_keyed() && !commit.reads_history());
+        assert!(!parse("").commit_keyed());
         assert!(
             check(&format!(
                 "fixtures = [\"data@sha256:{hex}\", \"more@sha256:{hex}\"]\n"
@@ -1738,6 +1836,7 @@ mod tests {
         for bad in [
             "inputs = [\"commits\"]\n".to_owned(),
             "inputs = [\"commit\", \"network\"]\n".to_owned(),
+            "inputs = [\"histories\"]\n".to_owned(),
             "fixtures = [\"data\"]\n".to_owned(),
             format!("fixtures = [\"@sha256:{hex}\"]\n"),
             format!("fixtures = [\"data@sha1:{hex}\"]\n"),

@@ -15,8 +15,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::clock::now_rfc3339;
-use crate::evidence::{CheckId, EVIDENCE_SCHEMA, EvidenceRecord, Producer, Subject, Unit, Verdict};
-use crate::git::Git;
+use crate::evidence::{
+    BASELINE, CheckId, EVIDENCE_SCHEMA, EvidenceRecord, Producer, Subject, Unit, Verdict,
+};
+use crate::git::{Git, GitError};
 use crate::materialize::{Unmade, materialize};
 use crate::policy::{CheckEntry, Policy};
 
@@ -24,8 +26,16 @@ use crate::policy::{CheckEntry, Policy};
 pub struct Candidate<'a> {
     pub commit: &'a str,
     pub tree: &'a str,
+    /// Where the adapter paths are materialized from: the accepted base, or the candidate itself
+    /// for its own new policy (§ 7).
     pub base: &'a str,
     pub base_tree: &'a str,
+    /// The accepted base the candidate was merged onto, whose tree is `base_tree`: the
+    /// request's `base`.
+    pub onto: &'a str,
+    /// The change the candidate lands, when it lands one: the request's `change` and
+    /// `messages`. A batch's candidate, a trunk bisection's and the conformance kit's carry none.
+    pub change: Option<&'a ChangeFacts>,
     /// The paths the candidate's tree changes against the trunk commit it was merged onto,
     /// sorted: the request's `changed_paths`.
     pub changed_paths: &'a [String],
@@ -36,6 +46,250 @@ pub struct Candidate<'a> {
     /// The version of each named input the candidate is checked under, `<kind>:<name>@<version>`
     /// (`INTERFACES` § 3): the request's `inputs`.
     pub inputs: &'a [String],
+}
+
+/// The change behind a candidate, as its check request names it (`INTERFACES` § 3).
+#[derive(Clone, Debug)]
+pub struct ChangeFacts {
+    pub id: String,
+    /// The intent's external reference and its revision.
+    pub intent_reference: String,
+    pub intent_revision: String,
+    /// The actor's name.
+    pub actor: String,
+    /// The change's revision, its last draft: the change's own commits are the ones it
+    /// reaches and the base does not.
+    pub revision: String,
+}
+
+/// The most commits of a change the request's `messages` carries.
+pub const MESSAGES_MAX: usize = 50;
+/// The most bytes of commit messages the request's `messages` carries, all told. A message is
+/// carried whole or not at all.
+pub const MESSAGES_MAX_BYTES: usize = 64 * 1024;
+
+/// The ref of the temporary history repository that names the request's base.
+pub const HISTORY_BASE_REF: &str = crate::names::CHECK_BASE;
+/// The ref of the temporary history repository that names the candidate.
+pub const HISTORY_CANDIDATE_REF: &str = crate::names::CHECK_CANDIDATE;
+/// The ref of the temporary history repository that names the change's revision.
+pub const HISTORY_REVISION_REF: &str = crate::names::CHECK_REVISION;
+
+/// The request's `messages`: the change's own commits, the ones `change.revision` reaches and
+/// `onto` does not, oldest first, each `{"commit", "message"}`; and its `messages_truncated`,
+/// whether they were cut to [`MESSAGES_MAX`] commits or [`MESSAGES_MAX_BYTES`]. When cut, the
+/// newest are kept.
+///
+/// # Errors
+///
+/// Git cannot list the commits.
+fn messages(
+    git: &Git,
+    onto: &str,
+    change: &ChangeFacts,
+) -> Result<(Vec<serde_json::Value>, bool), String> {
+    let limit = format!("--max-count={}", MESSAGES_MAX + 1);
+    let exclude = format!("^{onto}");
+    let out = git
+        .run_bytes(
+            &[
+                "log",
+                "-z",
+                "--format=%H%n%B",
+                &limit,
+                &change.revision,
+                &exclude,
+                "--",
+            ],
+            &[],
+            None,
+        )
+        .map_err(|error| error.message())?;
+    let text = String::from_utf8_lossy(&out);
+    let listed: Vec<(&str, &str)> = text
+        .split('\0')
+        .filter(|record| !record.is_empty())
+        .map(|record| record.split_once('\n').unwrap_or((record, "")))
+        .collect();
+    let mut truncated = listed.len() > MESSAGES_MAX;
+    let (mut kept, mut bytes) = (Vec::new(), 0);
+    // Newest first, as Git lists them: what is cut is the oldest.
+    for (commit, message) in listed.into_iter().take(MESSAGES_MAX) {
+        if bytes + message.len() > MESSAGES_MAX_BYTES {
+            truncated = true;
+            break;
+        }
+        bytes += message.len();
+        kept.push(json!({"commit": commit, "message": message}));
+    }
+    kept.reverse();
+    Ok((kept, truncated))
+}
+
+/// What a request says beyond the candidate, the same for each check of one run: `base`, and,
+/// for a candidate that lands a change, `change` and `messages` (`INTERFACES` § 3).
+///
+/// # Errors
+///
+/// Git cannot list the change's commits.
+fn about(
+    git: &Git,
+    candidate: &Candidate,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut about = serde_json::Map::new();
+    about.insert(
+        "base".to_owned(),
+        json!({"commit": candidate.onto, "tree": candidate.base_tree}),
+    );
+    if let Some(change) = candidate.change {
+        about.insert(
+            "change".to_owned(),
+            json!({
+                "id": change.id,
+                "intent": {"reference": change.intent_reference, "revision": change.intent_revision},
+                "actor": change.actor,
+                "revision": change.revision,
+            }),
+        );
+        let (kept, truncated) = messages(git, candidate.onto, change)?;
+        about.insert("messages".to_owned(), json!(kept));
+        about.insert("messages_truncated".to_owned(), json!(truncated));
+    }
+    Ok(about)
+}
+
+/// The read-only history of one check run with `inputs = ["history"]` (`INTERFACES` § 3): a
+/// fresh bare repository in the run's scratch, whose `objects/info/alternates` names the
+/// repository's object directory, with refs at the base, the candidate and the change's
+/// revision. The adapter reads every object through it; what it writes there stays in the
+/// scratch and is removed with it. The object directory and its own alternates are bound
+/// read-only in the sandbox (`sandbox-exec`, `bwrap`), so no write reaches the store; with no
+/// sandbox (`bay.executorSandbox = none`) read-only is not enforced, and the record says
+/// `sandbox: "none"`.
+pub(crate) struct History {
+    /// The temporary bare repository: `GIT_DIR` for the adapter.
+    pub dir: PathBuf,
+    /// The repository's object directory.
+    pub object_dir: PathBuf,
+    /// The object directories the store itself borrows from, in the order its alternates name
+    /// them (and theirs after them).
+    pub alternates: Vec<PathBuf>,
+    /// The repository holds [`HISTORY_REVISION_REF`]: the candidate lands a change.
+    pub revision: bool,
+}
+
+impl History {
+    /// Every directory the check may read and must never write.
+    fn read_only(&self) -> Vec<PathBuf> {
+        std::iter::once(self.object_dir.clone())
+            .chain(self.alternates.iter().cloned())
+            .collect()
+    }
+
+    /// The request's `git`.
+    fn request(&self) -> serde_json::Value {
+        let mut git = json!({
+            "dir": self.dir.display().to_string(),
+            "object_dir": self.object_dir.display().to_string(),
+            "refs": {
+                "base": HISTORY_BASE_REF,
+                "candidate": HISTORY_CANDIDATE_REF,
+            },
+        });
+        if self.revision {
+            git["refs"]["revision"] = json!(HISTORY_REVISION_REF);
+        }
+        if !self.alternates.is_empty() {
+            git["alternates"] = json!(
+                self.alternates
+                    .iter()
+                    .map(|dir| dir.display().to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
+        git
+    }
+}
+
+/// The object directories `objects` borrows from: its `info/alternates`, each line a path
+/// (relative ones from `objects`), and theirs after them, as Git follows them, five deep.
+fn alternates_of(objects: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut next = vec![objects.to_path_buf()];
+    for _ in 0..5 {
+        let mut deeper = Vec::new();
+        for dir in &next {
+            let Ok(text) = std::fs::read_to_string(dir.join("info").join("alternates")) else {
+                continue;
+            };
+            for line in text.lines().map(str::trim) {
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let path = real(&dir.join(line));
+                if path != real(objects) && !found.contains(&path) {
+                    found.push(path.clone());
+                    deeper.push(path);
+                }
+            }
+        }
+        if deeper.is_empty() {
+            break;
+        }
+        next = deeper;
+    }
+    found
+}
+
+/// Makes the [`History`] of a check run in `scratch`: `history.git`, a bare repository by hand
+/// (no Git process), in the object format of the candidate's ids, borrowing every object from
+/// `git`'s store.
+///
+/// # Errors
+///
+/// The store's location cannot be read, or the directory cannot be written.
+fn make_history(git: &Git, scratch: &Path, candidate: &Candidate) -> Result<History, String> {
+    let common = git.common_dir().map_err(|error| error.message())?;
+    let object_dir = real(&Path::new(&common).join("objects"));
+    let alternates = alternates_of(&object_dir);
+    let dir = scratch.join("history.git");
+    let write = |path: PathBuf, text: String| -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("{}: {error}", parent.display()))?;
+        }
+        std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))
+    };
+    // A SHA-256 id is 64 hex digits; Git's repository format 1 names the object format.
+    let config = if candidate.commit.len() == 64 {
+        "[core]\n\trepositoryformatversion = 1\n\tbare = true\n[extensions]\n\tobjectformat = sha256\n"
+    } else {
+        "[core]\n\trepositoryformatversion = 0\n\tbare = true\n"
+    };
+    write(dir.join("config"), config.to_owned())?;
+    write(
+        dir.join("objects").join("info").join("alternates"),
+        format!("{}\n", object_dir.display()),
+    )?;
+    std::fs::create_dir_all(dir.join("refs").join("heads"))
+        .map_err(|error| format!("{}: {error}", dir.display()))?;
+    write(dir.join("HEAD"), format!("{}\n", candidate.commit))?;
+    let mut refs = vec![
+        (HISTORY_BASE_REF, candidate.onto),
+        (HISTORY_CANDIDATE_REF, candidate.commit),
+    ];
+    if let Some(change) = candidate.change {
+        refs.push((HISTORY_REVISION_REF, change.revision.as_str()));
+    }
+    for (name, commit) in refs {
+        write(dir.join(name), format!("{commit}\n"))?;
+    }
+    Ok(History {
+        dir,
+        object_dir,
+        alternates,
+        revision: candidate.change.is_some(),
+    })
 }
 
 /// The paths `commit`'s tree adds, modifies or deletes against `base`'s, sorted. Renames are
@@ -78,6 +332,18 @@ pub struct Limits {
     pub hidden: Vec<PathBuf>,
     /// The sandbox the checks run in, and why none runs when there is none (ruling R14).
     pub sandbox: Sandbox,
+    /// N-3: what a check with `baseline = "base"` is judged against. `None` judges every check
+    /// whole-green, as a run with no base to compare with does (the conformance kit, bisection).
+    pub baseline: Option<Baseline>,
+}
+
+/// N-3: the base a check with `baseline = "base"` is judged against: the trunk commit the
+/// candidate was merged onto (its tree is the candidate's `base_tree`), and the records on that
+/// tree that count and answer the policy's checks (signed under the registry when there is one,
+/// from a listed producer), read before the run.
+pub struct Baseline {
+    pub commit: String,
+    pub records: Vec<EvidenceRecord>,
 }
 
 /// What an adapter, a check's or an input provider's, may neither read nor write (§ 7): the
@@ -347,11 +613,13 @@ fn real(path: &Path) -> PathBuf {
 }
 
 /// The command that runs `executable` inside the sandbox, an allow-list (G62): it sees its
-/// `scratch` (the candidate and the adapter) read-write, the system files of
+/// `scratch` (the candidate and the adapter) read-write, the directories of `read_only` (the
+/// object store a history check reads, G267) and the system files of
 /// [`sandbox::SYSTEM_DIRS`] and [`sandbox::SYSTEM_ETC`] read-only, and nothing else; any of
-/// `hidden` inside those is hidden on top. The network is denied unless `network` (a check's
-/// `network = true`, judged at the base). With no sandbox, a `#!` script starts as
-/// [`crate::platform::script`] says (on Windows through Git for Windows' `sh.exe`).
+/// `hidden` inside the system files is hidden on top. The network is denied unless `network`
+/// (a check's `network = true`, judged at the base). With no sandbox, a `#!` script starts as
+/// [`crate::platform::script`] says (on Windows through Git for Windows' `sh.exe`), and
+/// nothing is read-only.
 ///
 /// # Errors
 ///
@@ -361,14 +629,18 @@ pub(crate) fn sandboxed(
     executable: &Path,
     args: &[&str],
     hidden: &[PathBuf],
-    scratch: &Path,
+    (scratch, read_only): (&Path, &[PathBuf]),
     network: bool,
 ) -> Result<Command, String> {
     Ok(match kind {
         "sandbox-exec" => {
             let mut cmd = Command::new("/usr/bin/sandbox-exec");
             cmd.arg("-p")
-                .arg(sandbox::macos_profile(hidden, scratch, network))
+                .arg(sandbox::macos_profile(
+                    hidden,
+                    (scratch, read_only),
+                    network,
+                ))
                 .arg(executable)
                 .args(args);
             cmd
@@ -376,7 +648,7 @@ pub(crate) fn sandboxed(
         "bwrap" => {
             // Found on the executor's own `PATH`: the check's cleared environment may not have it.
             let mut cmd = Command::new(on_path("bwrap"));
-            cmd.args(sandbox::bwrap_args(hidden, scratch, network));
+            cmd.args(sandbox::bwrap_args(hidden, (scratch, read_only), network));
             cmd.arg("--").arg(executable).args(args);
             cmd
         }
@@ -425,6 +697,18 @@ struct Judged {
     units: Vec<Unit>,
     selection: Option<String>,
     unavailable: Option<String>,
+    /// N-3: on a `product_failure`, how the rest of the result is judged were every failing
+    /// unit pre-existing: what a check with `baseline = "base"` records when the base failed
+    /// each of them too.
+    excused: Option<Excused>,
+}
+
+/// N-3: the judgement of a failed result past its failing units: its other units, its plan
+/// and its selection, judged as [`judge`] judges a result with no failing unit.
+struct Excused {
+    verdict: Verdict,
+    why: Option<String>,
+    selection: Option<String>,
 }
 
 impl Judged {
@@ -435,6 +719,7 @@ impl Judged {
             units: Vec::new(),
             selection: None,
             unavailable: None,
+            excused: None,
         }
     }
 }
@@ -494,6 +779,10 @@ pub fn run_all(
     // The execution budget runs on the monotonic clock from the start of the checks.
     let started = Instant::now();
     let mut records = Vec::new();
+    // N-3: the base runs this run made, so a rerun of a check compares with the same record.
+    let mut on_base: Vec<EvidenceRecord> = Vec::new();
+    // The request's `base`, `change` and `messages`, read once for every check of the run.
+    let mut about_run: Option<serde_json::Map<String, serde_json::Value>> = None;
     for (index, entry) in policy.checks.iter().enumerate() {
         let id = CheckId::new(&entry.id, &entry.environment);
         // A quarantined check is not required (ruling 8c), a post-publication one runs after
@@ -503,6 +792,12 @@ pub fn run_all(
         if finished.contains(&id) || !policy.runs(entry, candidate.changed_paths) {
             continue;
         }
+        if about_run.is_none() {
+            about_run = Some(about(git, candidate)?);
+        }
+        let Some(told) = about_run.as_ref() else {
+            continue;
+        };
         // Flake-aware retry: a `product_failure` runs again on the identical tree, freshly
         // materialized, up to `retry_on_failure` times, and stops at the first other answer.
         // Every run is its own record, so a failure and a later pass combine to `flaky`.
@@ -514,13 +809,34 @@ pub fn run_all(
                 limits,
                 hooks,
                 (index, entry),
-                (work_dir, started),
+                (work_dir, started, told),
             )?;
             if let Some(reason) = judged.unavailable.take() {
                 return Ok(Ran {
                     records,
                     unavailable: Some((entry.environment.clone(), reason)),
                 });
+            }
+            // N-3: a check with `baseline = "base"` that failed is judged against the base: only
+            // a unit the base did not fail is a failure. A run that did not fail needs no base.
+            let mut compared = None;
+            if let Some(base) = limits
+                .baseline
+                .as_ref()
+                .filter(|_| entry.baseline.is_some() && judged.verdict == Verdict::ProductFailure)
+            {
+                let answer = base_answer(
+                    git,
+                    policy,
+                    candidate,
+                    producer,
+                    limits,
+                    hooks,
+                    (index, entry),
+                    (work_dir, started),
+                    (base, &mut on_base),
+                )?;
+                compared = Some(against_base(&mut judged, answer, &base.commit));
             }
             let mut record = evidence(
                 candidate,
@@ -531,6 +847,11 @@ pub fn run_all(
                 ran,
                 sandbox,
             );
+            // N-3: the record names the base record it was judged against, and each unit that
+            // failed on both, so its verdict is auditable.
+            if let Some(compared) = compared {
+                record.unknown.insert(BASELINE.to_owned(), compared);
+            }
             // NEW-10: a check with `footprint = true` stamps its read set, so a later candidate
             // whose read set is the same can carry this record (`crate::throughput`).
             if let Some(stamp) =
@@ -561,12 +882,13 @@ pub fn run_all(
 
 /// One run of the check `entry`, the `index`th of `policy`, on `candidate`: its tree and adapter
 /// freshly materialized under `work_dir` and removed after, within what is left of the budget
-/// since `started`. Returns the judgement and when the check itself started, after its
-/// materialization.
+/// since `started`, with `about` in its request. Returns the judgement and when the check
+/// itself started, after its materialization.
 ///
 /// # Errors
 ///
-/// The candidate or the adapter cannot be materialized (a fault of bay's own, not a verdict).
+/// The candidate or the adapter cannot be materialized, or the history of a check with
+/// `inputs = ["history"]` cannot be made (a fault of bay's own, not a verdict).
 fn run_once(
     git: &Git,
     policy: &Policy,
@@ -574,7 +896,7 @@ fn run_once(
     limits: &Limits,
     hooks: &mut Hooks,
     (index, entry): (usize, &CheckEntry),
-    (work_dir, started): (&Path, Instant),
+    (work_dir, started, about): (&Path, Instant, &serde_json::Map<String, serde_json::Value>),
 ) -> Result<(Judged, Instant), String> {
     let budget = limits.budget;
     let dir = work_dir.join(format!("check-{index}"));
@@ -596,12 +918,21 @@ fn run_once(
             (&mut *hooks.beat, limits.heartbeat),
         )?,
     };
+    // G267: a check that reads history gets it through a repository of its own run, which
+    // borrows the store's objects and is removed with the scratch.
+    let history = if not_run.is_none() && entry.reads_history() {
+        Some(make_history(git, &dir, candidate)?)
+    } else {
+        None
+    };
     let place = Place {
         tree: &tree_dir,
         adapter: &adapter_dir,
         scratch: &dir,
         hidden: &limits.hidden,
         sandbox: limits.sandbox.kind,
+        about,
+        history: history.as_ref(),
     };
     let remaining = budget.map(|budget| budget.saturating_sub(started.elapsed()));
     let ran = Instant::now();
@@ -674,6 +1005,201 @@ fn run_id(producer: &str, candidate: &str, index: usize, run: u32) -> String {
     } else {
         format!("{producer}/{candidate}-{}-rerun-{run}", index + 1)
     }
+}
+
+/// N-3: whether `record` answers check `entry` on the base under the exact inputs the
+/// candidate's run had: a `check` record of it about the base's tree (and commit, for a
+/// commit-keyed check), made under the same manifest, so the same definition and adapter,
+/// under the same provenance and fixtures, with an answer. An `unknown` or `infra_failure`
+/// record is no answer, so the base is run again rather than leaving every later candidate on
+/// it unknown.
+fn answers_on_base(
+    record: &EvidenceRecord,
+    policy: &Policy,
+    candidate: &Candidate,
+    entry: &CheckEntry,
+    base: &str,
+) -> bool {
+    let commit_keyed = entry.inputs.iter().any(|input| input == "commit");
+    record.kind == crate::evidence::KIND_CHECK
+        && record.check == CheckId::new(&entry.id, &entry.environment)
+        && record.subject.tree == candidate.base_tree
+        && (!commit_keyed || record.subject.commit == base)
+        && record.manifest_digest == policy.manifest_digest
+        && record.policy_provenance.as_deref() == Some(candidate.policy_provenance.as_str())
+        && record.fixtures().as_deref() == Some(entry.fixtures.as_slice())
+        && matches!(record.verdict, Verdict::Pass | Verdict::ProductFailure)
+}
+
+/// N-3: the record of check `entry` on the base that the candidate's failed run is judged
+/// against: the base's own record when one answers it under exact inputs
+/// ([`answers_on_base`]), else one run of the check on the base, materialized like a
+/// candidate, with the adapter the candidate's run had, and handed to `hooks.keep` as the
+/// base's evidence, so a later candidate on the same base reuses it: one run per base, never
+/// one per candidate. The inner error says why the base has no answer at all (no worker ran
+/// it).
+///
+/// # Errors
+///
+/// A git fault, the base cannot be materialized, or `keep` fails.
+#[allow(clippy::too_many_arguments)]
+fn base_answer(
+    git: &Git,
+    policy: &Policy,
+    candidate: &Candidate,
+    producer: &str,
+    limits: &Limits,
+    hooks: &mut Hooks,
+    (index, entry): (usize, &CheckEntry),
+    (work_dir, started): (&Path, Instant),
+    (base, on_base): (&Baseline, &mut Vec<EvidenceRecord>),
+) -> Result<Result<EvidenceRecord, String>, String> {
+    if let Some(found) = on_base
+        .iter()
+        .chain(&base.records)
+        .find(|record| answers_on_base(record, policy, candidate, entry, &base.commit))
+    {
+        return Ok(Ok(found.clone()));
+    }
+    // The base is checked as it was landed: against its own first parent, so an adapter that
+    // selects by `changed_paths` selects what it did then. A root commit changes every path.
+    let parent_commit =
+        match git.run(&["rev-parse", "--verify", "-q", &format!("{}^1", base.commit)]) {
+            Ok(parent) => Some(parent.trim().to_owned()),
+            // `rev-parse --verify` fails on a root commit, which has no first parent.
+            Err(GitError::Failed { .. }) => None,
+            Err(error) => return Err(error.message()),
+        };
+    let parent = match &parent_commit {
+        Some(commit) => tree_of(git, commit)?,
+        None => git
+            .run_with(&["mktree"], &[], Some(b""))
+            .map_err(|error| error.message())?
+            .trim()
+            .to_owned(),
+    };
+    let changed = changed_paths(git, &parent, &base.commit)?;
+    let id = format!("{}-baseline", candidate.id);
+    let on = Candidate {
+        commit: &base.commit,
+        tree: candidate.base_tree,
+        base: candidate.base,
+        base_tree: &parent,
+        onto: parent_commit.as_deref().unwrap_or(&parent),
+        change: None,
+        changed_paths: &changed,
+        id: &id,
+        policy_provenance: candidate.policy_provenance,
+        inputs: candidate.inputs,
+    };
+    let (mut judged, ran) = run_once(
+        git,
+        policy,
+        &on,
+        limits,
+        hooks,
+        (index, entry),
+        (work_dir, started, &about(git, &on)?),
+    )?;
+    if let Some(reason) = judged.unavailable.take() {
+        return Ok(Err(format!(
+            "no worker ran the check on the base {}: {reason}",
+            base.commit
+        )));
+    }
+    // The base's run is whole: its own failures are what the candidate is compared with.
+    judged.excused = None;
+    let mut record = evidence(
+        &on,
+        producer,
+        policy,
+        (index, entry, 0),
+        judged,
+        ran,
+        limits.sandbox.kind,
+    );
+    record.unknown.insert(
+        "baseline_for".to_owned(),
+        serde_json::Value::String(candidate.commit.to_owned()),
+    );
+    (hooks.keep)(&mut record)?;
+    on_base.push(record.clone());
+    Ok(Ok(record))
+}
+
+/// The tree of `commit`.
+fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
+    git.run(&["rev-parse", &format!("{commit}^{{tree}}")])
+        .map(|tree| tree.trim().to_owned())
+        .map_err(|error| error.message())
+}
+
+/// N-3: judges `judged`, a candidate's run that failed, against `answer`, the check's record on
+/// the base `base` (or why the base has none), and returns what the record states of it:
+/// `{"commit", "record", "failures"}`, the base record's id and the units that failed on both.
+///
+/// A failing unit is pre-existing only when the same unit (by id) failed on the base; one the
+/// base passed, has no result for, or lacks is a failure of the candidate. When every failing
+/// unit is pre-existing, the run is judged by the rest of its result ([`Excused`]); otherwise
+/// it stays `product_failure`. A base with no answer, `unknown` or `infra_failure`, makes the
+/// run `unknown`: a failure that cannot be told new or old is never a pass.
+fn against_base(
+    judged: &mut Judged,
+    answer: Result<EvidenceRecord, String>,
+    base: &str,
+) -> serde_json::Value {
+    let record = match answer {
+        Ok(record) => record,
+        Err(why) => {
+            judged.verdict = Verdict::Unknown;
+            judged.why = Some(why);
+            judged.excused = None;
+            return json!({"commit": base});
+        }
+    };
+    let mut stated = json!({"commit": base, "record": record.id});
+    if matches!(record.verdict, Verdict::Unknown | Verdict::InfraFailure) {
+        let word = serde_json::to_value(record.verdict)
+            .ok()
+            .and_then(|word| word.as_str().map(str::to_owned))
+            .unwrap_or_default();
+        judged.verdict = Verdict::Unknown;
+        judged.why = Some(format!(
+            "the check's run on the base {base} is {word}{}; a failure on the candidate cannot be told new or pre-existing, and unknown is never pass",
+            record
+                .why
+                .as_ref()
+                .map_or_else(String::new, |why| format!(" ({why})"))
+        ));
+        judged.excused = None;
+        return stated;
+    }
+    let failed_on_base = |id: &str| {
+        record
+            .units
+            .iter()
+            .any(|unit| unit.id == id && unit.verdict == Verdict::ProductFailure)
+    };
+    let failing: Vec<&str> = judged
+        .units
+        .iter()
+        .filter(|unit| unit.verdict == Verdict::ProductFailure)
+        .map(|unit| unit.id.as_str())
+        .collect();
+    let preexisting: Vec<&str> = failing
+        .iter()
+        .copied()
+        .filter(|id| failed_on_base(id))
+        .collect();
+    stated["failures"] = json!(preexisting);
+    if preexisting.len() == failing.len()
+        && let Some(excused) = judged.excused.take()
+    {
+        judged.verdict = excused.verdict;
+        judged.why = excused.why;
+        judged.selection = excused.selection;
+    }
+    stated
 }
 
 /// What a run calls back into: `keep` takes each record as soon as its check ends; `beat`
@@ -761,16 +1287,40 @@ struct Place<'a> {
     scratch: &'a Path,
     hidden: &'a [PathBuf],
     sandbox: &'a str,
+    /// The request's `base`, `change` and `messages` ([`about`]).
+    about: &'a serde_json::Map<String, serde_json::Value>,
+    /// The read-only history of a check with `inputs = ["history"]`.
+    history: Option<&'a History>,
 }
 
-/// The `bay.check.request/1` bay sends for `entry` on `candidate` (`INTERFACES` § 3).
-fn request(entry: &CheckEntry, policy: &Policy, candidate: &Candidate) -> serde_json::Value {
+/// The `bay.check.request/1` bay sends for `entry` on `candidate` (`INTERFACES` § 3). Fields
+/// are only ever added to a request of one schema, and an adapter ignores a field it does not
+/// know, so `base`, `change`, `messages`, `messages_truncated` and `git` keep it at `/1`:
+/// - `base`: `{"commit", "tree"}`, the accepted base the candidate was merged onto.
+/// - `change`: `{"id", "intent": {"reference", "revision"}, "actor", "revision"}`, and
+///   `messages`: the change's own commits between the base and its revision, oldest first,
+///   each `{"commit", "message"}`, at most [`MESSAGES_MAX`] and [`MESSAGES_MAX_BYTES`], with
+///   `messages_truncated` saying whether they were cut. Absent when the candidate lands no one
+///   change (a batch's, a trunk bisection's).
+/// - `git`: only for a check with `inputs = ["history"]` ([`History`]): `{"dir", "object_dir",
+///   "alternates"?, "refs": {"base", "candidate", "revision"?}}`, so that
+///   `GIT_DIR=<dir> git log <base>` reads the repository's history, and no write reaches it.
+///
+/// A check whose verdict reads `base`, `change` or `messages` declares `inputs = ["commit"]` or
+/// `["history"]`, so its evidence is keyed by subject commit and never stands for another
+/// commit with the same tree.
+fn request(
+    entry: &CheckEntry,
+    policy: &Policy,
+    candidate: &Candidate,
+    place: &Place,
+) -> serde_json::Value {
     let mut requires = json!({"environment": entry.environment});
     if !entry.fixtures.is_empty() {
         // § 3: the fixtures the policy pins, by digest (ruling R18).
         requires["fixtures"] = json!(entry.fixtures);
     }
-    json!({
+    let mut request = json!({
         "schema": "bay.check.request/1",
         "candidate": {"commit": candidate.commit, "tree": candidate.tree},
         "changed_paths": candidate.changed_paths,
@@ -778,7 +1328,14 @@ fn request(entry: &CheckEntry, policy: &Policy, candidate: &Candidate) -> serde_
         "requires": requires,
         "timeout_s": entry.timeout_s,
         "inputs": candidate.inputs,
-    })
+    });
+    if let Some(fields) = request.as_object_mut() {
+        fields.extend(place.about.clone());
+        if let Some(history) = place.history {
+            fields.insert("git".to_owned(), history.request());
+        }
+    }
+    request
 }
 
 fn run_one(
@@ -793,7 +1350,7 @@ fn run_one(
     let (tree_dir, adapter_dir) = (place.tree, place.adapter);
     let mut words = entry.command.split_whitespace();
     let executable = adapter_dir.join(words.next().unwrap_or_default());
-    let request = request(entry, policy, candidate);
+    let request = request(entry, policy, candidate, place);
     let args: Vec<&str> = words.collect();
     // Ruling 8b: a named variable the executor does not set is an infrastructure failure;
     // the check never runs without what its policy declares.
@@ -813,12 +1370,13 @@ fn run_one(
     let scratch_home = place.scratch.join("home");
     let _ = std::fs::create_dir_all(&scratch_tmp);
     let _ = std::fs::create_dir_all(&scratch_home);
+    let read_only = place.history.map(History::read_only).unwrap_or_default();
     let mut cmd = match sandboxed(
         place.sandbox,
         &executable,
         &args,
         place.hidden,
-        place.scratch,
+        (place.scratch, read_only.as_slice()),
         entry.network,
     ) {
         Ok(cmd) => cmd,
@@ -908,9 +1466,15 @@ fn exchange(
 
 /// Whether the check's stderr names a hidden path. A path inside the check's own scratch is
 /// never one, though the scratch sits under the repository's git directory (G241): a shell's
-/// error about the check's own adapter is no reach outside.
+/// error about the check's own adapter is no reach outside. Nor is the object directory a
+/// history check reads (G267): a Git refusing to write there names it.
 fn reaches_out(stderr: &str, place: &Place) -> bool {
-    let own = forms(place.scratch);
+    let mut own = forms(place.scratch);
+    if let Some(history) = place.history {
+        for dir in history.read_only() {
+            own.extend(forms(&dir));
+        }
+    }
     place.hidden.iter().any(|hidden| {
         forms(hidden)
             .iter()
@@ -1031,19 +1595,35 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
         return too_long;
     }
     let units = recorded_units(result);
+    let failed = units
+        .iter()
+        .any(|unit| unit.verdict == Verdict::ProductFailure);
+    let mut judged = judge_units(result, entry, units);
+    if failed {
+        // A failing unit is the run's verdict. N-3: the rest of the result is judged all the
+        // same, so a check with `baseline = "base"` whose every failure is pre-existing records
+        // what its other units, its plan and its selection say, never a pass by default.
+        judged.excused = Some(Excused {
+            verdict: judged.verdict,
+            why: judged.why.take(),
+            selection: judged.selection.take(),
+        });
+        judged.verdict = Verdict::ProductFailure;
+    }
+    judged
+}
+
+/// [`judge`] past the failing units: the plan, the selection and every unit that did not
+/// fail. A failing unit is judged by the caller.
+fn judge_units(result: &CheckResult, entry: &CheckEntry, units: Vec<Unit>) -> Judged {
     let with = |verdict: Verdict, why: Option<String>, units: Vec<Unit>| Judged {
         verdict,
         why,
         units,
         selection: None,
         unavailable: None,
+        excused: None,
     };
-    if units
-        .iter()
-        .any(|unit| unit.verdict == Verdict::ProductFailure)
-    {
-        return with(Verdict::ProductFailure, None, units);
-    }
     // § 7: `declared_empty` is valid only with `selected` = 0 and `expected_minimum` = 0; any
     // other combination is `unknown`.
     let declared = result.plan.selection.as_deref();
@@ -1115,6 +1695,7 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
         units,
         selection: empty.then(|| DECLARED_EMPTY.to_owned()),
         unavailable: None,
+        excused: None,
     }
 }
 
@@ -1545,6 +2126,8 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
                 tree: &tree,
                 base: &commit,
                 base_tree: &tree,
+                onto: &commit,
+                change: None,
                 changed_paths: &[],
                 id: "op.1",
                 policy_provenance: crate::policy::Provenance::Bay,
@@ -1556,6 +2139,7 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
                 heartbeat: None,
                 hidden: Vec::new(),
                 sandbox,
+                baseline: None,
             };
             let mut keep = |_: &mut EvidenceRecord| Ok(());
             let mut records = run_all(

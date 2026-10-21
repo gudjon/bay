@@ -101,7 +101,8 @@
         "LANE_LEAK",
         "APPROVAL_PENDING",
         "WIP_LIMIT",
-        "DISK_LOW"
+        "DISK_LOW",
+        "TRUNK_HELD"
       ]
     },
     "change": {
@@ -178,7 +179,8 @@
         "view_reaches_no_lane_commit",
         "approved",
         "a_live_change_lands_or_is_abandoned",
-        "free_space_above_floor"
+        "free_space_above_floor",
+        "hold_cleared"
       ]
     },
     "waiting_for": {

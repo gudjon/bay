@@ -106,9 +106,15 @@ fn under_system(path: &Path, network: bool) -> bool {
 }
 
 /// The whole `bwrap` argument list before `--`: the system part, then each hidden path that
-/// lies inside it made empty, then `scratch` read-write (the candidate and the adapter).
+/// lies inside it made empty, then each directory of `read_only` read-only (the object store a
+/// history check reads, G267: bound at its own path, so a write there fails), then `scratch`
+/// read-write (the candidate, the adapter and the history repository of its run).
 #[must_use]
-pub fn bwrap_args(hidden: &[PathBuf], scratch: &Path, network: bool) -> Vec<OsString> {
+pub fn bwrap_args(
+    hidden: &[PathBuf],
+    (scratch, read_only): (&Path, &[PathBuf]),
+    network: bool,
+) -> Vec<OsString> {
     let mut args = bwrap_system_args(network);
     for path in hidden.iter().filter(|path| under_system(path, network)) {
         let target = real(path).into_os_string();
@@ -117,6 +123,10 @@ pub fn bwrap_args(hidden: &[PathBuf], scratch: &Path, network: bool) -> Vec<OsSt
         } else {
             args.extend([os("--tmpfs"), target]);
         }
+    }
+    for dir in read_only {
+        let dir = real(dir).into_os_string();
+        args.extend([os("--ro-bind"), dir.clone(), dir]);
     }
     let scratch = real(scratch).into_os_string();
     args.extend([os("--bind"), scratch.clone(), scratch]);
@@ -159,9 +169,15 @@ pub const MACOS_MACH: &[&str] = &[
 
 /// The `sandbox-exec` profile: deny by default (never `allow default`), then allow running
 /// programs, reading the system list, reading and writing the scratch, and, with
-/// `network = true` only, the network. A hidden path inside the system list is denied on top.
+/// `network = true` only, the network. A hidden path inside the system list is denied on top;
+/// each directory of `read_only` (the object store a history check reads, G267) is readable
+/// after that, never writable.
 #[must_use]
-pub fn macos_profile(hidden: &[PathBuf], scratch: &Path, network: bool) -> String {
+pub fn macos_profile(
+    hidden: &[PathBuf],
+    (scratch, read_only): (&Path, &[PathBuf]),
+    network: bool,
+) -> String {
     let quote = |path: &Path| {
         format!(
             "\"{}\"",
@@ -184,11 +200,14 @@ pub fn macos_profile(hidden: &[PathBuf], scratch: &Path, network: bool) -> Strin
     rules.push(format!("(allow mach-lookup {})", mach.join(" ")));
     // A path is opened by walking it: each directory above the scratch and the root itself
     // can be looked up, never listed or read.
-    let mut ancestors: Vec<String> = scratch
-        .ancestors()
-        .skip(1)
+    let read_only: Vec<PathBuf> = read_only.iter().map(PathBuf::as_path).map(real).collect();
+    let mut ancestors: Vec<String> = std::iter::once(&scratch)
+        .chain(&read_only)
+        .flat_map(|path| path.ancestors().skip(1))
         .map(|dir| filter("literal", dir))
         .collect();
+    ancestors.sort();
+    ancestors.dedup();
     for link in ["/etc", "/var", "/tmp", "/private"] {
         ancestors.push(filter("literal", Path::new(link)));
     }
@@ -227,6 +246,12 @@ pub fn macos_profile(hidden: &[PathBuf], scratch: &Path, network: bool) -> Strin
             denied.join(" ")
         ));
     }
+    // G267: the store a history check reads, under the hidden repository: readable after the
+    // deny above (the later rule wins), and nothing allows a write there.
+    if !read_only.is_empty() {
+        let readable: Vec<String> = read_only.iter().map(|dir| filter("subpath", dir)).collect();
+        rules.push(format!("(allow file-read* {})", readable.join(" ")));
+    }
     rules.push(format!(
         "(allow file-read* file-write* {})",
         filter("subpath", &scratch)
@@ -246,7 +271,7 @@ mod tests {
     fn the_macos_profile_is_an_allow_list() {
         let scratch = Path::new("/nonexistent/scratch/check-0");
         let hidden = [PathBuf::from("/nonexistent/repo")];
-        let closed = macos_profile(&hidden, scratch, false);
+        let closed = macos_profile(&hidden, (scratch, &[]), false);
         assert!(closed.starts_with("(version 1)(deny default)"), "{closed}");
         assert!(!closed.contains("(allow default)"), "{closed}");
         assert!(!closed.contains("network"), "{closed}");
@@ -268,9 +293,22 @@ mod tests {
         );
         assert!(!closed.contains("(subpath \"/\")"), "{closed}");
         assert!(!closed.contains("/Users"), "{closed}");
-        let open = macos_profile(&hidden, scratch, true);
+        let open = macos_profile(&hidden, (scratch, &[]), true);
         assert!(open.contains("(allow network*)"), "{open}");
         assert!(!open.contains("(allow default)"), "{open}");
+        // G267: a history check reads the store under the hidden repository, after the deny,
+        // and never writes it.
+        let store = [PathBuf::from("/nonexistent/repo/.git/objects")];
+        let history = macos_profile(&hidden, (scratch, &store), false);
+        let deny = history.find("(deny file-read* file-write*").unwrap();
+        let read = history
+            .find("(allow file-read* (subpath \"/nonexistent/repo/.git/objects\"))")
+            .unwrap_or_else(|| panic!("{history}"));
+        assert!(deny < read, "{history}");
+        assert!(
+            !history.contains("file-write* (subpath \"/nonexistent/repo/.git/objects\")"),
+            "{history}"
+        );
     }
 
     /// G62 on Linux, as arguments: `/` is never bound, the network is unshared unless the
@@ -278,7 +316,7 @@ mod tests {
     #[test]
     fn the_bwrap_arguments_are_an_allow_list() {
         let scratch = Path::new("/nonexistent/scratch/check-0");
-        let args = bwrap_args(&[], scratch, false);
+        let args = bwrap_args(&[], (scratch, &[]), false);
         let text: Vec<&str> = args.iter().filter_map(|arg| arg.to_str()).collect();
         assert!(
             !text
@@ -299,8 +337,28 @@ mod tests {
                 OsString::from(scratch)
             ]
         );
-        let open = bwrap_args(&[], scratch, true);
+        let open = bwrap_args(&[], (scratch, &[]), true);
         assert!(!open.contains(&OsString::from("--unshare-net")));
         assert!(open.contains(&OsString::from("/etc/resolv.conf")));
+        // G267: the store a history check reads is bound read-only at its own path, before the
+        // scratch, which stays the last bind.
+        let store = PathBuf::from("/nonexistent/repo/.git/objects");
+        let history = bwrap_args(&[], (scratch, std::slice::from_ref(&store)), false);
+        assert!(
+            history.windows(3).any(|three| three
+                == [
+                    OsString::from("--ro-bind"),
+                    OsString::from(&store),
+                    OsString::from(&store)
+                ]),
+            "{history:?}"
+        );
+        assert!(
+            !history
+                .windows(2)
+                .any(|pair| pair[0] == "--bind" && pair[1] == store.as_os_str()),
+            "{history:?}"
+        );
+        assert_eq!(history[history.len() - 3], OsString::from("--bind"));
     }
 }

@@ -257,6 +257,8 @@ fn run_at(
             tree: &tree,
             base: &base,
             base_tree: &base_tree,
+            onto: &base,
+            change: None,
             changed_paths: &changed,
             id: &candidate_id,
             policy_provenance: crate::policy::Provenance::Bay,
@@ -269,6 +271,8 @@ fn run_at(
             heartbeat: None,
             hidden: check::hidden_for(repo, keys),
             sandbox: check::Sandbox::here(),
+            // Bisection asks whether each commit fails, whole: no base excuses a failure.
+            baseline: None,
         },
         &mut check::Hooks {
             keep: &mut keep,

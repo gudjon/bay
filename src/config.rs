@@ -5,7 +5,8 @@
 //! ([`Config::ignored`]). `[runtime] command` (the runtime adapter, `INTERFACES` § 4) is
 //! not in § 7's list yet. `[executor]` and `[retention]` are read by built features but are
 //! not in § 7's list yet (BACKLOG 18), nor is `[view]` (G175), nor `[red]` (NEW-6), nor are
-//! `[[target]]` and `[[freeze]]` (NEW-5, NEW-9, `crate::target`), nor `[[lane]]` (NEW-4, [`Lane`]). A key or table bay does not know is a config error that
+//! `[[target]]` and `[[freeze]]` (NEW-5, NEW-9, `crate::target`), nor `[hold]` (N-8,
+//! `crate::hold`), nor `[[lane]]` (NEW-4, [`Lane`]). A key or table bay does not know is a config error that
 //! names it, as is `evidence_reuse` set to anything but `"off"` or `"exact-inputs"`: a misspelled
 //! setting never loads as a silent default. A config written for a later bay is refused by
 //! this one, and the recovery is `bay update`.
@@ -27,7 +28,8 @@ pub struct Config {
     /// such as `refs/heads/staging` to a commit already on its source; it is not a landing.
     #[serde(default, rename = "target")]
     pub targets: Vec<Target>,
-    /// `[[freeze]]`: the freeze windows of the targets (NEW-9, `crate::target`).
+    /// `[[freeze]]`: the freeze windows of the targets (NEW-9, `crate::target`), and of the
+    /// trunk itself (N-8, `crate::hold`).
     #[serde(default, rename = "freeze")]
     pub freezes: Vec<Freeze>,
     pub remote: Option<String>,
@@ -43,6 +45,8 @@ pub struct Config {
     pub notify: Option<Notify>,
     /// `[wake] command`: the wake adapter (G58), asked once when this machine accepts a talk.
     pub wake: Option<Wake>,
+    /// `[hold] command`: the hold adapter (N-8, `crate::hold`), asked before each publication.
+    pub hold: Option<HoldAdapter>,
     pub runtime: Option<Runtime>,
     pub policy: Option<PolicyProfile>,
     pub hooks: Option<Hooks>,
@@ -105,7 +109,8 @@ impl Target {
 }
 
 /// One `[[freeze]]` (NEW-9): until `end`, a target takes only a commit whose landing carries
-/// `Fixes:` or `Reverts:`.
+/// `Fixes:` or `Reverts:`. A freeze whose `target` is the trunk's name holds the trunk (N-8,
+/// `crate::hold`): until `end`, only such a landing is published.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Freeze {
@@ -130,6 +135,15 @@ impl Freeze {
 #[serde(deny_unknown_fields)]
 pub struct Notify {
     pub command: Option<String>,
+}
+
+/// `[hold] command`: the hold adapter (N-8, `crate::hold`), run as `<command> status` before
+/// each publication, within `timeout_s` (10 s unless set).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HoldAdapter {
+    pub command: Option<String>,
+    pub timeout_s: Option<u64>,
 }
 
 /// `[wake] command`: the wake adapter (G58, `crate::talk::wake`).
@@ -192,6 +206,9 @@ pub struct Red {
 
 /// The deepest `[red] window`: each commit in it may cost one read of its evidence notes.
 pub const MAX_RED_WINDOW: usize = 10_000;
+
+/// The longest `[hold] timeout_s` (N-8): the hold adapter is asked before each publication.
+pub const MAX_HOLD_TIMEOUT_S: u64 = 120;
 
 /// How long a closed change keeps its drafts before the retention cut (§ 5), and the bay ref
 /// count past which an executor compacts markers (§ 10a ref-growth budget, `crate::compact`).
@@ -413,6 +430,24 @@ impl Config {
             ));
         }
         config.validate_targets()?;
+        if let Some(hold) = &config.hold {
+            if hold
+                .command
+                .as_deref()
+                .is_some_and(|command| command.trim().is_empty())
+            {
+                return Err("[hold] command is empty".to_owned());
+            }
+            // A hold is asked before each publication: its bound stays short.
+            if let Some(timeout) = hold.timeout_s
+                && !(1..=MAX_HOLD_TIMEOUT_S).contains(&timeout)
+            {
+                return Err(format!(
+                    "[hold] timeout_s = {timeout}: the hold adapter's bound is 1 to \
+                     {MAX_HOLD_TIMEOUT_S} s"
+                ));
+            }
+        }
         config.validate_lanes()?;
         config.validate_throughput()?;
         // § 4: the takeover window is longer than the executor lease.
@@ -473,8 +508,8 @@ impl Config {
 
     /// NEW-5, NEW-9: each target has an operator name, used once and never the trunk's; a ref
     /// of its own outside bay's namespaces and never the trunk; a source that is the trunk or
-    /// another target, with no cycle; and named checks. Each freeze names a target, an end bay
-    /// can read and a reason.
+    /// another target, with no cycle; and named checks. Each freeze names a target or the
+    /// trunk (N-8), an end bay can read and a reason.
     fn validate_targets(&self) -> Result<(), String> {
         let trunk = self.trunk();
         let trunk_ref = format!("refs/heads/{trunk}");
@@ -539,13 +574,15 @@ impl Config {
             }
         }
         for freeze in &self.freezes {
-            if !self
-                .targets
-                .iter()
-                .any(|target| target.name == freeze.target)
+            // N-8: a freeze of the trunk itself holds the trunk (`crate::hold`).
+            if freeze.target != trunk
+                && !self
+                    .targets
+                    .iter()
+                    .any(|target| target.name == freeze.target)
             {
                 return Err(format!(
-                    "[[freeze]] target = {:?} names no [[target]]",
+                    "[[freeze]] target = {:?} names neither the trunk {trunk:?} nor a [[target]]",
                     freeze.target
                 ));
             }
@@ -1149,7 +1186,7 @@ product = "claude"                 # leave this table out when the box does not 
             ),
             (
                 "[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"r\"\n",
-                "names no",
+                "names neither",
             ),
             (
                 "[[target]]\nname = \"staging\"\n[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24\"\nreason = \"r\"\n",
@@ -1159,6 +1196,36 @@ product = "claude"                 # leave this table out when the box does not 
                 "[[target]]\nname = \"staging\"\n[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \" \"\n",
                 "reason",
             ),
+        ] {
+            let error = Config::parse(text).unwrap_err();
+            assert!(error.contains(named), "{text}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_freeze_of_the_trunk_and_the_hold_adapter_are_read_and_checked() {
+        // N-8: a freeze may name the trunk itself, with no [[target]].
+        let config = Config::parse(
+            "trunk = \"main\"\n[[freeze]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\n\
+             reason = \"migration\"\n[hold]\ncommand = \"scripts/bay-hold\"\ntimeout_s = 5\n",
+        )
+        .unwrap();
+        assert_eq!(config.freezes[0].target, "main");
+        let hold = config.hold.as_ref().unwrap();
+        assert_eq!(hold.command.as_deref(), Some("scripts/bay-hold"));
+        assert_eq!(hold.timeout_s, Some(5));
+        for (text, named) in [
+            (
+                "[[freeze]]\ntarget = \"main\"\nend = \"2026-12-24\"\nreason = \"r\"\n",
+                "end",
+            ),
+            (
+                "[[freeze]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"\"\n",
+                "reason",
+            ),
+            ("[hold]\ncommand = \" \"\n", "empty"),
+            ("[hold]\ncommand = \"x\"\ntimeout_s = 0\n", "timeout_s"),
+            ("[hold]\ncommand = \"x\"\nevery = 1\n", "every"),
         ] {
             let error = Config::parse(text).unwrap_err();
             assert!(error.contains(named), "{text}: {error}");

@@ -48,6 +48,7 @@ fn record(id: &str, base: &str) -> ChangeRecord {
         retention_cut: false,
         receipts: Vec::new(),
         lane: None,
+        from: None,
     }
 }
 

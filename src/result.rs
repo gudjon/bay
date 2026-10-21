@@ -191,6 +191,10 @@ reasons! {
     // G265 (N-13); not yet in INTERFACES § 2: the box's `bay.minFreeMiB` floor is above the free
     // space of the filesystem a view or a materialized tree would be written to.
     DiskLow => "DISK_LOW", ["read"], "free_space_above_floor", false;
+    // N-8; not yet in INTERFACES § 2: trunk is held, by a `[[freeze]]` of the trunk or the
+    // hold adapter (`crate::hold`), and the change carries neither `Fixes:` nor `Reverts:`. The
+    // operation stays queued, publishes nothing, and is tried again once the hold clears.
+    TrunkHeld => "TRUNK_HELD", ["wait"], "hold_cleared", false;
 }
 
 impl Reason {
@@ -469,7 +473,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 61);
+        assert_eq!(Reason::ALL.len(), 62);
     }
 
     #[test]

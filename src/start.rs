@@ -10,8 +10,8 @@ use std::path::Path;
 use serde_json::json;
 
 use crate::change::{
-    Actor, Chain, ChangeRecord, ChangeState, Intent, IntentClaim, RECORD_SCHEMA, actor_source,
-    change_ref, commit_on, current_actor, freeze_draft, intent_hash,
+    Actor, Chain, ChangeRecord, ChangeState, Intent, IntentClaim, RECORD_SCHEMA, StartedFrom,
+    actor_source, change_ref, commit_on, current_actor, freeze_draft, intent_hash,
 };
 use crate::git::Git;
 use crate::ids::{is_change_id, new_change_id};
@@ -25,7 +25,8 @@ use crate::view;
 
 pub struct StartRequest {
     pub intent: Option<String>,
-    /// Claim the intent's next generation after its change landed (`start --new`).
+    /// Claim the intent's next generation after its change landed, or ended without landing
+    /// (`start --new`, G272).
     pub new: bool,
     pub intent_revision: String,
     pub paths: Vec<String>,
@@ -40,6 +41,9 @@ pub struct StartRequest {
     /// The sandbox lane of `.bay/config.toml` this change works in (`start --lane`, NEW-4): its
     /// checks run against the current trunk and it never lands.
     pub lane: Option<String>,
+    /// A branch made outside bay this change takes in (`start --from`, G268): a branch name or a
+    /// full ref. Its net change since its merge base with trunk is the change's first draft.
+    pub from: Option<String>,
 }
 
 /// How long a start whose claim push met a held remote ref lock waits before it re-reads.
@@ -217,25 +221,13 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
     view::release_ended(repo, repo.config.retention_window(), &ended)
 }
 
-fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
-    let intent = request
-        .intent
-        .clone()
-        .ok_or("bay start needs an intent, or --resume <change>")?;
-    let base = repo.fetch_trunk().map_err(|error| error.message())?;
-    let me = current_actor()?;
-    let source = actor_source();
-    // G152: a policy at the base that requires a named actor refuses a name from a default,
-    // before any claim is written.
-    if source.is_default() && crate::policy::requires_actor_at(&repo.git, &base)? {
-        return Ok(BayResult::blocked(Reason::ActorUnnamed).with_detail(json!({
-            "actor": me.name,
-            "actor_source": source,
-            "policy": crate::policy::POLICY_PATH,
-            "base": base,
-            "recovery": "set BAY_ACTOR to this session's own actor name and start again",
-        })));
-    }
+/// The refusal of a start whose `--lane` the config at trunk does not declare, or whose
+/// `--fixes` names no change on trunk at `base`; nothing is created then.
+fn named_or_refused(
+    repo: &Repo,
+    request: &StartRequest,
+    base: &str,
+) -> Result<Option<BayResult>, String> {
     // NEW-4: a lane is one the config at trunk declares, or nothing is created.
     if let Some(lane) = &request.lane
         && repo.config.lane(lane).is_none()
@@ -256,15 +248,51 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         if !is_change_id(fixed) {
             return Err(format!("--fixes {fixed} is not a change id"));
         }
-        if crate::undo::landed_commit(repo, fixed, &base)?.is_none() {
-            return Ok(BayResult::blocked(Reason::ChangeNotLanded)
-                .with_change(fixed.clone())
-                .with_detail(json!({"trunk": base, "fixes": fixed,
-                    "why": "a fix names a change that landed"})));
+        if crate::undo::landed_commit(repo, fixed, base)?.is_none() {
+            return Ok(Some(
+                BayResult::blocked(Reason::ChangeNotLanded)
+                    .with_change(fixed.clone())
+                    .with_detail(json!({"trunk": base, "fixes": fixed,
+                    "why": "a fix names a change that landed"})),
+            ));
         }
+    }
+    Ok(None)
+}
+
+fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
+    let intent = request
+        .intent
+        .clone()
+        .ok_or("bay start needs an intent, or --resume <change>")?;
+    let base = repo.fetch_trunk().map_err(|error| error.message())?;
+    let me = current_actor()?;
+    let source = actor_source();
+    // G152: a policy at the base that requires a named actor refuses a name from a default,
+    // before any claim is written.
+    if source.is_default() && crate::policy::requires_actor_at(&repo.git, &base)? {
+        return Ok(BayResult::blocked(Reason::ActorUnnamed).with_detail(json!({
+            "actor": me.name,
+            "actor_source": source,
+            "policy": crate::policy::POLICY_PATH,
+            "base": base,
+            "recovery": "set BAY_ACTOR to this session's own actor name and start again",
+        })));
+    }
+    if let Some(refused) = named_or_refused(repo, request, &base)? {
+        return Ok(refused);
     }
     // G264: the most live changes one actor may hold, as the policy at the base sets it.
     let limit = crate::policy::max_live_changes_at(&repo.git, &base)?;
+    // G268: the outside branch is resolved, judged against the declared paths and merged onto
+    // the base before any claim is written, so a refusal creates nothing.
+    let taken_in = match &request.from {
+        None => None,
+        Some(reference) => match take_in(repo, reference, &base, &request.paths)? {
+            Ok(taken_in) => Some(taken_in),
+            Err(refusal) => return Ok(refusal),
+        },
+    };
     let hash = intent_hash(&intent, &request.intent_revision);
     // § 4: one intent, one change, by claim. A lost race re-reads the claims.
     for _ in 0..5 {
@@ -281,11 +309,18 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
                             .with_detail(json!({"intent": intent, "generation": generation,
                                 "next": "start --new claims the next generation"})));
                     }
+                    // G272: a change that ended without landing closes its generation too.
+                    (false, true) if ended_unlanded(fetched_record(repo, change)?.state) => {
+                        (generation + 1, Some(change.clone()))
+                    }
                     (false, true) => {
                         return Ok(BayResult::blocked(Reason::ChangeSuperseded)
                             .with_change(change.clone())
                             .with_detail(json!({"intent": intent, "generation": generation,
-                                "why": "the next generation needs this one landed"})));
+                                "why": format!("change {change} of generation {generation} is \
+                                    live: the next generation needs it landed or given up"),
+                                "recovery": format!("bay land --abandon from its view gives it \
+                                    up; bay start {intent} without --new adopts it")})));
                     }
                     (false, false) => {
                         return adopt_or_refuse(repo, request, &me, change, &base, limit);
@@ -301,7 +336,17 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
             hash: hash.clone(),
             generation,
         };
-        if let Some(result) = create(repo, request, &intent, &me, &base, claim, supersedes)? {
+        let opened = create(
+            repo,
+            request,
+            &intent,
+            &me,
+            &base,
+            claim,
+            supersedes,
+            taken_in.as_ref(),
+        )?;
+        if let Some(result) = opened {
             return Ok(result);
         }
     }
@@ -395,6 +440,73 @@ fn remote_claims(
     Ok(claims)
 }
 
+/// Whether `state` ends a change without a landing (G272): abandoned, superseded or no effect.
+/// Such a change closes its generation, so `start --new` may claim the next one.
+fn ended_unlanded(state: ChangeState) -> bool {
+    matches!(
+        state,
+        ChangeState::Abandoned | ChangeState::Superseded | ChangeState::NoEffect
+    )
+}
+
+/// Fetches `change`'s chain ref from the remote, over any local copy.
+fn fetch_change(repo: &Repo, change: &str) -> Result<(), String> {
+    let name = change_ref(change);
+    repo.git
+        .run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            repo.remote(),
+            &format!("+{name}:{name}"),
+        ])
+        .map_err(|error| error.message())?;
+    Ok(())
+}
+
+/// The current record of `change`'s chain, after fetching its change ref from the remote.
+fn fetched_record(repo: &Repo, change: &str) -> Result<ChangeRecord, String> {
+    fetch_change(repo, change)?;
+    let (_, record) = Chain::new(&repo.git)
+        .read(change)
+        .map_err(|error| error.message())?;
+    Ok(record)
+}
+
+/// G272: the newer generation of `record`'s intent that the remote claims, when `record` ended
+/// without landing: generation and change id. Re-opening such a change would put two live
+/// changes on one intent, so adoption and resume refuse it.
+fn newer_generation(repo: &Repo, record: &ChangeRecord) -> Result<Option<(u64, String)>, String> {
+    let Some(claim) = &record.claim else {
+        return Ok(None);
+    };
+    if !ended_unlanded(record.state) {
+        return Ok(None);
+    }
+    let claims = remote_claims(repo, &claim.hash)?;
+    Ok(claims
+        .range(claim.generation + 1..)
+        .next_back()
+        .map(|(generation, change)| (*generation, change.clone())))
+}
+
+/// `CHANGE_SUPERSEDED` for change `id`, which ended without landing behind the newer
+/// generation `newer` of its intent (G272).
+fn superseded_by_newer(id: &str, record: &ChangeRecord, newer: &(u64, String)) -> BayResult {
+    let (generation, change) = newer;
+    BayResult::blocked(Reason::ChangeSuperseded)
+        .with_change(id)
+        .with_detail(json!({
+            "intent": record.intent.reference,
+            "state": record.state,
+            "superseded_by": change,
+            "generation": generation,
+            "why": format!("change {id} ended without landing and generation {generation} of \
+                its intent is change {change}"),
+            "recovery": format!("bay start --resume {change} continues the intent"),
+        }))
+}
+
 /// Whether the remote holds the marker `name`: as a ref, or compacted into its shard index
 /// (§ 10a), where the record stands in for the ref.
 fn remote_has(repo: &Repo, name: &str) -> Result<bool, String> {
@@ -453,8 +565,123 @@ fn compacted_claims(
     Ok(())
 }
 
+/// An outside branch a start takes in (`start --from`, G268): what the record keeps of it, and
+/// the draft on the base that holds its net change.
+struct TakenIn {
+    from: StartedFrom,
+    draft: String,
+}
+
+/// Takes in the branch made outside bay that `reference` names (G268): the commit it names
+/// here, or on the remote when this repository does not hold it; every path it changes since
+/// its merge base with trunk, which the declared `paths` must cover; and the three-way merge of
+/// it onto `base` (`merge_onto`, the merge a candidate is built with), committed on `base` as
+/// the change's first draft. A conflict is the `MERGE_CONFLICT` refusal; nothing is written
+/// but objects no ref names.
+fn take_in(
+    repo: &Repo,
+    reference: &str,
+    base: &str,
+    paths: &[String],
+) -> Result<Result<TakenIn, BayResult>, String> {
+    let commit = resolve_from(repo, reference)?;
+    let from = StartedFrom {
+        reference: reference.to_owned(),
+        commit: commit.clone(),
+    };
+    let merge_base = repo
+        .git
+        .run(&["merge-base", base, &commit])
+        .map_err(|_| format!("--from {reference}: {commit} shares no history with trunk {base}"))?;
+    // `--no-renames`: which paths changed is read from trees alone, never from blob contents.
+    let changed = repo
+        .git
+        .run(&[
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            &merge_base,
+            &commit,
+        ])
+        .map_err(|error| error.message())?;
+    // A change that declares no paths holds the whole tree.
+    let uncovered: Vec<&str> = changed
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .filter(|path| {
+            !paths.is_empty() && !paths.iter().any(|declared| inputs::within(declared, path))
+        })
+        .collect();
+    if !uncovered.is_empty() {
+        return Err(format!(
+            "--from {reference} changes paths --paths does not declare: {uncovered:?}; declare \
+             them with --paths and start again"
+        ));
+    }
+    match merge_onto(&repo.git, base, &commit).map_err(|error| error.message())? {
+        Merge::Conflict(conflicts, _) => Ok(Err(BayResult::blocked(Reason::MergeConflict)
+            .with_detail(json!({
+                "conflicts": conflicts,
+                "from": from,
+                "trunk": base,
+                "next": "bring trunk into the branch outside bay, then start again",
+            })))),
+        Merge::Clean(tree) => {
+            let draft = commit_on(&repo.git, &tree, base, &format!("start --from {reference}"))
+                .map_err(|error| error.message())?;
+            Ok(Ok(TakenIn { from, draft }))
+        }
+    }
+}
+
+/// The commit `reference` names (G268): here, as a full ref, a branch or any revision this
+/// repository holds; otherwise fetched from the remote, a branch name or a full ref, into a
+/// ref of bay's own that is deleted once read.
+fn resolve_from(repo: &Repo, reference: &str) -> Result<String, String> {
+    if reference.is_empty() || reference.starts_with('-') {
+        return Err(format!("--from {reference:?} names no branch or ref"));
+    }
+    if let Ok(commit) = repo.git.run(&[
+        "rev-parse",
+        "--verify",
+        "-q",
+        &format!("{reference}^{{commit}}"),
+    ]) {
+        return Ok(commit);
+    }
+    let fetched = format!("{}from-{}", crate::names::FETCH, std::process::id());
+    let commit = repo
+        .git
+        .run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            repo.remote(),
+            &format!("+{reference}:{fetched}"),
+        ])
+        .and_then(|_| {
+            repo.git.run(&[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("{fetched}^{{commit}}"),
+            ])
+        });
+    let _ = repo.git.run(&["update-ref", "-d", &fetched]);
+    commit.map_err(|error| {
+        format!(
+            "--from {reference} is not held here, and the remote {} has no such branch or ref: {}",
+            repo.remote(),
+            error.message()
+        )
+    })
+}
+
 /// Creates the change and its claim in one atomic push (§ 4), so a crash never leaves a claim
-/// without a change. Returns `None` when another start claimed the generation first.
+/// without a change. Returns `None` when another start claimed the generation first. A change
+/// that takes in an outside branch (G268) starts from its draft rather than from `base`.
+#[allow(clippy::too_many_arguments)]
 fn create(
     repo: &Repo,
     request: &StartRequest,
@@ -463,6 +690,7 @@ fn create(
     base: &str,
     claim: IntentClaim,
     supersedes: Option<String>,
+    taken_in: Option<&TakenIn>,
 ) -> Result<Option<BayResult>, String> {
     let id = new_change_id().map_err(|error| error.to_string())?;
     let intent_ref = claim.intent_ref();
@@ -506,13 +734,15 @@ fn create(
         retention_cut: false,
         receipts: Vec::new(),
         lane: request.lane.clone(),
+        from: taken_in.map(|taken_in| taken_in.from.clone()),
     };
+    let draft = taken_in.map_or(base, |taken_in| taken_in.draft.as_str());
     // § 8: the view is of `base`, so what the actor reads there is what it observed.
     record.observed_versions = inputs::observe(repo, &record, base);
     let mut chain = Chain::new(&repo.git);
     chain.sign_with(agent_signer(repo, &me.name)?);
     let head = chain
-        .create(&record, base, &format!("start {intent}"))
+        .create(&record, draft, &format!("start {intent}"))
         .map_err(|error| error.message())?;
     let name = change_ref(&id);
     // G198: both refs are create-only. A lease that expects no ref refuses one that exists,
@@ -545,7 +775,7 @@ fn create(
     }
     // The claim is the remote's now; its local copy is created, never moved (G198).
     let _ = repo.git.run(&["update-ref", &intent_ref, &head, ""]);
-    let view = view::create(repo, &id, base, &request.paths).map_err(|error| error.message())?;
+    let view = view::create(repo, &id, draft, &request.paths).map_err(|error| error.message())?;
     Ok(Some(
         BayResult::ok(json!({
             "view": view.display().to_string(),
@@ -558,6 +788,7 @@ fn create(
             "actor_source": record.actor_source,
             "fixes": record.fixes,
             "lane": record.lane,
+            "from": record.from,
             "pushed": true,
         }))
         .with_change(id),
@@ -578,17 +809,10 @@ fn adopt_or_refuse(
     limit: Option<u64>,
 ) -> Result<BayResult, String> {
     let name = change_ref(change);
-    repo.git
-        .run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            repo.remote(),
-            &format!("+{name}:{name}"),
-        ])
-        .map_err(|error| error.message())?;
+    fetch_change(repo, change)?;
     let mut chain = Chain::new(&repo.git);
     let (mut head, mut record) = chain.read(change).map_err(|error| error.message())?;
+    same_from(request, &record, change)?;
     let free = record.actor.name == me.name
         || matches!(
             record.state,
@@ -673,15 +897,62 @@ fn adopt_or_refuse(
         )
         .map_err(|error| error.message())?;
     }
-    Ok(BayResult::ok(json!({
+    let mut detail = json!({
         "view": path.display().to_string(),
         "adopted": previous != *me,
         "adopted_from": previous,
         "actor": record.actor,
         "actor_source": record.actor_source,
         "paths": request.paths,
-    }))
-    .with_change(change))
+    });
+    add_behind(repo, &mut detail, change, &record.base, base)?;
+    Ok(BayResult::ok(detail).with_change(change))
+}
+
+/// G272: an adopted change's detail says how far trunk moved past its base (`behind`, trunk
+/// first-parent commits in `base..trunk`) and, when it moved, how to bring that trunk in.
+fn add_behind(
+    repo: &Repo,
+    detail: &mut serde_json::Value,
+    change: &str,
+    base: &str,
+    trunk: &str,
+) -> Result<(), String> {
+    let behind: u64 = repo
+        .git
+        .run(&[
+            "rev-list",
+            "--first-parent",
+            "--count",
+            &format!("{base}..{trunk}"),
+        ])
+        .map_err(|error| error.message())?
+        .trim()
+        .parse()
+        .map_err(|_| "git rev-list --count printed no count".to_owned())?;
+    detail["behind"] = json!(behind);
+    if behind > 0 {
+        detail["recovery"] = json!(format!("bay start --resume {change} brings in newer trunk"));
+    }
+    Ok(())
+}
+
+/// G268: an outside branch opens a change of its own. A start whose `--from` is not the branch
+/// the intent's live change took in (or that change took in none) never adopts it, which would
+/// drop the branch; a retry of the same start adopts as any other.
+fn same_from(request: &StartRequest, record: &ChangeRecord, change: &str) -> Result<(), String> {
+    match &request.from {
+        Some(reference)
+            if record.from.as_ref().map(|from| from.reference.as_str())
+                != Some(reference.as_str()) =>
+        {
+            Err(format!(
+                "--from {reference}: the intent already has the change {change}; resume it with \
+                 start --resume {change}, or start another intent"
+            ))
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Another live session of `me`'s actor name that holds `change` (§ 4, rulings-open-questions.md
@@ -800,6 +1071,11 @@ fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
         })?;
     }
     let (mut head, mut record) = chain.read(id).map_err(|error| error.message())?;
+    // G272: a change that ended without landing is never resumed behind a newer generation of
+    // its intent (plain `start` adopts only the newest claim's change).
+    if let Some(newer) = newer_generation(repo, &record)? {
+        return Ok(superseded_by_newer(id, &record, &newer));
+    }
     chain.sign_with(agent_signer(repo, &record.actor.name)?);
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
     let latest = chain

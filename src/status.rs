@@ -236,6 +236,10 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     if let (Some(detail), Some(accept)) = (result.detail.as_mut(), talk_accept) {
         detail["talk_accept"] = accept;
     }
+    // N-8: a held trunk is named, with where the hold comes from, its reason and its end.
+    if let (Some(detail), Some(hold)) = (result.detail.as_mut(), crate::hold::held(&repo, &trunk)) {
+        detail["hold"] = hold.to_json();
+    }
     if let (Some(detail), Some(warning)) = (result.detail.as_mut(), no_live_executor(&repo, queued))
     {
         detail["warnings"] = json!([warning]);
@@ -1270,6 +1274,7 @@ fn describe(
         "change": record.id,
         "intent": record.intent.reference,
         "lane": record.lane,
+        "from": record.from,
         "state": state,
         "recorded_state": record.state,
         "landed": landed.map(|found| &found.commit),

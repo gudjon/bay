@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.2
+
+- A check request now names its base commit, the change, its actor and the change's commit messages.
+- A check declaring `inputs = ["history"]` reads repository history through a temporary, read-only Git directory.
+- History-reading checks are keyed by commit, so their evidence never stands for another commit.
+- `bay start --from <branch>` takes in a branch made outside bay; it lands as one checked commit.
+- `bay status --heads` lists every remote branch as trunk, target, lane, landed, stale or unique.
+- `bay status --heads --prune` archives each landed branch under `refs/bay/archive/heads/`, then deletes it under a lease.
+- Only branches proven landed by ancestry or equal patches are pruned, never by Change-Id alone.
+- A `[[freeze]]` naming the trunk holds it: only fixes and reverts land until its end.
+- A `[hold] command` adapter can hold the trunk; an unreadable answer counts as held.
+- Held changes wait queued with `TRUNK_HELD`; `bay status` shows the hold in `detail.hold`.
+- A check with `baseline = "base"` fails a change only on failures its base does not share.
+- Pre-existing failures land named under `coverage_gaps` as `baseline_failures`, never as a pass.
+- After `bay land --abandon`, `bay start <intent> --new` claims the next generation, superseding the abandoned change.
+- `bay start --resume` refuses an abandoned change once a newer generation of its intent exists.
+- Re-opening a change reports `behind`, how many trunk commits it missed, with a hint to resume.
+
 ## 0.2.1
 
 - A land whose `[executor] command` cannot start or refuses now ends `failed`, and nothing lands it later.

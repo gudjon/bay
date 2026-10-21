@@ -58,6 +58,16 @@ fn is_zero(oid: &str) -> bool {
     !oid.is_empty() && oid.bytes().all(|byte| byte == b'0')
 }
 
+/// G269: a pruned branch's archive (`refs/bay/archive/heads/<branch>`) is created once and
+/// never moved or deleted: it is what the restore line of `bay status --heads --prune` reads.
+fn archive(update: &Update) -> Result<(), String> {
+    if is_zero(&update.old) {
+        Ok(())
+    } else {
+        Err("an archived branch is created once; it is never moved or deleted".to_owned())
+    }
+}
+
 /// The most live refs a host holds and an adopt check reads (§ 10a: the hook's work is bounded).
 const LIVE_REFS_MAX: usize = 256;
 /// The most host reflog entries of one live ref an adopt check reads. An honest machine pushes
@@ -236,6 +246,8 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             judge.presence(update, executor)
         } else if let Some(talk) = name.strip_prefix(crate::talk::TALK_PREFIX) {
             judge.talk(update, talk)
+        } else if name.starts_with(crate::names::ARCHIVE_HEADS) {
+            archive(update)
         } else {
             Ok(())
         };
@@ -333,6 +345,16 @@ fn never_a_lane(record: &crate::change::ChangeRecord, commit: &str) -> Result<()
         )),
         None => Ok(()),
     }
+}
+
+/// Whether `state` ends a change without a landing (G272): abandoned, superseded or no effect.
+fn ended_unlanded(state: crate::change::ChangeState) -> bool {
+    matches!(
+        state,
+        crate::change::ChangeState::Abandoned
+            | crate::change::ChangeState::Superseded
+            | crate::change::ChangeState::NoEffect
+    )
 }
 
 /// Whether `record`'s change holds the intent claim `claim` (`<hash>/<generation>`).
@@ -1025,6 +1047,21 @@ impl Judge<'_> {
             {
                 return Err(format!("{commit} changes the lane of change {id}"));
             }
+            // G272: a change that ended without landing stays closed once a newer generation
+            // of its intent is claimed; that newer change carries the intent on.
+            if let (Some(before), Some(claim)) = (&previous, &record.claim)
+                && ended_unlanded(before.state)
+                && !ended_unlanded(record.state)
+                && self.claim_exists(&claim.hash, claim.generation + 1)?
+            {
+                return Err(format!(
+                    "{}: {commit} re-opens change {id} of generation {}, and generation {} of \
+                     its intent is claimed",
+                    crate::result::Reason::ChangeSuperseded.code(),
+                    claim.generation,
+                    claim.generation + 1
+                ));
+            }
             let before = previous.filter(|before| before.actor.name != record.actor.name);
             if let Some(before) = &before {
                 if self
@@ -1655,7 +1692,8 @@ impl Judge<'_> {
     }
 
     /// An intent claim: created once, together with its change, by the change's agent; the
-    /// next generation only after the previous one's change landed (§ 4).
+    /// next generation only after the previous one's change closed: it landed, or it ended
+    /// without landing (abandoned, superseded or no effect, G272) (§ 4).
     fn intent(&self, update: &Update, claim: &str) -> Result<(), String> {
         if !is_zero(&update.old) || is_zero(&update.new) {
             return Err("an intent claim is created once and never moved or deleted".to_owned());
@@ -1689,27 +1727,43 @@ impl Judge<'_> {
                     .to_owned(),
             );
         }
-        if generation > 1 && !self.generation_landed(hash, generation - 1)? {
+        if generation > 1 && !self.generation_closed(hash, generation - 1)? {
             return Err(format!(
-                "generation {generation} needs generation {} landed",
+                "generation {generation} needs generation {} landed or given up",
                 generation - 1
             ));
         }
         Ok(())
     }
 
-    /// Whether generation `generation` of the intent `hash` landed. A compacted claim was
-    /// compacted only with its landed claim (`compacted_delete`), so its landed claim's
-    /// publication names the change, which carries its landed marker (§ 10a).
-    fn generation_landed(&self, hash: &str, generation: u64) -> Result<bool, String> {
+    /// Whether generation `generation` of the intent `hash` is closed: its change landed, or
+    /// its chain's current record ended it without a landing (abandoned, superseded or no
+    /// effect, G272). A compacted claim was compacted only with its landed claim
+    /// (`compacted_delete`), so its landed claim's publication names the change, which carries
+    /// its landed marker (§ 10a).
+    fn generation_closed(&self, hash: &str, generation: u64) -> Result<bool, String> {
         let claim = format!("{}{hash}/{generation}", crate::names::INTENT);
         if let Some(previous) = self.after(&claim)? {
             let before = Chain::new(self.git)
                 .record_at(&previous)
                 .map_err(|error| error.message())?;
-            return Ok(self
+            if self
                 .marker(&format!("{}{}", crate::names::LANDED, before.id))?
-                .is_some());
+                .is_some()
+            {
+                return Ok(true);
+            }
+            let chain = format!("{}{}", crate::names::CHANGES, before.id);
+            if crate::names::bay_ref(&chain).is_err() {
+                return Ok(false);
+            }
+            let Some(head) = self.after(&chain)? else {
+                return Ok(false);
+            };
+            let current = Chain::new(self.git)
+                .record_at(&head)
+                .map_err(|error| error.message())?;
+            return Ok(ended_unlanded(current.state));
         }
         if self.recorded(&claim)?.is_none() {
             return Err("the previous generation has no claim".to_owned());
@@ -1728,6 +1782,13 @@ impl Judge<'_> {
         Ok(self
             .marker(&format!("{}{change}", crate::names::LANDED))?
             .is_some())
+    }
+
+    /// Whether generation `generation` of the intent `hash` is claimed after this push: by its
+    /// claim ref, or by the shard index record that stands in for it (§ 10a).
+    fn claim_exists(&self, hash: &str, generation: u64) -> Result<bool, String> {
+        let claim = format!("{}{hash}/{generation}", crate::names::INTENT);
+        Ok(self.marker(&claim)?.is_some())
     }
 
     /// A landed-intent marker: created once, with the trunk update that lands its generation,
