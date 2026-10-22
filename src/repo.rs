@@ -157,30 +157,42 @@ pub enum OpenError {
     Known(PathBuf, String),
     /// No bootstrap, or no config at the trunk tip: the refusal's detail.
     ConfigMissing(PathBuf, Value),
+    /// G317: the config at the trunk tip names a newer bay than this one (`bay = "<version>"`):
+    /// the refusal's detail.
+    BayBelowFloor(PathBuf, Value),
 }
 
 impl OpenError {
-    /// This error as a command's result: the `CONFIG_MISSING` refusal, or a failure.
+    /// This error as a command's result: the `CONFIG_MISSING` or `BAY_BELOW_FLOOR` refusal, or
+    /// a failure.
     #[must_use]
     pub fn into_result(self) -> BayResult {
         match self {
             Self::ConfigMissing(_, detail) => {
                 BayResult::blocked(Reason::ConfigMissing).with_detail(detail)
             }
+            Self::BayBelowFloor(_, detail) => {
+                BayResult::blocked(Reason::BayBelowFloor).with_detail(detail)
+            }
             Self::NoRepository(message) | Self::Known(_, message) => BayResult::failed(message),
         }
     }
 
-    /// This error as a message; a `CONFIG_MISSING` one starts with its code.
+    /// This error as a message; a `CONFIG_MISSING` or `BAY_BELOW_FLOOR` one starts with its
+    /// code.
     #[must_use]
     pub fn message(&self) -> String {
+        let coded = |reason: Reason, detail: &Value| {
+            format!(
+                "{}: {}",
+                reason.code(),
+                detail["message"].as_str().unwrap_or_default()
+            )
+        };
         match self {
             Self::NoRepository(message) | Self::Known(_, message) => message.clone(),
-            Self::ConfigMissing(_, detail) => format!(
-                "{}: {}",
-                Reason::ConfigMissing.code(),
-                detail["message"].as_str().unwrap_or_default()
-            ),
+            Self::ConfigMissing(_, detail) => coded(Reason::ConfigMissing, detail),
+            Self::BayBelowFloor(_, detail) => coded(Reason::BayBelowFloor, detail),
         }
     }
 }
@@ -258,21 +270,24 @@ impl Repo {
             let message = error.message();
             match error {
                 OpenError::NoRepository(_) => (None, message),
-                OpenError::Known(common, _) | OpenError::ConfigMissing(common, _) => {
-                    (Some(common), message)
-                }
+                OpenError::Known(common, _)
+                | OpenError::ConfigMissing(common, _)
+                | OpenError::BayBelowFloor(common, _) => (Some(common), message),
             }
         })
     }
 
     /// The `CONFIG_MISSING` refusal for a command that needs the trunk or policy, when `dir`
-    /// is in a work repository with no bootstrap or no config at the trunk tip. Before the
-    /// first fetch it fetches trunk with the bootstrap's remote and trunk. `None` otherwise:
+    /// is in a work repository with no bootstrap or no config at the trunk tip, and the
+    /// `BAY_BELOW_FLOOR` refusal when that config names a newer bay than this one (G317). Before
+    /// the first fetch it fetches trunk with the bootstrap's remote and trunk. `None` otherwise:
     /// the command opens the repository itself and reports any other fault.
     #[must_use]
     pub fn config_missing(dir: &Path) -> Option<BayResult> {
         match Self::open_with(dir, Fetch::IfMissing) {
-            Err(error @ OpenError::ConfigMissing(..)) => Some(error.into_result()),
+            Err(error @ (OpenError::ConfigMissing(..) | OpenError::BayBelowFloor(..))) => {
+                Some(error.into_result())
+            }
             _ => None,
         }
     }
@@ -334,14 +349,19 @@ impl Repo {
                 missing_config(&bootstrap, &tracking, false, fetch_error),
             ));
         };
-        let config = committed_config(&git, &tip)
+        let text = committed_config(&git, &tip)
             .map_err(|message| known(format!("{tracking}:{CONFIG_PATH}: {message}")))?;
-        let Some(mut config) = config else {
+        let Some(text) = text else {
             return Err(OpenError::ConfigMissing(
                 common_dir.clone(),
                 missing_config(&bootstrap, &tracking, true, None),
             ));
         };
+        // G317: the floor is read before the strict parse, which would refuse a key a newer
+        // bay brought as a config error.
+        floor_met(&text, &common_dir, &tracking)?;
+        let mut config = Config::parse(&text)
+            .map_err(|message| known(format!("{tracking}:{CONFIG_PATH}: {message}")))?;
         // The config cannot move the trunk it was read from: a committed `trunk` or `remote`
         // other than the bootstrap's is refused, never followed.
         for (key, named, used) in [
@@ -656,11 +676,11 @@ fn fetch_into(git: &Git, bootstrap: &Bootstrap, work_root: &Path) -> Result<Stri
     git.run(&["rev-parse", "--verify", &tracking])
 }
 
-/// The config committed at `commit`; `None` when that commit's tree has no
+/// The config text committed at `commit`; `None` when that commit's tree has no
 /// `.bay/config.toml`. A tree git cannot read is an error, never "no config".
-fn committed_config(git: &Git, commit: &str) -> Result<Option<Config>, String> {
+fn committed_config(git: &Git, commit: &str) -> Result<Option<String>, String> {
     // Read once per process (plan B2), shared with `Config::at` at the same commit.
-    let text = crate::memo::at(
+    crate::memo::at(
         crate::config::COMMITTED,
         git,
         commit,
@@ -685,8 +705,24 @@ fn committed_config(git: &Git, commit: &str) -> Result<Option<Config>, String> {
                 .map(Some)
                 .map_err(|error| error.message())
         },
-    )?;
-    text.map(|text| Config::parse(&text)).transpose()
+    )
+}
+
+/// G317: `BAY_BELOW_FLOOR` when the config `text` read at `tracking` names a bay newer than
+/// this one.
+fn floor_met(text: &str, common_dir: &Path, tracking: &str) -> Result<(), OpenError> {
+    match crate::config::unmet_floor(text) {
+        Some(floor) => Err(OpenError::BayBelowFloor(
+            common_dir.to_path_buf(),
+            json!({
+                "message": crate::config::below_floor(&floor),
+                "floor": floor,
+                "bay": crate::version::BAY,
+                "ref": tracking,
+            }),
+        )),
+        None => Ok(()),
+    }
 }
 
 #[cfg(test)]

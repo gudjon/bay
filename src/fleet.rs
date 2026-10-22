@@ -14,6 +14,10 @@
 //! [`FLEET_EXECUTOR_PREFIX`] and records them beside the machines (G67, `crate::presence`): the
 //! map lists every executor with its version, environments, age and whether it is `stale`.
 //!
+//! G314: each machine's summary carries its last `bay doctor` verdict (`crate::live`), so the
+//! map lists every machine's `doctor` block with its age, `null` for a machine that never ran
+//! doctor, and `ready` sums them up: green, red, never ran doctor, and the lowest bay version.
+//!
 //! A row's age never compares two machines' clocks (ruling R-A2-3): it is the summary's age on
 //! this machine's clock (now, against the fetch that first brought that summary commit) plus
 //! the row's age inside the summary (the summary's `at` against the row's `at`, both the
@@ -400,6 +404,53 @@ fn session_age(row: &Value, age: u64) -> Value {
     }
 }
 
+/// G314: a machine's `doctor` block as the map lists it: the fields its summary carries
+/// ([`live::DOCTOR_FIELDS`]) and `age_s`, the summary's age on this machine's clock plus the
+/// verdict's age inside the summary (`written`, the summary's time, against the verdict's `at`,
+/// both the publisher's), so it never compares two machines' clocks. `null` when the summary
+/// carries none.
+fn doctor_of(doctor: &Value, written: Option<u64>, summary_age: u64) -> Value {
+    let Some(mut block) = live::doctor_block(doctor) else {
+        return Value::Null;
+    };
+    block["age_s"] = match (written, live::unix_at(&block)) {
+        (Some(written), Some(at)) => json!(summary_age + written.saturating_sub(at)),
+        _ => Value::Null,
+    };
+    block
+}
+
+/// G314: the fleet's readiness from its machines' `doctor` blocks: how many are green (their
+/// last doctor decided `ok`), red, never ran doctor, or have a summary this cache cannot read,
+/// and the lowest bay version a verdict names.
+fn ready(machines: &[Value]) -> Value {
+    let (mut green, mut red, mut never, mut unreadable) = (0_u64, 0_u64, 0_u64, 0_u64);
+    let mut lowest: Option<(crate::version::Version, String)> = None;
+    for machine in machines {
+        let doctor = &machine["doctor"];
+        match doctor["decision"].as_str() {
+            Some("ok") => green += 1,
+            Some(_) => red += 1,
+            None if machine["readable"] == false => unreadable += 1,
+            None => never += 1,
+        }
+        if let Some(version) = doctor["bay_version"].as_str() {
+            let parsed = crate::version::Version::parse(version);
+            if lowest.as_ref().is_none_or(|(held, _)| parsed < *held) {
+                lowest = Some((parsed, version.to_owned()));
+            }
+        }
+    }
+    json!({
+        "machines": machines.len(),
+        "green": green,
+        "red": red,
+        "never_ran_doctor": never,
+        "unreadable": unreadable,
+        "lowest_bay_version": lowest.map(|(_, version)| version),
+    })
+}
+
 /// Whether live commit `commit` holding `summary` is signed by the agent key and agent it
 /// names (ruling R-A2-2); the signer, `None` without a registry.
 fn verified(
@@ -493,11 +544,13 @@ fn remote(
         let row = match checked {
             Ok((summary, signer)) => {
                 let fresh = map.summary(git, machine, &summary, *since);
+                let doctor = doctor_of(&summary[live::DOCTOR_FIELD], live::unix_at(&summary), age);
                 json!({"machine": machine, "commit": commit, "readable": true,
-                    "signer": signer, "at": summary["at"], "age_s": age, "sessions": fresh})
+                    "signer": signer, "at": summary["at"], "age_s": age, "sessions": fresh,
+                    "doctor": doctor})
             }
             Err(why) => json!({"machine": machine, "commit": commit, "readable": false,
-                "why": why, "at": null, "age_s": age, "sessions": 0}),
+                "why": why, "at": null, "age_s": age, "sessions": 0, "doctor": null}),
         };
         map.machines.insert(machine.clone(), row);
     }
@@ -508,12 +561,15 @@ fn remote(
 /// carry them, with the files each last wrote.
 fn local(repo: &Repo, here: &str, fetched: &Fetched, lines: Option<&[Value]>, map: &mut Map) {
     let commit = fetched.tips.get(here).map(|(commit, _)| commit.clone());
+    // G314: this machine's verdict as its own live ref last carried it, on its own clock.
+    let doctor = live::doctor_at(&repo.git, here)
+        .map_or(Value::Null, |doctor| doctor_of(&doctor, Some(map.now), 0));
     let machine = |sessions: usize| {
         json!({"machine": here, "commit": commit, "readable": true, "source": "local records",
-            "at": now_rfc3339(), "age_s": 0, "sessions": sessions})
+            "at": now_rfc3339(), "age_s": 0, "sessions": sessions, "doctor": doctor})
     };
     let Some(lines) = lines else {
-        if commit.is_some() {
+        if commit.is_some() || !doctor.is_null() {
             map.machines.insert(here.to_owned(), machine(0));
         }
         return;
@@ -685,7 +741,8 @@ fn target_rows(repo: &Repo, trunk: &str) -> Value {
 /// `on_red` names those whose paths cover its change's declared paths or the files its session
 /// last wrote (G244b).
 /// `targets` lists the promotion targets as `bay status` does (NEW-5), from the copies of the
-/// target refs its last fetch made.
+/// target refs its last fetch made. G314: each machine carries `doctor`, its last verdict with
+/// its age ([`doctor_of`]), and `ready` counts the fleet's verdicts ([`ready`]).
 ///
 /// `detail.behind` is never a known `false`: whether the remote moved since the fetch cannot
 /// be known without the network, which the map never touches. It is `true` once the fetch is a
@@ -768,6 +825,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         crate::unattributed::scan(git, trunk).unwrap_or_else(|why| json!({"unread": why}))
     });
     let targets = map.trunk.as_deref().map(|trunk| target_rows(repo, trunk));
+    let machines: Vec<Value> = map.machines.into_values().collect();
     let mut result = BayResult::ok(json!({
         "remote": repo.remote(),
         "fetched_at": fetched.at,
@@ -776,7 +834,8 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         "behind_basis": "true once the fetch is a takeover window old; before that unknown (null): the map never asks the remote",
         "window_s": map.window,
         "trunk": map.trunk,
-        "machines": map.machines.into_values().collect::<Vec<_>>(),
+        "ready": ready(&machines),
+        "machines": machines,
         "machines_truncated": truncated,
         "executors": executors,
         "actors": map.actors.into_iter().map(|(actor, (age, on))| json!({
@@ -810,6 +869,43 @@ mod tests {
         assert_eq!(super::session_age(&row, 5), json!(35));
         assert_eq!(
             super::session_age(&json!({"at": "2026-10-19T10:00:30Z"}), 5),
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn the_fleets_readiness_counts_each_machines_last_verdict() {
+        // G314: green, red, never ran doctor and unreadable, and the lowest bay a verdict names.
+        let machines = [
+            json!({"readable": true, "doctor": {"decision": "ok", "bay_version": "0.2.15"}}),
+            json!({"readable": true, "doctor": {"decision": "blocked", "bay_version": "0.2.9"}}),
+            json!({"readable": true, "doctor": null}),
+            json!({"readable": false, "doctor": null}),
+        ];
+        let ready = super::ready(&machines);
+        assert_eq!(ready["machines"], 4, "{ready}");
+        assert_eq!(ready["green"], 1, "{ready}");
+        assert_eq!(ready["red"], 1, "{ready}");
+        assert_eq!(ready["never_ran_doctor"], 1, "{ready}");
+        assert_eq!(ready["unreadable"], 1, "{ready}");
+        assert_eq!(ready["lowest_bay_version"], "0.2.9", "{ready}");
+        assert_eq!(
+            super::ready(&[])["lowest_bay_version"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn a_verdicts_age_never_compares_two_clocks() {
+        // G314: the summary's age here, plus the verdict's age inside the summary.
+        let doctor = json!({"at": "2026-10-19T10:00:00Z", "decision": "ok", "path": "/x"});
+        let written = crate::clock::unix_of("2026-10-19T10:00:30Z");
+        let block = super::doctor_of(&doctor, written, 5);
+        assert_eq!(block["age_s"], 35, "{block}");
+        // Only the verdict's own fields travel.
+        assert!(block.get("path").is_none(), "{block}");
+        assert_eq!(
+            super::doctor_of(&serde_json::Value::Null, written, 5),
             serde_json::Value::Null
         );
     }

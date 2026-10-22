@@ -131,6 +131,25 @@ fn section(out: &mut String, command: &Value) {
     if !about.is_empty() {
         let _ = writeln!(out, "      {about}");
     }
+    // G321: what the command writes, and what it never writes.
+    let listed = |key: &str| -> Vec<String> {
+        command[key]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (writes, never) = (listed("writes"), listed("never"));
+    if !writes.is_empty() {
+        let _ = writeln!(out, "      Writes: {}", writes.join("; "));
+    }
+    if !never.is_empty() {
+        let _ = writeln!(out, "      Never: {}", never.join("; "));
+    }
     for arg in args.iter().filter(|arg| arg["positional"] != true) {
         let _ = writeln!(
             out,

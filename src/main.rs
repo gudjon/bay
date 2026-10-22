@@ -520,8 +520,9 @@ enum ExecutorAction {
 }
 
 /// The `CONFIG_MISSING` refusal of a command that needs the trunk or policy, so needs the
-/// `.bay/config.toml` committed at trunk (ruling: config location). The host, doctor's box
-/// rows, install, update and the agent hook do not.
+/// `.bay/config.toml` committed at trunk (ruling: config location), or its `BAY_BELOW_FLOOR`
+/// refusal when that config names a newer bay (G317), before anything else the command does.
+/// The host, doctor's box rows, install, update and the agent hook do not.
 fn config_refusal(cli: &Cli) -> Option<BayResult> {
     // `status --fleet` never fetches (G49): it reads the config without a fetch itself.
     // `status --stranded` reads local refs only, and needs no config (G156).

@@ -9,7 +9,7 @@
 //! (`merge_onto`, with `HEAD` as the merge base). `bay land --wait` follows, with its result
 //! semantics. On `landed` the checkout's trunk branch fast-forwards to the landing, once the
 //! saved files still hold what was saved, so no edit is lost. Any refusal leaves the checkout
-//! exactly as it was, and names the change when one was opened, for `bay start --resume`.
+//! exactly as it was, and names the change when one was opened, for `bay start <change>`.
 //!
 //! `--message` is the first draft's commit message, kept in the change's chain. It is never the
 //! intent's revision, which would name another intent, and the trunk commit keeps bay's own
@@ -377,7 +377,7 @@ fn replace_draft(
     if !uncovered.is_empty() {
         return Err(format!(
             "the intent's open change {id} declares {declared:?}, which does not cover \
-             {uncovered:?}: save under another intent, or repair {id} with bay start --resume {id}"
+             {uncovered:?}: save under another intent, or repair {id} with bay start {id}"
         ));
     }
     let resumed = start::start(
@@ -440,7 +440,7 @@ fn untouched(mut result: BayResult, saved: &[String]) -> BayResult {
         fields.push((
             "repair",
             json!(format!(
-                "the change stays open: bay start --resume {id} opens its view for repair"
+                "the change stays open: bay start {id} opens its view for repair"
             )),
         ));
     }

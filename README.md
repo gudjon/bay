@@ -46,7 +46,7 @@ bay start CARD-123 --paths src/api   # a view of only the files this change need
 # … the agent edits …
 bay land                             # submit: bay checks the exact result and merges it; returns at once
 bay status                           # what every change is doing, what passed, and why it waits
-bay status --fleet                   # every machine and session on the repository
+bay status --fleet                   # every machine and session on the repository, and whether each is ready
 bay watch                            # what changed that affects my work
 bay start c7k2m4qa                   # pick a change up again, on the newest main
 bay abandon                          # give the change up; another agent may adopt it
@@ -203,15 +203,16 @@ People and agents have held a rollout back because they did not know this, so he
 | `bay install --machine` | the `bay` program, and its guide (the skill) for your agent | hook entries, a project's settings, its Git config |
 | `bay install` in a clone | the above, plus bay's hook entries in the project's agent settings file and this clone's `bay.*` Git config | anything on main: you commit and land the settings file yourself |
 | `bay update` | a newer `bay` program, verified first | anything in a project |
-| `bay doctor`, `bay status`, `bay waiting`, `bay watch`, `bay help` | only fetched copies of the remote's refs, and bay's own cache under `.git/bay/` | your files, your branches, main |
+| `bay status`, `bay waiting`, `bay watch`, `bay help` | only fetched copies of the remote's refs, and bay's own cache under `.git/bay/` | your files, your branches, main |
+| `bay doctor` | the above, and this machine's readiness on its presence record on the remote, so `bay status --fleet` shows it | your files, your branches, main, any settings or hook entries |
 | `bay start`, `bay land`, `bay save`, `bay approve`, `bay undo` | the change's record on the remote, its view (a separate folder), and evidence | your checkout's files, except `bay save`, which updates the main checkout to the new main |
 
 A hook entry that bay installs first checks that `bay` is on the machine: where it is not, the agent's action goes
 ahead. So rolling the hooks out is safe in this order:
-1. On every machine: `bay update`, then `bay install --machine` for each Claude config directory in use.
+1. On every machine: `bay update`, then `bay install --machine`, which reaches every Claude config directory it finds.
 2. Put `[agent] product = "claude"` in `.bay/config.toml` on main. Doctor then reads the hooks red until step 3.
 3. In one clone, `bay install`, then land the change that commits `.claude/settings.json`.
-4. `bay doctor` on each machine as it takes that change.
+4. `bay doctor` on each machine as it takes that change; `bay status --fleet` shows every machine's verdict.
 
 ## Keys are optional
 

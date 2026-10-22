@@ -30,6 +30,8 @@
 //! local cache, and `bay watch` names each listed landing outside bay as an
 //! `unattributed_landing` event ([`event`]).
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use crate::git::Git;
@@ -84,8 +86,10 @@ pub fn event(commit: &str, landed_as: &str, subject: &str) -> Value {
 }
 
 /// The unattributed landings of `trunk`, newest first, as `detail.unattributed`:
-/// `{"window", "count", "off_first_parent", "landings": [{"commit", "landed_as", "base",
-/// "at", "subject", "merged", "merged_count"}]}`.
+/// `{"window", "count", "by_writer": [{"writer", "count"}], "off_first_parent", "landings":
+/// [{"commit", "landed_as", "base", "at", "subject", "merged", "merged_count"}]}`. G315:
+/// `by_writer` groups the landings by their committer as Git records it, `Name <email>`, the
+/// most first.
 ///
 /// The cost is bounded: one log for the adoption, one log of the window's commits, one
 /// signature check per commit that carries a `Change-Id` under a registry, and two
@@ -118,7 +122,7 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
         trunk,
         window,
         (!adoption.is_empty()).then_some(adoption.as_str()),
-        "%ct%x1f%s",
+        "%ct%x1f%ce%x1f%s",
     )?;
     let (lanes, tips, _) = crate::lane::tips_at(git, trunk)?;
     let mut landings = Vec::new();
@@ -127,8 +131,10 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
     let mut lane_leaks: u64 = 0;
     // G305: the window's landings that came through bay, beside the ones that went around it.
     let mut through_bay: u64 = 0;
+    // G315: the landings around bay by the committer Git records, `Name <email>`.
+    let mut writers: BTreeMap<String, u64> = BTreeMap::new();
     for entry in &line.entries {
-        let [time, subject] = entry.extra.as_slice() else {
+        let [time, email, subject] = entry.extra.as_slice() else {
             continue;
         };
         let (commit, parents) = (entry.commit.as_str(), entry.parents.as_str());
@@ -175,11 +181,15 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
             landing["lane"] = leaked;
             landing["lane_leak"] = named;
         }
+        *writers
+            .entry(format!("{} <{email}>", entry.committer))
+            .or_insert(0_u64) += 1;
         landings.push(landing);
     }
     let mut scanned = json!({
         "window": window,
         "count": landings.len(),
+        "by_writer": by_writer(writers),
         "through_bay": through_bay,
         "off_first_parent": off_first_parent,
         "landings_off_first_parent": pushed_off,
@@ -189,6 +199,16 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
         scanned["lane_leaks"] = json!(lane_leaks);
     }
     Ok(scanned)
+}
+
+/// G315: `by_writer`, the landings around bay per committer, the most first (ties by name).
+fn by_writer(writers: BTreeMap<String, u64>) -> Vec<Value> {
+    let mut counted: Vec<(String, u64)> = writers.into_iter().collect();
+    counted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    counted
+        .into_iter()
+        .map(|(writer, count)| json!({"writer": writer, "count": count}))
+        .collect()
 }
 
 /// The commits merge `commit` reaches only through its other parents: at most [`MAX_MERGED`]

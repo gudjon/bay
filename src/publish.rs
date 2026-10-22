@@ -489,6 +489,20 @@ impl<'a> Ctx<'a> {
         Registry::signing(self.registry.as_ref())
     }
 
+    /// Whether a record may stand for a run on base `base` (`DESIGN` § 7): every record is
+    /// producer-signed (a registry that signs everything), or evidence counts unsigned (no
+    /// registry, or `signing = "approvals"`) and the policy at `base` says `[policy]
+    /// reuse_unsigned = true` (G318). There the team already takes an unsigned record as the
+    /// check's own pass, so taking it for an equal tree adds no trust. Only the base's policy
+    /// says so, never a candidate's own: no candidate turns reuse on for its own landing.
+    fn reuse_trusted(&self, base: &str) -> bool {
+        self.signing().is_some()
+            || matches!(
+                policy::load_at(&self.repo.git, base),
+                Ok(Some(policy)) if policy.reuse_unsigned
+            )
+    }
+
     /// The agent's signer: its key under the change's actor name. Required with a registry
     /// that signs everything.
     fn agent_signer(&self) -> Result<Option<Signer>, String> {
@@ -1592,10 +1606,10 @@ fn batch(
 }
 
 /// The batch the head `op_id` at place `at` would form on `trunk`, with the policy at
-/// `trunk`: `None` when batching is off, reuse cannot stand for a run (§ 7), the head is a
-/// repair, a culprit or names inputs, a check is keyed by commit (the tip's own commit was
-/// never checked), fewer members than `max(min, 2)` fold, or the lane's recent failure rate is
-/// above `max_failure_rate`.
+/// `trunk`: `None` when batching is off, reuse cannot stand for a run (§ 7,
+/// [`Ctx::reuse_trusted`]), the head is a repair, a culprit or names inputs, a check is keyed
+/// by commit (the tip's own commit was never checked), fewer members than `max(min, 2)` fold,
+/// or the lane's recent failure rate is above `max_failure_rate`.
 fn batch_plan(
     ctx: &Ctx,
     op_id: &str,
@@ -1608,8 +1622,7 @@ fn batch_plan(
     let Some(bounds) = repo.config.batch() else {
         return Ok(None);
     };
-    if ctx.signing().is_none()
-        || !repo.config.evidence_reuse()
+    if !repo.config.evidence_reuse()
         || ctx.repair.is_some()
         || ctx.op(op_id).batch_culprit.is_some()
         || !inputs::names(&ctx.record.declared_inputs).is_empty()
@@ -1620,7 +1633,7 @@ fn batch_plan(
         return Ok(None);
     };
     let commit_keyed = policy.checks.iter().any(policy::CheckEntry::commit_keyed);
-    if policy.unchecked || commit_keyed {
+    if !ctx.reuse_trusted(trunk) || policy.unchecked || commit_keyed {
         return Ok(None);
     }
     let queue = crate::queue::Queue::local(git)?;
@@ -2541,11 +2554,8 @@ fn ahead_of_turn(ctx: &mut Ctx, op_id: &str, trunk: &str, mut result: BayResult)
 fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json::Value>, String> {
     let repo = ctx.repo;
     let git = &repo.git;
-    // § 7: only a producer-signed record stands for a run, and no record shows named inputs.
-    if ctx.signing().is_none()
-        || !repo.config.evidence_reuse()
-        || !inputs::names(&ctx.record.declared_inputs).is_empty()
-    {
+    // § 7: no record shows named inputs, and a pre-check's records count only through reuse.
+    if !repo.config.evidence_reuse() || !inputs::names(&ctx.record.declared_inputs).is_empty() {
         return Ok(None);
     }
     let queue = crate::queue::Queue::local(git)?;
@@ -2562,7 +2572,9 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
     let Ok(Some(at_trunk)) = policy::load_at(git, trunk) else {
         return Ok(None);
     };
-    if ahead.is_empty() {
+    // § 7, G318: a pre-check is worth making only where the policy at the base lets its
+    // record stand for a run.
+    if ahead.is_empty() || !ctx.reuse_trusted(trunk) {
         return Ok(None);
     }
     let revision = ctx.op(op_id).revision.clone();
@@ -4639,6 +4651,7 @@ fn run_policy(
             candidate: candidate_id,
             tree,
             commit,
+            base: trunk,
             base_tree: &base_tree,
             provenance: policy_provenance,
             inputs,
@@ -5348,6 +5361,8 @@ struct Judged<'a> {
     candidate: &'a str,
     tree: &'a str,
     commit: &'a str,
+    /// The base commit the candidate is judged on: its policy says what may stand for a run.
+    base: &'a str,
     base_tree: &'a str,
     provenance: policy::Provenance,
     /// The request's `inputs` (`INTERFACES` § 3).
@@ -5513,13 +5528,13 @@ fn carry_over(
 }
 
 /// Whether evidence reuse applies to this judgement (G7): `[policy] evidence_reuse =
-/// "exact-inputs"`, a producer registry that signs everything, so that only producer-signed records stand for a run
-/// (`DESIGN` § 7: an unsigned record never counts as evidence), and a request without named
-/// inputs. A record does not hold the request's input versions, so it cannot show they
-/// matched: a change with named inputs is always rechecked.
+/// "exact-inputs"`, a record that may stand for a run on the judgement's base
+/// ([`Ctx::reuse_trusted`]: a producer registry that signs everything, or `[policy]
+/// reuse_unsigned = true` at the base where evidence counts unsigned, G318), and a request
+/// without named inputs. A record does not hold the request's input versions, so it cannot
+/// show they matched: a change with named inputs is always rechecked.
 fn reuses(ctx: &Ctx, judged: &Judged) -> bool {
-    // N-21: under `signing = "approvals"` no producer signs, so nothing is reused.
-    ctx.repo.config.evidence_reuse() && ctx.signing().is_some() && judged.inputs.is_empty()
+    ctx.repo.config.evidence_reuse() && ctx.reuse_trusted(judged.base) && judged.inputs.is_empty()
 }
 
 /// Whether `records` answer check `id` under `digest` (for `subject`, when commit-keyed):

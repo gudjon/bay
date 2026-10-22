@@ -329,7 +329,9 @@ fn denied_push(
         );
     }
     let force = args.iter().any(|arg| {
-        *arg == "-f"
+        // G322: a short-flag cluster such as `-fu` or `-vf` forces as `-f` does. A cluster
+        // that only holds an `f` inside an option's value (`-ofoo`) is refused too: the safe way.
+        is_short_cluster_with(arg, 'f')
             || *arg == "--force"
             || arg.starts_with("--force-with-lease")
             || arg.starts_with("--force-if-includes")
@@ -637,9 +639,53 @@ fn view_lane_refs(command: &str, cwd: &std::path::Path) -> Vec<String> {
         .collect()
 }
 
+/// Whether `arg` is a cluster of short flags (`-fu`: one dash, then letters) that holds `flag`.
+fn is_short_cluster_with(arg: &str, flag: char) -> bool {
+    arg.strip_prefix('-').is_some_and(|cluster| {
+        !cluster.starts_with('-')
+            && !cluster.is_empty()
+            && cluster.chars().all(|c| c.is_ascii_alphabetic())
+            && cluster.contains(flag)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{denied, denied_targets};
+
+    /// G322 (owed by the hooks research, claim 12): every spelling of a force push is refused,
+    /// on any branch, not only `-f` alone.
+    #[test]
+    fn every_force_push_spelling_is_denied() {
+        for command in [
+            "git push -f origin topic",
+            "git push -fu origin topic",
+            "git push -uf origin topic",
+            "git push -vf origin topic",
+            "git push -qf origin topic",
+            "git push --force origin topic",
+            "git push --force-with-lease origin topic",
+            "git push --force-with-lease=topic origin topic",
+            "git push --force-if-includes origin topic",
+            "git push origin +topic",
+            "git push origin +topic:topic",
+            "git push origin +HEAD:refs/heads/topic",
+            "git -C . push -f origin topic",
+            "env GIT_TRACE=1 git push -fu origin topic",
+            "bash -c 'git push -uf origin topic'",
+            "git push origin :main",
+            "git push --delete origin main",
+            "git push -d origin main",
+        ] {
+            assert!(
+                denied(command, "main", Some("topic")).is_some(),
+                "{command} is a force push or a delete of main, and was let through"
+            );
+        }
+        // A cluster without `f` is not a force push.
+        assert!(denied("git push -u origin topic", "main", Some("topic")).is_none());
+        assert!(denied("git push -uv origin topic", "main", Some("topic")).is_none());
+    }
 
     #[test]
     fn every_shape_on_the_list_is_denied() {

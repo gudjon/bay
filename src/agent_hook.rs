@@ -340,6 +340,11 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
 
 /// [`dispatch`] of a payload from `product`: one event handling for every product.
 fn dispatch_as(product: Product, event: &str, input: &str, dir: &Path) -> Outcome {
+    // G323: the command line names the moment, and a tool call never slips past `pre-tool` under
+    // another name (a typo, or a settings file and a bay from different versions).
+    if let Some(why) = misnamed_tool_call(event, input) {
+        return invalid_payload(product, input, dir, &why);
+    }
     // G54: a live session accepts its talks at most once per poll interval; what arrives is
     // told by the talk notice at a later hook (G147).
     if matches!(event, "user-prompt-submit" | "post-tool")
@@ -523,6 +528,31 @@ fn pre_tool_call(product: Product, input: &str) -> Result<(Value, Call), &'stati
 /// product's protocol; stdout holds the `bay.result/1` of the refusal, for a caller that reads
 /// one (Claude Code reads stderr at exit 2). A JSON object that names a session is recorded as
 /// a deny in its work record, with `why` and none of the payload.
+/// G323: why a payload that carries a tool call reached `bay hook <event>` under a name that is
+/// not `pre-tool` and must be refused: the name is one bay does not know, or the payload says it
+/// is the product's pre-tool event. `None` for every payload bay may take under that name. Fail
+/// closed: an unknown name with a tool call is never allowed, so a misnamed entry stops writes
+/// instead of passing them without a word.
+fn misnamed_tool_call(event: &str, input: &str) -> Option<String> {
+    if event == "pre-tool" {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(input).ok()?;
+    payload.get("tool_name")?;
+    let known = crate::agent_settings::CLAUDE_EVENTS
+        .iter()
+        .chain(crate::agent_settings::CODEX_EVENTS)
+        .any(|(_, bay_event)| *bay_event == event);
+    if !known {
+        return Some(format!(
+            "arrived as `bay hook {event}`, a name bay does not know (check the hook entry)"
+        ));
+    }
+    (payload["hook_event_name"] == "PreToolUse").then(|| {
+        format!("arrived as `bay hook {event}`, and its entry must call `bay hook pre-tool`")
+    })
+}
+
 fn invalid_payload(product: Product, input: &str, dir: &Path, why: &str) -> Outcome {
     let reason = Reason::HookInputInvalid;
     record_pre_tool(

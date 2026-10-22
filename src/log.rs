@@ -325,6 +325,48 @@ fn records(git: &Git, commits: &[&str]) -> Result<Vec<Option<String>>, String> {
     Ok(out)
 }
 
+/// G316: the published terminal records of `changes`, one per operation, from every executor
+/// log this repository holds, in three `git` spawns however long the logs are: one
+/// `for-each-ref` of the logs, one `git log` of their subjects, and one `cat-file --batch` of
+/// only the records whose subject names an operation of one of `changes`
+/// (`terminal record <change>.<n>`). No git call when `changes` is empty.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn published_of(git: &Git, changes: &BTreeSet<&str>) -> Result<Vec<Value>, String> {
+    if changes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tips = tips(git)?;
+    if tips.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["log".to_owned(), "--format=%H %s".to_owned()];
+    args.extend(tips.into_values());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let listed = git.run(&args).map_err(|error| error.message())?;
+    let commits: Vec<&str> = listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(_, subject)| {
+            subject
+                .strip_prefix("terminal record ")
+                .and_then(|op_id| op_id.rsplit_once('.'))
+                .is_some_and(|(change, _)| changes.contains(change))
+        })
+        .map(|(commit, _)| commit)
+        .collect();
+    let mut seen = BTreeSet::new();
+    Ok(records(git, &commits)?
+        .into_iter()
+        .flatten()
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(|record| record["schema"] != EVENT_SCHEMA && record["outcome"] == "published")
+        .filter(|record| seen.insert(record["op_id"].to_string()))
+        .collect())
+}
+
 /// Every terminal record for change `id`, from every executor log this repository holds.
 ///
 /// # Errors

@@ -215,6 +215,9 @@ reasons! {
     // limit of the policy at the base (`crate::limits`), refused at submit and at candidate
     // build, before any check runs.
     ChangeTooLarge => "CHANGE_TOO_LARGE", ["read", "repair"], "change_within_limits", false;
+    // G317; not yet in INTERFACES § 2: the config committed at trunk names, as `bay =
+    // "<version>"`, a newer bay than this one. Read before anything else the command does.
+    BayBelowFloor => "BAY_BELOW_FLOOR", ["read"], "bay_updated_to_floor", false;
 }
 
 impl Reason {
@@ -868,7 +871,7 @@ impl Reason {
                 "Check the network and this box's key for the remote, then run `bay doctor` again."
             }
             Self::HooksMissing => {
-                "Run `bay install` to write the hook entries, then `bay doctor` again."
+                "Do what the hooks row's `recovery` says: land the tracked settings file, or run `bay install`."
             }
             Self::SkillMismatch => {
                 "Run `bay install` to copy this version's skill, then `bay doctor` again."
@@ -952,6 +955,7 @@ impl Reason {
             Self::ChangeTooLarge => {
                 "Keep large files elsewhere or split the change, then `bay land` again. Never raise the limits to get it through."
             }
+            Self::BayBelowFloor => "Run `bay update`, then run the command again.",
         }
     }
 
@@ -1113,6 +1117,7 @@ impl Reason {
             Self::DependencyAbandoned => {
                 "A change this one depends on was dropped, so this one cannot be added; start it again without it."
             }
+            Self::BayBelowFloor => "This project needs a newer bay; update it, then try again.",
         })
     }
 
@@ -1317,6 +1322,10 @@ fn ok_say(result: &BayResult) -> &'static str {
     if let Some(sentence) = answered_say(detail) {
         return sentence;
     }
+    // G320: a clone install wrote hook entries that main does not hold yet.
+    if detail.is_some_and(|detail| detail.get("hooks_to_land") == Some(&Value::Bool(true))) {
+        return "bay is set up here; add the new settings file to main, so every copy of the project gets the safety settings.";
+    }
     // G320: `bay install --machine` writes the program and its guide, never hook settings.
     if detail.is_some_and(|detail| detail.get("scope") == Some(&Value::from("machine"))) {
         return "bay and its guide are installed on this computer; safety settings come with the project itself.";
@@ -1394,7 +1403,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 68);
+        assert_eq!(Reason::ALL.len(), 69);
     }
 
     #[test]

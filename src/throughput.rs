@@ -5,11 +5,14 @@
 //! trunk's ceiling (`DESIGN` § 6: about 120 landings a day for a 12-minute check). Three levers
 //! raise it. Each is off by default behind a key of `[executor]` in `.bay/config.toml`, and each
 //! is a rule of evidence reuse, never a new verdict: every one needs `[policy] evidence_reuse =
-//! "exact-inputs"` and a producer registry, and without them nothing here runs. What they keep:
+//! "exact-inputs"` and a producer registry that signs everything, or, where evidence counts
+//! unsigned (no registry, or `signing = "approvals"`), `[policy] reuse_unsigned = true` in the
+//! policy at the base (G318); without them nothing here runs. What they keep:
 //!
 //! - **G1, what lands is exactly the checked tree on the trunk it was checked against.** The
 //!   publishing push is still judged per commit by the executor and by the host hook: a commit
-//!   lands on producer-signed evidence for its own tree under the policy at its base. Two
+//!   lands on evidence for its own tree under the policy at its base, producer-signed unless
+//!   the policy reuses unsigned evidence, whose results still name their trust. Two
 //!   widenings are each the policy's to declare: a carried record (below) holds for a tree only
 //!   where the check's policy entry says its verdict depends on nothing outside its read set,
 //!   and a batch member before the last stands on its batch tip's evidence, the atomic group

@@ -107,12 +107,155 @@ fn adapter_events(
         .collect()
 }
 
+/// G321 (learned in a fleet rollout, 2026-10-22): what each top-level command writes, and what
+/// it never writes, so a person or an agent never has to guess before running it. One table,
+/// declared here, exported on each command of `bay help --json` (`writes`, `never`) and shown
+/// by `bay help`; the read commands' "nothing of yours" is held by G321's test, which runs them
+/// and finds no file, branch or main moved.
+pub const WRITES: &[(&str, &[&str], &[&str])] = &[
+    (
+        "save",
+        &[
+            "a change of the main checkout's edits, landed on main",
+            "the main checkout, moved to the new main",
+        ],
+        &["any branch of yours"],
+    ),
+    (
+        "waiting",
+        &["only fetched copies of the remote's refs"],
+        &["your files", "your branches", "main"],
+    ),
+    (
+        "approve",
+        &["your signed approval, or with --waive a signed waiver, pushed"],
+        &["the change itself", "main"],
+    ),
+    (
+        "undo",
+        &["a new change that reverses one landing, checked and landed like any other"],
+        &["history: nothing is rewritten"],
+    ),
+    (
+        "start",
+        &[
+            "the change's record and claim on the remote",
+            "its view: a separate folder under .git/bay/views",
+        ],
+        &["your checkout's files", "main"],
+    ),
+    (
+        "land",
+        &[
+            "a request on the change's record; with --wait, the checks' evidence and the landing on main",
+        ],
+        &["your checkout's files"],
+    ),
+    (
+        "abandon",
+        &["an abandon request on the change's record"],
+        &["the view's files", "main"],
+    ),
+    (
+        "status",
+        &[
+            "only fetched copies of the remote's refs, and bay's cache under .git/bay",
+            "with --heads --prune, the older spelling of bay prune: what bay prune deletes",
+        ],
+        &["your files", "your branches", "main"],
+    ),
+    (
+        "watch",
+        &["only fetched copies of the remote's refs, and bay's cache under .git/bay"],
+        &["your files", "your branches", "main"],
+    ),
+    ("talk", &["one talk on the remote"], &["your files", "main"]),
+    (
+        "prune",
+        &["deletes remote branches that already landed, each archived first and logged"],
+        &["a branch that has not landed", "main"],
+    ),
+    (
+        "enrol",
+        &["one key in the key registry, signed with this machine's registry key and pushed"],
+        &["main"],
+    ),
+    (
+        "doctor",
+        &[
+            "bay's cache under .git/bay",
+            "this machine's readiness on its presence record on the remote, for bay status --fleet",
+        ],
+        &[
+            "your files",
+            "your branches",
+            "main",
+            "settings or hook entries",
+        ],
+    ),
+    (
+        "install",
+        &[
+            "the bay program and its skill in each Claude config directory",
+            "in a clone, without --machine: bay's hook entries in the project's agent settings file and this clone's bay.* Git config",
+        ],
+        &[
+            "main: you commit and land the settings file",
+            "with --machine: hook entries, a project's settings or its Git config",
+        ],
+    ),
+    (
+        "host",
+        &["init: a new bare repository whose main only moves forward"],
+        &["an existing repository"],
+    ),
+    (
+        "executor",
+        &[
+            "run: the landings of queued changes on main, with their evidence and its log",
+            "install: a service file that keeps it running",
+        ],
+        &["your checkout's files"],
+    ),
+    (
+        "share",
+        &["a change and its evidence pushed to a remote, or written to a bundle file"],
+        &["main"],
+    ),
+    (
+        "evidence",
+        &["record: one signed record, pushed; missing writes nothing"],
+        &["main"],
+    ),
+    (
+        "update",
+        &["a newer bay program, verified before it replaces this one"],
+        &["anything in a project"],
+    ),
+    (
+        "adapter",
+        &["nothing: it runs a connector with test inputs"],
+        &["your files", "main"],
+    ),
+    (
+        "hook",
+        &["the session's record of what it did; a deny of the agent's action when bay refuses it"],
+        &["your files", "main"],
+    ),
+    ("help", &["nothing"], &["anything"]),
+];
+
 /// `command` and, after it, each of its subcommands, depth first.
 fn walk<'a>(command: &'a clap::Command, parent: &[&'a str], out: &mut Vec<Value>) {
     let mut path = parent.to_vec();
     path.push(command.get_name());
+    let writes = WRITES
+        .iter()
+        .find(|(name, _, _)| path.len() == 1 && *name == path[0]);
     out.push(json!({
         "command": path.join(" "),
+        "writes": writes.map(|(_, writes, _)| writes),
+        "never": writes.map(|(_, _, never)| never),
         "about": command.get_about().map(ToString::to_string),
         "hidden": command.is_hide_set(),
         "args": command

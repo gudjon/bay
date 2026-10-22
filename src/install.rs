@@ -1,7 +1,8 @@
 //! `install`: the release's admin command (`DESIGN` § 15.1, § 15.3, § 15.4).
 //!
 //! Writes `$HOME/.local/bin/bay`, the skill at `$HOME/.claude/skills/bay/` (or
-//! `$CLAUDE_CONFIG_DIR/skills/bay/` when that is set) and, when the
+//! `$CLAUDE_CONFIG_DIR/skills/bay/` when that is set) and in every other Claude config directory
+//! on the machine (`skill::config_dirs`, G319) and, when the
 //! Claude adapter is configured, bay's hook entries in the project agent settings (for the
 //! Codex adapter, in `.codex/hooks.json`, G308). Global Git config, user-global Claude settings,
 //! `user.name`, `user.email` and other tools' hook entries stay unchanged.
@@ -75,12 +76,18 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
     let target = bin_dir.join(format!("bay{}", std::env::consts::EXE_SUFFIX));
     place_binary(&bin_dir, &target)?;
 
-    // § 15.3 item 4: the skill this binary carries, at the one path doctor checks.
+    // § 15.3 item 4: the skill this binary carries, at the caller's path and (G319) in every
+    // other Claude config directory on the machine, the paths doctor checks.
+    let git = Git::new(dir);
     let skill_dir = skill::installed_path(&home, skill::config_dir().as_deref());
-    skill::install(&skill_dir)?;
+    let written = skill::install_all(&skill::config_dirs(&home, &git))?;
+    let written: Vec<String> = written
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
 
     let mut detail = json!({"binary": target.display().to_string(),
-        "skill": skill_dir.display().to_string()});
+        "skill": skill_dir.display().to_string(), "skills": written});
     if machine {
         // G320: what this install writes, and what it never does, said on its result.
         detail["scope"] = json!("machine");
@@ -92,7 +99,6 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
         return Ok(BayResult::ok(detail));
     }
 
-    let git = Git::new(dir);
     if let Ok(info) = git.repo_info()
         && !info.bare
     {
@@ -127,6 +133,18 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
                 .map_err(|error: GitError| error.message())?;
             detail["hooks"] = json!(path.display().to_string());
             detail["unrelated_hooks_unchanged"] = json!(before == after);
+            // G320: entries that differ from the committed file reach no other clone until the
+            // change that commits them lands; the result says so.
+            let unlanded = git
+                .run(&["status", "--porcelain", "--", &path.display().to_string()])
+                .is_ok_and(|out| !out.trim().is_empty());
+            if unlanded {
+                detail["hooks_to_land"] = json!(true);
+                detail["next"] = json!(format!(
+                    "commit {} and land it: every clone gets bay's hook entries from main",
+                    path.display()
+                ));
+            }
         }
         // § 11a, ruling R1: the name this machine's live summary ref carries.
         detail["machine"] = json!(crate::live::ensure_machine(&git)?);

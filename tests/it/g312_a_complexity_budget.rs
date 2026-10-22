@@ -23,9 +23,11 @@ use support::TestBox;
 /// The budget. Raise a number only in the commit that adds the surface, and add its line.
 ///
 /// - 0.2.15: the counts bay had when the budget began.
+/// - G317, one reason (`BAY_BELOW_FLOOR`): a config that names a newer bay says "update bay"
+///   instead of a config error someone must trace to a key an older bay does not know.
 const COMMANDS: usize = 28;
 const FLAGS: usize = 78;
-const REASONS: usize = 68;
+const REASONS: usize = 69;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.

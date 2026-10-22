@@ -78,3 +78,19 @@ fn an_untracked_settings_file_still_says_run_install() {
     assert_eq!(hooks["state"], "red", "{doctor}");
     assert_eq!(hooks["recovery"], "run install again", "{hooks}");
 }
+
+#[test]
+fn a_clone_install_says_its_hook_entries_still_have_to_land() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.commit_config(&repo, CLAUDE_ADAPTER);
+    test_box.fake_claude(Some("2.1.302"));
+    let installed = test_box.bay_ok(&repo, &["install"]);
+    assert_eq!(installed["detail"]["hooks_to_land"], true, "{installed}");
+    let say = installed["say"].as_str().unwrap_or_default();
+    assert!(
+        say.contains("add the new settings file to main"),
+        "{installed}"
+    );
+    assert!(!say.contains("nothing else is needed"), "{installed}");
+}

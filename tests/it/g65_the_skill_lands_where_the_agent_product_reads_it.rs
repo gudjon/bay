@@ -2,7 +2,7 @@
 //!
 //! With `CLAUDE_CONFIG_DIR` set, install (and `install --machine`) writes the skill to
 //! `$CLAUDE_CONFIG_DIR/skills/bay/` and doctor's skill row checks and names that path; unset or
-//! empty, both use `$HOME/.claude/skills/bay/`. No other config directory is looked for.
+//! empty, both use `$HOME/.claude/skills/bay/`. The machine's other config directories are G319.
 //!
 //! `ROADMAP` § 1; `DESIGN` § 15.2, § 15.3, § 15.4.
 

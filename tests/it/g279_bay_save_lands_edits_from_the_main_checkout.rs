@@ -268,10 +268,7 @@ fn a_save_whose_check_fails_is_check_failed_names_the_change_and_keeps_the_edits
     let id = refused["change"].as_str().expect("the change is named");
     assert_eq!(refused["detail"]["change"], id, "{refused}");
     let repair = refused["detail"]["repair"].as_str().unwrap_or_default();
-    assert!(
-        repair.contains(&format!("bay start --resume {id}")),
-        "{refused}"
-    );
+    assert!(repair.contains(&format!("bay start {id}")), "{refused}");
     assert_eq!(
         refused["detail"]["saved"],
         serde_json::json!(["src/a.rs", "src/broken"]),

@@ -24,6 +24,12 @@
 //! and two pushers never overwrite a newer summary with an older one. Its last outcome is kept
 //! in `<git-common-dir>/bay/live-push.json`, which `bay doctor` shows when it failed.
 //!
+//! G314: the summary also carries `doctor`, this machine's last `bay doctor` verdict
+//! ([`DOCTOR_FIELDS`]): doctor writes and pushes the summary with it ([`publish_doctor`]), and
+//! every later write carries the block forward from the local live ref, so the ref is the one
+//! home of the machine's readiness. A machine with a verdict and no session records still
+//! publishes its summary, with no sessions.
+//!
 //! § 4: a heartbeat naming a change counts as that change's activity only when it is signed by
 //! the actor the change chain records as its current actor, and its row of the change is fresh
 //! ([`heartbeat_of`]).
@@ -65,6 +71,19 @@ const ROW_FIELDS: [&str; 13] = [
     "uncheckpointed",
     "uncheckpointed_unknown",
     "at",
+];
+/// The field of a summary that carries this machine's last `bay doctor` verdict (G314).
+pub const DOCTOR_FIELD: &str = "doctor";
+/// The fields of a `doctor` block: no path and no secret, only names, states and versions.
+pub const DOCTOR_FIELDS: [&str; 8] = [
+    "at",
+    "bay_version",
+    "decision",
+    "reason",
+    "red",
+    "hooks",
+    "sandbox",
+    "role",
 ];
 /// The most of a session record's tail read for its latest line.
 const TAIL_BYTES: u64 = 64 * 1024;
@@ -267,17 +286,53 @@ pub fn lines(repo: &Repo) -> Option<Vec<Value>> {
     )
 }
 
+/// The `doctor` block of `value` ([`DOCTOR_FIELDS`] alone); `None` when it carries none.
+#[must_use]
+pub fn doctor_block(value: &Value) -> Option<Value> {
+    let block = value.as_object()?;
+    Some(Value::Object(
+        DOCTOR_FIELDS
+            .iter()
+            .filter_map(|field| {
+                block
+                    .get(*field)
+                    .map(|held| ((*field).to_owned(), held.clone()))
+            })
+            .collect(),
+    ))
+}
+
+/// G314: the `doctor` block the local live ref of `machine` carries: this machine's last
+/// verdict as it last wrote it. `None` without the ref, or a summary that carries none.
+#[must_use]
+pub fn doctor_at(git: &Git, machine: &str) -> Option<Value> {
+    let tip = git
+        .run(&["rev-parse", "--verify", "-q", &live_ref(machine)])
+        .ok()?;
+    let summary = summary_at(git, tip.trim()).ok().flatten()?;
+    doctor_block(&summary[DOCTOR_FIELD])
+}
+
 /// Writes this machine's summary commit and points the local live ref at it. `None` when this
-/// repository has no session records here.
+/// repository has no session records here and no doctor verdict.
 ///
 /// # Errors
 ///
 /// A bad machine name, a missing agent key under a registry, or a git fault.
 pub fn write(repo: &Repo) -> Result<Option<(String, String)>, String> {
+    write_with(repo, None)
+}
+
+/// [`write`], carrying `doctor` as the summary's `doctor` block (G314); without one, the block
+/// the local live ref already carries.
+fn write_with(repo: &Repo, doctor: Option<Value>) -> Result<Option<(String, String)>, String> {
     let machine = machine(&repo.git)?;
-    let Some(lines) = lines(repo) else {
+    let doctor = doctor.or_else(|| doctor_at(&repo.git, &machine));
+    let lines = lines(repo);
+    if lines.is_none() && doctor.is_none() {
         return Ok(None);
-    };
+    }
+    let lines = lines.unwrap_or_default();
     let git = &repo.git;
     let key = if Registry::current(git)?.is_some_and(|registry| registry.signs_all()) {
         Some(Keys::load(git).agent.ok_or(
@@ -298,6 +353,9 @@ pub fn write(repo: &Repo) -> Result<Option<(String, String)>, String> {
         summary["signer"] = json!(actor);
     }
     summary["sessions"] = json!(rows_of(lines, unix_now(), repo.config.takeover().as_secs()));
+    if let Some(doctor) = doctor {
+        summary[DOCTOR_FIELD] = doctor;
+    }
     let mut text = serde_json::to_string_pretty(&summary).map_err(|error| error.to_string())?;
     text.push('\n');
     let blob = git
@@ -342,7 +400,22 @@ pub fn write(repo: &Repo) -> Result<Option<(String, String)>, String> {
 }
 
 fn push_once(repo: &Repo) -> Result<Value, String> {
-    let Some((name, commit)) = write(repo)? else {
+    push_written(repo, write(repo)?)
+}
+
+/// G314, for `bay doctor`: writes this machine's summary carrying `doctor`, its verdict, and
+/// pushes it, waiting for the push. Best effort: the outcome is kept as a live push's is, so a
+/// failure shows in doctor's `live` row, and it never changes doctor's result.
+pub fn publish_doctor(repo: &Repo, doctor: Value) {
+    let outcome = write_with(repo, Some(doctor)).and_then(|written| push_written(repo, written));
+    if std::fs::create_dir_all(bay_dir(repo)).is_ok() {
+        keep_outcome(repo, &outcome);
+    }
+}
+
+/// Pushes the summary commit [`write_with`] wrote, if it wrote one.
+fn push_written(repo: &Repo, written: Option<(String, String)>) -> Result<Value, String> {
+    let Some((name, commit)) = written else {
         return Ok(json!({"pushed": false, "why": "no sessions"}));
     };
     // The commit just written, never the local ref's name: a fetch of the remote's live refs

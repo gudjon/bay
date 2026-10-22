@@ -110,7 +110,8 @@
         "PATHS_UNDECLARED",
         "DEPENDENCY_PENDING",
         "DEPENDENCY_ABANDONED",
-        "CHANGE_TOO_LARGE"
+        "CHANGE_TOO_LARGE",
+        "BAY_BELOW_FLOOR"
       ]
     },
     "say": {
@@ -195,7 +196,8 @@
         "paths_declared",
         "dependencies_landed",
         "dependency_dropped_or_restarted",
-        "change_within_limits"
+        "change_within_limits",
+        "bay_updated_to_floor"
       ]
     },
     "next_step": {

@@ -10,6 +10,12 @@
 //! two more git calls: one `cat-file --batch` of the commits whose times it needs and one
 //! first-parent walk of the chains it times. No fetch beyond what `bay status` already makes.
 //!
+//! G316: the flow also names the queue wait and the check time of those landings, p50 and p90.
+//! It does not time them again: each operation's terminal record already holds its queue wait
+//! and its check runs ([`crate::timing`]), so the flow reads the published records of the
+//! changes landed in the last 30 days from the executor logs, in three more git calls however
+//! long the logs are ([`crate::log::published_of`]), and none when nothing landed then.
+//!
 //! A record keeps no clock of its own, so each time is the committer time of the commit that
 //! recorded the event: a change starts at the earliest commit of its chain's first-parent line
 //! above its first base (its first draft, or its first state commit); it lands at the
@@ -20,7 +26,7 @@
 //! G310: under `[limits] max_waiting_approvals = N`, [`review_queue`] is what `bay land` counts
 //! before it submits a change whose paths need an approval check.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Value, json};
 
@@ -75,6 +81,16 @@ pub fn review_queue(repo: &Repo, except: Option<&str>) -> Result<Review, String>
 /// - `cycle_time_s`: `{p50, p90, landed}`, the median and 90th percentile in seconds from start
 ///   to landing of the changes landed in the last 30 days, and how many those are; null when
 ///   none landed then;
+/// - `queue_wait_s` (G316): `{p50, p90, landed}`, the median and 90th percentile in seconds of
+///   the queue wait of the changes landed in the last 30 days, and how many carry one; null when
+///   none does. Each is the `queue_wait_s` of the change's published terminal record
+///   ([`crate::timing`]): from the state commit that gave it a queue place (`queued <op>`), or
+///   from its land request when it never queued, to its first claim after that, when it became
+///   the head an executor works on. A landing whose record carries none is left out;
+/// - `check_time_s` (G316): `{p50, p90, runs}`, the median and 90th percentile in seconds of the
+///   check runs of those same landings, and how many runs; null when none is timed. A run is one
+///   attempt row (`checks[]`) of the published terminal record: from its candidate commit to the
+///   chain state that first records it checked or blocked;
 /// - `oldest_live`: `{change, age_s}`, the live change that started first and its age in
 ///   seconds; null when none is live;
 /// - `waiting_approval`: `{count, oldest, age_s}`, how many live changes wait for a person's
@@ -131,16 +147,8 @@ pub fn flow(repo: &Repo, trunk: &str) -> Result<Value, String> {
         .iter()
         .map(|&(held, at)| at.saturating_sub(start_of(&started, held)))
         .collect();
-    cycles.sort_unstable();
-    let cycle_time = if cycles.is_empty() {
-        Value::Null
-    } else {
-        json!({
-            "p50": percentile(&cycles, 50),
-            "p90": percentile(&cycles, 90),
-            "landed": cycles.len(),
-        })
-    };
+    let recent_ids: BTreeSet<&str> = recent.iter().map(|(held, _)| held.id.as_str()).collect();
+    let published = crate::log::published_of(&repo.git, &recent_ids)?;
     let oldest_live = live
         .iter()
         .map(|&held| (start_of(&started, held), held.id.clone()))
@@ -154,7 +162,9 @@ pub fn flow(repo: &Repo, trunk: &str) -> Result<Value, String> {
         "live": live.len(),
         "by_actor": by_actor(repo, trunk, &live)?,
         "landed": landed_count,
-        "cycle_time_s": cycle_time,
+        "cycle_time_s": spread(&mut cycles, "landed"),
+        "queue_wait_s": queue_wait(&published),
+        "check_time_s": check_time(&published),
         "oldest_live": oldest_live,
         "waiting_approval": {
             "count": review.waiting,
@@ -217,6 +227,43 @@ fn review_of(waiting: &[&HeldChain], times: &HashMap<String, u64>, now: u64) -> 
         age_s: oldest.as_ref().map(|(since, _)| now.saturating_sub(*since)),
         oldest: oldest.map(|(_, change)| change),
     }
+}
+
+/// `queue_wait_s` of [`flow`]: the `queue_wait_s` each published terminal record in
+/// `published` carries ([`crate::timing`]), the one home of an operation's queue wait.
+fn queue_wait(published: &[Value]) -> Value {
+    let mut waits: Vec<u64> = published
+        .iter()
+        .filter_map(|record| record["queue_wait_s"].as_u64())
+        .collect();
+    spread(&mut waits, "landed")
+}
+
+/// `check_time_s` of [`flow`]: the `seconds` of each attempt row (`checks[]`) the published
+/// terminal records in `published` carry ([`crate::timing`]), one check run each.
+fn check_time(published: &[Value]) -> Value {
+    let mut runs: Vec<u64> = published
+        .iter()
+        .filter_map(|record| record["checks"].as_array())
+        .flatten()
+        .filter_map(|row| row["seconds"].as_u64())
+        .collect();
+    spread(&mut runs, "runs")
+}
+
+/// `{p50, p90, <count>}` of `values` in seconds, sorted here, `count` naming how many they
+/// are; null when there are none.
+fn spread(values: &mut [u64], count: &str) -> Value {
+    if values.is_empty() {
+        return Value::Null;
+    }
+    values.sort_unstable();
+    let mut out = json!({
+        "p50": percentile(values, 50),
+        "p90": percentile(values, 90),
+    });
+    out[count] = json!(values.len());
+    out
 }
 
 /// The `percent`th percentile of `sorted` (ascending, not empty), by nearest rank.

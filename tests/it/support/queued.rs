@@ -1,5 +1,6 @@
 //! A bay host with a key registry, two producers and a publication queue the test fills, for
-//! the throughput G-tests (`crate::throughput`: G256, G257, G258). Its check logs every request
+//! the throughput G-tests (`crate::throughput`: G256, G257, G258), or one whose evidence counts
+//! unsigned (G318: no registry, or `signing = "approvals"`). Its check logs every request
 //! it gets, can hold its first run until the test lets it go, and fails a run when the test's
 //! shell condition holds in the candidate's tree.
 
@@ -8,7 +9,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::{EXECUTOR, PRODUCER, TestBox, TestKeys, check_files, passing_result, result_json};
+use super::{
+    AGENT, EXECUTOR, PRODUCER, REGISTRAR, TestBox, TestKeys, check_files, key_line, passing_result,
+    result_json,
+};
 
 /// The second producer the registry enrolls, under the test keys' rogue key.
 pub const OTHER_PRODUCER: &str = "ci-2";
@@ -28,6 +32,18 @@ pub struct Check<'a> {
     pub fails: &'a str,
 }
 
+/// What the host's registry signs (N-21, G318).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trust {
+    /// A key registry that signs everything and enrols both producers.
+    Signed,
+    /// No key registry: every record counts unsigned.
+    Unsigned,
+    /// A key registry of the agent and the registrar only, for a policy that says `[policy]
+    /// signing = "approvals"`: check evidence counts unsigned.
+    Approvals,
+}
+
 /// The host, the agent's clone, and the check's files.
 pub struct Held {
     pub test_box: TestBox,
@@ -40,12 +56,20 @@ pub struct Held {
     /// Lets the first run go.
     pub go: PathBuf,
     pub keys: TestKeys,
+    pub trust: Trust,
 }
 
 /// A bay host whose check does what `check` says. Trunk is seeded before the registry exists:
 /// from then on only executors publish.
 #[must_use]
 pub fn host(check: &Check) -> Held {
+    host_under(check, Trust::Signed)
+}
+
+/// [`host`], with the registry `trust` names. Every clone names its producer ([`PRODUCER`] or
+/// [`OTHER_PRODUCER`]) whatever the trust, so unsigned records keep one writer per name.
+#[must_use]
+pub fn host_under(check: &Check, trust: Trust) -> Held {
     let test_box = TestBox::new();
     let remote = test_box.path().join("host.git");
     test_box.host_init(&remote);
@@ -83,13 +107,28 @@ pub fn host(check: &Check) -> Held {
     files.push((".bay/config.toml".to_owned(), check.config.to_owned()));
     test_box.seed_with_check(&repo, check.seed, &files);
     let keys = test_box.keys();
-    test_box.enroll_classes(
-        &repo,
-        &keys,
-        &keys.executor,
-        &[],
-        &[(PRODUCER, &keys.producer), (OTHER_PRODUCER, &keys.rogue)],
-    );
+    match trust {
+        Trust::Signed => {
+            test_box.enroll_classes(
+                &repo,
+                &keys,
+                &keys.executor,
+                &[],
+                &[(PRODUCER, &keys.producer), (OTHER_PRODUCER, &keys.rogue)],
+            );
+        }
+        Trust::Unsigned => {}
+        Trust::Approvals => {
+            test_box.enroll_files(
+                &repo,
+                &keys,
+                &[
+                    ("agent", key_line(AGENT, &keys.agent)),
+                    ("registry", key_line(REGISTRAR, &keys.registry)),
+                ],
+            );
+        }
+    }
     test_box.use_keys(&repo, &keys);
     Held {
         test_box,
@@ -99,6 +138,7 @@ pub fn host(check: &Check) -> Held {
         waiting,
         go,
         keys,
+        trust,
     }
 }
 
@@ -146,8 +186,10 @@ impl Held {
             key: self.keys.executor.clone(),
             name: EXECUTOR.to_owned(),
         };
+        // An unsigned host's reservations are unsigned, as an executor there writes them.
+        let signer = (self.trust == Trust::Signed).then_some(&signer);
         let opened = bay::repo::Repo::open(&self.repo).unwrap();
-        bay::queue::join(&opened, Some(&signer), &op_id, &id).unwrap();
+        bay::queue::join(&opened, signer, &op_id, &id).unwrap();
         id
     }
 

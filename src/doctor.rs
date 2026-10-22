@@ -1,7 +1,9 @@
 //! `bay doctor`: the capability probe (`DESIGN` § 15.2, `INTERFACES` § 8), and the `bay`
 //! row of `bay update` (installed version, newest recorded release, pin).
 //!
-//! Doctor reads. It writes no settings file and no Git config.
+//! Doctor reads. It writes no settings file and no Git config. In a work repository whose
+//! remote answers, it publishes its verdict on this machine's live summary (G314,
+//! `crate::live::publish_doctor`), so `bay status --fleet` shows every machine's readiness.
 
 use std::path::Path;
 use std::process::Command;
@@ -65,9 +67,64 @@ pub fn doctor(dir: &Path) -> BayResult {
 #[must_use]
 pub fn doctor_as(dir: &Path, executor: bool) -> BayResult {
     match probe(dir, executor) {
-        Ok(result) => result,
+        Ok(result) => {
+            publish(dir, &result);
+            result
+        }
         Err(message) => BayResult::failed(message),
     }
+}
+
+/// G314: this machine's verdict as its live summary carries it, derived from doctor's result
+/// alone: when, which bay, the decision and reason, the names of the red rows, whether bay's
+/// hooks are `on`, `off` or `missing`, the state of the `sandbox` row, and the role. No path
+/// and no secret.
+fn verdict(result: &BayResult) -> Value {
+    let detail = result.detail.as_ref().unwrap_or(&Value::Null);
+    let rows: &[Value] = detail["rows"].as_array().map_or(&[][..], Vec::as_slice);
+    let named = |name: &str| rows.iter().find(|row| row["name"] == name);
+    let red: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["state"] == "red")
+        .map(|row| &row["name"])
+        .collect();
+    let hooks = if detail["guard"]["hook"] == "off" {
+        "off"
+    } else if named("hooks").is_some_and(|row| row["state"] == "green") {
+        "on"
+    } else {
+        "missing"
+    };
+    json!({
+        "at": crate::clock::now_rfc3339(),
+        "bay_version": crate::version::BAY,
+        "decision": result.decision.word(),
+        "reason": result.reason.map(Reason::code),
+        "red": red,
+        "hooks": hooks,
+        "sandbox": named("sandbox").map(|row| row["state"].clone()),
+        "role": detail["role"],
+    })
+}
+
+/// G314: publishes [`verdict`] on this machine's live summary, when doctor ran in a work
+/// repository whose remote answered. Best effort ([`crate::live::publish_doctor`]): nothing
+/// here changes `result`.
+fn publish(dir: &Path, result: &BayResult) {
+    let Some(detail) = &result.detail else {
+        return;
+    };
+    let answered = detail["rows"].as_array().is_some_and(|rows| {
+        rows.iter()
+            .any(|row| row["name"] == "remote" && row["state"] == "green")
+    });
+    if !answered {
+        return;
+    }
+    let Ok(repo) = Repo::open(dir) else {
+        return;
+    };
+    crate::live::publish_doctor(&repo, verdict(result));
 }
 
 /// The role of this box, which names its Git floor (`DESIGN` § 15.2, `GIT-FEATURES` § 1).
@@ -105,16 +162,21 @@ impl Role {
     }
 }
 
+/// The repository doctor runs in; `None` outside one, where the machine rows still answer and
+/// the repository rows do not apply.
+fn repo_here(git: &Git) -> Result<Option<RepoInfo>, String> {
+    if git.outside_repository().map_err(|error| error.message())? {
+        Ok(None)
+    } else {
+        git.repo_info().map(Some).map_err(|error| error.message())
+    }
+}
+
 fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     let git = Git::new(dir);
     let git_line = git.version().map_err(|error| error.message())?;
     let git_version = Version::parse(&git_line);
-    // Outside a repository the machine rows still answer; the repository rows do not apply.
-    let info = if git.outside_repository().map_err(|error| error.message())? {
-        None
-    } else {
-        Some(git.repo_info().map_err(|error| error.message())?)
-    };
+    let info = repo_here(&git)?;
     // The config every command runs under: the one committed at the trunk tracking ref
     // (ruling: config location), read without a fetch, since doctor only reads.
     let (config, config_row) = match &info {
@@ -143,6 +205,13 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     let claude = program_rows(&config, &minimum, &mut report)?;
 
     if let Some(info) = &info {
+        // G317: a config that names a newer bay is red: every command here refuses.
+        if config_row
+            .as_ref()
+            .is_some_and(|row| row["reason"] == Reason::BayBelowFloor.code())
+        {
+            report.red(Reason::BayBelowFloor, None);
+        }
         report.rows.extend(config_row);
         remote_row(&git, &config, info.bare, &mut report)?;
         hooks_row(&git, &config, info, &mut report)?;
@@ -174,7 +243,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
             .push(json!({"name": "hooks", "state": "not applicable", "note": note}));
     }
 
-    skill_row(&config, &mut report)?;
+    skill_row(&git, &config, &mut report)?;
     custody_row(&git, &config, info.as_ref(), &mut report);
     if info.is_none() {
         // § 15.2: with no configured remote the box is not ready, and outside a repository no
@@ -398,41 +467,64 @@ fn codex_row(codex: &Program, report: &mut Report) {
     report.rows.push(row);
 }
 
-/// The config of the work repository at `dir`, and a `config` row when it has none or it
-/// carries retired keys ([`ignored_row`]). With none,
-/// the other rows name the bootstrap's remote and trunk where there is one, and otherwise the
-/// defaults. The row is not red: the box is ready, and the repository's commands refuse
-/// `CONFIG_MISSING` until trunk has a config.
+/// The config of the work repository at `dir`, and a `config` row when it has none, names
+/// the bay it needs, or carries retired keys ([`loaded_row`]). With none, or one that needs a
+/// newer bay (G317), the other rows name the bootstrap's remote and trunk where there is one,
+/// and otherwise the defaults. A missing config's row is not red: the box is ready, and the
+/// repository's commands refuse `CONFIG_MISSING` until trunk has a config. A config that needs
+/// a newer bay is red, `BAY_BELOW_FLOOR`, as every command here refuses.
 fn repository_config(dir: &Path) -> Result<(Config, Option<Value>), String> {
+    let bootstrapped = || {
+        let mut config = Config::default();
+        if let Some(Ok(bootstrap)) = Bootstrap::of(dir) {
+            config.trunk = Some(bootstrap.trunk);
+            config.remote = Some(bootstrap.remote);
+        }
+        config
+    };
     match Repo::open_with(dir, Fetch::Never) {
         Ok(repo) => {
-            let row = ignored_row(&repo.config);
+            let row = loaded_row(&repo.config);
             Ok((repo.config, row))
         }
         Err(OpenError::ConfigMissing(_, detail)) => {
-            let mut config = Config::default();
-            if let Some(Ok(bootstrap)) = Bootstrap::of(dir) {
-                config.trunk = Some(bootstrap.trunk);
-                config.remote = Some(bootstrap.remote);
-            }
             let row = json!({"name": "config", "required": false, "state": "missing",
                 "reason": Reason::ConfigMissing.code(), "detail": detail});
-            Ok((config, Some(row)))
+            Ok((bootstrapped(), Some(row)))
+        }
+        Err(OpenError::BayBelowFloor(_, detail)) => {
+            let row = json!({"name": "config", "state": "red", "floor": detail["floor"].clone(),
+                "bay": crate::version::BAY, "meets_floor": false,
+                "reason": Reason::BayBelowFloor.code(), "detail": detail});
+            Ok((bootstrapped(), Some(row)))
         }
         Err(error) => Err(error.message()),
     }
 }
 
-/// A `config` row naming the retired keys the config carries, which bay accepts and never
-/// reads (ruling Q14), when it carries any. Green: the config loads, and the policy is the one
-/// source of every check command (G141).
-fn ignored_row(config: &Config) -> Option<Value> {
+/// A green `config` row, when the config names the bay it needs (G317: `floor`, which this bay
+/// meets, or the config would not load) or carries retired keys, which bay accepts and never
+/// reads (ruling Q14). Green: the config loads, and the policy is the one source of every check
+/// command (G141).
+fn loaded_row(config: &Config) -> Option<Value> {
     let ignored = config.ignored();
-    (!ignored.is_empty()).then(|| {
-        json!({"name": "config", "state": "green", "ignored": ignored,
-            "note": "ignored: checks and their commands are declared in .bay/policy.toml, and \
-                the update settings are the box's global Git config"})
-    })
+    if ignored.is_empty() && config.bay.is_none() {
+        return None;
+    }
+    let mut row = json!({"name": "config", "state": "green"});
+    if let Some(floor) = &config.bay {
+        row["floor"] = json!(floor);
+        row["bay"] = json!(crate::version::BAY);
+        row["meets_floor"] = json!(true);
+    }
+    if !ignored.is_empty() {
+        row["ignored"] = json!(ignored);
+        row["note"] = json!(
+            "ignored: checks and their commands are declared in .bay/policy.toml, and the \
+             update settings are the box's global Git config"
+        );
+    }
+    Some(row)
 }
 
 /// The Git rows: the floor for `role`, the shared cache and the recommended features. Returns
@@ -500,8 +592,8 @@ fn unguarded(git: &Git, config: &Config, report: &mut Report) {
     let mut row = json!({
         "name": "hooks",
         "state": "off",
-        "note": "no agent adapter is declared, so bay does not judge an agent's Git commands here: an agent can push the trunk around bay",
-        "recovery": "add [agent] product = \"claude\" (or \"codex\") to .bay/config.toml on the trunk, then run bay install",
+        "note": "no agent adapter is declared, so bay does not judge an agent's Git commands here: an agent can push main around bay",
+        "recovery": "add [agent] product = \"claude\" (or \"codex\") to .bay/config.toml on main, run bay install in one clone, and land the settings file it writes",
     });
     let mut guard = json!({"hook": "off"});
     if let Some((count, through)) = around_bay(git, config)
@@ -1231,29 +1323,51 @@ fn read_paths_row(git: &Git, report: &mut Report) {
 
 /// The installed skill at `$HOME/.claude/skills/bay/` (or `$CLAUDE_CONFIG_DIR/skills/bay/`
 /// when that is set, the path install writes, G65) against the skill this bay version
-/// installs (§ 15.2, G49). A consumer repository's skills are never this copy. A mismatch is
-/// red on every box; a missing copy is red only where the Claude adapter is configured.
-fn skill_row(config: &Config, report: &mut Report) -> Result<(), String> {
+/// installs (§ 15.2, G49), and (G319) the copy in every other Claude config directory on the
+/// machine (`skill::config_dirs`), each listed in `dirs`. A consumer repository's skills are
+/// never this copy. A mismatch is red on every box; a missing copy is red only where the Claude
+/// adapter is configured. `mismatched` names each config directory that makes the row red.
+fn skill_row(git: &Git, config: &Config, report: &mut Report) -> Result<(), String> {
     let home =
         crate::platform::home().ok_or("HOME is not set; doctor cannot name the skill path")?;
     let path = skill::installed_path(Path::new(&home), skill::config_dir().as_deref());
     let required = config.claude_adapter();
-    let mut row =
-        json!({"name": "skill", "path": path.display().to_string(), "required": required});
-    match skill::compare(&path)? {
-        skill::Installed::Matches => row["state"] = json!("green"),
-        skill::Installed::Missing if !required => row["state"] = json!("missing"),
-        installed => {
-            let note = if installed == skill::Installed::Missing {
-                "skill not installed"
-            } else {
-                "skill does not match this bay"
-            };
-            row["state"] = json!("red");
-            row["note"] = json!(note);
-            row["recovery"] = json!("run install again");
-            report.red(Reason::SkillMismatch, Some(note));
-        }
+    let mut dirs = Vec::new();
+    let mut mismatched = Vec::new();
+    let (mut missing, mut differs) = (false, false);
+    for dir in skill::config_dirs(Path::new(&home), git) {
+        let state = match skill::compare(&dir.join("skills").join("bay"))? {
+            skill::Installed::Matches => "green",
+            skill::Installed::Missing => {
+                missing = true;
+                if required {
+                    mismatched.push(dir.display().to_string());
+                }
+                "missing"
+            }
+            skill::Installed::Differs => {
+                differs = true;
+                mismatched.push(dir.display().to_string());
+                "differs"
+            }
+        };
+        dirs.push(json!({"dir": dir.display().to_string(), "state": state}));
+    }
+    let mut row = json!({"name": "skill", "path": path.display().to_string(),
+        "required": required, "dirs": dirs});
+    if mismatched.is_empty() {
+        row["state"] = json!(if missing { "missing" } else { "green" });
+    } else {
+        let note = if differs {
+            "skill does not match this bay"
+        } else {
+            "skill not installed"
+        };
+        row["state"] = json!("red");
+        row["note"] = json!(note);
+        row["mismatched"] = json!(mismatched);
+        row["recovery"] = json!("run install again");
+        report.red(Reason::SkillMismatch, Some(note));
     }
     report.rows.push(row);
     Ok(())

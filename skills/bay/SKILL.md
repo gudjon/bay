@@ -43,8 +43,8 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Add one key to the key registry, when the user sets up keys | `bay enrol <class> <name> <key.pub>` (class `registry`, `approver`, `reviewer`, `producer`, `executor` or `agent`; signed by `bay.registryKey`) |
 | Give the change up, so another agent may adopt it | `bay abandon [<change>]` (default: the view's change) |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
-| Read state, and main commits that did not merge through bay (`unattributed`) | `bay status` |
-| See the flow: live changes by actor and their limit, merges this week, cycle time, the oldest live change, what waits for a yes | `bay status` (`detail.flow`) |
+| Read state, and main commits that did not merge through bay (`unattributed`; `by_writer` counts them per committer) | `bay status` |
+| See the flow: live changes by actor and their limit, merges this week, cycle time, queue wait and check time (p50, p90), the oldest live change, what waits for a yes | `bay status` (`detail.flow`) |
 | See each promotion target (`staging`): its tip, `drift`, `lag`, checks, freeze and the `promotable` commit | `bay status` (`detail.targets`) |
 | See whether main is held, by whom (`source`: `freeze` or `adapter`), why and until when | `bay status` (`detail.hold`) |
 | Reverse a merged change with a new, checked change | `bay undo <change> [--wait[=<seconds>]]` |
@@ -55,7 +55,8 @@ After a merge, a plain `bay start <intent>` opens the next change; `--new` is no
 `<intent>` is the card, issue or ticket id. `--paths` lists every path the change reads and writes:
 the view holds only those. `bay start` lists in `detail.overlaps` the live changes whose
 declared paths overlap yours (change, intent, actor, paths). It does not refuse; talk to them, or
-narrow your paths. `bay help` shows every command and flag on one page, and `bay <command> --help`
+narrow your paths. `bay help` shows every command and flag on one page, with what each one writes and
+never writes (read it before you hesitate to run one), and `bay <command> --help`
 says more about one. `bay help --json` is the same list for programs, with every reason code and
 the JSON Schema of `bay.result/1`.
 It also lists each agent adapter's events and what each can block.
@@ -127,7 +128,7 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 
 | When | Run |
 | --- | --- |
-| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the executors with their age (`executors`; `stale`) | `bay status --fleet` |
+| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the executors with their age (`executors`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --fleet` |
 | See every head: each branch on the remote, classed `trunk`, `target`, `lane`, `landed`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --heads [--stale-days <n>]` |
 | Delete only the remote branches `landed` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[heads] on_prune` adapter runs after each delete (`detail.pruned[].on_prune`). `bay status --heads --prune` and `bay status --stranded` still work | `bay prune [--stale-days <n>]` |
 | See merges, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`, `trunk_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`, `wake`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
@@ -154,6 +155,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    `[hold] command` that answers `{"held": true|false, "reason": "..."}` to `<command> status`.
    To act on the host when `bay prune` deletes a branch (close its pull request,
    say), add `[heads] on_prune`: it runs as `<command> pruned <branch> <sha> <archive ref>`.
+   When you add a key a newer bay introduced, set `bay = "<version>"` in the same commit: an
+   older bay then refuses `BAY_BELOW_FLOOR` and its next step is `bay update`.
 2. `.bay/policy.toml` lists the required checks. Each `[[check]]` needs `expected_minimum`. A
    repository that wants no checks says `unchecked = true`. Paths that need a person's approval
    get a `[[check]]` with `kind = "approval"` and `when_paths`, and no command; each approver is
@@ -165,6 +168,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    A small team with no executor host sets `[policy] signing = "approvals"`: only approvals are
    signed, and no machine needs an executor, producer or agent key. Each clone takes its own
    producer name (`local-<id>` in its git config); set `bay.producerName` only to choose one.
+   There, and with no registry, evidence reuse and batching stay off unless the policy also says
+   `[policy] reuse_unsigned = true`. Results still name their trust: `unsigned` or `approvals`.
    To keep changes small, add `[limits]` with `max_file_mib`, `max_files` or `max_added_lines`
    (positive integers; each optional). To cap the review queue, add `max_waiting_approvals`:
    with that many changes waiting for a yes, a change that needs one more is refused `WIP_LIMIT`.
@@ -172,7 +177,9 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    prove it: `bay adapter test check|wake|notify -- <command>`. It runs bay's contract cases the
    way bay runs that adapter, changes nothing, and exits 0 only when every case passes.
    `detail.cases` names each failing case and why.
-4. In each clone: `bay install --trunk <name> --remote <name>`.
+4. In each clone: `bay install --trunk <name> --remote <name>`. It puts this skill in every Claude
+   config directory it finds on the machine. Name any other one with
+   `git config --global --add bay.claudeConfigDirs <dir>` (each value is one config directory).
 5. Run an executor: `bay executor run`, under a supervisor. `bay executor install` writes one for
    this repository (a launchd agent on macOS, a systemd user unit on Linux) and prints the one
    command that starts it; it starts nothing. Tell the user that command. `--print` only shows it.
@@ -188,21 +195,22 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 - **Everything that reaches main, only on a bay-hosted main** (`bay host init`). On a forge such as GitHub, a merge
   made in its web page or API, and a script's push, never pass a local hook; protect main there so that only the
   executor may push it.
-- bay sees what went around it: `bay status` counts it in `detail.unattributed`, and `bay doctor` is red when main
+- bay sees what went around it: `bay status` counts it in `detail.unattributed` (per committer in `by_writer`), and `bay doctor` is red when main
   bay lands on also holds such landings. Tell the user; do not work around it.
 
 ## Roll bay's hooks out to many machines
 
 The order, learned in a fleet rollout:
-1. On every machine: `bay update`, then `bay install --machine` for each Claude config directory in use
-   (`CLAUDE_CONFIG_DIR=<dir> bay install --machine`). It writes only the bay program and its guide. It never
-   writes hook entries, a repository's settings or its Git config, so it is safe to run on a busy machine.
-2. Put `[agent] product = "claude"` in `.bay/config.toml` on main. Each machine's `bay doctor` now reads hooks red,
-   with the recovery that names step 3: that is expected, not a fault.
+1. On every machine: `bay update`, then `bay install --machine`. It writes only the bay program and its guide, in
+   every Claude config directory it finds (`bay.claudeConfigDirs` names others). It never writes hook entries, a
+   repository's settings or its Git config, so it is safe to run on a busy machine.
+2. Put `[agent] product = "claude"` in `.bay/config.toml` on main. Each machine's `bay doctor` now reads hooks red
+   until step 3 lands: that is expected, not a fault.
 3. In one clone, run `bay install`, and land the change that commits `.claude/settings.json` with bay's entries.
    Every machine gets the hooks as it takes that change. A machine without bay is unaffected: each entry first
    checks that bay is present.
-4. Run `bay doctor` on each machine after it takes the change, and fix what it names; do not guess.
+4. Run `bay doctor` on each machine after it takes the change. `bay status --fleet` then shows every machine's
+   verdict in one place (`ready`); fix each red machine it names, and do not guess.
 
 ## Set up bay for a team (agent-led)
 
@@ -217,7 +225,8 @@ When the user asks to set bay up for a small team, do each step for them. Tell t
    public key, the `.pub` file. A name is a short lower-case word.
 5. On each approver's machine: `git config bay.approverName <name>` and
    `git config bay.approverKey <their private key path>`.
-6. `bay doctor` on each machine. It names anything missing, with its fix.
+6. `bay doctor` on each machine. It names anything missing, with its fix, and publishes its verdict, so
+   `bay status` then `bay status --fleet` on any one machine shows every machine's (`ready`).
 
 `bay enrol` refuses a key that is already enrolled, and says why. Nothing is written then.
 

@@ -62,12 +62,15 @@ struct PolicyFile {
 }
 
 /// The `[policy]` table: `signing = "all"` (the default) or `"approvals"` (N-21). Any other value
-/// does not parse, so the policy is `POLICY_INVALID`.
+/// does not parse, so the policy is `POLICY_INVALID`. `reuse_unsigned = true` (G318) lets
+/// evidence reuse and batching run on evidence that counts unsigned; off by default.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PolicyTable {
     #[serde(default)]
     signing: Signing,
+    #[serde(default)]
+    reuse_unsigned: bool,
 }
 
 /// What a key registry signs (N-21, `[policy] signing`), judged at the accepted base like every
@@ -1028,6 +1031,16 @@ pub struct Policy {
     pub agent: AgentPolicy,
     /// `[policy] signing` (N-21): what a key registry signs.
     pub signing: Signing,
+    /// `[policy] reuse_unsigned = true` (G318, owner ruling 2026-10-22): evidence reuse,
+    /// pre-checks, footprint carry and batching run where evidence counts unsigned (no
+    /// registry, or `signing = "approvals"`). There the team already takes an unsigned record
+    /// as the check's own pass, so taking it for an equal tree assumes no new trust; results
+    /// still name `trust: unsigned` or `approvals`. With a registry that signs everything it
+    /// changes nothing. Judged at the accepted base like every policy key, so a candidate never
+    /// turns it on for its own landing. Like `signing` and a profile, it is in no digest: it
+    /// says which records may stand for a run, not what a check computes, and a policy that
+    /// sets it is a policy change all the same (`revision`).
+    pub reuse_unsigned: bool,
     /// `[limits]` (owner ruling 2026-10-21): how big one change may be.
     pub limits: crate::limits::Limits,
 }
@@ -1175,6 +1188,7 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
         manifest_digest,
         agent: file.agent,
         signing: file.policy.signing,
+        reuse_unsigned: file.policy.reuse_unsigned,
         limits: file.limits,
     }))
 }
@@ -1809,6 +1823,34 @@ mod tests {
             "[policy\nsigning = \"approvals\"\n",
         ] {
             assert_eq!(signing_in(text), Signing::All, "{text}");
+        }
+    }
+
+    /// G318: `[policy] reuse_unsigned` is off by default and a boolean; any other value does
+    /// not parse (`POLICY_INVALID`), so a typo never turns reuse on.
+    #[test]
+    fn reuse_unsigned_is_off_by_default_and_a_boolean() {
+        let file = |extra: &str| {
+            toml::from_str::<PolicyFile>(&format!("revision = 1\nunchecked = true\n{extra}"))
+        };
+        assert!(!file("").unwrap().policy.reuse_unsigned);
+        assert!(
+            !file("[policy]\nsigning = \"approvals\"\n")
+                .unwrap()
+                .policy
+                .reuse_unsigned
+        );
+        assert!(
+            file("[policy]\nreuse_unsigned = true\n")
+                .unwrap()
+                .policy
+                .reuse_unsigned
+        );
+        for bad in [
+            "[policy]\nreuse_unsigned = \"yes\"\n",
+            "[policy]\nreuse_unsigned = 1\n",
+        ] {
+            assert!(file(bad).is_err(), "{bad}");
         }
     }
 

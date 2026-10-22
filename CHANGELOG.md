@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.17
+
+- `bay status --fleet` shows each machine's last `bay doctor` verdict, and `ready` counts the fleet's green and red.
+- `bay doctor` publishes this machine's verdict on its presence record, so the fleet view needs no ssh.
+- `unattributed` counts the landings that went around bay per writer, under `by_writer`.
+- `detail.flow` adds queue wait and check time, p50 and p90, from the records bay keeps.
+- A config may name the bay it needs, `bay = "<version>"`; an older bay then says to update.
+- `[policy] reuse_unsigned = true` lets unsigned evidence be reused and batched; results still name their trust.
+- `bay install` and `bay update` put the skill in every Claude config directory found; doctor checks each one.
+- `git config --global --add bay.claudeConfigDirs <dir>` names a config directory bay cannot find itself.
+- `bay help` and `bay help --json` say what each command writes, and what it never writes.
+- The hook refuses a force push spelled as a short-flag cluster, such as `-fu` or `-vf`, not only `-f`.
+- A tool call that reaches `bay hook` under an unknown or wrong name is refused, never let through.
+- `bay install` in a clone says when its hook entries still have to land on main.
+- Doctor's and `HOOKS_MISSING`'s recovery name landing the settings file; `bay save`'s repair says `bay start <change>`.
+
 ## 0.2.16
 
 - `bay help --json` declares the Codex adapter too: its events, timeout, and that its hooks fail open.

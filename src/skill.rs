@@ -2,13 +2,16 @@
 //!
 //! The files are embedded at build time, so a released binary installs the skill of its own
 //! version. `install` copies them to `$HOME/.claude/skills/bay/`, or to
-//! `$CLAUDE_CONFIG_DIR/skills/bay/` when that is set (§ 15.3 item 4, G65); doctor compares that
-//! copy with them (§ 15.2, G49). Nothing else under the skills directory is read or written
-//! (§ 15.4), and no other config directory is looked for.
+//! `$CLAUDE_CONFIG_DIR/skills/bay/` when that is set (§ 15.3 item 4, G65), and into every other
+//! Claude config directory [`config_dirs`] finds on the machine (G319); doctor compares each
+//! copy with them (§ 15.2, G49). Nothing else under a skills directory is read or written
+//! (§ 15.4).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
+
+use crate::git::Git;
 
 /// Every file of `skills/bay/`, by its path inside that directory. A unit test holds this list
 /// to the source directory, so a file added there and not here fails the build's tests.
@@ -37,10 +40,170 @@ pub fn config_dir() -> Option<OsString> {
 /// `<config_dir>/skills/bay` when a config directory is given, else `$HOME/.claude/skills/bay`.
 #[must_use]
 pub fn installed_path(home: &Path, config_dir: Option<&OsStr>) -> PathBuf {
-    config_dir
-        .map_or_else(|| home.join(".claude"), PathBuf::from)
-        .join("skills")
-        .join("bay")
+    own_config_dir(home, config_dir).join("skills").join("bay")
+}
+
+fn own_config_dir(home: &Path, config_dir: Option<&OsStr>) -> PathBuf {
+    config_dir.map_or_else(|| home.join(".claude"), PathBuf::from)
+}
+
+/// The multi-valued global Git config key that names a box's other Claude config directories
+/// (G319). Each value is one config directory, absolute or starting with `~/`. A directory that
+/// holds config directories is not searched, so each one is named.
+pub const CONFIG_DIRS_KEY: &str = "bay.claudeConfigDirs";
+
+/// What a Claude Code config directory holds. A `$HOME/.claude-*` directory with none of these
+/// (`.claude-worktrees`, say) is not one.
+const CONFIG_MARKERS: &[&str] = &["settings.json", ".claude.json", "projects", "skills"];
+
+/// G319: this machine's Claude config directories, the caller's own first (`CLAUDE_CONFIG_DIR`,
+/// else `$HOME/.claude`, listed whether or not it exists yet), then every other that exists:
+/// `$HOME/.claude`; each `$HOME/.claude-*` that looks like a config directory
+/// ([`CONFIG_MARKERS`]); on Linux, the `CLAUDE_CONFIG_DIR` of each running `claude` of this
+/// user under this `HOME`; and each value of [`CONFIG_DIRS_KEY`]. Deduplicated by real path.
+/// Reads only.
+#[must_use]
+pub fn config_dirs(home: &Path, git: &Git) -> Vec<PathBuf> {
+    let mut found = vec![own_config_dir(home, config_dir().as_deref())];
+    let mut others = vec![home.join(".claude")];
+    others.extend(home_config_dirs(home));
+    others.extend(running_config_dirs(home));
+    others.extend(named_config_dirs(home, git));
+    found.extend(others.into_iter().filter(|dir| dir.is_dir()));
+    let mut seen = BTreeSet::new();
+    found.retain(|dir| seen.insert(dir.canonicalize().unwrap_or_else(|_| dir.clone())));
+    found
+}
+
+/// Writes the skill to `<dir>/skills/bay` for each of `dirs` ([`config_dirs`]), and returns
+/// each skill directory written.
+///
+/// # Errors
+///
+/// A copy cannot be written ([`install`]).
+pub fn install_all(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    let mut written = Vec::new();
+    for dir in dirs {
+        let path = dir.join("skills").join("bay");
+        install(&path)?;
+        written.push(path);
+    }
+    Ok(written)
+}
+
+/// Each `$HOME/.claude-*` directory that holds one of [`CONFIG_MARKERS`].
+fn home_config_dirs(home: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(home) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with(".claude-"))
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && CONFIG_MARKERS
+                    .iter()
+                    .any(|marker| path.join(marker).exists())
+        })
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// Each value of [`CONFIG_DIRS_KEY`] in the global Git config, `~/` read as `home`. A value
+/// that is not then absolute names no directory and is not read.
+fn named_config_dirs(home: &Path, git: &Git) -> Vec<PathBuf> {
+    // `git config --get-all` exits 1 for a key that is not set.
+    let Ok((0, values, _)) = git.run_status(&["config", "--global", "--get-all", CONFIG_DIRS_KEY])
+    else {
+        return Vec::new();
+    };
+    values
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .strip_prefix("~/")
+                .map_or_else(|| PathBuf::from(value), |rest| home.join(rest))
+        })
+        .filter(|path| path.is_absolute())
+        .collect()
+}
+
+/// The `CLAUDE_CONFIG_DIR` of each running `claude` owned by this user whose `HOME` is `home`
+/// (a session under another `HOME` is not this caller's), best effort: a process whose files
+/// cannot be read is skipped. Another user's processes are never read.
+#[cfg(target_os = "linux")]
+fn running_config_dirs(home: &Path) -> Vec<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(me) = std::fs::metadata("/proc/self").map(|meta| meta.uid()) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let is_pid = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| !name.is_empty() && name.bytes().all(|byte| byte.is_ascii_digit()));
+        let process = entry.path();
+        if !is_pid
+            || !std::fs::metadata(&process).is_ok_and(|meta| meta.uid() == me)
+            || !is_claude(&process)
+        {
+            continue;
+        }
+        if let Some(dir) = std::fs::read(process.join("environ"))
+            .ok()
+            .and_then(|environ| session_config_dir(&environ, home))
+        {
+            dirs.push(dir);
+        }
+    }
+    dirs.sort();
+    dirs
+}
+
+#[cfg(not(target_os = "linux"))]
+fn running_config_dirs(_home: &Path) -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Whether the process at `/proc/<pid>` runs `claude`: its `comm`, or the file name of its
+/// first argument.
+#[cfg(target_os = "linux")]
+fn is_claude(process: &Path) -> bool {
+    let comm = std::fs::read_to_string(process.join("comm")).unwrap_or_default();
+    if comm.trim_end() == "claude" {
+        return true;
+    }
+    std::fs::read(process.join("cmdline")).is_ok_and(|cmdline| {
+        let first = cmdline.split(|byte| *byte == 0).next().unwrap_or_default();
+        String::from_utf8_lossy(first).rsplit('/').next() == Some("claude")
+    })
+}
+
+/// The absolute `CLAUDE_CONFIG_DIR` in a process environment (`/proc/<pid>/environ`) whose
+/// `HOME` is `home`.
+#[cfg(target_os = "linux")]
+fn session_config_dir(environ: &[u8], home: &Path) -> Option<PathBuf> {
+    let config_prefix = format!("{CONFIG_DIR_VAR}=");
+    let mut session_home = None;
+    let mut config = None;
+    for var in environ.split(|byte| *byte == 0) {
+        let var = String::from_utf8_lossy(var);
+        if let Some(value) = var.strip_prefix("HOME=") {
+            session_home = Some(PathBuf::from(value));
+        } else if let Some(value) = var.strip_prefix(config_prefix.as_str()) {
+            config = Some(PathBuf::from(value));
+        }
+    }
+    let config = config.filter(|dir| dir.is_absolute())?;
+    (session_home.as_deref() == Some(home)).then_some(config)
 }
 
 /// Compares the copy at `dir` with [`FILES`]. Reads only.
@@ -213,5 +376,23 @@ mod tests {
         assert_eq!(compare(&copy).unwrap(), Installed::Differs);
         install(&copy).unwrap();
         assert_eq!(compare(&copy).unwrap(), Installed::Matches);
+    }
+
+    /// G319: a running session's config directory counts only under this `HOME`, and only
+    /// when it is absolute.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_session_config_dir_counts_only_under_this_home() {
+        let environ = b"PATH=/bin\0HOME=/h\0CLAUDE_CONFIG_DIR=/h/.claude-two\0";
+        assert_eq!(
+            super::session_config_dir(environ, Path::new("/h")),
+            Some(Path::new("/h/.claude-two").to_path_buf())
+        );
+        assert_eq!(
+            super::session_config_dir(environ, Path::new("/other")),
+            None
+        );
+        let relative = b"HOME=/h\0CLAUDE_CONFIG_DIR=two\0";
+        assert_eq!(super::session_config_dir(relative, Path::new("/h")), None);
     }
 }
