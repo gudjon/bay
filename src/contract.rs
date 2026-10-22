@@ -4,7 +4,9 @@
 //! run time from the command line bay parses; every decision with its exit code, and every
 //! reason code with what it still allows, when a retry can succeed, the agent's next step and
 //! whether it is transient, read from the table in `result.rs`; and the JSON Schema of
-//! `bay.result/1`, built from the same table. No list here is a second definition: each one is
+//! `bay.result/1`, built from the same table; and each agent adapter's events, what each can
+//! block and what the hook does not judge (G306), from the tables `bay install` writes from.
+//! No list here is a second definition: each one is
 //! derived from the one the code uses.
 //! `schemas/bay.result.schema.json` is a copy of the schema that G252 holds equal to it.
 
@@ -33,7 +35,45 @@ pub fn contract(mut cli: clap::Command) -> BayResult {
         "decisions": decisions(),
         "reasons": reasons(),
         "schema": schema(),
+        "adapters": adapters(),
     }))
+}
+
+/// Every agent product bay has an adapter for (G306), each declared from the tables its code
+/// uses: the events `bay install` writes with each entry's shape (`agent_settings::entry_shape`),
+/// the payload version and doctor's floor, the presence test, and what the hook does not judge.
+fn adapters() -> Vec<Value> {
+    use crate::agent_settings::{
+        CLAUDE_EVENTS, CLAUDE_SETTINGS_FILE, DEFAULT_ON_FAILURE, PRESENCE_GUARD, WITHOUT_BAY,
+        entry_shape,
+    };
+    let events: Vec<Value> = CLAUDE_EVENTS
+        .iter()
+        .map(|(product_event, bay_event)| {
+            let shape = entry_shape(product_event);
+            json!({
+                "product_event": product_event,
+                "bay_event": bay_event,
+                "blocks": shape.blocks,
+                "on_failure": shape.on_failure.unwrap_or(DEFAULT_ON_FAILURE),
+                "timeout_s": shape.timeout_s,
+                "matcher": shape.matcher,
+            })
+        })
+        .collect();
+    vec![json!({
+        "product": crate::config::CLAUDE_PRODUCT,
+        // The hook events were read against this version's payloads
+        // (`tests/fixtures/claude-code-<version>`), and doctor requires it as the floor.
+        "payload_version": crate::version::CLAUDE_HOOK_MINIMUM,
+        "floor": crate::version::CLAUDE_HOOK_MINIMUM,
+        "settings_file": CLAUDE_SETTINGS_FILE,
+        "events": events,
+        "presence_test": true,
+        "presence_guard": PRESENCE_GUARD,
+        "without_bay": WITHOUT_BAY,
+        "cannot_see": crate::agent_hook::CANNOT_SEE,
+    })]
 }
 
 /// `command` and, after it, each of its subcommands, depth first.

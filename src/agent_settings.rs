@@ -1,9 +1,12 @@
 //! bay's entries in the project agent settings (`DESIGN` § 11a, § 11b, § 15).
 //!
-//! For Claude Code the project settings file is `.claude/settings.json`. bay owns only the
-//! matcher groups whose every hook command is `bay hook <event>`, behind bay's presence test
-//! ([`hook_command`]) or bare as an earlier bay wrote it; every other entry is another tool's
-//! and is never removed, reordered or de-duplicated.
+//! For Claude Code the project settings file is `.claude/settings.json`; for Codex it is
+//! `.codex/hooks.json` (G308), the project file the Codex probe configured, in the same shape:
+//! `{"hooks": {<event>: [{"hooks": [{"type": "command", "command", "timeout"}]}]}}`. bay owns
+//! only the matcher groups whose every hook command is `bay hook <event>`, behind bay's
+//! presence test ([`hook_command`]) or bare as an earlier bay wrote it (and as bay writes it
+//! for Codex); every other entry is another tool's and is never removed, reordered or
+//! de-duplicated.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +33,21 @@ pub const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("PreCompact", "pre-compact"),
 ];
 
+/// Codex events bay hooks (G308), with the `bay hook` event name each one calls: the events
+/// `tests/fixtures/codex-0.153.2` recorded, and only those (ruling R16). Codex has no
+/// `PostToolBatch`, so its `PostToolUse` ends a step; it ignores an unknown event name without
+/// a word, so no Claude-only event is written for it.
+pub const CODEX_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "user-prompt-submit"),
+    ("PreToolUse", "pre-tool"),
+    ("PostToolUse", "post-tool"),
+    ("Stop", "stop"),
+    ("SubagentStart", "subagent-start"),
+    ("SubagentStop", "subagent-stop"),
+    ("SessionEnd", "session-end"),
+];
+
 const BAY_COMMAND_PREFIX: &str = "bay hook ";
 
 /// What bay's hook command runs before `bay hook <event>` (G169): on a box where `bay` does not
@@ -37,7 +55,11 @@ const BAY_COMMAND_PREFIX: &str = "bay hook ";
 /// turns `onFailure: "block"` into a deny of every tool on a box that runs no bay session.
 /// Where bay resolves, `exec` hands the entry to it, so its exit code, a hang and its timeout
 /// stay bay's and fail closed. POSIX sh: the product runs the command through its shell.
-const PRESENCE_GUARD: &str = "command -v bay >/dev/null 2>&1 || exit 0; exec ";
+pub const PRESENCE_GUARD: &str = "command -v bay >/dev/null 2>&1 || exit 0; exec ";
+
+/// What a bay entry does on a box without bay (G169): [`PRESENCE_GUARD`] exits 0, so the
+/// product goes on.
+pub const WITHOUT_BAY: &str = "allow";
 
 /// The command bay installs for its `bay hook <event>` entry (G169).
 #[must_use]
@@ -94,7 +116,19 @@ pub fn claude_override_paths(root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
 /// hooks (H7, G72). None without an agent adapter.
 #[must_use]
 pub fn hook_settings_file(config: &crate::config::Config) -> Option<&'static str> {
-    config.claude_adapter().then_some(CLAUDE_SETTINGS_FILE)
+    if config.claude_adapter() {
+        Some(CLAUDE_SETTINGS_FILE)
+    } else {
+        config.codex_adapter().then_some(CODEX_HOOKS_FILE)
+    }
+}
+
+/// Codex's project hooks file, relative to the work tree's top level (G308).
+pub const CODEX_HOOKS_FILE: &str = ".codex/hooks.json";
+
+#[must_use]
+pub fn codex_hooks_path(root: &Path) -> PathBuf {
+    root.join(".codex").join("hooks.json")
 }
 
 /// Reads the settings file. A missing file is an empty object.
@@ -130,15 +164,85 @@ fn is_bay_group(group: &Value) -> bool {
         })
 }
 
-fn bay_group(event: &str, bay_event: &str) -> Value {
-    let mut hook = json!({"type": "command", "command": hook_command(bay_event)});
-    if event == "PreToolUse" {
+/// The tools bay's `PreToolUse` entry runs for (§ 11a).
+pub const PRE_TOOL_MATCHER: &str = "Edit|Write|NotebookEdit|Bash";
+
+/// What Claude Code does when a hook without `onFailure` fails: a non-blocking error, so the
+/// session goes on.
+pub const DEFAULT_ON_FAILURE: &str = "allow";
+
+/// How bay's entry for one Claude event behaves: what [`add_claude_entries`] writes on it and
+/// what `bay help --json` declares of it (G306), from this one table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EntryShape {
+    /// The entry can stop the agent: a deny at `pre-tool`, the one stop refusal at `stop` (R7).
+    pub blocks: bool,
+    /// The entry's `onFailure`; `None` writes none, so the product's [`DEFAULT_ON_FAILURE`]
+    /// holds.
+    pub on_failure: Option<&'static str>,
+    /// The entry's `timeout` in seconds; `None` keeps the product's default.
+    pub timeout_s: Option<u64>,
+    /// The group's `matcher`; `None` runs the entry for every call of the event.
+    pub matcher: Option<&'static str>,
+}
+
+/// An entry that only records: it never stops the agent and sets nothing of its own.
+const RECORDS: EntryShape = EntryShape {
+    blocks: false,
+    on_failure: None,
+    timeout_s: None,
+    matcher: None,
+};
+
+/// The shape of bay's entry for the Claude event `event`.
+#[must_use]
+pub fn entry_shape(event: &str) -> EntryShape {
+    match event {
         // § 11a: exec form with `onFailure: "block"`, probed on the installed version (ROADMAP § 4).
-        hook["onFailure"] = json!("block");
         // G158: under `onFailure: "block"` a timeout denies (probe P2a); without one the
         // product's default (600 s on 2.1.303, probe P2b) holds the agent on a hung bay.
+        "PreToolUse" => EntryShape {
+            blocks: true,
+            on_failure: Some("block"),
+            timeout_s: Some(PRE_TOOL_TIMEOUT_S),
+            matcher: Some(PRE_TOOL_MATCHER),
+        },
+        // Ruling R7: a stop over uncheckpointed edits is refused once (exit 2).
+        "Stop" => EntryShape {
+            blocks: true,
+            ..RECORDS
+        },
+        _ => RECORDS,
+    }
+}
+
+fn bay_group(event: &str, bay_event: &str) -> Value {
+    let shape = entry_shape(event);
+    let mut hook = json!({"type": "command", "command": hook_command(bay_event)});
+    if let Some(on_failure) = shape.on_failure {
+        hook["onFailure"] = json!(on_failure);
+    }
+    if let Some(timeout_s) = shape.timeout_s {
+        hook["timeout"] = json!(timeout_s);
+    }
+    let mut group = Map::new();
+    if let Some(matcher) = shape.matcher {
+        group.insert("matcher".to_owned(), json!(matcher));
+    }
+    group.insert("hooks".to_owned(), json!([hook]));
+    Value::Object(group)
+}
+
+/// bay's group for a Codex event (G308): the bare `bay hook <event>`, with no presence test.
+/// Codex lets a tool run when its hook cannot start or fails (probed on 0.153.2), so on a box
+/// without bay the entry never denies (G169's reason), and no shell is needed to run it. The
+/// `PreToolUse` entry's `timeout` (seconds, the field the probe set) bounds a hung bay; Codex
+/// runs the tool when it fires. No `matcher`: the recorded configuration shows none.
+fn codex_group(event: &str, bay_event: &str) -> Value {
+    let mut hook =
+        json!({"type": "command", "command": format!("{BAY_COMMAND_PREFIX}{bay_event}")});
+    if event == "PreToolUse" {
         hook["timeout"] = json!(PRE_TOOL_TIMEOUT_S);
-        return json!({"matcher": "Edit|Write|NotebookEdit|Bash", "hooks": [hook]});
     }
     json!({"hooks": [hook]})
 }
@@ -163,7 +267,20 @@ fn bay_hooks<'a>(
 /// The Claude events that have no bay entry.
 #[must_use]
 pub fn missing_claude_events(settings: &Map<String, Value>) -> Vec<&'static str> {
-    CLAUDE_EVENTS
+    missing_events(settings, CLAUDE_EVENTS)
+}
+
+/// The Codex events that have no bay entry (G308).
+#[must_use]
+pub fn missing_codex_events(settings: &Map<String, Value>) -> Vec<&'static str> {
+    missing_events(settings, CODEX_EVENTS)
+}
+
+fn missing_events(
+    settings: &Map<String, Value>,
+    events: &'static [(&'static str, &'static str)],
+) -> Vec<&'static str> {
+    events
         .iter()
         .filter(|(event, bay_event)| bay_hooks(settings, event, bay_event).next().is_none())
         .map(|(event, _)| *event)
@@ -223,10 +340,10 @@ pub fn claude_pre_tool_on_failure(settings: &Map<String, Value>) -> Option<Optio
     })
 }
 
-/// The `timeout` (seconds) of bay's `PreToolUse` entry: `None` when bay has no such entry,
-/// `Some(None)` when the entry sets none (G158).
+/// The `timeout` (seconds) of bay's `PreToolUse` entry, in either product's file: `None` when
+/// bay has no such entry, `Some(None)` when the entry sets none (G158).
 #[must_use]
-pub fn claude_pre_tool_timeout(settings: &Map<String, Value>) -> Option<Option<u64>> {
+pub fn pre_tool_timeout(settings: &Map<String, Value>) -> Option<Option<u64>> {
     claude_pre_tool_hook(settings).map(|hook| hook.get("timeout").and_then(Value::as_u64))
 }
 
@@ -258,6 +375,19 @@ pub fn unrelated_digest(settings: &Map<String, Value>) -> String {
 /// bay group under an event bay no longer hooks is taken out, and the event with it when
 /// nothing else is left there.
 pub fn add_claude_entries(settings: &mut Map<String, Value>) {
+    add_entries(settings, CLAUDE_EVENTS, bay_group);
+}
+
+/// [`add_claude_entries`] for Codex's hooks file (G308).
+pub fn add_codex_entries(settings: &mut Map<String, Value>) {
+    add_entries(settings, CODEX_EVENTS, codex_group);
+}
+
+fn add_entries(
+    settings: &mut Map<String, Value>,
+    events: &[(&str, &str)],
+    group_for: fn(&str, &str) -> Value,
+) {
     let hooks = settings
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()));
@@ -268,7 +398,7 @@ pub fn add_claude_entries(settings: &mut Map<String, Value>) {
         return;
     };
     hooks.retain(|event, groups| {
-        if CLAUDE_EVENTS.iter().any(|(hooked, _)| hooked == event) {
+        if events.iter().any(|(hooked, _)| hooked == event) {
             return true;
         }
         let Some(list) = groups.as_array_mut() else {
@@ -278,7 +408,7 @@ pub fn add_claude_entries(settings: &mut Map<String, Value>) {
         list.retain(|group| !is_bay_group(group));
         !(list.is_empty() && before > 0)
     });
-    for (event, bay_event) in CLAUDE_EVENTS {
+    for (event, bay_event) in events {
         let groups = hooks
             .entry(*event)
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -287,7 +417,7 @@ pub fn add_claude_entries(settings: &mut Map<String, Value>) {
         }
         if let Some(groups) = groups.as_array_mut() {
             groups.retain(|group| !is_bay_group(group));
-            groups.push(bay_group(event, bay_event));
+            groups.push(group_for(event, bay_event));
         }
     }
 }

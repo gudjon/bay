@@ -1,4 +1,5 @@
-//! The Claude Code payload adapter behind `bay hook <event>` (`DESIGN` § 11, § 11a, `ROADMAP` § 8).
+//! The agent-product payload adapters behind `bay hook <event>` (`DESIGN` § 11, § 11a,
+//! `ROADMAP` § 8).
 //!
 //! One entry, [`dispatch`], maps a hook's stdin to bay's events and runs what bay does there:
 //! the session work record of every probed event in a repository but pre-tool
@@ -6,23 +7,135 @@
 //! sessions in the same tree (`crate::claims`, G101), the shell deny list (G39) and the
 //! stale-write judgement of an edit tool against the coordination cache (`crate::coord`, G8,
 //! G23), the stop refusal at `stop` (ruling R7), and at `post-tool` and
-//! `user-prompt-submit` the notices of the session's change (`crate::notice`, R6). The adapter
-//! relies only on the payload shapes recorded in `tests/fixtures/claude-code-2.1.302`: an event
-//! with no recorded payload has no behaviour (ruling R16), and a field the recordings do not
-//! show is never read: an edit tool's target is `tool_input.file_path`, the field fixture 03
-//! shows. A hook never blocks the session except by the deny exit, a held path's deny, the
-//! stale-write refusal, the
+//! `user-prompt-submit` the notices of the session's change (`crate::notice`, R6). Each product
+//! has its own small payload module, which reads only the shapes recorded for it: `claude`
+//! (`tests/fixtures/claude-code-2.1.302`) and `codex` (`tests/fixtures/codex-0.153.2`, G308).
+//! An event with no recorded payload has no behaviour (ruling R16), and a field the recordings
+//! do not show is never read. The product is the `[agent] product` of the config at trunk
+//! ([`Product::configured`]), never a `bay hook` argument. A hook never blocks the session
+//! except by the deny exit, a held path's deny, the stale-write refusal, the
 //! one stop refusal and a `pre-tool` payload it cannot read (`HOOK_INPUT_INVALID`, ruling R-H1,
 //! G59), so every other outcome exits 0: the events that only record allow an unreadable one.
+//! Both products deny by exit 2 with the reason on stderr; Codex also runs the tool when its
+//! hook crashes, hangs or exits otherwise (probed on 0.153.2), so there the deny is advisory and
+//! the guard is `land` and the trunk hook.
+
+mod claude;
+mod codex;
 
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use serde_json::Value;
 
 use crate::result::Reason;
 use crate::session::SessionId;
 
-/// A Claude Code hook event, by the payload's `hook_event_name`.
+/// The agent product whose payloads `bay hook` reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Product {
+    /// Claude Code: `[agent] product = "claude"`, and the reading when no config names Codex.
+    Claude,
+    /// Codex: `[agent] product = "codex"` (G308).
+    Codex,
+}
+
+impl Product {
+    /// The product the config at trunk of the repository that holds the payload's `cwd` (else
+    /// `dir`) names: Codex for `[agent] product = "codex"`, else Claude Code, the one adapter
+    /// bay had before G308, so an unreadable payload or config reads as before.
+    #[must_use]
+    pub fn configured(input: &str, dir: &Path) -> Self {
+        let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
+        let cwd = crate::session::hook_cwd(&value, dir);
+        match crate::repo::Repo::open(&cwd) {
+            Ok(repo) if repo.config.codex_adapter() => Self::Codex,
+            _ => Self::Claude,
+        }
+    }
+
+    /// The bay event of the payload's `hook_event_name`.
+    fn event(self, name: &str) -> Event {
+        match self {
+            Self::Claude => Event::from_name(name),
+            Self::Codex => codex::event(name),
+        }
+    }
+
+    /// The product events bay installs, with the `bay hook` name each one calls.
+    fn entries(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Self::Claude => crate::agent_settings::CLAUDE_EVENTS,
+            Self::Codex => crate::agent_settings::CODEX_EVENTS,
+        }
+    }
+
+    /// The event that ends a step, whose writes bay records and whose notices it gives: Claude
+    /// Code's `PostToolBatch`; Codex has none, so its `PostToolUse`.
+    #[must_use]
+    pub fn step_event(self) -> Event {
+        match self {
+            Self::Claude => Event::PostToolBatch,
+            Self::Codex => Event::PostToolUse,
+        }
+    }
+
+    /// The edit targets a post-tool payload names.
+    fn edited(self, event: Event, value: &Value) -> Vec<PathBuf> {
+        match self {
+            Self::Claude => claude::edited(event, value),
+            Self::Codex => codex::edited(event, value),
+        }
+    }
+
+    /// What a `pre-tool` payload (a JSON object) calls, or why bay cannot judge it (ruling R-H1,
+    /// G59): a call with no string `tool_name`, or a shell call with no string
+    /// `tool_input.command`, the shell's shape in both products' recordings.
+    fn call(self, value: &Value) -> Result<Call, &'static str> {
+        let Some(tool) = value["tool_name"].as_str() else {
+            return Err("has no string tool_name");
+        };
+        if tool == "Bash" {
+            return value["tool_input"]["command"]
+                .as_str()
+                .map(|command| Call::Shell(command.to_owned()))
+                .ok_or("is a Bash call with no string tool_input.command");
+        }
+        let targets = match self {
+            Self::Claude => claude::edit_targets(tool, value),
+            Self::Codex => codex::edit_targets(tool, value)?,
+        };
+        Ok(targets.map_or(Call::Other, Call::Edit))
+    }
+
+    /// `outcome` in the product's output form. Claude Code reads it as made. No Codex recording
+    /// shows Codex reading a hook's stdout (R16), and output it cannot parse fails the hook, so
+    /// at exit 0 Codex gets bay's lines on stderr only; `session-start`'s context stays plain
+    /// text on stdout, and a deny keeps its `bay.result/1`.
+    fn deliver(self, event: &str, outcome: Outcome) -> Outcome {
+        if self == Self::Codex && outcome.exit == 0 && event != "session-start" {
+            return Outcome {
+                stdout: String::new(),
+                ..outcome
+            };
+        }
+        outcome
+    }
+}
+
+/// A `pre-tool` call, as bay judges it.
+#[derive(Debug)]
+enum Call {
+    /// The shell, with its command.
+    Shell(String),
+    /// An edit tool, with the targets its payload names; none when it names none bay reads.
+    Edit(Vec<PathBuf>),
+    /// Any other tool: not judged.
+    Other,
+}
+
+/// A hook event, by the payload's `hook_event_name` in Claude Code's names; each product's
+/// module maps its own names to these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
     SessionStart,
@@ -118,6 +231,8 @@ impl Event {
 /// One hook payload, as far as the recorded shapes show it.
 #[derive(Debug)]
 pub struct Payload {
+    /// The product whose payload this is.
+    pub product: Product,
     pub event: Event,
     /// `session_id`, when it names a file and nothing else. A subagent keeps its parent's.
     pub session: Option<SessionId>,
@@ -128,9 +243,9 @@ pub struct Payload {
     /// A `Stop` payload's `stop_hook_active`: the product already continued the session once
     /// for a stop hook.
     pub stop_hook_active: Option<bool>,
-    /// The targets of the step's edit-tool calls (`tool_input.file_path`): of a `PostToolBatch`'s
-    /// `tool_calls` (fixture 08), or of a `PostToolUse`'s own call (fixture 04). As the payload
-    /// gives them: absolute, or relative to `cwd`.
+    /// The targets of the step's edit-tool calls, as the product's module reads them
+    /// (`claude::edited`, `codex::edited`). As the payload gives them: absolute, or relative to
+    /// `cwd`.
     pub edited: Vec<PathBuf>,
     /// The product's `permission_mode` (fixtures 02-15, e.g. `bypassPermissions`), when it is
     /// one plain word: the value reaches the fleet map, so any other text is dropped (G153).
@@ -138,31 +253,33 @@ pub struct Payload {
 }
 
 impl Payload {
-    /// Reads `input` (the hook's stdin) for `bay hook <bay_event>`. The payload's
-    /// `hook_event_name` names the event; without one, the installed entry's `bay hook` name
-    /// does. `None` when the input is not a JSON object.
+    /// Reads `input` (the hook's stdin) from `product` for `bay hook <bay_event>`. The
+    /// payload's `hook_event_name` names the event; without one, the installed entry's
+    /// `bay hook` name does. `None` when the input is not a JSON object.
     #[must_use]
-    pub fn parse(bay_event: &str, input: &str, dir: &Path) -> Option<Self> {
+    pub fn parse(product: Product, bay_event: &str, input: &str, dir: &Path) -> Option<Self> {
         let value: Value = serde_json::from_str(input).ok()?;
         if !value.is_object() {
             return None;
         }
         let event = value["hook_event_name"].as_str().map_or_else(
             || {
-                crate::agent_settings::CLAUDE_EVENTS
+                product
+                    .entries()
                     .iter()
                     .find(|(_, name)| *name == bay_event)
-                    .map_or(Event::Unprobed, |(product, _)| Event::from_name(product))
+                    .map_or(Event::Unprobed, |(name, _)| product.event(name))
             },
-            Event::from_name,
+            |name| product.event(name),
         );
         Some(Self {
+            product,
             event,
             session: value["session_id"].as_str().and_then(SessionId::parse),
             agent: value["agent_id"].as_str().map(str::to_owned),
             cwd: crate::session::hook_cwd(&value, dir),
             stop_hook_active: value["stop_hook_active"].as_bool(),
-            edited: edited(event, &value),
+            edited: product.edited(event, &value),
             permission_mode: value["permission_mode"]
                 .as_str()
                 .filter(|mode| {
@@ -171,29 +288,33 @@ impl Payload {
                 .map(str::to_owned),
         })
     }
-}
 
-/// The edit-tool targets a post-tool payload names; none for another event.
-fn edited(event: Event, value: &Value) -> Vec<PathBuf> {
-    let calls: Vec<&Value> = match event {
-        Event::PostToolBatch => value["tool_calls"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .collect(),
-        Event::PostToolUse => vec![value],
-        _ => Vec::new(),
-    };
-    calls
-        .into_iter()
-        .filter(|call| {
-            call["tool_name"]
-                .as_str()
-                .is_some_and(|tool| EDIT_TOOLS.contains(&tool))
-        })
-        .filter_map(|call| call["tool_input"]["file_path"].as_str())
-        .map(PathBuf::from)
-        .collect()
+    /// Whether this event ends a step of its product ([`Product::step_event`]).
+    #[must_use]
+    pub fn ends_step(&self) -> bool {
+        self.event == self.product.step_event()
+    }
+
+    /// The session's state after this event ([`Event::state_after`]): `working` after a step.
+    #[must_use]
+    pub fn state_after(&self) -> Option<&'static str> {
+        if self.ends_step() {
+            Some("working")
+        } else {
+            self.event.state_after()
+        }
+    }
+
+    /// What the event does with the view's Git status ([`Event::writes`]): a step's end lists
+    /// the step's writes.
+    #[must_use]
+    pub fn writes(&self) -> Option<crate::writes::Step> {
+        if self.ends_step() {
+            Some(crate::writes::Step::Diff)
+        } else {
+            self.event.writes()
+        }
+    }
 }
 
 /// What `bay hook` returns to the product: its exit code and what it prints.
@@ -204,14 +325,21 @@ pub struct Outcome {
     pub stderr: String,
 }
 
-/// `bay hook <event>` with `input` on stdin, run in `dir`. Claude Code's exit protocol
-/// (`INTERFACES` § 1): exit 2 denies, with the reason on stderr.
+/// `bay hook <event>` with `input` on stdin, run in `dir`, for the configured product. The
+/// exit protocol of both products (`INTERFACES` § 1): exit 2 denies, with the reason on stderr.
 #[must_use]
 pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
     // G54: the idle wait an asynchronous hook runs: exit 2 (the wake) at the first accepted talk.
     if event == "talk-wait" {
         return talk_wait(dir);
     }
+    let product = Product::configured(input, dir);
+    let outcome = dispatch_as(product, event, input, dir);
+    product.deliver(event, outcome)
+}
+
+/// [`dispatch`] of a payload from `product`: one event handling for every product.
+fn dispatch_as(product: Product, event: &str, input: &str, dir: &Path) -> Outcome {
     // G54: a live session accepts its talks at most once per poll interval; what arrives is
     // told by the talk notice at a later hook (G147).
     if matches!(event, "user-prompt-submit" | "post-tool")
@@ -220,10 +348,10 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
         let _ = crate::talk::poll::live(&repo, crate::live::unix_now());
     }
     // `PreToolUse` is the blocking path (`onFailure: "block"`): § 11a gives it only the refusal,
-    // and the same step's `PostToolBatch` records it.
+    // and the same step's end (`PostToolBatch`, Codex's `PostToolUse`) records it.
     let mut recorded = crate::session::Recorded::default();
     let mut product_event = Event::Unprobed;
-    if let Some(payload) = Payload::parse(event, input, dir)
+    if let Some(payload) = Payload::parse(product, event, input, dir)
         && !matches!(payload.event, Event::Unprobed | Event::PreToolUse)
     {
         product_event = payload.event;
@@ -251,21 +379,31 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
     if !recorded.notice.is_empty() {
         return notice(product_event, recorded.notice);
     }
-    if event == "pre-tool"
-        && let Err(why) = pre_tool_payload(input)
-    {
-        return invalid_payload(input, dir, why);
-    }
     if event != "pre-tool" {
-        return shell_deny(event, input, dir);
+        return shell_deny(product, event, input, dir);
     }
-    let unknown = match pre_tool_claim(input, dir) {
+    pre_tool(product, input, dir)
+}
+
+/// `pre-tool`: a payload bay cannot read is denied (G59); else the claims of other sessions
+/// (G101), then the stale-write judgement of an edit tool or the shell deny list (G39).
+fn pre_tool(product: Product, input: &str, dir: &Path) -> Outcome {
+    let (value, call) = match pre_tool_call(product, input) {
+        Ok(read) => read,
+        Err(why) => return invalid_payload(product, input, dir, why),
+    };
+    let unknown = match pre_tool_claim(product, input, dir, &value, &call) {
         Ok(unknown) => unknown,
         Err(denied) => return denied,
     };
-    let outcome = pre_tool_write(input, dir).unwrap_or_else(|| shell_deny(event, input, dir));
+    let outcome = match &call {
+        Call::Edit(targets) => pre_tool_write(product, input, dir, &value, targets),
+        Call::Shell(_) | Call::Other => shell_deny(product, "pre-tool", input, dir),
+    };
     match unknown {
-        Some(unreadable) if outcome.exit == 0 => claims_unknown(input, dir, &unreadable, &outcome),
+        Some(unreadable) if outcome.exit == 0 => {
+            claims_unknown(product, input, dir, &unreadable, &outcome)
+        }
         _ => outcome,
     }
 }
@@ -304,7 +442,7 @@ fn talk_wait(dir: &Path) -> Outcome {
 
 /// The shell deny list's judgement of `event` (G39): exit 2 with the reason, recorded by the
 /// command's shape; else the default outcome.
-fn shell_deny(event: &str, input: &str, dir: &Path) -> Outcome {
+fn shell_deny(product: Product, event: &str, input: &str, dir: &Path) -> Outcome {
     let Some(denial) = crate::deny::judge_hook(event, input, dir) else {
         return Outcome::default();
     };
@@ -316,6 +454,7 @@ fn shell_deny(event: &str, input: &str, dir: &Path) -> Outcome {
         refused["wrapped"] = Value::from(wrapped);
     }
     record_pre_tool(
+        product,
         input,
         dir,
         serde_json::json!({
@@ -352,16 +491,18 @@ fn allow_verdict_with_warning(reason: Reason) -> Value {
 /// Appends a `pre-tool` row with `extra` to the session's work record, when the payload names a
 /// session (`session::record_with`). A pre-tool line is never a stop, so it carries no stop
 /// refusal.
-fn record_pre_tool(input: &str, dir: &Path, extra: Value) {
-    if let (Some(payload), Value::Object(extra)) = (Payload::parse("pre-tool", input, dir), extra) {
+fn record_pre_tool(product: Product, input: &str, dir: &Path, extra: Value) {
+    if let (Some(payload), Value::Object(extra)) =
+        (Payload::parse(product, "pre-tool", input, dir), extra)
+    {
         let _ = crate::session::record_with(&payload, &extra);
     }
 }
 
-/// Whether bay can judge a `pre-tool` payload (ruling R-H1, G59): a JSON object with a string
-/// `tool_name`, and for `Bash` a string `tool_input.command`. Else why not. An empty stdin and
-/// one that is not UTF-8 (read as empty) are not JSON.
-fn pre_tool_payload(input: &str) -> Result<(), &'static str> {
+/// The `pre-tool` payload and what it calls, when bay can judge it (ruling R-H1, G59): a JSON
+/// object whose call the product's module reads ([`Product::call`]). Else why not. An empty
+/// stdin and one that is not UTF-8 (read as empty) are not JSON.
+fn pre_tool_call(product: Product, input: &str) -> Result<(Value, Call), &'static str> {
     let Ok(value) = serde_json::from_str::<Value>(input) else {
         return Err(if input.trim().is_empty() {
             "is missing"
@@ -372,13 +513,8 @@ fn pre_tool_payload(input: &str) -> Result<(), &'static str> {
     if !value.is_object() {
         return Err("is not a JSON object");
     }
-    let Some(tool) = value["tool_name"].as_str() else {
-        return Err("has no string tool_name");
-    };
-    if tool == "Bash" && !value["tool_input"]["command"].is_string() {
-        return Err("is a Bash call with no string tool_input.command");
-    }
-    Ok(())
+    let call = product.call(&value)?;
+    Ok((value, call))
 }
 
 /// A `pre-tool` payload bay cannot read is denied (ruling R-H1, AGENT-HOOKS-0.1 § 6.3), never
@@ -387,9 +523,10 @@ fn pre_tool_payload(input: &str) -> Result<(), &'static str> {
 /// product's protocol; stdout holds the `bay.result/1` of the refusal, for a caller that reads
 /// one (Claude Code reads stderr at exit 2). A JSON object that names a session is recorded as
 /// a deny in its work record, with `why` and none of the payload.
-fn invalid_payload(input: &str, dir: &Path, why: &str) -> Outcome {
+fn invalid_payload(product: Product, input: &str, dir: &Path, why: &str) -> Outcome {
     let reason = Reason::HookInputInvalid;
     record_pre_tool(
+        product,
         input,
         dir,
         serde_json::json!({
@@ -436,34 +573,25 @@ fn notice(event: Event, text: String) -> Outcome {
 
 /// `pre-tool` on an edit tool, or on Bash when the command names a path: denied when another
 /// live session of the target's tree holds that path (`DESIGN` § 11c, G101; `crate::claims`).
-/// `None` passes it to the next judgement. The deny exits 2 with one line naming the reason
-/// code, the holder and the path, and its row in the denied session's work record is a G60
-/// verdict. A payload with no session id is not the holder's. `Ok(None)` passes it to the next
-/// judgement; `Ok(Some(_))` does too, but a claims file could not be read, so the write was not
-/// judged here ([`claims_unknown`]).
-fn pre_tool_claim(input: &str, dir: &Path) -> Result<Option<crate::claims::Unreadable>, Outcome> {
-    let Ok(value) = serde_json::from_str::<Value>(input) else {
-        return Ok(None);
-    };
-    let Some(tool) = value["tool_name"].as_str() else {
-        return Ok(None);
-    };
-    let cwd = crate::session::hook_cwd(&value, dir);
+/// The deny exits 2 with one line naming the reason code, the holder and the path, and its row
+/// in the denied session's work record is a G60 verdict. A payload with no session id is not
+/// the holder's. `Ok(None)` passes it to the next judgement; `Ok(Some(_))` does too, but a
+/// claims file could not be read, so the write was not judged here ([`claims_unknown`]).
+fn pre_tool_claim(
+    product: Product,
+    input: &str,
+    dir: &Path,
+    value: &Value,
+    call: &Call,
+) -> Result<Option<crate::claims::Unreadable>, Outcome> {
+    let cwd = crate::session::hook_cwd(value, dir);
     let session = value["session_id"].as_str().and_then(SessionId::parse);
     let session = session.as_ref().map(SessionId::as_str);
     let now = crate::live::unix_now();
-    let judged = if EDIT_TOOLS.contains(&tool) {
-        let Some(file) = value["tool_input"]["file_path"].as_str() else {
-            return Ok(None);
-        };
-        crate::claims::held(&cwd, Path::new(file), session, now)
-    } else if tool == "Bash" {
-        let Some(command) = value["tool_input"]["command"].as_str() else {
-            return Ok(None);
-        };
-        crate::claims::held_by_command(&cwd, command, session, now)
-    } else {
-        Ok(None)
+    let judged = match call {
+        Call::Edit(targets) => held_target(&cwd, targets, session, now),
+        Call::Shell(command) => crate::claims::held_by_command(&cwd, command, session, now),
+        Call::Other => Ok(None),
     };
     let held = match judged {
         Ok(Some(held)) => held,
@@ -473,6 +601,7 @@ fn pre_tool_claim(input: &str, dir: &Path) -> Result<Option<crate::claims::Unrea
     let reason = Reason::PathHeld;
     let until = crate::clock::rfc3339_of(held.deadline_s);
     record_pre_tool(
+        product,
         input,
         dir,
         serde_json::json!({
@@ -499,11 +628,34 @@ fn pre_tool_claim(input: &str, dir: &Path) -> Result<Option<crate::claims::Unrea
     })
 }
 
+/// The first of an edit's `targets` another live session holds ([`crate::claims::held`]); else
+/// the first claims file that could not be read; else none. An edit that names no target is
+/// not judged here.
+fn held_target(
+    cwd: &Path,
+    targets: &[PathBuf],
+    session: Option<&str>,
+    now: u64,
+) -> Result<Option<crate::claims::Held>, crate::claims::Unreadable> {
+    let mut unreadable = None;
+    for target in targets {
+        match crate::claims::held(cwd, target, session, now) {
+            Ok(Some(held)) => return Ok(Some(held)),
+            Ok(None) => {}
+            Err(why) => {
+                unreadable.get_or_insert(why);
+            }
+        }
+    }
+    unreadable.map_or(Ok(None), Err)
+}
+
 /// A `pre-tool` call the later judgements allowed (`outcome`, exit 0) whose claims file could
 /// not be read: allowed with a `COVERAGE_UNKNOWN` notice (ruling R5, G101), never silently. The
 /// notice goes in `additionalContext`, beside any notice the write already had, and on stderr;
 /// the session's row records it with its G60 verdict.
 fn claims_unknown(
+    product: Product,
     input: &str,
     dir: &Path,
     unreadable: &crate::claims::Unreadable,
@@ -512,6 +664,7 @@ fn claims_unknown(
     let reason = Reason::CoverageUnknown;
     let file = unreadable.file.display().to_string();
     record_pre_tool(
+        product,
         input,
         dir,
         serde_json::json!({
@@ -552,28 +705,33 @@ fn claims_unknown(
     }
 }
 
-/// The edit tools whose target `pre-tool` judges (§ 11a's `PreToolUse` row).
-const EDIT_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
+/// What `pre-tool` does not judge (G306), as `bay help --json` declares it: a shell command is
+/// judged only by the deny list (G39); an edit whose payload names no target is an edit to an
+/// unknown path; a write against a coordination cache older than `[hooks] cache_max_age_s` is
+/// allowed with `COVERAGE_UNKNOWN` (ruling R5).
+pub const CANNOT_SEE: &[&str] = &[
+    "shell writes, judged only by the deny list",
+    "an edit whose payload names no target (no file_path, or a patch with no file header)",
+    "writes while the coordination cache is older than [hooks] cache_max_age_s, allowed with COVERAGE_UNKNOWN",
+];
 
-/// `pre-tool` on an edit tool: the write judged against the coordination cache. `None` when the
-/// payload is not an edit tool's, so the deny list judges it. The target is
-/// `tool_input.file_path`, the field probed payload 03 shows; a payload without it (a
-/// `NotebookEdit` names its target in a field no probe recorded, R16) is an edit to an unknown
-/// path. A refusal exits 2, the deny exit of the shell deny list (G39); a `COVERAGE_UNKNOWN`
-/// notice allows the write with `additionalContext` (ruling R5) and the same line on stderr,
-/// since no probe has yet shown `PreToolUse` delivering that field. Both are recorded in the
-/// session's row.
-fn pre_tool_write(input: &str, dir: &Path) -> Option<Outcome> {
-    let value: Value = serde_json::from_str(input).ok()?;
-    let tool = value["tool_name"].as_str()?;
-    if !EDIT_TOOLS.contains(&tool) {
-        return None;
-    }
-    let file = value["tool_input"]["file_path"].as_str().map(PathBuf::from);
-    let cwd = crate::session::hook_cwd(&value, dir);
-    let verdict = crate::coord::judge(&cwd, file.as_deref(), std::time::SystemTime::now());
-    let record = |extra: Value| record_pre_tool(input, dir, extra);
-    Some(match verdict {
+/// `pre-tool` on an edit tool: the write of each of its `targets` judged against the
+/// coordination cache ([`judge_targets`]). An edit that names no target (a `NotebookEdit`, an
+/// `apply_patch` with no file header) is an edit to an unknown path. A refusal exits 2, the
+/// deny exit of the shell deny list (G39); a `COVERAGE_UNKNOWN` notice allows the write with
+/// `additionalContext` (ruling R5) and the same line on stderr, since no probe has yet shown
+/// `PreToolUse` delivering that field. Both are recorded in the session's row.
+fn pre_tool_write(
+    product: Product,
+    input: &str,
+    dir: &Path,
+    value: &Value,
+    targets: &[PathBuf],
+) -> Outcome {
+    let cwd = crate::session::hook_cwd(value, dir);
+    let verdict = judge_targets(&cwd, targets, SystemTime::now());
+    let record = |extra: Value| record_pre_tool(product, input, dir, extra);
+    match verdict {
         crate::coord::Verdict::Allow => Outcome::default(),
         crate::coord::Verdict::Refuse {
             reason,
@@ -608,31 +766,84 @@ fn pre_tool_write(input: &str, dir: &Path) -> Option<Outcome> {
                 stderr: format!("{text}\n"),
             }
         }
-    })
+    }
+}
+
+/// The coordination cache's verdict on writing `targets` at `now` ([`crate::coord::judge`]):
+/// the first refusal of a target; else its first notice; else allowed. No target is an edit to
+/// an unknown path.
+fn judge_targets(cwd: &Path, targets: &[PathBuf], now: SystemTime) -> crate::coord::Verdict {
+    use crate::coord::{Verdict, judge};
+    if targets.is_empty() {
+        return judge(cwd, None, now);
+    }
+    let mut notice = None;
+    for target in targets {
+        match judge(cwd, Some(target.as_path()), now) {
+            Verdict::Allow => {}
+            refused @ Verdict::Refuse { .. } => return refused,
+            noticed @ Verdict::Notice { .. } => {
+                notice.get_or_insert(noticed);
+            }
+        }
+    }
+    notice.unwrap_or(Verdict::Allow)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::{Event, Payload};
+    use super::{Event, Payload, Product};
 
     #[test]
     fn the_payload_names_the_event_and_the_entry_name_is_the_fallback() {
         let dir = Path::new("/nonexistent");
-        let named = Payload::parse("post-tool", r#"{"hook_event_name": "Stop"}"#, dir).unwrap();
+        let parse = |event, input| Payload::parse(Product::Claude, event, input, dir);
+        let named = parse("post-tool", r#"{"hook_event_name": "Stop"}"#).unwrap();
         assert_eq!(named.event, Event::Stop);
-        let bare = Payload::parse("teammate-idle", "{}", dir).unwrap();
+        let bare = parse("teammate-idle", "{}").unwrap();
         assert_eq!(bare.event, Event::TeammateIdle);
-        let unprobed = Payload::parse("worktree-create", "{}", dir).unwrap();
+        let unprobed = parse("worktree-create", "{}").unwrap();
         assert_eq!(unprobed.event, Event::Unprobed);
-        assert!(Payload::parse("stop", "[]", dir).is_none());
+        assert!(parse("stop", "[]").is_none());
     }
 
     #[test]
     fn a_session_id_that_is_not_a_file_name_is_dropped() {
         let dir = Path::new("/nonexistent");
-        let payload = Payload::parse("stop", r#"{"session_id": "../x"}"#, dir).unwrap();
+        let payload =
+            Payload::parse(Product::Claude, "stop", r#"{"session_id": "../x"}"#, dir).unwrap();
         assert!(payload.session.is_none());
+    }
+
+    #[test]
+    fn codex_reads_only_its_recorded_events_and_its_post_tool_ends_a_step() {
+        // G308, R16: Codex has no `PostToolBatch`, so its `PostToolUse` is the step's end; a
+        // Claude-only event name has no behaviour.
+        let dir = Path::new("/nonexistent");
+        let parse = |event, input| Payload::parse(Product::Codex, event, input, dir);
+        let step = parse("post-tool", r#"{"hook_event_name": "PostToolUse"}"#).unwrap();
+        assert!(step.ends_step());
+        assert_eq!(step.state_after(), Some("working"));
+        let bare = parse("post-tool", "{}").unwrap();
+        assert_eq!(bare.event, Event::PostToolUse);
+        let claude_only = parse("post-tool", r#"{"hook_event_name": "PostToolBatch"}"#).unwrap();
+        assert_eq!(claude_only.event, Event::Unprobed);
+        let patch = r#"{"hook_event_name": "PostToolUse", "tool_name": "apply_patch",
+            "tool_input": {"command": "*** Begin Patch\n*** Add File: a.txt\n+a\n*** End Patch"}}"#;
+        assert_eq!(
+            parse("post-tool", patch).unwrap().edited,
+            vec![PathBuf::from("a.txt")]
+        );
+        // Claude Code's `PostToolUse` does not end a step: its `PostToolBatch` does.
+        let claude = Payload::parse(
+            Product::Claude,
+            "post-tool",
+            r#"{"hook_event_name": "PostToolUse"}"#,
+            dir,
+        )
+        .unwrap();
+        assert!(!claude.ends_step());
     }
 }

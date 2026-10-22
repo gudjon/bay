@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.14
+
+- `bay help --json` declares each agent adapter: its events, which can block, how each fails, and what it cannot see.
+- An executor outcome the author must act on wakes them once through `[wake] command`; `land --wait` wakes nothing.
+- `bay.wake/1` gains `cause`: `talk` or `outcome`; talk requests keep every field they had.
+- `[agent] product = "codex"`: bay reads Codex's hooks as a sensor; they fail open, so main stays the guard.
+- `AGENT_ABSENT` and `AGENT_BELOW_FLOOR` name a missing or old agent product other than Claude Code.
+- `bay status` names the flow: live changes per actor, landings, cycle time, the oldest change and the approval queue.
+- `[limits] max_waiting_approvals` caps how many changes wait for a yes; a change needing one is refused `WIP_LIMIT`.
+
 ## 0.2.13
 
 - `bay help` shows every command, subcommand and flag on one page, grouped for people, agents and admins.

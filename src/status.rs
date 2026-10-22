@@ -15,7 +15,9 @@
 //! ([`crate::unattributed`], G85). With operations queued and no fresh executor presence on
 //! record (`crate::presence`, G67), `detail.warnings` names `no_live_executor`. N-20: each merge
 //! outside bay in the red window that pushed bay landings off trunk's first-parent line is named
-//! there as `trunk_not_linear` ([`crate::trunkline`]).
+//! there as `trunk_not_linear` ([`crate::trunkline`]). G309: `detail.flow` names the flow of
+//! work, live changes by actor beside the WIP limit, landings, cycle time, the oldest live change
+//! and the changes waiting for an approval, derived from the chains on read ([`crate::flow`]).
 
 use std::path::Path;
 
@@ -184,9 +186,12 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     let flakes = flake_rows(&repo, &trunk, &read);
     let (red_rows_now, red_pending) = red_rows(&repo, &trunk);
     let targets = target_rows(&repo, &trunk, fetched_at.is_some(), &read);
+    // G309: the flow of work, derived on read from the chains this repository holds.
+    let flow = crate::flow::flow(&repo, &trunk).unwrap_or_else(|why| json!({"unread": why}));
     let mut result = BayResult::ok(json!({
         "changes": changes,
         "flakes": flakes,
+        "flow": flow,
         "leftovers": leftovers,
         "quarantines": quarantines,
         "red": red_rows_now,

@@ -29,6 +29,7 @@ pub mod enrol;
 pub mod evidence;
 pub mod executor;
 pub mod fleet;
+pub mod flow;
 pub mod git;
 pub mod guide;
 pub mod heads;

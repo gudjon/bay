@@ -2,7 +2,8 @@
 //!
 //! Writes `$HOME/.local/bin/bay`, the skill at `$HOME/.claude/skills/bay/` (or
 //! `$CLAUDE_CONFIG_DIR/skills/bay/` when that is set) and, when the
-//! Claude adapter is configured, bay's hook entries in the project agent settings. Global Git config, user-global Claude settings,
+//! Claude adapter is configured, bay's hook entries in the project agent settings (for the
+//! Codex adapter, in `.codex/hooks.json`, G308). Global Git config, user-global Claude settings,
 //! `user.name`, `user.email` and other tools' hook entries stay unchanged.
 //!
 //! With a key registry, it also writes the repository-local signing identity (§ 15.3 item 3):
@@ -32,6 +33,15 @@ use crate::skill;
 #[must_use]
 pub fn install(dir: &Path, machine: bool) -> BayResult {
     install_with(dir, machine, &Trunk::default())
+}
+
+/// The agent adapter whose hook entries install writes.
+#[derive(Clone, Copy)]
+enum Adapter {
+    /// `.claude/settings.json`.
+    Claude,
+    /// `.codex/hooks.json` (G308).
+    Codex,
 }
 
 /// The trunk and remote `bay install --trunk --remote` names for this repository.
@@ -82,19 +92,28 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
         let root = Path::new(&info.toplevel);
         detail["bootstrap"] = write_bootstrap(&git, trunk)?;
         // The adapter is the config's at the trunk tip, never the work tree's file.
-        let claude = match Repo::open_with(dir, Fetch::Never) {
-            Ok(repo) => repo.config.claude_adapter(),
+        let adapter = match Repo::open_with(dir, Fetch::Never) {
+            Ok(repo) if repo.config.claude_adapter() => Some(Adapter::Claude),
+            Ok(repo) if repo.config.codex_adapter() => Some(Adapter::Codex),
+            Ok(_) => None,
             Err(OpenError::ConfigMissing(_, missing)) => {
                 detail["config"] = missing;
-                false
+                None
             }
             Err(error) => return Err(error.message()),
         };
-        if claude {
-            let path = agent_settings::claude_settings_path(root);
+        if let Some(adapter) = adapter {
+            let path = match adapter {
+                Adapter::Claude => agent_settings::claude_settings_path(root),
+                // G308: the project hooks file Codex reads.
+                Adapter::Codex => agent_settings::codex_hooks_path(root),
+            };
             let mut settings = agent_settings::read(&path)?;
             let before = agent_settings::unrelated_digest(&settings);
-            agent_settings::add_claude_entries(&mut settings);
+            match adapter {
+                Adapter::Claude => agent_settings::add_claude_entries(&mut settings),
+                Adapter::Codex => agent_settings::add_codex_entries(&mut settings),
+            }
             let after = agent_settings::unrelated_digest(&settings);
             agent_settings::write(&path, &settings)?;
             git.run(&["config", "--local", UNRELATED_HOOKS_KEY, &after])

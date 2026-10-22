@@ -113,11 +113,12 @@ fn named(by_name: &BTreeMap<String, String>, word: &str) -> Vec<String> {
         .collect()
 }
 
-const WAKE_CASES: [&str; 8] = [
+const WAKE_CASES: [&str; 9] = [
     "answers",
     "env_baseline",
     "exit_code",
     "one_document",
+    "outcome",
     "reason",
     "recorded",
     "schema",
@@ -171,17 +172,32 @@ fn a_conforming_wake_adapter_passes_every_case() {
     let sent = &result["detail"]["cases"][0]["sent"];
     assert_eq!(sent["schema"], "bay.wake/1", "{result}");
     assert_eq!(sent["op"], "wake", "{result}");
+    assert_eq!(sent["cause"], "talk", "{result}");
+    // G307: the kit also sends the request an executor sends for an outcome.
+    let outcome = result["detail"]["cases"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["name"] == "outcome"))
+        .map_or_else(|| panic!("{result}"), |row| row["sent"].clone());
+    assert_eq!(outcome["cause"], "outcome", "{result}");
+    assert_eq!(outcome["reason"], "CHECK_FAILED", "{result}");
+    assert_eq!(outcome["decision"], "blocked", "{result}");
 }
 
 #[test]
 fn a_wake_adapter_with_the_wrong_schema_fails_the_schema() {
     let answer = WAKE_ANSWER.replace("bay.wake-result/1", "bay.wake-result/2");
-    wake_fails_exactly(&wake_script("", &answer, 0), &["recorded", "schema"]);
+    wake_fails_exactly(
+        &wake_script("", &answer, 0),
+        &["outcome", "recorded", "schema"],
+    );
 }
 
 #[test]
 fn a_wake_adapter_that_exits_nonzero_fails_the_exit_code() {
-    wake_fails_exactly(&wake_script("", WAKE_ANSWER, 3), &["exit_code", "recorded"]);
+    wake_fails_exactly(
+        &wake_script("", WAKE_ANSWER, 3),
+        &["exit_code", "outcome", "recorded"],
+    );
 }
 
 /// The answer is waited for past bay's 5 s, so the kit judges it, and shows that bay records
@@ -190,7 +206,7 @@ fn a_wake_adapter_that_exits_nonzero_fails_the_exit_code() {
 fn a_wake_adapter_that_answers_after_the_limit_fails_the_limit() {
     wake_fails_exactly(
         &wake_script("sleep 6", WAKE_ANSWER, 0),
-        &["recorded", "within_limit"],
+        &["outcome", "recorded", "within_limit"],
     );
 }
 
@@ -198,7 +214,7 @@ fn a_wake_adapter_that_answers_after_the_limit_fails_the_limit() {
 fn a_wake_adapter_that_prints_noise_on_stdout_fails_one_document() {
     wake_fails_exactly(
         &wake_script("echo waking the session", WAKE_ANSWER, 0),
-        &["one_document", "recorded"],
+        &["one_document", "outcome", "recorded"],
     );
 }
 

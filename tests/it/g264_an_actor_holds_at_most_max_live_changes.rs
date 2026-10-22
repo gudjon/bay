@@ -9,7 +9,7 @@
 //! Guards to mutate: `crate::start::wip_limit`'s comparison
 //! `if u64::try_from(live.len()).unwrap_or(u64::MAX) < limit {` (make it always return
 //! `Ok(None)`: the refusal tests fail), and the `live(held.record.state)` term of
-//! `crate::overlap::held_by`'s filter (drop it: the abandoned change still counts and the
+//! `crate::overlap::counts_live`, which `held_by` filters by (drop it: the abandoned change still counts and the
 //! freed-place test fails).
 
 use crate::support;

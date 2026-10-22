@@ -87,6 +87,9 @@ pub const GIT_RECOMMENDED: &str = "2.50";
 pub const GIT_BACKFILL_PATHSPEC: &str = "2.54";
 /// The Claude Code version the hook events were read against (`DESIGN` § 11a).
 pub const CLAUDE_HOOK_MINIMUM: &str = "2.1.302";
+/// The Codex version the Codex adapter's hook payloads were read against (G308,
+/// `tests/fixtures/codex-0.153.2`).
+pub const CODEX_HOOK_MINIMUM: &str = "0.153.2";
 
 #[cfg(test)]
 mod tests {

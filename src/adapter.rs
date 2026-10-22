@@ -292,6 +292,21 @@ fn test_wake(dir: &Path, command: &str) -> BayResult {
         .error
         .is_none()
         .then(|| wake::ask(with_callers_env(callers), &request, bound));
+    // G307: the request an executor sends for an outcome its author must act on.
+    let outcome = wake::outcome_request(
+        &wake::Outcome {
+            change: "adaptertest",
+            op_id: "adaptertest.1",
+            decision: Decision::Blocked,
+            reason: Some(Reason::CheckFailed),
+            actor: &me,
+        },
+        "adapter-test",
+    );
+    let to_outcome = match crate::run::command(dir, command) {
+        Some(Ok(cmd)) if answer.error.is_none() => Some(wake::ask(cmd, &outcome, bound)),
+        _ => None,
+    };
     let shown = wake_shown(&request, &answer);
     let ran = (answer.error.is_none() || answer.timed_out).then_some(answer.elapsed);
     let late = "bay stops waiting at the limit and records uncertain / WAKE_ADAPTER_FAILED";
@@ -311,6 +326,14 @@ fn test_wake(dir: &Path, command: &str) -> BayResult {
         ),
         case("within_limit", &shown, within(ran, limit, late)),
         case("recorded", &shown, wake_recorded(&answer, limit)),
+        case(
+            "outcome",
+            &to_outcome.as_ref().map_or_else(
+                || wake_shown(&outcome, &answer),
+                |other| wake_shown(&outcome, other),
+            ),
+            wake_outcome(to_outcome.as_ref(), limit),
+        ),
         case(
             "env_baseline",
             &with_callers.as_ref().map_or_else(
@@ -416,6 +439,29 @@ fn wake_recorded(answer: &wake::Answer, limit: Duration) -> Judgement {
             limit.as_secs()
         )),
         Err(why) => Fail(format!("bay records {recorded} on the ack: {why}")),
+    }
+}
+
+/// G307: whether the adapter answers a `cause: "outcome"` request as bay records it on the
+/// outcome event; `None` when the talk request had no answer, so none was sent.
+fn wake_outcome(answer: Option<&wake::Answer>, limit: Duration) -> Judgement {
+    let Some(answer) = answer else {
+        return NotJudged(
+            "the talk request had no answer, so no outcome request was sent".to_owned(),
+        );
+    };
+    let recorded = wake::recorded(answer, limit);
+    match wake::answered(answer) {
+        Ok(_) if answer.elapsed <= limit => Pass(format!(
+            "it answered a cause: outcome request; bay records {recorded} on the outcome event"
+        )),
+        Ok(_) => Fail(format!(
+            "bay records {recorded} on the outcome event: the answer came after the {} s limit",
+            limit.as_secs()
+        )),
+        Err(why) => Fail(format!(
+            "bay records {recorded} on the outcome event: {why}"
+        )),
     }
 }
 

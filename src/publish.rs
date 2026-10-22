@@ -826,6 +826,11 @@ fn submit_land(
     if let Some(refusal) = too_large_at_submit(&ctx, &trunk, &revision)? {
         return Ok(refusal);
     }
+    // G310: under `[limits] max_waiting_approvals`, a change that needs an approval waits for
+    // room in the review queue before it is submitted.
+    if let Some(refusal) = review_full_at_submit(&ctx, &trunk, &revision)? {
+        return Ok(refusal);
+    }
     kill_point("before-submit");
 
     let op_id = match ctx
@@ -900,6 +905,56 @@ fn too_large_at_submit(
     }
     Ok(Some(
         crate::limits::refusal(&limits, &exceeded, trunk, "submit").with_change(ctx.id.clone()),
+    ))
+}
+
+/// G310: `WIP_LIMIT` at submit when the policy at `trunk` sets `[limits] max_waiting_approvals
+/// = N`, the change's own edits (from where `revision` meets `trunk`) wake an approval check of
+/// that policy, and N or more other live changes already wait for an approval
+/// ([`crate::flow::review_queue`]). Its detail `review` names how many wait, the cap, and the
+/// one that has waited longest. A change that needs no approval, or a policy without the key,
+/// is never refused here, and nothing is written.
+fn review_full_at_submit(
+    ctx: &Ctx,
+    trunk: &str,
+    revision: &str,
+) -> Result<Option<BayResult>, String> {
+    let git = &ctx.repo.git;
+    let Some(max) = policy::limits_at(git, trunk)?.max_waiting_approvals else {
+        return Ok(None);
+    };
+    let Some(policy) = policy::load_at(git, trunk).map_err(String::from)? else {
+        return Ok(None);
+    };
+    let from = git
+        .run(&["merge-base", trunk, revision])
+        .unwrap_or_else(|_| trunk.to_owned());
+    let changed = check::changed_paths(git, &from, revision)?;
+    let needs_approval = policy
+        .checks
+        .iter()
+        .any(|entry| entry.is_approval() && policy.requires(entry, &changed));
+    if !needs_approval {
+        return Ok(None);
+    }
+    let queue = crate::flow::review_queue(ctx.repo, Some(ctx.id.as_str()))?;
+    if queue.waiting < max {
+        return Ok(None);
+    }
+    Ok(Some(
+        BayResult::blocked(Reason::WipLimit)
+            .with_change(ctx.id.clone())
+            .with_detail(json!({
+                "review": {
+                    "waiting": queue.waiting,
+                    "max": max,
+                    "oldest": queue.oldest,
+                    "age_s": queue.age_s,
+                },
+                "policy": policy::POLICY_PATH,
+                "base": trunk,
+                "next": "answer or finish the changes waiting for a yes first",
+            })),
     ))
 }
 
@@ -1025,12 +1080,74 @@ pub fn execute(
         // A lost notice is never retried: `bay watch` reads the event from the log.
         let _ = crate::notify::notify(ctx.repo, &event);
     }
+    // G307: a landing this pass reached wakes the change's author once. A wake is a
+    // convenience, never the outcome: one that cannot be recorded changes nothing here.
+    let _ = landed_wake(&ctx, op_id, &result);
     Ok(result)
+}
+
+/// G307: asks the wake adapter, once, to wake the author of `ctx`'s change for operation
+/// `op_id`'s outcome, and returns what bay records of the answer. Only an executor pass
+/// ([`execute`]) asks: an outcome reached inside the author's own `bay land --wait` returns to
+/// that session directly, so it never wakes the turn that caused it. The session to wake is
+/// the one the change record names.
+fn wake_author(
+    ctx: &Ctx,
+    op_id: &str,
+    decision: Decision,
+    reason: Option<Reason>,
+) -> serde_json::Value {
+    crate::talk::wake::wake_outcome(
+        ctx.repo,
+        &crate::talk::wake::Outcome {
+            change: &ctx.id,
+            op_id,
+            decision,
+            reason,
+            actor: &ctx.record.actor,
+        },
+    )
+}
+
+/// G307: a landing an executor pass reached wakes the change's author once, so a session that
+/// left the change to the executor can move on. Landings are read from trunk and never logged,
+/// so what trunk cannot hold, the adapter's answer, is a `wake` event on this executor's log,
+/// keyed by the operation and its outcome: one landing is one wake, however often a pass sees
+/// it, and a log that already holds it is never asked again. Without a `[wake] command`
+/// nothing is asked and nothing is written. The notify adapter is not told: the landing is
+/// on trunk, and a wake is no outcome of its own.
+fn landed_wake(ctx: &Ctx, op_id: &str, result: &BayResult) -> Result<(), String> {
+    if result.decision != Decision::Landed || !crate::talk::wake::configured(ctx.repo) {
+        return Ok(());
+    }
+    let id = digest(&json!({"op_id": op_id, "outcome": "landed"}))?;
+    let id = format!("evt_{}", &id.trim_start_matches("sha256:")[..20]);
+    crate::log::fetch(ctx.repo);
+    if crate::log::held_events(&ctx.repo.git)?.contains(&id) {
+        return Ok(());
+    }
+    let wake = wake_author(ctx, op_id, Decision::Landed, None);
+    let event = json!({
+        "schema": crate::log::EVENT_SCHEMA,
+        "id": id,
+        "at": crate::clock::now_rfc3339(),
+        "kind": "wake",
+        "change": ctx.id,
+        "op_id": op_id,
+        "decision": Decision::Landed.word(),
+        "actor": ctx.record.actor,
+        "wake": wake,
+        "recurrence_key": format!("wake/{op_id}"),
+    });
+    let executor = ctx.executor_name();
+    let signer = ctx.executor_signer().ok().flatten();
+    crate::log::append(ctx.repo, &executor, signer.as_ref(), &event).map(|_| ())
 }
 
 /// `INTERFACES` § 2, outcomes that arrive after the agent left: a blocked outcome the executor
 /// reached, which waits for the actor, is an event for the change's actor on this executor's
-/// log. Returns the event when it was new, for the caller to tell the notify adapter.
+/// log. Returns the event when it was new, for the caller to tell the notify adapter. A new
+/// event carries the author's wake (G307, [`wake_author`]).
 fn outcome_event(
     ctx: &Ctx,
     op_id: &str,
@@ -1049,11 +1166,28 @@ fn outcome_event(
         return Ok(None);
     }
     let detail = result.detail.clone().unwrap_or(serde_json::Value::Null);
-    let event = blocked_event(&ctx.record, op_id, reason, &detail)?;
+    let mut event = blocked_event(&ctx.record, op_id, reason, &detail)?;
+    // As `crate::log::append_event` does, an event a log already holds is not new: the
+    // outcome was told, and its author woken, by whoever wrote it.
+    let id = event["id"].as_str().unwrap_or_default().to_owned();
+    crate::log::fetch(ctx.repo);
+    if crate::log::held_events(&ctx.repo.git)?.contains(&id) {
+        return Ok(None);
+    }
+    // G307: a block whose next step is the author's wakes the author once, keyed by this
+    // event's id, and the answer is recorded on the event as a talk's ack records it. Never
+    // retried, also when the log write below fails. A transient block is bay's own to retry,
+    // so it wakes no one. APPROVAL_PENDING waits on the approvers the refusal names, but a
+    // `bay.wake/1` request addresses a session, and an approver is a registry principal with
+    // no session the change record names: the author is woken, and the event names the
+    // approvers for whoever reads it.
+    if !reason.transient() {
+        event["wake"] = wake_author(ctx, op_id, result.decision, Some(reason));
+    }
     let executor = ctx.executor_name();
     let signer = ctx.executor_signer().ok().flatten();
-    let new = crate::log::append_event(ctx.repo, &executor, signer.as_ref(), &event)?;
-    Ok(new.then_some(event))
+    crate::log::append(ctx.repo, &executor, signer.as_ref(), &event)?;
+    Ok(Some(event))
 }
 
 /// The event of operation `op_id` of `record` blocked on `reason`: kind `check_failed`,
@@ -1157,6 +1291,8 @@ pub fn recover_events(repo: &Repo, records: &[ChangeRecord]) -> Result<usize, St
         if held.contains(event["id"].as_str().unwrap_or_default()) {
             continue;
         }
+        // G307: no wake. The pass that reached this outcome may have asked the wake adapter
+        // before its log write was lost, and a wake is never retried.
         crate::log::append(repo, &keys.executor_name, signer.as_ref(), &event)?;
         let _ = crate::notify::notify(repo, &event);
         written += 1;

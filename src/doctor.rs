@@ -17,8 +17,8 @@ use crate::repo::{Bootstrap, Fetch, OpenError, Repo};
 use crate::result::{BayResult, Decision, Reason};
 use crate::skill;
 use crate::version::{
-    CLAUDE_HOOK_MINIMUM, GIT_FLOOR_AGENT_VIEW, GIT_FLOOR_ANY, GIT_FLOOR_EXECUTOR,
-    GIT_FLOOR_HOSTED_TRUNK, GIT_RECOMMENDED, GIT_SHARED_CACHE, Version,
+    CLAUDE_HOOK_MINIMUM, CODEX_HOOK_MINIMUM, GIT_FLOOR_AGENT_VIEW, GIT_FLOOR_ANY,
+    GIT_FLOOR_EXECUTOR, GIT_FLOOR_HOSTED_TRUNK, GIT_RECOMMENDED, GIT_SHARED_CACHE, Version,
 };
 
 /// Where `bay install` records the digest of the hook entries that are not bay's.
@@ -26,7 +26,10 @@ pub const UNRELATED_HOOKS_KEY: &str = "bay.unrelated-hooks-digest";
 
 const CLAUDE_RECOVERY: &str = "upgrade Claude Code or run without the Claude adapter";
 
-enum Claude {
+const CODEX_RECOVERY: &str = "upgrade Codex or run without the Codex adapter";
+
+/// An agent product's program on this box, where its adapter is configured.
+enum Program {
     NotConfigured,
     Absent,
     Found(Version),
@@ -136,13 +139,8 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     let role_source = role.map(|_| if executor { "stated" } else { "inferred" });
     let keys = crate::signing::Keys::load(&git);
 
-    let claude = if config.claude_adapter() {
-        probe_claude()?
-    } else {
-        Claude::NotConfigured
-    };
     let minimum = Version::parse(CLAUDE_HOOK_MINIMUM);
-    claude_row(&claude, &minimum, &mut report);
+    let claude = program_rows(&config, &minimum, &mut report)?;
 
     if let Some(info) = &info {
         report.rows.extend(config_row);
@@ -338,23 +336,64 @@ fn ref_format_row(ref_format: &str) -> Value {
 }
 
 /// The `claude` row: Claude Code against the hook minimum, where the adapter is configured.
-fn claude_row(claude: &Claude, minimum: &Version, report: &mut Report) {
+fn claude_row(claude: &Program, minimum: &Version, report: &mut Report) {
     let row = match claude {
-        Claude::NotConfigured => {
+        Program::NotConfigured => {
             json!({"name": "claude", "state": "green", "note": "Claude adapter not configured"})
         }
-        Claude::Absent => {
+        Program::Absent => {
             report.red(Reason::ClaudeAbsent, None);
             json!({"name": "claude", "state": "red", "floor": CLAUDE_HOOK_MINIMUM,
                 "note": "claude is absent", "recovery": CLAUDE_RECOVERY})
         }
-        Claude::Found(version) if version < minimum => {
+        Program::Found(version) if version < minimum => {
             report.red(Reason::ClaudeBelowFloor, None);
             json!({"name": "claude", "version": version.to_string(), "floor": CLAUDE_HOOK_MINIMUM,
                 "state": "red", "recovery": CLAUDE_RECOVERY})
         }
-        Claude::Found(version) => json!({"name": "claude", "version": version.to_string(),
+        Program::Found(version) => json!({"name": "claude", "version": version.to_string(),
             "floor": CLAUDE_HOOK_MINIMUM, "state": "green"}),
+    };
+    report.rows.push(row);
+}
+
+/// The rows of the agent products' programs: `claude` on every box, and `codex` where the Codex
+/// adapter is configured (G308). Claude Code's program, which the status line names.
+fn program_rows(
+    config: &Config,
+    minimum: &Version,
+    report: &mut Report,
+) -> Result<Program, String> {
+    let claude = if config.claude_adapter() {
+        probe_claude()?
+    } else {
+        Program::NotConfigured
+    };
+    claude_row(&claude, minimum, report);
+    if config.codex_adapter() {
+        codex_row(&probe_program("codex")?, report);
+    }
+    Ok(claude)
+}
+
+/// The `codex` row (G308): Codex against the version its payloads were recorded on, where the
+/// Codex adapter is configured, as the `claude` row judges Claude Code.
+fn codex_row(codex: &Program, report: &mut Report) {
+    let minimum = Version::parse(CODEX_HOOK_MINIMUM);
+    let row = match codex {
+        Program::NotConfigured => return,
+        Program::Absent => {
+            report.red(Reason::AgentAbsent, Some("codex is absent"));
+            json!({"name": "codex", "state": "red", "floor": CODEX_HOOK_MINIMUM,
+                "note": "codex is absent", "recovery": CODEX_RECOVERY})
+        }
+        Program::Found(version) if *version < minimum => {
+            report.red(Reason::AgentBelowFloor, Some("codex below its floor"));
+            json!({"name": "codex", "version": version.to_string(), "floor": CODEX_HOOK_MINIMUM,
+                "state": "red", "recovery": CODEX_RECOVERY})
+        }
+        Program::Found(version) => json!({"name": "codex", "version": version.to_string(),
+            "floor": CODEX_HOOK_MINIMUM, "state": "green"}),
     };
     report.rows.push(row);
 }
@@ -514,6 +553,9 @@ fn hooks_row(
         }
         return Ok(());
     }
+    if config.codex_adapter() {
+        return codex_hooks_rows(git, info, report);
+    }
     if !config.claude_adapter() {
         unguarded(git, config, report);
         return Ok(());
@@ -530,7 +572,7 @@ fn hooks_row(
     }
     // G158: the entry's timeout bounds a hung hook; without it the product's default holds the
     // agent first. Not red: the hook still fails closed when the default fires.
-    if let Some(timeout) = agent_settings::claude_pre_tool_timeout(&settings) {
+    if let Some(timeout) = agent_settings::pre_tool_timeout(&settings) {
         row["pre_tool_timeout_s"] = json!(timeout);
         if timeout.is_none_or(|timeout| timeout > agent_settings::PRE_TOOL_TIMEOUT_S) {
             row["timeout_note"] = json!(format!(
@@ -563,6 +605,53 @@ fn hooks_row(
         &agent_settings::claude_override_paths(Path::new(&info.toplevel), home.as_deref()),
         report,
     );
+    Ok(())
+}
+
+/// The `hooks` and `agent-hooks` rows of the Codex adapter (G308): bay's entries in
+/// `.codex/hooks.json`, red with `HOOKS_MISSING` when one is missing, and the posture. Codex
+/// runs a tool whose hook crashes, hangs or exits other than 2 (probed on 0.153.2) and has no
+/// setting that changes it, so bay's deny there is advisory: the `agent-hooks` row, where
+/// doctor states every product's early refusal, says `fail_open`, and land and the trunk hook
+/// stay the guard.
+fn codex_hooks_rows(git: &Git, info: &RepoInfo, report: &mut Report) -> Result<(), String> {
+    let path = agent_settings::codex_hooks_path(Path::new(&info.toplevel));
+    let settings = agent_settings::read(&path)?;
+    let missing = agent_settings::missing_codex_events(&settings);
+    let present = missing.is_empty();
+    let mut row = json!({
+        "name": "hooks",
+        "product": "codex",
+        "file": agent_settings::CODEX_HOOKS_FILE,
+        "state": state(present),
+        "trust_note": "Codex runs these entries only in a trusted project, once its hooks are trusted",
+    });
+    if !present {
+        row["missing"] = json!(missing);
+        row["recovery"] = json!("run install again");
+        report.red(Reason::HooksMissing, Some("hooks missing"));
+    }
+    if let Some(timeout) = agent_settings::pre_tool_timeout(&settings) {
+        row["pre_tool_timeout_s"] = json!(timeout);
+    }
+    if let Some(recorded) = recorded_unrelated_digest(git)? {
+        row["unrelated_hooks_unchanged"] =
+            json!(recorded == agent_settings::unrelated_digest(&settings));
+    }
+    report.rows.push(row);
+    report.rows.push(json!({
+        "name": "agent-hooks",
+        "product": "codex",
+        "state": state(present),
+        "early_refusal": if present { "fail_open" } else { "none" },
+        "early_refusal_note": "Codex runs the tool when bay's hook crashes, hangs or fails, so bay's deny there is advisory; land and the trunk hook are the guard",
+        "pre_tool": {"event": "PreToolUse", "fails_closed": false,
+            "why": "exit 2 denies; a crash, a timeout or another exit lets the tool run (probed on Codex 0.153.2)"},
+        "stop": {"event": "Stop", "fails_closed": false,
+            "why": "no recording shows Codex keeping a session going for a stop hook"},
+        "guarantee": "land and trunk hook (G8, G23)",
+        "note": "the guarantee does not rest on this hook: land and the host hook re-judge every change",
+    }));
     Ok(())
 }
 
@@ -1153,19 +1242,26 @@ fn skill_row(config: &Config, report: &mut Report) -> Result<(), String> {
     Ok(())
 }
 
-fn probe_claude() -> Result<Claude, String> {
-    let mut cmd = Command::new(crate::platform::program("claude"));
+fn probe_claude() -> Result<Program, String> {
+    probe_program("claude")
+}
+
+/// `<name> --version` on this box: the version it prints (Codex prints `codex-cli 0.153.2`),
+/// or absent when no such program is on `PATH`.
+fn probe_program(name: &str) -> Result<Program, String> {
+    let mut cmd = Command::new(crate::platform::program(name));
     cmd.arg("--version");
-    match git::run_bounded(cmd, "claude --version") {
+    let display = format!("{name} --version");
+    match git::run_bounded(cmd, &display) {
         Err(GitError::Spawn(error)) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(Claude::Absent)
+            Ok(Program::Absent)
         }
         Err(error) => Err(error.message()),
         Ok(output) => {
             let text = String::from_utf8_lossy(&output.stdout);
             Version::find(&text)
-                .map(Claude::Found)
-                .ok_or_else(|| format!("claude --version printed no version: {}", text.trim()))
+                .map(Program::Found)
+                .ok_or_else(|| format!("{display} printed no version: {}", text.trim()))
         }
     }
 }
@@ -1182,7 +1278,7 @@ fn status_line(
     git_version: &Version,
     floor: &str,
     git_green: bool,
-    claude: &Claude,
+    claude: &Program,
     minimum: &Version,
     ready: bool,
     doctor_note: Option<&str>,
@@ -1193,12 +1289,12 @@ fn status_line(
         (false, false) => format!("git {git_version} (floor {floor}, upgrade git)"),
     };
     let claude_field = match claude {
-        Claude::NotConfigured => "claude adapter not configured".to_owned(),
-        Claude::Absent => format!("claude absent ({CLAUDE_RECOVERY})"),
-        Claude::Found(version) if version < minimum => {
+        Program::NotConfigured => "claude adapter not configured".to_owned(),
+        Program::Absent => format!("claude absent ({CLAUDE_RECOVERY})"),
+        Program::Found(version) if version < minimum => {
             format!("claude {version} (floor {CLAUDE_HOOK_MINIMUM}, {CLAUDE_RECOVERY})")
         }
-        Claude::Found(version) => format!("claude {version}"),
+        Program::Found(version) => format!("claude {version}"),
     };
     let doctor_field = match (ready, doctor_note) {
         (true, _) => "doctor ready".to_owned(),

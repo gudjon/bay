@@ -144,6 +144,9 @@ reasons! {
     GitBelowFloor => "GIT_BELOW_FLOOR", ["read"], "git_upgraded_to_floor", false;
     ClaudeBelowFloor => "CLAUDE_BELOW_FLOOR", ["read"], "claude_upgraded_or_adapter_removed", false;
     ClaudeAbsent => "CLAUDE_ABSENT", ["read"], "claude_installed_or_adapter_removed", false;
+    // G308; not yet in INTERFACES § 8: the Codex adapter's floor, as the Claude adapter's.
+    AgentBelowFloor => "AGENT_BELOW_FLOOR", ["read"], "agent_upgraded_or_adapter_removed", false;
+    AgentAbsent => "AGENT_ABSENT", ["read"], "agent_installed_or_adapter_removed", false;
     RemoteUnreachable => "REMOTE_UNREACHABLE", ["read"], "remote_answers_with_box_key", false;
     HooksMissing => "HOOKS_MISSING", ["read"], "install_wrote_hook_entries", false;
     SkillMismatch => "SKILL_MISMATCH", ["read"], "install_copied_skill_for_this_version", false;
@@ -188,7 +191,8 @@ reasons! {
     // approver's key for this exact tree.
     ApprovalPending => "APPROVAL_PENDING", ["wait"], "approved", false;
     // G264 (N-11); not yet in INTERFACES § 2: the policy at the base sets `[agent]
-    // max_live_changes` and the actor already holds that many live changes.
+    // max_live_changes` and the actor already holds that many live changes; or (G310) it sets
+    // `[limits] max_waiting_approvals` and that many live changes already wait for a yes.
     WipLimit => "WIP_LIMIT", ["read"], "a_live_change_lands_or_is_abandoned", false;
     // G265 (N-13); not yet in INTERFACES § 2: the box's `bay.minFreeMiB` floor is above the free
     // space of the filesystem a view or a materialized tree would be written to.
@@ -817,6 +821,13 @@ impl Reason {
             Self::ClaudeAbsent => {
                 "Tell the user to install Claude Code, or remove its adapter, then run `bay doctor` again."
             }
+            // An agent product other than Claude Code, named in `detail.rows` (`product`).
+            Self::AgentBelowFloor => {
+                "Tell the user to upgrade the agent product doctor names, or remove its adapter, then run `bay doctor` again."
+            }
+            Self::AgentAbsent => {
+                "Tell the user to install the agent product doctor names, or remove its adapter, then run `bay doctor` again."
+            }
             Self::RemoteUnreachable => {
                 "Check the network and this box's key for the remote, then run `bay doctor` again."
             }
@@ -885,7 +896,7 @@ impl Reason {
                 "Tell the user who can approve (`detail.approval`); the approver runs `bay approve <change>`. Then the executor lands it, or `bay land --wait`."
             }
             Self::WipLimit => {
-                "Land or abandon one of your live changes (`detail.live_changes`), then `bay start` again."
+                "Land or abandon one of the changes `detail` names (`live_changes`, or `review.oldest`), then run the command again."
             }
             Self::DiskLow => {
                 "Tell the user to free disk space on this box, or lower `bay.minFreeMiB`, then run the command again."
@@ -926,7 +937,8 @@ impl Reason {
             | Self::ApprovalPending
             | Self::TrunkHeld
             | Self::PathsUndeclared
-            | Self::ChangeTooLarge => return None,
+            | Self::ChangeTooLarge
+            | Self::WipLimit => return None,
             Self::TrunkMoved => {
                 "The shared copy moved on while saving; bay tries once more on its own, nothing to do."
             }
@@ -1007,6 +1019,12 @@ impl Reason {
             Self::ClaudeAbsent => {
                 "Claude Code is not installed here, but bay expects it; install it."
             }
+            Self::AgentBelowFloor => {
+                "The coding assistant on this computer is too old for bay; update it."
+            }
+            Self::AgentAbsent => {
+                "The coding assistant bay expects is not installed here; install it."
+            }
             Self::RemoteUnreachable => {
                 "bay cannot reach the shared copy from here; check the network and the access key."
             }
@@ -1053,9 +1071,6 @@ impl Reason {
             }
             Self::LaneNeverLands => {
                 "This was a try-out: its checks ran, and it is never added to the shared copy."
-            }
-            Self::WipLimit => {
-                "You already have the most open changes allowed; finish or give one up, then start again."
             }
             Self::DiskLow => {
                 "This computer is almost out of disk space; free some, then try again."
@@ -1159,6 +1174,15 @@ impl Reason {
                 "This change is too big to save here{}; keep large files elsewhere, such as a shared drive.",
                 named(too_large(detail))
             ),
+            // G310: a full review queue is named apart from the actor's own live changes.
+            Self::WipLimit if detail.is_some_and(|detail| detail.get("review").is_some()) => {
+                "Too many changes already wait for a person's OK; answer or finish those first, then save again."
+                    .to_owned()
+            }
+            Self::WipLimit => {
+                "You already have the most open changes allowed; finish or give one up, then start again."
+                    .to_owned()
+            }
             _ => "Not done yet; read the detail for what is needed, then try again.".to_owned(),
         }
     }
@@ -1332,7 +1356,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 66);
+        assert_eq!(Reason::ALL.len(), 68);
     }
 
     #[test]

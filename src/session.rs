@@ -197,7 +197,7 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
         "heartbeat": true,
     });
     payload_fields(&mut line, payload, &state_dir);
-    if let Some(state) = event.state_after() {
+    if let Some(state) = payload.state_after() {
         line["state"] = Value::from(state);
     }
     for (key, value) in extra {
@@ -206,7 +206,7 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
     let scope = crate::notice::Scope::new(change.as_deref(), &actor.name);
     let notice = notices(&repo, scope, payload, &state_dir, &mut line);
     let state = crate::writes::state_path(&state_dir, payload.agent.as_deref());
-    let stop_refused = match (&view, event.writes(), &state, &change) {
+    let stop_refused = match (&view, payload.writes(), &state, &change) {
         (Some(view), Some(step), Some(state), Some(id)) => step_fields(
             &mut line,
             payload,
@@ -458,11 +458,7 @@ fn notices(
         no_executor(repo, state_dir, line, &mut text);
         return text;
     }
-    if payload.agent.is_some()
-        || !matches!(
-            payload.event,
-            Event::PostToolBatch | Event::UserPromptSubmit
-        )
+    if payload.agent.is_some() || !(payload.ends_step() || payload.event == Event::UserPromptSubmit)
     {
         return String::new();
     }

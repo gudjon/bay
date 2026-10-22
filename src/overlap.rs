@@ -14,11 +14,11 @@
 //! declared paths overlap when one holds the other (`crate::inputs::within`); a change that
 //! declares none covers the whole tree, named `.`. Each overlap names the narrower path.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Value, json};
 
-use crate::change::{Chain, ChangeState};
+use crate::change::{Chain, ChangeState, HeldChain};
 use crate::repo::Repo;
 
 /// The live changes other than `id` this repository holds whose declared paths overlap
@@ -28,18 +28,10 @@ use crate::repo::Repo;
 ///
 /// The chains or the landed markers cannot be listed.
 pub fn overlaps(repo: &Repo, id: &str, declared: &[String]) -> Result<Vec<Value>, String> {
-    let chains = Chain::new(&repo.git)
-        .read_all()
-        .map_err(|error| error.message())?;
-    let landed = landed(repo)?;
+    let (chains, landed) = read_chains(repo)?;
     Ok(chains
         .iter()
-        .filter(|held| {
-            held.id != id
-                && live(held.record.state)
-                && held.record.lane.is_none()
-                && !landed.contains(&held.id)
-        })
+        .filter(|held| held.id != id && counts_live(held, &landed) && held.record.lane.is_none())
         .filter_map(|held| {
             let theirs = crate::inputs::paths(&held.record.declared_inputs);
             let paths = shared(declared, &theirs);
@@ -64,15 +56,10 @@ pub fn overlaps(repo: &Repo, id: &str, declared: &[String]) -> Result<Vec<Value>
 ///
 /// The chains or the landed markers cannot be listed.
 pub fn held_by(repo: &Repo, actor: &str) -> Result<Vec<Value>, String> {
-    let chains = Chain::new(&repo.git)
-        .read_all()
-        .map_err(|error| error.message())?;
-    let landed = landed(repo)?;
+    let (chains, landed) = read_chains(repo)?;
     Ok(chains
         .iter()
-        .filter(|held| {
-            held.record.actor.name == actor && live(held.record.state) && !landed.contains(&held.id)
-        })
+        .filter(|held| held.record.actor.name == actor && counts_live(held, &landed))
         .map(|held| {
             json!({
                 "change": held.id,
@@ -83,15 +70,47 @@ pub fn held_by(repo: &Repo, actor: &str) -> Result<Vec<Value>, String> {
         .collect())
 }
 
-/// The change ids whose landed marker this repository holds.
-fn landed(repo: &Repo) -> Result<HashSet<String>, String> {
+/// Every chain this repository holds (`Chain::read_all`) and its landed markers: change id to
+/// the publication its `refs/bay/landed/<id>` names. No fetch. The one read of what counts as
+/// live: [`held_by`] (G264), [`overlaps`], `bay status`'s `detail.flow` (G309) and the review
+/// queue of `bay land` (G310) all judge [`counts_live`] on it.
+///
+/// # Errors
+///
+/// The chains or the landed markers cannot be listed.
+pub fn read_chains(repo: &Repo) -> Result<(Vec<HeldChain>, HashMap<String, String>), String> {
+    let chains = Chain::new(&repo.git)
+        .read_all()
+        .map_err(|error| error.message())?;
+    Ok((chains, landed(repo)?))
+}
+
+/// Whether `held` is live: its chain says it has not ended ([`live`]) and `landed`, the
+/// markers [`read_chains`] read, holds no landing of it. A lane change counts.
+#[must_use]
+pub fn counts_live<S: std::hash::BuildHasher>(
+    held: &HeldChain,
+    landed: &HashMap<String, String, S>,
+) -> bool {
+    live(held.record.state) && !landed.contains_key(&held.id)
+}
+
+/// The landed markers this repository holds: change id to the publication the marker names.
+fn landed(repo: &Repo) -> Result<HashMap<String, String>, String> {
     Ok(repo
         .git
-        .run(&["for-each-ref", "--format=%(refname)", crate::names::LANDED])
+        .run(&[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            crate::names::LANDED,
+        ])
         .map_err(|error| error.message())?
         .lines()
-        .filter_map(|name| name.strip_prefix(crate::names::LANDED))
-        .map(str::to_owned)
+        .filter_map(|line| {
+            let (commit, name) = line.split_once(' ')?;
+            let id = name.strip_prefix(crate::names::LANDED)?;
+            Some((id.to_owned(), commit.to_owned()))
+        })
         .collect())
 }
 

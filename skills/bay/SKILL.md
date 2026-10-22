@@ -44,6 +44,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Give the change up, so another agent may adopt it | `bay abandon [<change>]` (default: the view's change) |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
 | Read state, and main commits that did not merge through bay (`unattributed`) | `bay status` |
+| See the flow: live changes by actor and their limit, merges this week, cycle time, the oldest live change, what waits for a yes | `bay status` (`detail.flow`) |
 | See each promotion target (`staging`): its tip, `drift`, `lag`, checks, freeze and the `promotable` commit | `bay status` (`detail.targets`) |
 | See whether main is held, by whom (`source`: `freeze` or `adapter`), why and until when | `bay status` (`detail.hold`) |
 | Reverse a merged change with a new, checked change | `bay undo <change> [--wait[=<seconds>]]` |
@@ -57,6 +58,7 @@ declared paths overlap yours (change, intent, actor, paths). It does not refuse;
 narrow your paths. `bay help` shows every command and flag on one page, and `bay <command> --help`
 says more about one. `bay help --json` is the same list for programs, with every reason code and
 the JSON Schema of `bay.result/1`.
+It also lists each agent adapter's events and what each can block.
 
 ## Read the result
 
@@ -102,6 +104,7 @@ A few reasons need more than their next step:
 | --- | --- |
 | `CHECK_FAILED` | A check with `baseline = "base"` names only new failures; pre-existing ones land as `baseline_failures` in `coverage_gaps`: report them, never as passed. A check with `waivable = true` may instead get an approver's waiver (`bay waiting` lists it); then `bay land --wait`. The waiver lands in `coverage_gaps` with the real verdict: report it, never as passed. |
 | `CHECK_FLAKY` | A landing may name one flaky in `coverage_gaps`: report it, never as passed. |
+| `WIP_LIMIT` | From `bay start`: you hold the most live changes (`detail.live_changes`). From `bay land`: the review queue is full (`detail.review`: `waiting`, `max`, `oldest`); do `detail.next`. |
 | `APPROVAL_PENDING` | Tell the user who can approve (`detail.approval.checks[].approvers`). An approval holds while its paths are unchanged (`checks[].set_aside` names the ones that changed). Never approve for them. |
 
 ## When the person is not a developer
@@ -126,7 +129,7 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 | See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the executors with their age (`executors`; `stale`) | `bay status --fleet` |
 | See every head: each branch on the remote, classed `trunk`, `target`, `lane`, `landed`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --heads [--stale-days <n>]` |
 | Delete only the remote branches `landed` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[heads] on_prune` adapter runs after each delete (`detail.pruned[].on_prune`). `bay status --heads --prune` and `bay status --stranded` still work | `bay prune [--stale-days <n>]` |
-| See merges, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`, `trunk_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
+| See merges, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`, `trunk_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`, `wake`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
 
@@ -135,11 +138,17 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 - A talk read after its `--expires` is void: the notice prints `EXPIRED`, and it owes no reply.
 - `bay land` and `bay undo` list the open talks about that change in `detail.open_talks`. Read them;
   they never block the merge.
+- With a `[wake] command`, bay wakes your session once for a talk to you, and once when an executor
+  lands your change or blocks it on a step that is yours (`cause: "outcome"`). The adapter's answer
+  is the event's `wake` in `bay watch`. An outcome your own `bay land --wait` returns wakes nothing.
 
 ## Set up a repository (only when the user asks)
 
 1. Commit `.bay/config.toml` and `.bay/policy.toml` to main and push them. bay reads both only from
-   main. https://getbay.io/docs/configuration lists every key. To hold main (an incident, a
+   main. https://getbay.io/docs/configuration lists every key. Name the agent product in
+   `[agent] product`: `claude` or `codex`; `bay install` writes bay's hooks where that product
+   reads them. Codex's hooks only sense (Codex runs a tool when a hook fails), so main is the
+   guard there. To hold main (an incident, a
    migration), add a `[[freeze]]` whose `target` is main's name, with `end` and `reason`, or a
    `[hold] command` that answers `{"held": true|false, "reason": "..."}` to `<command> status`.
    To act on the host when `bay prune` deletes a branch (close its pull request,
@@ -156,7 +165,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    signed, and no machine needs an executor, producer or agent key. Each clone takes its own
    producer name (`local-<id>` in its git config); set `bay.producerName` only to choose one.
    To keep changes small, add `[limits]` with `max_file_mib`, `max_files` or `max_added_lines`
-   (positive integers; each optional).
+   (positive integers; each optional). To cap the review queue, add `max_waiting_approvals`:
+   with that many changes waiting for a yes, a change that needs one more is refused `WIP_LIMIT`.
 3. Before you commit an adapter (a `[[check]]` command, `[wake] command` or `[notify] command`),
    prove it: `bay adapter test check|wake|notify -- <command>`. It runs bay's contract cases the
    way bay runs that adapter, changes nothing, and exits 0 only when every case passes.

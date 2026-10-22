@@ -190,6 +190,9 @@ pub struct PolicyProfile {
     pub evidence_reuse: Option<String>,
 }
 
+/// The `[agent] product` that selects the Claude Code adapter (`DESIGN` § 15.2).
+pub const CLAUDE_PRODUCT: &str = "claude";
+
 /// `[hooks] cache_max_age_s` (`DESIGN` § 11): the coordination cache's maximum age for
 /// `pre-tool` (`crate::coord`). Default 30 (`INTERFACES` § 7). `[hooks] notice_budget_bytes`
 /// (ruling R6): the bytes of notices a session is told per hour (`crate::notice`). Default 2048.
@@ -974,7 +977,16 @@ impl Config {
     pub fn claude_adapter(&self) -> bool {
         self.agent
             .as_ref()
-            .is_some_and(|agent| agent.product == "claude")
+            .is_some_and(|agent| agent.product == CLAUDE_PRODUCT)
+    }
+
+    /// The Codex adapter is configured by `[agent] product = "codex"` (G308). Its hooks only
+    /// sense: Codex runs a tool whose hook fails, so the guard stays at trunk.
+    #[must_use]
+    pub fn codex_adapter(&self) -> bool {
+        self.agent
+            .as_ref()
+            .is_some_and(|agent| agent.product == "codex")
     }
 
     /// The retired keys this config carries, which bay accepts and never reads, as doctor

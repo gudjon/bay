@@ -13,6 +13,11 @@
 //! `[wake] command` is a program path relative to the work tree, then its arguments, run from the
 //! work tree with only `PATH` and `HOME` from bay's environment (`crate::run`).
 //!
+//! G307: the executor asks the same adapter once for an outcome a session must act on (a
+//! landing, or a block whose next step is the author's), through the same [`ask`]: the request
+//! names `cause: "outcome"` ([`outcome_request`]) where a talk's names `cause: "talk"`, and every
+//! field a talk's request had before stays as it was, so a connector that reads talks still works.
+//!
 //! `bay adapter test wake` (`crate::adapter`) runs these same parts against a connector.
 
 use std::process::{Command, ExitStatus};
@@ -23,6 +28,7 @@ use serde_json::{Value, json};
 use super::Talk;
 use crate::change::Actor;
 use crate::repo::Repo;
+use crate::result::{Decision, Reason};
 use crate::run::Fault;
 
 /// How long the wake adapter has to answer.
@@ -46,6 +52,47 @@ pub fn failed() -> Value {
 /// Asks the wake adapter to wake `me`'s session for `talk`, and returns the ack's `wake` field.
 #[must_use]
 pub fn wake(repo: &Repo, talk: &Talk, me: &Actor) -> Value {
+    let request = request(
+        &talk.id,
+        me,
+        &crate::live::machine(&repo.git).unwrap_or_default(),
+        talk.body["urgent"].as_bool().unwrap_or(false),
+        talk.body["what"].as_str().unwrap_or_default(),
+    );
+    asked(repo, &request)
+}
+
+/// One outcome the executor reached that a session must act on (G307): operation `op_id` of
+/// `change` ended in `decision`, for `reason` when it was refused, and `actor` is the session
+/// the change record names as the one to wake.
+pub struct Outcome<'a> {
+    pub change: &'a str,
+    pub op_id: &'a str,
+    pub decision: Decision,
+    pub reason: Option<Reason>,
+    pub actor: &'a Actor,
+}
+
+/// Asks the wake adapter, once, to wake the session `outcome` names, and returns the outcome
+/// event's `wake` field, as [`wake`] returns a talk ack's.
+#[must_use]
+pub fn wake_outcome(repo: &Repo, outcome: &Outcome) -> Value {
+    let machine = crate::live::machine(&repo.git).unwrap_or_default();
+    asked(repo, &outcome_request(outcome, &machine))
+}
+
+/// Whether a `[wake] command` is configured. Without one nothing is asked.
+#[must_use]
+pub fn configured(repo: &Repo) -> bool {
+    repo.config
+        .wake
+        .as_ref()
+        .is_some_and(|wake| wake.command.is_some())
+}
+
+/// Runs the configured adapter once with `request`, and returns what bay records of its
+/// answer: the one path a talk's wake and an outcome's take.
+fn asked(repo: &Repo, request: &Value) -> Value {
     let Some(cmd) = repo
         .config
         .wake
@@ -59,14 +106,7 @@ pub fn wake(repo: &Repo, talk: &Talk, me: &Actor) -> Value {
     let Ok(cmd) = cmd else {
         return failed();
     };
-    let request = request(
-        &talk.id,
-        me,
-        &crate::live::machine(&repo.git).unwrap_or_default(),
-        talk.body["urgent"].as_bool().unwrap_or(false),
-        talk.body["what"].as_str().unwrap_or_default(),
-    );
-    recorded(&ask(cmd, &request, WAKE_TIMEOUT), WAKE_TIMEOUT)
+    recorded(&ask(cmd, request, WAKE_TIMEOUT), WAKE_TIMEOUT)
 }
 
 /// The `bay.wake/1` request for `talk` to `me` on `machine`; `line` is cut to 200 characters.
@@ -74,10 +114,35 @@ pub fn wake(repo: &Repo, talk: &Talk, me: &Actor) -> Value {
 pub fn request(talk: &str, me: &Actor, machine: &str, urgent: bool, line: &str) -> Value {
     let line: String = line.chars().take(200).collect();
     json!({
-        "schema": "bay.wake/1", "op": "wake", "talk": talk,
+        "schema": "bay.wake/1", "op": "wake", "cause": "talk", "talk": talk,
         "actor": {"name": me.name, "session": me.session},
         "machine": machine,
         "urgent": urgent,
+        "line": line,
+    })
+}
+
+/// The `bay.wake/1` request for `outcome`, asked from `machine` (G307): `cause: "outcome"`, the
+/// change, the operation, the decision and its reason code, and the actor and session to wake,
+/// with the `actor`, `machine`, `urgent` and `line` fields a talk's request has, so a connector
+/// that reads only those still wakes the right session. An outcome is never urgent.
+#[must_use]
+pub fn outcome_request(outcome: &Outcome, machine: &str) -> Value {
+    let reason = outcome.reason.map(Reason::code);
+    let decision = outcome.decision.word();
+    let line = match reason {
+        Some(code) => format!("change {} {decision}: {code}", outcome.change),
+        None => format!("change {} {decision}", outcome.change),
+    };
+    json!({
+        "schema": "bay.wake/1", "op": "wake", "cause": "outcome",
+        "change": outcome.change,
+        "op_id": outcome.op_id,
+        "decision": decision,
+        "reason": reason,
+        "actor": {"name": outcome.actor.name, "session": outcome.actor.session},
+        "machine": machine,
+        "urgent": false,
         "line": line,
     })
 }

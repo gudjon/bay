@@ -8,6 +8,12 @@
 //! before anything is submitted, and the executor at candidate build, before any check runs. A
 //! change over one is refused `CHANGE_TOO_LARGE`, naming each limit exceeded, the value and the
 //! largest offenders.
+//!
+//! G310: `max_waiting_approvals`, also optional and a positive integer, caps the review queue:
+//! while that many live changes of the repository already wait for an approval
+//! (`APPROVAL_PENDING`), `bay land` of a change whose paths need an approval check is refused
+//! `WIP_LIMIT`, its detail `review` naming how many wait, the cap and the oldest of them. A
+//! change that needs no approval is never held by it.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -31,16 +37,21 @@ pub struct Limits {
     pub max_files: Option<u64>,
     #[serde(default)]
     pub max_added_lines: Option<u64>,
+    /// G310: the most live changes that may wait for an approval before a land that needs
+    /// one more is refused `WIP_LIMIT`. Not a size limit: [`Limits::is_set`] and
+    /// [`Limits::to_json`] leave it out.
+    #[serde(default)]
+    pub max_waiting_approvals: Option<u64>,
 }
 
 impl Limits {
-    /// Whether any limit is set.
+    /// Whether any size limit is set.
     #[must_use]
     pub const fn is_set(&self) -> bool {
         self.max_file_mib.is_some() || self.max_files.is_some() || self.max_added_lines.is_some()
     }
 
-    /// The table as the policy states it, each key only when set.
+    /// The size limits as the policy states them, each key only when set.
     #[must_use]
     pub fn to_json(&self) -> Value {
         let mut table = serde_json::Map::new();
@@ -67,7 +78,8 @@ impl Limits {
     ///
     /// Why the table is invalid.
     pub fn validate(&self) -> Result<(), String> {
-        for (key, limit) in self.keys() {
+        let review = ("max_waiting_approvals", self.max_waiting_approvals);
+        for (key, limit) in self.keys().into_iter().chain([review]) {
             if limit == Some(0) {
                 return Err(format!(
                     "[limits] {key} = 0: each limit is a positive integer; leave the key out for no limit"
@@ -277,6 +289,25 @@ mod tests {
         };
         assert!(set.is_set());
         assert_eq!(set.to_json(), serde_json::json!({"max_added_lines": 10}));
+    }
+
+    #[test]
+    fn the_review_cap_is_a_positive_integer_and_no_size_limit() {
+        let cap: Limits = toml::from_str("max_waiting_approvals = 2\n").unwrap();
+        assert_eq!(cap.max_waiting_approvals, Some(2));
+        assert!(!cap.is_set());
+        assert!(cap.validate().is_ok());
+        assert_eq!(cap.to_json(), serde_json::json!({}));
+        let zero = Limits {
+            max_waiting_approvals: Some(0),
+            ..Limits::default()
+        };
+        assert!(
+            zero.validate()
+                .unwrap_err()
+                .contains("max_waiting_approvals")
+        );
+        assert!(toml::from_str::<Limits>("max_waiting_approvals = -1").is_err());
     }
 
     #[test]
