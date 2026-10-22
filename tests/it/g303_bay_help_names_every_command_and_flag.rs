@@ -84,6 +84,7 @@ fn every_command_and_flag_the_contract_lists_is_on_the_page() {
                 lines
                     .iter()
                     .any(|line| line.trim_start().starts_with(&format!("{long} "))
+                        || line.trim_start().starts_with(&format!("{long}[="))
                         || line.trim_start() == long
                         || line.trim_start().starts_with(&format!("{long}  "))),
                 "`bay {path}` does not name {long}:\n{}",

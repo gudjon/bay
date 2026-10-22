@@ -116,7 +116,7 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
     (
         "save",
         &[
-            "a change of the main checkout's edits, landed on main",
+            "a change of the main checkout's edits, merged into main",
             "the main checkout, moved to the new main",
         ],
         &["any branch of yours"],
@@ -279,6 +279,11 @@ fn argument(arg: &Arg) -> Value {
         "short": arg.get_short().map(|short| format!("-{short}")),
         "positional": arg.is_positional(),
         "takes_value": action.takes_values(),
+        // G327: the value may be left out (`--wait`, `--since`); `require_equals` says it is
+        // then written `--wait=SECONDS`.
+        "value_optional": action.takes_values()
+            && arg.get_num_args().is_some_and(|range| range.min_values() == 0),
+        "require_equals": arg.is_require_equals_set(),
         "repeatable": matches!(action, ArgAction::Append | ArgAction::Count),
         "required": arg.is_required_set(),
         "global": arg.is_global_set(),

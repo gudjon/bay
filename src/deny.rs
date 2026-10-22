@@ -260,7 +260,9 @@ fn denied_git(
         Some(Denial {
             shape,
             wrapped: None,
-            reason: format!("bay denies `{shape}` in an agent shell (DESIGN § 11)"),
+            reason: format!(
+                "bay denies `{shape}` in an agent shell: it can lose work or move main around bay"
+            ),
         })
     };
     match subcommand? {
@@ -341,7 +343,8 @@ fn denied_push(
     if force {
         return denial(
             "git push --force",
-            "bay denies a force-push from an agent shell (DESIGN § 11)".to_owned(),
+            "bay denies a force push from an agent shell: it rewrites what others built on"
+                .to_owned(),
         );
     }
     if args.iter().any(|arg| *arg == "--all" || *arg == "--mirror") {
@@ -483,7 +486,7 @@ fn denied_lane_git(words: &[String], lane_refs: &[String]) -> Option<Denial> {
             shape,
             wrapped: None,
             reason: format!(
-                "bay denies `{shape}` in the view of a change of no lane: a sandbox lane's work never reaches trunk (start the work with bay start --lane <lane>)"
+                "bay denies `{shape}` in the view of a change of no lane: a sandbox lane's work never reaches main (start the work with bay start --lane <lane>)"
             ),
         })
     };

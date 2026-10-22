@@ -64,7 +64,7 @@ fn a_tracked_settings_file_without_entries_names_landing_the_change() {
     assert_eq!(hooks["state"], "red", "{doctor}");
     let recovery = hooks["recovery"].as_str().unwrap_or_default();
     assert!(recovery.contains("is tracked"), "{hooks}");
-    assert!(recovery.contains("land the change"), "{hooks}");
+    assert!(recovery.contains("merge the change"), "{hooks}");
 }
 
 #[test]

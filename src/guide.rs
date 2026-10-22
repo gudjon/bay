@@ -172,7 +172,11 @@ fn flag(arg: &Value) -> String {
             str::to_owned,
         );
         let more = if arg["repeatable"] == true { "..." } else { "" };
-        format!("{name} <{value}>{more}")
+        match (arg["value_optional"] == true, arg["require_equals"] == true) {
+            (true, true) => format!("{name}[=<{value}>]{more}"),
+            (true, false) => format!("{name} [<{value}>]{more}"),
+            _ => format!("{name} <{value}>{more}"),
+        }
     } else {
         name.to_owned()
     }
@@ -180,7 +184,10 @@ fn flag(arg: &Value) -> String {
 
 /// `<NAME>` for a required positional argument, `[NAME]` for an optional one.
 fn positional(arg: &Value) -> String {
-    let name = arg["name"].as_str().unwrap_or_default().to_uppercase();
+    let name = arg["value_name"].as_str().map_or_else(
+        || arg["name"].as_str().unwrap_or_default().to_uppercase(),
+        str::to_owned,
+    );
     let more = if arg["repeatable"] == true { "..." } else { "" };
     if arg["required"] == true {
         format!("<{name}>{more}")

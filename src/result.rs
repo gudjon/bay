@@ -750,13 +750,13 @@ impl Reason {
                 "Read the cause in `detail` and tell the user; once it is fixed, `bay merge` again."
             }
             Self::RegistryChanged => {
-                "Do nothing: an executor with a valid key signs it again. `bay status <change>` shows the outcome."
+                "Do nothing: a runner with a valid key signs it again. `bay status <change>` shows the outcome."
             }
             Self::CheckFlaky => {
                 "Tell the user the check gives two answers for one tree; once it is fixed, `bay merge` again. Never quarantine it yourself."
             }
             Self::ChangeNotLanded => {
-                "Wait until the named change lands; `bay status <change>` shows its state. Then run the command again."
+                "Wait until the named change merges; `bay status <change>` shows its state. Then run the command again."
             }
             Self::HookTimeout => {
                 "Do nothing: bay retries after a short wait. If it keeps happening, run `bay doctor` and tell the user."
@@ -771,7 +771,7 @@ impl Reason {
                 "Read the failing check in `detail`, repair the change in the view, then `bay merge` again."
             }
             Self::CheckUnavailable => {
-                "Wait: bay retries once a worker can run the check. If `bay status --fleet` shows no live executor, tell the user."
+                "Wait: bay retries once a worker can run the check. If `bay status --fleet` shows no live runner, tell the user."
             }
             Self::CheckUnknown => {
                 "Wait for the check's result with `bay merge --wait`; never treat it as a pass. Repair the change if the check cannot answer."
@@ -783,22 +783,22 @@ impl Reason {
                 "Tell the user `.bay/policy.toml` on main is invalid, as `detail` says; once it is repaired, `bay merge` again."
             }
             Self::PolicyMissing => {
-                "Tell the user main has no `.bay/policy.toml`, so nothing can land; set it up only if they ask."
+                "Tell the user main has no `.bay/policy.toml`, so nothing can merge; set it up only if they ask."
             }
             Self::WorkspaceIncomplete => {
                 "Run `bay start <change>` to finish the interrupted step, then go on."
             }
             Self::PublishOutcomeUnknown => {
-                "Do nothing yet: bay reads main again. Never report it landed; `bay status <change>` shows the outcome."
+                "Do nothing yet: bay reads main again. Never report it merged; `bay status <change>` shows the outcome."
             }
             Self::TrunkRed => {
                 "Wait for the owner's fix to the red paths, or fix it yourself with `bay start <intent> --fixes <change>`."
             }
             Self::ChangeAlreadyLanded => {
-                "Do not retry: the change already landed. For more edits, `bay start <intent>` opens the next change."
+                "Do not retry: the change already merged. For more edits, `bay start <intent>` opens the next change."
             }
             Self::ChangeSuperseded => {
-                "Read the change that took over in `detail`; work in it, or `bay start` again once it lands or is abandoned."
+                "Read the change that took over in `detail`; work in it, or `bay start` again once it merges or is abandoned."
             }
             Self::ChangeHeld => {
                 "Another live session holds this change: wait until it ends, or work on another change. `bay status --fleet` shows the holder."
@@ -830,28 +830,28 @@ impl Reason {
             }
             // G317: for `bay` itself, the step is `bay update`.
             Self::ToolBelowFloor => {
-                "Update the tool `detail.tool` names to `detail.floor` (`bay update` for bay), or remove its adapter, then run the command again."
+                "Update the tool `detail.tool` names to `detail.floor` (`bay update` for bay), or remove its `[agent]` product, then run the command again."
             }
             Self::ToolAbsent => {
-                "Tell the user to install the tool `detail.tool` names, or remove its adapter, then run `bay doctor` again."
+                "Tell the user to install the tool `detail.tool` names, or remove its `[agent]` product, then run `bay doctor` again."
             }
             Self::RemoteUnreachable => {
-                "Check the network and this box's key for the remote, then run `bay doctor` again."
+                "Check the network and this machine's key for the remote, then run `bay doctor` again."
             }
             Self::HooksMissing => {
-                "Do what the hooks row's `recovery` says: land the tracked settings file, or run `bay install`."
+                "Do what the hooks row's `recovery` says: merge the tracked settings file, or run `bay install`."
             }
             Self::SkillMismatch => {
                 "Run `bay install` to copy this version's skill, then `bay doctor` again."
             }
             Self::SandboxAbsent => {
-                "Tell the user to install the sandbox `detail` names, or set the executor's sandbox to none."
+                "Tell the user to install the sandbox `detail` names, or set the runner's sandbox to none."
             }
             Self::CheckEnvUnset => {
-                "Tell the user to set the variables `detail` names for the executor, then run `bay doctor --role executor` again."
+                "Tell the user to set the variables `detail` names for the runner, then run `bay doctor --role executor` again."
             }
             Self::ExecutorKeyMissing => {
-                "Tell the user to set and enroll the executor and producer keys, then run `bay doctor --role executor` again."
+                "Tell the user to set and enroll the runner's `executor` and `producer` keys, then run `bay doctor --role executor` again."
             }
             Self::KeyExposed => {
                 "Tell the user to move the key `detail` names onto hardware, or out of the account agent sessions run as."
@@ -867,7 +867,7 @@ impl Reason {
                 "Read `detail.why`, correct or supersede the talk as it says, then `bay talk` again."
             }
             Self::UnattributedLanding => {
-                "Do not retry: that commit did not land through bay, so it names no lander. Ask its author directly."
+                "Do not retry: that commit did not merge through bay, so it names no author bay knows. Ask whoever made it."
             }
             Self::EvidenceWithdrawn => {
                 "Do not retry: an evidence record is never removed or changed. Push notes that keep every record."
@@ -879,22 +879,22 @@ impl Reason {
                 "Redo the work without the lane commits `detail` names, or start it as a lane change: `bay start <intent> --paths <paths> --lane <lane>`."
             }
             Self::ApprovalPending => {
-                "Tell the user who can approve (`detail.approval`); the approver runs `bay approve <change>`. Then the executor lands it, or `bay merge --wait`."
+                "Tell the user who can approve (`detail.approval`); the approver runs `bay approve <change>`. Then the runner merges it, or `bay merge --wait`."
             }
             Self::WipLimit => {
-                "Land or abandon one of the changes `detail` names (`live_changes`, or `review.oldest`), then run the command again."
+                "Merge or abandon one of the changes `detail` names (`live_changes`, or `review.oldest`), then run the command again."
             }
             Self::DiskLow => {
-                "Tell the user to free disk space on this box, or lower `bay.minFreeMiB`, then run the command again."
+                "Tell the user to free disk space on this machine, or lower `bay.minFreeMiB`, then run the command again."
             }
             Self::TrunkHeld => {
-                "Wait: the change stays queued and lands once the hold clears; `bay status` shows the hold. Only fixes and reverts land now."
+                "Wait: the change stays queued and merges once the hold clears; `bay status` shows the hold. Only fixes and reverts merge now."
             }
             Self::PathsUndeclared => {
                 "Run `bay start <intent> --from <branch>` again, with `--paths` covering every path in `detail.uncovered`."
             }
             Self::DependencyPending => {
-                "Wait: the change lands after each change it names with `--after` lands; `bay status <change>` shows them."
+                "Wait: the change merges after each change it names with `--after` merges; `bay status <change>` shows them."
             }
             Self::DependencyAbandoned => {
                 "Run `bay abandon`, then `bay start <intent> --new` without that `--after`; or restart the dropped change."

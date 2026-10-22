@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1
+
+- Every help text, next step, doctor note and the skill say merge, main, runner, plugin and machine.
+- `bay help` shows values you may leave out, as `--wait[=<SECONDS>]`; `help --json` marks them `value_optional`.
+- `bay help` names each argument by its placeholder, such as `<PUBLIC_KEY_FILE>`.
+- `bay share` and a talk's send push all their refs or none.
+- An unchecked merge no longer counts as a check run in `detail.flow`.
+- A clone refused for a config floor, or for no config, reads main once more before it refuses.
+- A config that names another main says to run `bay install --main`.
+- A shell command the hook denies names `SHELL_DENIED` and its next step.
+- Every recorded agent payload is held to the hook contract: exits, reasons and time.
+
 ## 0.3.0
 
 One name per idea. Old names are removed, not aliased, so update scripts and settings files together.

@@ -243,8 +243,9 @@ pub(crate) enum Pushed {
 }
 
 /// Pushes `refspecs` to the configured remote.
+/// All or nothing (G328): a talk's refs never reach the host in part.
 pub(crate) fn push(repo: &Repo, refspecs: &[String]) -> Pushed {
-    let mut args = vec!["push", "-q", repo.remote()];
+    let mut args = vec!["push", "-q", "--atomic", repo.remote()];
     args.extend(refspecs.iter().map(String::as_str));
     match repo.git.run(&args) {
         Ok(_) => Pushed::Yes,

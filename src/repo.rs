@@ -297,6 +297,7 @@ impl Repo {
     /// # Errors
     ///
     /// See [`OpenError`].
+    #[allow(clippy::too_many_lines)]
     pub fn open_with(dir: &Path, fetch: Fetch) -> Result<Self, OpenError> {
         let here = Git::new(dir);
         let common = here
@@ -343,14 +344,28 @@ impl Repo {
             // G200: only a fetch moves the tracking ref here, so only after one is it read again.
             have = tip_of(&git).map_err(known)?;
         }
-        let Some(tip) = have else {
+        let Some(mut tip) = have else {
             return Err(OpenError::ConfigMissing(
                 common_dir.clone(),
                 missing_config(&bootstrap, &tracking, false, fetch_error),
             ));
         };
-        let text = committed_config(&git, &tip)
+        let mut text = committed_config(&git, &tip)
             .map_err(|message| known(format!("{tracking}:{CONFIG_PATH}: {message}")))?;
+        // G330: a refusal read from a tracking ref this command has not fetched (no config there,
+        // or a floor above this bay) may be stale: main may have fixed it since. One fetch, then
+        // the refusal stands on what main holds now.
+        let refused = text
+            .as_deref()
+            .is_none_or(|text| crate::config::unmet_floor(text).is_some());
+        if refused && prefetched.is_none() && fetch != Fetch::Never {
+            prefetched = Some(fetch_into(&git, &bootstrap, &work_root));
+            if let Some(now) = tip_of(&git).map_err(known)? {
+                tip = now;
+                text = committed_config(&git, &tip)
+                    .map_err(|message| known(format!("{tracking}:{CONFIG_PATH}: {message}")))?;
+            }
+        }
         let Some(text) = text else {
             return Err(OpenError::ConfigMissing(
                 common_dir.clone(),
@@ -372,8 +387,9 @@ impl Repo {
                 && named != used
             {
                 return Err(known(format!(
-                    "{tracking}:{CONFIG_PATH} names {key} \"{named}\", but this repository's {key} is \"{used}\" (trunk from {}); run bay install --{key} {named}",
-                    bootstrap.source
+                    "{tracking}:{CONFIG_PATH} names {key} \"{named}\", but this repository's {key} is \"{used}\" (trunk from {}); run bay install --{} {named}",
+                    bootstrap.source,
+                    if key == "trunk" { "main" } else { key }
                 )));
             }
         }

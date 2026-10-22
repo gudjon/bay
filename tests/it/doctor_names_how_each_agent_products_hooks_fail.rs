@@ -46,11 +46,11 @@ fn installed_claude_hooks_fail_closed_and_stop_cannot() {
     assert_eq!(hooks["pre_tool"]["on_failure"], "block", "{hooks}");
     assert_eq!(hooks["stop"]["fails_closed"], false, "{hooks}");
     assert_eq!(
-        hooks["guarantee"], "land and trunk hook (G8, G23)",
+        hooks["guarantee"], "merge and main hook (G8, G23)",
         "{hooks}"
     );
     let note = hooks["note"].as_str().unwrap();
-    assert!(note.contains("land and the host hook re-judge"), "{note}");
+    assert!(note.contains("merge and the host hook re-judge"), "{note}");
 }
 
 #[test]
@@ -87,7 +87,7 @@ fn missing_entries_refuse_nothing_early_and_the_hooks_row_names_why() {
     assert_eq!(hooks["state"], "red", "{hooks}");
     assert_eq!(hooks["early_refusal"], "none", "{hooks}");
     assert_eq!(
-        hooks["guarantee"], "land and trunk hook (G8, G23)",
+        hooks["guarantee"], "merge and main hook (G8, G23)",
         "{hooks}"
     );
 }

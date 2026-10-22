@@ -117,7 +117,7 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
   - "Approve it": `bay approve <change>`. Their own Touch ID or key is the confirmation; never approve for them.
   - "Undo that": `bay undo <change>`.
 - **Tell them `say`.** Every result carries `say`, one plain sentence. Read it to them as it is, then add at most
-  one next step. Never say branch, commit, merge, trunk, rebase, ref or view to them.
+  one next step. Never say `branch`, `commit`, `merge`, `trunk`, `rebase`, `ref` or `view` to them.
 - **Show before they approve.** Before `bay approve`, show what changes: the files and a short plain summary of the
   diff from `bay waiting`. Ask yes or no.
 - **One place.** Everything happens in this conversation. Don't send them to a web page, a dashboard or a
@@ -165,7 +165,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    waive it on one candidate with `bay approve <change> --waive <check> --why <text>`. A waiver
    is never a pass; the merge names it in `coverage_gaps`. Without a registry no waiver counts.
    A small team with no runner host sets `[policy] signing = "approvals"`: only approvals are
-   signed, and no machine needs an executor, producer or agent key. Each clone takes its own
+   signed, and no machine needs an `executor`, `producer` or `agent` key. Each clone takes its own
    producer name (`local-<id>` in its git config); set `bay.producerName` only to choose one.
    There, and with no registry, evidence reuse and batching stay off unless the policy also says
    `[policy] reuse_unsigned = true`. Results still name their trust: `unsigned` or `approvals`.
@@ -183,7 +183,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    this repository (a launchd agent on macOS, a systemd user unit on Linux) and prints the one
    command that starts it; it starts nothing. Tell the user that command. `--print` only shows it.
 6. A check that must read a directory outside its tree (a package store) needs it named on the
-   box that runs checks: `git config --global --add bay.checkReadPath ~/<dir>`. It is read-only.
+   machine that runs checks: `git config --global --add bay.checkReadPath ~/<dir>`. It is read-only.
 
 ## What bay guards, and when
 

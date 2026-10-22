@@ -53,7 +53,9 @@ fn run(
 
     let remote = remote.unwrap_or_else(|| repo.remote()).to_owned();
     let refspecs: Vec<String> = refs.iter().map(|name| format!("{name}:{name}")).collect();
-    let mut args = vec!["push", "-q", remote.as_str()];
+    // G328: all or nothing, so a host that refuses one ref never holds the change without its
+    // evidence.
+    let mut args = vec!["push", "-q", "--atomic", remote.as_str()];
     args.extend(refspecs.iter().map(String::as_str));
     repo.git.run(&args).map_err(|error| error.message())?;
     Ok(BayResult::ok(json!({"remote": remote, "refs": refs})).with_change(id))

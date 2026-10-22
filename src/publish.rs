@@ -36,7 +36,7 @@ use crate::view;
 
 /// The producer name of the built-in local executor's evidence.
 pub const LOCAL_PRODUCER: &str = "local";
-/// After this many `MAIN_MOVED` refusals an operation stops rebuilding.
+/// After this many `MAIN_MOVED` retries an operation joins the queue instead of rebuilding again.
 const TRUNK_MOVED_LIMIT: u32 = 2;
 
 /// The identity bay commits candidates under until executor keys exist (item 11).

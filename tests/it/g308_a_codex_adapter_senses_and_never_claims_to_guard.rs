@@ -302,7 +302,7 @@ fn doctor_says_codex_hooks_fail_open_and_judges_its_floor() {
     assert_eq!(posture["product"], "codex", "{posture}");
     assert_eq!(posture["early_refusal"], "fail_open", "{posture}");
     assert_eq!(
-        posture["guarantee"], "land and trunk hook (G8, G23)",
+        posture["guarantee"], "merge and main hook (G8, G23)",
         "{posture}"
     );
     let codex = row(&result, "codex");

@@ -468,10 +468,17 @@ fn shell_deny(product: Product, event: &str, input: &str, dir: &Path) -> Outcome
             "verdict": deny_verdict(reason),
         }),
     );
+    // H2 (0.3.1, G331): a deny names its reason code and the next step on stderr, which the
+    // agent reads. stdout stays empty (G60): a product may read JSON there as its own answer.
     Outcome {
         exit: 2,
         stdout: String::new(),
-        stderr: format!("{}\n", denial.reason),
+        stderr: format!(
+            "bay: refused {}: {}. {}\n",
+            reason.code(),
+            denial.reason,
+            reason.next()
+        ),
     }
 }
 

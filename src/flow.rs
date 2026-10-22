@@ -240,12 +240,14 @@ fn queue_wait(published: &[Value]) -> Value {
 }
 
 /// `check_time_s` of [`flow`]: the `seconds` of each attempt row (`checks[]`) the published
-/// terminal records in `published` carry ([`crate::timing`]), one check run each.
+/// terminal records in `published` carry ([`crate::timing`]), one check run each. An attempt an
+/// unchecked policy judged ran nothing, so it is no run (G329).
 fn check_time(published: &[Value]) -> Value {
     let mut runs: Vec<u64> = published
         .iter()
         .filter_map(|record| record["checks"].as_array())
         .flatten()
+        .filter(|row| row["verdict"] != crate::publish::UNCHECKED)
         .filter_map(|row| row["seconds"].as_u64())
         .collect();
     spread(&mut runs, "runs")

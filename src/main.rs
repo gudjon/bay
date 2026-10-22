@@ -83,7 +83,7 @@ enum Command {
         /// The change that waits for the approval
         change: String,
         /// Waive this one check, marked `waivable = true`, on the pending candidate: a signed
-        /// waiver, never a pass; the landing names it as a coverage gap. Needs --why
+        /// waiver, never a pass; the merge names it as a coverage gap. Needs --why
         #[arg(long, value_name = "CHECK")]
         waive: Option<String>,
         /// Why, in the approver's words: kept in the signed record
@@ -99,7 +99,7 @@ enum Command {
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
     },
-    /// A new change that undoes one merge, checked and landed like any other; never a rewrite
+    /// A new change that undoes one merge, checked and merged like any other; never a rewrite
     Undo {
         /// The merged change to undo
         change: String,
@@ -118,7 +118,7 @@ enum Command {
         #[arg(long, value_name = "RANGE", num_args = 0..=1, default_missing_value = "",
             conflicts_with_all = ["change", "fleet"])]
         lineage: Option<String>,
-        /// Every branch on the remote, classed trunk, target, lane, landed (with its proof),
+        /// Every branch on the remote, classed `trunk`, `target`, `lane`, `landed` (with its proof),
         /// stale or unique, and the local branches no remote holds and worktrees whose folder
         /// is gone; one ls-remote and one fetch, nothing deleted
         #[arg(long, conflicts_with_all = ["change", "fleet", "lineage"])]
@@ -139,10 +139,10 @@ enum Command {
         #[arg(long, requires = "since")]
         merged: bool,
     },
-    /// Delete the remote's branches landed by ancestor or patch, each under a lease of the tip
+    /// Delete the remote's branches merged by ancestor or patch, each under a lease of the tip
     /// judged, after archiving the tip on the remote and logging the push that restores it to
     /// bay/pruned-heads.log in the repository's common directory; then runs the config's
-    /// `[plugin.prune] command` adapter, when set, once per deleted branch
+    /// `[plugin.prune]` plugin, when set, once per deleted branch
     Prune {
         /// A branch with commits off main whose tip is older than this is stale, and kept
         /// (default 30)
@@ -156,9 +156,9 @@ enum Command {
     /// registry with this machine's registry key (`bay.registryKey`) and push it. The first
     /// key enrolled is that registry key
     Enrol(EnrolArgs),
-    /// Admin: probe this box (git and Claude Code floors, remote, hook entries, installed skill)
+    /// Admin: probe this machine (git and Claude Code floors, remote, hook entries, installed skill)
     Doctor {
-        /// Judge this box in this role instead of the one doctor infers
+        /// Judge this machine in this role instead of the one doctor infers
         #[arg(long, value_parser = ["executor"])]
         role: Option<String>,
     },
@@ -195,7 +195,7 @@ enum Command {
         #[command(subcommand)]
         action: EvidenceAction,
     },
-    /// Admin: replace this binary with a verified release (the box's pin wins)
+    /// Admin: replace this binary with a verified release (this machine's pin wins)
     Update {
         /// Move to this exact version (X.Y.Z or X.Y.Z-suffix)
         #[arg(long)]
@@ -250,7 +250,7 @@ struct EnrolArgs {
 #[derive(Args)]
 #[allow(clippy::option_option)]
 struct WaitArgs {
-    /// Run the publication here and return its outcome, instead of returning at once. With
+    /// Run the merge here and return its outcome, instead of returning at once. With
     /// SECONDS: watch it that long, then return while the run goes on
     #[arg(long, value_name = "SECONDS", num_args = 0..=1, require_equals = true)]
     wait: Option<Option<u64>>,
@@ -268,7 +268,7 @@ impl WaitArgs {
 
 #[derive(Args)]
 struct InstallArgs {
-    /// Only the box's part: the binary and the skill. It never writes hook entries, a
+    /// Only the machine's part: the binary and the skill. It never writes hook entries, a
     /// repository's agent settings or its Git config: hooks reach a clone with the project's
     /// tracked settings file
     #[arg(long)]
@@ -289,7 +289,7 @@ struct TalkArgs {
     #[arg(value_name = "AGENT")]
     actor: Option<String>,
     /// Send to the agent that merged this change (a change id or its commit on main), read from
-    /// bay's publication record; then the one argument is the action
+    /// bay's merge record; then the one argument is the action
     #[arg(long, value_name = "CHANGE")]
     to_change: Option<String>,
     /// The action: the decision, the question or the change asked for
@@ -393,7 +393,7 @@ enum LiveAction {
 
 #[derive(Subcommand)]
 enum EvidenceAction {
-    /// Trunk's first-parent commits with no record of the kind from the producer about that
+    /// Main's first-parent commits with no record of the kind from the producer about that
     /// commit (by commit, or by base tree and tree; never by tree alone)
     Missing {
         /// The record kind, for example `check` or `review`
@@ -406,7 +406,7 @@ enum EvidenceAction {
         #[arg(long, value_name = "REV")]
         since: Option<String>,
     },
-    /// Write a signed record about landings on main, as an outside producer or reviewer, or about
+    /// Write a signed record about merges into main, as an outside producer or reviewer, or about
     /// a candidate, as an approver: one record per --commit, pushed once (a rerun with the same
     /// content writes nothing)
     Record {
@@ -417,7 +417,7 @@ enum EvidenceAction {
         /// `pass`, `product_failure`, `infra_failure` or `unknown`; there is no default
         #[arg(long)]
         verdict: String,
-        /// A landing the record is about (for an approval, the candidate commit the land names);
+        /// A merge the record is about (for an approval, the candidate commit the merge names);
         /// repeat for a range review
         #[arg(long = "commit", value_name = "COMMIT", required = true)]
         commits: Vec<String>,
@@ -453,7 +453,7 @@ enum PluginAction {
 
 #[derive(Args)]
 struct AdapterTestArgs {
-    /// The adapter kind: `check` (a policy's `[[check]]`), `wake` (`[plugin.wake] command`) or
+    /// The plugin kind: `check` (a policy's `[[check]]`), `wake` (`[plugin.wake] command`) or
     /// `notify` (`[plugin.notify] command`)
     #[arg(value_parser = bay::adapter::KINDS)]
     kind: String,
@@ -469,10 +469,10 @@ struct AdapterTestArgs {
     /// Check: a variable name of the entry's `env`, passed from this environment (repeatable)
     #[arg(long = "env", value_name = "NAME")]
     env: Vec<String>,
-    /// Check: another adapter path the command reads, relative to the repository (repeatable)
+    /// Check: another plugin path the command reads, relative to the repository (repeatable)
     #[arg(long = "with", value_name = "PATH")]
     with: Vec<String>,
-    /// The adapter's command, as the config or policy names it: a program path relative to
+    /// The plugin's command, as the config or policy names it: a program path relative to
     /// the repository, then its arguments
     #[arg(last = true, required = true, value_name = "COMMAND")]
     command: Vec<String>,

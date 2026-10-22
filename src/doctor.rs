@@ -611,7 +611,7 @@ fn unguarded(git: &Git, config: &Config, report: &mut Report) {
         "name": "hooks",
         "state": "off",
         "note": "no agent adapter is declared, so bay does not judge an agent's Git commands here: an agent can push main around bay",
-        "recovery": "add [agent] product = \"claude\" (or \"codex\") to .bay/config.toml on main, run bay install in one clone, and land the settings file it writes",
+        "recovery": "add [agent] product = \"claude\" (or \"codex\") to .bay/config.toml on main, run bay install in one clone, and merge the settings file it writes",
     });
     let mut guard = json!({"hook": "off"});
     if let Some((count, through)) = around_bay(git, config)
@@ -624,7 +624,7 @@ fn unguarded(git: &Git, config: &Config, report: &mut Report) {
         guard["around_bay"] = around;
         report.red(
             Reason::HooksMissing,
-            Some("bay does not guard this repository, and trunk landings went around it"),
+            Some("bay does not guard this repository, and merges into main went around it"),
         );
     }
     report.guard = Some(guard);
@@ -652,7 +652,7 @@ fn hooks_recovery(git: &Git, file: &str) -> String {
         .is_ok();
     if tracked {
         format!(
-            "{file} is tracked: run bay install in one clone, then land the change that commits its entries; each clone gets them when it takes that change"
+            "{file} is tracked: run bay install in one clone, then merge the change that commits its entries; each clone gets them when it takes that change"
         )
     } else {
         "run install again".to_owned()
@@ -780,13 +780,13 @@ fn codex_hooks_rows(git: &Git, info: &RepoInfo, report: &mut Report) -> Result<(
         "product": "codex",
         "state": state(present),
         "early_refusal": if present { "fail_open" } else { "none" },
-        "early_refusal_note": "Codex runs the tool when bay's hook crashes, hangs or fails, so bay's deny there is advisory; land and the trunk hook are the guard",
+        "early_refusal_note": "Codex runs the tool when bay's hook crashes, hangs or fails, so bay's deny there is advisory; merge and the main hook are the guard",
         "pre_tool": {"event": "PreToolUse", "fails_closed": false,
             "why": "exit 2 denies; a crash, a timeout or another exit lets the tool run (probed on Codex 0.153.2)"},
         "stop": {"event": "Stop", "fails_closed": false,
             "why": "no recording shows Codex keeping a session going for a stop hook"},
-        "guarantee": "land and trunk hook (G8, G23)",
-        "note": "the guarantee does not rest on this hook: land and the host hook re-judge every change",
+        "guarantee": "merge and main hook (G8, G23)",
+        "note": "the guarantee does not rest on this hook: merge and the host hook re-judge every change",
     }));
     Ok(())
 }
@@ -873,8 +873,8 @@ fn claude_hooks_posture(settings: &serde_json::Map<String, Value>, entries_prese
         // G153: the G61 probes P5a and P5b ran the installed entry under both bypass flags.
         "bypass_permissions": {"deny_holds": entries_present,
             "why": "PreToolUse hooks run in bypassPermissions and exit 2 still denies (probed on Claude Code 2.1.303); session rows name each session's permission_mode"},
-        "guarantee": "land and trunk hook (G8, G23)",
-        "note": "the guarantee does not rest on this hook: land and the host hook re-judge every change",
+        "guarantee": "merge and main hook (G8, G23)",
+        "note": "the guarantee does not rest on this hook: merge and the host hook re-judge every change",
     })
 }
 
@@ -1030,7 +1030,7 @@ fn custody_row(git: &Git, config: &Config, info: Option<&RepoInfo>, report: &mut
         custody.row["require_actor_proof"] = required;
         if refused {
             custody.row["actor_refusal"] = json!(
-                "the policy at trunk sets [agent] require_actor_proof: land is refused ACTOR_UNPROVEN on this box"
+                "the policy on main sets [agent] require_actor_proof: merge is refused ACTOR_UNPROVEN on this machine"
             );
         }
     }
@@ -1163,7 +1163,7 @@ fn signing_row(git: &Git, report: &mut Report) {
         Ok(Some(registry)) if registry.signs_all() => json!({"name": "signing",
             "required": false, "state": "green", "registry": registry.commit,
             "mode": registry.mode().name(),
-            "note": "landings, requests, chains and evidence are signed by enrolled keys"}),
+            "note": "merges, requests, chains and evidence are signed by enrolled keys"}),
         Ok(Some(registry)) => json!({"name": "signing", "required": false, "state": "green",
             "registry": registry.commit, "mode": registry.mode().name(),
             "note": "only approvals are signed, by keys of the registry's approver file; landings, requests, chains and other evidence run unsigned"}),

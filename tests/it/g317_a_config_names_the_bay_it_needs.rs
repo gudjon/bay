@@ -45,7 +45,7 @@ fn assert_below_floor(result: &Value, floor: &str) {
     );
     assert_eq!(
         result["next_step"],
-        "Update the tool `detail.tool` names to `detail.floor` (`bay update` for bay), or remove its adapter, then run the command again.",
+        "Update the tool `detail.tool` names to `detail.floor` (`bay update` for bay), or remove its `[agent]` product, then run the command again.",
         "{result}"
     );
     assert_eq!(result["detail"]["floor"], floor, "{result}");
@@ -103,4 +103,40 @@ fn the_floor_is_read_before_a_key_this_bay_does_not_know() {
     assert_below_floor(&status, "99.0.0");
     let text = status.to_string();
     assert!(!text.contains("unknown field"), "{status}");
+}
+
+/// G330 (0.3.1, the site's finding): a floor refusal read from a stale copy of main is checked
+/// against main once more. Before, a clone refused for a floor never fetched, so it kept
+/// refusing after main lowered the floor, until someone ran `git fetch` by hand.
+///
+/// Guard to mutate: `src/repo.rs` `open_with`: `if refused && prefetched.is_none()` to
+/// `if false` (the clone still refuses after main is fixed).
+#[test]
+fn a_floor_main_has_since_lowered_is_read_from_main() {
+    let test_box = TestBox::new();
+    let repo = seeded(&test_box, "repo", "bay = \"99.0.0\"\n");
+    let (code, refused) = result_json(test_box.bay(&repo).arg("status"));
+    assert_eq!(code, 10, "{refused}");
+    assert_below_floor(&refused, "99.0.0");
+
+    // Someone fixes main: the floor goes.
+    let remote = test_box.path().join("repo-remote.git");
+    let fixer = test_box.clone_of(&remote, "fixer");
+    std::fs::write(fixer.join(".bay/config.toml"), "bay = \"0.0.1\"\n").unwrap();
+    test_box.git_ok(&fixer, &["commit", "-qam", "lower the floor"]);
+    test_box.git_ok(&fixer, &["push", "-q", "origin", "main"]);
+
+    let (code, status) = result_json(test_box.bay(&repo).arg("status"));
+    assert_eq!(code, 0, "the clone still reads the old floor: {status}");
+}
+
+/// 0.3.1: a config that names another main than this clone's says the flag that exists,
+/// `bay install --main`.
+#[test]
+fn a_config_naming_another_main_names_install_main() {
+    let test_box = TestBox::new();
+    let repo = seeded(&test_box, "repo", "trunk = \"other\"\n");
+    let (_, status) = result_json(test_box.bay(&repo).arg("status"));
+    let text = status.to_string();
+    assert!(text.contains("bay install --main other"), "{status}");
 }
