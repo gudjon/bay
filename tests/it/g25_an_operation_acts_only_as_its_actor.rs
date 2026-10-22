@@ -36,7 +36,7 @@ fn a_request_signed_by_another_actors_key_is_refused() {
         test_box
             .bay(&view)
             .env("BAY_ACTOR", "agent-b")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 20, "{refused}");
     assert!(
@@ -75,10 +75,10 @@ fn land_as_one_session(config: Option<&str>) -> (TestBox, PathBuf, String) {
             .bay(&view)
             .env("BAY_ACTOR", "agent")
             .env("BAY_SESSION", "s-trailers-1")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let message = test_box.git_bare(&remote, &["log", "-1", "--format=%B", "main"]);
     (test_box, remote, message)
 }

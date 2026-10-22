@@ -1,8 +1,8 @@
-//! G244b: a red trunk shows in the fleet map and in `bay watch` (the pilot-gaps analysis of
+//! G244b: a red trunk shows in the fleet map and in `bay status --since` (the pilot-gaps analysis of
 //! 2026-10-20, plan item A1).
 //!
 //! `bay status --fleet` lists the post checks trunk is red on, as `bay status` does, and marks
-//! each entry whose change works on red paths (`on_red`). `bay watch` lists a `trunk_red` event
+//! each entry whose change works on red paths (`on_red`). `bay status --since` lists a `trunk_red` event
 //! when a check turns red after the cursor, and a `trunk_red_cleared` event when a fix clears it.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -76,7 +76,7 @@ impl Trunk {
 
     fn land(&self, path: &str, fixes: Option<&str>) -> (String, String) {
         let (id, view) = self.start(path, fixes);
-        let (code, landed) = result_json(self.test_box.bay(&view).args(["land", "--wait"]));
+        let (code, landed) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{landed}");
         let commit = landed["detail"]["commit"].as_str().unwrap().to_owned();
         (id, commit)
@@ -110,11 +110,11 @@ impl Trunk {
             .unwrap()
     }
 
-    /// `bay watch` outside any view, from `since`: its events and the cursor it returned.
+    /// `bay status --since` outside any view, from `since`: its events and the cursor it returned.
     fn watch(&self, since: Option<&str>) -> (Vec<Value>, String) {
-        let mut args = vec!["watch"];
+        let mut args = vec!["status", "--since"];
         if let Some(cursor) = since {
-            args.extend(["--since", cursor]);
+            args.push(cursor);
         }
         let watched = self.test_box.bay_ok(&self.repo, &args);
         let events = watched["detail"]["events"]
@@ -261,7 +261,7 @@ fn watch_judges_no_red_from_a_registry_it_cannot_read() {
     assert_eq!(code, 0, "{written}");
     let watched = trunk
         .test_box
-        .bay_ok(&trunk.repo, &["watch", "--since", &cursor]);
+        .bay_ok(&trunk.repo, &["status", "--since", &cursor]);
     let detail = &watched["detail"];
     assert!(detail["red_unread"].is_string(), "{watched}");
     let events = detail["events"].as_array().unwrap();

@@ -49,7 +49,7 @@ fn assert_policy_missing(result: &serde_json::Value, base: &str) {
 fn land_without_a_policy_at_the_base_is_policy_missing() {
     let (test_box, repo, remote, trunk) = seeded(&[]);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     assert_policy_missing(&result, &trunk);
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
@@ -59,10 +59,10 @@ fn land_without_a_policy_at_the_base_is_policy_missing() {
 fn the_executors_publish_without_a_policy_at_the_base_is_policy_missing() {
     let (test_box, repo, remote, trunk) = seeded(&[]);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     let executor = test_box.clone_of(&remote, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     // The executor's summary of the run carries the reason and its detail; the operation in
     // the chain carries what is allowed.
     let one = &ran["detail"]["ran"][0];
@@ -86,7 +86,7 @@ fn a_candidate_cannot_declare_itself_unchecked_at_a_base_without_a_policy() {
     let (_, view) = test_box.start_and_edit(&repo);
     std::fs::create_dir_all(view.join(".bay")).unwrap();
     std::fs::write(view.join(POLICY), UNCHECKED_POLICY).unwrap();
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     assert_policy_missing(&result, &trunk);
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
@@ -101,7 +101,7 @@ fn a_candidate_cannot_declare_itself_unchecked_under_a_checked_base() {
     let (_, view) = test_box.start_and_edit(&repo);
     std::fs::create_dir_all(view.join(".bay")).unwrap();
     std::fs::write(view.join(POLICY), "revision = 2\nunchecked = true\n").unwrap();
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "CHECK_FAILED", "{result}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
@@ -117,7 +117,7 @@ fn unchecked_beside_a_check_is_policy_invalid() {
     }
     let (test_box, repo, remote, trunk) = seeded(&files);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "POLICY_INVALID", "{result}");
     assert!(result.to_string().contains("unchecked"), "{result}");
@@ -130,9 +130,9 @@ fn unchecked_beside_a_check_is_policy_invalid() {
 fn an_unchecked_policy_lands_and_status_says_unchecked() {
     let (test_box, repo, remote, _) = seeded(&unchecked_files());
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(
         landed["detail"]["unchecked"], "unchecked by policy",
         "{landed}"
@@ -226,7 +226,7 @@ fn signed_commit(
 fn the_host_hook_refuses_a_publication_on_a_base_without_a_policy() {
     let (test_box, host, repo, keys) = hosted(&[]);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     let trunk = test_box.git_bare(&host, &["rev-parse", "main"]);
     assert_policy_missing(&result, &trunk);
@@ -278,7 +278,7 @@ fn the_host_hook_refuses_a_publication_on_a_base_without_a_policy() {
 fn an_unchecked_policy_lands_on_a_bay_hosted_trunk() {
     let (test_box, host, repo, keys) = hosted(&unchecked_files());
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(
         landed["detail"]["unchecked"], "unchecked by policy",
@@ -334,9 +334,9 @@ fn a_candidate_that_adds_checks_under_an_unchecked_base_lands_unchecked() {
         &view,
         &at_revision(check_files("true", &passing_result(1), 1, 60), 2),
     );
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(
         landed["detail"]["unchecked"], "unchecked by policy",
         "{landed}"
@@ -358,7 +358,7 @@ fn a_candidate_that_adds_checks_under_an_unchecked_base_lands_unchecked() {
     // own: one already on trunk would end `no_effect` (G213).
     let (next, view) = test_box.start_and_edit(&repo);
     std::fs::write(view.join("src/new.rs"), "fn next() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert!(landed["detail"].get("unchecked").is_none(), "{landed}");
     let status = test_box.bay_ok(&repo, &["status", &next]);
@@ -376,9 +376,9 @@ fn a_candidate_that_turns_a_checked_base_unchecked_lands_checked_by_the_base() {
     let (id, view) = test_box.start_and_edit(&repo);
     std::fs::create_dir_all(view.join(".bay")).unwrap();
     std::fs::write(view.join(POLICY), "revision = 2\nunchecked = true\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert!(landed["detail"].get("unchecked").is_none(), "{landed}");
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let change = &status["detail"]["changes"][0];
@@ -399,11 +399,7 @@ fn a_registry_signed_repair_adds_the_first_policy_to_a_base_without_one() {
         let (id, view) = start_on(&test_box, &repo, intent, &[".bay/", "scripts/"]);
         write_files(&view, &check_files("true", &passing_result(1), 1, 60));
         test_box.git_ok(&repo, &["config", "bay.agentKey", key.to_str().unwrap()]);
-        let landed = result_json(
-            test_box
-                .bay(&view)
-                .args(["land", "--wait", "--change", &id]),
-        );
+        let landed = result_json(test_box.bay(&view).args(["merge", "--wait", &id]));
         (id, landed)
     };
     let (_, (code, refused)) = repair(&keys.agent, "REPAIR-1");
@@ -412,7 +408,7 @@ fn a_registry_signed_repair_adds_the_first_policy_to_a_base_without_one() {
 
     let (id, (code, repaired)) = repair(&keys.registry, "REPAIR-2");
     assert_eq!(code, 0, "{repaired}");
-    assert_eq!(repaired["decision"], "landed", "{repaired}");
+    assert_eq!(repaired["decision"], "merged", "{repaired}");
     assert!(repaired["detail"].get("unchecked").is_none(), "{repaired}");
     assert!(
         test_box

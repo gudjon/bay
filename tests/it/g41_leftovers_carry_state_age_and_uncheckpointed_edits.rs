@@ -45,7 +45,7 @@ fn each_leftover_reports_state_age_and_uncheckpointed_edits() {
     );
 
     // A checkpoint records the edit.
-    test_box.bay_ok(&repo, &["start", "--resume", &edited_id]);
+    test_box.bay_ok(&repo, &["start", &edited_id]);
     let status = test_box.bay_ok(&repo, &["status"]);
     assert_eq!(leftover(&status, &edited_id)["uncheckpointed"], false);
 
@@ -53,7 +53,7 @@ fn each_leftover_reports_state_age_and_uncheckpointed_edits() {
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
     let status = test_box.bay_ok(&repo, &["status"]);
     assert_eq!(leftover(&status, &edited_id)["uncheckpointed"], true);
-    test_box.bay_ok(&repo, &["start", "--resume", &edited_id]);
+    test_box.bay_ok(&repo, &["start", &edited_id]);
     let status = test_box.bay_ok(&repo, &["status"]);
     assert_eq!(leftover(&status, &edited_id)["uncheckpointed"], false);
 

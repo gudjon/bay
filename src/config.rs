@@ -2,18 +2,18 @@
 //!
 //! Every key § 7 lists is parsed and typed, so a mistyped one is a config error. Retired keys
 //! (`[check] command`, `[update]`) are accepted and ignored, and doctor names them
-//! ([`Config::ignored`]). `[runtime] command` (the runtime adapter, `INTERFACES` § 4) is
-//! not in § 7's list yet. `[executor]` and `[retention]` are read by built features but are
+//! ([`Config::ignored`]). `[plugin.runtime] command` (the runtime adapter, `INTERFACES` § 4) is
+//! not in § 7's list yet. `[runner]` and `[retention]` are read by built features but are
 //! not in § 7's list yet (BACKLOG 18), nor is `[view]` (G175), nor `[red]` (NEW-6), nor are
-//! `[[target]]` and `[[freeze]]` (NEW-5, NEW-9, `crate::target`), nor `[hold]` (N-8,
-//! `crate::hold`), nor `[[lane]]` (NEW-4, [`Lane`]), nor `[heads]` (N-19, `crate::heads`). A
+//! `[[target]]` and `[[hold]]` (NEW-5, NEW-9, `crate::target`), nor `[plugin.hold]` (N-8,
+//! `crate::hold`), nor `[[lane]]` (NEW-4, [`Lane`]), nor `[plugin.prune]` (N-19, `crate::heads`). A
 //! key or table bay does not know is a config error that names it, as is `evidence_reuse` set to anything but `"off"` or `"exact-inputs"`: a misspelled
 //! setting never loads as a silent default. A config written for a later bay is refused by
 //! this one, and the recovery is `bay update`.
 //!
 //! G317: the top-level `bay = "<version>"` names the oldest bay the config needs. It is read
 //! loosely first ([`unmet_floor`]), before the strict parse could refuse a key this bay does not
-//! know, so a bay older than the floor refuses `BAY_BELOW_FLOOR`, never a confusing config
+//! know, so a bay older than the floor refuses `TOOL_BELOW_FLOOR`, never a confusing config
 //! error. A bay older than the release that brought `bay` cannot read it, and still names the
 //! newer key; so a team sets `bay` in the same commit as the first key the floor protects.
 
@@ -36,13 +36,16 @@ pub struct Config {
     /// such as `refs/heads/staging` to a commit already on its source; it is not a landing.
     #[serde(default, rename = "target")]
     pub targets: Vec<Target>,
-    /// `[[freeze]]`: the freeze windows of the targets (NEW-9, `crate::target`), and of the
-    /// trunk itself (N-8, `crate::hold`).
-    #[serde(default, rename = "freeze")]
+    /// `[[hold]]` (0.3.0; `[[hold]]` before): the hold windows of main itself (N-8,
+    /// `crate::hold`) and of the targets (NEW-9, `crate::target`). One with no `target` holds
+    /// main.
+    #[serde(default, rename = "hold")]
     pub freezes: Vec<Freeze>,
     pub remote: Option<String>,
     pub agent: Option<Agent>,
     pub trailers: Option<Trailers>,
+    /// `[runner]` (0.3.0; `[runner]` before): the runner that finishes operations.
+    #[serde(rename = "runner")]
     pub executor: Option<Executor>,
     pub retention: Option<Retention>,
     /// `[check]` is retired (ruling Q14): checks are declared in `.bay/policy.toml`, whose
@@ -50,15 +53,10 @@ pub struct Config {
     /// definition, inside the policy's revision and digest (G141). An older config that still
     /// carries the table keeps loading; nothing reads it but [`Config::ignored`].
     check: Option<toml::Table>,
-    pub notify: Option<Notify>,
-    /// `[wake] command`: the wake adapter (G58), asked once when this machine accepts a talk.
-    pub wake: Option<Wake>,
-    /// `[hold] command`: the hold adapter (N-8, `crate::hold`), asked before each publication.
-    pub hold: Option<HoldAdapter>,
-    /// `[heads] on_prune`: the prune adapter (N-19, `crate::heads`), run after each branch
-    /// `bay prune` deletes.
-    pub heads: Option<Heads>,
-    pub runtime: Option<Runtime>,
+    /// `[plugin.<kind>]` (0.3.0): each plugin's `command` and `timeout_s`, one shape for every
+    /// kind ([`Plugins`]).
+    #[serde(default)]
+    pub plugin: Plugins,
     pub policy: Option<PolicyProfile>,
     pub hooks: Option<Hooks>,
     pub view: Option<View>,
@@ -119,12 +117,14 @@ impl Target {
     }
 }
 
-/// One `[[freeze]]` (NEW-9): until `end`, a target takes only a commit whose landing carries
-/// `Fixes:` or `Reverts:`. A freeze whose `target` is the trunk's name holds the trunk (N-8,
-/// `crate::hold`): until `end`, only such a landing is published.
+/// One `[[hold]]` (NEW-9, N-8): until `end`, its target takes only a commit whose merge carries
+/// `Fixes:` or `Reverts:`. With no `target`, or main's name, it holds main (`crate::hold`):
+/// until `end`, only such a merge is published. [`Config::parse`] fills a missing target with
+/// main's name.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Freeze {
+    #[serde(default)]
     pub target: String,
     /// The end, in RFC 3339 UTC to the second (`2026-12-24T00:00:00Z`).
     pub end: String,
@@ -140,53 +140,93 @@ impl Freeze {
     }
 }
 
-/// `[notify] command`: the notify adapter (`INTERFACES` § 4), called once after each event is
-/// written (`crate::notify`).
-#[derive(Debug, Deserialize)]
+/// `[plugin.<kind>]` (0.3.0): the plugins, each a program path relative to the work tree, then
+/// its arguments (`crate::run`), with a bound of its own (`timeout_s`, the kind's default unless
+/// set):
+/// - `notify` (`INTERFACES` § 4, `crate::notify`): called once after each event is written;
+/// - `wake` (G58, `crate::talk::wake`): asked once when this machine accepts a talk;
+/// - `hold` (N-8, `crate::hold`): run as `<command> status` before each publication;
+/// - `prune` (N-19, `crate::heads`): after each branch `bay prune` deletes, run, materialized
+///   from main's tip, as `<command> pruned <branch> <sha> <archive ref>`. It is where a team
+///   reaches outside the repository, to close the branch's open pull request on its host for
+///   example; bay itself never does;
+/// - `runtime` (`INTERFACES` § 4, `crate::runtime`): asked by `bay status` for `running` and
+///   `effective` records about a merged commit.
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Notify {
-    pub command: Option<String>,
+pub struct Plugins {
+    pub notify: Option<Plugin>,
+    pub wake: Option<Plugin>,
+    pub hold: Option<Plugin>,
+    pub prune: Option<Plugin>,
+    pub runtime: Option<Plugin>,
 }
 
-/// `[hold] command`: the hold adapter (N-8, `crate::hold`), run as `<command> status` before
-/// each publication, within `timeout_s` (10 s unless set).
+impl Plugins {
+    /// Each plugin's command is not empty and its bound is at least 1 s; the hold and prune
+    /// plugins keep their own longest bounds.
+    fn validate(&self) -> Result<(), String> {
+        for (kind, plugin) in [
+            ("notify", &self.notify),
+            ("wake", &self.wake),
+            ("hold", &self.hold),
+            ("prune", &self.prune),
+            ("runtime", &self.runtime),
+        ] {
+            let Some(plugin) = plugin else { continue };
+            if plugin
+                .command
+                .as_deref()
+                .is_some_and(|command| command.trim().is_empty())
+            {
+                return Err(format!("[plugin.{kind}] command is empty"));
+            }
+            if plugin.timeout_s == Some(0) {
+                return Err(format!(
+                    "[plugin.{kind}] timeout_s = 0: a plugin's bound is at least 1 s"
+                ));
+            }
+        }
+        // A hold is asked before each publication: its bound stays short.
+        if let Some(timeout) = self.hold.as_ref().and_then(|hold| hold.timeout_s)
+            && !(1..=MAX_HOLD_TIMEOUT_S).contains(&timeout)
+        {
+            return Err(format!(
+                "[plugin.hold] timeout_s = {timeout}: the hold plugin's bound is 1 to \
+                 {MAX_HOLD_TIMEOUT_S} s"
+            ));
+        }
+        if let Some(timeout) = self.prune.as_ref().and_then(|prune| prune.timeout_s)
+            && !(1..=MAX_HEADS_TIMEOUT_S).contains(&timeout)
+        {
+            return Err(format!(
+                "[plugin.prune] timeout_s = {timeout}: the prune plugin's bound is 1 to \
+                 {MAX_HEADS_TIMEOUT_S} s"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// One `[plugin.<kind>]`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct HoldAdapter {
+pub struct Plugin {
     pub command: Option<String>,
     pub timeout_s: Option<u64>,
 }
 
-/// `[heads]` (N-19, `crate::heads`): `on_prune`, the prune adapter, a program path relative to
-/// the work tree, then its arguments. After each branch `bay prune` deletes,
-/// bay runs it, materialized from the trunk's tip, as `<on_prune> pruned <branch> <sha>
-/// <archive ref>`, within `timeout_s` (30 s unless set). It is where a team reaches outside
-/// the repository, to close the branch's open pull request on its host for example; bay
-/// itself never does.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Heads {
-    pub on_prune: Option<String>,
-    pub timeout_s: Option<u64>,
+impl Plugin {
+    /// Its bound: `timeout_s`, else the kind's `default`.
+    #[must_use]
+    pub fn timeout(&self, default: std::time::Duration) -> std::time::Duration {
+        self.timeout_s
+            .map_or(default, std::time::Duration::from_secs)
+    }
 }
 
-/// The longest `[heads] timeout_s` (N-19): the prune adapter runs once per pruned branch.
+/// The longest `[plugin.prune] timeout_s` (N-19): the prune plugin runs once per pruned branch.
 pub const MAX_HEADS_TIMEOUT_S: u64 = 600;
-
-/// `[wake] command`: the wake adapter (G58, `crate::talk::wake`).
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Wake {
-    pub command: Option<String>,
-}
-
-/// `[runtime] command`: the runtime adapter (`INTERFACES` § 4), asked by `bay status` for
-/// `running` and `effective` records about a landed commit (`crate::runtime`).
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Runtime {
-    pub command: Option<String>,
-}
 
 /// `[policy]`: the completion profile and evidence reuse ([`Config::evidence_reuse`]).
 /// `profile` names the `[profile.<name>]` of `.bay/policy.toml` that `bay status` judges
@@ -205,7 +245,7 @@ pub const CLAUDE_PRODUCT: &str = "claude";
 pub const CODEX_PRODUCT: &str = "codex";
 
 /// `[hooks] cache_max_age_s` (`DESIGN` § 11): the coordination cache's maximum age for
-/// `pre-tool` (`crate::coord`). Default 30 (`INTERFACES` § 7). `[hooks] notice_budget_bytes`
+/// `tool.before` (`crate::coord`). Default 30 (`INTERFACES` § 7). `[hooks] notice_budget_bytes`
 /// (ruling R6): the bytes of notices a session is told per hour (`crate::notice`). Default 2048.
 /// `[hooks] checkpoint_idle_s` (G165): how long after its last checkpoint a session's next hook
 /// event checkpoints its view (`crate::session`). Default 600.
@@ -240,7 +280,7 @@ pub struct Red {
 /// The deepest `[red] window`: each commit in it may cost one read of its evidence notes.
 pub const MAX_RED_WINDOW: usize = 10_000;
 
-/// The longest `[hold] timeout_s` (N-8): the hold adapter is asked before each publication.
+/// The longest `[plugin.hold] timeout_s` (N-8): the hold adapter is asked before each publication.
 pub const MAX_HOLD_TIMEOUT_S: u64 = 120;
 
 /// How long a closed change keeps its drafts before the retention cut (§ 5), and the bay ref
@@ -255,7 +295,7 @@ pub struct Retention {
 /// `[[lane]]` (NEW-4): a sandbox lane. `refs` are the ref names its work lives under, as the
 /// remote names them (`refs/heads/research/*`); each is a full ref name under `refs/`, outside
 /// `refs/bay/`, with at most one `*`, which matches any run of characters, slashes too. A change
-/// started with `bay start --lane <name>` runs its checks and never lands (`LANE_NEVER_LANDS`); a
+/// started with `bay start --lane <name>` runs its checks and never lands (its run ends `ok`); a
 /// change of no lane whose view reaches a lane ref's commits off trunk is refused (`LANE_LEAK`).
 /// `window_s` is how long an ended lane change keeps its view, shorter than the retention
 /// window (`[retention] window_s`); by default [`DEFAULT_LANE_WINDOW_S`], or the retention
@@ -314,7 +354,7 @@ pub struct Executor {
     pub parallel_checks: Option<usize>,
 }
 
-/// `[executor] batch` (`crate::throughput`): at least `min` members (default 1; a batch always
+/// `[runner] batch` (`crate::throughput`): at least `min` members (default 1; a batch always
 /// has two), at most `max` (default [`crate::throughput::DEFAULT_BATCH_MAX`]), and none while the
 /// lane's recent failure rate is above `max_failure_rate` (default
 /// [`crate::throughput::DEFAULT_MAX_FAILURE_RATE`]).
@@ -437,7 +477,14 @@ impl Config {
         if let Some(floor) = unmet_floor(text) {
             return Err(below_floor(&floor));
         }
-        let config: Self = toml::from_str(text).map_err(|error| error.to_string())?;
+        let mut config: Self = toml::from_str(text).map_err(|error| error.to_string())?;
+        // A `[[hold]]` with no target holds main.
+        let main = config.trunk().to_owned();
+        for hold in &mut config.freezes {
+            if hold.target.is_empty() {
+                hold.target.clone_from(&main);
+            }
+        }
         if let Some(floor) = &config.bay
             && !is_version(floor)
         {
@@ -464,7 +511,7 @@ impl Config {
             .is_some_and(|executor| executor.sandbox.is_some())
         {
             return Err(
-                "[executor] sandbox is not a repository setting (ruling R14): running \
+                "[runner] sandbox is not a repository setting (ruling R14): running \
                  checks with no sandbox is the box's choice, git config --global \
                  bay.executorSandbox none"
                     .to_owned(),
@@ -479,47 +526,13 @@ impl Config {
             ));
         }
         config.validate_targets()?;
-        if let Some(hold) = &config.hold {
-            if hold
-                .command
-                .as_deref()
-                .is_some_and(|command| command.trim().is_empty())
-            {
-                return Err("[hold] command is empty".to_owned());
-            }
-            // A hold is asked before each publication: its bound stays short.
-            if let Some(timeout) = hold.timeout_s
-                && !(1..=MAX_HOLD_TIMEOUT_S).contains(&timeout)
-            {
-                return Err(format!(
-                    "[hold] timeout_s = {timeout}: the hold adapter's bound is 1 to \
-                     {MAX_HOLD_TIMEOUT_S} s"
-                ));
-            }
-        }
-        if let Some(heads) = &config.heads {
-            if heads
-                .on_prune
-                .as_deref()
-                .is_some_and(|command| command.trim().is_empty())
-            {
-                return Err("[heads] on_prune is empty".to_owned());
-            }
-            if let Some(timeout) = heads.timeout_s
-                && !(1..=MAX_HEADS_TIMEOUT_S).contains(&timeout)
-            {
-                return Err(format!(
-                    "[heads] timeout_s = {timeout}: the prune adapter's bound is 1 to \
-                     {MAX_HEADS_TIMEOUT_S} s"
-                ));
-            }
-        }
+        config.plugin.validate()?;
         config.validate_lanes()?;
         config.validate_throughput()?;
         let parallel = config.parallel_checks();
         if !(1..=crate::check::MAX_PARALLEL_CHECKS).contains(&parallel) {
             return Err(format!(
-                "[executor] parallel_checks = {parallel}: 1 to {} of a candidate's checks run at \
+                "[runner] parallel_checks = {parallel}: 1 to {} of a candidate's checks run at \
                  once",
                 crate::check::MAX_PARALLEL_CHECKS
             ));
@@ -527,7 +540,7 @@ impl Config {
         // § 4: the takeover window is longer than the executor lease.
         if config.takeover() <= config.lease() {
             return Err(format!(
-                "[executor] takeover_s = {}: the takeover window must be longer than the lease \
+                "[runner] takeover_s = {}: the takeover window must be longer than the lease \
                  (lease_s = {})",
                 config.takeover().as_secs(),
                 config.lease().as_secs()
@@ -537,19 +550,19 @@ impl Config {
     }
 
     /// The throughput levers (`crate::throughput`): each in its bounds, and each a rule of
-    /// evidence reuse, so none is on without `[policy] evidence_reuse = "exact-inputs"`.
+    /// evidence reuse, so none is on with `[policy] evidence_reuse = "off"`.
     fn validate_throughput(&self) -> Result<(), String> {
         let ahead = self.ahead();
         if ahead > crate::throughput::MAX_AHEAD {
             return Err(format!(
-                "[executor] ahead = {ahead}: at most {} entries are checked ahead of their turn",
+                "[runner] ahead = {ahead}: at most {} entries are checked ahead of their turn",
                 crate::throughput::MAX_AHEAD
             ));
         }
         if let Some(batch) = self.batch() {
             if batch.min < 1 || batch.min > batch.max || batch.max > crate::throughput::MAX_BATCH {
                 return Err(format!(
-                    "[executor] batch = {{ min = {}, max = {} }}: 1 <= min <= max <= {}",
+                    "[runner] batch = {{ min = {}, max = {} }}: 1 <= min <= max <= {}",
                     batch.min,
                     batch.max,
                     crate::throughput::MAX_BATCH
@@ -557,27 +570,39 @@ impl Config {
             }
             if !(0.0..=1.0).contains(&batch.max_failure_rate) {
                 return Err(format!(
-                    "[executor] batch max_failure_rate = {}: a rate is 0 to 1",
+                    "[runner] batch max_failure_rate = {}: a rate is 0 to 1",
                     batch.max_failure_rate
                 ));
             }
         }
-        let on: Vec<&str> = [
-            (ahead > 0, "ahead"),
+        let on = self.throughput_levers();
+        if !on.is_empty() && self.reuse_setting() == Some("off") {
+            return Err(format!(
+                "[runner] {}: each throughput lever counts evidence only through reuse, and \
+                 [policy] evidence_reuse = \"off\" turns reuse off; drop that line",
+                on.join(", ")
+            ));
+        }
+        Ok(())
+    }
+
+    /// The throughput levers that are on (`crate::throughput`): each one counts evidence only
+    /// through reuse, so it turns reuse on ([`Config::evidence_reuse`]).
+    fn throughput_levers(&self) -> Vec<&'static str> {
+        [
+            (self.ahead() > 0, "ahead"),
             (self.footprint_lanes(), "footprint_lanes"),
             (self.batch().is_some(), "batch"),
         ]
         .into_iter()
         .filter_map(|(on, key)| on.then_some(key))
-        .collect();
-        if !on.is_empty() && !self.evidence_reuse() {
-            return Err(format!(
-                "[executor] {}: each throughput lever counts evidence only through reuse; \
-                 set [policy] evidence_reuse = \"exact-inputs\"",
-                on.join(", ")
-            ));
-        }
-        Ok(())
+        .collect()
+    }
+
+    fn reuse_setting(&self) -> Option<&str> {
+        self.policy
+            .as_ref()
+            .and_then(|policy| policy.evidence_reuse.as_deref())
     }
 
     /// NEW-5, NEW-9: each target has an operator name, used once and never the trunk's; a ref
@@ -656,19 +681,19 @@ impl Config {
                     .any(|target| target.name == freeze.target)
             {
                 return Err(format!(
-                    "[[freeze]] target = {:?} names neither the trunk {trunk:?} nor a [[target]]",
+                    "[[hold]] target = {:?} names neither the trunk {trunk:?} nor a [[target]]",
                     freeze.target
                 ));
             }
             if crate::clock::unix_of(&freeze.end).is_none() {
                 return Err(format!(
-                    "[[freeze]] of {:?}: end = {:?} is not an RFC 3339 UTC time to the second \
+                    "[[hold]] of {:?}: end = {:?} is not an RFC 3339 UTC time to the second \
                      (2026-12-24T00:00:00Z)",
                     freeze.target, freeze.end
                 ));
             }
             if freeze.reason.trim().is_empty() {
-                return Err(format!("[[freeze]] of {:?} has no reason", freeze.target));
+                return Err(format!("[[hold]] of {:?} has no reason", freeze.target));
             }
         }
         Ok(())
@@ -762,13 +787,15 @@ impl Config {
     /// (G318), where the record stands unsigned.
     #[must_use]
     pub fn evidence_reuse(&self) -> bool {
-        self.policy
-            .as_ref()
-            .and_then(|policy| policy.evidence_reuse.as_deref())
-            == Some("exact-inputs")
+        // 0.3.0: a throughput lever implies reuse; the key is needed only for reuse on its own.
+        match self.reuse_setting() {
+            Some("exact-inputs") => true,
+            Some(_) => false,
+            None => !self.throughput_levers().is_empty(),
+        }
     }
 
-    /// The coordination cache's maximum age for `pre-tool`: older, a write to a declared input
+    /// The coordination cache's maximum age for `tool.before`: older, a write to a declared input
     /// gets `COVERAGE_UNKNOWN` (`DESIGN` § 11).
     #[must_use]
     pub fn cache_max_age(&self) -> std::time::Duration {
@@ -937,7 +964,7 @@ impl Config {
         )
     }
 
-    /// Whether the executor finds the culprit of a red post check (`[executor] bisect_post`).
+    /// Whether the executor finds the culprit of a red post check (`[runner] bisect_post`).
     #[must_use]
     pub fn bisect_post(&self) -> bool {
         self.executor
@@ -954,7 +981,7 @@ impl Config {
             .map(std::time::Duration::from_secs)
     }
 
-    /// `[executor] parallel_checks` (N-17, `crate::check::run_all`): how many of a candidate's
+    /// `[runner] parallel_checks` (N-17, `crate::check::run_all`): how many of a candidate's
     /// checks run at once. Default 1, one after another.
     #[must_use]
     pub fn parallel_checks(&self) -> usize {
@@ -964,7 +991,7 @@ impl Config {
             .unwrap_or(1)
     }
 
-    /// `[executor] ahead` (NEW-2, `crate::throughput`): how many entries behind the queue's
+    /// `[runner] ahead` (NEW-2, `crate::throughput`): how many entries behind the queue's
     /// head are checked ahead of their turn. Default 0, off.
     #[must_use]
     pub fn ahead(&self) -> usize {
@@ -974,7 +1001,7 @@ impl Config {
             .unwrap_or(0)
     }
 
-    /// `[executor] footprint_lanes` (NEW-10, `crate::throughput`). Default off.
+    /// `[runner] footprint_lanes` (NEW-10, `crate::throughput`). Default off.
     #[must_use]
     pub fn footprint_lanes(&self) -> bool {
         self.executor
@@ -983,7 +1010,7 @@ impl Config {
             .unwrap_or(false)
     }
 
-    /// `[executor] batch` (`crate::throughput`), with its defaults; `None` when batching is off.
+    /// `[runner] batch` (`crate::throughput`), with its defaults; `None` when batching is off.
     #[must_use]
     pub fn batch(&self) -> Option<crate::throughput::Bounds> {
         let batch = self.executor.as_ref()?.batch?;
@@ -1106,7 +1133,7 @@ remote = "origin"
                       # Bay-Epoch are fixed names
 intent = "Intent"
 actor = "Actor"
-[notify]
+[plugin.notify]
 command = "scripts/bay-notify"
 [policy]
 profile = "default"                # completion dimensions per change kind
@@ -1125,7 +1152,7 @@ product = "claude"                 # leave this table out when the box does not 
         assert_eq!(config.intent_trailer(), "Intent");
         assert_eq!(config.actor_trailer(), "Actor");
         assert!(config.claude_adapter());
-        let notify = config.notify.as_ref().unwrap();
+        let notify = config.plugin.notify.as_ref().unwrap();
         assert_eq!(notify.command.as_deref(), Some("scripts/bay-notify"));
         let policy = config.policy.as_ref().unwrap();
         assert_eq!(policy.profile.as_deref(), Some("default"));
@@ -1138,7 +1165,7 @@ product = "claude"                 # leave this table out when the box does not 
     fn a_listed_key_of_the_wrong_type_does_not_load() {
         // A key bay reads is typed; a mistyped one is a config error, never a silent default.
         assert!(toml::from_str::<Config>("[hooks]\ncache_max_age_s = \"30\"\n").is_err());
-        assert!(toml::from_str::<Config>("[notify]\ncommand = 1\n").is_err());
+        assert!(toml::from_str::<Config>("[plugin.notify]\ncommand = 1\n").is_err());
         assert!(Config::parse("[hooks]\nnotice_budget_bytes = -1\n").is_err());
     }
 
@@ -1202,7 +1229,7 @@ product = "claude"                 # leave this table out when the box does not 
         assert!(error.contains("cache_max_age"), "{error}");
         assert!(Config::parse("trnk = \"main\"\n").is_err());
         assert!(Config::parse("[hook]\ncache_max_age_s = 30\n").is_err());
-        assert!(Config::parse("[executor]\nlease = 5\n").is_err());
+        assert!(Config::parse("[runner]\nlease = 5\n").is_err());
     }
 
     #[test]
@@ -1258,12 +1285,12 @@ product = "claude"                 # leave this table out when the box does not 
 
     #[test]
     fn the_takeover_window_is_longer_than_the_lease() {
-        assert!(Config::parse("[executor]\nlease_s = 5\ntakeover_s = 6\n").is_ok());
-        assert!(Config::parse("[executor]\nlease_s = 5\n").is_ok());
+        assert!(Config::parse("[runner]\nlease_s = 5\ntakeover_s = 6\n").is_ok());
+        assert!(Config::parse("[runner]\nlease_s = 5\n").is_ok());
         for text in [
-            "[executor]\nlease_s = 5\ntakeover_s = 5\n",
-            "[executor]\ntakeover_s = 0\n",
-            "[executor]\ntakeover_s = 30\n",
+            "[runner]\nlease_s = 5\ntakeover_s = 5\n",
+            "[runner]\ntakeover_s = 0\n",
+            "[runner]\ntakeover_s = 30\n",
         ] {
             let error = Config::parse(text).unwrap_err();
             assert!(error.contains("takeover_s"), "{text}: {error}");
@@ -1272,9 +1299,9 @@ product = "claude"                 # leave this table out when the box does not 
 
     #[test]
     fn a_repository_never_chooses_no_sandbox() {
-        assert!(Config::parse("[executor]\nlease_s = 5\n").is_ok());
+        assert!(Config::parse("[runner]\nlease_s = 5\n").is_ok());
         for value in ["\"none\"", "\"bwrap\"", "\"\"", "true"] {
-            let refused = Config::parse(&format!("[executor]\nsandbox = {value}\n")).unwrap_err();
+            let refused = Config::parse(&format!("[runner]\nsandbox = {value}\n")).unwrap_err();
             assert!(
                 refused.contains("bay.executorSandbox"),
                 "{value}: {refused}"
@@ -1289,7 +1316,7 @@ product = "claude"                 # leave this table out when the box does not 
             "[[target]]\nname = \"staging\"\nrequires = [\"suite\"]\n\
              [[target]]\nname = \"production\"\nfrom = \"staging\"\nsoak_s = 3600\n\
              ref = \"refs/heads/prod\"\n\
-             [[freeze]]\ntarget = \"production\"\nend = \"2026-12-24T00:00:00Z\"\n\
+             [[hold]]\ntarget = \"production\"\nend = \"2026-12-24T00:00:00Z\"\n\
              reason = \"holiday\"\n",
         )
         .unwrap();
@@ -1344,15 +1371,15 @@ product = "claude"                 # leave this table out when the box does not 
                 "advance = true needs requires",
             ),
             (
-                "[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"r\"\n",
+                "[[hold]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"r\"\n",
                 "names neither",
             ),
             (
-                "[[target]]\nname = \"staging\"\n[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24\"\nreason = \"r\"\n",
+                "[[target]]\nname = \"staging\"\n[[hold]]\ntarget = \"staging\"\nend = \"2026-12-24\"\nreason = \"r\"\n",
                 "end",
             ),
             (
-                "[[target]]\nname = \"staging\"\n[[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \" \"\n",
+                "[[target]]\nname = \"staging\"\n[[hold]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \" \"\n",
                 "reason",
             ),
         ] {
@@ -1365,26 +1392,35 @@ product = "claude"                 # leave this table out when the box does not 
     fn a_freeze_of_the_trunk_and_the_hold_adapter_are_read_and_checked() {
         // N-8: a freeze may name the trunk itself, with no [[target]].
         let config = Config::parse(
-            "trunk = \"main\"\n[[freeze]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\n\
-             reason = \"migration\"\n[hold]\ncommand = \"scripts/bay-hold\"\ntimeout_s = 5\n",
+            "trunk = \"main\"\n[[hold]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\n\
+             reason = \"migration\"\n[plugin.hold]\ncommand = \"scripts/bay-hold\"\ntimeout_s = 5\n",
         )
         .unwrap();
         assert_eq!(config.freezes[0].target, "main");
-        let hold = config.hold.as_ref().unwrap();
+        // 0.3.0: a `[[hold]]` with no target holds main.
+        let untargeted = Config::parse(
+            "trunk = \"trunk\"\n[[hold]]\nend = \"2026-12-24T00:00:00Z\"\nreason = \"migration\"\n",
+        )
+        .unwrap();
+        assert_eq!(untargeted.freezes[0].target, "trunk");
+        let hold = config.plugin.hold.as_ref().unwrap();
         assert_eq!(hold.command.as_deref(), Some("scripts/bay-hold"));
         assert_eq!(hold.timeout_s, Some(5));
         for (text, named) in [
             (
-                "[[freeze]]\ntarget = \"main\"\nend = \"2026-12-24\"\nreason = \"r\"\n",
+                "[[hold]]\ntarget = \"main\"\nend = \"2026-12-24\"\nreason = \"r\"\n",
                 "end",
             ),
             (
-                "[[freeze]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"\"\n",
+                "[[hold]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"\"\n",
                 "reason",
             ),
-            ("[hold]\ncommand = \" \"\n", "empty"),
-            ("[hold]\ncommand = \"x\"\ntimeout_s = 0\n", "timeout_s"),
-            ("[hold]\ncommand = \"x\"\nevery = 1\n", "every"),
+            ("[plugin.hold]\ncommand = \" \"\n", "empty"),
+            (
+                "[plugin.hold]\ncommand = \"x\"\ntimeout_s = 0\n",
+                "timeout_s",
+            ),
+            ("[plugin.hold]\ncommand = \"x\"\nevery = 1\n", "every"),
         ] {
             let error = Config::parse(text).unwrap_err();
             assert!(error.contains(named), "{text}: {error}");
@@ -1394,17 +1430,21 @@ product = "claude"                 # leave this table out when the box does not 
     #[test]
     fn the_prune_adapter_is_read_and_checked() {
         // N-19.
-        assert!(Config::default().heads.is_none());
+        assert!(Config::default().plugin.prune.is_none());
         let config =
-            Config::parse("[heads]\non_prune = \"scripts/on-prune\"\ntimeout_s = 5\n").unwrap();
-        let heads = config.heads.as_ref().unwrap();
-        assert_eq!(heads.on_prune.as_deref(), Some("scripts/on-prune"));
+            Config::parse("[plugin.prune]\ncommand = \"scripts/on-prune\"\ntimeout_s = 5\n")
+                .unwrap();
+        let heads = config.plugin.prune.as_ref().unwrap();
+        assert_eq!(heads.command.as_deref(), Some("scripts/on-prune"));
         assert_eq!(heads.timeout_s, Some(5));
         for (text, named) in [
-            ("[heads]\non_prune = \" \"\n", "empty"),
-            ("[heads]\non_prune = \"x\"\ntimeout_s = 0\n", "timeout_s"),
+            ("[plugin.prune]\ncommand = \" \"\n", "empty"),
             (
-                "[heads]\non_prune = \"x\"\non_delete = \"y\"\n",
+                "[plugin.prune]\ncommand = \"x\"\ntimeout_s = 0\n",
+                "timeout_s",
+            ),
+            (
+                "[plugin.prune]\ncommand = \"x\"\non_delete = \"y\"\n",
                 "on_delete",
             ),
         ] {
@@ -1486,7 +1526,7 @@ product = "claude"                 # leave this table out when the box does not 
     #[test]
     fn the_executor_and_retention_keys_built_features_use_are_read() {
         let config: Config = toml::from_str(
-            "[executor]\nlease_s = 5\nheartbeat_s = 2\n[retention]\nwindow_s = 0\nref_budget = 7\n",
+            "[runner]\nlease_s = 5\nheartbeat_s = 2\n[retention]\nwindow_s = 0\nref_budget = 7\n",
         )
         .unwrap();
         assert_eq!(config.lease().as_secs(), 5);
@@ -1501,36 +1541,42 @@ product = "claude"                 # leave this table out when the box does not 
     #[test]
     fn parallel_checks_default_to_one_and_are_bounded() {
         assert_eq!(Config::default().parallel_checks(), 1);
-        let on = Config::parse("[executor]\nparallel_checks = 3\n").unwrap();
+        let on = Config::parse("[runner]\nparallel_checks = 3\n").unwrap();
         assert_eq!(on.parallel_checks(), 3);
         for bad in [0, crate::check::MAX_PARALLEL_CHECKS + 1] {
-            let error =
-                Config::parse(&format!("[executor]\nparallel_checks = {bad}\n")).unwrap_err();
+            let error = Config::parse(&format!("[runner]\nparallel_checks = {bad}\n")).unwrap_err();
             assert!(error.contains("parallel_checks"), "{error}");
         }
-        assert!(Config::parse("[executor]\nparallel_checks = 16\n").is_ok());
+        assert!(Config::parse("[runner]\nparallel_checks = 16\n").is_ok());
     }
 
-    /// `crate::throughput`: every lever is off by default, in its bounds, and on only with
-    /// exact-inputs reuse, since a check made ahead of its turn counts only through reuse.
+    /// `crate::throughput`: every lever is off by default, in its bounds, and turns exact-inputs
+    /// reuse on (0.3.0), since a check made ahead of its turn counts only through reuse; a lever
+    /// with reuse turned off is refused.
     #[test]
-    fn the_throughput_levers_are_off_bounded_and_rest_on_reuse() {
-        const REUSE: &str = "[policy]\nevidence_reuse = \"exact-inputs\"\n";
+    fn the_throughput_levers_are_off_bounded_and_imply_reuse() {
+        const OFF: &str = "[policy]\nevidence_reuse = \"off\"\n";
         assert_eq!(Config::default().ahead(), 0);
-        let on = Config::parse(&format!("{REUSE}[executor]\nahead = 2\n")).unwrap();
+        assert!(!Config::default().evidence_reuse());
+        let on = Config::parse("[runner]\nahead = 2\n").unwrap();
         assert_eq!(on.ahead(), 2);
-        let error = Config::parse("[executor]\nahead = 2\n").unwrap_err();
+        assert!(on.evidence_reuse());
+        let error = Config::parse(&format!("{OFF}[runner]\nahead = 2\n")).unwrap_err();
         assert!(error.contains("evidence_reuse"), "{error}");
-        let error = Config::parse(&format!("{REUSE}[executor]\nahead = 17\n")).unwrap_err();
+        let error = Config::parse("[runner]\nahead = 17\n").unwrap_err();
         assert!(error.contains("at most 16"), "{error}");
-        assert!(Config::parse("[executor]\nahead = 0\n").is_ok());
+        assert!(
+            !Config::parse("[runner]\nahead = 0\n")
+                .unwrap()
+                .evidence_reuse()
+        );
         assert!(!Config::default().footprint_lanes());
-        let lanes = Config::parse(&format!("{REUSE}[executor]\nfootprint_lanes = true\n")).unwrap();
-        assert!(lanes.footprint_lanes());
-        let error = Config::parse("[executor]\nfootprint_lanes = true\n").unwrap_err();
+        let lanes = Config::parse("[runner]\nfootprint_lanes = true\n").unwrap();
+        assert!(lanes.footprint_lanes() && lanes.evidence_reuse());
+        let error = Config::parse(&format!("{OFF}[runner]\nfootprint_lanes = true\n")).unwrap_err();
         assert!(error.contains("footprint_lanes"), "{error}");
         assert_eq!(Config::default().batch(), None);
-        let batch = Config::parse(&format!("{REUSE}[executor]\nbatch = {{ max = 4 }}\n"))
+        let batch = Config::parse("[runner]\nbatch = { max = 4 }\n")
             .unwrap()
             .batch()
             .unwrap();
@@ -1544,10 +1590,10 @@ product = "claude"                 # leave this table out when the box does not 
             "batch = { size = 2 }",
         ] {
             assert!(
-                Config::parse(&format!("{REUSE}[executor]\n{bad}\n")).is_err(),
+                Config::parse(&format!("[runner]\n{bad}\n")).is_err(),
                 "{bad}"
             );
         }
-        assert!(Config::parse("[executor]\nbatch = { max = 4 }\n").is_err());
+        assert!(Config::parse(&format!("{OFF}[runner]\nbatch = {{ max = 4 }}\n")).is_err());
     }
 }

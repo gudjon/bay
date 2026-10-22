@@ -132,8 +132,13 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
         &["the change itself", "main"],
     ),
     (
+        "reject",
+        &["your signed no, pushed: the change is blocked"],
+        &["the change itself", "main"],
+    ),
+    (
         "undo",
-        &["a new change that reverses one landing, checked and landed like any other"],
+        &["a new change that reverses one merge, checked and merged like any other"],
         &["history: nothing is rewritten"],
     ),
     (
@@ -145,9 +150,9 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
         &["your checkout's files", "main"],
     ),
     (
-        "land",
+        "merge",
         &[
-            "a request on the change's record; with --wait, the checks' evidence and the landing on main",
+            "a request on the change's record; with --wait, the checks' evidence and the merge into main",
         ],
         &["your checkout's files"],
     ),
@@ -158,22 +163,14 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
     ),
     (
         "status",
-        &[
-            "only fetched copies of the remote's refs, and bay's cache under .git/bay",
-            "with --heads --prune, the older spelling of bay prune: what bay prune deletes",
-        ],
-        &["your files", "your branches", "main"],
-    ),
-    (
-        "watch",
         &["only fetched copies of the remote's refs, and bay's cache under .git/bay"],
         &["your files", "your branches", "main"],
     ),
     ("talk", &["one talk on the remote"], &["your files", "main"]),
     (
         "prune",
-        &["deletes remote branches that already landed, each archived first and logged"],
-        &["a branch that has not landed", "main"],
+        &["deletes remote branches that already merged, each archived first and logged"],
+        &["a branch that has not merged", "main"],
     ),
     (
         "enrol",
@@ -200,7 +197,7 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
             "in a clone, without --machine: bay's hook entries in the project's agent settings file and this clone's bay.* Git config",
         ],
         &[
-            "main: you commit and land the settings file",
+            "main: you commit and merge the settings file",
             "with --machine: hook entries, a project's settings or its Git config",
         ],
     ),
@@ -210,9 +207,9 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
         &["an existing repository"],
     ),
     (
-        "executor",
+        "runner",
         &[
-            "run: the landings of queued changes on main, with their evidence and its log",
+            "run: the merges of queued changes into main, with their evidence and its log",
             "install: a service file that keeps it running",
         ],
         &["your checkout's files"],
@@ -233,8 +230,8 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
         &["anything in a project"],
     ),
     (
-        "adapter",
-        &["nothing: it runs a connector with test inputs"],
+        "plugin",
+        &["nothing: it runs a plugin with test inputs"],
         &["your files", "main"],
     ),
     (
@@ -376,7 +373,6 @@ pub fn schema() -> Value {
             "candidate": string,
             "decision": {"enum": decisions},
             "state": string,
-            "published": {"type": "boolean"},
             "reason": {"enum": codes},
             "say": string,
             "change": string,
@@ -386,8 +382,7 @@ pub fn schema() -> Value {
             "next_step": string,
             "waiting_for": string,
             "elapsed_s": {"type": "integer", "minimum": 0},
-            "receipts": {"type": "array", "items": string},
-            "next": string,
+            "evidence": {"type": "array", "items": string},
             "receipt": string,
             "freshness": {
                 "type": "object",
@@ -414,7 +409,6 @@ mod tests {
             candidate: Some("c7k2m4.1.1".to_owned()),
             decision: Decision::Queued,
             state: Some("admitted".to_owned()),
-            published: Some(false),
             reason: Some(Reason::TrunkMoved),
             change: Some("c7k2m4".to_owned()),
             detail: Some(json!({})),
@@ -422,8 +416,7 @@ mod tests {
             retry_when: Some(Reason::TrunkMoved.retry_when()),
             waiting_for: Some("executor_capacity".to_owned()),
             elapsed_s: Some(1),
-            receipts: Some(Vec::new()),
-            next: Some("published"),
+            evidence: Some(Vec::new()),
             receipt: Some("local/ev1".to_owned()),
             freshness: Some(Freshness {
                 trunk: "a1b2c3d".to_owned(),

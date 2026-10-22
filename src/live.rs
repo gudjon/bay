@@ -19,7 +19,7 @@
 //!
 //! A hook event never pushes and never waits: it starts one detached `bay live push` unless one
 //! is running. The pusher holds a lock file for its whole life, pushes, waits one heartbeat
-//! (`[executor] heartbeat_s`) and pushes again while session records changed in the meantime,
+//! (`[runner] heartbeat_s`) and pushes again while session records changed in the meantime,
 //! so a burst of events ends with its latest state published, pushes stay one per heartbeat,
 //! and two pushers never overwrite a newer summary with an older one. Its last outcome is kept
 //! in `<git-common-dir>/bay/live-push.json`, which `bay doctor` shows when it failed.

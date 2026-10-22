@@ -33,9 +33,9 @@ fn trunk_advances_while_a_check_runs() {
     test_box.clone_of(&remote, "other");
     let (id, view) = test_box.start_and_edit(&repo);
 
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed");
+    assert_eq!(result["decision"], "merged");
     let published = result["detail"]["commit"].as_str().unwrap().to_owned();
 
     // What landed is the second candidate, built on the moved trunk.
@@ -99,9 +99,9 @@ fn the_check_request_names_exactly_the_paths_the_candidate_changes() {
     // Git quotes this name unless it is asked for NUL-separated output.
     std::fs::write(view.join("src/na\u{ef}ve.rs"), "fn naive() {}\n").unwrap();
 
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed", "{result}");
+    assert_eq!(result["decision"], "merged", "{result}");
 
     let request: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();

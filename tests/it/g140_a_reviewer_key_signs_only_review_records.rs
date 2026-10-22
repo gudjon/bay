@@ -99,7 +99,7 @@ fn a_check_pass_signed_by_a_reviewer_key_never_counts() {
     // The check collects nothing, so only another record could make it pass.
     let (test_box, _remote, repo, keys, reviewer) = reviewed(false, 0);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_UNKNOWN");
     let git = Git::new(&repo);
@@ -132,7 +132,7 @@ fn a_check_pass_signed_by_a_reviewer_key_never_counts() {
 
     // A pass for the required check, signed by the reviewer key in the reviewer's own ref.
     evidence::append(&git, REVIEWER, &pass(REVIEWER, "forged", &reviewer)).unwrap();
-    let (code, still) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, still) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{still}");
     assert_eq!(still["reason"], "CHECK_UNKNOWN", "{still}");
     assert_eq!(
@@ -142,16 +142,16 @@ fn a_check_pass_signed_by_a_reviewer_key_never_counts() {
 
     // Control: the same pass under the producer key counts.
     evidence::append(&git, PRODUCER, &pass(PRODUCER, "signed", &keys.producer)).unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed");
+    assert_eq!(landed["decision"], "merged");
 }
 
 #[test]
 fn a_review_record_verifies_only_under_the_reviewer_file() {
     let (test_box, _remote, repo, keys, reviewer) = reviewed(false, 1);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let commit = landed["detail"]["commit"].as_str().unwrap().to_owned();
     let tree = test_box.git_ok(&repo, &["rev-parse", &format!("{commit}^{{tree}}")]);
@@ -296,7 +296,7 @@ struct Landed {
 fn landed_on_host() -> Landed {
     let (test_box, _host, repo, keys, reviewer) = reviewed(true, 1);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     test_box.git_ok(&repo, &["fetch", "-q", "origin"]);
     let commit = test_box.git_ok(&repo, &["rev-parse", "origin/main"]);

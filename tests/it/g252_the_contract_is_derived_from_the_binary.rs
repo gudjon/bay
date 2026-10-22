@@ -303,23 +303,23 @@ fn every_command_clap_knows_is_listed_with_the_flags_its_help_shows() {
         }
     }
     // A flag with a value and one without are told apart, from clap.
-    let land = commands
-        .iter()
-        .find(|command| command["command"] == "land")
-        .unwrap();
-    let flag = |name: &str| {
-        land["args"]
+    let flag = |command_name: &str, name: &str| {
+        let command = commands
+            .iter()
+            .find(|command| command["command"] == command_name)
+            .unwrap();
+        command["args"]
             .as_array()
             .unwrap()
             .iter()
             .find(|arg| arg["long"] == name)
-            .unwrap_or_else(|| panic!("land has no {name}: {land}"))
+            .unwrap_or_else(|| panic!("{command_name} has no {name}: {command}"))
             .clone()
     };
-    assert_eq!(flag("--change")["takes_value"], true);
-    // G293: `--wait[=SECONDS]` takes an optional value; `--abandon` takes none.
-    assert_eq!(flag("--wait")["takes_value"], true);
-    assert_eq!(flag("--abandon")["takes_value"], false);
+    assert_eq!(flag("start", "--paths")["takes_value"], true);
+    assert_eq!(flag("start", "--new")["takes_value"], false);
+    // G293: `--wait[=SECONDS]` takes an optional value.
+    assert_eq!(flag("merge", "--wait")["takes_value"], true);
     let undo = commands
         .iter()
         .find(|command| command["command"] == "undo")
@@ -392,20 +392,20 @@ fn the_schema_holds_real_results_and_refuses_broken_ones() {
     let (id, view) = test_box.start_and_edit(&repo);
     let (_, started) = result_json(test_box.bay(&repo).args(["status", &id]));
     assert_valid(&schema, &started);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_valid(&schema, &landed);
     let reads: [&[&str]; 3] = [
         &["status", id.as_str()],
-        &["status", "--stranded"],
-        &["watch"],
+        &["status", "--heads"],
+        &["status", "--since"],
     ];
     for args in reads {
         let (_, result) = result_json(test_box.bay(&repo).args(args));
         assert_valid(&schema, &result);
     }
     // The same change landed again, as the binary answers it.
-    let (_, again) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (_, again) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_valid(&schema, &again);
 
     // The validator is not vacuous: each broken result is refused.

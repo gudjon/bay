@@ -82,15 +82,12 @@ fn a_channel_setting_changes_nothing() {
     fixture.release(OLDER, OLDER, None);
     fixture.list(&[(RC, true), (OLDER, false)]);
 
-    // Old scripts that still pass --channel keep working; the flag is not read.
-    for channel in ["stable", "latest", "nightly"] {
-        let (code, result) = update(&fixture, &[], &["--check", "--channel", channel]);
-        assert_eq!(code, 0, "--channel {channel}: {result}");
-        assert_eq!(
-            result["detail"]["target"], RC,
-            "--channel {channel}: {result}"
-        );
-    }
+    // 0.3.0: --channel is gone, so a script that still passes it gets a usage error.
+    let out = fixture
+        .bay(fixture.path())
+        .args(["update", "--check", "--channel", "stable"])
+        .output_busy();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
     let (code, result) = update(&fixture, &[("BAY_UPDATE_CHANNEL", "stable")], &["--check"]);
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["detail"]["target"], RC, "{result}");

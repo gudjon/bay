@@ -77,7 +77,7 @@ fn the_agents_whole_path_never_fetches_an_undeclared_blob() {
     assert!(!view.join("assets/big.bin").exists());
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
     test_box.bay_ok(&view, &["status"]);
-    test_box.bay_ok(&view, &["watch"]);
+    test_box.bay_ok(&view, &["status", "--since"]);
     for (oid, what) in [(&big, "the large asset"), (&docs, "an undeclared file")] {
         assert!(
             !holds(&test_box, &cache, oid),
@@ -91,7 +91,7 @@ fn the_agents_whole_path_never_fetches_an_undeclared_blob() {
     test_box.git_ok(&seed, &["commit", "-q", "-am", "trunk moves"]);
     test_box.git_ok(&seed, &["push", "-q", "origin", "main"]);
     let newer = test_box.git_ok(&seed, &["rev-parse", "HEAD:assets/big.bin"]);
-    test_box.bay_ok(&cache, &["start", "--resume", &id]);
+    test_box.bay_ok(&cache, &["start", &id]);
     assert_eq!(
         std::fs::read_to_string(view.join("src/a.rs")).unwrap(),
         "fn a() { /* moved */ }\n",
@@ -99,7 +99,7 @@ fn the_agents_whole_path_never_fetches_an_undeclared_blob() {
     );
     assert!(!view.join("assets/big.bin").exists());
 
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
     for (oid, what) in [

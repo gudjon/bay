@@ -20,7 +20,7 @@ use support::{TestBox, check_files, passing_result, result_json, row};
 
 /// A repository whose main work tree is an old checkout of `main` with no `.bay/` (and whose
 /// remote default branch is still `main`), and a linked worktree on `trunk`, the repository's
-/// trunk, that committed and pushed `.bay/config.toml`. `bay install --trunk trunk` named it.
+/// trunk, that committed and pushed `.bay/config.toml`. `bay install --main trunk` named it.
 /// Returns (main work tree, linked worktree, trunk tip).
 fn stale_main_and_a_linked_trunk(test_box: &TestBox) -> (PathBuf, PathBuf, String) {
     let repo = test_box.repo_any("repo");
@@ -39,7 +39,7 @@ fn stale_main_and_a_linked_trunk(test_box: &TestBox) -> (PathBuf, PathBuf, Strin
     test_box.git_ok(&linked, &["commit", "-q", "-m", "trunk"]);
     test_box.git_ok(&linked, &["push", "-q", "origin", "trunk"]);
     let tip = test_box.git_ok(&linked, &["rev-parse", "HEAD"]);
-    let (code, installed) = result_json(test_box.bay(&repo).args(["install", "--trunk", "trunk"]));
+    let (code, installed) = result_json(test_box.bay(&repo).args(["install", "--main", "trunk"]));
     assert_eq!(code, 0, "{installed}");
     assert_eq!(test_box.git_ok(&repo, &["config", "bay.trunk"]), "trunk");
     assert_eq!(test_box.git_ok(&repo, &["config", "bay.remote"]), "origin");
@@ -55,7 +55,7 @@ fn pre_tool(test_box: &TestBox, cwd: &Path, command: &str) -> (Option<i32>, Stri
     });
     let mut child = test_box
         .bay_process(cwd)
-        .args(["hook", "pre-tool"])
+        .args(["hook", "tool.before"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -120,7 +120,7 @@ fn a_draft_config_changes_nothing_uncommitted_or_committed_in_the_change() {
         &format!("#!/bin/sh\ntouch {}\nexit 1\n", mark.display()),
     );
     let draft = format!(
-        "trunk = \"elsewhere\"\n\n[policy]\nevidence_reuse = \"exact-inputs\"\n\n[executor]\ncommand = \"{}\"\n",
+        "trunk = \"elsewhere\"\n\n[policy]\nevidence_reuse = \"exact-inputs\"\n\n[runner]\ncommand = \"{}\"\n",
         decoy.display()
     );
     // Uncommitted in the main work tree.
@@ -134,7 +134,7 @@ fn a_draft_config_changes_nothing_uncommitted_or_committed_in_the_change() {
     let (code, status) = result_json(test_box.bay(&view).args(["status"]));
     assert_eq!(code, 0, "the draft's trunk was used: {status}");
 
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert!(
         !mark.exists(),
@@ -155,8 +155,8 @@ fn no_config_at_the_trunk_tip_is_config_missing() {
     for args in [
         &["start", "CARD-1", "--paths", "src/"][..],
         &["status"][..],
-        &["watch"][..],
-        &["land", "--change", "c-none"][..],
+        &["status", "--since"][..],
+        &["merge", "c-none"][..],
     ] {
         let (code, result) = result_json(test_box.bay(&repo).args(args));
         assert_eq!(code, 10, "bay {args:?}: {result}");

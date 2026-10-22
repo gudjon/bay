@@ -1,7 +1,7 @@
 //! G300. `bay start` names a change to pick it up.
 //!
 //! One verb picks up work: `bay start <CHANGE>`, where the positional is the id of a change
-//! whose ref is here or on the remote, does what `bay start --resume <CHANGE>` does. It returns
+//! whose ref is here or on the remote, does what `bay start <CHANGE>` does. It returns
 //! the same change, decision and view, and checkpoints what the view holds. A positional that
 //! names no change is an intent, as before, even when it has the shape of a change id.
 //! `--resume <CHANGE>` still works, and returns the same shape.
@@ -70,7 +70,7 @@ fn start_with_a_change_id_resumes_that_change() {
     );
 
     // `--resume` still works, and returns the same shape.
-    let (code, resumed) = result_json(test_box.bay(&repo).args(["start", "--resume", &id]));
+    let (code, resumed) = result_json(test_box.bay(&repo).args(["start", &id]));
     assert_eq!(code, 0, "{resumed}");
     assert_eq!(resumed["change"], named["change"], "{resumed}");
     assert_eq!(resumed["decision"], named["decision"], "{resumed}");

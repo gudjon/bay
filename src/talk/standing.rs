@@ -111,7 +111,7 @@ fn open_where(git: &Git, now: u64, keep: impl Fn(&Talk) -> bool) -> Result<Vec<V
     talks.iter().map(|talk| row(git, talk, now)).collect()
 }
 
-/// One talk as `bay watch` follows it (G47b).
+/// One talk as `bay status --since` follows it (G47b).
 #[derive(Clone, Debug)]
 pub struct Followed {
     /// The talk's row, as [`rows`] lists it.
@@ -123,7 +123,7 @@ pub struct Followed {
     pub replies: usize,
 }
 
-/// The talks `me` sent or must answer, oldest first, as `bay watch` follows them: every open one,
+/// The talks `me` sent or must answer, oldest first, as `bay status --since` follows them: every open one,
 /// and each closed one `held` keeps (those its cursor held open), so a close is seen once.
 ///
 /// # Errors

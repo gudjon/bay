@@ -787,7 +787,7 @@ static OWN: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 /// The file every child `bay` this process starts runs: this version's own, so a child runs
 /// the version its parent runs even after an update replaced the install path. The first call,
 /// in `main` at start, resolves it: this version's kept file when it is this binary's
-/// length, else the running file. `bay executor run` pins it first ([`pin_own_binary`]). A kept
+/// length, else the running file. `bay runner run` pins it first ([`pin_own_binary`]). A kept
 /// file pruned since falls back to the running file.
 #[must_use]
 pub fn own_binary() -> Option<PathBuf> {

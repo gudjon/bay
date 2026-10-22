@@ -2,7 +2,7 @@
 //!
 //! The WIP limit belongs where the bottleneck is: a person's review. Under the opt-in policy
 //! key `[limits] max_waiting_approvals = N`, while N live changes already wait for an approval
-//! (`APPROVAL_PENDING`), `bay land` of a change whose paths need an approval check is refused
+//! (`APPROVAL_PENDING`), `bay merge` of a change whose paths need an approval check is refused
 //! `WIP_LIMIT` (blocked, exit 10) before it is submitted, its detail `review` naming how many
 //! wait, the cap and the one that has waited longest, and `detail.next` the step: answer or
 //! finish those first. A change that needs no approval still lands. Without the key, both

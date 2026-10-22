@@ -1,6 +1,6 @@
 //! The agent hook's session events (`DESIGN` § 11, § 11a).
 //!
-//! Built here: `session-start` (ruling 8a moves it into increment 1). It prints the compact
+//! Built here: `session.start` (ruling 8a moves it into increment 1). It prints the compact
 //! state of the change whose view the session runs in, every time, also when nothing changed,
 //! and the open refusal an outcome left on it, so a result reached after its agent left
 //! (`INTERFACES` § 2, "Outcomes that arrive after the agent left") reaches the next session.
@@ -108,8 +108,8 @@ fn bind_env(state_dir: &Path, session: &SessionId) {
 /// `stop_hook_active` true or absent, and edits that cannot be read (`uncheckpointed_unknown`),
 /// are never refused.
 ///
-/// At `session-start` the session's delivered-notice cursor begins, and at `post-tool` and
-/// `user-prompt-submit` the session's own agent is given the notices of its view's change and
+/// At `session.start` the session's delivered-notice cursor begins, and at `step.end` and
+/// `turn.start` the session's own agent is given the notices of its view's change and
 /// of its actor's other changes it was not yet told (`crate::notice`, ruling R6); the line names them.
 ///
 /// Every line names the product's permission mode (`permission_mode`, G153): the payload's, else
@@ -133,10 +133,10 @@ pub struct Recorded {
     pub notice: String,
 }
 
-/// [`record`], with `extra` fields on the line: a `pre-tool` refusal's `blocked(<reason>)`
+/// [`record`], with `extra` fields on the line: a `tool.before` refusal's `blocked(<reason>)`
 /// state (a stale write, a shell command on the deny list by its shape, a payload bay cannot
 /// read), or the `COVERAGE_UNKNOWN` notice it allowed a write with (ruling R5), each with its
-/// AGENT-HOOKS-0.1 `verdict` (ruling R-H2). The silent `pre-tool` path appends nothing. It
+/// AGENT-HOOKS-0.1 `verdict` (ruling R-H2). The silent `tool.before` path appends nothing. It
 /// returns what [`record`] does.
 #[must_use]
 pub fn record_with(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Recorded {
@@ -439,7 +439,7 @@ fn claims(
 }
 
 /// The notices of `scope` (the view's change and the session's actor) for this event's line and
-/// agent: at `post-tool` and `user-prompt-submit`, to the session's own agent only
+/// agent: at `step.end` and `turn.start`, to the session's own agent only
 /// (`crate::notice`). At the session's own `SessionStart`, the instruction files its tree is
 /// behind trunk on (G155, `crate::notice::instructions`).
 fn notices(
@@ -554,11 +554,11 @@ fn refuse_once(state_dir: &Path, digest: &str) -> bool {
 fn stop_refusal(id: &str) -> String {
     format!(
         "bay: change {id}: the view holds edits that no checkpoint records. Checkpoint them \
-         with `bay start --resume {id}`, or submit the change with `bay land`; then stop.\n"
+         with `bay start {id}`, or submit the change with `bay merge`; then stop.\n"
     )
 }
 
-/// The text `bay hook session-start` prints for `input` (the product's payload): the compact
+/// The text `bay hook session.start` prints for `input` (the product's payload): the compact
 /// state of the view's change when the session runs in a view, then each other local change
 /// of the same actor that holds an open refusal (`INTERFACES` § 2: a refusal reached after the
 /// agent left goes "to a later session of the same actor at `SessionStart`"), wherever in the

@@ -18,6 +18,8 @@ pub const GIT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[serde(rename_all = "snake_case")]
 pub enum Decision {
     Ok,
+    /// 0.3.0: the word is `merged` (`landed` before).
+    #[serde(rename = "merged")]
     Landed,
     Queued,
     Blocked,
@@ -49,7 +51,7 @@ impl Decision {
     pub const fn word(self) -> &'static str {
         match self {
             Self::Ok => "ok",
-            Self::Landed => "landed",
+            Self::Landed => "merged",
             Self::Queued => "queued",
             Self::Blocked => "blocked",
             Self::Failed => "failed",
@@ -93,15 +95,15 @@ reasons! {
     InputChanged => "INPUT_CHANGED", ["read", "refresh", "repair"], "candidate_validated_against_required_versions", false;
     InputUnobserved => "INPUT_UNOBSERVED", ["read", "refresh"], "required_version_read", false;
     MergeConflict => "MERGE_CONFLICT", ["read", "refresh", "repair"], "conflict_paths_changed", false;
-    TrunkMoved => "TRUNK_MOVED", [], "retried_once_then_queued", true;
-    PublishRetryExhausted => "PUBLISH_RETRY_EXHAUSTED", ["read", "repair"], "cause_fixed", false;
+    TrunkMoved => "MAIN_MOVED", [], "retried_once_then_queued", true;
+    PublishRetryExhausted => "MERGE_RETRY_EXHAUSTED", ["read", "repair"], "cause_fixed", false;
     RegistryChanged => "REGISTRY_CHANGED", [], "resigned_by_valid_executor", false;
     CheckFlaky => "CHECK_FLAKY", ["repair"], "check_fixed_or_quarantined", false;
-    ChangeNotLanded => "CHANGE_NOT_LANDED", ["read"], "change_landed", false;
+    ChangeNotLanded => "CHANGE_NOT_MERGED", ["read"], "change_landed", false;
     HookTimeout => "HOOK_TIMEOUT", [], "retried_after_short_wait", true;
-    QueueHeld => "QUEUE_HELD", ["wait"], "reached_queue_head", false;
+    // 0.3.0: `QUEUE_HELD` and `PUBLICATION_QUEUED` are one code; `waiting_for` says `queue`.
+    Queued => "QUEUED", ["wait"], "reached_queue_head", false;
     QueueDeadlineExceeded => "QUEUE_DEADLINE_EXCEEDED", ["read", "repair"], "operation_changed_or_budget_raised", false;
-    PublicationQueued => "PUBLICATION_QUEUED", ["wait"], "reached_queue_head", false;
     CheckFailed => "CHECK_FAILED", ["repair"], "candidate_changed", false;
     CheckUnavailable => "CHECK_UNAVAILABLE", ["wait"], "capable_worker_reachable", true;
     CheckUnknown => "CHECK_UNKNOWN", ["wait", "repair"], "check_produced_result", false;
@@ -110,10 +112,10 @@ reasons! {
     // The missing-policy ruling; not yet in INTERFACES § 2: no `.bay/policy.toml` at the base.
     PolicyMissing => "POLICY_MISSING", ["read"], "policy_added", false;
     WorkspaceIncomplete => "WORKSPACE_INCOMPLETE", ["refresh"], "journal_ready", false;
-    PublishOutcomeUnknown => "PUBLISH_OUTCOME_UNKNOWN", [], "trunk_read_again", false;
+    PublishOutcomeUnknown => "MERGE_OUTCOME_UNKNOWN", [], "trunk_read_again", false;
     // G244: a post-publication check failed on a landing that touches the same paths.
-    TrunkRed => "TRUNK_RED", ["read", "repair"], "trunk_green_or_change_names_the_owner", false;
-    ChangeAlreadyLanded => "CHANGE_ALREADY_LANDED", ["read"], "never", false;
+    TrunkRed => "MAIN_RED", ["read", "repair"], "trunk_green_or_change_names_the_owner", false;
+    ChangeAlreadyLanded => "CHANGE_ALREADY_MERGED", ["read"], "never", false;
     ChangeSuperseded => "CHANGE_SUPERSEDED", ["read"], "existing_change_landed_abandoned_or_past_takeover", false;
     // Ruled 2026-10-19 (rulings-open-questions.md Q8): another live session of the same actor
     // name holds the change.
@@ -128,32 +130,30 @@ reasons! {
     ActorUnproven => "ACTOR_UNPROVEN", ["read"], "actor_key_on_hardware_or_own_account", false;
     CoverageUnknown => "COVERAGE_UNKNOWN", ["wait"], "coordination_data_reachable", false;
     // Ruling R-H1 (AGENT-HOOKS-0.1 § 6.3, `context_invalid`); not yet in INTERFACES § 2: a
-    // `pre-tool` payload bay cannot read is denied.
+    // `tool.before` payload bay cannot read is denied.
     HookInputInvalid => "HOOK_INPUT_INVALID", ["read"], "hook_payload_readable_by_this_bay", false;
     // Ruling R-H2 widened (H3, G60); not yet in INTERFACES § 2: a shell command on the deny list
-    // (G39), as its `pre-tool` row's verdict reason. The same command is never allowed.
+    // (G39), as its `tool.before` row's verdict reason. The same command is never allowed.
     ShellDenied => "SHELL_DENIED", ["read"], "never", false;
     // `DESIGN` § 11c, "Two sessions in one tree" (G101); not yet in INTERFACES § 2: a write of a
-    // path another live session of the same tree holds, as its `pre-tool` deny.
+    // path another live session of the same tree holds, as its `tool.before` deny.
     PathHeld => "PATH_HELD", ["read", "wait"], "holder_session_stopped_or_claim_past_deadline", false;
     RemoteNotFetched => "REMOTE_NOT_FETCHED", ["read"], "remote_fetched", false;
     // Ruling: config location (a repository with no `.bay/config.toml` anywhere bay looks);
     // not yet in INTERFACES § 2
     ConfigMissing => "CONFIG_MISSING", ["read"], "config_added", false;
     // INTERFACES § 8 (doctor)
-    GitBelowFloor => "GIT_BELOW_FLOOR", ["read"], "git_upgraded_to_floor", false;
-    ClaudeBelowFloor => "CLAUDE_BELOW_FLOOR", ["read"], "claude_upgraded_or_adapter_removed", false;
-    ClaudeAbsent => "CLAUDE_ABSENT", ["read"], "claude_installed_or_adapter_removed", false;
-    // G308; not yet in INTERFACES § 8: the Codex adapter's floor, as the Claude adapter's.
-    AgentBelowFloor => "AGENT_BELOW_FLOOR", ["read"], "agent_upgraded_or_adapter_removed", false;
-    AgentAbsent => "AGENT_ABSENT", ["read"], "agent_installed_or_adapter_removed", false;
+    // 0.3.0: one code for every tool below its floor (git, bay, an agent product) and one for
+    // an absent agent product; `detail.tool` names the tool (`git`, `bay`, `claude`, `codex`).
+    ToolBelowFloor => "TOOL_BELOW_FLOOR", ["read"], "tool_upgraded_or_adapter_removed", false;
+    ToolAbsent => "TOOL_ABSENT", ["read"], "tool_installed_or_adapter_removed", false;
     RemoteUnreachable => "REMOTE_UNREACHABLE", ["read"], "remote_answers_with_box_key", false;
     HooksMissing => "HOOKS_MISSING", ["read"], "install_wrote_hook_entries", false;
     SkillMismatch => "SKILL_MISMATCH", ["read"], "install_copied_skill_for_this_version", false;
     SandboxAbsent => "SANDBOX_ABSENT", ["read"], "sandbox_present_or_executor_sandbox_none", false;
     // `bay doctor --role executor` (G63); not yet in INTERFACES § 8
     CheckEnvUnset => "CHECK_ENV_UNSET", ["read"], "executor_sets_the_named_variables", false;
-    ExecutorKeyMissing => "EXECUTOR_KEY_MISSING", ["read"], "executor_and_producer_keys_set_and_enrolled", false;
+    ExecutorKeyMissing => "RUNNER_KEY_MISSING", ["read"], "executor_and_producer_keys_set_and_enrolled", false;
     // G145; not yet in INTERFACES § 8: a file-based release, producer, executor or registry key,
     // or a token beside it, that the account running agent sessions can read.
     KeyExposed => "KEY_EXPOSED", ["read"], "keys_on_hardware_or_outside_the_session_account", false;
@@ -162,16 +162,13 @@ reasons! {
     UpdateUnverified => "UPDATE_UNVERIFIED", ["read"], "release_republished", false;
     UpdatePinned => "UPDATE_PINNED", ["read"], "pin_moved", false;
     // `DESIGN` § 11c and rulings R9, T1, T7 and T10 (`bay talk`); not yet in INTERFACES § 2
-    TalkInvalid => "TALK_INVALID", ["repair"], "talk_corrected", false;
-    TalkBodyConflict => "TALK_BODY_CONFLICT", ["read", "repair"], "ask_changed_or_superseded", false;
-    TalkClosed => "TALK_CLOSED", ["read", "repair"], "follow_up_changed_or_superseded", false;
-    TalkSupersedeRefused => "TALK_SUPERSEDE_REFUSED", ["read"], "sender_or_decides_supersedes", false;
-    TalkAnswerConflict => "TALK_ANSWER_CONFLICT", ["read"], "answer_supersedes_the_standing_answer", false;
-    TalkSenderNotActor => "TALK_SENDER_NOT_ACTOR", ["read"], "sent_with_the_senders_agent_key", false;
-    TalkBacklog => "TALK_BACKLOG", ["read"], "an_open_talk_closed_or_superseded", false;
+    // 0.3.0: one code for a talk bay will not send; `detail.why` says why (it was invalid, a
+    // different body under one id, closed, a supersede only its sender or `decides` may make, a
+    // second answer, a sender who is no actor, or too many open talks).
+    TalkRefused => "TALK_REFUSED", ["read", "repair"], "talk_corrected_or_superseded", false;
     // G77 (the review dossier's K6); not yet in INTERFACES § 2: `bay talk --to-change` names a
     // trunk commit that is no executor-signed bay publication, so no lander can be read from it.
-    UnattributedLanding => "UNATTRIBUTED_LANDING", ["read"], "never", false;
+    UnattributedLanding => "OUTSIDE_MERGE", ["read"], "never", false;
     // G159 (owner ruling Q1); not yet in INTERFACES § 2: the host hook refuses a push of an
     // evidence notes ref whose note drops or changes a record the old note held.
     EvidenceWithdrawn => "EVIDENCE_WITHDRAWN", ["read"], "never", false;
@@ -180,9 +177,6 @@ reasons! {
     // first-parent line, not a fast-forward, a required check not passing, inside its soak, or
     // frozen without Fixes:/Reverts:). `bay status` names the promotable commit.
     PromotionRefused => "PROMOTION_REFUSED", ["read", "wait", "repair"], "pushed_commit_promotable", false;
-    // NEW-4 (owner ruling 2026-10-20); not yet in INTERFACES § 2: a lane change (`bay start
-    // --lane`) ran its checks against the current trunk, and never lands.
-    LaneNeverLands => "LANE_NEVER_LANDS", ["read"], "never", false;
     // NEW-4; not yet in INTERFACES § 2: a change of no lane whose view reaches commits of a lane
     // ref that are not on trunk.
     LaneLeak => "LANE_LEAK", ["read", "repair"], "view_reaches_no_lane_commit", false;
@@ -197,10 +191,10 @@ reasons! {
     // G265 (N-13); not yet in INTERFACES § 2: the box's `bay.minFreeMiB` floor is above the free
     // space of the filesystem a view or a materialized tree would be written to.
     DiskLow => "DISK_LOW", ["read"], "free_space_above_floor", false;
-    // N-8; not yet in INTERFACES § 2: trunk is held, by a `[[freeze]]` of the trunk or the
+    // N-8; not yet in INTERFACES § 2: trunk is held, by a `[[hold]]` of the trunk or the
     // hold adapter (`crate::hold`), and the change carries neither `Fixes:` nor `Reverts:`. The
     // operation stays queued, publishes nothing, and is tried again once the hold clears.
-    TrunkHeld => "TRUNK_HELD", ["wait"], "hold_cleared", false;
+    TrunkHeld => "MAIN_HELD", ["wait"], "hold_cleared", false;
     // N-5; not yet in INTERFACES § 2: `bay start --from <branch>` names a branch that changes
     // paths `--paths` does not declare. Nothing is created; a start whose paths cover them can.
     PathsUndeclared => "PATHS_UNDECLARED", ["read", "repair"], "paths_declared", false;
@@ -215,9 +209,6 @@ reasons! {
     // limit of the policy at the base (`crate::limits`), refused at submit and at candidate
     // build, before any check runs.
     ChangeTooLarge => "CHANGE_TOO_LARGE", ["read", "repair"], "change_within_limits", false;
-    // G317; not yet in INTERFACES § 2: the config committed at trunk names, as `bay =
-    // "<version>"`, a newer bay than this one. Read before anything else the command does.
-    BayBelowFloor => "BAY_BELOW_FLOOR", ["read"], "bay_updated_to_floor", false;
 }
 
 impl Reason {
@@ -278,7 +269,6 @@ pub struct BayResult {
     pub candidate: Option<String>,
     pub decision: Decision,
     pub state: Option<String>,
-    pub published: Option<bool>,
     pub reason: Option<Reason>,
     pub change: Option<String>,
     pub detail: Option<Value>,
@@ -288,9 +278,7 @@ pub struct BayResult {
     /// Seconds since the operation's request, for an operation still under way (G80).
     pub elapsed_s: Option<u64>,
     /// The evidence records the operation has so far (G80).
-    pub receipts: Option<Vec<String>>,
-    /// The state the operation moves to next, when it is under way (G80).
-    pub next: Option<&'static str>,
+    pub evidence: Option<Vec<String>>,
     pub receipt: Option<String>,
     pub freshness: Option<Freshness>,
     /// A command's own human rendering, when it has one (doctor's status line).
@@ -311,8 +299,6 @@ struct Wire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     state: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    published: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<Reason>,
     say: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -330,9 +316,7 @@ struct Wire<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     elapsed_s: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    receipts: Option<&'a [String]>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    next: Option<&'static str>,
+    evidence: Option<&'a [String]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     receipt: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -348,7 +332,6 @@ impl Serialize for BayResult {
             candidate: self.candidate.as_deref(),
             decision: self.decision,
             state: self.state.as_deref(),
-            published: self.published,
             reason: self.reason,
             say: &say,
             change: self.change.as_deref(),
@@ -358,8 +341,7 @@ impl Serialize for BayResult {
             next_step: self.reason.map(Reason::next),
             waiting_for: self.waiting_for.as_deref(),
             elapsed_s: self.elapsed_s,
-            receipts: self.receipts.as_deref(),
-            next: self.next,
+            evidence: self.evidence.as_deref(),
             receipt: self.receipt.as_deref(),
             freshness: self.freshness.as_ref(),
         }
@@ -376,7 +358,6 @@ impl BayResult {
             candidate: None,
             decision,
             state: None,
-            published: None,
             reason: None,
             change: None,
             detail: None,
@@ -384,8 +365,7 @@ impl BayResult {
             retry_when: None,
             waiting_for: None,
             elapsed_s: None,
-            receipts: None,
-            next: None,
+            evidence: None,
             receipt: None,
             freshness: None,
             human: None,
@@ -747,7 +727,7 @@ fn short(detail: Option<&Value>) -> Option<String> {
 
 impl Reason {
     /// The agent's next step on this reason: one imperative sentence, at most 25 words, every
-    /// command in it written as typed (`` `bay land` ``). Every refusal carries it as
+    /// command in it written as typed (`` `bay merge` ``). Every refusal carries it as
     /// `next_step`, and `bay help --json` lists it with each code; it is the one home of what to
     /// do on a reason. Every reason is in this match, so a new one cannot compile without one.
     #[allow(clippy::too_many_lines)]
@@ -755,25 +735,25 @@ impl Reason {
     pub const fn next(self) -> &'static str {
         match self {
             Self::InputChanged => {
-                "Read the new version `detail` names, run `bay start <change>`, adjust the view, then `bay land` again."
+                "Read the new version `detail` names, run `bay start <change>`, adjust the view, then `bay merge` again."
             }
             Self::InputUnobserved => {
-                "Read the required version `detail` names, then run `bay start <change>` and `bay land` again."
+                "Read the required version `detail` names, then run `bay start <change>` and `bay merge` again."
             }
             Self::MergeConflict => {
-                "Run `bay start <change>`, resolve the listed paths in the view, then `bay land` again."
+                "Run `bay start <change>`, resolve the listed paths in the view, then `bay merge` again."
             }
             Self::TrunkMoved => {
-                "Do nothing: bay retries once more, then queues the change. `bay land --wait` shows the outcome."
+                "Do nothing: bay retries once more, then queues the change. `bay merge --wait` shows the outcome."
             }
             Self::PublishRetryExhausted => {
-                "Read the cause in `detail` and tell the user; once it is fixed, `bay land` again."
+                "Read the cause in `detail` and tell the user; once it is fixed, `bay merge` again."
             }
             Self::RegistryChanged => {
                 "Do nothing: an executor with a valid key signs it again. `bay status <change>` shows the outcome."
             }
             Self::CheckFlaky => {
-                "Tell the user the check gives two answers for one tree; once it is fixed, `bay land` again. Never quarantine it yourself."
+                "Tell the user the check gives two answers for one tree; once it is fixed, `bay merge` again. Never quarantine it yourself."
             }
             Self::ChangeNotLanded => {
                 "Wait until the named change lands; `bay status <change>` shows its state. Then run the command again."
@@ -781,29 +761,26 @@ impl Reason {
             Self::HookTimeout => {
                 "Do nothing: bay retries after a short wait. If it keeps happening, run `bay doctor` and tell the user."
             }
-            Self::QueueHeld => {
-                "Keep working: the change waits its turn in the queue. `bay land --wait` or `bay status <change>` shows the outcome."
+            Self::Queued => {
+                "Keep working: the change waits its turn in the queue. `bay merge --wait` or `bay status <change>` shows the outcome."
             }
             Self::QueueDeadlineExceeded => {
-                "Read `detail`, shrink or split the change in the view, then `bay land` again; or ask the user to raise the budget."
-            }
-            Self::PublicationQueued => {
-                "Wait: the change is queued to land. `bay land --wait` or `bay status <change>` shows the outcome."
+                "Read `detail`, shrink or split the change in the view, then `bay merge` again; or ask the user to raise the budget."
             }
             Self::CheckFailed => {
-                "Read the failing check in `detail`, repair the change in the view, then `bay land` again."
+                "Read the failing check in `detail`, repair the change in the view, then `bay merge` again."
             }
             Self::CheckUnavailable => {
                 "Wait: bay retries once a worker can run the check. If `bay status --fleet` shows no live executor, tell the user."
             }
             Self::CheckUnknown => {
-                "Wait for the check's result with `bay land --wait`; never treat it as a pass. Repair the change if the check cannot answer."
+                "Wait for the check's result with `bay merge --wait`; never treat it as a pass. Repair the change if the check cannot answer."
             }
             Self::PolicyChanged => {
-                "Run `bay start <change>`, then `bay land` again: the change is checked under the current policy."
+                "Run `bay start <change>`, then `bay merge` again: the change is checked under the current policy."
             }
             Self::PolicyInvalid => {
-                "Tell the user `.bay/policy.toml` on main is invalid, as `detail` says; once it is repaired, `bay land` again."
+                "Tell the user `.bay/policy.toml` on main is invalid, as `detail` says; once it is repaired, `bay merge` again."
             }
             Self::PolicyMissing => {
                 "Tell the user main has no `.bay/policy.toml`, so nothing can land; set it up only if they ask."
@@ -834,10 +811,10 @@ impl Reason {
                 "Tell the user policy needs proof of the actor: a hardware agent key, or one OS account per actor."
             }
             Self::CoverageUnknown => {
-                "Keep editing; `bay land` again once coordination data is reachable."
+                "Keep editing; `bay merge` again once coordination data is reachable."
             }
             Self::HookInputInvalid => {
-                "Tell the user this bay cannot read the agent's hook payload; `bay doctor` names the floors, and `bay update` brings a newer bay."
+                "Read `detail.why`: a hook entry under a wrong name needs `bay install`; a payload this bay cannot read needs `bay update`."
             }
             Self::ShellDenied => {
                 "Do not run that command again; it is never allowed. Ask the user if the work truly needs it."
@@ -851,21 +828,12 @@ impl Reason {
             Self::ConfigMissing => {
                 "Tell the user bay is not set up here; commit `.bay/config.toml` to main only if they ask."
             }
-            Self::GitBelowFloor => {
-                "Tell the user to upgrade Git to the floor `detail` names, then run `bay doctor` again."
+            // G317: for `bay` itself, the step is `bay update`.
+            Self::ToolBelowFloor => {
+                "Update the tool `detail.tool` names to `detail.floor` (`bay update` for bay), or remove its adapter, then run the command again."
             }
-            Self::ClaudeBelowFloor => {
-                "Tell the user to upgrade Claude Code, or remove its adapter, then run `bay doctor` again."
-            }
-            Self::ClaudeAbsent => {
-                "Tell the user to install Claude Code, or remove its adapter, then run `bay doctor` again."
-            }
-            // An agent product other than Claude Code, named in `detail.rows` (`product`).
-            Self::AgentBelowFloor => {
-                "Tell the user to upgrade the agent product doctor names, or remove its adapter, then run `bay doctor` again."
-            }
-            Self::AgentAbsent => {
-                "Tell the user to install the agent product doctor names, or remove its adapter, then run `bay doctor` again."
+            Self::ToolAbsent => {
+                "Tell the user to install the tool `detail.tool` names, or remove its adapter, then run `bay doctor` again."
             }
             Self::RemoteUnreachable => {
                 "Check the network and this box's key for the remote, then run `bay doctor` again."
@@ -893,28 +861,10 @@ impl Reason {
                 "Keep the installed bay and tell the user; run `bay update` again once the release is republished."
             }
             Self::UpdatePinned => {
-                "Keep this version: `bay update` moves only after the box's pin moves."
+                "Keep this version: `bay update` moves only after this machine's pin moves."
             }
-            Self::TalkInvalid => {
-                "Correct the talk as `detail` says, then `bay talk` again; `bay talk --help` lists each kind's fields."
-            }
-            Self::TalkBodyConflict => {
-                "Read the talk already sent under this id; send a changed ask with `bay talk`, or supersede it."
-            }
-            Self::TalkClosed => {
-                "Read the closed talk; if it is still needed, send a new `bay talk` with a changed follow-up."
-            }
-            Self::TalkSupersedeRefused => {
-                "Only the sender or the one who decides may supersede that talk: ask them, or send a new `bay talk`."
-            }
-            Self::TalkAnswerConflict => {
-                "Read the standing answer; answer again only to supersede it, with `bay talk --answer <id> --value <v>`."
-            }
-            Self::TalkSenderNotActor => {
-                "Send the talk as its sender, signed with that actor's own agent key."
-            }
-            Self::TalkBacklog => {
-                "Close or supersede one of your open talks, then `bay talk` again; `bay status --fleet` lists them."
+            Self::TalkRefused => {
+                "Read `detail.why`, correct or supersede the talk as it says, then `bay talk` again."
             }
             Self::UnattributedLanding => {
                 "Do not retry: that commit did not land through bay, so it names no lander. Ask its author directly."
@@ -925,14 +875,11 @@ impl Reason {
             Self::PromotionRefused => {
                 "Push the commit `bay status` names promotable for that target, or wait until one is."
             }
-            Self::LaneNeverLands => {
-                "Read the check verdicts in `detail`; a lane change never lands. To land the work, start a change without `--lane`."
-            }
             Self::LaneLeak => {
                 "Redo the work without the lane commits `detail` names, or start it as a lane change: `bay start <intent> --paths <paths> --lane <lane>`."
             }
             Self::ApprovalPending => {
-                "Tell the user who can approve (`detail.approval`); the approver runs `bay approve <change>`. Then the executor lands it, or `bay land --wait`."
+                "Tell the user who can approve (`detail.approval`); the approver runs `bay approve <change>`. Then the executor lands it, or `bay merge --wait`."
             }
             Self::WipLimit => {
                 "Land or abandon one of the changes `detail` names (`live_changes`, or `review.oldest`), then run the command again."
@@ -950,12 +897,11 @@ impl Reason {
                 "Wait: the change lands after each change it names with `--after` lands; `bay status <change>` shows them."
             }
             Self::DependencyAbandoned => {
-                "Run `bay land --abandon`, then `bay start <intent> --new` without that `--after`; or restart the dropped change."
+                "Run `bay abandon`, then `bay start <intent> --new` without that `--after`; or restart the dropped change."
             }
             Self::ChangeTooLarge => {
-                "Keep large files elsewhere or split the change, then `bay land` again. Never raise the limits to get it through."
+                "Keep large files elsewhere or split the change, then `bay merge` again. Never raise the limits to get it through."
             }
-            Self::BayBelowFloor => "Run `bay update`, then run the command again.",
         }
     }
 
@@ -978,7 +924,10 @@ impl Reason {
             | Self::TrunkHeld
             | Self::PathsUndeclared
             | Self::ChangeTooLarge
-            | Self::WipLimit => return None,
+            | Self::WipLimit
+            | Self::ToolBelowFloor
+            | Self::ToolAbsent
+            | Self::HookInputInvalid => return None,
             Self::TrunkMoved => {
                 "Main moved on while saving; bay tries once more on its own, nothing to do."
             }
@@ -992,14 +941,11 @@ impl Reason {
             Self::HookTimeout => {
                 "bay took too long to answer and tries again shortly; nothing to do."
             }
-            Self::QueueHeld => {
+            Self::Queued => {
                 "Saved; it waits in line behind other changes, so keep working meanwhile."
             }
             Self::QueueDeadlineExceeded => {
                 "This change waited in line too long and was stopped; make it smaller or ask for more time."
-            }
-            Self::PublicationQueued => {
-                "Saved; it is in line and will be checked and added shortly."
             }
             Self::CheckUnavailable => {
                 "Saved; it waits for a machine that can run its checks, nothing to do."
@@ -1038,9 +984,6 @@ impl Reason {
             Self::CoverageUnknown => {
                 "bay cannot reach its shared notes right now; keep working and save again later."
             }
-            Self::HookInputInvalid => {
-                "bay could not read what the assistant asked to do, so it stopped it."
-            }
             Self::ShellDenied => {
                 "That command could lose work, so bay stopped it; it is never allowed."
             }
@@ -1049,19 +992,6 @@ impl Reason {
             }
             Self::ConfigMissing => {
                 "bay is not set up in this project yet; ask whoever runs it, or set it up."
-            }
-            Self::GitBelowFloor => {
-                "The Git program on this computer is too old; update it, then try again."
-            }
-            Self::ClaudeBelowFloor => "Claude Code on this computer is too old for bay; update it.",
-            Self::ClaudeAbsent => {
-                "Claude Code is not installed here, but bay expects it; install it."
-            }
-            Self::AgentBelowFloor => {
-                "The coding assistant on this computer is too old for bay; update it."
-            }
-            Self::AgentAbsent => {
-                "The coding assistant bay expects is not installed here; install it."
             }
             Self::RemoteUnreachable => {
                 "bay cannot reach main from here; check the network and the access key."
@@ -1087,18 +1017,8 @@ impl Reason {
             Self::UpdatePinned => {
                 "This project keeps bay at a fixed version, so it was not updated."
             }
-            Self::TalkInvalid => "That message is missing something; fix it and send it again.",
-            Self::TalkBodyConflict => {
-                "A different message with the same name was already sent; read it first."
-            }
-            Self::TalkClosed => "That conversation is already closed; start a new one if needed.",
-            Self::TalkSupersedeRefused => "Only the sender can replace that message.",
-            Self::TalkAnswerConflict => {
-                "That question already has a different answer; read it first."
-            }
-            Self::TalkSenderNotActor => "That message must be sent with the sender's own key.",
-            Self::TalkBacklog => {
-                "Too many conversations are open; close one before starting another."
+            Self::TalkRefused => {
+                "That message was not sent; read why in the detail, fix it, then send it again."
             }
             Self::UnattributedLanding => {
                 "That change did not come through bay, so bay cannot say who made it."
@@ -1107,9 +1027,6 @@ impl Reason {
             Self::PromotionRefused => {
                 "That version is not ready for the next stage yet; use the one bay status names, or wait."
             }
-            Self::LaneNeverLands => {
-                "This was a try-out: its checks ran, and it is never added to main."
-            }
             Self::DiskLow => {
                 "This computer is almost out of disk space; free some, then try again."
             }
@@ -1117,12 +1034,12 @@ impl Reason {
             Self::DependencyAbandoned => {
                 "A change this one depends on was dropped, so this one cannot be added; start it again without it."
             }
-            Self::BayBelowFloor => "This project needs a newer bay; update it, then try again.",
         })
     }
 
     /// One plain sentence for a person who does not know Git (owner ruling 2026-10-21): what
     /// happened and the one next step, with what `detail` names when it is there.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn say(self, detail: Option<&Value>) -> String {
         // G305: doctor's evidence that the trunk changes around bay.
@@ -1222,6 +1139,28 @@ impl Reason {
                 "You already have the most open changes allowed; finish or give one up, then start again."
                     .to_owned()
             }
+            // A hook entry under an old name: the fix is the entry, not a newer bay.
+            Self::HookInputInvalid
+                if detail.and_then(|detail| detail.get("misnamed")) == Some(&Value::Bool(true)) =>
+            {
+                "bay's safety settings here call it by an old name, so it stopped the assistant; run bay install."
+                    .to_owned()
+            }
+            Self::HookInputInvalid => {
+                "bay could not read what the assistant asked to do, so it stopped it.".to_owned()
+            }
+            Self::ToolBelowFloor => match text_at(detail, &["/tool"]) {
+                Some("bay") => "This project needs a newer bay; update it, then try again.",
+                Some("git") => "The Git program on this computer is too old; update it, then try again.",
+                Some("claude") => "Claude Code on this computer is too old for bay; update it.",
+                _ => "The coding assistant on this computer is too old for bay; update it.",
+            }
+            .to_owned(),
+            Self::ToolAbsent => match text_at(detail, &["/tool"]) {
+                Some("claude") => "Claude Code is not installed here, but bay expects it; install it.",
+                _ => "The coding assistant bay expects is not installed here; install it.",
+            }
+            .to_owned(),
             _ => "Not done yet; read the detail for what is needed, then try again.".to_owned(),
         }
     }
@@ -1403,7 +1342,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 69);
+        assert_eq!(Reason::ALL.len(), 57);
     }
 
     #[test]
@@ -1421,9 +1360,9 @@ mod tests {
     /// bay's top-level commands, as `src/main.rs` names them (the library cannot see the
     /// binary's command line; G295 checks each `next` against `bay help --json` itself).
     const COMMANDS: &[&str] = &[
-        "start", "land", "abandon", "save", "waiting", "approve", "enrol", "undo", "status",
-        "prune", "watch", "talk", "doctor", "install", "host", "executor", "live", "share",
-        "evidence", "update", "adapter", "hook", "help",
+        "start", "merge", "abandon", "save", "waiting", "approve", "reject", "enrol", "undo",
+        "status", "prune", "talk", "doctor", "install", "host", "runner", "live", "share",
+        "evidence", "update", "plugin", "hook", "help",
     ];
 
     #[test]
@@ -1457,7 +1396,7 @@ mod tests {
             .collect();
         assert_eq!(
             transient,
-            ["TRUNK_MOVED", "HOOK_TIMEOUT", "CHECK_UNAVAILABLE"]
+            ["MAIN_MOVED", "HOOK_TIMEOUT", "CHECK_UNAVAILABLE"]
         );
     }
 
@@ -1487,7 +1426,6 @@ mod tests {
         let mut result = BayResult::new(Decision::Queued).with_op("c7k2m4.1");
         result.candidate = Some("c7k2m4.1.2".to_owned());
         result.state = Some("admitted".to_owned());
-        result.published = Some(false);
         result.waiting_for = Some("executor_capacity".to_owned());
         assert_eq!(
             result.to_json().unwrap(),

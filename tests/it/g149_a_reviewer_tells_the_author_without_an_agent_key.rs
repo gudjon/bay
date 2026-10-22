@@ -63,7 +63,7 @@ fn reviewed() -> Reviewed {
     let change = started["change"].as_str().unwrap().to_owned();
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, landed) = result_json(as_agent(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(as_agent(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let landing = landed["detail"]["commit"].as_str().unwrap().to_owned();
     let reviewer_box = test_box.clone_of(&host, "reviewer-box");
@@ -134,7 +134,7 @@ fn a_reviewer_with_a_review_of_the_landing_reaches_its_author() {
     // No review record of its own on the landing: refused, and nothing is sent.
     let (code, refused) = case.finding("remove the unused function", &delivery);
     assert_ne!(code, 0, "{refused}");
-    assert_eq!(refused["reason"], "TALK_SENDER_NOT_ACTOR", "{refused}");
+    assert_eq!(refused["reason"], "TALK_REFUSED", "{refused}");
     assert!(refused.to_string().contains("review record"), "{refused}");
 
     case.review();
@@ -174,6 +174,6 @@ fn a_reviewer_sends_only_a_delivery_talk_about_a_change() {
         &["--kind", "discovery", "--decision", &decision],
     );
     assert_ne!(code, 0, "{refused}");
-    assert_eq!(refused["reason"], "TALK_SENDER_NOT_ACTOR", "{refused}");
+    assert_eq!(refused["reason"], "TALK_REFUSED", "{refused}");
     assert!(refused.to_string().contains("delivery"), "{refused}");
 }

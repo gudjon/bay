@@ -2,7 +2,7 @@
 //!
 //! `bay start <intent> --fixes <Change-Id>` records the landed change the new one fixes, and its
 //! publication carries a `Fixes: <Change-Id>` trailer beside `Supersedes:` and `Reverts:`. The
-//! named change must be on trunk, or the start is `CHANGE_NOT_LANDED` and nothing is created. A
+//! named change must be on trunk, or the start is `CHANGE_NOT_MERGED` and nothing is created. A
 //! fix is a change of its own intent: it claims generation 1 of that intent and never a
 //! generation of the fixed change's intent, so it carries no `Supersedes:`. bay never infers the
 //! link from subject words: a change whose intent merely says "fix" carries no `Fixes:`.
@@ -27,7 +27,7 @@ fn landed_change() -> (TestBox, PathBuf, PathBuf, String) {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     (test_box, repo, remote, id)
 }
@@ -84,7 +84,7 @@ fn a_fix_lands_with_a_fixes_trailer_and_claims_no_generation_of_the_fixed_intent
 
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/new.rs"), "fn new() { fixed() }\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote)[0], fix);
     assert_eq!(tip_trailer(&test_box, &remote, "Fixes"), id);
@@ -119,7 +119,7 @@ fn a_fix_of_an_unlanded_change_is_change_not_landed_and_creates_nothing() {
             .args(["start", "CARD-fix", "--paths", "src/", "--fixes", &open]),
     );
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "CHANGE_NOT_LANDED", "{refused}");
+    assert_eq!(refused["reason"], "CHANGE_NOT_MERGED", "{refused}");
     assert_eq!(refused["change"], open.as_str(), "{refused}");
     assert_eq!(refs(&test_box, &remote, "refs/bay/changes/"), changes);
     assert_eq!(refs(&test_box, &remote, "refs/bay/intent/"), claims);
@@ -144,7 +144,7 @@ fn a_change_whose_intent_says_fix_carries_no_fixes_trailer() {
     let started = test_box.bay_ok(&repo, &["start", &intent, "--paths", "src/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/new.rs"), "fn new() { 2 }\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(tip_trailer(&test_box, &remote, "Fixes"), "");
 }

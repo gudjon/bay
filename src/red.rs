@@ -20,16 +20,16 @@
 //! - Culprit finding: when the newest pass sits right below the first failure, one landing is
 //!   left in the range, and the evidence names it. That landing is the `culprit`, with the
 //!   answers `tested` from the pass up to the newest failure, and it owns the red in place of
-//!   the newest failure. A post producer, or an executor with `[executor] bisect_post`
+//!   the newest failure. A post producer, or an executor with `[runner] bisect_post`
 //!   (`crate::bisect`), narrows the range by recording runs on its midpoints.
 //! - A `product_failure` is cleared by a later landing whose `Fixes:`, `Reverts:` or
 //!   `Supersedes:` names the owning change, or by a quarantine of the check at trunk.
 //!
-//! While red, the executor refuses a candidate that touches those paths with `TRUNK_RED`,
+//! While red, the executor refuses a candidate that touches those paths with `MAIN_RED`,
 //! naming the owner and the ways out; a change that names the owning change in `--fixes`, an
 //! undo of it, or a superseding change is never refused.
 //!
-//! G195: `bay watch --since` judges from what its cursor carries ([`Judged`]): how each check
+//! G195: `bay status --since` judges from what its cursor carries ([`Judged`]): how each check
 //! was decided, at which trunk, under which evidence tips and registry. It reads the answers of
 //! the landings after that trunk and of those whose note moved (one `diff-tree` per moved
 //! producer ref), so its Git work grows with what changed, not with the window. Two reads are
@@ -64,7 +64,7 @@ pub fn window(git: &Git, trunk: &str) -> Result<usize, String> {
     Ok(crate::config::Config::at(git, trunk)?.red_window())
 }
 
-/// Trunk red on one post-publication check. A `bay watch` cursor carries the red checks it saw
+/// Trunk red on one post-publication check. A `bay status --since` cursor carries the red checks it saw
 /// in this shape (G244b).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -249,7 +249,7 @@ struct Landing {
     names: Vec<String>,
 }
 
-/// G195: what a red judgement of `trunk` decided, carried in a `bay watch` cursor so that the
+/// G195: what a red judgement of `trunk` decided, carried in a `bay status --since` cursor so that the
 /// next judgement reads only what moved since: the landings after `trunk`, and those whose
 /// evidence note changed.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

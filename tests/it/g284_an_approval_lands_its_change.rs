@@ -9,7 +9,7 @@
 //! approval holds while the files it covers are unchanged: G292). A pass that finds
 //! nothing changed leaves it waiting. A rejection ends it `CHECK_FAILED`, and no later pass
 //! runs it. The refusal states the plain next step: an executor lands it once approved, and
-//! without one the author's `bay land --wait` does.
+//! without one the author's `bay merge --wait` does.
 //!
 //! Guards to mutate (each makes a case here fail):
 //! - `src/executor.rs` `runs`: `(op.state != OpState::Blocked || publish::awaits_approval(op))`
@@ -129,7 +129,7 @@ impl Trunk {
     }
 
     fn land(&self, view: &Path) -> (i32, serde_json::Value) {
-        result_json(self.test_box.bay(view).args(["land", "--wait"]))
+        result_json(self.test_box.bay(view).args(["merge", "--wait"]))
     }
 
     /// The approver reads change `id` from its own clone and records `verdict` about
@@ -155,7 +155,7 @@ impl Trunk {
     fn pass(&self, id: &str) -> Option<serde_json::Value> {
         let ran = self
             .test_box
-            .bay_ok(&self.repo, &["executor", "run", "--once"]);
+            .bay_ok(&self.repo, &["runner", "run", "--once"]);
         ran["detail"]["ran"]
             .as_array()
             .unwrap_or_else(|| panic!("no ran rows: {ran}"))
@@ -198,7 +198,7 @@ fn an_approval_lands_the_approved_candidate_with_no_second_land() {
         .as_str()
         .unwrap_or_default();
     assert!(next.contains("executor"), "{waiting}");
-    assert!(next.contains("bay land --wait"), "{waiting}");
+    assert!(next.contains("bay merge --wait"), "{waiting}");
     let candidate = held(&waiting, "pending");
     assert_eq!(trunk.runs(), 1);
 
@@ -213,7 +213,7 @@ fn an_approval_lands_the_approved_candidate_with_no_second_land() {
     // nothing more.
     trunk.approve(&id, "pass", &candidate);
     let row = trunk.pass(&id).expect("the pass runs the approved change");
-    assert_eq!(row["decision"], "landed", "{row}");
+    assert_eq!(row["decision"], "merged", "{row}");
     assert_eq!(
         trunk.trunk_tip(),
         candidate,
@@ -269,7 +269,7 @@ fn a_moved_trunk_rebuilds_and_waits_for_an_approval_of_the_new_candidate() {
     // The approval of the new candidate lands it.
     trunk.approve(&id, "pass", &second);
     let row = trunk.pass(&id).expect("the pass runs the approved change");
-    assert_eq!(row["decision"], "landed", "{row}");
+    assert_eq!(row["decision"], "merged", "{row}");
     assert_eq!(trunk.trunk_tip(), second);
     assert_eq!(trunk.runs(), 3);
 }

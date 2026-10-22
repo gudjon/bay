@@ -14,7 +14,7 @@
 //! subagent keeps its parent's session id, so it works under its parent's claims and claims for
 //! its parent.
 //!
-//! `pre-tool` judges a write by reading the claims file of the target's tree: a few file-system
+//! `tool.before` judges a write by reading the claims file of the target's tree: a few file-system
 //! calls, no Git and no fetch. A claim never refuses a write in another tree: the file read is the
 //! target's tree's, and its paths are relative to that tree. A claims file that cannot be read
 //! holds nothing, but never silently: claims are a best-effort guard against two writers of one
@@ -230,7 +230,7 @@ pub struct Unreadable {
     pub why: &'static str,
 }
 
-/// The claims judgement of one `pre-tool` call: each tree's claims file read once, and the
+/// The claims judgement of one `tool.before` call: each tree's claims file read once, and the
 /// first one that could not be read.
 #[derive(Default)]
 struct Judge {

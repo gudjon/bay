@@ -1,7 +1,7 @@
 //! G266 (NEW-10). A live change hears of a landing on its declared paths.
 //!
 //! Change A starts on `api/`, and change B on `api/` too. B lands. A's session is told once, at
-//! its next `post-tool`, through the notice path of the refusals and early conflicts: one
+//! its next `step.end`, through the notice path of the refusals and early conflicts: one
 //! `landed_on_your_paths` line naming B, its intent and actor, and the shared path `api/`, and
 //! saying to refresh; the session's line names B in `landed_on_your_paths`. The next hook tells
 //! nothing. A change on `ui/` hears of nothing. The paths are judged as `bay start` judges its
@@ -83,16 +83,9 @@ fn hook(
     )
 }
 
-/// The notice `post-tool` gives the session's agent.
+/// The notice `step.end` gives the session's agent.
 fn post_tool(test_box: &TestBox, view: &Path, session: &str) -> String {
-    hook(
-        test_box,
-        view,
-        "post-tool",
-        "08-PostToolBatch.json",
-        session,
-    )
-    .1
+    hook(test_box, view, "step.end", "08-PostToolBatch.json", session).1
 }
 
 fn last_line(repo: &Path, session: &str) -> Value {
@@ -116,14 +109,14 @@ fn a_landing_on_the_declared_paths_is_told_once_and_not_on_other_paths() {
     hook(
         &test_box,
         &a_view,
-        "session-start",
+        "session.start",
         "01-SessionStart.json",
         "s-a",
     );
     hook(
         &test_box,
         &ui_view,
-        "session-start",
+        "session.start",
         "01-SessionStart.json",
         "s-c",
     );
@@ -134,9 +127,9 @@ fn a_landing_on_the_declared_paths_is_told_once_and_not_on_other_paths() {
     // B starts on the same paths and lands.
     let (b, b_view) = start(&test_box, &repo, "agent-b", "PATHS-B", &["api/"]);
     std::fs::write(b_view.join("api/b.rs"), "fn b() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&b_view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&b_view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     // A fetching command brings the landing here.
     let _ = result_json(test_box.bay(&repo).arg("status"));
 
@@ -146,7 +139,7 @@ fn a_landing_on_the_declared_paths_is_told_once_and_not_on_other_paths() {
     assert!(
         told.starts_with(&format!(
             "bay: change {a}: landed_on_your_paths: change {b} (intent PATHS-B, actor agent-b) \
-             landed on trunk on api/: refresh (`bay start --resume {a}`)"
+             landed on trunk on api/: refresh (`bay start {a}`)"
         )),
         "{told}"
     );
@@ -164,7 +157,7 @@ fn a_landing_on_the_declared_paths_is_told_once_and_not_on_other_paths() {
     let (context, prompt) = hook(
         &test_box,
         &a_view,
-        "user-prompt-submit",
+        "turn.start",
         "02-UserPromptSubmit.json",
         "s-a",
     );

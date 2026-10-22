@@ -29,7 +29,7 @@
     "decision": {
       "enum": [
         "ok",
-        "landed",
+        "merged",
         "queued",
         "blocked",
         "failed"
@@ -38,23 +38,19 @@
     "state": {
       "type": "string"
     },
-    "published": {
-      "type": "boolean"
-    },
     "reason": {
       "enum": [
         "INPUT_CHANGED",
         "INPUT_UNOBSERVED",
         "MERGE_CONFLICT",
-        "TRUNK_MOVED",
-        "PUBLISH_RETRY_EXHAUSTED",
+        "MAIN_MOVED",
+        "MERGE_RETRY_EXHAUSTED",
         "REGISTRY_CHANGED",
         "CHECK_FLAKY",
-        "CHANGE_NOT_LANDED",
+        "CHANGE_NOT_MERGED",
         "HOOK_TIMEOUT",
-        "QUEUE_HELD",
+        "QUEUED",
         "QUEUE_DEADLINE_EXCEEDED",
-        "PUBLICATION_QUEUED",
         "CHECK_FAILED",
         "CHECK_UNAVAILABLE",
         "CHECK_UNKNOWN",
@@ -62,9 +58,9 @@
         "POLICY_INVALID",
         "POLICY_MISSING",
         "WORKSPACE_INCOMPLETE",
-        "PUBLISH_OUTCOME_UNKNOWN",
-        "TRUNK_RED",
-        "CHANGE_ALREADY_LANDED",
+        "MERGE_OUTCOME_UNKNOWN",
+        "MAIN_RED",
+        "CHANGE_ALREADY_MERGED",
         "CHANGE_SUPERSEDED",
         "CHANGE_HELD",
         "ABANDON_REFUSED",
@@ -76,42 +72,31 @@
         "PATH_HELD",
         "REMOTE_NOT_FETCHED",
         "CONFIG_MISSING",
-        "GIT_BELOW_FLOOR",
-        "CLAUDE_BELOW_FLOOR",
-        "CLAUDE_ABSENT",
-        "AGENT_BELOW_FLOOR",
-        "AGENT_ABSENT",
+        "TOOL_BELOW_FLOOR",
+        "TOOL_ABSENT",
         "REMOTE_UNREACHABLE",
         "HOOKS_MISSING",
         "SKILL_MISMATCH",
         "SANDBOX_ABSENT",
         "CHECK_ENV_UNSET",
-        "EXECUTOR_KEY_MISSING",
+        "RUNNER_KEY_MISSING",
         "KEY_EXPOSED",
         "UPDATE_UNAVAILABLE",
         "UPDATE_UNVERIFIED",
         "UPDATE_PINNED",
-        "TALK_INVALID",
-        "TALK_BODY_CONFLICT",
-        "TALK_CLOSED",
-        "TALK_SUPERSEDE_REFUSED",
-        "TALK_ANSWER_CONFLICT",
-        "TALK_SENDER_NOT_ACTOR",
-        "TALK_BACKLOG",
-        "UNATTRIBUTED_LANDING",
+        "TALK_REFUSED",
+        "OUTSIDE_MERGE",
         "EVIDENCE_WITHDRAWN",
         "PROMOTION_REFUSED",
-        "LANE_NEVER_LANDS",
         "LANE_LEAK",
         "APPROVAL_PENDING",
         "WIP_LIMIT",
         "DISK_LOW",
-        "TRUNK_HELD",
+        "MAIN_HELD",
         "PATHS_UNDECLARED",
         "DEPENDENCY_PENDING",
         "DEPENDENCY_ABANDONED",
-        "CHANGE_TOO_LARGE",
-        "BAY_BELOW_FLOOR"
+        "CHANGE_TOO_LARGE"
       ]
     },
     "say": {
@@ -165,11 +150,8 @@
         "holder_session_stopped_or_claim_past_deadline",
         "remote_fetched",
         "config_added",
-        "git_upgraded_to_floor",
-        "claude_upgraded_or_adapter_removed",
-        "claude_installed_or_adapter_removed",
-        "agent_upgraded_or_adapter_removed",
-        "agent_installed_or_adapter_removed",
+        "tool_upgraded_or_adapter_removed",
+        "tool_installed_or_adapter_removed",
         "remote_answers_with_box_key",
         "install_wrote_hook_entries",
         "install_copied_skill_for_this_version",
@@ -180,13 +162,7 @@
         "release_reachable",
         "release_republished",
         "pin_moved",
-        "talk_corrected",
-        "ask_changed_or_superseded",
-        "follow_up_changed_or_superseded",
-        "sender_or_decides_supersedes",
-        "answer_supersedes_the_standing_answer",
-        "sent_with_the_senders_agent_key",
-        "an_open_talk_closed_or_superseded",
+        "talk_corrected_or_superseded",
         "pushed_commit_promotable",
         "view_reaches_no_lane_commit",
         "approved",
@@ -196,8 +172,7 @@
         "paths_declared",
         "dependencies_landed",
         "dependency_dropped_or_restarted",
-        "change_within_limits",
-        "bay_updated_to_floor"
+        "change_within_limits"
       ]
     },
     "next_step": {
@@ -210,14 +185,11 @@
       "type": "integer",
       "minimum": 0
     },
-    "receipts": {
+    "evidence": {
       "type": "array",
       "items": {
         "type": "string"
       }
-    },
-    "next": {
-      "type": "string"
     },
     "receipt": {
       "type": "string"

@@ -42,11 +42,7 @@ fn a_failure_that_breaks_the_view_and_the_push_leaves_a_receipt() {
     set_writable(&remote.join("refs"), false);
     set_writable(&remote.join("objects"), false);
 
-    let (code, result) = result_json(
-        test_box
-            .bay(&repo)
-            .args(["land", "--wait", "--change", &id]),
-    );
+    let (code, result) = result_json(test_box.bay(&repo).args(["merge", "--wait", &id]));
     assert_eq!(code, 20, "{result}");
     let receipt_id = result["receipt"].as_str().unwrap().to_owned();
     assert!(receipt_id.starts_with("r-"), "{result}");
@@ -98,7 +94,7 @@ fn a_machine_that_dies_before_the_sync_shows_a_missing_record_never_success() {
     let killed = test_box
         .bay(&view)
         .env("BAY_TEST_KILL_AT", "after-freeze")
-        .args(["land", "--wait"])
+        .args(["merge", "--wait"])
         .output()
         .unwrap();
     assert_eq!(killed.status.code(), Some(137));

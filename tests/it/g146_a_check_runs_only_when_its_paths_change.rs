@@ -119,7 +119,7 @@ fn a_studio_change_skips_the_world_check_and_records_why() {
     // says what is required.
     let view = start(&test_box, &repo, "STUDIO-1", &["studio/", "world/"]);
     write(&view, "studio/app.txt", "studio two\n");
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let tree = landed_tree(&test_box, &remote, &landed);
     assert_eq!(ids(&records_on(&test_box, &remote, &tree)), ["studio"]);
@@ -151,7 +151,7 @@ fn a_shared_change_requires_both_checks() {
     let (test_box, repo, remote) = trunk();
     let view = start(&test_box, &repo, "SHARED-1", &["shared/"]);
     write(&view, "shared/lib.txt", "shared two\n");
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let tree = landed_tree(&test_box, &remote, &landed);
     assert_eq!(
@@ -170,7 +170,7 @@ fn a_write_outside_the_declared_paths_still_requires_its_check() {
     let view = start(&test_box, &repo, "STUDIO-2", &["studio/"]);
     write(&view, "studio/app.txt", "studio two\n");
     write(&view, "world/broken", "oops\n");
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     assert_eq!(
@@ -196,7 +196,7 @@ fn a_candidate_cannot_narrow_when_paths_for_itself() {
         ".bay/policy.toml",
         &policy(2, "when_paths = [\"nowhere/\"]\n"),
     );
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     assert_eq!(
@@ -224,7 +224,7 @@ fn an_edit_to_when_paths_is_a_new_definition_checked_twice() {
             "when_paths = [\"world/\", \"shared/*.txt\", \"docs/\"]\n",
         ),
     );
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let tree = landed_tree(&test_box, &remote, &landed);
     let records = records_on(&test_box, &remote, &tree);
@@ -260,7 +260,7 @@ fn a_bad_when_paths_list_makes_the_policy_invalid() {
         );
         let view = start(&test_box, &repo, "BAD-1", &["studio/"]);
         write(&view, "studio/app.txt", "studio two\n");
-        let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+        let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 10, "{bad}: {refused}");
         assert_eq!(refused["reason"], "POLICY_INVALID", "{bad}: {refused}");
     }

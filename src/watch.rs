@@ -1,4 +1,4 @@
-//! `bay watch [--since <cursor>]` (`DESIGN` § 4, § 6, § 9; `INTERFACES` § 5; ruling R6): what
+//! `bay status --since [--since <cursor>]` (`DESIGN` § 4, § 6, § 9; `INTERFACES` § 5; ruling R6): what
 //! happened after the caller's cursor, so a lost notice never hides anything (G9).
 //!
 //! Landings are not events: they are read from trunk, every first-parent commit after the
@@ -19,7 +19,7 @@
 //! Like `bay status`, after a fetch it accepts and acks this actor's talks (`DESIGN` § 11c,
 //! [`crate::talk::receive`]): the ack is the recipient's arrival record, not a notice.
 //!
-//! `bay watch --landed` (G73) is the landed stream alone, for a producer that reads every
+//! `bay status --since --merged` (G73) is the landed stream alone, for a producer that reads every
 //! landing: the same landings and cursor, no events and no invalidations. Each landing names
 //! its base (the first parent) and its committer time, and one landed outside bay stays in
 //! the stream with `change: null`, `outside_bay: true` and `landed_as` (`merge` or `outside`,
@@ -111,7 +111,8 @@ impl Cursor {
     /// `text` is not a cursor: not base32, not the cursor's JSON, or an id that is not an
     /// object id.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let bad = |why: &str| format!("{text:?} is not a cursor bay watch returned: {why}");
+        let bad =
+            |why: &str| format!("{text:?} is not a cursor bay status --since returned: {why}");
         let bytes = crate::ids::from_base32(text).ok_or_else(|| bad("not base32"))?;
         let cursor: Self =
             serde_json::from_slice(&bytes).map_err(|error| bad(&error.to_string()))?;
@@ -163,7 +164,7 @@ pub fn watch(dir: &Path, since: Option<&Cursor>) -> BayResult {
     run(dir, since, false).unwrap_or_else(BayResult::failed)
 }
 
-/// `bay watch --landed`: the landed stream of the module doc.
+/// `bay status --since --merged`: the landed stream of the module doc.
 #[must_use]
 pub fn landed(dir: &Path, since: Option<&Cursor>) -> BayResult {
     run(dir, since, true).unwrap_or_else(BayResult::failed)
@@ -422,7 +423,7 @@ fn red_judged(
     })
 }
 
-/// `bay watch --landed` (G73): the landings of [`collect`] after `since`, the count of
+/// `bay status --since --merged` (G73): the landings of [`collect`] after `since`, the count of
 /// commits off the first-parent line in the range listed, and the cursor to watch from next.
 /// The cursor moves trunk only: its log tips are those a full watch from `since` would read
 /// from, so a full watch from it still lists every event.

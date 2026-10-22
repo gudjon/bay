@@ -1,7 +1,7 @@
 //! G278 (N-21): approvals-only signing needs no executor key (owner ruling 2026-10-21).
 //!
 //! `[policy] signing = "approvals"` at the accepted base lets a small team land with
-//! `bay land --wait` on their own machines under a key registry, with no executor, producer or
+//! `bay merge --wait` on their own machines under a key registry, with no executor, producer or
 //! agent key anywhere: landings, requests, chains and check evidence are unsigned and count
 //! unsigned, and results say `trust: "approvals"`. An `approval` record still counts only when
 //! a key of the registry's approver file signed it: one signed by another key, or unsigned,
@@ -126,7 +126,7 @@ impl Trunk {
     }
 
     fn land(&self, view: &Path) -> (i32, serde_json::Value) {
-        result_json(self.test_box.bay(view).args(["land", "--wait"]))
+        result_json(self.test_box.bay(view).args(["merge", "--wait"]))
     }
 
     /// `bay evidence record` of an approval with `verdict` about candidate `commit`, from `dir`.
@@ -177,7 +177,7 @@ fn approvals_only_lands_without_executor_keys_and_counts_only_an_approvers_signa
     let (id, view) = trunk.start("CARD-src", "src/other.rs", "fn other() {}\n");
     let (code, landed) = trunk.land(&view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(landed["detail"]["trust"], "approvals", "{landed}");
     let tip = trunk.trunk_tip();
     assert_eq!(
@@ -280,7 +280,7 @@ fn approvals_only_lands_without_executor_keys_and_counts_only_an_approvers_signa
     assert_eq!(code, 0, "{approved}");
     let (code, landed) = trunk.land(&view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(landed["detail"]["trust"], "approvals", "{landed}");
 }
 
@@ -317,7 +317,7 @@ fn with_signing_absent_the_same_machine_is_refused_and_a_candidate_never_switche
     );
     let (code, refused) = trunk.land(&view);
     assert_ne!(code, 0, "{refused}");
-    assert_ne!(refused["decision"], "landed", "{refused}");
+    assert_ne!(refused["decision"], "merged", "{refused}");
     assert!(refused.to_string().contains("bay.executorKey"), "{refused}");
     assert_eq!(trunk.trunk_tip(), before, "trunk did not move");
 }

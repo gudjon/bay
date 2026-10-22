@@ -1,9 +1,10 @@
-//! G156. `bay status --stranded` names work that exists only on this disk.
+//! G156. `bay status --heads` names work that exists only on this disk.
 //!
 //! A local branch whose tip no remote-tracking ref contains holds commits no remote has: the
 //! list names it with the commits it is ahead, the age of its tip and the worktree it is
-//! checked out in. A worktree record whose folder is gone is listed too. The read uses local
-//! refs only: it never fetches, prunes or deletes.
+//! checked out in. A worktree record whose folder is gone is listed too, in `detail.stranded`
+//! (0.3.0: `bay status --stranded` is gone; `--heads` shows every head). That part of the read
+//! uses local refs only, and nothing is pruned or deleted.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -27,7 +28,7 @@ fn commit(test_box: &TestBox, dir: &std::path::Path, file: &str, date: &str) {
 }
 
 fn branch<'a>(result: &'a Value, name: &str) -> Option<&'a Value> {
-    result["detail"]["branches"]
+    result["detail"]["stranded"]["branches"]
         .as_array()
         .unwrap_or_else(|| panic!("no branches: {result}"))
         .iter()
@@ -79,7 +80,7 @@ fn branches_no_remote_holds_and_worktrees_whose_folder_is_gone_are_listed() {
     std::fs::remove_dir_all(&gone).unwrap();
     let refs_before = test_box.git_ok(&repo, &["for-each-ref"]);
 
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--stranded"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--heads"]));
     assert_eq!(code, 0, "{result}");
     let stranded = branch(&result, "local-only").unwrap_or_else(|| panic!("{result}"));
     assert_eq!(stranded["ahead"], 2, "{stranded}");
@@ -103,7 +104,7 @@ fn branches_no_remote_holds_and_worktrees_whose_folder_is_gone_are_listed() {
             "{held} is on the remote: {result}"
         );
     }
-    let prunable = result["detail"]["prunable_worktrees"]
+    let prunable = result["detail"]["stranded"]["prunable_worktrees"]
         .as_array()
         .unwrap_or_else(|| panic!("{result}"));
     assert_eq!(prunable.len(), 1, "{result}");
@@ -122,13 +123,13 @@ fn branches_no_remote_holds_and_worktrees_whose_folder_is_gone_are_listed() {
 }
 
 #[test]
-fn stranded_conflicts_with_a_change_and_with_fleet() {
+fn heads_conflicts_with_a_change_and_with_fleet() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     for args in [
-        &["status", "--stranded", "--fleet"][..],
-        &["status", "abcdefgh", "--stranded"][..],
+        &["status", "--heads", "--fleet"][..],
+        &["status", "abcdefgh", "--heads"][..],
     ] {
         let out = test_box.bay(&repo).args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");

@@ -41,6 +41,8 @@ enum Program {
 struct Report {
     rows: Vec<Value>,
     first_red: Option<Reason>,
+    /// The tool the first red reason names, for `TOOL_BELOW_FLOOR` and `TOOL_ABSENT`.
+    first_tool: Option<&'static str>,
     /// The first red row that is not a version, as the doctor field names it.
     doctor_note: Option<&'static str>,
     /// G305: whether bay guards this repository's Git here (`detail.guard`).
@@ -53,6 +55,15 @@ impl Report {
         if let Some(note) = note {
             self.doctor_note.get_or_insert(note);
         }
+    }
+
+    /// [`Report::red`] for a tool below its floor or absent: `detail.tool` names it when this is
+    /// the first red reason.
+    fn red_tool(&mut self, reason: Reason, tool: &'static str, note: Option<&'static str>) {
+        if self.first_red.is_none() {
+            self.first_tool = Some(tool);
+        }
+        self.red(reason, note);
     }
 }
 
@@ -134,7 +145,7 @@ enum Role {
     AgentView,
     /// The bare repository `bay host init` creates (§ 10a).
     HostedTrunk,
-    /// A box that runs `bay executor run`, as `--role executor` states (G63).
+    /// A box that runs `bay runner run`, as `--role executor` states (G63).
     Executor,
     /// Doctor runs outside every repository: only the machine rows apply, at the floor of any
     /// machine running bay.
@@ -208,9 +219,9 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
         // G317: a config that names a newer bay is red: every command here refuses.
         if config_row
             .as_ref()
-            .is_some_and(|row| row["reason"] == Reason::BayBelowFloor.code())
+            .is_some_and(|row| row["reason"] == Reason::ToolBelowFloor.code())
         {
-            report.red(Reason::BayBelowFloor, None);
+            report.red_tool(Reason::ToolBelowFloor, "bay", None);
         }
         report.rows.extend(config_row);
         remote_row(&git, &config, info.bare, &mut report)?;
@@ -268,7 +279,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
         ready,
         report.doctor_note,
     );
-    let detail = json!({
+    let mut detail = json!({
         "bay": crate::version::BAY,
         "git": git_line,
         "repository": info.as_ref().map(|info| &info.toplevel),
@@ -280,6 +291,9 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
         "rows": report.rows,
         "guard": report.guard,
     });
+    if let Some(tool) = report.first_tool {
+        detail["tool"] = json!(tool);
+    }
     let mut result = match report.first_red {
         None => BayResult::new(Decision::Ok),
         Some(reason) => BayResult::blocked(reason),
@@ -411,12 +425,12 @@ fn claude_row(claude: &Program, minimum: &Version, report: &mut Report) {
             json!({"name": "claude", "state": "green", "note": "Claude adapter not configured"})
         }
         Program::Absent => {
-            report.red(Reason::ClaudeAbsent, None);
+            report.red_tool(Reason::ToolAbsent, "claude", None);
             json!({"name": "claude", "state": "red", "floor": CLAUDE_HOOK_MINIMUM,
                 "note": "claude is absent", "recovery": CLAUDE_RECOVERY})
         }
         Program::Found(version) if version < minimum => {
-            report.red(Reason::ClaudeBelowFloor, None);
+            report.red_tool(Reason::ToolBelowFloor, "claude", None);
             json!({"name": "claude", "version": version.to_string(), "floor": CLAUDE_HOOK_MINIMUM,
                 "state": "red", "recovery": CLAUDE_RECOVERY})
         }
@@ -452,12 +466,16 @@ fn codex_row(codex: &Program, report: &mut Report) {
     let row = match codex {
         Program::NotConfigured => return,
         Program::Absent => {
-            report.red(Reason::AgentAbsent, Some("codex is absent"));
+            report.red_tool(Reason::ToolAbsent, "codex", Some("codex is absent"));
             json!({"name": "codex", "state": "red", "floor": CODEX_HOOK_MINIMUM,
                 "note": "codex is absent", "recovery": CODEX_RECOVERY})
         }
         Program::Found(version) if *version < minimum => {
-            report.red(Reason::AgentBelowFloor, Some("codex below its floor"));
+            report.red_tool(
+                Reason::ToolBelowFloor,
+                "codex",
+                Some("codex below its floor"),
+            );
             json!({"name": "codex", "version": version.to_string(), "floor": CODEX_HOOK_MINIMUM,
                 "state": "red", "recovery": CODEX_RECOVERY})
         }
@@ -472,7 +490,7 @@ fn codex_row(codex: &Program, report: &mut Report) {
 /// newer bay (G317), the other rows name the bootstrap's remote and trunk where there is one,
 /// and otherwise the defaults. A missing config's row is not red: the box is ready, and the
 /// repository's commands refuse `CONFIG_MISSING` until trunk has a config. A config that needs
-/// a newer bay is red, `BAY_BELOW_FLOOR`, as every command here refuses.
+/// a newer bay is red, `TOOL_BELOW_FLOOR`, as every command here refuses.
 fn repository_config(dir: &Path) -> Result<(Config, Option<Value>), String> {
     let bootstrapped = || {
         let mut config = Config::default();
@@ -495,7 +513,7 @@ fn repository_config(dir: &Path) -> Result<(Config, Option<Value>), String> {
         Err(OpenError::BayBelowFloor(_, detail)) => {
             let row = json!({"name": "config", "state": "red", "floor": detail["floor"].clone(),
                 "bay": crate::version::BAY, "meets_floor": false,
-                "reason": Reason::BayBelowFloor.code(), "detail": detail});
+                "reason": Reason::ToolBelowFloor.code(), "detail": detail});
             Ok((bootstrapped(), Some(row)))
         }
         Err(error) => Err(error.message()),
@@ -536,7 +554,7 @@ fn git_rows(git_version: &Version, role: Role, report: &mut Report) -> bool {
         "version": git_version.to_string(), "floor": floor, "state": state(git_green)});
     if !git_green {
         git_row["recovery"] = json!("upgrade git");
-        report.red(Reason::GitBelowFloor, None);
+        report.red_tool(Reason::ToolBelowFloor, "git", None);
     }
     report.rows.push(git_row);
 
@@ -699,6 +717,15 @@ fn hooks_row(
         row["outdated_note"] = json!(
             "these entries run bay without testing that it is installed, so on a box without bay \
              they deny every tool; run install again"
+        );
+    }
+    // G324: an entry an older bay wrote under a name 0.3.0 no longer knows (H1, no aliases).
+    let renamed = agent_settings::renamed_claude_events(&settings);
+    if !renamed.is_empty() {
+        row["old_names"] = json!(renamed);
+        row["old_names_note"] = json!(
+            "these entries call bay hook under a name an older bay wrote, which this bay \
+             refuses; run install again"
         );
     }
     if let Some(recorded) = recorded_unrelated_digest(git)? {
@@ -1225,7 +1252,7 @@ fn presence_row(git: &Git, config: &Config, keys: &crate::signing::Keys, report:
         None => {
             row["state"] = json!("none");
             row["note"] = json!(
-                "this executor has published no presence here yet; each pass of bay executor run publishes it"
+                "this executor has published no presence here yet; each pass of bay runner run publishes it"
             );
         }
         Some(record) => {

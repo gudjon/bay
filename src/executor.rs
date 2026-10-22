@@ -1,4 +1,4 @@
-//! `bay executor run`: the supervised local executor (`DESIGN` § 9a,
+//! `bay runner run`: the supervised local executor (`DESIGN` § 9a,
 //! `INTERFACES` § 3a).
 //!
 //! It fetches the change chains from the remote and drives every queued operation to a stated
@@ -7,7 +7,7 @@
 //! it keeps polling.
 //!
 //! The contract's actions map onto bay: `submit` is the request in the change chain (and, with
-//! `[executor] command`, a call to that adapter); `inspect` is `bay status`; `resume` is running
+//! `[runner] command`, a call to that adapter); `inspect` is `bay status`; `resume` is running
 //! the operation again from the chain, which never repeats a persisted candidate; `cancel` is a
 //! newer revision (kickstart item 19b); `complete` is the evidence notes. The ownership claim
 //! with epochs is item 16; leases and takeover are item 19a.
@@ -94,7 +94,7 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
                     "path": binary.path,
                 }}));
             }
-            eprintln!("bay executor: {}", binary.stays());
+            eprintln!("bay runner: {}", binary.stays());
             binary.accept();
         }
         if once {
@@ -114,10 +114,10 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             return BayResult::ok(detail);
         }
         if let Some(message) = &unreleased {
-            eprintln!("bay executor: {message}");
+            eprintln!("bay runner: {message}");
         }
         for row in advanced.iter().filter(|row| row.get("error").is_some()) {
-            eprintln!("bay executor: {row}");
+            eprintln!("bay runner: {row}");
         }
         // A looping supervisor never reaches the end of `main`: a pass that fetched trunk
         // leaves the coordination cache now (`crate::coord`).
@@ -127,14 +127,15 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
 }
 
 /// The executor's Git floor (`GIT-FEATURES` § 1, G68): below it the executor refuses with
-/// `GIT_BELOW_FLOOR` before it fetches or claims anything. `line` is what `git --version`
+/// `TOOL_BELOW_FLOOR` before it fetches or claims anything. `line` is what `git --version`
 /// printed; a Git that cannot report its version is left to the first Git call, which fails
 /// with its own message.
 fn below_floor(line: &str) -> Option<BayResult> {
     use crate::version::{GIT_FLOOR_EXECUTOR, Version};
     let version = Version::parse(line);
     (version < Version::parse(GIT_FLOOR_EXECUTOR)).then(|| {
-        BayResult::blocked(crate::result::Reason::GitBelowFloor).with_detail(json!({
+        BayResult::blocked(crate::result::Reason::ToolBelowFloor).with_detail(json!({
+            "tool": "git",
             "role": "executor",
             "version": version.to_string(),
             "floor": GIT_FLOOR_EXECUTOR,
@@ -163,7 +164,7 @@ pub fn reexec(result: &BayResult) {
     {
         use std::os::unix::process::CommandExt as _;
         let error = Command::new(path).args(std::env::args_os().skip(1)).exec();
-        eprintln!("bay executor: cannot start {path}: {error}");
+        eprintln!("bay runner: cannot start {path}: {error}");
     }
     #[cfg(not(unix))]
     let _ = path;

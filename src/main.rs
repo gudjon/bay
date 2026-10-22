@@ -24,66 +24,47 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Open a change: a fresh main, a sparse view of the declared paths, the change record;
-    /// or, named by its id, pick up an existing change, as --resume does
+    /// or, named by its id, pick up an existing change: checkpoint its draft, bring in newer main
     Start {
         /// The intent (a card, issue or ticket id), or an existing change's id to pick it up
-        #[arg(required_unless_present = "resume")]
-        intent: Option<String>,
-        /// The revision of the intent's external reference
-        #[arg(long, default_value = "1", hide = true)]
-        intent_revision: String,
+        intent: String,
         /// The paths this change reads and writes (its declared inputs)
         #[arg(long, num_args = 1..)]
         paths: Vec<String>,
         /// A named input this change depends on, `<kind>:<name>` (repeatable)
         #[arg(long = "input", value_name = "KIND:NAME", value_parser = bay::inputs::InputName::parse)]
         inputs: Vec<bay::inputs::InputName>,
-        /// Restore an existing change: checkpoint its draft, bring in newer main (the same as
-        /// `bay start <CHANGE>`)
-        #[arg(long, value_name = "CHANGE", conflicts_with = "intent")]
-        resume: Option<String>,
-        /// No longer needed after a landing: plain start takes the intent's next generation.
-        /// After an abandon, claim the next generation instead of adopting the abandoned change
+        /// After an abandon, claim the intent's next generation instead of adopting the abandoned
+        /// change (after a merge, plain start already does)
         #[arg(long)]
         new: bool,
-        /// The landed change this one fixes; its landing carries a Fixes: trailer
-        #[arg(long, value_name = "CHANGE", conflicts_with = "resume")]
+        /// The merged change this one fixes; its merge carries a Fixes: trailer
+        #[arg(long, value_name = "CHANGE")]
         fixes: Option<String>,
-        /// A sandbox lane of the config: the change's checks run, and it never lands
-        #[arg(long, value_name = "LANE", conflicts_with = "resume")]
+        /// A sandbox lane of the config: the change's checks run, and it never merges
+        #[arg(long, value_name = "LANE")]
         lane: Option<String>,
         /// A branch made outside bay (a branch name or a full ref): its net change is the draft
-        #[arg(long, value_name = "REF", conflicts_with = "resume")]
+        #[arg(long, value_name = "REF")]
         from: Option<String>,
-        /// A change this one lands only after (repeatable): it publishes once that change landed
-        #[arg(long, value_name = "CHANGE", conflicts_with = "resume")]
+        /// A change this one merges only after (repeatable): it merges once that change merged
+        #[arg(long, value_name = "CHANGE")]
         after: Vec<String>,
     },
-    /// Freeze the draft, build the candidate, check it, publish it
-    Land {
+    /// Freeze the draft, build the candidate, check it, merge it into main
+    Merge {
         /// The change (default: the change of the view bay runs in)
         change: Option<String>,
-        /// The change, as a flag: the same as the positional one, kept for older scripts
-        #[arg(
-            long = "change",
-            value_name = "CHANGE",
-            hide = true,
-            conflicts_with = "change"
-        )]
-        change_flag: Option<String>,
         #[command(flatten)]
         wait: WaitArgs,
-        /// Submit the abandon request instead: the change is given up, any actor may adopt it
-        #[arg(long, conflicts_with_all = ["wait", "observe"])]
-        abandon: bool,
     },
-    /// Give a change up: the abandon request `bay land --abandon` submits; any actor may adopt it
+    /// Give a change up: any actor may adopt it
     Abandon {
         /// The change (default: the change of the view bay runs in)
         change: Option<String>,
     },
-    /// Land the edits made in the main checkout as one change: start, land --wait, then move
-    /// the checkout to the new tip of main. Never in a view (use land there)
+    /// Merge the edits made in the main checkout as one change: start, merge --wait, then move
+    /// the checkout to the new tip of main. Never in a view (use merge there)
     Save {
         /// The intent: a card, issue or ticket id
         intent: String,
@@ -101,9 +82,6 @@ enum Command {
     Approve {
         /// The change that waits for the approval
         change: String,
-        /// Say no instead: the record's verdict is `product_failure`, and the change is blocked
-        #[arg(long, conflicts_with = "waive")]
-        reject: bool,
         /// Waive this one check, marked `waivable = true`, on the pending candidate: a signed
         /// waiver, never a pass; the landing names it as a coverage gap. Needs --why
         #[arg(long, value_name = "CHECK")]
@@ -112,9 +90,18 @@ enum Command {
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
     },
-    /// A new change that undoes one landing, checked and landed like any other; never a rewrite
+    /// Say no to a change that waits for an approval: this machine's approver signs a
+    /// `product_failure` record of its exact candidate, and the change is blocked
+    Reject {
+        /// The change that waits for the approval
+        change: String,
+        /// Why, in the approver's words: kept in the signed record
+        #[arg(long, value_name = "TEXT")]
+        why: Option<String>,
+    },
+    /// A new change that undoes one merge, checked and landed like any other; never a rewrite
     Undo {
-        /// The landed change to undo
+        /// The merged change to undo
         change: String,
         #[command(flatten)]
         wait: WaitArgs,
@@ -126,48 +113,41 @@ enum Command {
         /// The fleet map from the local cache `bay status` fetches; fails closed without that fetch
         #[arg(long, conflicts_with = "change")]
         fleet: bool,
-        /// Local branches no remote-tracking ref holds, and worktree records whose folder is
-        /// gone; local refs only, never a fetch, a prune or a delete
-        #[arg(long, conflicts_with_all = ["change", "fleet"])]
-        stranded: bool,
         /// The Reverts:, Supersedes: and Fixes: pairs of a first-parent range (default: main);
         /// local refs only, never a fetch
         #[arg(long, value_name = "RANGE", num_args = 0..=1, default_missing_value = "",
-            conflicts_with_all = ["change", "fleet", "stranded"])]
+            conflicts_with_all = ["change", "fleet"])]
         lineage: Option<String>,
         /// Every branch on the remote, classed trunk, target, lane, landed (with its proof),
-        /// stale or unique, and the stranded heads of --stranded; one ls-remote and one fetch,
-        /// nothing deleted
-        #[arg(long, conflicts_with_all = ["change", "fleet", "stranded", "lineage"])]
+        /// stale or unique, and the local branches no remote holds and worktrees whose folder
+        /// is gone; one ls-remote and one fetch, nothing deleted
+        #[arg(long, conflicts_with_all = ["change", "fleet", "lineage"])]
         heads: bool,
-        /// With --heads: the same as `bay prune`, kept for older scripts
-        #[arg(long, requires = "heads")]
-        prune: bool,
         /// With --heads: a branch with commits off main whose tip is older than this is stale
         /// (default 30)
         #[arg(long, value_name = "DAYS", requires = "heads")]
         stale_days: Option<u64>,
+        /// What happened after a cursor: merges into main, log events, new invalidations of the
+        /// view's change; with no cursor, from the start. Each answer names the next cursor
+        /// (`detail.cursor`)
+        #[arg(long, value_name = "CURSOR", num_args = 0..=1, default_missing_value = "",
+            value_parser = since_cursor,
+            conflicts_with_all = ["change", "fleet", "lineage", "heads"])]
+        since: Option<String>,
+        /// With --since: only the merges, each with its base, committer time and whether it
+        /// merged outside bay, and the count of commits off the first-parent line
+        #[arg(long, requires = "since")]
+        merged: bool,
     },
     /// Delete the remote's branches landed by ancestor or patch, each under a lease of the tip
     /// judged, after archiving the tip on the remote and logging the push that restores it to
     /// bay/pruned-heads.log in the repository's common directory; then runs the config's
-    /// `[heads] on_prune` adapter, when set, once per deleted branch
+    /// `[plugin.prune] command` adapter, when set, once per deleted branch
     Prune {
         /// A branch with commits off main whose tip is older than this is stale, and kept
         /// (default 30)
         #[arg(long, value_name = "DAYS")]
         stale_days: Option<u64>,
-    },
-    /// What happened after a cursor: landings on main, log events, new invalidations of the
-    /// view's change
-    Watch {
-        /// The cursor a previous watch returned (`detail.cursor`)
-        #[arg(long, value_name = "CURSOR", value_parser = bay::watch::Cursor::parse)]
-        since: Option<bay::watch::Cursor>,
-        /// Only the landings: each with its base, committer time and whether it landed outside
-        /// bay, and the count of commits off the first-parent line
-        #[arg(long)]
-        landed: bool,
     },
     /// Send one talk to one agent: one action, one target, the time the reply is owed. Arrival is
     /// the recipient's ack, written when its bay fetches
@@ -189,10 +169,10 @@ enum Command {
         #[command(subcommand)]
         action: HostAction,
     },
-    /// Admin: the executor that finishes operations after their agents leave
-    Executor {
+    /// Admin: the runner that finishes operations after their agents leave
+    Runner {
         #[command(subcommand)]
-        action: ExecutorAction,
+        action: RunnerAction,
     },
     /// This machine's live summary ref (started by the agent hook once per heartbeat)
     #[command(hide = true)]
@@ -217,9 +197,6 @@ enum Command {
     },
     /// Admin: replace this binary with a verified release (the box's pin wins)
     Update {
-        /// Accepted and ignored, so older scripts keep working: every release is a candidate
-        #[arg(long, hide = true)]
-        channel: Option<String>,
         /// Move to this exact version (X.Y.Z or X.Y.Z-suffix)
         #[arg(long)]
         version: Option<String>,
@@ -227,14 +204,14 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
-    /// Admin: prove a connector keeps an adapter contract, run as bay runs it; changes nothing
-    Adapter {
+    /// Admin: prove a plugin keeps its contract, run as bay runs it; changes nothing
+    Plugin {
         #[command(subcommand)]
-        action: AdapterAction,
+        action: PluginAction,
     },
     /// Admin: the agent hook entry point (`bay hook <event>`)
     Hook {
-        /// The agent product's event, for example `pre-tool`
+        /// The agent product's event, for example `tool.before`
         event: String,
     },
     /// Every command and flag on one page, grouped by who runs it; or the help of one command.
@@ -245,6 +222,14 @@ enum Command {
         #[arg(value_name = "COMMAND")]
         command: Vec<String>,
     },
+}
+
+/// `status --since [<CURSOR>]`: empty (from the start), or a cursor bay returned.
+fn since_cursor(text: &str) -> Result<String, String> {
+    if !text.is_empty() {
+        bay::watch::Cursor::parse(text)?;
+    }
+    Ok(text.to_owned())
 }
 
 /// `bay enrol <class> <name> <public-key-file>`.
@@ -260,7 +245,7 @@ struct EnrolArgs {
     public_key: PathBuf,
 }
 
-/// `--wait[=SECONDS]`, the one flag `bay land` and `bay undo` share. `Option<Option<_>>` is
+/// `--wait[=SECONDS]`, the one flag `bay merge` and `bay undo` share. `Option<Option<_>>` is
 /// clap's flag with an optional value: absent, present alone, or present with SECONDS.
 #[derive(Args)]
 #[allow(clippy::option_option)]
@@ -269,18 +254,14 @@ struct WaitArgs {
     /// SECONDS: watch it that long, then return while the run goes on
     #[arg(long, value_name = "SECONDS", num_args = 0..=1, require_equals = true)]
     wait: Option<Option<u64>>,
-    /// The same as --wait=SECONDS, kept for older scripts
-    #[arg(long, value_name = "SECONDS", hide = true)]
-    observe: Option<u64>,
 }
 
 impl WaitArgs {
     /// Whether to wait, and for how long at most: `None` waits for the outcome.
     fn wait(&self) -> (bool, Option<std::time::Duration>) {
-        let seconds = self.wait.flatten().or(self.observe);
         (
-            self.wait.is_some() || self.observe.is_some(),
-            seconds.map(std::time::Duration::from_secs),
+            self.wait.is_some(),
+            self.wait.flatten().map(std::time::Duration::from_secs),
         )
     }
 }
@@ -294,7 +275,7 @@ struct InstallArgs {
     machine: bool,
     /// The repository's main branch, written to git config bay.trunk (default: what it holds,
     /// else the remote's default branch)
-    #[arg(long, conflicts_with = "machine")]
+    #[arg(long = "main", value_name = "BRANCH", conflicts_with = "machine")]
     trunk: Option<String>,
     /// Main's remote, written to git config bay.remote (default: what it holds, else
     /// origin)
@@ -307,7 +288,7 @@ struct TalkArgs {
     /// The agent who owes the reply (a person's name works too)
     #[arg(value_name = "AGENT")]
     actor: Option<String>,
-    /// Send to the agent that landed this change (a change id or its commit on main), read from
+    /// Send to the agent that merged this change (a change id or its commit on main), read from
     /// bay's publication record; then the one argument is the action
     #[arg(long, value_name = "CHANGE")]
     to_change: Option<String>,
@@ -389,7 +370,8 @@ enum HostAction {
     /// Create a bare repository on reftable whose main is append-only
     Init {
         path: PathBuf,
-        #[arg(long, default_value = "main")]
+        /// The name of main
+        #[arg(long = "main", value_name = "BRANCH", default_value = "main")]
         trunk: String,
         /// By default the object format of the repository bay runs in, else Git's default
         #[arg(long, value_parser = ["sha1", "sha256"])]
@@ -463,16 +445,16 @@ enum EvidenceAction {
 }
 
 #[derive(Subcommand)]
-enum AdapterAction {
-    /// Run the contract cases of one adapter kind against a command; exits 0 only when every
+enum PluginAction {
+    /// Run the contract cases of one plugin kind against a command; exits 0 only when every
     /// case passes
     Test(AdapterTestArgs),
 }
 
 #[derive(Args)]
 struct AdapterTestArgs {
-    /// The adapter kind: `check` (a policy's `[[check]]`), `wake` (`[wake] command`) or
-    /// `notify` (`[notify] command`)
+    /// The adapter kind: `check` (a policy's `[[check]]`), `wake` (`[plugin.wake] command`) or
+    /// `notify` (`[plugin.notify] command`)
     #[arg(value_parser = bay::adapter::KINDS)]
     kind: String,
     /// Check: the entry's `timeout_s` (default: the policy's default)
@@ -497,7 +479,7 @@ struct AdapterTestArgs {
 }
 
 #[derive(Subcommand)]
-enum ExecutorAction {
+enum RunnerAction {
     /// Drive queued operations to an outcome on this machine
     Run {
         /// Make one pass and exit
@@ -507,7 +489,7 @@ enum ExecutorAction {
         #[arg(long, default_value = "10")]
         interval_s: u64,
     },
-    /// Write a service that keeps `bay executor run` running for this repository (a launchd
+    /// Write a service that keeps `bay runner run` running for this repository (a launchd
     /// agent on macOS, a systemd user unit on Linux), and print the one command that starts it
     Install {
         /// Show the service file and write nothing
@@ -520,22 +502,20 @@ enum ExecutorAction {
 }
 
 /// The `CONFIG_MISSING` refusal of a command that needs the trunk or policy, so needs the
-/// `.bay/config.toml` committed at trunk (ruling: config location), or its `BAY_BELOW_FLOOR`
+/// `.bay/config.toml` committed at trunk (ruling: config location), or its `TOOL_BELOW_FLOOR`
 /// refusal when that config names a newer bay (G317), before anything else the command does.
 /// The host, doctor's box rows, install, update and the agent hook do not.
 fn config_refusal(cli: &Cli) -> Option<BayResult> {
     // `status --fleet` never fetches (G49): it reads the config without a fetch itself.
-    // `status --stranded` reads local refs only, and needs no config (G156).
     let needs_config = !matches!(
         cli.command,
         Command::Status { fleet: true, .. }
-            | Command::Status { stranded: true, .. }
             | Command::Host { .. }
             | Command::Doctor { .. }
             | Command::Install(_)
             | Command::Update { .. }
             | Command::Hook { .. }
-            | Command::Adapter { .. }
+            | Command::Plugin { .. }
             | Command::Help { .. }
     );
     needs_config
@@ -561,7 +541,7 @@ fn parse() -> Cli {
         std::process::exit(0);
     }
     let cli = Cli::parse();
-    if !matches!(cli.command, Command::Executor { .. }) {
+    if !matches!(cli.command, Command::Runner { .. }) {
         let _ = bay::update::own_binary();
     }
     cli
@@ -593,7 +573,7 @@ fn stdout_is_terminal() -> bool {
             && std::env::var_os("BAY_TEST_STDOUT_TERMINAL").is_some())
 }
 
-/// `bay executor run`: its result, then, between operations, the new version in its place.
+/// `bay runner run`: its result, then, between operations, the new version in its place.
 fn executor_run(dir: &std::path::Path, json: bool, once: bool, interval_s: u64) -> ExitCode {
     let result = bay::executor::run(dir, once, std::time::Duration::from_secs(interval_s));
     bay::coord::after_command();
@@ -603,16 +583,12 @@ fn executor_run(dir: &std::path::Path, json: bool, once: bool, interval_s: u64) 
     code
 }
 
-/// `bay approve`: the approval its arguments ask for.
+/// `bay approve` or `bay reject`: the approval its arguments ask for.
 fn approve_change(dir: &std::path::Path, command: Command) -> BayResult {
-    let Command::Approve {
-        change,
-        reject,
-        waive,
-        why,
-    } = command
-    else {
-        unreachable!("approve_change takes an approve command");
+    let (change, reject, waive, why) = match command {
+        Command::Approve { change, waive, why } => (change, false, waive, why),
+        Command::Reject { change, why } => (change, true, None, why),
+        _ => unreachable!("approve_change takes an approve or reject command"),
     };
     bay::approve::approve(
         dir,
@@ -625,8 +601,8 @@ fn approve_change(dir: &std::path::Path, command: Command) -> BayResult {
     )
 }
 
-/// `bay abandon [CHANGE]` (G301): the abandon request `bay land --abandon` submits, by the same
-/// call; with no change, the change of the view bay runs in.
+/// `bay abandon [CHANGE]` (G301): the abandon request; with no change, the change of the view
+/// bay runs in.
 fn abandon(dir: &std::path::Path, change: Option<&str>) -> BayResult {
     bay::publish::land(dir, change, false, None, true)
 }
@@ -652,10 +628,8 @@ fn enrol(dir: &std::path::Path, args: EnrolArgs) -> BayResult {
 fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
     let Command::Start {
         intent,
-        intent_revision,
         paths,
         inputs,
-        resume,
         new,
         fixes,
         lane,
@@ -668,12 +642,12 @@ fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
     bay::start::start(
         dir,
         &bay::start::StartRequest {
-            intent,
+            intent: Some(intent),
             new,
-            intent_revision,
+            intent_revision: "1".to_owned(),
             paths,
             inputs,
-            resume,
+            resume: None,
             reverts: None,
             fixes,
             lane,
@@ -693,7 +667,9 @@ fn main() -> ExitCode {
         start @ Command::Start { .. } => start_change(&cli.dir, start),
         Command::Save { intent, message } => save(&cli.dir, intent, message),
         Command::Waiting => bay::approve::waiting(&cli.dir),
-        approve @ Command::Approve { .. } => approve_change(&cli.dir, approve),
+        approve @ (Command::Approve { .. } | Command::Reject { .. }) => {
+            approve_change(&cli.dir, approve)
+        }
         Command::Undo { change, wait } => {
             let (wait, observe) = wait.wait();
             bay::undo::undo(&cli.dir, &change, wait, observe)
@@ -703,20 +679,9 @@ fn main() -> ExitCode {
             bundle,
             remote,
         } => bay::share::share(&cli.dir, &change, bundle.as_deref(), remote.as_deref()),
-        Command::Land {
-            change,
-            change_flag,
-            wait,
-            abandon,
-        } => {
+        Command::Merge { change, wait } => {
             let (wait, observe) = wait.wait();
-            bay::publish::land(
-                &cli.dir,
-                change.or(change_flag).as_deref(),
-                wait,
-                observe,
-                abandon,
-            )
+            bay::publish::land(&cli.dir, change.as_deref(), wait, observe, false)
         }
         Command::Abandon { change } => abandon(&cli.dir, change.as_deref()),
         Command::Host {
@@ -730,29 +695,25 @@ fn main() -> ExitCode {
         Command::Host {
             action: HostAction::Hook { event, args },
         } => return ExitCode::from(bay::host::hook(&event, &args)),
-        Command::Executor {
-            action: ExecutorAction::Run { once, interval_s },
+        Command::Runner {
+            action: RunnerAction::Run { once, interval_s },
         } => return executor_run(&cli.dir, cli.json, once, interval_s),
-        Command::Executor {
-            action: ExecutorAction::Install { print, force },
+        Command::Runner {
+            action: RunnerAction::Install { print, force },
         } => bay::service::install(&cli.dir, &bay::service::Request { print, force }),
         Command::Live { action } => live(&cli.dir, action),
         command @ Command::Status { .. } => status(&cli.dir, command),
         // The one prune: the same request `status --heads --prune` makes (G302).
         Command::Prune { stale_days } => heads(&cli.dir, true, stale_days),
-        Command::Watch { since, landed } if landed => bay::watch::landed(&cli.dir, since.as_ref()),
-        Command::Watch { since, .. } => bay::watch::watch(&cli.dir, since.as_ref()),
         Command::Talk(args) => talk(&cli.dir, *args),
         Command::Evidence { action } => evidence(&cli.dir, action),
         Command::Enrol(args) => enrol(&cli.dir, args),
         Command::Doctor { role } => doctor(&cli.dir, role.as_deref()),
         Command::Install(args) => install(&cli.dir, args),
-        Command::Update {
-            channel: _,
-            version,
-            check,
-        } => bay::update::update(&bay::update::Request { version, check }),
-        Command::Adapter { action } => adapter(&cli.dir, action),
+        Command::Update { version, check } => {
+            bay::update::update(&bay::update::Request { version, check })
+        }
+        Command::Plugin { action } => plugin(&cli.dir, action),
         Command::Help { command } => return help(&command, cli.json),
         Command::Hook { event } => {
             // The agent hook follows the agent product's exit protocol (INTERFACES § 1): for
@@ -766,7 +727,7 @@ fn main() -> ExitCode {
             return ExitCode::from(outcome.exit);
         }
     };
-    // A command that fetched trunk leaves the coordination cache the `pre-tool` hook reads
+    // A command that fetched trunk leaves the coordination cache the `tool.before` hook reads
     // (`DESIGN` § 11); a hook never writes it.
     bay::coord::after_command();
     render(&result, cli.json)
@@ -798,9 +759,9 @@ fn doctor(dir: &std::path::Path, role: Option<&str>) -> BayResult {
     result
 }
 
-/// `bay adapter test <kind> -- <command...>`: the conformance kit, which changes nothing.
-fn adapter(dir: &std::path::Path, action: AdapterAction) -> BayResult {
-    let AdapterAction::Test(args) = action;
+/// `bay plugin test <kind> -- <command...>`: the conformance kit, which changes nothing.
+fn plugin(dir: &std::path::Path, action: PluginAction) -> BayResult {
+    let PluginAction::Test(args) = action;
     bay::adapter::test(
         dir,
         &bay::adapter::Test {
@@ -825,7 +786,7 @@ fn live(dir: &std::path::Path, action: LiveAction) -> BayResult {
 }
 
 /// The census of the remote's branches, and with `prune` the prune of the landed ones: the one
-/// path of `bay status --heads`, `bay prune` and `bay status --heads --prune` (G302).
+/// path of `bay status --heads`, `bay prune` and `bay prune` (G302).
 fn heads(dir: &std::path::Path, prune: bool, stale_days: Option<u64>) -> BayResult {
     bay::heads::heads(dir, &bay::heads::Request { prune, stale_days })
 }
@@ -836,23 +797,32 @@ fn status(dir: &std::path::Path, command: Command) -> BayResult {
     let Command::Status {
         change,
         fleet,
-        stranded,
         lineage,
         heads: every_head,
-        prune,
         stale_days,
+        since,
+        merged,
     } = command
     else {
         unreachable!("status takes a status command");
     };
     if every_head {
-        return heads(dir, prune, stale_days);
+        return heads(dir, false, stale_days);
     }
     if fleet {
         return bay::fleet::fleet(dir);
     }
-    if stranded {
-        return bay::stranded::stranded(dir);
+    // 0.3.0: what `bay status --since` was; an empty cursor reads from the start.
+    if let Some(since) = since {
+        // `since_cursor` parsed it already: a bad cursor is a usage error.
+        let cursor = Some(since.as_str())
+            .filter(|text| !text.is_empty())
+            .and_then(|text| bay::watch::Cursor::parse(text).ok());
+        return if merged {
+            bay::watch::landed(dir, cursor.as_ref())
+        } else {
+            bay::watch::watch(dir, cursor.as_ref())
+        };
     }
     if let Some(range) = lineage {
         return bay::lineage::lineage(dir, Some(range.as_str()));

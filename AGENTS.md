@@ -35,7 +35,7 @@ A promise is done when its failure test passes in bay's gate, and the pass is on
 
 - bay is not a code-review tool. Review is an outside producer of evidence, and bay never calls a model.
   No model sits in bay's decision path.
-- bay does not carry any one organisation's landing tooling.
+- bay does not carry any one organisation's merge tooling.
 
 ## One place, one truth
 
@@ -59,7 +59,7 @@ learn.
 
 bay is a general tool. Nothing in this repository is specific to one organisation: no organisation's
 names, hosts, paths, tools, trunk names, trailers, commands, defaults, examples or test fixtures. What an
-organisation needs goes in its own `.bay/config.toml` and `.bay/policy.toml`, in an adapter behind a
+organisation needs goes in its own `.bay/config.toml` and `.bay/policy.toml`, in a plugin behind a
 public contract, or in its own docs. A feature that only makes sense for one organisation does not go
 into bay. Defaults are plain Git ones: `main`, any host.
 

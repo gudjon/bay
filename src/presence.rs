@@ -1,7 +1,7 @@
 //! An executor's presence, `refs/bay/executor/<executor>` (G67; fleet-rollout-analysis F6).
 //!
 //! An executor that is down cannot otherwise be seen: agents on other boxes see no process, and
-//! an idle executor writes nothing else to the remote. So each `bay executor run` pass publishes
+//! an idle executor writes nothing else to the remote. So each `bay runner run` pass publishes
 //! one small record of itself: one parentless commit whose tree is `presence.json` alone (schema
 //! `bay.executor/1`), replacing the ref's last one as a live summary does (`crate::live`). It
 //! names the executor, its machine (`bay.machine`, never a pid), its bay and Git versions, the
@@ -10,7 +10,7 @@
 //! drives first, if any (`holding`), and the live queue depth it saw. Under a key registry it is
 //! signed by the executor key, and the host hook takes it only from the executor it is named for.
 //!
-//! A looping executor writes it at most once per heartbeat (`[executor] heartbeat_s`). A write
+//! A looping executor writes it at most once per heartbeat (`[runner] heartbeat_s`). A write
 //! costs a fixed number of git spawns (one config read, four plumbing calls, one push) whatever
 //! the queue or the history holds, and a pass within a heartbeat of the last write spawns none.
 //! The write is best effort: a failure never stops the executor, and its outcome is kept in
@@ -405,7 +405,7 @@ pub fn no_live_executor(repo: &Repo, queued: usize) -> Option<Value> {
         "executor": executor,
         "seen_s": seen_s,
         "executors": executors,
-        "note": "operations are queued and no executor presence is fresh: they stay queued and land once an executor runs (bay executor run)",
+        "note": "operations are queued and no executor presence is fresh: they stay queued and land once an executor runs (bay runner run)",
     }))
 }
 

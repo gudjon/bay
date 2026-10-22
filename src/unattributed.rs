@@ -27,7 +27,7 @@
 //!   first lane named, and `lane_leaks` counts the landings that name one.
 //!
 //! `bay status` lists them under `detail.unattributed`, `bay status --fleet` the same from the
-//! local cache, and `bay watch` names each listed landing outside bay as an
+//! local cache, and `bay status --since` names each listed landing outside bay as an
 //! `unattributed_landing` event ([`event`]).
 
 use std::collections::BTreeMap;

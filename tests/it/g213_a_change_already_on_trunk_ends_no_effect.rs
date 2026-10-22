@@ -73,13 +73,13 @@ fn a_change_whose_bytes_another_landed_first_ends_no_effect() {
     // Both write the same src/new.rs.
     let (_, first) = test_box.start_and_edit(&repo);
     let (second_id, second) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&first).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&first).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let trunk = landed["detail"]["commit"].as_str().unwrap().to_owned();
     let tree = test_box.git_ok(&repo, &["rev-parse", &format!("{trunk}^{{tree}}")]);
     let records = evidence_on(&test_box, &repo, &tree);
 
-    let (code, result) = result_json(test_box.bay(&second).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&second).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
     assert_no_effect(&test_box, &repo, &second_id, &result, &trunk);
     assert_eq!(
@@ -109,7 +109,7 @@ fn a_change_whose_edits_cancel_out_ends_no_effect() {
         .to_owned();
     let (id, view) = test_box.start_and_edit(&repo);
     std::fs::remove_file(view.join("src/new.rs")).unwrap();
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
     assert_no_effect(&test_box, &repo, &id, &result, &trunk);
 }

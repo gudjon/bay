@@ -27,9 +27,8 @@
 //! local branches no remote-tracking ref holds, worktree records whose folder is gone), read
 //! from local refs only, so one view shows every head (G302).
 //!
-//! `bay prune` deletes; `bay status --heads` alone never does (G302). Its older
-//! spelling `bay status --heads --prune` is the same request, through the same `heads`. It
-//! deletes the `landed` branches proven by `ancestor` or `patch`, and nothing else: never the
+//! `bay prune` deletes; `bay status --heads` alone never does (G302). Both go through the same
+//! `heads`. `bay prune` deletes the `landed` branches proven by `ancestor` or `patch`, and nothing else: never the
 //! trunk, a target, a lane ref, a stale or a unique branch, and never one landed by
 //! `change` alone (a branch can carry a landed change's `Change-Id` and still hold edits that
 //! never landed). For each branch it deletes, in this order:
@@ -46,11 +45,11 @@
 //! 3. it deletes the branch under a lease of the tip the census judged
 //!    (`--force-with-lease=refs/heads/<name>:<sha>`), so a branch someone moved since is
 //!    refused by the remote, not deleted;
-//! 4. when the config at the trunk's tip sets `[heads] on_prune` (N-19), it runs that prune
+//! 4. when the config at the trunk's tip sets `[plugin.prune] command` (N-19), it runs that prune
 //!    adapter once for the branch it deleted: `<on_prune> pruned <name> <sha> <archive ref>`,
 //!    its program materialized from the trunk's tip the way the hold adapter's is
 //!    (`crate::hold::run_from_trunk`), never taken from this machine's work tree, within
-//!    `[heads] timeout_s` (30 s unless set). The adapter is where a team reaches outside the
+//!    `[plugin.prune] timeout_s` (30 s unless set). The adapter is where a team reaches outside the
 //!    repository, to close the branch's open pull request on its host for example; bay itself
 //!    never does. Its outcome is recorded on the branch's `pruned` row as `on_prune: {ok, why}`
 //!    (`why`: the exit status and the first line of its stderr, or why it did not run). A
@@ -79,7 +78,7 @@ pub const DEFAULT_STALE_DAYS: u64 = 30;
 /// The file under `<common dir>/bay/` that holds one restore line per pruned branch.
 pub const LOG_FILE: &str = "pruned-heads.log";
 
-/// How long the prune adapter may take when `[heads] timeout_s` is not set (N-19).
+/// How long the prune adapter may take when `[plugin.prune] timeout_s` is not set (N-19).
 pub const DEFAULT_ON_PRUNE_TIMEOUT_S: u64 = 30;
 
 /// The first argument the prune adapter is run with (N-19).
@@ -87,7 +86,7 @@ pub const PRUNED: &str = "pruned";
 
 /// What `bay status --heads` or `bay prune` was asked.
 pub struct Request {
-    /// Delete the landed branches: `bay prune`, or `bay status --heads --prune`.
+    /// Delete the landed branches: `bay prune`, or `bay prune`.
     pub prune: bool,
     /// The stale age in days; [`DEFAULT_STALE_DAYS`] when `None`.
     pub stale_days: Option<u64>,
@@ -188,7 +187,7 @@ impl Head {
 }
 
 /// The census of the remote's branches; with [`Request::prune`], the prune of the landed ones.
-/// `bay status --heads`, `bay prune` and `bay status --heads --prune` all come here.
+/// `bay status --heads`, `bay prune` and `bay prune` all come here.
 #[must_use]
 pub fn heads(dir: &Path, request: &Request) -> BayResult {
     run(dir, request).unwrap_or_else(BayResult::failed)
@@ -586,10 +585,12 @@ fn prune(
     log: &Path,
 ) -> (Vec<Value>, Vec<Value>) {
     let git = &repo.git;
-    let adapter = repo.config.heads.as_ref().and_then(|heads| {
-        let command = heads.on_prune.as_deref()?;
-        let timeout = heads.timeout_s.unwrap_or(DEFAULT_ON_PRUNE_TIMEOUT_S);
-        Some((command, Duration::from_secs(timeout)))
+    let adapter = repo.config.plugin.prune.as_ref().and_then(|prune| {
+        let command = prune.command.as_deref()?;
+        Some((
+            command,
+            prune.timeout(Duration::from_secs(DEFAULT_ON_PRUNE_TIMEOUT_S)),
+        ))
     });
     let mut pruned = Vec::new();
     let mut skipped = Vec::new();
@@ -705,7 +706,7 @@ fn on_prune(
     match crate::hold::run_from_trunk(
         repo,
         trunk_tip,
-        "[heads] on_prune",
+        "[plugin.prune] command",
         command,
         &[PRUNED, name, sha, archive],
         timeout,

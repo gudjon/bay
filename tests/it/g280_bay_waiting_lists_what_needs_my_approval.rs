@@ -42,7 +42,7 @@ fn waiting_lists_the_held_change_with_its_candidate_paths_and_diff_and_nothing_e
     let (_, view) = trunk.start("CARD-src", &["src/"], &[("src/other.rs", "fn o() {}\n")]);
     let (code, landed) = trunk.land(&view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let (_, view) = trunk.start(
         "CARD-failing",
         &["billing/", "src/"],

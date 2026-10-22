@@ -44,9 +44,9 @@ fn start(
     (id, view)
 }
 
-/// `bay land --wait` in `view`.
+/// `bay merge --wait` in `view`.
 fn land(test_box: &TestBox, view: &Path) -> (i32, Value) {
-    result_json(test_box.bay(view).args(["land", "--wait"]))
+    result_json(test_box.bay(view).args(["merge", "--wait"]))
 }
 
 /// `bay evidence record` of a passing approval about `commit`, from `dir`.

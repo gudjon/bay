@@ -43,7 +43,7 @@ fn submitted(
         &check_files("true", result, 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     let executor = test_box.clone_of(&remote, "executor");
     (test_box, repo, executor, remote, id)
@@ -59,7 +59,7 @@ fn disconnected_while_queued() {
         "{status}"
     );
     assert_eq!(change(&status)["operation"]["published"], false);
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let status = test_box.bay_ok(&repo, &["status", &id]);
     assert_eq!(change(&status)["state"], "landed");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
@@ -72,14 +72,14 @@ fn disconnected_while_running() {
     let killed = test_box
         .bay(&executor)
         .env("BAY_TEST_KILL_AT", "after-commit")
-        .args(["executor", "run", "--once"])
+        .args(["runner", "run", "--once"])
         .output()
         .unwrap();
     assert_eq!(killed.status.code(), Some(137));
     let status = test_box.bay_ok(&repo, &["status", &id]);
     assert_ne!(change(&status)["state"], "landed", "{status}");
     assert_eq!(change(&status)["operation"]["published"], false);
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let status = test_box.bay_ok(&repo, &["status", &id]);
     assert_eq!(change(&status)["state"], "landed");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
@@ -90,7 +90,7 @@ fn disconnected_while_running() {
 fn disconnected_after_a_receipt_is_stored() {
     let failing = passing_result(1).replace("\\\"pass\\\"", "\\\"product_failure\\\"");
     let (test_box, repo, executor, remote, id) = submitted(&failing);
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let op = &change(&status)["operation"];
     assert_eq!(op["outcome"], "CHECK_FAILED", "{status}");
@@ -100,7 +100,7 @@ fn disconnected_after_a_receipt_is_stored() {
         "{status}"
     );
     // Reconnecting again adds nothing.
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let status = test_box.bay_ok(&repo, &["status", &id]);
     assert_eq!(
         change(&status)["receipts"].as_array().unwrap().len(),
@@ -117,17 +117,17 @@ fn disconnected_after_publication_before_the_acknowledgement() {
     let killed = test_box
         .bay(&executor)
         .env("BAY_TEST_KILL_AT", "after-publish")
-        .args(["executor", "run", "--once"])
+        .args(["runner", "run", "--once"])
         .output()
         .unwrap();
     assert_eq!(killed.status.code(), Some(137));
     let status = test_box.bay_ok(&repo, &["status", &id]);
     assert_eq!(change(&status)["state"], "landed", "{status}");
     let view = repo.join(".git/bay/views").join(&id);
-    let (code, again) = result_json(test_box.bay(&view).arg("land"));
+    let (code, again) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{again}");
-    assert_eq!(again["decision"], "landed");
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    assert_eq!(again["decision"], "merged");
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
     assert_eq!(operations(&test_box, &executor, &id), 1);
 }

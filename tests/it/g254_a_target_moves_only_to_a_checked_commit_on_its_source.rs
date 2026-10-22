@@ -6,9 +6,9 @@
 //! it the trunk does not reach (`drift`), its required checks and the newest promotable commit.
 //! On a bay host the hook refuses, with `PROMOTION_REFUSED`, a push that moves it to a commit off
 //! the trunk's first-parent line, or one whose required post check has not passed; a recorded
-//! pass makes the same push succeed. While a `[[freeze]]` is in force only a landing that
+//! pass makes the same push succeed. While a `[[hold]]` is in force only a landing that
 //! carries `Fixes:` is promoted. On a forge, which enforces nothing, the same reading detects a
-//! target moved off the trunk as drift, and `bay watch` names the move.
+//! target moved off the trunk as drift, and `bay status --since` names the move.
 
 // Each case runs shell scripts (adapters), so these run on Unix only.
 #![cfg(unix)]
@@ -70,7 +70,7 @@ impl Hosted {
         let id = started["change"].as_str().unwrap().to_owned();
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join(path), format!("// {path}\n")).unwrap();
-        let (code, landed) = result_json(self.test_box.bay(&view).args(["land", "--wait"]));
+        let (code, landed) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{landed}");
         let commit = landed["detail"]["commit"].as_str().unwrap().to_owned();
         (id, commit)
@@ -213,7 +213,7 @@ fn a_bay_host_promotes_only_a_checked_commit_on_trunk() {
 #[test]
 fn a_freeze_refuses_a_plain_promotion_and_takes_a_fix() {
     let config = format!(
-        "{STAGING}\n[[freeze]]\ntarget = \"staging\"\nend = \"{}\"\nreason = \"release week\"\n",
+        "{STAGING}\n[[hold]]\ntarget = \"staging\"\nend = \"{}\"\nreason = \"release week\"\n",
         from_now(3600)
     );
     let hosted = hosted(&config);
@@ -267,7 +267,7 @@ fn on_a_forge_a_target_moved_off_trunk_is_drift_and_watch_names_it() {
         row["promotable"]["blocked_by"][0]["rule"], "not_fast_forward",
         "{row}"
     );
-    let watched = test_box.bay_ok(&repo, &["watch"]);
+    let watched = test_box.bay_ok(&repo, &["status", "--since"]);
     let events = watched["detail"]["events"].as_array().unwrap();
     let unpromotable = events
         .iter()
@@ -283,7 +283,7 @@ fn on_a_forge_a_target_moved_off_trunk_is_drift_and_watch_names_it() {
     let row = target(&test_box, &repo, "staging");
     assert_eq!(row["on_from"], true, "{row}");
     assert_eq!(row["drift"]["count"], 0, "{row}");
-    let watched = test_box.bay_ok(&repo, &["watch", "--since", &cursor]);
+    let watched = test_box.bay_ok(&repo, &["status", "--since", &cursor]);
     let moved = watched["detail"]["events"]
         .as_array()
         .unwrap()

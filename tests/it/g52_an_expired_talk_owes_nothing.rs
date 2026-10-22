@@ -115,7 +115,7 @@ fn closed(status: &Value) -> Vec<Value> {
 #[test]
 fn a_talk_read_after_it_expires_prints_expired_and_owes_no_backbrief() {
     let case = hosted_talk();
-    hook(&case, "session-start", "01-SessionStart.json");
+    hook(&case, "session.start", "01-SessionStart.json");
 
     // In time: read (acked) before `expires`.
     let (in_time, _) = send(&case, "Take the capture now", 5);
@@ -155,7 +155,7 @@ fn a_talk_read_after_it_expires_prints_expired_and_owes_no_backbrief() {
     assert_eq!(owed["owes"], "agent-b", "{owed}");
 
     // The notice prints EXPIRED for the late one, and the in-time one as it arrived.
-    let told = hook(&case, "post-tool", "08-PostToolBatch.json");
+    let told = hook(&case, "step.end", "08-PostToolBatch.json");
     assert!(
         told.contains(&format!(
             "bay: EXPIRED: talk {late} (delivery) arrived for agent-b after its `expires`, so it owes no backbrief: read it with `git show refs/bay/talk/agent-b/{late}:talk.json`\n"

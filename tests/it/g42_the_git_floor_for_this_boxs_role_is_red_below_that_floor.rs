@@ -17,7 +17,8 @@ fn an_agent_view_below_2_40_is_red() {
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["decision"], "blocked");
-    assert_eq!(result["reason"], "GIT_BELOW_FLOOR");
+    assert_eq!(result["reason"], "TOOL_BELOW_FLOOR");
+    assert_eq!(result["detail"]["tool"], "git", "{result}");
     let git = row(&result, "git");
     assert_eq!(git["role"], "agent-view");
     assert_eq!(git["floor"], "2.40");
@@ -41,7 +42,8 @@ fn a_bay_hosted_trunk_below_2_54_is_red() {
     test_box.fake_git_version("2.53.0");
     let (code, result) = result_json(test_box.bay(&host).arg("doctor"));
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "GIT_BELOW_FLOOR");
+    assert_eq!(result["reason"], "TOOL_BELOW_FLOOR");
+    assert_eq!(result["detail"]["tool"], "git", "{result}");
     let git = row(&result, "git");
     assert_eq!(git["role"], "bay-hosted-trunk");
     assert_eq!(git["floor"], "2.54");

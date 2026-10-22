@@ -9,7 +9,7 @@
 //! revoked is refused at its push; a later revocation does not strand a queued request. A
 //! newer revision or a cancel that races the publishing push wins at the hook and the losing
 //! operation is told it was superseded; a cancel or newer revision after the publish gets
-//! `CHANGE_ALREADY_LANDED`. A publication whose executor key was revoked after signing is
+//! `CHANGE_ALREADY_MERGED`. A publication whose executor key was revoked after signing is
 //! refused with `REGISTRY_CHANGED`, even when it names the older registry; an executor with a
 //! valid key re-signs it on the same tree and parent (taking it over at once, without waiting
 //! out a lease, when the revoked key was the publisher's own), reusing tree-keyed evidence and rerunning commit-keyed checks, and
@@ -162,7 +162,7 @@ fn a_dead_executor_is_replaced_and_the_publication_is_executor_signed() {
     // A second trunk commit whose first check is slow (pushed through bay is not needed: the
     // policy is already on trunk; this edit only changes the check script's behaviour).
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     std::fs::remove_dir_all(&view).ok();
 
@@ -176,7 +176,7 @@ fn a_dead_executor_is_replaced_and_the_publication_is_executor_signed() {
         .bay_process(&e1)
         .env("BAY_TEST_PAUSE_AT", "after-commit")
         .env("BAY_TEST_PAUSE_FILE", &started)
-        .args(["executor", "run", "--once"])
+        .args(["runner", "run", "--once"])
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -188,8 +188,8 @@ fn a_dead_executor_is_replaced_and_the_publication_is_executor_signed() {
     let _ = first.wait();
     let _ = marker;
 
-    let ran = test_box.bay_ok(&e2, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    let ran = test_box.bay_ok(&e2, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
     let tip = test_box.git_bare(&host, &["rev-parse", "main"]);
     assert!(test_box.executor_signed(&host, &keys, &tip));
@@ -218,7 +218,7 @@ fn a_dead_executor_is_replaced_and_the_publication_is_executor_signed() {
 fn the_hook_refuses_what_a_key_class_may_not_write() {
     let (test_box, _host, repo, keys) = hosted();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     test_box.git_ok(&repo, &["fetch", "-q", "origin"]);
     let trunk = test_box.git_ok(&repo, &["rev-parse", "origin/main"]);
@@ -427,7 +427,7 @@ fn the_hook_refuses_what_a_key_class_may_not_write() {
 fn a_revoked_agent_key_is_refused_at_push_but_a_queued_request_is_not_stranded() {
     let (test_box, host, repo, keys) = hosted();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     // The agent's key is revoked after its request was queued.
     test_box.enroll_with(&repo, &keys, &keys.executor, &[]);
@@ -438,8 +438,8 @@ fn a_revoked_agent_key_is_refused_at_push_but_a_queued_request_is_not_stranded()
     test_box.enroll(&repo, &rotated);
     let executor = test_box.clone_of(&host, "executor");
     test_box.use_keys(&executor, &keys);
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id]);
 
     // A new change and request signed by the revoked key are refused at their push.
@@ -502,7 +502,7 @@ fn request_text(change: &str, revision: &str, registry: &str) -> String {
 fn a_request_naming_a_registry_off_the_chain_is_refused_at_its_push() {
     let (test_box, _host, repo, keys) = hosted();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).arg("land"));
+    let (code, landed) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{landed}");
     test_box.git_ok(&repo, &["fetch", "-q", "origin"]);
     let trunk = test_box.git_ok(&repo, &["rev-parse", "origin/main"]);
@@ -543,7 +543,7 @@ fn a_request_naming_a_registry_off_the_chain_is_refused_at_its_push() {
 fn a_publication_naming_a_request_under_a_forged_registry_is_refused() {
     let (test_box, host, repo, keys) = hosted();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r1) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r1}");
     let release = test_box.path().join("release");
     let (mut held, executor) = held_executor(&test_box, &host, &keys, &release);
@@ -625,7 +625,7 @@ fn held_executor(
         .bay_process(&executor)
         .env("BAY_TEST_PAUSE_AT", "before-publish")
         .env("BAY_TEST_PAUSE_FILE", release)
-        .args(["--json", "executor", "run", "--once"])
+        .args(["--json", "runner", "run", "--once"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -659,13 +659,13 @@ fn finish(child: std::process::Child, release: &Path) -> serde_json::Value {
 fn a_newer_revision_that_races_the_publishing_push_wins_with_a_stated_answer() {
     let (test_box, host, repo, keys) = hosted();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r1) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r1}");
 
     let release = test_box.path().join("release");
     let (held, executor) = held_executor(&test_box, &host, &keys, &release);
     std::fs::write(view.join("src/new.rs"), "fn new() { r2 }\n").unwrap();
-    let (code, r2) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r2) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r2}");
     let lost = finish(held, &release);
     assert_eq!(lost["op_id"], format!("{id}.1"), "{lost}");
@@ -673,9 +673,9 @@ fn a_newer_revision_that_races_the_publishing_push_wins_with_a_stated_answer() {
     assert_eq!(lost["detail"]["superseded"], true, "{lost}");
     assert_eq!(test_box.trunk_change_ids(&host), Vec::<String>::new());
 
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(ran["detail"]["ran"][0]["op_id"], format!("{id}.2"), "{ran}");
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id]);
     assert_eq!(
         test_box.git_bare(&host, &["show", "main:src/new.rs"]),
@@ -689,12 +689,12 @@ fn a_newer_revision_that_races_the_publishing_push_wins_with_a_stated_answer() {
 fn a_cancel_that_races_the_publishing_push_wins_with_a_stated_answer() {
     let (test_box, host, repo, keys) = hosted();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r1) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r1}");
 
     let release = test_box.path().join("release");
     let (executor, _) = held_executor(&test_box, &host, &keys, &release);
-    let (code, abandoned) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    let (code, abandoned) = result_json(test_box.bay(&view).args(["abandon"]));
     assert_eq!(code, 0, "{abandoned}");
     let lost = finish(executor, &release);
     assert_eq!(lost["op_id"], format!("{id}.1"), "{lost}");
@@ -711,25 +711,25 @@ fn a_cancel_that_races_the_publishing_push_wins_with_a_stated_answer() {
 }
 
 /// The publish wins the race: a cancel or a newer revision that arrives after it is answered
-/// with the landing, `CHANGE_ALREADY_LANDED`, never left pending.
+/// with the landing, `CHANGE_ALREADY_MERGED`, never left pending.
 #[test]
 fn a_cancel_or_newer_revision_after_the_publish_is_answered_with_the_landing() {
     let (test_box, host, repo, keys) = hosted();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r1) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r1}");
     let executor = test_box.clone_of(&host, "executor");
     test_box.use_keys(&executor, &keys);
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
 
-    let (code, cancel) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    let (code, cancel) = result_json(test_box.bay(&view).args(["abandon"]));
     assert_eq!(code, 10, "{cancel}");
-    assert_eq!(cancel["reason"], "CHANGE_ALREADY_LANDED", "{cancel}");
+    assert_eq!(cancel["reason"], "CHANGE_ALREADY_MERGED", "{cancel}");
     std::fs::write(view.join("src/new.rs"), "fn new() { late }\n").unwrap();
-    let (code, newer) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, newer) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{newer}");
-    assert_eq!(newer["reason"], "CHANGE_ALREADY_LANDED", "{newer}");
+    assert_eq!(newer["reason"], "CHANGE_ALREADY_MERGED", "{newer}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id]);
 }
 
@@ -768,7 +768,7 @@ fn last_candidate(test_box: &TestBox, host: &Path, id: &str) -> String {
 fn a_revoked_executor_key_cannot_publish_by_naming_the_older_registry_id() {
     let (test_box, host, repo, keys) = hosted();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r1) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r1}");
     let release = test_box.path().join("release");
     let (mut held, executor) = held_executor(&test_box, &host, &keys, &release);
@@ -836,7 +836,7 @@ fn copy_of(
 fn a_publication_naming_a_registry_off_the_chain_is_refused() {
     let (test_box, host, repo, keys) = hosted();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r1) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r1}");
     let release = test_box.path().join("release");
     let (mut held, executor) = held_executor(&test_box, &host, &keys, &release);
@@ -902,7 +902,7 @@ fn two_checks(test_box: &TestBox) -> Vec<(String, String)> {
         // holder's lease is not waited out).
         (
             ".bay/config.toml".to_owned(),
-            format!("[executor]\nlease_s = {LONG_LEASE_S}\nheartbeat_s = 1\n"),
+            format!("[runner]\nlease_s = {LONG_LEASE_S}\nheartbeat_s = 1\n"),
         ),
     ]
 }
@@ -965,7 +965,7 @@ fn assert_resigned(test_box: &TestBox, host: &Path, refused: &str, registry: &st
 }
 
 /// `REGISTRY_CHANGED` is not a retry of the same push (`INTERFACES` § 2): no publish retry was
-/// counted toward `PUBLISH_RETRY_EXHAUSTED`.
+/// counted toward `MERGE_RETRY_EXHAUSTED`.
 fn assert_no_publish_retry(test_box: &TestBox, host: &Path, id: &str) {
     let record = test_box.git_bare(
         host,
@@ -1018,8 +1018,8 @@ fn revoking_the_publishing_executor_key_between_signing_and_pushing_resigns_once
 
     let other = other_executor(&test_box, &host, &keys, &rotated, ("ci-2", &producer));
     let started = Instant::now();
-    let ran = test_box.bay_ok(&other, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    let ran = test_box.bay_ok(&other, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     assert!(
         started.elapsed() < Duration::from_secs(LONG_LEASE_S / 2),
         "the takeover waited out the revoked holder's lease: {:?}",
@@ -1072,8 +1072,8 @@ fn a_registry_change_the_executor_cannot_read_yet_leaves_the_operation_waiting()
     assert_eq!(test_box.trunk_change_ids(&host), Vec::<String>::new());
 
     test_box.git_bare(&host, &["config", "--unset", "uploadpack.hideRefs"]);
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
     assert_eq!(runs_of(&test_box), ["tests", "meta", "meta"]);
     assert_resigned(&test_box, &host, &refused_c, &registry);
@@ -1103,7 +1103,7 @@ fn an_executor_whose_box_holds_a_valid_key_re_signs_c_itself() {
     );
 
     let ran = finish(held, &release);
-    assert_eq!(ran["decision"], "landed", "{ran}");
+    assert_eq!(ran["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
     assert_eq!(runs_of(&test_box), ["tests", "meta", "meta"]);
     assert_resigned(&test_box, &host, &refused_c, &registry);
@@ -1136,7 +1136,7 @@ fn a_registry_change_revoking_only_the_producer_key_rechecks_and_re_signs() {
     );
 
     let ran = finish(held, &release);
-    assert_eq!(ran["decision"], "landed", "{ran}");
+    assert_eq!(ran["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
     assert_eq!(runs_of(&test_box), ["tests", "meta", "tests", "meta"]);
     assert_resigned(&test_box, &host, &refused_c, &registry);
@@ -1165,8 +1165,8 @@ fn a_revoked_producer_key_behind_the_pass_is_rechecked_before_the_re_sign() {
     let lost = finish(held, &release);
     assert_eq!(lost["reason"], "REGISTRY_CHANGED", "{lost}");
     let other = other_executor(&test_box, &host, &keys, &rotated, ("ci-2", &producer));
-    let ran = test_box.bay_ok(&other, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    let ran = test_box.bay_ok(&other, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id]);
     assert_eq!(runs_of(&test_box), ["tests", "meta", "tests", "meta"]);
     assert_resigned(&test_box, &host, &refused_c, &registry);
@@ -1177,7 +1177,7 @@ fn a_revoked_producer_key_behind_the_pass_is_rechecked_before_the_re_sign() {
 fn signed_and_held() -> Held {
     let (test_box, host, repo, keys) = hosted_with(two_checks);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r1) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r1}");
     let release = test_box.path().join("release");
     let (child, _) = held_executor(&test_box, &host, &keys, &release);
@@ -1231,7 +1231,7 @@ fn a_hook_event_of(test_box: &TestBox, cwd: &Path, session: &str) {
         "hook_event_name": "PostToolBatch", "tool_calls": []});
     let out = test_box
         .bay(cwd)
-        .args(["hook", "post-tool"])
+        .args(["hook", "step.end"])
         .write_stdin(payload.to_string())
         .output()
         .unwrap();
@@ -1382,7 +1382,7 @@ fn live_case_with(takeover_s: u64) -> (TestBox, PathBuf, PathBuf, PathBuf, PathB
         let mut files = check_files("true", &passing_result(1), 1, 60);
         files.push((
             ".bay/config.toml".to_owned(),
-            format!("[executor]\ntakeover_s = {takeover_s}\n"),
+            format!("[runner]\ntakeover_s = {takeover_s}\n"),
         ));
         files
     });

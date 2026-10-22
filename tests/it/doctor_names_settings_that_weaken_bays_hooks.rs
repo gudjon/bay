@@ -47,7 +47,7 @@ fn no_weakening_settings_is_green() {
     // A local file that adds another tool's hook and keeps bay's events alone weakens nothing.
     write(
         &repo.join(".claude/settings.local.json"),
-        &json!({"hooks": {"Notification": [{"hooks": [{"type": "command", "command": "bay hook notification"}, {"type": "command", "command": "other-tool notify"}]}]},
+        &json!({"hooks": {"Notification": [{"hooks": [{"type": "command", "command": "bay hook session.wait"}, {"type": "command", "command": "other-tool notify"}]}]},
             "permissions": {"allow": ["Bash(ls)"]}}),
     );
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));

@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use super::Event;
 
-/// The edit tools whose target `pre-tool` judges (§ 11a's `PreToolUse` row).
+/// The edit tools whose target `tool.before` judges (§ 11a's `PreToolUse` row).
 pub(super) const EDIT_TOOLS: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
 
 /// The targets `tool` names when it is an edit tool, as the payload gives them: absolute, or

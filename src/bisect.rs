@@ -4,7 +4,7 @@
 //!
 //! A post check (`stage = "post"`, G91) that tests only some trunk tips leaves a [`Suspect`]
 //! range: the landings after its newest pass up to its first failure. Off by default, with
-//! `[executor] bisect_post = true` in `.bay/config.toml` at trunk, an executor pass narrows it:
+//! `[runner] bisect_post = true` in `.bay/config.toml` at trunk, an executor pass narrows it:
 //!
 //! - Only a red check whose range holds more than one landing and has a pass below it, on a
 //!   box that serves the check's environment (`bay.checkEnvironment`), and only when the
@@ -38,7 +38,7 @@ use crate::signing::{Keys, Signer};
 pub const CULPRIT: &str = "culprit";
 
 /// What this executor pass did for each red post check over more than one landing, or `None`
-/// when `[executor] bisect_post` is off or no such check is red. A fault is reported, never
+/// when `[runner] bisect_post` is off or no such check is red. A fault is reported, never
 /// fatal to the pass: the queue does not wait on culprit finding.
 #[must_use]
 pub fn run(repo: &Repo) -> Option<Value> {

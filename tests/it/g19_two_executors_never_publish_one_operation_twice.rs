@@ -31,7 +31,7 @@ fn submitted(test_box: &TestBox) -> (String, PathBuf, PathBuf, PathBuf) {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     let a = test_box.clone_of(&remote, "executor-a");
     let b = test_box.clone_of(&remote, "executor-b");
@@ -61,14 +61,14 @@ impl Drop for Held {
     }
 }
 
-/// `bay executor run --once` in `clone`, held at publication boundary `at` until the file
+/// `bay runner run --once` in `clone`, held at publication boundary `at` until the file
 /// `release` exists. Returns once the executor has reached the boundary.
 fn paused_at(test_box: &TestBox, clone: &Path, at: &str, release: &Path) -> Held {
     let child = test_box
         .bay_process(clone)
         .env("BAY_TEST_PAUSE_AT", at)
         .env("BAY_TEST_PAUSE_FILE", release)
-        .args(["--json", "executor", "run", "--once"])
+        .args(["--json", "runner", "run", "--once"])
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -120,7 +120,7 @@ fn the_loser_records_superseded_when_it_resumes_before_the_publication() {
     );
 
     let winner = resumed(second);
-    assert_eq!(winner["decision"], "landed", "{winner}");
+    assert_eq!(winner["decision"], "merged", "{winner}");
     assert_ne!(winner["detail"]["existing"], true, "{winner}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
 }
@@ -135,14 +135,14 @@ fn the_loser_reports_the_existing_publication_when_it_resumes_after_it() {
     let release_a = test_box.path().join("release-a");
     let first = paused_at(&test_box, &a, "after-persist", &release_a);
 
-    let ran = test_box.bay_ok(&b, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&b, &["runner", "run", "--once"]);
     let winner = &ran["detail"]["ran"][0];
-    assert_eq!(winner["decision"], "landed", "{ran}");
+    assert_eq!(winner["decision"], "merged", "{ran}");
     assert_ne!(winner["detail"]["existing"], true, "{ran}");
     let tip = test_box.git_bare(&remote, &["rev-parse", "main"]);
 
     let loser = resumed(first);
-    assert_eq!(loser["decision"], "landed", "{loser}");
+    assert_eq!(loser["decision"], "merged", "{loser}");
     assert_eq!(loser["detail"]["existing"], true, "{loser}");
     assert_eq!(loser["detail"]["commit"], tip.as_str(), "{loser}");
     assert_eq!(
@@ -166,7 +166,7 @@ fn run(test_box: &TestBox, round: usize) {
         &check_files("sleep 1", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
 
     let one = test_box.clone_of(&remote, &format!("executor-a{round}"));
@@ -204,7 +204,7 @@ fn run(test_box: &TestBox, round: usize) {
     );
     let published = results
         .iter()
-        .filter(|result| result["decision"] == "landed" && result["detail"]["existing"] != true)
+        .filter(|result| result["decision"] == "merged" && result["detail"]["existing"] != true)
         .count();
     assert_eq!(published, 1, "exactly one executor publishes: {outputs:?}");
     let log = test_box.git_bare(
@@ -212,7 +212,7 @@ fn run(test_box: &TestBox, round: usize) {
         &["log", "--format=%s", &format!("refs/bay/changes/{id}")],
     );
     for result in &results {
-        let landed = result["decision"] == "landed";
+        let landed = result["decision"] == "merged";
         let superseded = result["detail"]["superseded"] == true;
         assert!(
             landed || superseded,

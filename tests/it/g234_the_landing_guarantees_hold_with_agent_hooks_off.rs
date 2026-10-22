@@ -69,9 +69,9 @@ fn what_lands_is_exactly_what_was_checked_with_hooks_off() {
     test_box.clone_of(&remote, "other");
     let (id, view) = start(&test_box, &repo);
 
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed");
+    assert_eq!(result["decision"], "merged");
     assert_hooks_off(&test_box, &[&repo, &view]);
     let published = result["detail"]["commit"].as_str().unwrap().to_owned();
 
@@ -120,7 +120,7 @@ fn a_rewound_trunk_is_never_forced_with_hooks_off() {
     let (_, view) = start(&test_box, &repo);
     test_box.git_bare(&remote, &["update-ref", "refs/heads/main", &first]);
 
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 20, "{result}");
     assert!(
         result["detail"].as_str().unwrap().contains("rewound"),
@@ -152,7 +152,7 @@ fn unknown_is_never_pass_with_hooks_off() {
             &check_files(before, printed, 1, 60),
         );
         let (_, view) = start(&test_box, &repo);
-        let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+        let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 10, "{before}: {result}");
         assert_eq!(result["reason"], "CHECK_UNKNOWN", "{before}: {result}");
         assert_eq!(
@@ -181,9 +181,9 @@ fn an_executor_publishes_and_an_agent_cannot_push_trunk_with_hooks_off() {
     test_box.use_keys(&repo, &keys);
     let (id, view) = start(&test_box, &repo);
 
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_hooks_off(&test_box, &[&repo, &view]);
     assert_eq!(test_box.trunk_change_ids(&host), vec![id]);
     let tip = test_box.git_bare(&host, &["rev-parse", "main"]);

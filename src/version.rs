@@ -77,7 +77,7 @@ pub const BAY: &str = match option_env!("BAY_RELEASE_VERSION") {
 pub const GIT_FLOOR_ANY: &str = "2.40";
 pub const GIT_FLOOR_AGENT_VIEW: &str = "2.40";
 pub const GIT_FLOOR_HOSTED_TRUNK: &str = "2.54";
-/// The floor of a box in the executor role (`GIT-FEATURES` § 1), enforced by `bay executor
+/// The floor of a box in the executor role (`GIT-FEATURES` § 1), enforced by `bay runner
 /// run` and judged by `bay doctor --role executor` (G63, G68).
 pub const GIT_FLOOR_EXECUTOR: &str = "2.50";
 pub const GIT_SHARED_CACHE: &str = "2.48";

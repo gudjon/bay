@@ -36,7 +36,7 @@ fn land(case: &TalkCase, args: &[&str], file: &str, text: &str) -> (String, Stri
             .bay(&view)
             .env("BAY_ACTOR", "agent")
             .env("BAY_SESSION", "s-agent")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "{landed}");
     (id, trunk_tip(case))

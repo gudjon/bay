@@ -1,7 +1,7 @@
 //! G40. The holder can abandon and another actor can adopt.
 //!
 //! The current actor submits request kind `abandon` on an unlanded change (`bay abandon`, or
-//! `bay land --abandon`, G301) and the state becomes `abandoned`. A second actor adopts that
+//! `bay abandon`, G301) and the state becomes `abandoned`. A second actor adopts that
 //! intent with `bay start`. Another actor's abandon request is refused with
 //! `ABANDON_REFUSED`. Trunk does not move. The view remains.
 
@@ -25,7 +25,7 @@ fn the_holder_abandons_and_another_actor_adopts() {
     let mut files = check_files("true", &passing_result(1), 1, 60);
     files.push((
         ".bay/config.toml".to_owned(),
-        format!("[executor]\ntakeover_s = {TAKEOVER_S}\n"),
+        format!("[runner]\ntakeover_s = {TAKEOVER_S}\n"),
     ));
     let trunk = test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let started = test_box.bay_ok(&repo, &["start", "CARD-40", "--paths", "src/"]);
@@ -38,13 +38,13 @@ fn the_holder_abandons_and_another_actor_adopts() {
         test_box
             .bay(&view)
             .env("BAY_ACTOR", "someone-else")
-            .args(["land", "--abandon"]),
+            .args(["abandon"]),
     );
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "ABANDON_REFUSED");
 
     // The holder abandons: the state is abandoned; trunk and the view stay.
-    let (code, abandoned) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    let (code, abandoned) = result_json(test_box.bay(&view).args(["abandon"]));
     assert_eq!(code, 0, "{abandoned}");
     assert_eq!(abandoned["detail"]["state"], "abandoned");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
@@ -75,7 +75,7 @@ fn the_holder_abandons_and_another_actor_adopts() {
         test_box
             .bay(&view)
             .env("BAY_ACTOR", "agent-b")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
@@ -85,8 +85,8 @@ fn the_holder_abandons_and_another_actor_adopts() {
         test_box
             .bay(&view)
             .env("BAY_ACTOR", "agent-b")
-            .args(["land", "--abandon"]),
+            .args(["abandon"]),
     );
     assert_eq!(code, 10, "{late}");
-    assert_eq!(late["reason"], "CHANGE_ALREADY_LANDED");
+    assert_eq!(late["reason"], "CHANGE_ALREADY_MERGED");
 }

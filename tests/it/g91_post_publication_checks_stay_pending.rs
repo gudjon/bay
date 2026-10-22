@@ -72,9 +72,9 @@ fn a_post_check_never_blocks_and_stays_pending_until_its_record_arrives() {
     );
     let (test_box, repo, remote) = trunk(&policy);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "a red post check never blocks: {landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let commit = landed["detail"]["commit"].as_str().unwrap().to_owned();
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), commit);
     // The land result names the post check, pending for the landed commit.
@@ -161,7 +161,7 @@ fn one_check_id_in_both_stages_makes_the_policy_invalid() {
     let policy = format!("revision = 1\n{}{post}", entry("tests", ""));
     let (test_box, repo, _) = trunk(&policy);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
     assert!(
@@ -179,7 +179,7 @@ fn an_unknown_stage_makes_the_policy_invalid() {
     );
     let (test_box, repo, _) = trunk(&policy);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
 }

@@ -1,7 +1,7 @@
 //! G289. A local chain record is never moved back.
 //!
 //! A change's chain ref in this store can hold a state commit the remote lacks: work not yet
-//! pushed, here the request a `bay land` committed while the remote could not be reached
+//! pushed, here the request a `bay merge` committed while the remote could not be reached
 //! (G17). Every reader of the remote's chain reads it by one rule (`Repo::remote_chain`): it
 //! moves this store's chain ref only by fast-forward, and keeps a local head the remote lacks.
 //! So `bay start --new` on the change's intent, a plain `bay start` that adopts it, and an
@@ -52,7 +52,7 @@ fn unpushed() -> (TestBox, PathBuf, PathBuf, String, String) {
     // The remote is away while the request is committed, as in G17.
     let away = remote.with_extension("away");
     std::fs::rename(&remote, &away).unwrap();
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     std::fs::rename(&away, &remote).unwrap();
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["waiting_for"], "remote", "{queued}");
@@ -137,7 +137,7 @@ fn an_adoption_keeps_the_unpushed_commit() {
 #[test]
 fn an_executor_pass_pushes_the_unpushed_commit_first() {
     let (test_box, repo, remote, id, ahead) = unpushed();
-    let ran = test_box.bay_ok(&repo, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&repo, &["runner", "run", "--once"]);
     survives(&test_box, &repo, &remote, &id, &ahead, "an executor pass");
     let name = format!("refs/bay/changes/{id}");
     assert!(
@@ -167,7 +167,7 @@ fn an_executor_pass_whose_push_is_refused_keeps_the_unpushed_commit() {
     // The pass's own outcome is not this card's: only what it did to the chain ref is.
     let _ = test_box
         .bay(&repo)
-        .args(["executor", "run", "--once", "--json"])
+        .args(["runner", "run", "--once", "--json"])
         .output()
         .unwrap();
     let name = format!("refs/bay/changes/{id}");

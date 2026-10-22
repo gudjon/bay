@@ -115,7 +115,7 @@ impl Trunk {
     }
 
     fn land(&self, view: &Path) -> (i32, serde_json::Value) {
-        result_json(self.test_box.bay(view).args(["land", "--wait"]))
+        result_json(self.test_box.bay(view).args(["merge", "--wait"]))
     }
 
     /// `bay evidence record` of an approval with `verdict` about candidate `commit`, from `dir`.
@@ -253,13 +253,13 @@ fn a_change_to_an_approval_path_lands_only_with_an_enrolled_approvers_record() {
     assert_eq!(code, 0, "{approved}");
     let (code, landed) = trunk.land(&view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 
     // A change elsewhere needs no approval.
     let (_, view) = trunk.start("CARD-src", "src/other.rs");
     let (code, elsewhere) = trunk.land(&view);
     assert_eq!(code, 0, "{elsewhere}");
-    assert_eq!(elsewhere["decision"], "landed", "{elsewhere}");
+    assert_eq!(elsewhere["decision"], "merged", "{elsewhere}");
 }
 
 #[test]

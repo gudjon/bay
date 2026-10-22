@@ -6,7 +6,7 @@
 //! structure alone; a kind other than `delivery`, `discovery` or `reliability`, and a target
 //! field another kind owns, are refused; a body over `BAY_TALK_MAX_BYTES` is refused naming that
 //! bay limit; CRLF folds to LF and any other control character, a bare CR among them, is
-//! refused; a `decides` that is not a registry actor is refused. Each is `TALK_INVALID`, and
+//! refused; a `decides` that is not a registry actor is refused. Each is `TALK_REFUSED`, and
 //! nothing is committed. The host refuses the same shapes when a commit skips the sender's bay.
 //! `owns`, `promises`, `needs` and `promise_evidence` are fields on the talk; a talk names at
 //! most one of `target`, `forecast` and `commitment`, and `done` or `ready` labels neither a
@@ -24,8 +24,8 @@ fn refused(case: &TalkCase, args: &[&str]) -> Value {
     let (code, result) = case.talk("agent", args);
     assert_eq!(code, 10, "{args:?}: {result}");
     assert_eq!(result["decision"], "blocked", "{result}");
-    assert_eq!(result["reason"], "TALK_INVALID", "{args:?}: {result}");
-    assert_eq!(result["allowed"], json!(["repair"]), "{result}");
+    assert_eq!(result["reason"], "TALK_REFUSED", "{args:?}: {result}");
+    assert_eq!(result["allowed"], json!(["read", "repair"]), "{result}");
     result
 }
 
@@ -202,7 +202,7 @@ fn size_and_control_characters_are_bay_limits() {
     let oversize = "a".repeat(9000);
     let (code, result) = talk(&oversize);
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "TALK_INVALID");
+    assert_eq!(result["reason"], "TALK_REFUSED");
     assert_eq!(result["detail"]["limit"], "BAY_TALK_MAX_BYTES", "{result}");
     assert_eq!(result["detail"]["max_bytes"], 8192, "{result}");
     assert!(
@@ -223,7 +223,7 @@ fn size_and_control_characters_are_bay_limits() {
     for bad in ["Ship it\rnow", "Ship it\u{1b}[2J", "Ship\u{7}it"] {
         let (code, result) = talk(bad);
         assert_eq!(code, 10, "{bad:?}: {result}");
-        assert_eq!(result["reason"], "TALK_INVALID", "{result}");
+        assert_eq!(result["reason"], "TALK_REFUSED", "{result}");
         assert!(
             result["detail"]["why"]
                 .as_str()
@@ -322,19 +322,19 @@ fn the_host_refuses_a_bad_ask_that_skips_the_senders_bay() {
     };
     let mut two = good.clone();
     two["artifact"] = json!("dist/a.tar");
-    assert!(push(&two).contains("TALK_INVALID"));
+    assert!(push(&two).contains("TALK_REFUSED"));
     let mut list = good.clone();
     list["change"] = json!(["abcd2345", "wxyz6723"]);
-    assert!(push(&list).contains("TALK_INVALID"));
+    assert!(push(&list).contains("TALK_REFUSED"));
     let mut cr = good.clone();
     cr["what"] = json!("Ship\rit");
-    assert!(push(&cr).contains("TALK_INVALID"));
+    assert!(push(&cr).contains("TALK_REFUSED"));
     let mut big = good.clone();
     big["context"] = json!("a".repeat(9000));
     assert!(push(&big).contains("BAY_TALK_MAX_BYTES"));
     let mut decides = good;
     decides["decides"] = json!("nobody");
-    assert!(push(&decides).contains("TALK_INVALID"));
+    assert!(push(&decides).contains("TALK_REFUSED"));
 }
 
 /// `owns`, `promises`, `needs` and `promise_evidence` are fields on the same talk; `target`,
@@ -426,7 +426,7 @@ fn the_talk_words_are_fields_and_stay_distinct() {
     let commit = bay::talk::root_commit(&git, &both, &case.keys.agent, "agent").unwrap();
     let stderr = case.refused(&case.a, &format!("{commit}:{name}"));
     assert!(
-        stderr.contains("TALK_INVALID: a talk names at most one of"),
+        stderr.contains("TALK_REFUSED: a talk names at most one of"),
         "{stderr}"
     );
 }

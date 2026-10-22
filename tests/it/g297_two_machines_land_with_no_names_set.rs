@@ -40,7 +40,7 @@ fn land_from(trunk: &Trunk, dir: &Path, intent: &str, path: &str) -> (i32, Value
         .bay_ok(dir, &["start", intent, "--paths", "src/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join(path), "fn f() {}\n").unwrap();
-    support::result_json(trunk.test_box.bay(&view).args(["land", "--wait"]))
+    support::result_json(trunk.test_box.bay(&view).args(["merge", "--wait"]))
 }
 
 /// The clone's own `bay.producerName`.
@@ -65,13 +65,13 @@ fn a_second_machine_lands_and_each_keeps_a_name_of_its_own() {
 
     let (code, first) = land_from(&trunk, &trunk.repo, "CARD-one", "src/one.rs");
     assert_eq!(code, 0, "{first}");
-    assert_eq!(first["decision"], "landed", "{first}");
+    assert_eq!(first["decision"], "merged", "{first}");
 
     let host = trunk.test_box.path().join("host.git");
     let second = trunk.test_box.clone_of(&host, "second-box");
     let (code, landed) = land_from(&trunk, &second, "CARD-two", "src/two.rs");
     assert_eq!(code, 0, "the second machine could not land: {landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 
     // Each clone keeps one name, its own, from one command to the next.
     let one = producer_name(&trunk, &trunk.repo);

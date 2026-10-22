@@ -41,7 +41,7 @@ fn a_missing_required_check_blocks_publication() {
         ],
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_UNKNOWN");
     assert_eq!(blocked["detail"]["checks"][0]["check"], "lint", "{blocked}");
@@ -64,7 +64,7 @@ fn a_landed_change_reports_each_dimension_apart() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, _) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0);
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let completion = &status["detail"]["changes"][0]["completion"];
@@ -121,7 +121,7 @@ fn a_quarantined_check_is_not_required_and_is_reported_as_a_coverage_gap() {
     let (test_box, repo, remote) = red_on_trunk(QUARANTINES);
     let trunk = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_ne!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
     // Each set-aside check is named as a coverage gap, never as tested.
@@ -183,7 +183,7 @@ fn a_candidate_cannot_quarantine_the_check_it_fails() {
         ),
     )
     .unwrap();
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
@@ -243,7 +243,7 @@ fn a_policy_change_reports_the_gaps_of_its_own_policy_too() {
         ),
     )
     .unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(
         landed["detail"]["coverage_gaps"],
@@ -263,7 +263,7 @@ fn a_quarantine_that_names_no_check_or_has_no_valid_end_makes_the_policy_invalid
         );
         let (test_box, repo) = mapped_trunk(&policy);
         let (_, view) = test_box.start_and_edit(&repo);
-        let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+        let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 10, "{id} {end}: {refused}");
         assert_eq!(refused["reason"], "POLICY_INVALID", "{id} {end}: {refused}");
     }
@@ -280,7 +280,7 @@ fn a_quarantined_check_does_not_count_toward_the_above_zero_rule() {
     );
     let (test_box, repo) = mapped_trunk(&policy);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
 }

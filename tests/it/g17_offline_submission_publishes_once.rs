@@ -1,6 +1,6 @@
 //! G17. Offline submission publishes once.
 //!
-//! `bay land` offline returns `queued` / `waiting_for: remote`; after reconnecting it
+//! `bay merge` offline returns `queued` / `waiting_for: remote`; after reconnecting it
 //! publishes exactly once, also after a crash while offline.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -39,9 +39,9 @@ fn setup() -> (TestBox, PathBuf, PathBuf, String, PathBuf) {
 fn reconnect_and_publish(test_box: &TestBox, repo: &Path, remote: &Path, id: &str) {
     test_box.bay_ok(repo, &["status", id]);
     let executor = test_box.clone_of(remote, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
-    let again = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
+    let again = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(again["detail"]["ran"], serde_json::json!([]));
     assert_eq!(test_box.trunk_change_ids(remote), vec![id.to_owned()]);
 }
@@ -50,11 +50,11 @@ fn reconnect_and_publish(test_box: &TestBox, repo: &Path, remote: &Path, id: &st
 fn land_offline_queues_for_the_remote_then_publishes_once() {
     let (test_box, repo, remote, id, view) = setup();
     let away = offline(&remote);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued");
     assert_eq!(queued["waiting_for"], "remote");
-    assert_eq!(queued["published"], false);
+    assert_ne!(queued["decision"], "merged");
     // The signed request is committed locally.
     let local = test_box.git_ok(
         &repo,
@@ -70,7 +70,7 @@ fn land_offline_queues_for_the_remote_then_publishes_once() {
 fn land_offline_with_wait_still_queues_for_the_remote() {
     let (test_box, repo, remote, id, view) = setup();
     let away = offline(&remote);
-    let (code, queued) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, queued) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["waiting_for"], "remote");
     online(&remote, &away);
@@ -84,15 +84,15 @@ fn a_crash_while_offline_still_publishes_once() {
     let killed = test_box
         .bay(&view)
         .env("BAY_TEST_KILL_AT", "after-freeze")
-        .arg("land")
+        .arg("merge")
         .output()
         .unwrap();
     assert_eq!(killed.status.code(), Some(137));
     online(&remote, &away);
     reconnect_and_publish(&test_box, &repo, &remote, &id);
     // The agent landing again after it all finds the publication; nothing new lands.
-    let (code, again) = result_json(test_box.bay(&view).arg("land"));
+    let (code, again) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{again}");
-    assert_eq!(again["decision"], "landed");
+    assert_eq!(again["decision"], "merged");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
 }

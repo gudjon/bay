@@ -1,6 +1,6 @@
 //! G274. A candidate's required checks run in parallel.
 //!
-//! `[executor] parallel_checks = N` runs up to N of a candidate's checks at once, each in its
+//! `[runner] parallel_checks = N` runs up to N of a candidate's checks at once, each in its
 //! own work directory; the default, 1, runs them one after another. What a parallel run
 //! records and reports is what a serial run does: the records reach the tree in the policy's
 //! check order, the same in everything but their timing, and a refusal names the same checks
@@ -88,7 +88,7 @@ fn land(test_box: &TestBox, repo: &Path, files: &[&str]) -> (i32, Value, Duratio
         std::fs::write(full, "fail\n").unwrap();
     }
     let at = Instant::now();
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     (code, result, at.elapsed())
 }
 
@@ -186,7 +186,7 @@ fn three_checks_run_at_once_and_record_what_a_serial_run_records() {
 
     // `parallel_checks = 3`: all three at once.
     let parallel_box = TestBox::new();
-    let (repo, log) = trunk(&parallel_box, "[executor]\nparallel_checks = 3\n", &even());
+    let (repo, log) = trunk(&parallel_box, "[runner]\nparallel_checks = 3\n", &even());
     let (code, parallel, parallel_took) = land(&parallel_box, &repo, &[]);
     assert_eq!(code, 0, "{parallel}");
     let runs = intervals(&log);
@@ -235,7 +235,7 @@ fn a_parallel_refusal_names_what_a_serial_one_names() {
     assert_eq!(serial["reason"], "CHECK_FAILED", "{serial}");
 
     let parallel_box = TestBox::new();
-    let (repo, log) = trunk(&parallel_box, "[executor]\nparallel_checks = 3\n", sleep);
+    let (repo, log) = trunk(&parallel_box, "[runner]\nparallel_checks = 3\n", sleep);
     let remote = parallel_box.path().join("repo-remote.git");
     let tip = parallel_box.git_bare(&remote, &["rev-parse", "main"]);
     let (code, parallel, _) = land(&parallel_box, &repo, &failing);

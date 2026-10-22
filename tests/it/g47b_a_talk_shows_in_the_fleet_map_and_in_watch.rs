@@ -1,10 +1,10 @@
-//! G47b: a talk shows in the fleet map and in `bay watch` (`DESIGN` § 11a, § 11c; `INTERFACES`
+//! G47b: a talk shows in the fleet map and in `bay status --since` (`DESIGN` § 11a, § 11c; `INTERFACES`
 //! § 5, § 5a).
 //!
 //! `bay status --fleet` lists every open talk the local cache holds, as `bay status` lists them:
 //! who owes the reply, the ages and the standing. Each session entry counts the open talks its
 //! actor owes (`owes_talks`) and is owed (`owed_talks`), and a talk's sender is an actor the map
-//! knows. `bay watch` from a cursor lists `talk_arrived` once when a talk to its actor arrives,
+//! knows. `bay status --since` from a cursor lists `talk_arrived` once when a talk to its actor arrives,
 //! and `talk_closed` once when that talk closes; a watch from the cursor it returned lists
 //! neither again.
 
@@ -17,11 +17,11 @@ use serde_json::Value;
 use support::result_json;
 use support::talk::{TalkCase, from_now, hosted_talk_landing};
 
-/// `bay watch` as `agent` on its clone, outside any view, from `since`: its events and cursor.
+/// `bay status --since` as `agent` on its clone, outside any view, from `since`: its events and cursor.
 fn watch(case: &TalkCase, since: Option<&str>) -> (Vec<Value>, String) {
-    let mut args = vec!["watch"];
+    let mut args = vec!["status", "--since"];
     if let Some(cursor) = since {
-        args.extend(["--since", cursor]);
+        args.push(cursor);
     }
     let (code, watched) = result_json(case.bay_as("agent").args(&args));
     assert_eq!(code, 0, "{watched}");

@@ -1,7 +1,7 @@
 //! G257. A footprint check is carried onto a candidate with the same read set (NEW-10,
 //! `crate::throughput`).
 //!
-//! With `[executor] footprint_lanes = true` and exact-inputs reuse on a bay host, two changes
+//! With `[runner] footprint_lanes = true` and exact-inputs reuse on a bay host, two changes
 //! wait in the publication queue: the head changes `ui/`, the second `api/`, and each path has
 //! its own check with `when_paths`. While executor A checks the head, executor B pre-checks the
 //! second on the current tip, since its footprint is disjoint from the head's. When the second
@@ -26,7 +26,7 @@ use serde_json::Value;
 use support::PRODUCER;
 use support::queued::{Check, Held, OTHER_PRODUCER, finished, host, ran_for};
 
-const CONFIG: &str = "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[executor]\nlease_s = 30\nheartbeat_s = 1\nfootprint_lanes = true\n";
+const CONFIG: &str = "[runner]\nlease_s = 30\nheartbeat_s = 1\nfootprint_lanes = true\n";
 
 /// The policy: check `ui` on `ui/`, and check `api` on `api/` with `api_extra` lines.
 fn policy(api_extra: &str) -> String {
@@ -87,7 +87,7 @@ fn while_the_head_is_checked(
     held.go();
     let outcome = finished(child);
     for id in [&one, &two] {
-        assert_eq!(ran_for(&outcome, id)["decision"], "landed", "{outcome}");
+        assert_eq!(ran_for(&outcome, id)["decision"], "merged", "{outcome}");
     }
     assert_eq!(
         held.test_box.trunk_change_ids(&held.remote),

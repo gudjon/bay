@@ -21,7 +21,7 @@ use crate::repo::Repo;
 pub const AFTER_TRAILER: &str = "Bay-After";
 
 /// The release reason of a queue place given back because a dependency has not landed. It
-/// counts toward neither `QUEUE_DEADLINE_EXCEEDED` nor `PUBLISH_RETRY_EXHAUSTED` (`DESIGN` § 6).
+/// counts toward neither `QUEUE_DEADLINE_EXCEEDED` nor `MERGE_RETRY_EXHAUSTED` (`DESIGN` § 6).
 pub const RELEASE: &str = "dependency_pending";
 
 /// Where one dependency stands.

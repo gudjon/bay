@@ -1,1 +1,1 @@
-{"schema":"bay.result/1","op_id":"c7k2m4.1","candidate":"c7k2m4.1.2","decision":"queued","state":"admitted","published":false,"say":"Saved; it is in line and will be checked and added shortly.","waiting_for":"executor_capacity"}
+{"schema":"bay.result/1","op_id":"c7k2m4.1","candidate":"c7k2m4.1.2","decision":"queued","state":"admitted","say":"Saved; it is in line and will be checked and added shortly.","waiting_for":"executor_capacity"}

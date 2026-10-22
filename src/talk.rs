@@ -15,7 +15,7 @@
 //!
 //! Who writes what (T1, T10): only an agent key sends, as the registry actor it is enrolled for;
 //! only `who` acks, backbriefs and closes; only `who` or `decides` answers a discovery talk, and a
-//! second, different answer names the standing one in `supersedes` or is `TALK_ANSWER_CONFLICT`;
+//! second, different answer names the standing one in `supersedes` or is `TALK_REFUSED`;
 //! only the sender (or `decides`) supersedes a talk, and the recipient's accept closes the
 //! superseded one as `superseded`, naming its successor. A delivery talk about a change closes as
 //! `answered` once a landing that names the change (`Fixes:`, `Reverts:` or `Supersedes:`) is on
@@ -27,7 +27,7 @@
 //! [`open_on`]).
 //!
 //! Delivery is the recipient's fetch and accept ([`receive`]), which any fetching bay command on
-//! the recipient's machine runs (`bay status`, `bay watch`): it writes the ack on the same chain,
+//! the recipient's machine runs (`bay status`, `bay status --since`): it writes the ack on the same chain,
 //! signed by the recipient's key. A push is not delivery, and a fetch without accept is not an
 //! ack. The sender sees the ack after its own fetch.
 
@@ -213,7 +213,7 @@ impl Refusal {
 
     #[must_use]
     pub fn invalid(why: impl Into<String>) -> Self {
-        Self::new(Reason::TalkInvalid, why)
+        Self::new(Reason::TalkRefused, why)
     }
 
     #[must_use]
@@ -434,7 +434,7 @@ fn check_words(map: &Map<String, Value>) -> Result<(), Refusal> {
 ///
 /// # Errors
 ///
-/// The first rule the body breaks, as `TALK_INVALID`.
+/// The first rule the body breaks, as `TALK_REFUSED`.
 pub fn check_body(body: &Value) -> Result<(), Refusal> {
     let Some(map) = body.as_object() else {
         return Err(Refusal::invalid("a talk is a JSON object"));
@@ -500,8 +500,8 @@ pub fn check_body(body: &Value) -> Result<(), Refusal> {
 ///
 /// # Errors
 ///
-/// A name the registry does not enrol, as `TALK_INVALID`; the sender, as
-/// `TALK_SENDER_NOT_ACTOR`.
+/// A name the registry does not enrol, as `TALK_REFUSED`; the sender, as
+/// `TALK_REFUSED`.
 pub fn check_actors(registry: &Registry, body: &Value) -> Result<(), Refusal> {
     for field in ["who", "decides"] {
         if let Some(name) = body[field].as_str()
@@ -516,13 +516,13 @@ pub fn check_actors(registry: &Registry, body: &Value) -> Result<(), Refusal> {
     match sender_class(registry, body) {
         Some(_) => Ok(()),
         None if registry.enrols(KeyClass::Reviewer, from) => Err(Refusal::new(
-            Reason::TalkSenderNotActor,
+            Reason::TalkRefused,
             format!(
                 "the sender {from:?} is a reviewer: a reviewer sends only a delivery talk about a change (--kind delivery --change)"
             ),
         )),
         None => Err(Refusal::new(
-            Reason::TalkSenderNotActor,
+            Reason::TalkRefused,
             format!("the sender {from:?} is not a registry actor: only an agent sends a talk"),
         )),
     }
@@ -552,11 +552,11 @@ pub fn sender_class(registry: &Registry, body: &Value) -> Option<KeyClass> {
 ///
 /// # Errors
 ///
-/// No such record, as `TALK_SENDER_NOT_ACTOR`; a git fault as a refusal too.
+/// No such record, as `TALK_REFUSED`; a git fault as a refusal too.
 pub fn reviewed(git: &Git, registry: &Registry, trunk: &str, body: &Value) -> Result<(), Refusal> {
     let from = body["from"]["name"].as_str().unwrap_or_default();
     let change = body["change"].as_str().unwrap_or_default();
-    let refuse = |why: String| Refusal::new(Reason::TalkSenderNotActor, why);
+    let refuse = |why: String| Refusal::new(Reason::TalkRefused, why);
     let fault = |error: String| refuse(error);
     let commits = git
         .run(&[

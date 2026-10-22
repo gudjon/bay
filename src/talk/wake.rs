@@ -1,16 +1,16 @@
 //! The wake adapter (G58, G53; `INTERFACES` § 4; ruling T4 and the wake contract in
 //! `plans/drafts/talk-vs-oz-say.md` § 4).
 //!
-//! On the recipient's machine, when it accepts a talk, bay asks the configured `[wake] command`
+//! On the recipient's machine, when it accepts a talk, bay asks the configured `[plugin.wake] command`
 //! once to wake the recipient's session: `bay.wake/1` on stdin, `bay.wake-result/1` on stdout,
 //! within [`WAKE_TIMEOUT`]. The answer goes on the ack as `wake: {result, reason}`, so the sender
 //! sees it after a fetch. The adapter's word is recorded as the adapter's, never as bay's proof.
 //!
-//! - No `[wake]` table: `not_attempted`, `NO_WAKE_ADAPTER`.
+//! - No `[plugin.wake]` table: `not_attempted`, `NO_WAKE_ADAPTER`.
 //! - An exit other than 0, no valid document, or no answer within the bound: `uncertain`,
 //!   `WAKE_ADAPTER_FAILED`. bay never calls `wake` twice for one talk: an ack is written once.
 //!
-//! `[wake] command` is a program path relative to the work tree, then its arguments, run from the
+//! `[plugin.wake] command` is a program path relative to the work tree, then its arguments, run from the
 //! work tree with only `PATH` and `HOME` from bay's environment (`crate::run`).
 //!
 //! G307: the executor asks the same adapter once for an outcome a session must act on (a
@@ -18,7 +18,7 @@
 //! names `cause: "outcome"` ([`outcome_request`]) where a talk's names `cause: "talk"`, and every
 //! field a talk's request had before stays as it was, so a connector that reads talks still works.
 //!
-//! `bay adapter test wake` (`crate::adapter`) runs these same parts against a connector.
+//! `bay plugin test wake` (`crate::adapter`) runs these same parts against a connector.
 
 use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
@@ -81,10 +81,11 @@ pub fn wake_outcome(repo: &Repo, outcome: &Outcome) -> Value {
     asked(repo, &outcome_request(outcome, &machine))
 }
 
-/// Whether a `[wake] command` is configured. Without one nothing is asked.
+/// Whether a `[plugin.wake] command` is configured. Without one nothing is asked.
 #[must_use]
 pub fn configured(repo: &Repo) -> bool {
     repo.config
+        .plugin
         .wake
         .as_ref()
         .is_some_and(|wake| wake.command.is_some())
@@ -93,10 +94,9 @@ pub fn configured(repo: &Repo) -> bool {
 /// Runs the configured adapter once with `request`, and returns what bay records of its
 /// answer: the one path a talk's wake and an outcome's take.
 fn asked(repo: &Repo, request: &Value) -> Value {
-    let Some(cmd) = repo
-        .config
-        .wake
-        .as_ref()
+    let plugin = repo.config.plugin.wake.as_ref();
+    let timeout = plugin.map_or(WAKE_TIMEOUT, |plugin| plugin.timeout(WAKE_TIMEOUT));
+    let Some(cmd) = plugin
         .and_then(|wake| wake.command.as_deref())
         .and_then(|command| crate::run::command(&repo.work_root, command))
     else {
@@ -106,7 +106,7 @@ fn asked(repo: &Repo, request: &Value) -> Value {
     let Ok(cmd) = cmd else {
         return failed();
     };
-    recorded(&ask(cmd, request, WAKE_TIMEOUT), WAKE_TIMEOUT)
+    recorded(&ask(cmd, request, timeout), timeout)
 }
 
 /// The `bay.wake/1` request for `talk` to `me` on `machine`; `line` is cut to 200 characters.

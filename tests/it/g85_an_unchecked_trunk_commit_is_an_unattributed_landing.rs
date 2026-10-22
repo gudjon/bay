@@ -4,7 +4,7 @@
 //! names each such first-parent commit under `detail.unattributed`, `landed_as` `merge` or
 //! `outside`, and counts them; a merge also names the commits reached only through its other
 //! parent, counted as `off_first_parent`. bay's own landing is never listed, and neither is the
-//! commit that adopted bay. The fleet map shows the same, and `bay watch` names each one as an
+//! commit that adopted bay. The fleet map shows the same, and `bay status --since` names each one as an
 //! `unattributed_landing` event.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -46,16 +46,16 @@ fn a_merge_and_a_push_outside_bay_are_named_and_counted_and_bays_landing_is_not(
     let status = test_box.bay_ok(&repo, &["status"]);
     let before = &status["detail"]["unattributed"];
     assert_eq!(before["count"], 0, "{adopted} adopted bay: {status}");
-    let cursor = test_box.bay_ok(&repo, &["watch"])["detail"]["cursor"]
+    let cursor = test_box.bay_ok(&repo, &["status", "--since"])["detail"]["cursor"]
         .as_str()
         .unwrap()
         .to_owned();
 
     // A change lands through bay.
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed", "{result}");
+    assert_eq!(result["decision"], "merged", "{result}");
     test_box.git_ok(&repo, &["pull", "-q", "--ff-only", "origin", "main"]);
     let published = test_box.git_ok(&repo, &["rev-parse", "HEAD"]);
 
@@ -98,8 +98,8 @@ fn a_merge_and_a_push_outside_bay_are_named_and_counted_and_bays_landing_is_not(
     let fleet = test_box.bay_ok(&repo, &["status", "--fleet"]);
     assert_eq!(fleet["detail"]["unattributed"], *unattributed, "{fleet}");
 
-    // `bay watch` names each as an event, and never bay's landing.
-    let watched = test_box.bay_ok(&repo, &["watch", "--since", &cursor]);
+    // `bay status --since` names each as an event, and never bay's landing.
+    let watched = test_box.bay_ok(&repo, &["status", "--since", &cursor]);
     let events: Vec<&Value> = watched["detail"]["events"]
         .as_array()
         .unwrap_or_else(|| panic!("{watched}"))

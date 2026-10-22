@@ -35,7 +35,7 @@ fn a_land_whose_request_loses_the_chain_race_is_queued_not_failed() {
         .bay_process(&view)
         .env("BAY_TEST_PAUSE_AT", "before-submit")
         .env("BAY_TEST_PAUSE_FILE", &release)
-        .args(["--json", "land"])
+        .args(["--json", "merge"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -51,7 +51,7 @@ fn a_land_whose_request_loses_the_chain_race_is_queued_not_failed() {
     }
 
     // Meanwhile a second land of the same view writes the request on the chain.
-    let (code, second) = support::result_json(trunk.test_box.bay(&view).arg("land"));
+    let (code, second) = support::result_json(trunk.test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{second}");
     assert_eq!(second["decision"], "queued", "{second}");
     let op = second["op_id"].as_str().unwrap().to_owned();

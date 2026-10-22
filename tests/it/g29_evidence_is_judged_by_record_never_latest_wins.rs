@@ -42,7 +42,7 @@ fn a_check_cannot_read_the_producer_key_or_write_evidence() {
     test_box.enroll(&repo, &keys);
     test_box.use_keys(&repo, &keys);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_UNKNOWN");
     assert_eq!(
@@ -81,7 +81,7 @@ fn another_operation_on_the_same_tree_is_rechecked_not_reused() {
     let (_, first) = test_box.start_and_edit(&repo);
     let (_, second) = test_box.start_and_edit(&repo);
     assert_eq!(land_stopped_before_publish(&test_box, &first), 137);
-    let (code, landed) = result_json(test_box.bay(&second).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&second).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);
     assert_eq!(
@@ -119,15 +119,15 @@ fn one_producer_name_used_by_two_executors_is_a_collision() {
         test_box.git_ok(clone, &["config", "bay.producerName", "shared-checks"]);
     }
     let (_, first) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&first).arg("land"));
+    let (code, _) = result_json(test_box.bay(&first).arg("merge"));
     assert_eq!(code, 0);
-    test_box.bay_ok(&one, &["executor", "run", "--once"]);
+    test_box.bay_ok(&one, &["runner", "run", "--once"]);
 
     let (_, second) = test_box.start_and_edit(&repo);
     std::fs::write(second.join("src/other.rs"), "fn other() {}\n").unwrap();
-    let (code, _) = result_json(test_box.bay(&second).arg("land"));
+    let (code, _) = result_json(test_box.bay(&second).arg("merge"));
     assert_eq!(code, 0);
-    let ran = test_box.bay_ok(&two, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&two, &["runner", "run", "--once"]);
     let result = &ran["detail"]["ran"][0];
     assert_eq!(result["decision"], "failed", "{ran}");
     assert!(
@@ -144,13 +144,13 @@ fn failing_result() -> String {
     passing_result(1).replace("\\\"pass\\\"", "\\\"product_failure\\\"")
 }
 
-/// `bay land --wait` in `view`, stopped just before its publishing push: its check ran and its
+/// `bay merge --wait` in `view`, stopped just before its publishing push: its check ran and its
 /// evidence is on the remote, and trunk did not move. Returns the exit code (137).
 fn land_stopped_before_publish(test_box: &TestBox, view: &std::path::Path) -> i32 {
     test_box
         .bay(view)
         .env("BAY_TEST_KILL_AT", "before-publish")
-        .args(["--json", "land", "--wait"])
+        .args(["--json", "merge", "--wait"])
         .output()
         .unwrap()
         .status
@@ -203,7 +203,10 @@ fn two_runs_on_one_tree(first: &str, second: &str, extra: &str) -> TwoRuns {
     let trunk = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let mut stopped = test_box.bay(&one);
     stopped.env("BAY_TEST_KILL_AT", "before-publish");
-    let out = stopped.args(["--json", "land", "--wait"]).output().unwrap();
+    let out = stopped
+        .args(["--json", "merge", "--wait"])
+        .output()
+        .unwrap();
     let first = if out.status.code() == Some(137) {
         (
             0,
@@ -217,7 +220,7 @@ fn two_runs_on_one_tree(first: &str, second: &str, extra: &str) -> TwoRuns {
         )
     };
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
-    let second = result_json(test_box.bay(&two).args(["land", "--wait"]));
+    let second = result_json(test_box.bay(&two).args(["merge", "--wait"]));
     let moved = test_box.git_bare(&remote, &["rev-parse", "main"]) != trunk;
     TwoRuns {
         first,
@@ -260,7 +263,7 @@ fn an_older_pass_and_a_newer_unknown_on_one_tree_still_lands_through_land() {
     assert_eq!(*code, 0, "{landed}");
     let (code, again) = &runs.second;
     assert_eq!(*code, 0, "{again}");
-    assert_eq!(again["decision"], "landed", "{again}");
+    assert_eq!(again["decision"], "merged", "{again}");
 }
 
 #[test]
@@ -277,7 +280,7 @@ fn a_commit_keyed_failure_on_one_commit_does_not_block_another_with_the_same_tre
     assert_eq!(failed["reason"], "CHECK_FAILED", "{failed}");
     let (code, landed) = &runs.second;
     assert_eq!(*code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert!(runs.moved, "trunk did not move: {landed}");
 }
 
@@ -311,7 +314,7 @@ fn a_pass_on_one_environment_does_not_satisfy_a_second_through_land() {
         ],
     );
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_UNKNOWN", "{blocked}");
     assert_eq!(

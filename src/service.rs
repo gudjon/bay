@@ -1,7 +1,7 @@
-//! `bay executor install` (G286): the service definition that keeps `bay executor run` running
+//! `bay runner install` (G286): the service definition that keeps `bay runner run` running
 //! for one repository, under the supervisor the person's own machine already has: a launchd
 //! agent in `~/Library/LaunchAgents/` on macOS, a systemd user unit in
-//! `~/.config/systemd/user/` on Linux. It runs `<bay> -C <repository> executor run`, where
+//! `~/.config/systemd/user/` on Linux. It runs `<bay> -C <repository> runner run`, where
 //! `<bay>` is the running executable, restarts it whenever it ends (`KeepAlive`,
 //! `Restart=always`), and logs to `<common dir>/bay/executor.log`.
 //!
@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use crate::repo::Repo;
 use crate::result::{BayResult, Decision};
 
-/// What `bay executor install` was asked to do.
+/// What `bay runner install` was asked to do.
 pub struct Request {
     /// Show the file and write nothing.
     pub print: bool,
@@ -114,7 +114,7 @@ fn systemd_word(word: &str) -> String {
     }
 }
 
-/// The service definition of `kind` that runs `<bay> -C <work_root> executor run` with `path`
+/// The service definition of `kind` that runs `<bay> -C <work_root> runner run` with `path`
 /// as its `PATH` and `log` as its output, under `home` (or, for systemd, `config_home`, the
 /// box's `XDG_CONFIG_HOME`, when set).
 #[must_use]
@@ -130,7 +130,7 @@ pub fn service(
         bay.display().to_string(),
         "-C".to_owned(),
         work_root.display().to_string(),
-        "executor".to_owned(),
+        "runner".to_owned(),
         "run".to_owned(),
     ];
     let log_text = log.display().to_string();
@@ -209,7 +209,7 @@ fn systemd_unit(work_root: &Path, args: &[String], path: &str, log: &str) -> Str
     let log = log.replace('%', "%%");
     format!(
         "[Unit]\n\
-         Description=bay executor for {repo}\n\
+         Description=bay runner for {repo}\n\
          \n\
          [Service]\n\
          ExecStart={exec}\n\
@@ -245,7 +245,7 @@ pub fn load_command(service: &Service, replaced: bool) -> String {
     }
 }
 
-/// `bay executor install [--print] [--force]` in the repository that holds `dir`.
+/// `bay runner install [--print] [--force]` in the repository that holds `dir`.
 #[must_use]
 pub fn install(dir: &Path, request: &Request) -> BayResult {
     install_in(dir, request).unwrap_or_else(BayResult::failed)
@@ -264,8 +264,8 @@ fn refused(message: String, mut detail: serde_json::Value) -> BayResult {
 fn install_in(dir: &Path, request: &Request) -> Result<BayResult, String> {
     let Some(kind) = Kind::here() else {
         return Err(
-            "bay executor install writes a launchd agent (macOS) or a systemd user unit \
-             (Linux); on this platform, run bay executor run under a supervisor of your own"
+            "bay runner install writes a launchd agent (macOS) or a systemd user unit \
+             (Linux); on this platform, run bay runner run under a supervisor of your own"
                 .to_owned(),
         );
     };
@@ -294,7 +294,7 @@ fn install_in(dir: &Path, request: &Request) -> Result<BayResult, String> {
         "name": service.name,
         "path": service.path.display().to_string(),
         "command": [bay.display().to_string(), "-C", repo.work_root.display().to_string(),
-            "executor", "run"],
+            "runner", "run"],
         "log": log.display().to_string(),
         "content": service.content,
         "exists": exists,
@@ -381,7 +381,7 @@ mod tests {
         );
         assert!(
             unit.content
-                .contains("ExecStart=/opt/bin/bay -C /work/repo executor run\n"),
+                .contains("ExecStart=/opt/bin/bay -C /work/repo runner run\n"),
             "{}",
             unit.content
         );
@@ -400,7 +400,7 @@ mod tests {
             "{agent:?}"
         );
         assert!(agent.content.contains("<key>KeepAlive</key>\n\t<true/>"));
-        assert!(agent.content.contains("\t\t<string>/opt/bin/bay</string>\n\t\t<string>-C</string>\n\t\t<string>/work/repo</string>\n\t\t<string>executor</string>\n\t\t<string>run</string>\n"));
+        assert!(agent.content.contains("\t\t<string>/opt/bin/bay</string>\n\t\t<string>-C</string>\n\t\t<string>/work/repo</string>\n\t\t<string>runner</string>\n\t\t<string>run</string>\n"));
         assert!(
             load_command(&agent, false)
                 .starts_with("launchctl load -w '/home/me/Library/LaunchAgents/bay.executor.repo-")

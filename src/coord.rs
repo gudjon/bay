@@ -1,4 +1,4 @@
-//! The coordination cache `pre-tool` judges a write against (`DESIGN` § 11, § 11a's
+//! The coordination cache `tool.before` judges a write against (`DESIGN` § 11, § 11a's
 //! `PreToolUse` row; `INTERFACES` § 7 `[hooks]`; rulings R4, R5).
 //!
 //! `<git-common-dir>/bay/coord.json` is written by a bay command that is not a hook, after it
@@ -13,7 +13,7 @@
 //! provider listed, or the change's declared paths when it listed none, or the whole tree when
 //! the change declares none. Claims never refuse a write. A write the cache shows covered by an
 //! input trunk requires a version of that the change has not observed is refused with
-//! `INPUT_UNOBSERVED`, and the repair is `bay start --resume <change>`. An observed input with
+//! `INPUT_UNOBSERVED`, and the repair is `bay start <change>`. An observed input with
 //! no validated candidate yet (`INPUT_CHANGED`) refuses no write: the repair is an edit, and
 //! refusing it would deadlock (G8); land still refuses the unvalidated candidate. A cache older
 //! than `[hooks] cache_max_age_s`, or one that cannot say, gives a write to a declared input a
@@ -50,7 +50,7 @@ pub fn path(repo: &Repo) -> PathBuf {
     repo.common_dir.join("bay").join("coord.json")
 }
 
-/// What `pre-tool` needs to judge a write, as of one fetch.
+/// What `tool.before` needs to judge a write, as of one fetch.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Coord {
     pub schema: String,
@@ -209,7 +209,7 @@ fn input_of(judgement: &Judgement, declared: &[String]) -> CoordInput {
     }
 }
 
-/// What `pre-tool` answers for one write.
+/// What `tool.before` answers for one write.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// Silent (§ 11a: "otherwise silent").
@@ -449,7 +449,7 @@ fn refusal(id: &str, path: &str, stale: &CoordInput) -> Verdict {
     let version = |version: &Option<String>| version.as_deref().unwrap_or("none").to_owned();
     let line = format!(
         "bay: refused INPUT_UNOBSERVED: {path} is covered by {} (observed {}, required {}); \
-         repair: bay start --resume {id}",
+         repair: bay start {id}",
         stale.input,
         version(&stale.observed),
         version(&stale.required),

@@ -80,7 +80,7 @@ fn a_candidate_that_edits_the_policy_is_judged_by_the_bases_policy() {
         ".bay/policy.toml",
         &policy(2, 1).replace("id = \"tests\"", "id = \"other\""),
     );
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_FAILED");
 }
@@ -90,7 +90,7 @@ fn a_policy_edit_that_keeps_the_old_revision_is_refused() {
     let (test_box, _repo, remote, _id, view) = change(true);
     let trunk = test_box.git_bare(&remote, &["rev-parse", "main"]);
     write(&view, ".bay/policy.toml", &policy(1, 2));
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     // No reason code covers an invalid policy edit (INTERFACES § 2), so it is a refused
     // operation with a receipt.
     assert_eq!(code, 20, "{refused}");
@@ -105,7 +105,7 @@ fn a_policy_edit_that_keeps_the_old_revision_is_refused() {
 fn an_adapter_edit_without_raising_revision_is_refused() {
     let (test_box, _repo, _remote, _id, view) = change(true);
     write(&view, "scripts/bay-check", &script(true, "# adapter v2"));
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     // No reason code covers an invalid policy edit (INTERFACES § 2), so it is a refused
     // operation with a receipt.
     assert_eq!(code, 20, "{refused}");
@@ -120,7 +120,7 @@ fn a_candidate_that_edits_its_adapter_is_judged_by_the_bases_adapter() {
     let (test_box, _repo, _remote, _id, view) = change(false);
     write(&view, "scripts/bay-check", &script(true, "# adapter v2"));
     write(&view, ".bay/policy.toml", &policy(2, 1));
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_FAILED");
     assert!(
@@ -137,7 +137,7 @@ fn an_adapter_edit_that_fails_under_its_own_new_adapter_is_refused() {
     let (test_box, _repo, _remote, _id, view) = change(true);
     write(&view, "scripts/bay-check", &script(false, "# adapter v2"));
     write(&view, ".bay/policy.toml", &policy(2, 1));
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_FAILED");
     assert!(
@@ -155,7 +155,7 @@ fn an_adapter_edit_that_passes_both_adapters_lands_and_its_manifest_is_the_bases
     let base = test_box.git_bare(&remote, &["rev-parse", "main"]);
     write(&view, "scripts/bay-check", &script(true, "# adapter v2"));
     write(&view, ".bay/policy.toml", &policy(2, 1));
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);
     let notes = test_box.git_ok(
@@ -191,7 +191,7 @@ fn a_policy_with_two_entries_for_one_check_is_refused() {
     write(&repo, ".bay/policy.toml", &doubled);
     test_box.git_ok(&repo, &["commit", "-q", "-am", "invalid policy"]);
     test_box.git_ok(&repo, &["push", "-q", "origin", "main"]);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     // The policy at the accepted base breaks a validity rule (INTERFACES § 2, § 7).
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
@@ -230,9 +230,8 @@ fn a_registry_signed_repair_restores_a_broken_adapter_and_an_agent_signed_one_is
         write(&view, ".bay/policy.toml", &policy(3, 1));
         test_box.git_ok(&repo, &["config", "bay.agentKey", key.to_str().unwrap()]);
         result_json(test_box.bay(&view).args([
-            "land",
+            "merge",
             "--wait",
-            "--change",
             started["change"].as_str().unwrap(),
         ]))
     };
@@ -245,7 +244,7 @@ fn a_registry_signed_repair_restores_a_broken_adapter_and_an_agent_signed_one_is
     // Registry-signed: the last resort, judged by its own new adapter alone.
     let (code, repaired) = repair(&keys.registry, "REPAIR-2");
     assert_eq!(code, 0, "{repaired}");
-    assert_eq!(repaired["decision"], "landed");
+    assert_eq!(repaired["decision"], "merged");
     assert!(
         test_box
             .git_bare(&remote, &["show", "main:scripts/bay-check"])
@@ -285,9 +284,8 @@ fn an_invalid_policy_on_trunk_is_policy_invalid_until_a_registry_signed_repair()
         write(&view, ".bay/policy.toml", &policy(revision, 1));
         test_box.git_ok(&repo, &["config", "bay.agentKey", key.to_str().unwrap()]);
         result_json(test_box.bay(&view).args([
-            "land",
+            "merge",
             "--wait",
-            "--change",
             started["change"].as_str().unwrap(),
         ]))
     };
@@ -310,7 +308,7 @@ fn an_invalid_policy_on_trunk_is_policy_invalid_until_a_registry_signed_repair()
     // A registry-signed repair is judged by its own new policy alone.
     let (code, repaired) = repair_at(&keys.registry, "REPAIR-2", 8);
     assert_eq!(code, 0, "{repaired}");
-    assert_eq!(repaired["decision"], "landed");
+    assert_eq!(repaired["decision"], "merged");
 }
 
 /// The `policy_provenance` of every evidence record on the remote trunk's tree.
@@ -373,9 +371,8 @@ fn land_files(
         write(&view, path, text);
     }
     let (code, landed) = result_json(test_box.bay(&view).args([
-        "land",
+        "merge",
         "--wait",
-        "--change",
         started["change"].as_str().unwrap(),
     ]));
     assert_eq!(code, 0, "{landed}");
@@ -388,7 +385,7 @@ fn evidence_says_how_its_policy_reached_trunk() {
     // The seed added the first policy by hand. That is the bootstrap, the one way a first
     // policy reaches any trunk, and there was no policy before it to weaken: evidence under it
     // is `bay`, and no event is recorded.
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let provenance = provenance_at_trunk(&test_box, &repo, &remote);
     assert!(provenance.iter().all(|p| p == "bay"), "{provenance:?}");
@@ -548,7 +545,7 @@ fn land_with_environment(
     );
     let (_, view) = test_box.start_and_edit(&repo);
     let mut land = test_box.bay(&view);
-    land.args(["land", "--wait"]);
+    land.args(["merge", "--wait"]);
     for (key, value) in env {
         land.env(key, value);
     }
@@ -573,7 +570,7 @@ fn a_check_sees_only_the_fixed_baseline_and_its_declared_variables() {
         &[("UNDECLARED_VAR", "leak"), ("DECLARED_VAR", "declared")],
     );
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed", "{result}");
+    assert_eq!(result["decision"], "merged", "{result}");
 }
 
 #[test]
@@ -603,7 +600,7 @@ fn a_check_without_path_runs_under_the_stated_default_path() {
         &[],
     );
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed", "{result}");
+    assert_eq!(result["decision"], "merged", "{result}");
 }
 
 #[test]
@@ -630,7 +627,7 @@ fn a_candidates_own_invalid_policy_is_policy_invalid() {
         ".bay/policy.toml",
         &format!("{}path = [\"bin\"]\n", policy(2, 1)),
     );
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
     assert_eq!(refused["detail"]["policy"], "candidate", "{refused}");
@@ -653,7 +650,7 @@ fn an_adapter_that_reads_an_unlisted_file_is_an_infra_failure() {
         &files,
     );
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_UNKNOWN");
     assert_eq!(
@@ -664,7 +661,7 @@ fn an_adapter_that_reads_an_unlisted_file_is_an_infra_failure() {
 
 /// A rules-only policy edit (a higher `revision`, the same checks) lands on trunk during the
 /// first two checks. Each time the candidate was checked under an older policy, so it is
-/// `POLICY_CHANGED` and rechecked under the new one (DESIGN § 7). That is not a `TRUNK_MOVED`
+/// `POLICY_CHANGED` and rechecked under the new one (DESIGN § 7). That is not a `MAIN_MOVED`
 /// refusal, so it never sends the operation into the publication queue (§ 6).
 #[test]
 fn a_policy_edit_landing_during_the_check_is_policy_changed_and_rechecked() {
@@ -692,9 +689,9 @@ fn a_policy_edit_landing_during_the_check_is_policy_changed_and_rechecked() {
     test_box.clone_of(&remote, "policy-owner");
     let (id, view) = test_box.start_and_edit(&repo);
 
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(
         std::fs::read_to_string(&runs).unwrap().lines().count(),
         3,
@@ -755,18 +752,15 @@ fn a_rules_only_policy_edit_makes_queued_candidates_policy_changed() {
     );
     test_box.clone_of(&remote, "mover");
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     let executor = test_box.clone_of(&remote, "executor");
 
     // Two trunk moves: the operation joins the queue.
-    let first = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(
-        first["detail"]["ran"][0]["reason"], "PUBLICATION_QUEUED",
-        "{first}"
-    );
+    let first = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(first["detail"]["ran"][0]["reason"], "QUEUED", "{first}");
     // As head it checks while the policy changes: released as policy_changed, and it rejoins.
-    let second = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let second = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(
         second["detail"]["ran"][0]["reason"], "POLICY_CHANGED",
         "{second}"
@@ -774,8 +768,8 @@ fn a_rules_only_policy_edit_makes_queued_candidates_policy_changed() {
     let release = test_box.git_bare(&remote, &["show", "refs/bay/queue-done/1:release.json"]);
     assert!(release.contains("\"policy_changed\""), "{release}");
     // Rechecked under the new policy, it lands.
-    let third = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(third["detail"]["ran"][0]["decision"], "landed", "{third}");
+    let third = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(third["detail"]["ran"][0]["decision"], "merged", "{third}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];

@@ -25,7 +25,7 @@
 //! An adopt of another actor's open change is judged by the host's own clock (ruling R1): the
 //! chain head's age is the age of its newest entry in the host reflog, and the last heartbeat
 //! of the change's actor is the newest entry of a live ref's host reflog with a fresh row of the
-//! change; both must be at least the takeover window (`[executor] takeover_s` on trunk) old.
+//! change; both must be at least the takeover window (`[runner] takeover_s` on trunk) old.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -73,6 +73,10 @@ fn archive(update: &Update) -> Result<(), String> {
         Err("an archived branch is created once; it is never moved or deleted".to_owned())
     }
 }
+
+/// The words of the host's refusal of a push that would pass the queue's head, which the
+/// merging side reads to know it waits its turn (`QUEUED`).
+pub const QUEUE_HELD_BY: &str = "the publication queue is held by";
 
 /// The most live refs a host holds and an adopt check reads (§ 10a: the hook's work is bounded).
 const LIVE_REFS_MAX: usize = 256;
@@ -387,8 +391,7 @@ fn approvals_only(git: &Git, registry: &Registry, updates: &[Update]) -> Result<
 fn never_a_lane(record: &crate::change::ChangeRecord, commit: &str) -> Result<(), String> {
     match &record.lane {
         Some(lane) => Err(format!(
-            "{}: {commit} publishes change {} of lane {lane}; a lane change never lands",
-            crate::result::Reason::LaneNeverLands.code(),
+            "{commit} publishes change {} of lane {lane}; a lane change never merges",
             record.id
         )),
         None => Ok(()),
@@ -713,7 +716,7 @@ impl Judge<'_> {
             };
             if !releases_head || head.change != change {
                 return Err(format!(
-                    "QUEUE_HELD: the publication queue is held by {} (place {})",
+                    "QUEUED: {QUEUE_HELD_BY} {} (place {})",
                     head.op_id, head.seq
                 ));
             }
@@ -732,7 +735,7 @@ impl Judge<'_> {
                         .is_none()
                     {
                         return Err(format!(
-                            "{commit} lands a batch, and the config at its base {base} sets no [executor] batch"
+                            "{commit} lands a batch, and the config at its base {base} sets no [runner] batch"
                         ));
                     }
                     Judged::BatchBase(base)

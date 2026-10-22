@@ -188,7 +188,7 @@ fn a_waived_check_lands_named_as_a_gap_with_its_real_verdict() {
     // The author's retry lands that same candidate, naming the waiver and the real verdict.
     let (code, landed) = trunk.land(&view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let gaps = landed["detail"]["coverage_gaps"]
         .as_array()
         .unwrap_or_else(|| panic!("no coverage_gaps: {landed}"));
@@ -346,7 +346,7 @@ fn a_waiver_counts_only_from_an_approver_and_only_on_its_own_candidate() {
     let record = waived["detail"]["records"][0].as_str().unwrap().to_owned();
     let (code, landed) = trunk.land(&view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let named: Vec<&Value> = landed["detail"]["coverage_gaps"]
         .as_array()
         .unwrap()

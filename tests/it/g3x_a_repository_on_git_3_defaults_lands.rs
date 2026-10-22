@@ -71,17 +71,17 @@ fn the_core_flow_lands_on_git_3_defaults() {
         &[("src/a.rs", "fn a() {}\n")],
         &check_files("true", &passing_result(1), 1, 60),
     );
-    let cursor = test_box.bay_ok(&repo, &["watch"])["detail"]["cursor"]
+    let cursor = test_box.bay_ok(&repo, &["status", "--since"])["detail"]["cursor"]
         .as_str()
         .unwrap()
         .to_owned();
 
     let (id, view) = test_box.start_and_edit(&repo);
-    let queued = test_box.bay_ok(&view, &["land"]);
-    assert_eq!(queued["published"], false, "{queued}");
+    let queued = test_box.bay_ok(&view, &["merge"]);
+    assert_ne!(queued["decision"], "merged", "{queued}");
     let executor = test_box.clone_of(&host, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     let landing = ran["detail"]["ran"][0]["detail"]["commit"]
         .as_str()
         .unwrap()
@@ -100,7 +100,7 @@ fn the_core_flow_lands_on_git_3_defaults() {
     assert_eq!(change["state"], "landed", "{status}");
     assert_eq!(change["landed"], landing.as_str(), "{status}");
 
-    let watched = test_box.bay_ok(&repo, &["watch", "--landed", "--since", &cursor]);
+    let watched = test_box.bay_ok(&repo, &["status", "--since", &cursor, "--merged"]);
     let landings = watched["detail"]["landings"].as_array().unwrap();
     assert_eq!(landings.len(), 1, "{watched}");
     assert_eq!(landings[0]["change"], id.as_str(), "{watched}");

@@ -1,7 +1,7 @@
 //! G262 (NEW-5). An agent cannot push a promotion target.
 //!
 //! A `[[target]]` (`staging`) moves only by bay's promotion rules, never by an agent's push.
-//! `bay hook pre-tool` reads the targets of the config at trunk and denies, with
+//! `bay hook tool.before` reads the targets of the config at trunk and denies, with
 //! `SHELL_DENIED` and the shape `git push of a target`, a push whose destination is a target's
 //! ref, in every refspec form: the full ref, the short name, `HEAD:`, `+`, `--force`,
 //! `--delete`, and a bare push from the target's branch. The reason names the target's ref. A
@@ -33,7 +33,7 @@ fn pre_tool(test_box: &TestBox, repo: &Path, command: &str) -> (Option<i32>, Str
     });
     let mut child = test_box
         .bay_process(repo)
-        .args(["hook", "pre-tool"])
+        .args(["hook", "tool.before"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

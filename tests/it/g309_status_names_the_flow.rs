@@ -77,7 +77,7 @@ fn status_counts_live_by_actor_landings_cycle_time_and_the_oldest_live_change() 
         test_box
             .bay(&landing_view)
             .env("BAY_ACTOR", "alice")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "{landed}");
 

@@ -1,4 +1,4 @@
-//! G73. `bay watch --landed --since <cursor>` lists the landings after the cursor, and only
+//! G73. `bay status --since --merged --since <cursor>` lists the landings after the cursor, and only
 //! them.
 //!
 //! The stream is trunk's first-parent line after the cursor's trunk, oldest first: each
@@ -19,10 +19,11 @@ use serde_json::Value;
 use support::{TestBox, result_json, unchecked_files};
 
 fn landed(test_box: &TestBox, dir: &Path, since: Option<&str>) -> Value {
-    let mut args = vec!["watch", "--landed"];
+    let mut args = vec!["status", "--since"];
     if let Some(cursor) = since {
-        args.extend(["--since", cursor]);
+        args.push(cursor);
     }
+    args.push("--merged");
     let watched = test_box.bay_ok(dir, &args);
     assert_eq!(watched["decision"], "ok", "{watched}");
     assert!(watched["detail"]["cursor"].is_string(), "{watched}");
@@ -76,9 +77,9 @@ fn landings_after_a_cursor_name_base_time_and_landings_outside_bay() {
 
     // A change lands through bay.
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed", "{result}");
+    assert_eq!(result["decision"], "merged", "{result}");
     test_box.git_ok(&repo, &["pull", "-q", "--ff-only", "origin", "main"]);
     let published = test_box.git_ok(&repo, &["rev-parse", "HEAD"]);
 

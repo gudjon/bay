@@ -40,7 +40,7 @@ fn an_approval_with_no_executor_says_its_author_adds_it() {
 fn a_no_says_the_author_fixes_it() {
     let trunk = trunk();
     let (id, _view, _candidate) = trunk.held_change();
-    let (code, rejected) = trunk.approve(&trunk.approver_box, &id, &["--reject"]);
+    let (code, rejected) = trunk.reject(&trunk.approver_box, &id, &[]);
     assert_eq!(code, 0, "{rejected}");
     assert_eq!(
         rejected["detail"]["lands_by"], "author_repairs",

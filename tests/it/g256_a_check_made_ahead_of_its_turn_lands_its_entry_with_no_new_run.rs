@@ -1,7 +1,7 @@
 //! G256. A check made ahead of its turn lands its entry with no new run (NEW-2,
 //! `crate::throughput`).
 //!
-//! With `[executor] ahead = 2` and exact-inputs reuse on a bay host, three changes wait in the
+//! With `[runner] ahead = 2` and exact-inputs reuse on a bay host, three changes wait in the
 //! publication queue. While executor A checks the head, executor B (its own producer), which
 //! may not run the head, checks the second and third entries on the bases the entries ahead of
 //! them predict, and nothing else. Once A has landed the head, the second and third land with no
@@ -26,7 +26,7 @@ use serde_json::Value;
 use support::PRODUCER;
 use support::queued::{Check, Held, OTHER_PRODUCER, finished, host, ran_for};
 
-const CONFIG: &str = "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[executor]\nlease_s = 30\nheartbeat_s = 1\nahead = 2\n";
+const CONFIG: &str = "[runner]\nlease_s = 30\nheartbeat_s = 1\nahead = 2\n";
 
 /// Three queued changes; executor A checks the head, which holds, and executor B pre-checks
 /// the second and third meanwhile. Returns the host, the three ids and A's pass.
@@ -77,7 +77,7 @@ fn while_the_head_is_checked(fail_head: bool) -> (Held, [String; 3], Value) {
 fn entries_checked_on_their_predicted_bases_land_with_no_new_run_in_queue_order() {
     let (held, [one, two, three], outcome) = while_the_head_is_checked(false);
     for id in [&one, &two, &three] {
-        assert_eq!(ran_for(&outcome, id)["decision"], "landed", "{outcome}");
+        assert_eq!(ran_for(&outcome, id)["decision"], "merged", "{outcome}");
     }
     let requests = held.requests();
     assert_eq!(
@@ -111,7 +111,7 @@ fn a_failing_head_leaves_the_pre_checks_unused_and_the_entries_are_checked_again
         "{outcome}"
     );
     for id in [&two, &three] {
-        assert_eq!(ran_for(&outcome, id)["decision"], "landed", "{outcome}");
+        assert_eq!(ran_for(&outcome, id)["decision"], "merged", "{outcome}");
     }
     let requests = held.requests();
     assert_eq!(

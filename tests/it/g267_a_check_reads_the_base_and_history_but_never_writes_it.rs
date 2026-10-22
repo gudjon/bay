@@ -79,9 +79,9 @@ fn land(extra: &str) -> Landed {
     }
     let trunk = test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (change, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let request: Value = serde_json::from_str(&std::fs::read_to_string(&seen).unwrap()).unwrap();
     let answers = std::fs::read_to_string(&found)
         .unwrap()

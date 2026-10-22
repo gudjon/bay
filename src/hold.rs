@@ -1,17 +1,17 @@
 //! N-8: a trunk hold. A team sometimes must hold its trunk (an incident, an infrastructure
 //! migration, a lock outside the repository). While trunk is held the executor publishes only
-//! a landing that carries `Fixes:` or `Reverts:`, the same rule a `[[freeze]]` of a promotion
-//! target keeps (`crate::target`); every other operation waits with `TRUNK_HELD`, publishes
+//! a landing that carries `Fixes:` or `Reverts:`, the same rule a `[[hold]]` of a promotion
+//! target keeps (`crate::target`); every other operation waits with `MAIN_HELD`, publishes
 //! nothing and holds no queue place, so a fix behind it reaches the head (`crate::publish`).
 //!
 //! A hold comes from one of two places, both read from the config at the trunk's tip, so a
 //! change never lifts a hold for itself:
 //!
-//! - a `[[freeze]]` whose `target` is the trunk's own name, in force until its `end`;
-//! - the hold adapter, `[hold] command` in `.bay/config.toml`: a program path relative to the
-//!   work tree, then its arguments, as `[notify] command` is. Its program is materialized from
+//! - a `[[hold]]` whose `target` is the trunk's own name, in force until its `end`;
+//! - the hold adapter, `[plugin.hold] command` in `.bay/config.toml`: a program path relative to the
+//!   work tree, then its arguments, as `[plugin.notify] command` is. Its program is materialized from
 //!   the trunk's tip, never taken from this machine's work tree, and run as `<command> status`
-//!   with only `PATH` and `HOME` of bay's environment, within `[hold] timeout_s` (10 s unless
+//!   with only `PATH` and `HOME` of bay's environment, within `[plugin.hold] timeout_s` (10 s unless
 //!   set). It answers `{"held": true|false, "reason": "..."}` on stdout and exits 0.
 //!
 //! Unknown is never clear: a config at the trunk's tip bay cannot read, an adapter that does not
@@ -26,20 +26,20 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::repo::Repo;
 
-/// How long the hold adapter may take when `[hold] timeout_s` is not set.
+/// How long the hold adapter may take when `[plugin.hold] timeout_s` is not set.
 pub const DEFAULT_TIMEOUT_S: u64 = 10;
 
 /// The argument the hold adapter is asked with.
 pub const STATUS: &str = "status";
 
 /// The release reason of a queue place given back because trunk is held. It counts toward
-/// neither `QUEUE_DEADLINE_EXCEEDED` nor `PUBLISH_RETRY_EXHAUSTED` (`DESIGN` § 6).
+/// neither `QUEUE_DEADLINE_EXCEEDED` nor `MERGE_RETRY_EXHAUSTED` (`DESIGN` § 6).
 pub const RELEASE: &str = "trunk_held";
 
 /// A hold in force on trunk.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Hold {
-    /// `freeze` (a `[[freeze]]` of the trunk), `adapter` (`[hold] command`), or `config` (the
+    /// `freeze` (a `[[hold]]` of the trunk), `adapter` (`[plugin.hold] command`), or `config` (the
     /// config at the trunk's tip could not be read).
     pub source: &'static str,
     pub reason: String,
@@ -83,20 +83,20 @@ pub fn held(repo: &Repo, trunk: &str) -> Option<Hold> {
     if let Some(hold) = frozen(&config, repo.trunk(), crate::live::unix_now()) {
         return Some(hold);
     }
-    let adapter = config.hold.as_ref()?;
+    let adapter = config.plugin.hold.as_ref()?;
     let command = adapter.command.as_deref()?;
-    let timeout = Duration::from_secs(adapter.timeout_s.unwrap_or(DEFAULT_TIMEOUT_S));
+    let timeout = adapter.timeout(Duration::from_secs(DEFAULT_TIMEOUT_S));
     match ask(repo, trunk, command, timeout) {
         Ok(answer) => answer,
         Err(fault) => Some(Hold {
-            source: "adapter",
+            source: "plugin",
             reason: format!("the hold adapter {command:?} gave no answer bay can read: {fault}"),
             end: None,
         }),
     }
 }
 
-/// The `[[freeze]]` of the trunk `trunk_name` in force at `now`, the one that ends last.
+/// The `[[hold]]` of main, `trunk_name`, in force at `now`, the one that ends last.
 #[must_use]
 pub fn frozen(config: &Config, trunk_name: &str, now: u64) -> Option<Hold> {
     config
@@ -105,7 +105,7 @@ pub fn frozen(config: &Config, trunk_name: &str, now: u64) -> Option<Hold> {
         .filter(|freeze| freeze.target == trunk_name && freeze.active(now))
         .max_by_key(|freeze| crate::clock::unix_of(&freeze.end).unwrap_or(u64::MAX))
         .map(|freeze| Hold {
-            source: "freeze",
+            source: "window",
             reason: freeze.reason.clone(),
             end: Some(freeze.end.clone()),
         })
@@ -122,7 +122,7 @@ fn ask(repo: &Repo, trunk: &str, command: &str, timeout: Duration) -> Result<Opt
     let (status, stdout, stderr) = run_from_trunk(
         repo,
         trunk,
-        "[hold] command",
+        "[plugin.hold] command",
         command,
         &[STATUS],
         timeout,
@@ -142,7 +142,7 @@ fn ask(repo: &Repo, trunk: &str, command: &str, timeout: Duration) -> Result<Opt
 /// scratch of its own under `<common dir>/bay/<runs>/`, never taken from this machine's work
 /// tree, and run there with only `PATH` and `HOME` of bay's environment, materializing and
 /// running together within `timeout`. The scratch is removed once it ends. `what` names the
-/// setting in an error (`[hold] command`). The hold adapter and the prune adapter
+/// setting in an error (`[plugin.hold] command`). The hold adapter and the prune adapter
 /// (`crate::heads`) both run this way.
 ///
 /// # Errors
@@ -241,7 +241,7 @@ pub fn read_answer(stdout: &[u8]) -> Result<Option<Hold>, String> {
         .unwrap_or("the hold adapter answers held and names no reason")
         .to_owned();
     Ok(Some(Hold {
-        source: "adapter",
+        source: "plugin",
         reason,
         end: answer["end"].as_str().map(str::to_owned),
     }))
@@ -258,7 +258,7 @@ mod tests {
         let held = read_answer(br#"{"held": true, "reason": "incident 12"}"#)
             .unwrap()
             .unwrap();
-        assert_eq!(held.source, "adapter");
+        assert_eq!(held.source, "plugin");
         assert_eq!(held.reason, "incident 12");
         assert!(read_answer(b"not json").is_err());
         assert!(read_answer(br#"{"held": "no"}"#).is_err());
@@ -268,12 +268,12 @@ mod tests {
     #[test]
     fn a_freeze_of_the_trunk_holds_it_until_its_end() {
         let config = Config::parse(
-            "trunk = \"main\"\n[[freeze]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"migration\"\n",
+            "trunk = \"main\"\n[[hold]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"migration\"\n",
         )
         .unwrap();
         let end = crate::clock::unix_of("2026-12-24T00:00:00Z").unwrap();
         let hold = frozen(&config, "main", end - 1).unwrap();
-        assert_eq!(hold.source, "freeze");
+        assert_eq!(hold.source, "window");
         assert_eq!(hold.reason, "migration");
         assert_eq!(hold.end.as_deref(), Some("2026-12-24T00:00:00Z"));
         assert!(frozen(&config, "main", end).is_none());

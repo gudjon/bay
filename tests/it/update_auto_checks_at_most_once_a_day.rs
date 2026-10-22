@@ -113,7 +113,10 @@ fn the_switches_and_a_pin_keep_the_check_from_running() {
     assert_eq!(checked_at(&fixture), Some(due));
 
     // The hook never checks.
-    let _ = fixture.bay(&plain).args(["hook", "pre-tool"]).output_busy();
+    let _ = fixture
+        .bay(&plain)
+        .args(["hook", "tool.before"])
+        .output_busy();
     assert_eq!(checked_at(&fixture), Some(due));
 
     // The box's switch and the box's pin keep it from running.

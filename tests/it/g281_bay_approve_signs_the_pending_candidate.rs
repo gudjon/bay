@@ -5,7 +5,7 @@
 //! approval check that waits on the change and that approver is enrolled for, about exactly the
 //! candidate commit its pending operation names, through the `bay evidence record` path (the
 //! approver key signs it, and it is pushed). `--why` is the record's `why`. The result says what
-//! happens next. A yes lets `bay land --wait` land the change; a no blocks it `CHECK_FAILED`,
+//! happens next. A yes lets `bay merge --wait` land the change; a no blocks it `CHECK_FAILED`,
 //! naming the approver and the why. It refuses, naming why and the recovery, and writes nothing,
 //! with no approver key, on a change that waits on no approval, and for an approver the
 //! registry does not enrol for the check: it never answers for another name.
@@ -86,7 +86,7 @@ fn approve_signs_exactly_the_pending_candidate_and_the_change_then_lands() {
     assert!(
         detail["next"]
             .as_str()
-            .is_some_and(|next| next.contains("bay land --wait")),
+            .is_some_and(|next| next.contains("bay merge --wait")),
         "{approved}"
     );
 
@@ -115,7 +115,7 @@ fn approve_signs_exactly_the_pending_candidate_and_the_change_then_lands() {
     // The author's retry lands it.
     let (code, landed) = trunk.land(&view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 }
 
 #[test]
@@ -123,11 +123,7 @@ fn a_rejection_blocks_the_change_naming_the_approver_and_why() {
     let trunk = trunk();
     let (id, view, _) = trunk.held_change();
 
-    let (code, rejected) = trunk.approve(
-        &trunk.approver_box,
-        &id,
-        &["--reject", "--why", "too steep"],
-    );
+    let (code, rejected) = trunk.reject(&trunk.approver_box, &id, &["--why", "too steep"]);
     assert_eq!(code, 0, "{rejected}");
     assert_eq!(
         rejected["detail"]["verdict"], "product_failure",

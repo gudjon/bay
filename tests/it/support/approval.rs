@@ -134,9 +134,9 @@ impl Trunk {
         (id, view)
     }
 
-    /// `bay land --wait` in `view`.
+    /// `bay merge --wait` in `view`.
     pub fn land(&self, view: &Path) -> (i32, serde_json::Value) {
-        result_json(self.test_box.bay(view).args(["land", "--wait"]))
+        result_json(self.test_box.bay(view).args(["merge", "--wait"]))
     }
 
     /// A change on `billing/` and `src/` held `APPROVAL_PENDING`: its id, its view and the
@@ -170,6 +170,11 @@ impl Trunk {
     /// `bay approve <change>` in `dir`, with `args` after it.
     pub fn approve(&self, dir: &Path, change: &str, args: &[&str]) -> (i32, serde_json::Value) {
         result_json(self.test_box.bay(dir).arg("approve").arg(change).args(args))
+    }
+
+    /// `bay reject <change> <args>` in `dir`.
+    pub fn reject(&self, dir: &Path, change: &str, args: &[&str]) -> (i32, serde_json::Value) {
+        result_json(self.test_box.bay(dir).arg("reject").arg(change).args(args))
     }
 
     /// The tip of the remote trunk, as the work repository last fetched it.

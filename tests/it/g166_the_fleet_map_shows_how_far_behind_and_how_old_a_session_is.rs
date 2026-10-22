@@ -69,7 +69,7 @@ fn a_sessions_entry_counts_its_trunk_lag_and_its_age() {
     hook(
         &test_box,
         &view,
-        "session-start",
+        "session.start",
         "01-SessionStart.json",
         "s-lag",
     );
@@ -81,7 +81,7 @@ fn a_sessions_entry_counts_its_trunk_lag_and_its_age() {
     hook(
         &test_box,
         &view,
-        "post-tool",
+        "step.end",
         "08-PostToolBatch.json",
         "s-lag",
     );
@@ -111,7 +111,7 @@ fn a_sessions_entry_counts_its_trunk_lag_and_its_age() {
     hook(
         &test_box,
         &fresh_view,
-        "session-start",
+        "session.start",
         "01-SessionStart.json",
         "s-tip",
     );

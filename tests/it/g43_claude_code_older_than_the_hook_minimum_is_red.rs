@@ -19,7 +19,8 @@ fn claude_older_than_2_1_302_is_red() {
     test_box.fake_claude(Some("2.1.200"));
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "CLAUDE_BELOW_FLOOR");
+    assert_eq!(result["reason"], "TOOL_BELOW_FLOOR");
+    assert_eq!(result["detail"]["tool"], "claude", "{result}");
     let claude = row(&result, "claude");
     assert_eq!(claude["state"], "red");
     assert_eq!(claude["floor"], "2.1.302");
@@ -47,7 +48,8 @@ fn a_configured_adapter_with_claude_absent_is_red() {
     test_box.fake_claude(None);
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "CLAUDE_ABSENT");
+    assert_eq!(result["reason"], "TOOL_ABSENT");
+    assert_eq!(result["detail"]["tool"], "claude", "{result}");
     let claude = row(&result, "claude");
     assert_eq!(claude["state"], "red");
     assert_eq!(claude["note"], "claude is absent");

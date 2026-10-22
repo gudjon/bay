@@ -1,11 +1,11 @@
 //! G244d: a red post check names its culprit by bisection.
 //!
 //! A post check that tests only some trunk tips leaves a suspect range, and the newest failure
-//! is not always the landing that broke it. With `[executor] bisect_post = true`, an executor
+//! is not always the landing that broke it. With `[runner] bisect_post = true`, an executor
 //! that serves the check's environment runs it on the range's midpoints, first parent, records
 //! each verdict as ordinary post evidence, and runs the suspect once more to rule out a flake,
 //! in at most log2(n) + 1 runs. The pinned landing is the red's `culprit`, and it owns the
-//! red: `bay status` names it, and `TRUNK_RED` names its change. Off by default.
+//! red: `bay status` names it, and `MAIN_RED` names its change. Off by default.
 
 // Each case runs shell scripts (adapters), so these run on Unix only.
 #![cfg(unix)]
@@ -74,7 +74,7 @@ impl Trunk {
         let id = started["change"].as_str().unwrap().to_owned();
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join(path), format!("{path}\n")).unwrap();
-        let (code, landed) = result_json(self.test_box.bay(&view).args(["land", "--wait"]));
+        let (code, landed) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{landed}");
         (id, landed["detail"]["commit"].as_str().unwrap().to_owned())
     }
@@ -115,7 +115,7 @@ impl Trunk {
     fn executor_pass(&self) -> Option<Value> {
         let ran = self
             .test_box
-            .bay_ok(&self.repo, &["executor", "run", "--once"]);
+            .bay_ok(&self.repo, &["runner", "run", "--once"]);
         ran["detail"]["ran"]
             .as_array()
             .unwrap()
@@ -158,7 +158,7 @@ fn tested((change, commit): &(String, String), verdict: &str) -> Value {
 
 #[test]
 fn a_bisect_names_the_landing_that_broke_the_post_check_not_the_newest_failure() {
-    let trunk = trunk("[executor]\nbisect_post = true\n");
+    let trunk = trunk("[runner]\nbisect_post = true\n");
     let landings = trunk.red_over_four();
     let red = trunk.red();
     assert_eq!(red[0]["landing"], landings[4].1.as_str(), "{red}");
@@ -210,11 +210,11 @@ fn a_bisect_names_the_landing_that_broke_the_post_check_not_the_newest_failure()
     // A pinned range is not bisected again.
     assert_eq!(trunk.executor_pass(), None);
 
-    // TRUNK_RED names the culprit's change as the owner.
+    // MAIN_RED names the culprit's change as the owner.
     let (_, view) = trunk.test_box.start_and_edit(&trunk.repo);
-    let (code, refused) = result_json(trunk.test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(trunk.test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "TRUNK_RED", "{refused}");
+    assert_eq!(refused["reason"], "MAIN_RED", "{refused}");
     assert_eq!(
         refused["detail"]["red"][0]["change"],
         landings[3].0.as_str(),

@@ -28,7 +28,7 @@ fn an_op_id_whose_request_digest_changed_is_refused_without_work() {
         ),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
 
     // The same op id now carries a different request digest.
@@ -51,7 +51,7 @@ fn an_op_id_whose_request_digest_changed_is_refused_without_work() {
     );
 
     let executor = test_box.clone_of(&remote, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let result = &ran["detail"]["ran"][0];
     assert_eq!(result["decision"], "failed", "{ran}");
     assert!(

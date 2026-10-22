@@ -23,7 +23,7 @@
 //! chain says landed; and it waits for an approval since the state commit that carries its land
 //! request (`Request-Id`).
 //!
-//! G310: under `[limits] max_waiting_approvals = N`, [`review_queue`] is what `bay land` counts
+//! G310: under `[limits] max_waiting_approvals = N`, [`review_queue`] is what `bay merge` counts
 //! before it submits a change whose paths need an approval check.
 
 use std::collections::{BTreeSet, HashMap};

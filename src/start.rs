@@ -217,7 +217,7 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
             return None;
         }
         let (head, record) = chain.read(id).ok()?;
-        // NEW-4: a lane change never lands. Once refused `LANE_NEVER_LANDS` its work is done,
+        // NEW-4: a lane change never lands. Once its checks ran (`lane::CHECKED`) its work is done,
         // and its view goes after the lane's shorter window; one of a lane the config no longer
         // declares keeps the retention window.
         let lane_window = record.lane.as_deref().map(|lane| {
@@ -230,7 +230,7 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
             && record
                 .operations
                 .last()
-                .is_some_and(|op| op.outcome.as_deref() == Some(Reason::LaneNeverLands.code()));
+                .is_some_and(|op| op.outcome.as_deref() == Some(crate::lane::CHECKED));
         let ended = never_lands
             || matches!(
                 record.state,
@@ -352,7 +352,7 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
     let intent = request
         .intent
         .clone()
-        .ok_or("bay start needs an intent, or --resume <change>")?;
+        .ok_or("bay start needs an intent, or a change id")?;
     let base = repo.fetch_trunk().map_err(|error| error.message())?;
     let me = current_actor()?;
     let source = actor_source();
@@ -408,7 +408,7 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
                             .with_detail(json!({"intent": intent, "generation": generation,
                                 "why": format!("change {change} of generation {generation} is \
                                     live: the next generation needs it landed or given up"),
-                                "recovery": format!("bay land --abandon from its view gives it \
+                                "recovery": format!("bay abandon from its view gives it \
                                     up; bay start {intent} without --new adopts it")})));
                     }
                     (false, false) => {
@@ -479,7 +479,7 @@ fn wip_limit(
         "live_changes": live,
         "policy": crate::policy::POLICY_PATH,
         "base": base,
-        "recovery": "land one of the live changes, or give one up with bay land --abandon, then start again",
+        "recovery": "land one of the live changes, or give one up with bay abandon, then start again",
     }))))
 }
 
@@ -575,7 +575,7 @@ fn superseded_by_newer(id: &str, record: &ChangeRecord, newer: &(u64, String)) -
             "generation": generation,
             "why": format!("change {id} ended without landing and generation {generation} of \
                 its intent is change {change}"),
-            "recovery": format!("bay start --resume {change} continues the intent"),
+            "recovery": format!("bay start {change} continues the intent"),
         }))
 }
 
@@ -1126,7 +1126,7 @@ fn add_behind(
         .map_err(|_| "git rev-list --count printed no count".to_owned())?;
     detail["behind"] = json!(behind);
     if behind > 0 {
-        detail["recovery"] = json!(format!("bay start --resume {change} brings in newer trunk"));
+        detail["recovery"] = json!(format!("bay start {change} brings in newer trunk"));
     }
     Ok(())
 }
@@ -1142,7 +1142,7 @@ fn same_from(request: &StartRequest, record: &ChangeRecord, change: &str) -> Res
         {
             Err(format!(
                 "--from {reference}: the intent already has the change {change}; resume it with \
-                 start --resume {change}, or start another intent"
+                 start {change}, or start another intent"
             ))
         }
         _ => Ok(()),
@@ -1366,7 +1366,7 @@ fn checkpoint_view(
 }
 
 /// The checkpoint the agent hook starts (G165: at the session's end, and on the idle timer
-/// `[hooks] checkpoint_idle_s`): `bay start --resume`'s checkpoint of the view of change `id`,
+/// `[hooks] checkpoint_idle_s`): `bay start`'s checkpoint of the view of change `id`,
 /// pushed like any checkpoint, without its fetch of trunk, so the view the session works in
 /// never moves under it. A change with no complete view here has nothing to checkpoint.
 #[must_use]

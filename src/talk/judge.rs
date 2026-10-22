@@ -3,14 +3,14 @@
 //!
 //! A create is one parentless commit holding `talk.json` alone, in canonical form, with a body
 //! that passes [`check_body`] and [`check_actors`] and names this ref's `who` and id, signed by the
-//! agent key of its sender (an executor, producer or registry key is `TALK_SENDER_NOT_ACTOR`), and
+//! agent key of its sender (an executor, producer or registry key is `TALK_REFUSED`), and
 //! committed at `sent`, which is no more than [`BAY_TALK_CLOCK_SKEW_S`] ahead of this host's clock.
 //! A `supersedes` names a talk this host holds, or this push brings, whose sender, or `decides`,
-//! is this sender, that is not closed and has no other successor (`TALK_SUPERSEDE_REFUSED`). The
+//! is this sender, that is not closed and has no other successor (`TALK_REFUSED`). The
 //! sender's open talks to `who`, the superseded one aside, number fewer than `BAY_TALK_OPEN_MAX`,
-//! counting this push's other creates by the same sender (`TALK_BACKLOG`, naming the oldest). A
+//! counting this push's other creates by the same sender (`TALK_REFUSED`, naming the oldest). A
 //! reviewer's delivery talk about a change stands beside no other open talk of that reviewer about
-//! that change, the one it supersedes aside (G149b, `TALK_BACKLOG` naming the open one).
+//! that change, the one it supersedes aside (G149b, `TALK_REFUSED` naming the open one).
 //!
 //! An append is one or more commits, each on the one before it, from the old tip; each keeps every
 //! file byte for byte (so a different body under the same id is refused) and adds the next
@@ -19,7 +19,7 @@
 //! outcome, first step and what is unclear, any `owes` is a registry actor, any `follow_up` is
 //! after `sent`, any `status` is a status word, and a blocked one names a reason code and a new
 //! `follow_up`; an answer by `who` or `decides` on a discovery talk, where a different value from
-//! the standing answer names that answer's commit in `supersedes` (`TALK_ANSWER_CONFLICT`); a
+//! the standing answer names that answer's commit in `supersedes` (`TALK_REFUSED`); a
 //! close as `superseded` by a talk under the same `who` that supersedes it, or as `answered` by
 //! the landing of a change whose `Fixes:`, `Reverts:` or `Supersedes:` names the delivery talk's
 //! change (G148), or as `expired` when its ack's commit time is later than its `expires` (G52).
@@ -239,7 +239,7 @@ fn tree_files(git: &Git, trees: &[String], hash_len: usize) -> Result<Vec<Vec<Fi
             let entries = (kind == "tree")
                 .then(|| super::tree_entries(&data, hash_len))
                 .flatten()
-                .ok_or_else(|| format!("TALK_INVALID: {oid} is not a tree that parses"))?;
+                .ok_or_else(|| format!("TALK_REFUSED: {oid} is not a tree that parses"))?;
             read.insert(oid.clone(), entries);
         }
         let mut next = Vec::new();
@@ -392,21 +392,21 @@ impl Chain {
     /// [`BAY_TALK_MAX_BYTES`], as [`canonical_blob`] judges one.
     fn entry_value(&self, file: &File) -> Result<Value, String> {
         if file.mode != "100644" || file.kind != "blob" {
-            return Err(format!("TALK_INVALID: {} is not a plain file", file.path));
+            return Err(format!("TALK_REFUSED: {} is not a plain file", file.path));
         }
         let Some(data) = self.texts.get(&file.oid) else {
             return Err(format!(
-                "TALK_INVALID: {} is over BAY_TALK_MAX_BYTES ({BAY_TALK_MAX_BYTES} bytes), a bay limit",
+                "TALK_REFUSED: {} is over BAY_TALK_MAX_BYTES ({BAY_TALK_MAX_BYTES} bytes), a bay limit",
                 file.path
             ));
         };
         let text = std::str::from_utf8(data)
-            .map_err(|_| format!("TALK_INVALID: {} is not JSON", file.path))?;
+            .map_err(|_| format!("TALK_REFUSED: {} is not JSON", file.path))?;
         let value: Value = serde_json::from_str(text)
-            .map_err(|_| format!("TALK_INVALID: {} is not JSON", file.path))?;
+            .map_err(|_| format!("TALK_REFUSED: {} is not JSON", file.path))?;
         if canonical(&value)? != text {
             return Err(format!(
-                "TALK_INVALID: {} is not in RFC 8785 canonical form",
+                "TALK_REFUSED: {} is not in RFC 8785 canonical form",
                 file.path
             ));
         }
@@ -523,14 +523,14 @@ fn other_class(push: &Push, commit: &str) -> Result<Option<&'static str>, String
 /// The JSON of a blob that is canonical text of at most [`BAY_TALK_MAX_BYTES`].
 fn canonical_blob(git: &Git, file: &File) -> Result<Value, String> {
     if file.mode != "100644" || file.kind != "blob" {
-        return Err(format!("TALK_INVALID: {} is not a plain file", file.path));
+        return Err(format!("TALK_REFUSED: {} is not a plain file", file.path));
     }
     if file
         .size
         .is_none_or(|size| size > BAY_TALK_MAX_BYTES as u64)
     {
         return Err(format!(
-            "TALK_INVALID: {} is over BAY_TALK_MAX_BYTES ({BAY_TALK_MAX_BYTES} bytes), a bay limit",
+            "TALK_REFUSED: {} is over BAY_TALK_MAX_BYTES ({BAY_TALK_MAX_BYTES} bytes), a bay limit",
             file.path
         ));
     }
@@ -538,10 +538,10 @@ fn canonical_blob(git: &Git, file: &File) -> Result<Value, String> {
         .run(&["cat-file", "blob", &file.oid])
         .map_err(|error| error.message())?;
     let value: Value = serde_json::from_str(&text)
-        .map_err(|_| format!("TALK_INVALID: {} is not JSON", file.path))?;
+        .map_err(|_| format!("TALK_REFUSED: {} is not JSON", file.path))?;
     if canonical(&value)? != text {
         return Err(format!(
-            "TALK_INVALID: {} is not in RFC 8785 canonical form",
+            "TALK_REFUSED: {} is not in RFC 8785 canonical form",
             file.path
         ));
     }
@@ -561,7 +561,7 @@ fn not_ahead(field: &str, at: u64) -> Result<(), String> {
     let now = crate::live::unix_now();
     if at > now.saturating_add(BAY_TALK_CLOCK_SKEW_S) {
         return Err(format!(
-            "TALK_INVALID: `{field}` is {}s ahead of this host's clock; a talk's times are at most BAY_TALK_CLOCK_SKEW_S ({BAY_TALK_CLOCK_SKEW_S}s) ahead",
+            "TALK_REFUSED: `{field}` is {}s ahead of this host's clock; a talk's times are at most BAY_TALK_CLOCK_SKEW_S ({BAY_TALK_CLOCK_SKEW_S}s) ahead",
             at - now
         ));
     }
@@ -573,7 +573,7 @@ fn sender_key(push: &Push, new: &str, from: &str) -> Result<(), String> {
     match agent_signer(push, new)? {
         Some(signer) if signer == from => Ok(()),
         Some(signer) => Err(format!(
-            "TALK_SENDER_NOT_ACTOR: {new} is signed by agent {signer}'s key and names {from} as its sender"
+            "TALK_REFUSED: {new} is signed by agent {signer}'s key and names {from} as its sender"
         )),
         None => {
             let by = other_class(push, new)?.map_or_else(
@@ -581,7 +581,7 @@ fn sender_key(push: &Push, new: &str, from: &str) -> Result<(), String> {
                 |class| format!("an {class} key"),
             );
             Err(format!(
-                "TALK_SENDER_NOT_ACTOR: {new} is signed by {by}; only the sender's agent key sends a talk"
+                "TALK_REFUSED: {new} is signed by {by}; only the sender's agent key sends a talk"
             ))
         }
     }
@@ -594,7 +594,7 @@ fn reviewer_sender(push: &Push, new: &str, from: &str, body: &Value) -> Result<(
     let signer = signing::verify_commit(push.git, new, &file).map_err(|error| error.message())?;
     if signer.as_deref() != Some(from) {
         return Err(format!(
-            "TALK_SENDER_NOT_ACTOR: {new} is not signed by reviewer {from}'s key"
+            "TALK_REFUSED: {new} is not signed by reviewer {from}'s key"
         ));
     }
     super::reviewed(push.git, push.registry, "HEAD", body).map_err(|refusal| refusal.text())
@@ -606,20 +606,20 @@ fn create(push: &Push, new: &str, who: &str, id: &str) -> Result<(), String> {
         .run(&["show", "-s", "--format=%P", new])
         .map_err(|error| error.message())?;
     if !parents.trim().is_empty() {
-        return Err("TALK_INVALID: a talk starts as one parentless commit".to_owned());
+        return Err("TALK_REFUSED: a talk starts as one parentless commit".to_owned());
     }
     let root = files(git, new)?;
     let [file] = root.as_slice() else {
-        return Err(format!("TALK_INVALID: a new talk holds {TALK_FILE} alone"));
+        return Err(format!("TALK_REFUSED: a new talk holds {TALK_FILE} alone"));
     };
     if file.path != TALK_FILE {
-        return Err(format!("TALK_INVALID: a new talk holds {TALK_FILE} alone"));
+        return Err(format!("TALK_REFUSED: a new talk holds {TALK_FILE} alone"));
     }
     let body = canonical_blob(git, file)?;
     check_body(&body).map_err(|refusal| refusal.text())?;
     if body["id"] != id || body["who"] != who {
         return Err(format!(
-            "TALK_INVALID: the ref names talk {id} to {who}, and its body another"
+            "TALK_REFUSED: the ref names talk {id} to {who}, and its body another"
         ));
     }
     check_actors(push.registry, &body).map_err(|refusal| refusal.text())?;
@@ -631,7 +631,7 @@ fn create(push: &Push, new: &str, who: &str, id: &str) -> Result<(), String> {
     }
     let sent = body["sent"].as_str().and_then(unix_of);
     if commit_time(git, new)? != sent {
-        return Err("TALK_INVALID: `sent` is not the talk's commit time".to_owned());
+        return Err("TALK_REFUSED: `sent` is not the talk's commit time".to_owned());
     }
     not_ahead("sent", sent.unwrap_or_default())?;
     let supersedes = body["supersedes"].as_str();
@@ -648,7 +648,7 @@ fn create(push: &Push, new: &str, who: &str, id: &str) -> Result<(), String> {
         .collect();
     if let Some((open, oldest)) = backlog(&held, &pushed, from, supersedes) {
         return Err(format!(
-            "TALK_BACKLOG: {from} holds {open} open talks to {who} (BAY_TALK_OPEN_MAX {BAY_TALK_OPEN_MAX}); the oldest open one is {oldest}"
+            "TALK_REFUSED: {from} holds {open} open talks to {who} (BAY_TALK_OPEN_MAX {BAY_TALK_OPEN_MAX}); the oldest open one is {oldest}"
         ));
     }
     if super::sender_class(push.registry, &body) == Some(KeyClass::Reviewer) {
@@ -656,7 +656,7 @@ fn create(push: &Push, new: &str, who: &str, id: &str) -> Result<(), String> {
         let talks: Vec<&Talk> = held.iter().chain(&pushed).collect();
         if let Some(open) = open_findings(&talks, &body).first() {
             return Err(format!(
-                "TALK_BACKLOG: reviewer {from} holds open talk {} to {who} about change {}; a reviewer holds one open talk per change, and a later finding supersedes it",
+                "TALK_REFUSED: reviewer {from} holds open talk {} to {who} about change {}; a reviewer holds one open talk per change, and a later finding supersedes it",
                 open.id,
                 body["change"].as_str().unwrap_or_default()
             ));
@@ -681,10 +681,10 @@ fn held_talk(push: &Push, name: &str, old: &str) -> Result<Option<Talk>, String>
 fn may_supersede(push: &Push, name: &str, old: &str, from: &str) -> Result<(), String> {
     let Some(talk) = held_talk(push, name, old)? else {
         return Err(format!(
-            "TALK_INVALID: `supersedes` names talk {old}, which this host does not hold"
+            "TALK_REFUSED: `supersedes` names talk {old}, which this host does not hold"
         ));
     };
-    let refused = Reason::TalkSupersedeRefused.code();
+    let refused = Reason::TalkRefused.code();
     if !talk.superseded_by_allowed(from) {
         return Err(format!(
             "{refused}: talk {old} was sent by {}; only its sender or its `decides` supersedes it",

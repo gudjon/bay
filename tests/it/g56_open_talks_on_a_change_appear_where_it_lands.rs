@@ -1,6 +1,6 @@
 //! G56: open talks on a change appear where it lands (`DESIGN` § 11c; ruling T9).
 //!
-//! `bay land` and `bay undo` fetch the acting actor's talk refs before they act, and their result
+//! `bay merge` and `bay undo` fetch the acting actor's talk refs before they act, and their result
 //! lists under `detail.open_talks` every talk to that actor, unread or open, whose target is the
 //! change. A talk about another change is not listed. The fetch writes no ack, so an unread talk
 //! stays unread, and the verbs never block on a talk.
@@ -77,10 +77,10 @@ fn land_and_undo_name_the_unread_talks_on_their_change_and_no_other() {
             .bay(&view)
             .env("BAY_ACTOR", "agent")
             .env("BAY_SESSION", "s-agent")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "a talk never blocks a landing: {landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(open_talks(&landed), vec![on_c.clone()], "{landed}");
     let row = &landed["detail"]["open_talks"][0];
     assert_eq!(row["from"], "agent-b", "{row}");

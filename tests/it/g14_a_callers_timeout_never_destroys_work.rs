@@ -29,12 +29,7 @@ fn the_observation_timeout_detaches_the_caller_and_the_run_continues() {
     let (id, view) = test_box.start_and_edit(&repo);
 
     let started = Instant::now();
-    let (code, detached) =
-        result_json(
-            test_box
-                .bay(&view)
-                .args(["land", "--wait", "--observe", "1"]),
-        );
+    let (code, detached) = result_json(test_box.bay(&view).args(["merge", "--wait=1"]));
     assert_eq!(code, 0, "{detached}");
     assert_eq!(detached["decision"], "queued");
     assert_eq!(detached["state"], "running");
@@ -66,11 +61,11 @@ fn the_execution_budget_ends_the_check_with_a_stated_outcome() {
     let mut files = check_files("sleep 5", &passing_result(1), 1, 60);
     files.push((
         ".bay/config.toml".to_owned(),
-        "[executor]\nexecution_budget_s = 1\n".to_owned(),
+        "[runner]\nexecution_budget_s = 1\n".to_owned(),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_UNKNOWN");
     assert!(
@@ -90,7 +85,7 @@ fn the_submission_timeout_ends_the_operation_with_a_stated_outcome() {
     ));
     files.push((
         ".bay/config.toml".to_owned(),
-        "[executor]\ncommand = \"scripts/executor\"\nsubmission_timeout_s = 1\n".to_owned(),
+        "[runner]\ncommand = \"scripts/executor\"\nsubmission_timeout_s = 1\n".to_owned(),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     std::fs::set_permissions(
@@ -99,7 +94,7 @@ fn the_submission_timeout_ends_the_operation_with_a_stated_outcome() {
     )
     .unwrap();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, failed) = result_json(test_box.bay(&view).arg("land"));
+    let (code, failed) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 20, "{failed}");
     assert!(
         failed.to_string().contains("submission timeout"),
@@ -131,12 +126,12 @@ fn a_one_off_status_reports_a_suspected_lease_expiry_and_never_claims() {
         ),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     let executor = test_box.clone_of(&remote, "executor");
     let mut owner = test_box
         .bay_process(&executor)
-        .args(["executor", "run", "--once"])
+        .args(["runner", "run", "--once"])
         .spawn()
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(90);
@@ -181,12 +176,7 @@ fn finished_check_units_keep_their_receipts_after_the_caller_leaves() {
     ];
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, detached) =
-        result_json(
-            test_box
-                .bay(&view)
-                .args(["land", "--wait", "--observe", "1"]),
-        );
+    let (code, detached) = result_json(test_box.bay(&view).args(["merge", "--wait=1"]));
     assert_eq!(code, 0, "{detached}");
     assert_eq!(detached["state"], "running");
     let deadline = Instant::now() + Duration::from_secs(60);

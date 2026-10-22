@@ -3,7 +3,7 @@
 //!
 //! A talk has arrived when the recipient's accept acked it (a fetching command, `bay status`).
 //! The hook reads the talk refs this repository holds, no fetch, and tells the session's own
-//! agent at its next `post-tool` or `user-prompt-submit`: one line naming the talk's id, its kind
+//! agent at its next `step.end` or `turn.start`: one line naming the talk's id, its kind
 //! and where to read it, never its prose. The delivered-notice cursor keeps the talk ids, so the
 //! same talk is never told again in that session. A talk fetched but not acked is not arrived.
 
@@ -58,7 +58,7 @@ fn hook(case: &TalkCase, event: &str, name: &str) -> (String, String) {
 }
 
 fn post_tool(case: &TalkCase) -> String {
-    hook(case, "post-tool", "08-PostToolBatch.json").1
+    hook(case, "step.end", "08-PostToolBatch.json").1
 }
 
 fn last_line(case: &TalkCase) -> Value {
@@ -69,7 +69,7 @@ fn last_line(case: &TalkCase) -> Value {
 #[test]
 fn a_talk_that_arrives_is_one_notice_and_never_again() {
     let case = hosted_talk();
-    hook(&case, "session-start", "01-SessionStart.json");
+    hook(&case, "session.start", "01-SessionStart.json");
     let follow_up = from_now(3600);
     let (code, sent) = case.talk(
         "agent",
@@ -126,9 +126,6 @@ fn a_talk_that_arrives_is_one_notice_and_never_again() {
 
     // Never again: not at the next step, not at the next prompt.
     assert_eq!(post_tool(&case), "");
-    assert_eq!(
-        hook(&case, "user-prompt-submit", "02-UserPromptSubmit.json").0,
-        ""
-    );
+    assert_eq!(hook(&case, "turn.start", "02-UserPromptSubmit.json").0, "");
     assert!(last_line(&case).get("talk_notices").is_none());
 }

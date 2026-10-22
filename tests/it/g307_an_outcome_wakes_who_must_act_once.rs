@@ -1,13 +1,13 @@
 //! G307. An outcome someone must act on wakes them once.
 //!
 //! When an executor pass records an outcome its author must act on, bay asks the configured
-//! `[wake] command` once for it, as it asks once for a talk: a `bay.wake/1` request with
+//! `[plugin.wake] command` once for it, as it asks once for a talk: a `bay.wake/1` request with
 //! `cause: "outcome"`, the change, the operation, the decision, the reason code, and the actor
 //! and session the change record names. The adapter's answer goes on the outcome event in the
-//! executor's log as `wake: {result, reason}`, so `bay watch` shows it. A block the executor
+//! executor's log as `wake: {result, reason}`, so `bay status --since` shows it. A block the executor
 //! reached wakes its author once, and a later pass over the same outcome never wakes again. A
 //! landing the executor reached wakes its author once too. An outcome the author's own
-//! `bay land --wait` reached returns to that session, so nothing wakes it. Without a `[wake]`
+//! `bay merge --wait` reached returns to that session, so nothing wakes it. Without a `[plugin.wake]`
 //! table nothing is run, and the event records `not_attempted`.
 //!
 //! Guards to mutate (each makes a case here fail):
@@ -21,8 +21,8 @@
 //! - `src/executor.rs` line 501, `runs`, with `src/publish.rs` line 1119, the held-event check in
 //!   `outcome_event`: run blocked operations again and drop the check, and the second pass wakes
 //!   a second time.
-//! - `src/talk/wake.rs` line 103, the `not_attempted` answer with no `[wake] command`: return
-//!   `failed()` instead and the case without a `[wake]` table fails.
+//! - `src/talk/wake.rs` line 103, the `not_attempted` answer with no `[plugin.wake] command`: return
+//!   `failed()` instead and the case without a `[plugin.wake]` table fails.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -36,7 +36,7 @@ use support::{TestBox, check_files, passing_result, result_json, write_executabl
 
 /// A trunk whose check answers `result`, with a wake adapter in `scripts/bay-wake` that appends
 /// each request it is given to `<root>/woken` and answers `woken`. With `wake`, the config names
-/// it in `[wake] command`; without, the script is there and nothing names it. Returns the box,
+/// it in `[plugin.wake] command`; without, the script is there and nothing names it. Returns the box,
 /// the work repository, the remote and the request file.
 fn trunk(result: &str, wake: bool) -> (TestBox, PathBuf, PathBuf, PathBuf) {
     let test_box = TestBox::new();
@@ -55,7 +55,7 @@ fn trunk(result: &str, wake: bool) -> (TestBox, PathBuf, PathBuf, PathBuf) {
     if wake {
         files.push((
             ".bay/config.toml".to_owned(),
-            "[wake]\ncommand = \"scripts/bay-wake\"\n".to_owned(),
+            "[plugin.wake]\ncommand = \"scripts/bay-wake\"\n".to_owned(),
         ));
     }
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
@@ -89,9 +89,9 @@ fn actor(test_box: &TestBox, repo: &Path, id: &str) -> Value {
     serde_json::from_str::<Value>(&record).unwrap()["actor"].clone()
 }
 
-/// The event of `kind` about change `id` that `bay watch` lists from `dir`.
+/// The event of `kind` about change `id` that `bay status --since` lists from `dir`.
 fn event(test_box: &TestBox, dir: &Path, id: &str, kind: &str) -> Value {
-    let watched = test_box.bay_ok(dir, &["watch"]);
+    let watched = test_box.bay_ok(dir, &["status", "--since"]);
     watched["detail"]["events"]
         .as_array()
         .and_then(|events| {
@@ -104,7 +104,7 @@ fn event(test_box: &TestBox, dir: &Path, id: &str, kind: &str) -> Value {
 }
 
 /// Submits a change and leaves; an executor on another clone runs one pass. Returns the change
-/// id, the executor clone, the pass, and the change's view (where `bay watch` lists every event
+/// id, the executor clone, the pass, and the change's view (where `bay status --since` lists every event
 /// of the change: outside a view, a watch with no cursor starts from now).
 fn submitted_and_run(
     test_box: &TestBox,
@@ -112,11 +112,11 @@ fn submitted_and_run(
     remote: &Path,
 ) -> (String, PathBuf, Value, PathBuf) {
     let (id, view) = test_box.start_and_edit(repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
     let executor = test_box.clone_of(remote, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     (id, executor, ran, view)
 }
 
@@ -142,7 +142,7 @@ fn a_block_the_executor_reached_wakes_its_author_once() {
     assert_eq!(request["actor"]["session"], author["session"], "{request}");
     assert!(request.get("talk").is_none(), "{request}");
 
-    // The answer is on the outcome event, and `bay watch` shows it.
+    // The answer is on the outcome event, and `bay status --since` shows it.
     let blocked = event(&test_box, &view, &id, "check_failed");
     assert_eq!(
         blocked["wake"],
@@ -151,7 +151,7 @@ fn a_block_the_executor_reached_wakes_its_author_once() {
     );
 
     // A second pass over the same outcome wakes no one.
-    let again = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let again = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(again["detail"]["ran"], json!([]), "{again}");
     assert_eq!(requests(&woken).len(), 1, "a wake is asked once");
 }
@@ -160,12 +160,12 @@ fn a_block_the_executor_reached_wakes_its_author_once() {
 fn a_landing_the_executor_reached_wakes_its_author_once() {
     let (test_box, repo, remote, woken) = trunk(&passing_result(1), true);
     let (id, executor, ran, view) = submitted_and_run(&test_box, &repo, &remote);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
 
     let asked = requests(&woken);
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert_eq!(asked[0]["cause"], "outcome", "{asked:?}");
-    assert_eq!(asked[0]["decision"], "landed", "{asked:?}");
+    assert_eq!(asked[0]["decision"], "merged", "{asked:?}");
     assert_eq!(asked[0]["reason"], Value::Null, "{asked:?}");
     assert_eq!(asked[0]["change"], id.as_str(), "{asked:?}");
     let author = actor(&test_box, &repo, &id);
@@ -178,7 +178,7 @@ fn a_landing_the_executor_reached_wakes_its_author_once() {
         "{wake}"
     );
 
-    let again = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let again = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(again["detail"]["ran"], json!([]), "{again}");
     assert_eq!(requests(&woken).len(), 1, "a wake is asked once");
 }
@@ -187,9 +187,9 @@ fn a_landing_the_executor_reached_wakes_its_author_once() {
 fn a_landing_the_author_waited_on_wakes_nothing() {
     let (test_box, repo, remote, woken) = trunk(&passing_result(1), true);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(
         requests(&woken),
         Vec::<Value>::new(),
@@ -198,7 +198,7 @@ fn a_landing_the_author_waited_on_wakes_nothing() {
 
     // An executor pass afterwards has nothing to wake for either.
     let executor = test_box.clone_of(&remote, "executor");
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(requests(&woken), Vec::<Value>::new());
 }
 

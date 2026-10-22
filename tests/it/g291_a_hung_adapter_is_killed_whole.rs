@@ -84,7 +84,7 @@ fn a_hung_wake_adapter_and_its_child_are_killed_at_the_bound() {
                 ("src/a.rs", "fn a() {}\n"),
                 (
                     ".bay/config.toml",
-                    "[wake]\ncommand = \"scripts/bay-wake\"\n",
+                    "[plugin.wake]\ncommand = \"scripts/bay-wake\"\n",
                 ),
                 ("scripts/bay-wake", wake.as_str()),
             ],
@@ -129,7 +129,7 @@ fn a_hung_executor_submit_and_its_child_are_killed_at_the_bound() {
     files.push(("scripts/executor".to_owned(), hanging("submit-child.pid")));
     files.push((
         ".bay/config.toml".to_owned(),
-        "[executor]\ncommand = \"scripts/executor\"\nsubmission_timeout_s = 1\n".to_owned(),
+        "[runner]\ncommand = \"scripts/executor\"\nsubmission_timeout_s = 1\n".to_owned(),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     std::fs::set_permissions(
@@ -138,7 +138,7 @@ fn a_hung_executor_submit_and_its_child_are_killed_at_the_bound() {
     )
     .unwrap();
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, failed) = result_json(test_box.bay(&view).arg("land"));
+    let (code, failed) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 20, "{failed}");
     assert!(
         failed.to_string().contains("submission timeout"),

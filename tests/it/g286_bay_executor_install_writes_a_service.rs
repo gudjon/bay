@@ -1,6 +1,6 @@
-//! G286. `bay executor install` writes a service.
+//! G286. `bay runner install` writes a service.
 //!
-//! In a repository set up for bay, `bay executor install` writes the service definition that
+//! In a repository set up for bay, `bay runner install` writes the service definition that
 //! keeps `bay -C <repository> executor run` running, with the running bay as its program: a
 //! launchd agent plist in `~/Library/LaunchAgents/` on macOS (`KeepAlive`), a systemd user unit
 //! in `~/.config/systemd/user/` on Linux (`Restart=always`). Both log to
@@ -54,7 +54,7 @@ fn service_dir(home: &Path) -> PathBuf {
 }
 
 fn install(test_box: &TestBox, repo: &Path, args: &[&str]) -> (i32, serde_json::Value) {
-    result_json(test_box.bay(repo).args(["executor", "install"]).args(args))
+    result_json(test_box.bay(repo).args(["runner", "install"]).args(args))
 }
 
 #[test]
@@ -110,7 +110,7 @@ fn install_writes_the_service_and_starts_nothing() {
         );
         let program = |bay: &Path| {
             format!(
-                "\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{}</string>\n\t\t<string>-C</string>\n\t\t<string>{}</string>\n\t\t<string>executor</string>\n\t\t<string>run</string>\n\t</array>\n",
+                "\t<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{}</string>\n\t\t<string>-C</string>\n\t\t<string>{}</string>\n\t\t<string>runner</string>\n\t\t<string>run</string>\n\t</array>\n",
                 bay.display(),
                 repo.display()
             )
@@ -149,7 +149,7 @@ fn install_writes_the_service_and_starts_nothing() {
         );
         let exec = |bay: &Path| {
             format!(
-                "\nExecStart={} -C {} executor run\n",
+                "\nExecStart={} -C {} runner run\n",
                 bay.display(),
                 repo.display()
             )

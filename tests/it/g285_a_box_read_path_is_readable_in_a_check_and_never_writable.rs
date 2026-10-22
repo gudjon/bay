@@ -104,12 +104,12 @@ fn a_configured_read_path_is_readable_and_never_writable() {
     // `~/` is the executor's HOME.
     add_read_path(&test_box, "~/.store");
     let (repo, view) = submitted(&test_box, &store);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(
         code, 0,
         "the check could not read the box read path, or wrote it: {landed}"
     );
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert!(
         !store.join("written.txt").exists(),
         "the check wrote the store"
@@ -139,7 +139,7 @@ fn without_the_setting_the_read_fails_as_before() {
     let test_box = TestBox::new();
     let store = store(&test_box);
     let (repo, view) = submitted(&test_box, &store);
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "the check read outside its allow-list: {blocked}");
     assert_eq!(blocked["reason"], "CHECK_FAILED", "{blocked}");
     assert!(!records(&test_box, &repo).contains("\"sandbox_read\""));
@@ -151,7 +151,7 @@ fn a_relative_read_path_refuses_the_check_by_name() {
     let store = store(&test_box);
     add_read_path(&test_box, "relative/store");
     let (_repo, view) = submitted(&test_box, &store);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(
         code, 10,
         "a relative read path did not refuse the check: {refused}"

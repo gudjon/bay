@@ -19,26 +19,14 @@ use bay::result::Reason;
 /// The flags of `INTERFACES` § 1, by command.
 const FLAGS: &[(&[&str], &[&str])] = &[
     (&[], &["-C", "--json", "--version", "--help"]),
-    (&["start"], &["--paths", "--new", "--resume", "--fixes"]),
-    (&["land"], &["--wait", "--abandon"]),
+    (&["start"], &["--paths", "--new", "--fixes"]),
+    (&["merge"], &["--wait"]),
     (&["undo"], &["--wait"]),
     (&["status"], &["--fleet"]),
     (&["update"], &["--version", "--check"]),
-    (&["host", "init"], &["--trunk", "--object-format"]),
-    (&["executor", "run"], &["--once", "--interval-s"]),
+    (&["host", "init"], &["--main", "--object-format"]),
+    (&["runner", "run"], &["--once", "--interval-s"]),
     (&["share"], &["--remote", "--bundle"]),
-];
-
-/// Flags § 1 lists that `--help` does not show, each with a value it parses. `bay update
-/// --channel` is accepted and ignored since update channels were removed. `bay land --change`
-/// and `--observe` are kept for older scripts (G293): the change is positional, and
-/// `--wait=SECONDS` observes. `bay start --intent-revision` is kept, hidden, until it is
-/// retired (G300).
-const HIDDEN_FLAGS: &[(&str, &str, &str)] = &[
-    ("start", "--intent-revision", "2"),
-    ("update", "--channel", "x"),
-    ("land", "--change", "abcd2345"),
-    ("land", "--observe", "2"),
 ];
 
 fn src() -> PathBuf {
@@ -272,13 +260,4 @@ fn every_flag_interfaces_1_documents_is_in_help() {
         "flags INTERFACES § 1 documents that --help does not show:\n{}",
         missing.join("\n")
     );
-    // The hidden flags are still accepted: clap parses them, so a usage error never names them.
-    for (command, flag, value) in HIDDEN_FLAGS {
-        let output = Command::cargo_bin("bay")
-            .unwrap()
-            .args([*command, *flag, *value, "--help"])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "bay {command} {flag}: {output:?}");
-    }
 }

@@ -2,9 +2,9 @@
 //! `plans/wave2.md`).
 //!
 //! A talk is signed by the agent key of the registry actor it names as its sender: an executor-
-//! or producer-signed talk is refused (`TALK_SENDER_NOT_ACTOR`), by the sender's bay and by the
+//! or producer-signed talk is refused (`TALK_REFUSED`), by the sender's bay and by the
 //! host. One sender holds at most `BAY_TALK_OPEN_MAX` (20) open talks to one recipient: the 21st
-//! is refused (`TALK_BACKLOG`) naming the oldest open id, by the sender's bay and by the host; a
+//! is refused (`TALK_REFUSED`) naming the oldest open id, by the sender's bay and by the host; a
 //! closed or superseded talk does not count, and another sender's talks do not count, in the same
 //! push or not. Hundreds of closed talks never lock a recipient out, and a retry the host refuses
 //! leaves no local copy to count.
@@ -47,7 +47,7 @@ fn an_executor_or_producer_signed_talk_is_refused() {
     );
     let (code, result) = ask(&case, "agent", "Publish the report", &[]);
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "TALK_SENDER_NOT_ACTOR", "{result}");
+    assert_eq!(result["reason"], "TALK_REFUSED", "{result}");
     case.test_box.git_ok(
         &case.a,
         &["config", "bay.agentKey", case.keys.agent.to_str().unwrap()],
@@ -65,12 +65,12 @@ fn an_executor_or_producer_signed_talk_is_refused() {
     ] {
         let commit = bay::talk::root_commit(&git, &body, key, principal).unwrap();
         let stderr = case.refused(&case.a, &format!("{commit}:{name}"));
-        assert!(stderr.contains("TALK_SENDER_NOT_ACTOR"), "{stderr}");
+        assert!(stderr.contains("TALK_REFUSED"), "{stderr}");
     }
     // Signed by another agent's key while naming `agent` as its sender.
     let commit = bay::talk::root_commit(&git, &body, &case.c_key, "agent-c").unwrap();
     let stderr = case.refused(&case.a, &format!("{commit}:{name}"));
-    assert!(stderr.contains("TALK_SENDER_NOT_ACTOR"), "{stderr}");
+    assert!(stderr.contains("TALK_REFUSED"), "{stderr}");
     assert_eq!(case.host_tip(&name), None);
 
     // The sender's own agent key sends it.
@@ -109,7 +109,7 @@ fn the_twenty_first_open_talk_to_one_recipient_is_refused_naming_the_oldest() {
     ids.push(id);
     let (code, full) = ask(&case, "agent", "Publish report 21", &[]);
     assert_eq!(code, 10, "{full}");
-    assert_eq!(full["reason"], "TALK_BACKLOG", "{full}");
+    assert_eq!(full["reason"], "TALK_REFUSED", "{full}");
     assert_eq!(full["detail"]["oldest"], ids[0].as_str(), "{full}");
     assert_eq!(full["detail"]["open"], 20, "{full}");
     assert!(
@@ -128,7 +128,7 @@ fn the_twenty_first_open_talk_to_one_recipient_is_refused_naming_the_oldest() {
     let commit = bay::talk::root_commit(&git, &body, &case.keys.agent, "agent").unwrap();
     let name = talk_ref("agent-b", body["id"].as_str().unwrap());
     let stderr = case.refused(&case.a, &format!("{commit}:{name}"));
-    assert!(stderr.contains("TALK_BACKLOG"), "{stderr}");
+    assert!(stderr.contains("TALK_REFUSED"), "{stderr}");
     assert!(stderr.contains(&ids[0]), "{stderr}");
 
     // Another sender's talks to the same recipient are not this pair's backlog.
@@ -293,7 +293,7 @@ fn a_retry_the_host_refuses_leaves_no_local_talk() {
         .git_ok(&case.a, &["remote", "set-url", "origin", &host]);
     let (code, retry) = offline("Publish the offline report");
     assert_eq!(code, 10, "{retry}");
-    assert_eq!(retry["reason"], "TALK_BACKLOG", "{retry}");
+    assert_eq!(retry["reason"], "TALK_REFUSED", "{retry}");
     assert_eq!(case.local_tip(&case.a, &name), None, "{retry}");
     assert_eq!(case.host_tip(&name), None);
 }

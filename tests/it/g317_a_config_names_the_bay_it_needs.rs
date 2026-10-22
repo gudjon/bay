@@ -2,7 +2,7 @@
 //!
 //! `.bay/config.toml` may name the oldest bay it needs, `bay = "<version>"`. A bay older than
 //! that refuses every command that reads the config, before anything else, with
-//! `BAY_BELOW_FLOOR`, the next step `bay update` and one plain sentence. The floor is read
+//! `TOOL_BELOW_FLOOR`, the next step `bay update` and one plain sentence. The floor is read
 //! loosely before the strict parse, so a config that also carries a key this bay does not know
 //! still gets the floor refusal, never a config error. A bay that meets the floor works as
 //! before, and `bay doctor` names the floor in its config row and whether this machine meets it.
@@ -37,13 +37,15 @@ fn seeded(test_box: &TestBox, name: &str, config: &str) -> PathBuf {
 /// `result` is the floor refusal naming `floor`.
 fn assert_below_floor(result: &Value, floor: &str) {
     assert_eq!(result["decision"], "blocked", "{result}");
-    assert_eq!(result["reason"], "BAY_BELOW_FLOOR", "{result}");
+    assert_eq!(result["reason"], "TOOL_BELOW_FLOOR", "{result}");
+    assert_eq!(result["detail"]["tool"], "bay", "{result}");
     assert_eq!(
         result["say"], "This project needs a newer bay; update it, then try again.",
         "{result}"
     );
     assert_eq!(
-        result["next_step"], "Run `bay update`, then run the command again.",
+        result["next_step"],
+        "Update the tool `detail.tool` names to `detail.floor` (`bay update` for bay), or remove its adapter, then run the command again.",
         "{result}"
     );
     assert_eq!(result["detail"]["floor"], floor, "{result}");
@@ -70,7 +72,8 @@ fn a_bay_older_than_the_floor_refuses_and_says_to_update() {
     assert_eq!(config["floor"], "99.0.0", "{config}");
     assert_eq!(config["meets_floor"], false, "{config}");
     assert_eq!(config["state"], "red", "{config}");
-    assert_eq!(doctor["reason"], "BAY_BELOW_FLOOR", "{doctor}");
+    assert_eq!(doctor["reason"], "TOOL_BELOW_FLOOR", "{doctor}");
+    assert_eq!(doctor["detail"]["tool"], "bay", "{doctor}");
 }
 
 #[test]
@@ -78,7 +81,7 @@ fn a_bay_that_meets_the_floor_works_and_doctor_names_it() {
     let test_box = TestBox::new();
     let repo = seeded(&test_box, "repo", "bay = \"0.0.1\"\n");
     let status = test_box.bay_ok(&repo, &["status"]);
-    assert_ne!(status["reason"], "BAY_BELOW_FLOOR", "{status}");
+    assert_ne!(status["reason"], "TOOL_BELOW_FLOOR", "{status}");
 
     let (_, doctor) = result_json(test_box.bay(&repo).arg("doctor"));
     let config = row(&doctor, "config");

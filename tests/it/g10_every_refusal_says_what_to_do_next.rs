@@ -18,7 +18,7 @@ fn every_reason_code_returns_allowed_and_retry_when() {
     for &reason in Reason::ALL {
         let code = reason.code();
         assert!(
-            code.chars().all(|c| c.is_ascii_uppercase() || c == '_') && code.contains('_'),
+            code.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
             "{code}"
         );
         assert_eq!(Reason::from_code(code), Some(reason), "{code}");
@@ -49,13 +49,13 @@ fn an_unchanged_retry_is_refused_without_work() {
     );
     let (_, view) = test_box.start_and_edit(&repo);
 
-    let (code, first) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, first) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{first}");
     assert_eq!(first["reason"], "CHECK_FAILED");
     assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 1);
 
     // Nothing changed: the same code, at once, and the check does not run again.
-    let (code, again) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, again) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{again}");
     assert_eq!(again["reason"], "CHECK_FAILED");
     assert_eq!(again["detail"]["unchanged"], true);
@@ -69,7 +69,7 @@ fn an_unchanged_retry_is_refused_without_work() {
 
     // A repair is a new revision, and that does run.
     std::fs::write(view.join("src/new.rs"), "fn new() { repaired }\n").unwrap();
-    let (code, repaired) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, repaired) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{repaired}");
     assert_ne!(repaired["detail"]["unchanged"], true);
     assert_eq!(std::fs::read_to_string(&runs).unwrap().lines().count(), 2);
@@ -94,14 +94,14 @@ fn an_unchanged_merge_conflict_is_refused_without_work() {
     test_box.git_ok(&other, &["commit", "-q", "-am", "theirs"]);
     test_box.git_ok(&other, &["push", "-q", "origin", "main"]);
 
-    let (code, first) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, first) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{first}");
     assert_eq!(first["reason"], "MERGE_CONFLICT");
     assert_eq!(
         first["detail"]["conflicts"],
         serde_json::json!(["src/a.rs"])
     );
-    let (code, again) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, again) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{again}");
     assert_eq!(again["reason"], "MERGE_CONFLICT");
     assert_eq!(again["detail"]["unchanged"], true);

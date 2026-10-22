@@ -5,7 +5,7 @@
 //! names that talk in `supersedes`, so the author's accept closes the earlier one as `superseded`
 //! and the author's session lists one open talk from the reviewer about the change. The same
 //! finding again is that finding, not a third talk. A second open talk that skips the sender's
-//! bay is `TALK_BACKLOG` naming the open one, at the host hook and, where no hook judged it, at
+//! bay is `TALK_REFUSED` naming the open one, at the host hook and, where no hook judged it, at
 //! the author's accept.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -65,7 +65,7 @@ fn reviewed() -> Reviewed {
     let change = started["change"].as_str().unwrap().to_owned();
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, landed) = result_json(as_agent(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(as_agent(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let landing = landed["detail"]["commit"].as_str().unwrap().to_owned();
     let reviewer_box = test_box.clone_of(&host, "reviewer-box");
@@ -231,7 +231,7 @@ fn a_later_finding_supersedes_the_open_one_and_the_author_sees_one() {
         &["--supersedes", &first],
     );
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "TALK_BACKLOG", "{refused}");
+    assert_eq!(refused["reason"], "TALK_REFUSED", "{refused}");
     assert_eq!(refused["detail"]["oldest"], second.as_str(), "{refused}");
 
     // The host hook refuses a second open finding that skips the sender's bay.
@@ -245,7 +245,7 @@ fn a_later_finding_supersedes_the_open_one_and_the_author_sees_one() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "the host took it: {stderr}");
-    assert!(stderr.contains("TALK_BACKLOG"), "{stderr}");
+    assert!(stderr.contains("TALK_REFUSED"), "{stderr}");
     assert!(stderr.contains(&second), "{stderr}");
 
     // The author's accept acks the later finding and closes the earlier one as superseded, and
@@ -306,7 +306,7 @@ fn the_authors_accept_closes_a_superseded_finding_and_refuses_a_second_open_one(
         .find(|row| row["talk"] == third)
         .unwrap_or_else(|| panic!("{third} is not refused: {status}"));
     let why = refused["why"].as_str().unwrap();
-    assert!(why.contains("TALK_BACKLOG"), "{refused}");
+    assert!(why.contains("TALK_REFUSED"), "{refused}");
     assert!(why.contains(&second), "{refused}");
     let files = case
         .test_box

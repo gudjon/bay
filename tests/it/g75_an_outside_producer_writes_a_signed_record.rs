@@ -55,7 +55,7 @@ fn reviewed() -> (TestBox, PathBuf, PathBuf, [String; 2], PathBuf, TestKeys) {
     for body in ["fn one() {}\n", "fn two() {}\n"] {
         let (_, view) = test_box.start_and_edit(&repo);
         std::fs::write(view.join("src/new.rs"), body).unwrap();
-        let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+        let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{result}");
         landed.push(result["detail"]["commit"].as_str().unwrap().to_owned());
     }

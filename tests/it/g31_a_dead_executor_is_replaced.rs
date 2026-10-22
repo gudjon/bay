@@ -33,7 +33,7 @@ fn now() -> u64 {
 
 fn supervisor(test_box: &TestBox, clone: &Path, once: bool) -> Child {
     let mut cmd = test_box.bay_process(clone);
-    cmd.args(["executor", "run"]);
+    cmd.args(["runner", "run"]);
     if once {
         cmd.arg("--once");
     } else {
@@ -68,11 +68,11 @@ fn a_killed_owner_is_replaced_after_its_lease_by_a_supervisor_that_waited_a_full
     let mut files = check_files(&before, &passing_result(1), 1, 60);
     files.push((
         ".bay/config.toml".to_owned(),
-        format!("[executor]\nlease_s = {LEASE_S}\nheartbeat_s = 1\n"),
+        format!("[runner]\nlease_s = {LEASE_S}\nheartbeat_s = 1\n"),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     let chain = format!("refs/bay/changes/{id}");
 
@@ -133,11 +133,11 @@ fn a_killed_owner_is_replaced_after_its_lease_by_a_supervisor_that_waited_a_full
 
     // The dead owner, resumed, cannot publish: it finds the publication.
     let tip = test_box.git_bare(&remote, &["rev-parse", "main"]);
-    let resumed = test_box.bay_ok(&a, &["executor", "run", "--once"]);
+    let resumed = test_box.bay_ok(&a, &["runner", "run", "--once"]);
     let ran = resumed["detail"]["ran"].as_array().unwrap();
     assert!(
         ran.iter()
-            .all(|result| result["decision"] != "landed" || result["detail"]["existing"] == true),
+            .all(|result| result["decision"] != "merged" || result["detail"]["existing"] == true),
         "{resumed}"
     );
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), tip);

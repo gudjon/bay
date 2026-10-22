@@ -1,7 +1,7 @@
 //! G104b. Metadata reads never fetch lazily (`GIT-FEATURES` § 2 row 6).
 //!
 //! On a blob-less cache, Git never fetches an object on its own inside a call `bay status` or
-//! `bay watch` runs: every such call runs with lazy fetch off. A file of bay's own that trunk
+//! `bay status --since` runs: every such call runs with lazy fetch off. A file of bay's own that trunk
 //! moved (here its config) is read by name, and the cache gets exactly that blob in one
 //! explicit fetch by id. When the object cannot be had, the read is an error bay reports,
 //! never a pass on a guess and never a fetch Git starts by itself.
@@ -85,15 +85,17 @@ fn cache_and_view() -> (TestBox, PathBuf, PathBuf, PathBuf, PathBuf) {
 fn status_and_watch_read_bays_files_by_name_and_never_lazily() {
     let (test_box, _remote, seed, cache, view) = cache_and_view();
     let path = ".bay/config.toml";
-    for command in ["status", "watch"] {
+    for command in ["status", "status --since"] {
         let blob = move_trunk(&test_box, &seed, path, &format!("before {command}"));
         let docs = test_box.git_ok(&seed, &["rev-parse", "HEAD:docs/guide.md"]);
-        let trace = test_box.path().join(format!("{command}-trace2.json"));
+        let trace = test_box
+            .path()
+            .join(format!("{}-trace2.json", command.replace(' ', "-")));
         let (code, result) = result_json(
             test_box
                 .bay(&view)
                 .env("GIT_TRACE2_EVENT", &trace)
-                .arg(command),
+                .args(command.split(' ')),
         );
         assert_eq!(code, 0, "{result}");
         let lazy = lazy_fetches(&trace);
@@ -124,15 +126,15 @@ fn a_metadata_object_the_cache_cannot_have_is_an_error() {
     assert!(!holds(&test_box, &cache, &blob));
     std::fs::rename(&remote, remote.with_extension("away")).unwrap();
 
-    for command in ["status", "watch"] {
+    for command in ["status", "status --since"] {
         let trace = test_box
             .path()
-            .join(format!("offline-{command}-trace2.json"));
+            .join(format!("offline-{}-trace2.json", command.replace(' ', "-")));
         let (code, result) = result_json(
             test_box
                 .bay(&view)
                 .env("GIT_TRACE2_EVENT", &trace)
-                .arg(command),
+                .args(command.split(' ')),
         );
         assert_ne!(result["decision"], "ok", "{result}");
         assert_ne!(code, 0, "{result}");
@@ -193,14 +195,14 @@ fn a_policy_the_cache_cannot_read_is_an_error_naming_it_never_no_policy() {
     );
 
     // Watch cannot judge red either, and says which file it could not read.
-    let (code, watched) = result_json(test_box.bay(&view).arg("watch"));
+    let (code, watched) = result_json(test_box.bay(&view).args(["status", "--since"]));
     assert_ne!(code, 0, "{watched}");
     assert_ne!(watched["decision"], "ok", "{watched}");
     assert!(watched.to_string().contains(path), "{watched}");
 
     // Land fails naming the file it could not read: not POLICY_MISSING, and nothing lands.
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_ne!(code, 0, "{landed}");
     assert_ne!(landed["reason"], "POLICY_MISSING", "{landed}");
     assert!(!landed.to_string().contains("POLICY_MISSING"), "{landed}");
@@ -224,7 +226,7 @@ fn a_trunk_with_no_policy_file_is_still_policy_missing_on_a_blob_less_cache() {
     lose_promisor(&test_box, &cache);
 
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{landed}");
     assert_eq!(landed["reason"], "POLICY_MISSING", "{landed}");
     assert_eq!(landed["detail"]["base"], trunk.as_str(), "{landed}");

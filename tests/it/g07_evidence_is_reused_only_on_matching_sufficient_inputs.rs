@@ -135,12 +135,12 @@ impl Trunk {
     }
 
     fn land_wait(&self, view: &Path) -> (i32, serde_json::Value) {
-        result_json(self.test_box.bay(view).args(["land", "--wait"]))
+        result_json(self.test_box.bay(view).args(["merge", "--wait"]))
     }
 
     /// Submits the change in `view` without running it.
     fn submit(&self, view: &Path) {
-        let (code, submitted) = result_json(self.test_box.bay(view).arg("land"));
+        let (code, submitted) = result_json(self.test_box.bay(view).arg("merge"));
         assert_eq!(code, 0, "{submitted}");
     }
 
@@ -170,7 +170,7 @@ impl Trunk {
             .test_box
             .bay_process(&e1)
             .env("BAY_TEST_KILL_AT", "before-publish")
-            .args(["--json", "executor", "run", "--once"])
+            .args(["--json", "runner", "run", "--once"])
             .output()
             .unwrap();
         assert_eq!(died.status.code(), Some(137), "E1 died before it published");

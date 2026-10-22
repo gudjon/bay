@@ -84,7 +84,7 @@ fn own_records(test_box: &TestBox, repo: &Path, id: &str) -> Vec<EvidenceRecord>
 fn a_record_from_an_unlisted_producer_does_not_count() {
     let (test_box, repo, id, view) = change(&format!("[\"{LISTED}\"]"));
     // This box's producer is not listed: its own pass does not answer the check.
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_UNKNOWN", "{blocked}");
     assert_eq!(
@@ -103,17 +103,17 @@ fn a_record_from_an_unlisted_producer_does_not_count() {
     theirs.id = format!("{LISTED}/{}", pass.id.split_once('/').unwrap().1);
     theirs.producer.name = LISTED.to_owned();
     evidence::append(&Git::new(&repo), LISTED, &theirs).unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed");
+    assert_eq!(landed["decision"], "merged");
 }
 
 #[test]
 fn a_listed_producer_answers_its_check() {
     let (test_box, _repo, _id, view) = change(&format!("[\"{LISTED}\", \"{OWN}\"]"));
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed");
+    assert_eq!(landed["decision"], "merged");
 }
 
 #[test]
@@ -129,7 +129,7 @@ fn a_candidate_that_lists_its_own_producer_gets_no_effect() {
     );
     assert_ne!(text, widened);
     std::fs::write(&path, widened).unwrap();
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_UNKNOWN", "{blocked}");
     assert_eq!(

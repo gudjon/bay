@@ -42,7 +42,7 @@ fn submitted(result: &str) -> (TestBox, PathBuf, PathBuf, String, PathBuf) {
         &check_files("true", result, 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, submitted) = result_json(test_box.bay(&view).arg("land"));
+    let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{submitted}");
     let executor = test_box.clone_of(&remote, "executor");
     (test_box, remote, view, id, executor)
@@ -56,7 +56,7 @@ fn held_after_commit(test_box: &TestBox, executor: &Path) -> (Killed, PathBuf) {
         .bay_process(executor)
         .env("BAY_TEST_PAUSE_AT", "after-commit")
         .env("BAY_TEST_PAUSE_FILE", &release)
-        .args(["--json", "executor", "run", "--once"])
+        .args(["--json", "runner", "run", "--once"])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
@@ -118,7 +118,7 @@ fn a_prune_between_merge_and_push_lands_the_same_candidate() {
     test_box.git_ok(&executor, &["gc", "-q", "--prune=now"]);
 
     let ran = release(held, &file);
-    assert_eq!(ran["decision"], "landed", "{ran}");
+    assert_eq!(ran["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
 
     // What landed is the candidate the anchor held, tree and all.
@@ -161,7 +161,7 @@ fn an_inflight_ref_is_never_pushed_and_a_stale_one_is_a_leftover() {
     let head = test_box.git_ok(&repo, &["rev-parse", "HEAD"]);
     let gone = format!("refs/bay/inflight/{id}.9");
     test_box.git_ok(&repo, &["update-ref", &gone, &head]);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
     assert_eq!(
@@ -210,10 +210,10 @@ fn a_change_abandoned_in_flight_leaves_no_anchor() {
     let (test_box, remote, view, _id, executor) = submitted(&passing_result(1));
     let (held, file) = held_after_commit(&test_box, &executor);
     assert_eq!(anchors(&test_box, &executor).len(), 1);
-    let abandoned = test_box.bay_ok(&view, &["land", "--abandon"]);
+    let abandoned = test_box.bay_ok(&view, &["abandon"]);
     assert_eq!(abandoned["detail"]["state"], "abandoned", "{abandoned}");
     let ran = release(held, &file);
-    assert_ne!(ran["decision"], "landed", "{ran}");
+    assert_ne!(ran["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&remote), Vec::<String>::new());
     assert!(
         anchors(&test_box, &executor).is_empty(),

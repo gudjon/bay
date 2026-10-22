@@ -1,7 +1,7 @@
 //! G258. A batch lands whole, and a failing one bisects to its first failing member
 //! (`crate::throughput`, batching with bisection).
 //!
-//! With `[executor] batch` and exact-inputs reuse on a bay host, the queue's head and the
+//! With `[runner] batch` and exact-inputs reuse on a bay host, the queue's head and the
 //! entries behind it are checked once as their combined tree on trunk. On a pass every member
 //! lands in one push: each with its own executor-signed commit and `Change-Id`, parented on the
 //! member before it, carrying `Bay-Batch`, so trunk's history is the queue's order and trunk
@@ -28,9 +28,8 @@ use support::queued::{Check, Held, host, ran_for};
 /// A trunk whose check fails a candidate that holds `src/bad.rs`, batching at most eight under
 /// `rate`.
 fn batching(rate: &str) -> Held {
-    let config = format!(
-        "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[executor]\nlease_s = 30\nheartbeat_s = 1\nbatch = {{ min = 2, max = 8{rate} }}\n"
-    );
+    let config =
+        format!("[runner]\nlease_s = 30\nheartbeat_s = 1\nbatch = {{ min = 2, max = 8{rate} }}\n");
     host(&Check {
         config: &config,
         policy: None,
@@ -59,7 +58,7 @@ fn batch_trailers(held: &Held, count: usize) -> Vec<String> {
 }
 
 fn landed(pass: &Value, id: &str) -> bool {
-    ran_for(pass, id)["decision"] == "landed"
+    ran_for(pass, id)["decision"] == "merged"
 }
 
 #[test]

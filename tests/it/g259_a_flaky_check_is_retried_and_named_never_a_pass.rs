@@ -91,9 +91,9 @@ fn a_check_that_fails_once_then_passes_lands_flaky_with_both_runs_when_allowed()
     let remote = test_box.path().join("repo-remote.git");
     let trunk = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_ne!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
     assert_eq!(runs(&log), 2, "one failure, one rerun");
 
@@ -145,7 +145,7 @@ fn a_check_that_fails_once_then_passes_is_refused_check_flaky_unless_allowed() {
     let remote = test_box.path().join("repo-remote.git");
     let trunk = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FLAKY", "{refused}");
     assert_eq!(
@@ -170,7 +170,7 @@ fn without_retry_on_failure_a_failure_runs_once() {
     let test_box = TestBox::new();
     let (repo, log) = flaky_trunk(&test_box, 1, "allow_flaky = true\n");
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     assert_eq!(
@@ -185,7 +185,7 @@ fn a_check_that_fails_every_run_is_rerun_at_most_n_times_and_fails() {
     let test_box = TestBox::new();
     let (repo, log) = flaky_trunk(&test_box, 99, "retry_on_failure = 2\nallow_flaky = true\n");
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     assert_eq!(runs(&log), 3, "one run and two reruns");
@@ -204,7 +204,7 @@ fn a_flake_key_out_of_bounds_or_on_a_post_check_makes_the_policy_invalid() {
         );
         let (repo, _) = flaky_trunk(&test_box, 0, &extra);
         let (_, view) = test_box.start_and_edit(&repo);
-        let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+        let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 10, "{extra}: {refused}");
         assert_eq!(refused["reason"], "POLICY_INVALID", "{extra}: {refused}");
     }
@@ -230,7 +230,7 @@ fn an_overdue_quarantine_stays_in_force_and_status_names_its_owner_and_age() {
     }
     let trunk = test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     // DESIGN § 7: a quarantine past its end stays in force until a policy change removes it.
     assert_eq!(code, 0, "{landed}");
     assert_ne!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);

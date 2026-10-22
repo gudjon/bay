@@ -1,6 +1,6 @@
 //! G263 (N-7): an advancing target follows the newest promotable commit.
 //!
-//! A `[[target]]` with `advance = true` is moved by the executor: each `bay executor run` pass
+//! A `[[target]]` with `advance = true` is moved by the executor: each `bay runner run` pass
 //! fast-forwards its ref on the remote to the newest commit of its source that `bay status`
 //! names promotable (`detail.targets[].promotable`), never to one whose required check is red,
 //! and names the move in `detail.advanced` as `{target, from, to}`. A target promoted from
@@ -71,7 +71,7 @@ impl Hosted {
         let id = started["change"].as_str().unwrap().to_owned();
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join(path), format!("// {path}\n")).unwrap();
-        let (code, landed) = result_json(self.test_box.bay(&view).args(["land", "--wait"]));
+        let (code, landed) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{landed}");
         let commit = landed["detail"]["commit"].as_str().unwrap().to_owned();
         (id, commit)
@@ -100,7 +100,7 @@ impl Hosted {
     fn pass(&self) -> Value {
         let ran = self
             .test_box
-            .bay_ok(&self.repo, &["executor", "run", "--once"]);
+            .bay_ok(&self.repo, &["runner", "run", "--once"]);
         ran["detail"]["advanced"].clone()
     }
 

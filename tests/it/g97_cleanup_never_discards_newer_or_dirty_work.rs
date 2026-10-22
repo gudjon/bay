@@ -57,7 +57,7 @@ fn start_with(test_box: &TestBox, repo: &Path, name: &str) -> (String, PathBuf) 
 }
 
 fn land(test_box: &TestBox, view: &Path) {
-    let (code, landed) = result_json(test_box.bay(view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
 }
 
@@ -96,7 +96,7 @@ fn a_landed_view_is_released_and_every_view_with_work_or_in_use_is_kept() {
         land(&test_box, view);
     }
     // A change with an operation that has not ended: its check refused it.
-    let (code, blocked) = result_json(test_box.bay(&refused_view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&refused_view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
 
     // After the landings: an edit of a tracked file, a new untracked file, a commit made in the

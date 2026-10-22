@@ -34,7 +34,7 @@ fn landed() -> (TestBox, PathBuf, PathBuf, TestKeys, String, String) {
     test_box.enroll(&repo, &keys);
     test_box.use_keys(&repo, &keys);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, out) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, out) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{out}");
     test_box.git_ok(&repo, &["fetch", "-q", "origin"]);
     test_box.git_ok(

@@ -1,11 +1,11 @@
-//! The notify adapter (`INTERFACES` § 4, `DESIGN` § 9; ruling R6): `[notify] command` in
+//! The notify adapter (`INTERFACES` § 4, `DESIGN` § 9; ruling R6): `[plugin.notify] command` in
 //! `.bay/config.toml`, called once after each event is written, with the event's JSON on
 //! stdin. Exit 0 means delivered. The event carries its id so the adapter can deduplicate;
 //! bay cannot make another system exactly-once.
 //!
 //! A notice is a convenience, never the record: the event is already on the executor's log
 //! when the adapter runs, its answer is never written back, and a failed or slow notice is
-//! never retried. `bay watch` reads what a lost notice would have said (G9).
+//! never retried. `bay status --since` reads what a lost notice would have said (G9).
 
 use std::process::{Command, ExitStatus};
 use std::time::{Duration, Instant};
@@ -20,7 +20,7 @@ pub const NOTIFY_TIMEOUT: Duration = Duration::from_secs(5);
 /// What became of one notice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Delivery {
-    /// No `[notify] command` is configured.
+    /// No `[plugin.notify] command` is configured.
     Unconfigured,
     /// The adapter exited 0.
     Delivered,
@@ -29,15 +29,17 @@ pub enum Delivery {
 }
 
 /// Calls the configured notify adapter once with `event` on stdin. The command is a program
-/// path relative to the main work tree, then its arguments, as `[executor] command` is, run
+/// path relative to the main work tree, then its arguments, as `[runner] command` is, run
 /// from the work tree with only `PATH` and `HOME` from bay's environment (`crate::run`).
 #[must_use]
 pub fn notify(repo: &Repo, event: &Value) -> Delivery {
-    let Some(cmd) = repo
-        .config
-        .notify
-        .as_ref()
-        .and_then(|notify| notify.command.as_deref())
+    let Some(plugin) = repo.config.plugin.notify.as_ref() else {
+        return Delivery::Unconfigured;
+    };
+    let timeout = plugin.timeout(NOTIFY_TIMEOUT);
+    let Some(cmd) = plugin
+        .command
+        .as_deref()
         .and_then(|command| crate::run::command(&repo.work_root, command))
     else {
         return Delivery::Unconfigured;
@@ -46,7 +48,7 @@ pub fn notify(repo: &Repo, event: &Value) -> Delivery {
     let Ok(cmd) = cmd else {
         return Delivery::Lost;
     };
-    send(cmd, notice(event).as_bytes(), NOTIFY_TIMEOUT).delivery(NOTIFY_TIMEOUT)
+    send(cmd, notice(event).as_bytes(), timeout).delivery(timeout)
 }
 
 /// The bytes one notice of `event` puts on the adapter's stdin: its JSON and a newline.

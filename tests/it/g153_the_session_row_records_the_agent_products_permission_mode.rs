@@ -67,13 +67,13 @@ fn the_row_carries_the_mode_the_payload_names_and_the_fleet_shows_it() {
     // The recorded SessionStart names no mode: the line has none to give.
     let start = fixture("01-SessionStart.json", "s-bypass", &repo);
     assert!(start.get("permission_mode").is_none(), "{start}");
-    hook(&test_box, &repo, "session-start", &start);
+    hook(&test_box, &repo, "session.start", &start);
     let first = lines(&repo, "s-bypass");
     assert!(first[0].get("permission_mode").is_none(), "{}", first[0]);
 
     let prompt = fixture("02-UserPromptSubmit.json", "s-bypass", &repo);
     assert_eq!(prompt["permission_mode"], "bypassPermissions");
-    hook(&test_box, &repo, "user-prompt-submit", &prompt);
+    hook(&test_box, &repo, "turn.start", &prompt);
     let after = lines(&repo, "s-bypass");
     assert_eq!(
         after.last().unwrap()["permission_mode"],
@@ -84,7 +84,7 @@ fn the_row_carries_the_mode_the_payload_names_and_the_fleet_shows_it() {
     // A later payload without the field keeps the session's last named mode on its line.
     let mut stop = fixture("09-Stop.json", "s-bypass", &repo);
     stop.as_object_mut().unwrap().remove("permission_mode");
-    hook(&test_box, &repo, "stop", &stop);
+    hook(&test_box, &repo, "turn.end", &stop);
     let last = lines(&repo, "s-bypass").pop().unwrap();
     assert_eq!(last["event"], "stop", "{last}");
     assert_eq!(last["permission_mode"], "bypassPermissions", "{last}");
@@ -92,10 +92,10 @@ fn the_row_carries_the_mode_the_payload_names_and_the_fleet_shows_it() {
     // A session in the default mode says so; a value that is not a plain word is not recorded.
     let mut plain = fixture("02-UserPromptSubmit.json", "s-plain", &repo);
     plain["permission_mode"] = json!("default");
-    hook(&test_box, &repo, "user-prompt-submit", &plain);
+    hook(&test_box, &repo, "turn.start", &plain);
     let mut odd = fixture("02-UserPromptSubmit.json", "s-odd", &repo);
     odd["permission_mode"] = json!("by pass\n; rm -rf /");
-    hook(&test_box, &repo, "user-prompt-submit", &odd);
+    hook(&test_box, &repo, "turn.start", &odd);
     let odd_line = lines(&repo, "s-odd").pop().unwrap();
     assert!(odd_line.get("permission_mode").is_none(), "{odd_line}");
 

@@ -112,7 +112,7 @@ fn a_sparse_view_from_the_cache_lands_with_no_full_clone() {
 
     // The first check runs from the cache; history it never needed is still not fetched.
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
     assert!(
@@ -153,7 +153,7 @@ fn an_undeclared_path_fetched_later_is_an_observed_input() {
     test_box.git_ok(&view, &["sparse-checkout", "add", "/docs/"]);
     assert!(view.join("docs/guide.md").is_file());
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     let record = test_box.git_ok(
         &cache,
@@ -186,7 +186,7 @@ fn a_check_cannot_write_into_another_changes_workspace() {
     let other = test_box.bay_ok(&repo, &["start", "CARD-2", "--paths", "src/"]);
     let other_view = PathBuf::from(other["detail"]["view"].as_str().unwrap());
     let (_, view) = test_box.start_and_edit(&repo);
-    let (_, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (_, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     // The check ran, inside the sandbox: its evidence record says which one.
     let notes = test_box.git_ok(
         &repo,

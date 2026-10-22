@@ -81,10 +81,10 @@ fn status_names_the_queue_wait_and_check_time_of_landed_changes() {
             format!("fn {name}() {{}}\n"),
         )
         .unwrap();
-        let (code, submitted) = result_json(test_box.bay(&view).arg("land"));
+        let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
         assert_eq!(code, 0, "{submitted}");
-        let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-        assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+        let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+        assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
         ids.push(id);
     }
 

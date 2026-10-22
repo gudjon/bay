@@ -33,7 +33,7 @@ use serde_json::Value;
 use support::PRODUCER;
 use support::queued::{Check, Held, OTHER_PRODUCER, Trust, finished, host_under, ran_for};
 
-const CONFIG: &str = "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[executor]\nlease_s = 30\nheartbeat_s = 1\nfootprint_lanes = true\n";
+const CONFIG: &str = "[runner]\nlease_s = 30\nheartbeat_s = 1\nfootprint_lanes = true\n";
 
 /// The policy: check `ui` on `ui/`, and check `api` on `api/`, both `footprint = true`, with
 /// `table` as its `[policy]` table.
@@ -86,7 +86,7 @@ fn footprint_case(trust: Trust, table: &str) -> Seen {
     held.go();
     let outcome = finished(child);
     for id in [&one, &two] {
-        assert_eq!(ran_for(&outcome, id)["decision"], "landed", "{outcome}");
+        assert_eq!(ran_for(&outcome, id)["decision"], "merged", "{outcome}");
     }
     assert_eq!(
         held.test_box.trunk_change_ids(&held.remote),
@@ -172,7 +172,7 @@ fn under_approvals_only_signing_the_key_carries_the_record_and_says_approvals() 
 /// Three changes on `api/` wait in the queue of an unsigned host that batches up to eight;
 /// one executor pass lands them all. Returns the check runs it took.
 fn batch_runs(table: &str) -> usize {
-    let config = "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[executor]\nlease_s = 30\nheartbeat_s = 1\nbatch = { min = 2, max = 8 }\n";
+    let config = "[runner]\nlease_s = 30\nheartbeat_s = 1\nbatch = { min = 2, max = 8 }\n";
     let policy = policy(table);
     let held = host_under(
         &Check {
@@ -192,7 +192,7 @@ fn batch_runs(table: &str) -> usize {
     let executor = held.executor("exec", PRODUCER);
     let pass = held.pass(&executor);
     for id in &ids {
-        assert_eq!(ran_for(&pass, id)["decision"], "landed", "{pass}");
+        assert_eq!(ran_for(&pass, id)["decision"], "merged", "{pass}");
         assert_eq!(ran_for(&pass, id)["detail"]["trust"], "unsigned", "{pass}");
     }
     held.requests().len()

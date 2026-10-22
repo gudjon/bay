@@ -144,7 +144,7 @@ fn one_id_is_one_talk() {
         &["--context", "other"],
     );
     assert_eq!(code, 10, "{other}");
-    assert_eq!(other["reason"], "TALK_BODY_CONFLICT", "{other}");
+    assert_eq!(other["reason"], "TALK_REFUSED", "{other}");
     assert_eq!(case.host_tip(&name).as_deref(), Some(tip.as_str()));
 
     // ... and by the host, which never lets a chain's body change.
@@ -228,10 +228,10 @@ fn an_unknown_actor_and_an_empty_action_are_refused_before_a_commit() {
         ],
     );
     assert_eq!(code, 10, "{unknown}");
-    assert_eq!(unknown["reason"], "TALK_INVALID", "{unknown}");
+    assert_eq!(unknown["reason"], "TALK_REFUSED", "{unknown}");
     let (code, empty) = send(&case, "  \n\t ", &follow_up, &[]);
     assert_eq!(code, 10, "{empty}");
-    assert_eq!(empty["reason"], "TALK_INVALID", "{empty}");
+    assert_eq!(empty["reason"], "TALK_REFUSED", "{empty}");
     let refs = case.test_box.git_ok(
         &case.a,
         &["for-each-ref", "--format=%(refname)", "refs/bay/talk/"],
@@ -257,7 +257,7 @@ fn a_recipient_named_like_a_verb_is_an_actor() {
         ],
     );
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "TALK_INVALID", "{result}");
+    assert_eq!(result["reason"], "TALK_REFUSED", "{result}");
     assert!(
         result["detail"]["why"]
             .as_str()
@@ -267,14 +267,14 @@ fn a_recipient_named_like_a_verb_is_an_actor() {
     );
 }
 
-/// `bay watch` fetches too, and so accepts and acks on the recipient's machine.
+/// `bay status --since` fetches too, and so accepts and acks on the recipient's machine.
 #[test]
 fn watch_on_the_recipients_machine_accepts() {
     let case = hosted_talk();
     let (code, sent) = send(&case, "Read the changelog", &from_now(3600), &[]);
     assert_eq!(code, 0, "{sent}");
     let id = sent["detail"]["talk"].as_str().unwrap().to_owned();
-    let (code, watched) = support::result_json(case.bay_as("agent-b").arg("watch"));
+    let (code, watched) = support::result_json(case.bay_as("agent-b").args(["status", "--since"]));
     assert_eq!(code, 0, "{watched}");
     assert_eq!(
         watched["detail"]["talk_accept"]["acked"],

@@ -18,19 +18,19 @@ use sha2::{Digest, Sha256};
 /// hook replaces the product's own worktree creation), so `CwdChanged`, `WorktreeCreate`,
 /// `WorktreeRemove` and `StopFailure` wait for their probe.
 pub const CLAUDE_EVENTS: &[(&str, &str)] = &[
-    ("SessionStart", "session-start"),
-    ("UserPromptSubmit", "user-prompt-submit"),
-    ("PreToolUse", "pre-tool"),
-    ("PostToolBatch", "post-tool"),
-    ("FileChanged", "file-changed"),
-    ("Notification", "notification"),
-    ("Stop", "stop"),
-    ("SubagentStart", "subagent-start"),
-    ("SubagentStop", "subagent-stop"),
+    ("SessionStart", "session.start"),
+    ("UserPromptSubmit", "turn.start"),
+    ("PreToolUse", "tool.before"),
+    ("PostToolBatch", "step.end"),
+    ("FileChanged", "file.change"),
+    ("Notification", "session.wait"),
+    ("Stop", "turn.end"),
+    ("SubagentStart", "subagent.start"),
+    ("SubagentStop", "subagent.end"),
     // A teammate session's idle (probed, round 2): recorded as idle.
-    ("TeammateIdle", "teammate-idle"),
-    ("SessionEnd", "session-end"),
-    ("PreCompact", "pre-compact"),
+    ("TeammateIdle", "session.wait"),
+    ("SessionEnd", "session.end"),
+    ("PreCompact", "compact.before"),
 ];
 
 /// Codex events bay hooks (G308), with the `bay hook` event name each one calls: the events
@@ -38,14 +38,14 @@ pub const CLAUDE_EVENTS: &[(&str, &str)] = &[
 /// `PostToolBatch`, so its `PostToolUse` ends a step; it ignores an unknown event name without
 /// a word, so no Claude-only event is written for it.
 pub const CODEX_EVENTS: &[(&str, &str)] = &[
-    ("SessionStart", "session-start"),
-    ("UserPromptSubmit", "user-prompt-submit"),
-    ("PreToolUse", "pre-tool"),
-    ("PostToolUse", "post-tool"),
-    ("Stop", "stop"),
-    ("SubagentStart", "subagent-start"),
-    ("SubagentStop", "subagent-stop"),
-    ("SessionEnd", "session-end"),
+    ("SessionStart", "session.start"),
+    ("UserPromptSubmit", "turn.start"),
+    ("PreToolUse", "tool.before"),
+    ("PostToolUse", "step.end"),
+    ("Stop", "turn.end"),
+    ("SubagentStart", "subagent.start"),
+    ("SubagentStop", "subagent.end"),
+    ("SessionEnd", "session.end"),
 ];
 
 const BAY_COMMAND_PREFIX: &str = "bay hook ";
@@ -175,7 +175,7 @@ pub const DEFAULT_ON_FAILURE: &str = "allow";
 /// what `bay help --json` declares of it (G306), from this one table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EntryShape {
-    /// The entry can stop the agent: a deny at `pre-tool`, the one stop refusal at `stop` (R7).
+    /// The entry can stop the agent: a deny at `tool.before`, the one stop refusal at `stop` (R7).
     pub blocks: bool,
     /// The entry's `onFailure`; `None` writes none, so the product's [`DEFAULT_ON_FAILURE`]
     /// holds.
@@ -309,6 +309,32 @@ fn missing_events(
         .collect()
 }
 
+/// The Claude events whose bay entry calls `bay hook` under another name than the one bay hooks
+/// it with (G324): a name an older bay wrote, such as `pre-tool`, which 0.3.0 no longer knows
+/// (hook contract H1, no aliases). A re-install rewrites it.
+#[must_use]
+pub fn renamed_claude_events(settings: &Map<String, Value>) -> Vec<&'static str> {
+    let Some(hooks) = settings.get("hooks").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    CLAUDE_EVENTS
+        .iter()
+        .filter(|(event, bay_event)| {
+            hooks
+                .get(*event)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+                .flatten()
+                .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+                .filter_map(bay_event_of)
+                .any(|event| event != *bay_event)
+        })
+        .map(|(event, _)| *event)
+        .collect()
+}
+
 /// The Claude events whose bay entry is the bare `bay hook <event>` an earlier bay wrote,
 /// without the presence test (G169): on a box without bay it denies every tool. A re-install
 /// replaces it.
@@ -369,9 +395,9 @@ pub fn pre_tool_timeout(settings: &Map<String, Value>) -> Option<Option<u64>> {
     claude_pre_tool_hook(settings).map(|hook| hook.get("timeout").and_then(Value::as_u64))
 }
 
-/// bay's `bay hook pre-tool` hook, in a `PreToolUse` group bay owns.
+/// bay's `bay hook tool.before` hook, in a `PreToolUse` group bay owns.
 fn claude_pre_tool_hook(settings: &Map<String, Value>) -> Option<&Value> {
-    bay_hooks(settings, "PreToolUse", "pre-tool").next()
+    bay_hooks(settings, "PreToolUse", "tool.before").next()
 }
 
 /// A digest over every hook entry that is not bay's, in file order.

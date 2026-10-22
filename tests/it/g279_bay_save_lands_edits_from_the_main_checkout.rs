@@ -5,12 +5,12 @@
 //! tree's changes against `HEAD` (modified, added untracked files that are not ignored, and
 //! deleted files), opens the normal change on exactly those files, whose draft is `HEAD` plus
 //! the edits merged onto the current trunk the way `start --from` takes a branch in, and lands
-//! it with `bay land --wait`. On `landed` the main checkout's trunk branch fast-forwards to the
+//! it with `bay merge --wait`. On `landed` the main checkout's trunk branch fast-forwards to the
 //! landing and its files follow, so it is clean at the new tip; an ignored file stays. A
 //! conflict with newer trunk is `MERGE_CONFLICT` before anything is created; a failing check is
 //! `CHECK_FAILED` naming the change, which stays open for repair. On every refusal the main
 //! checkout's files and `HEAD` are exactly as they were. In a view, `bay save` is refused and
-//! names `bay land`.
+//! names `bay merge`.
 //!
 //! The guards to mutate:
 //! - `src/start.rs`, the draft the new change starts from in `create`,
@@ -25,7 +25,7 @@
 //!   `untouched(landed, &saved)`: drop it and the fourth case fails (no `repair` names the
 //!   change).
 //! - `src/save.rs`, `save_in`'s `if let Some(change) = repo.view_change(dir)` refusal: drop it
-//!   and the fifth case fails (the refusal no longer names `bay land`).
+//!   and the fifth case fails (the refusal no longer names `bay merge`).
 
 // Each case runs shell scripts (adapters), so these run on Unix only.
 #![cfg(unix)]
@@ -69,9 +69,9 @@ fn land_through_bay(test_box: &TestBox, repo: &Path, intent: &str, path: &str, t
     let started = test_box.bay_ok(repo, &["start", intent, "--paths", "src/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     write(&view, path, text);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 }
 
 fn refs(test_box: &TestBox, remote: &Path, prefix: &str) -> Vec<String> {
@@ -103,7 +103,7 @@ fn edits_additions_and_deletions_in_the_main_checkout_land_as_one_change() {
 
     let (code, saved) = result_json(test_box.bay(&repo).args(["save", "CARD-1"]));
     assert_eq!(code, 0, "{saved}");
-    assert_eq!(saved["decision"], "landed", "{saved}");
+    assert_eq!(saved["decision"], "merged", "{saved}");
     assert_eq!(
         saved["detail"]["saved"],
         serde_json::json!(["src/a.rs", "src/b.rs", "src/c.rs", "src/new.rs"]),
@@ -186,7 +186,7 @@ fn a_save_after_trunk_moved_on_another_file_lands_merged() {
                 .args(["save", "CARD-2", "--message", "a is one now"]),
         );
     assert_eq!(code, 0, "{saved}");
-    assert_eq!(saved["decision"], "landed", "{saved}");
+    assert_eq!(saved["decision"], "merged", "{saved}");
     assert_eq!(
         saved["detail"]["saved"],
         serde_json::json!(["src/a.rs"]),
@@ -283,7 +283,7 @@ fn a_save_whose_check_fails_is_check_failed_names_the_change_and_keeps_the_edits
     assert_eq!(status(&test_box, &repo), dirty);
 
     // The change stays open: its view resumes for repair.
-    let resumed = test_box.bay_ok(&repo, &["start", "--resume", id]);
+    let resumed = test_box.bay_ok(&repo, &["start", id]);
     let view = PathBuf::from(resumed["detail"]["view"].as_str().unwrap());
     assert_eq!(read(&view, "src/a.rs"), "fn a() { 1 }\n");
 }
@@ -301,7 +301,7 @@ fn bay_save_in_a_view_is_refused_and_names_bay_land() {
     let (code, refused) = result_json(test_box.bay(&view).args(["save", "CARD-5"]));
     assert_ne!(code, 0, "{refused}");
     let why = refused["detail"].as_str().unwrap_or_default();
-    assert!(why.contains("bay land"), "names bay land: {refused}");
+    assert!(why.contains("bay merge"), "names bay merge: {refused}");
     assert_eq!(refs(&test_box, &remote, "refs/bay/changes/"), changes);
     assert_eq!(refs(&test_box, &remote, "refs/bay/intent/"), claims);
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), tip);

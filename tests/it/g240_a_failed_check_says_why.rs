@@ -33,7 +33,7 @@ fn a_failed_units_reason_reaches_the_refusal_the_signed_record_and_status() {
     test_box.enroll(&repo, &keys);
     test_box.use_keys(&repo, &keys);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     let check = &refused["detail"]["checks"][0];
@@ -94,7 +94,7 @@ fn a_reason_over_two_kilobytes_is_an_infra_failure_never_cut() {
     test_box.enroll(&repo, &keys);
     test_box.use_keys(&repo, &keys);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_ne!(code, 0, "{refused}");
     assert_eq!(refused["reason"], "CHECK_UNKNOWN", "{refused}");
     let check = &refused["detail"]["checks"][0];

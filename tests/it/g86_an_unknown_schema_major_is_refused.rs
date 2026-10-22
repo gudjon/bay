@@ -26,7 +26,7 @@ fn an_evidence_record_of_an_unknown_major_never_counts() {
     test_box.enroll(&repo, &keys);
     test_box.use_keys(&repo, &keys);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let commit = landed["detail"]["commit"].as_str().unwrap();
     let tree = test_box.git_ok(&repo, &["rev-parse", &format!("{commit}^{{tree}}")]);

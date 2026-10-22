@@ -1,14 +1,14 @@
 //! G276 (N-19): a prune adapter runs after each delete.
 //!
-//! A team on a hosted remote wants more than the branch gone when `bay status --heads --prune`
+//! A team on a hosted remote wants more than the branch gone when `bay prune`
 //! deletes it: the branch's open pull request closed, for example. bay never talks to a host.
-//! `[heads] on_prune` in `.bay/config.toml` names an adapter, a program path relative to the
+//! `[plugin.prune] command` in `.bay/config.toml` names an adapter, a program path relative to the
 //! work tree; after each branch the prune deletes, bay runs it as
 //! `<on_prune> pruned <branch> <sha> <archive ref>`, its program materialized from the trunk's
-//! tip (never this machine's work tree), within `[heads] timeout_s`. Its outcome is recorded on
+//! tip (never this machine's work tree), within `[plugin.prune] timeout_s`. Its outcome is recorded on
 //! the branch's `pruned` row as `on_prune: {ok, why}`, `why` naming the exit status and the
 //! first line of its stderr. A failing adapter never undoes the delete and never stops the
-//! loop: the next branch is pruned and its adapter runs. Without `[heads] on_prune`, nothing
+//! loop: the next branch is pruned and its adapter runs. Without `[plugin.prune] command`, nothing
 //! runs and no row carries `on_prune`.
 //!
 //! Guards to mutate (each makes a case here fail), in `src/heads.rs`:
@@ -108,11 +108,7 @@ fn fixture(config: &str, adapter: bool) -> Fixture {
 
 impl Fixture {
     fn prune(&self) -> Value {
-        let (code, result) = result_json(
-            self.test_box
-                .bay(&self.repo)
-                .args(["status", "--heads", "--prune"]),
-        );
+        let (code, result) = result_json(self.test_box.bay(&self.repo).args(["prune"]));
         assert_eq!(code, 0, "{result}");
         result
     }
@@ -146,7 +142,7 @@ fn pruned<'a>(result: &'a Value, name: &str) -> &'a Value {
 #[test]
 fn the_adapter_runs_once_per_deleted_branch_and_a_failure_undoes_nothing() {
     let fixture = fixture(
-        "trunk = \"main\"\n\n[heads]\non_prune = \"scripts/on-prune\"\ntimeout_s = 20\n",
+        "trunk = \"main\"\n\n[plugin.prune]\ncommand = \"scripts/on-prune\"\ntimeout_s = 20\n",
         true,
     );
     let result = fixture.prune();
@@ -214,7 +210,7 @@ fn the_adapter_runs_once_per_deleted_branch_and_a_failure_undoes_nothing() {
 
 #[test]
 fn without_an_adapter_nothing_runs_and_a_missing_one_is_recorded() {
-    // No `[heads] on_prune`: the prune is as it was, and no row carries an outcome.
+    // No `[plugin.prune] command`: the prune is as it was, and no row carries an outcome.
     let plain = fixture("trunk = \"main\"\n", false);
     let result = plain.prune();
     assert_eq!(plain.remote_heads(), ["main"], "{result}");
@@ -226,7 +222,7 @@ fn without_an_adapter_nothing_runs_and_a_missing_one_is_recorded() {
 
     // An adapter the trunk does not hold is a failure on each row, and the prune goes on.
     let missing = fixture(
-        "trunk = \"main\"\n\n[heads]\non_prune = \"scripts/not-here\"\n",
+        "trunk = \"main\"\n\n[plugin.prune]\ncommand = \"scripts/not-here\"\n",
         false,
     );
     let result = missing.prune();

@@ -125,7 +125,7 @@ impl Trunk {
     }
 
     fn land(&self, view: &Path) -> (i32, Value) {
-        result_json(self.test_box.bay(view).args(["land", "--wait"]))
+        result_json(self.test_box.bay(view).args(["merge", "--wait"]))
     }
 
     /// The approver reads change `id` from its own clone and says yes to candidate `commit`.
@@ -159,7 +159,7 @@ impl Trunk {
     fn pass(&self, id: &str) -> Option<Value> {
         let ran = self
             .test_box
-            .bay_ok(&self.repo, &["executor", "run", "--once"]);
+            .bay_ok(&self.repo, &["runner", "run", "--once"]);
         ran["detail"]["ran"]
             .as_array()
             .unwrap_or_else(|| panic!("no ran rows: {ran}"))
@@ -212,7 +212,7 @@ fn an_unrelated_landing_keeps_the_approval_and_the_landing_names_it() {
     let row = trunk
         .pass(&id)
         .expect("the pass asks the waiting change again");
-    assert_eq!(row["decision"], "landed", "{row}");
+    assert_eq!(row["decision"], "merged", "{row}");
     let tip = trunk.trunk_tip();
     assert_eq!(row["detail"]["commit"], tip.as_str(), "{row}");
     assert_ne!(tip, first, "a new candidate landed, not the approved one");
@@ -310,7 +310,7 @@ fn with_carry_false_an_unrelated_landing_needs_a_new_approval() {
     // The approval of the new candidate lands it.
     trunk.approve(&id, &second);
     let row = trunk.pass(&id).expect("the pass runs the approved change");
-    assert_eq!(row["decision"], "landed", "{row}");
+    assert_eq!(row["decision"], "merged", "{row}");
     assert_eq!(trunk.trunk_tip(), second);
     assert!(row["detail"]["carried_approvals"].is_null(), "{row}");
 }

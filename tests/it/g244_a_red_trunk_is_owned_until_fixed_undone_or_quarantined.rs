@@ -3,7 +3,7 @@
 //!
 //! A post-publication check that fails on a landing makes trunk red on that check's paths,
 //! owned by the landing. `bay status` names it. While red, a landing that touches those paths
-//! is refused `TRUNK_RED`, naming the owner; a landing elsewhere lands, and a change that names
+//! is refused `MAIN_RED`, naming the owner; a landing elsewhere lands, and a change that names
 //! the owner (`--fixes`) lands and clears the red.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -71,7 +71,7 @@ impl Trunk {
         let id = started["change"].as_str().unwrap().to_owned();
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join(path), format!("{path}\n")).unwrap();
-        let (code, result) = result_json(self.test_box.bay(&view).args(["land", "--wait"]));
+        let (code, result) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         (code, result, id)
     }
 
@@ -119,7 +119,7 @@ fn a_failed_post_check_makes_its_paths_red_until_a_fix_lands() {
     // A landing on the red paths is refused, naming the owner.
     let (code, refused, _) = trunk.land("src/next.rs", None);
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "TRUNK_RED", "{refused}");
+    assert_eq!(refused["reason"], "MAIN_RED", "{refused}");
     assert_eq!(
         refused["detail"]["red"][0]["change"],
         broke.as_str(),

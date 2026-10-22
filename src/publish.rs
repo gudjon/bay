@@ -5,7 +5,7 @@
 //! change chain and the evidence notes; after it, "landed" is derived from trunk. Every
 //! attempt first scans `base_first..B` for an earlier publication of the change.
 //!
-//! `bay land` does the agent's part and returns at once; `bay executor run` (or `land --wait`)
+//! `bay merge` does the agent's part and returns at once; `bay runner run` (or `land --wait`)
 //! does the rest. After two moves of trunk the operation joins the publication queue (§ 6).
 
 use std::cell::Cell;
@@ -36,14 +36,14 @@ use crate::view;
 
 /// The producer name of the built-in local executor's evidence.
 pub const LOCAL_PRODUCER: &str = "local";
-/// After this many `TRUNK_MOVED` refusals an operation stops rebuilding.
+/// After this many `MAIN_MOVED` refusals an operation stops rebuilding.
 const TRUNK_MOVED_LIMIT: u32 = 2;
 
 /// The identity bay commits candidates under until executor keys exist (item 11).
 const EXECUTOR_IDENTITY: &[(&str, &str)] = &[
-    ("GIT_AUTHOR_NAME", "bay executor"),
+    ("GIT_AUTHOR_NAME", "bay runner"),
     ("GIT_AUTHOR_EMAIL", "executor@bay.invalid"),
-    ("GIT_COMMITTER_NAME", "bay executor"),
+    ("GIT_COMMITTER_NAME", "bay runner"),
     ("GIT_COMMITTER_EMAIL", "executor@bay.invalid"),
 ];
 
@@ -125,7 +125,7 @@ pub fn land(
     };
     let _ = receipts::sync(&repo);
     let Some(id) = change.map(str::to_owned).or_else(|| repo.view_change(dir)) else {
-        return BayResult::failed("run bay land in a change's view, or name the change");
+        return BayResult::failed("run bay merge in a change's view, or name the change");
     };
     // G56 (ruling T9): the talks on this change, fetched before the landing and named in its
     // result. A talk never blocks a landing.
@@ -228,12 +228,10 @@ fn ended_elsewhere(
         .with_change(id)
         .with_op(op_id);
     }
-    let mut result = BayResult::blocked(Reason::ChangeSuperseded)
+    BayResult::blocked(Reason::ChangeSuperseded)
         .with_change(id)
         .with_op(op_id)
-        .with_detail(json!({"state": state, "outcome": outcome, "landed": false}));
-    result.published = Some(false);
-    result
+        .with_detail(json!({"state": state, "outcome": outcome, "landed": false}))
 }
 
 /// `land --wait` with an observation timeout (§ 9a): the run happens in a detached process,
@@ -258,7 +256,7 @@ fn observe_land(
     let mut run = std::process::Command::new(bay);
     run.arg("-C")
         .arg(dir)
-        .args(["land", "--wait", id])
+        .args(["merge", "--wait", id])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -287,7 +285,6 @@ fn observe_land(
         .with_change(id)
         .with_op(op_id);
     result.state = Some("running".to_owned());
-    result.published = Some(false);
     result.waiting_for = Some("executor".to_owned());
     Ok(result.with_detail(json!({
         "observation_timeout_s": timeout.as_secs(),
@@ -889,7 +886,6 @@ fn submit_land(
     result.state = serde_json::to_value(op.state)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned));
-    result.published = Some(false);
     result.waiting_for = Some(if online { "executor" } else { "remote" }.to_owned());
     Ok(with_progress(&ctx.repo.git, ctx.op(&op_id), result))
 }
@@ -1034,10 +1030,9 @@ pub fn progress(git: &Git, op: &Operation) -> (Option<u64>, Vec<String>, Option<
 
 /// Sets `result`'s progress fields from operation `op` (G80).
 fn with_progress(git: &Git, op: &Operation, mut result: BayResult) -> BayResult {
-    let (elapsed, receipts, next) = progress(git, op);
+    let (elapsed, evidence, _) = progress(git, op);
     result.elapsed_s = elapsed;
-    result.receipts = Some(receipts);
-    result.next = next;
+    result.evidence = Some(evidence);
     result
 }
 
@@ -1089,7 +1084,7 @@ pub fn execute(
     // A log that cannot take the event now leaves the blocked operation on the chain, and the
     // next executor pass writes the event the logs lack (`recover_events`).
     if let Ok(Some(event)) = outcome_event(&ctx, op_id, &result) {
-        // A lost notice is never retried: `bay watch` reads the event from the log.
+        // A lost notice is never retried: `bay status --since` reads the event from the log.
         let _ = crate::notify::notify(ctx.repo, &event);
     }
     // G307: a landing this pass reached wakes the change's author once. A wake is a
@@ -1100,7 +1095,7 @@ pub fn execute(
 
 /// G307: asks the wake adapter, once, to wake the author of `ctx`'s change for operation
 /// `op_id`'s outcome, and returns what bay records of the answer. Only an executor pass
-/// ([`execute`]) asks: an outcome reached inside the author's own `bay land --wait` returns to
+/// ([`execute`]) asks: an outcome reached inside the author's own `bay merge --wait` returns to
 /// that session directly, so it never wakes the turn that caused it. The session to wake is
 /// the one the change record names.
 fn wake_author(
@@ -1125,7 +1120,7 @@ fn wake_author(
 /// left the change to the executor can move on. Landings are read from trunk and never logged,
 /// so what trunk cannot hold, the adapter's answer, is a `wake` event on this executor's log,
 /// keyed by the operation and its outcome: one landing is one wake, however often a pass sees
-/// it, and a log that already holds it is never asked again. Without a `[wake] command`
+/// it, and a log that already holds it is never asked again. Without a `[plugin.wake] command`
 /// nothing is asked and nothing is written. The notify adapter is not told: the landing is
 /// on trunk, and a wake is no outcome of its own.
 fn landed_wake(ctx: &Ctx, op_id: &str, result: &BayResult) -> Result<(), String> {
@@ -1439,7 +1434,7 @@ fn release_after_fault(ctx: &mut Ctx, op_id: &str, revision: &str) {
 }
 
 /// Steps 2–7 for one operation, rebuilding when trunk moves; joins the queue after two
-/// `TRUNK_MOVED` refusals. `seq` is this operation's place when it is the queue's head.
+/// `MAIN_MOVED` refusals. `seq` is this operation's place when it is the queue's head.
 fn run_attempts(
     ctx: &mut Ctx,
     op_id: &str,
@@ -2082,7 +2077,7 @@ fn after_refused_push(
             return registry_changed(ctx, op_id, revision, attempt, &registry);
         }
         // Trunk moved as well: C can no longer be re-signed on its parent. The move is the
-        // refusal that counts (`TRUNK_MOVED`, § 6), and the rebuild signs under the current
+        // refusal that counts (`MAIN_MOVED`, § 6), and the rebuild signs under the current
         // registry.
     }
     if error.contains(Reason::HookTimeout.code()) {
@@ -2122,7 +2117,7 @@ fn after_refused_push(
         {
             return Ok(Some(blocked));
         }
-        return enqueue(ctx, op_id, revision, Reason::PublicationQueued).map(Some);
+        return enqueue(ctx, op_id, revision, Reason::Queued).map(Some);
     }
     // G128: another process on the remote holds a ref lock. Trunk did not move, so the same
     // candidate is pushed again after a short wait, uncounted; bay never unlinks the lock.
@@ -2136,7 +2131,7 @@ fn after_refused_push(
                 .with_op(op_id),
         ));
     }
-    let held = error.contains(Reason::QueueHeld.code());
+    let held = error.contains(crate::hook::QUEUE_HELD_BY);
     *trunk = now;
     ctx.record.observed_remote.clone_from(trunk);
     let moved = Moved {
@@ -2185,7 +2180,6 @@ fn registry_after_change(
                 "registry": registry,
                 "released": released,
             }));
-        result.published = Some(false);
         result.waiting_for = Some(waiting_for.to_owned());
         result
     };
@@ -2206,7 +2200,7 @@ fn registry_after_change(
 /// `REGISTRY_CHANGED` on an unmoved trunk, with a valid key: re-sign a C with the same tree and
 /// parent and the current `Registry-Id` (`None`: build again, where tree-keyed evidence is
 /// reused, commit-keyed checks run again, and evidence whose producer key the registry revoked
-/// no longer counts, so it is rechecked first). Not counted toward `PUBLISH_RETRY_EXHAUSTED`.
+/// no longer counts, so it is rechecked first). Not counted toward `MERGE_RETRY_EXHAUSTED`.
 fn registry_changed(
     ctx: &mut Ctx,
     op_id: &str,
@@ -2253,13 +2247,13 @@ fn executor_key_valid(ctx: &Ctx, registry: &Registry) -> Result<bool, String> {
     Ok(registry.holds(KeyClass::Executor, &signer.name, &key_type, &blob))
 }
 
-/// After this many uncounted publish retries an operation is `PUBLISH_RETRY_EXHAUSTED` (§ 6).
+/// After this many uncounted publish retries an operation is `MERGE_RETRY_EXHAUSTED` (§ 6).
 const PUBLISH_RETRY_LIMIT: u32 = 5;
 /// The short wait before a publishing push the hook timed out is tried again.
 const HOOK_RETRY_WAIT: Duration = Duration::from_secs(1);
 
 /// The trunk hook timed out on the publishing push: retry the same candidate after a short wait
-/// (`None`), uncounted toward `TRUNK_MOVED` and the queue's deadline (`INTERFACES` § 2).
+/// (`None`), uncounted toward `MAIN_MOVED` and the queue's deadline (`INTERFACES` § 2).
 fn hook_timed_out(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<BayResult>, String> {
     if let Some(blocked) = uncounted_retry(ctx, op_id, revision, "hook timeout")? {
         return Ok(Some(blocked));
@@ -2306,7 +2300,7 @@ fn held_lock(error: &str) -> bool {
 }
 
 /// G128: the remote's ref lock was held: retry the same candidate after a short wait (`None`),
-/// uncounted toward `TRUNK_MOVED` and the queue's deadline, as a hook timeout is.
+/// uncounted toward `MAIN_MOVED` and the queue's deadline, as a hook timeout is.
 fn lock_held(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<BayResult>, String> {
     if let Some(blocked) = uncounted_retry(ctx, op_id, revision, "remote ref lock held")? {
         return Ok(Some(blocked));
@@ -2316,7 +2310,7 @@ fn lock_held(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<BayRes
 }
 
 /// Counts one uncounted retry (a `HOOK_TIMEOUT`, or a deadline release during a publish): the
-/// fifth blocks the operation with `PUBLISH_RETRY_EXHAUSTED` (`DESIGN` § 6). The count lives in
+/// fifth blocks the operation with `MERGE_RETRY_EXHAUSTED` (`DESIGN` § 6). The count lives in
 /// the chain, since the next pass re-reads the record from the remote.
 fn uncounted_retry(
     ctx: &mut Ctx,
@@ -2368,7 +2362,7 @@ fn after_trunk_moved(
     moved: &Moved,
 ) -> Result<Option<BayResult>, String> {
     if moved.held {
-        return enqueue(ctx, op_id, revision, Reason::QueueHeld).map(Some);
+        return enqueue(ctx, op_id, revision, Reason::Queued).map(Some);
     }
     if policy_identity(&ctx.repo.git, moved.base)? != policy_identity(&ctx.repo.git, moved.trunk)? {
         return recheck_under_new_policy(ctx, op_id, revision, seq);
@@ -2377,13 +2371,13 @@ fn after_trunk_moved(
     op.trunk_moved += 1;
     // § 6: bay retries once more, then the operation joins the publication queue.
     if op.trunk_moved >= TRUNK_MOVED_LIMIT && seq.is_none() {
-        return enqueue(ctx, op_id, revision, Reason::PublicationQueued).map(Some);
+        return enqueue(ctx, op_id, revision, Reason::Queued).map(Some);
     }
     Ok(None)
 }
 
 /// § 7: a candidate checked under an older policy is `POLICY_CHANGED` and rechecked under the new
-/// one. That is no `TRUNK_MOVED` refusal. A queue head is released with `policy_changed`, which
+/// one. That is no `MAIN_MOVED` refusal. A queue head is released with `policy_changed`, which
 /// counts toward no limit (§ 6), and rejoins; any other operation rechecks at once (`None`).
 fn recheck_under_new_policy(
     ctx: &mut Ctx,
@@ -2471,12 +2465,7 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str) -> Result<Gate, String> {
         return Ok(Gate::Head(head.seq));
     }
     let revision = ctx.op(op_id).revision.clone();
-    let reason = if queue.of(op_id).is_some() {
-        Reason::PublicationQueued
-    } else {
-        Reason::QueueHeld
-    };
-    enqueue(ctx, op_id, &revision, reason).map(|result| Gate::Wait(Box::new(result)))
+    enqueue(ctx, op_id, &revision, Reason::Queued).map(|result| Gate::Wait(Box::new(result)))
 }
 
 /// Holds a place in the queue: reserves one if the operation has none, gives up ownership so
@@ -2501,7 +2490,7 @@ fn enqueue(
     if op.state != OpState::Admitted || op.owner.is_some() {
         op.state = OpState::Admitted;
         op.owner = None;
-        op.outcome = Some(Reason::PublicationQueued.code().to_owned());
+        op.outcome = Some(Reason::Queued.code().to_owned());
         ctx.save(revision, None, &format!("queued {op_id} at {}", entry.seq))?;
         ctx.push_chain();
     }
@@ -2513,7 +2502,6 @@ fn enqueue(
             "seq": entry.seq,
             "head": queue.head().map(|head| head.op_id.clone()),
         }));
-    result.published = Some(false);
     result.waiting_for = Some("queue".to_owned());
     Ok(result)
 }
@@ -2542,11 +2530,11 @@ fn ahead_of_turn(ctx: &mut Ctx, op_id: &str, trunk: &str, mut result: BayResult)
 }
 
 /// The check [`ahead_of_turn`] makes, or `None` when there is none to make: the operation is
-/// further behind the head than `[executor] ahead` and shares a footprint with an entry ahead
+/// further behind the head than `[runner] ahead` and shares a footprint with an entry ahead
 /// (or footprint lanes are off), an entry ahead cannot be read or changes the policy, its own
 /// merge onto the base conflicts, ends `no_effect` or changes the policy, it names inputs, or
 /// that base and tree were checked already. The base is what the live entries ahead predict
-/// ([`throughput::predict`]), or, beyond `ahead` and with `[executor] footprint_lanes`, the
+/// ([`throughput::predict`]), or, beyond `ahead` and with `[runner] footprint_lanes`, the
 /// trunk tip for an operation whose footprint is disjoint from every entry's ahead of it
 /// ([`throughput::disjoint`]). The operation's merge onto it is checked as an unsigned
 /// predicted commit under the policy at that base, with the adapter from it, by this
@@ -2889,6 +2877,7 @@ fn retry_blocked(
 ) -> Result<Option<BayResult>, String> {
     let op = ctx.op(op_id);
     let reason = op.outcome.as_deref().and_then(Reason::from_code);
+    let lane_checked = op.outcome.as_deref() == Some(crate::lane::CHECKED);
     let tree = op.attempts.last().map(|attempt| attempt.tree.clone());
     let then = op.blocked_on.clone();
     // N-9: a failed or unanswered check of a policy with a waivable check may get a waiver.
@@ -2906,6 +2895,17 @@ fn retry_blocked(
         tree.as_deref(),
         &ctx.record.observed_versions,
     )?;
+    // A lane change whose checks ran says `ok` again, with no work, while nothing changed.
+    if lane_checked && then.as_deref() == Some(now.as_str()) {
+        return Ok(Some(
+            BayResult::new(Decision::Ok)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(
+                    json!({"unchanged": true, "condition": now, "note": crate::lane::NOTE}),
+                ),
+        ));
+    }
     if let Some(reason) = reason
         && !reason.transient()
         && then.as_deref() == Some(now.as_str())
@@ -3422,9 +3422,9 @@ fn not_admitted(ctx: &mut Ctx, op_id: &str, revision: &str, outcome: &str, why: 
 
 /// NEW-4: the outcome of a lane change's land request, a check-only operation. Its candidate
 /// was built on the current trunk and checked like any other (`refusal` is how the check ended
-/// when it did not pass); it is never published. The operation is blocked `LANE_NEVER_LANDS` on
-/// the condition of that candidate, and the result carries the verdicts so the agent learns
-/// them. A refusal that is not a check's verdict (a conflict, a check no worker could run, an
+/// when it did not pass); it is never published. The operation is held, `lane::CHECKED`, on the
+/// condition of that candidate, and the result is `ok` with the verdicts so the agent learns
+/// them (0.3.0: it is not a refusal). A refusal that is not a check's verdict (a conflict, a check no worker could run, an
 /// operation another executor holds) is returned as it is: no check ran to an answer.
 fn lane_never_lands(
     ctx: &mut Ctx,
@@ -3476,7 +3476,7 @@ fn lane_never_lands(
     let lane = ctx.record.lane.clone();
     if let Some(op) = ctx.find_op_mut(op_id) {
         op.state = OpState::Blocked;
-        op.outcome = Some(Reason::LaneNeverLands.code().to_owned());
+        op.outcome = Some(crate::lane::CHECKED.to_owned());
         op.blocked_on = Some(blocked_on);
         ctx.save(
             revision,
@@ -3485,7 +3485,7 @@ fn lane_never_lands(
         )?;
         ctx.push_chain();
     }
-    let mut result = BayResult::blocked(Reason::LaneNeverLands)
+    let result = BayResult::new(Decision::Ok)
         .with_change(ctx.id.clone())
         .with_op(op_id)
         .with_detail(json!({
@@ -3499,9 +3499,8 @@ fn lane_never_lands(
                 .as_ref()
                 .and_then(|refusal| refusal.detail.as_ref())
                 .map(|detail| detail["checks"].clone()),
-            "why": "a lane change runs its checks against the current trunk and never lands",
+            "note": crate::lane::NOTE,
         }));
-    result.published = Some(false);
     Ok(result)
 }
 
@@ -3542,13 +3541,13 @@ fn lane_leak(ctx: &Ctx, trunk: &str, revision: &str) -> Result<Option<BayResult>
                 "leaks": leaks.iter().map(crate::lane::Leak::to_json).collect::<Vec<_>>(),
                 "trunk": trunk,
                 "tips_truncated": truncated,
-                "repair": "take the lane's commits out of the view (reset it to the change's base and redo the work there), then bay land again; or start the work in the lane: bay start <intent> --lane <lane>",
+                "repair": "take the lane's commits out of the view (reset it to the change's base and redo the work there), then bay merge again; or start the work in the lane: bay start <intent> --lane <lane>",
             })),
     ))
 }
 
 /// G244: trunk is red on paths this change touches, and the change does not name the landing
-/// that made it red (by `--fixes`, an undo, or a supersede): `TRUNK_RED`, naming the owner and
+/// that made it red (by `--fixes`, an undo, or a supersede): `MAIN_RED`, naming the owner and
 /// the ways out. The operation is blocked on trunk's state, never failed. A check no landing
 /// in the window answers (NEW-6, [`crate::red::Pending`]) is unknown, not red: it refuses
 /// nothing here, and `bay status` lists it as `red_pending`, never as clear.
@@ -3610,10 +3609,10 @@ fn red_gate(
 }
 
 /// N-8 (`crate::hold`): trunk is held, and this change carries neither `Fixes:` nor `Reverts:`:
-/// `TRUNK_HELD`, naming the hold. Nothing is published and no limit is counted. The operation
+/// `MAIN_HELD`, naming the hold. Nothing is published and no limit is counted. The operation
 /// stays queued and holds no queue place, so a fix behind it reaches the head: a place it holds
 /// is released as `trunk_held`, which counts toward neither `QUEUE_DEADLINE_EXCEEDED` nor
-/// `PUBLISH_RETRY_EXHAUSTED` (§ 6). A claim this executor holds is given back, and a later
+/// `MERGE_RETRY_EXHAUSTED` (§ 6). A claim this executor holds is given back, and a later
 /// pass tries the operation again; once the hold clears it rejoins the queue. An operation
 /// another executor holds is left as it is. `None` when trunk is clear or the change passes.
 fn hold_gate(
@@ -3658,11 +3657,10 @@ fn hold_gate(
             "why": why,
             "trunk": trunk,
             "ways_out": [
-                "wait: the operation stays queued and lands once the hold clears (bay land --wait again, or an executor pass)",
+                "wait: the operation stays queued and lands once the hold clears (bay merge --wait again, or an executor pass)",
                 "land a fix or a revert: bay start --fixes <change>, or bay undo <change>",
             ],
         }));
-    result.published = Some(false);
     result.waiting_for = Some("hold".to_owned());
     Ok(Some(result))
 }
@@ -3689,7 +3687,7 @@ fn give_back_place(ctx: &Ctx, op_id: &str, release: &str) -> Result<(), String> 
 /// N-8, G273: `op_id` waits, as `reason`, on a condition outside its own work (a held trunk,
 /// a dependency that has not landed), and holds no queue place meanwhile, so the operations
 /// behind it reach the head. A place it holds is released as `release`, a reason that counts
-/// toward neither `QUEUE_DEADLINE_EXCEEDED` nor `PUBLISH_RETRY_EXHAUSTED` (§ 6). A claim this
+/// toward neither `QUEUE_DEADLINE_EXCEEDED` nor `MERGE_RETRY_EXHAUSTED` (§ 6). A claim this
 /// executor holds is given back (a running operation returns to admitted or submitted) and the
 /// outcome names `reason`, written once with the chain message `message`; a later pass tries
 /// the operation again. An operation another executor holds is left as it is.
@@ -3807,7 +3805,7 @@ fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayR
     if let Some(first) = ended.first() {
         let intent = &ctx.record.intent.reference;
         let named = &first.change;
-        let mut result = BayResult::blocked(Reason::DependencyAbandoned)
+        let result = BayResult::blocked(Reason::DependencyAbandoned)
             .with_change(ctx.id.clone())
             .with_op(op_id)
             .with_detail(json!({
@@ -3818,10 +3816,9 @@ fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayR
                 ),
                 "trunk": trunk,
                 "recovery": format!(
-                    "drop the dependency: bay land --abandon here, then bay start {intent} --new without --after {named}; or restart {named} (bay start of its intent adopts it), land it, then bay land again"
+                    "drop the dependency: bay abandon here, then bay start {intent} --new without --after {named}; or restart {named} (bay start of its intent adopts it), land it, then bay merge again"
                 ),
             }));
-        result.published = Some(false);
         return Ok(Some(result));
     }
     let pending: Vec<&crate::after::Dependency> = standing
@@ -3847,11 +3844,10 @@ fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayR
             ),
             "trunk": trunk,
             "ways_out": [
-                "wait: the operation stays queued and lands once every change it names has landed (bay land --wait again, or an executor pass)",
+                "wait: the operation stays queued and lands once every change it names has landed (bay merge --wait again, or an executor pass)",
                 "land the changes it names first",
             ],
         }));
-    result.published = Some(false);
     result.waiting_for = Some("dependencies".to_owned());
     Ok(Some(result))
 }
@@ -4283,7 +4279,7 @@ fn input_refusal(
 ) -> BayResult {
     let reason = stale.reason().unwrap_or(Reason::InputChanged);
     let repair = if reason == Reason::InputUnobserved {
-        format!("read the required version: bay start --resume {}", ctx.id)
+        format!("read the required version: bay start {}", ctx.id)
     } else {
         format!(
             "repair the change for {} {}",
@@ -4899,7 +4895,7 @@ fn approval_detail(
     let mut detail = json!({"checks": rows, "commit": commit, "tree": tree});
     // G284: what lands it once an approver said yes; nothing else asks the change again.
     detail["once_approved"] = json!(
-        "an executor's next pass lands this candidate; without an executor, the author's bay land --wait lands it"
+        "an executor's next pass lands this candidate; without an executor, the author's bay merge --wait lands it"
     );
     if registry.is_none() {
         detail["why"] = json!(format!(
@@ -4963,7 +4959,6 @@ fn unavailable(
         .with_change(ctx.id.clone())
         .with_op(op_id)
         .with_detail(detail);
-    result.published = Some(false);
     result.waiting_for = Some("worker".to_owned());
     result
 }
@@ -5733,7 +5728,7 @@ fn publish_push(
 }
 
 /// When trunk already holds a publication of the change, returns the result: this revision
-/// is landed, or another revision landed (`CHANGE_ALREADY_LANDED`).
+/// is landed, or another revision landed (`CHANGE_ALREADY_MERGED`).
 fn scanned(ctx: &mut Ctx, trunk: &str, revision: &str) -> Result<Option<BayResult>, String> {
     let found = scan(&ctx.repo.git, &ctx.record.base_first, trunk, &ctx.id)?;
     let Some(publication) = found.publications.first() else {
@@ -6416,7 +6411,6 @@ fn landed_result(
             "revision": revision,
             "trust": evidence::trust(registry),
         }));
-    result.published = Some(true);
     if let Some(op_id) = op_id {
         result = result.with_op(op_id);
     }

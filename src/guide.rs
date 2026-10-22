@@ -13,10 +13,10 @@ use serde_json::Value;
 
 /// The commands a person asks for, in the order they meet them. The agent runs them for the
 /// person.
-const PEOPLE: &[&str] = &["save", "waiting", "approve", "undo"];
+const PEOPLE: &[&str] = &["save", "waiting", "approve", "reject", "undo"];
 
 /// The commands an agent runs to do its work.
-const AGENTS: &[&str] = &["start", "land", "abandon", "status", "watch", "talk"];
+const AGENTS: &[&str] = &["start", "merge", "abandon", "status", "talk"];
 
 /// Whether a top-level command belongs to a group of the page.
 type Member = fn(&str) -> bool;

@@ -25,7 +25,7 @@ fn hook(test_box: &TestBox, cwd: &Path, payload: &Value, envs: &[(&str, &str)]) 
         command.env(key, value);
     }
     let mut child = command
-        .args(["hook", "session-start"])
+        .args(["hook", "session.start"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

@@ -47,7 +47,7 @@ fn land_one(
         test_box.use_keys(&repo, &keys);
     }
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     (test_box, repo, keys, id, landed)
 }

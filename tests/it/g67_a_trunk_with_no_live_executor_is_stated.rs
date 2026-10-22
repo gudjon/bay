@@ -1,6 +1,6 @@
 //! G67. A trunk with no live executor is stated (fleet-rollout-analysis F6).
 //!
-//! Each `bay executor run` pass publishes the executor's presence, `refs/bay/executor/<name>`:
+//! Each `bay runner run` pass publishes the executor's presence, `refs/bay/executor/<name>`:
 //! one parentless commit whose `presence.json` names the executor, its machine, its bay and Git,
 //! the environments the box serves, the time of the pass, the operation it drives first and the
 //! queue depth it saw. `bay status` fetches it with the fleet refs, `bay status --fleet` lists
@@ -25,9 +25,9 @@ fn seeded() -> (TestBox, PathBuf, PathBuf, PathBuf) {
     (test_box, repo, remote, executor)
 }
 
-/// One `bay executor run --once` in `dir`, which must succeed.
+/// One `bay runner run --once` in `dir`, which must succeed.
 fn once(test_box: &TestBox, dir: &Path) -> Value {
-    let (code, result) = result_json(test_box.bay(dir).args(["executor", "run", "--once"]));
+    let (code, result) = result_json(test_box.bay(dir).args(["runner", "run", "--once"]));
     assert_eq!(code, 0, "{result}");
     result
 }
@@ -85,7 +85,7 @@ fn an_executor_pass_publishes_its_presence_and_replaces_the_last_one() {
     // With an operation queued, the next pass names it as the one it drives first, and its
     // presence replaces the last one: one parentless commit, never a growing chain.
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     let op_id = queued["op_id"].as_str().unwrap().to_owned();
     once(&test_box, &executor);
@@ -152,7 +152,7 @@ fn queued_work_with_only_a_stale_presence_says_no_live_executor() {
     let (test_box, repo, _remote, executor) = seeded();
     once(&test_box, &executor);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
 
@@ -181,7 +181,7 @@ fn queued_work_with_only_a_stale_presence_says_no_live_executor() {
 fn queued_work_and_no_executor_ever_says_none_seen() {
     let (test_box, repo, _remote, _executor) = seeded();
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     let result = status(&test_box, &view, 0);
     let warning = no_live_executor(&result).unwrap_or_else(|| panic!("no warning: {result}"));

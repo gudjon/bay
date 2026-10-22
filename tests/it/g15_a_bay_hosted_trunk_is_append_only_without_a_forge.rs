@@ -58,7 +58,7 @@ fn the_trunk_hook_refuses_rewrites_and_allows_retention_cuts() {
 
     // A landing through bay is an ordinary fast-forward and is accepted.
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
 
     // Trunk that held landings cannot be recreated, even after someone removed it on the host.
@@ -122,7 +122,7 @@ fn host_init_below_2_54_is_refused_and_creates_nothing() {
         );
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["decision"], "blocked");
-    assert_eq!(result["reason"], "GIT_BELOW_FLOOR");
+    assert_eq!(result["reason"], "TOOL_BELOW_FLOOR");
     assert_eq!(result["detail"]["role"], "bay-hosted-trunk");
     assert_eq!(result["detail"]["version"], "2.53.0");
     assert_eq!(result["detail"]["floor"], "2.54");

@@ -162,7 +162,7 @@ fn enrol_creates_the_registry_and_an_enrolled_approver_approves() {
     assert_eq!(approved["detail"]["approver"], APPROVER, "{approved}");
     let (code, landed) = trunk.land(&view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 }
 
 #[test]

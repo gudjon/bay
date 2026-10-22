@@ -12,10 +12,10 @@
 //! registry) not signed by the agent it names lists no sessions. And the `Stop` refusal (ruling
 //! R7): a stop over uncheckpointed edits is refused once. And the hook notices (ruling R6): a
 //! refused or failed operation of the session's change is one line at its agent's next
-//! `post-tool` or `user-prompt-submit`, read from the logs this repository holds, and never
-//! again; past the budget a notice is counted in the row, not emitted, and `bay watch` lists
+//! `step.end` or `turn.start`, read from the logs this repository holds, and never
+//! again; past the budget a notice is counted in the row, not emitted, and `bay status --since` lists
 //! it. The
-//! `pre-tool` cache clauses (`COVERAGE_UNKNOWN` past `cache_max_age_s`, land refusing the same
+//! `tool.before` cache clauses (`COVERAGE_UNKNOWN` past `cache_max_age_s`, land refusing the same
 //! stale write with the hooks removed) are tested with G8's inputs in
 //! `g08_invalidation_stops_stale_work_and_permits_repair.rs`.
 
@@ -123,14 +123,14 @@ fn a_shell_write_is_recorded_from_the_view() {
     let record = repo.join(".git/bay/sessions/s-g23.jsonl");
 
     let start = fixture("01-SessionStart.json", "s-g23", &view);
-    assert_eq!(hook(&test_box, &view, "session-start", &start), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &start), Some(0));
 
     // The step's shell call (`echo b > b.txt` in the fixture) wrote a file the payload never
     // names; the write record comes from the view.
     std::fs::write(view.join("src/shell.rs"), "fn shell() {}\n").unwrap();
     std::fs::write(view.join("src/a.rs"), "fn a() { 1; }\n").unwrap();
     let batch = fixture("08-PostToolBatch.json", "s-g23", &view);
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     let line = last_line(&record);
     assert_eq!(line["event"], "post_tool_batch", "{line}");
     assert_eq!(line["change"], id.as_str(), "{line}");
@@ -144,11 +144,11 @@ fn a_shell_write_is_recorded_from_the_view() {
 
     // A second edit of the same file is a write again, though status alone shows it unchanged.
     std::fs::write(view.join("src/shell.rs"), "fn shell() { 2; }\n").unwrap();
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     assert_eq!(wrote(&last_line(&record)), ["src/shell.rs"]);
 
     // A step that writes nothing lists nothing.
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     assert_eq!(wrote(&last_line(&record)), [] as [&str; 0]);
 
     // A file put back to trunk's content is a write; a deleted file is a write, also one the
@@ -159,7 +159,7 @@ fn a_shell_write_is_recorded_from_the_view() {
     // bay refused the first one (ruling R7).
     let mut stop = fixture("09-Stop.json", "s-g23", &view);
     stop["stop_hook_active"] = Value::from(true);
-    assert_eq!(hook(&test_box, &view, "stop", &stop), Some(0));
+    assert_eq!(hook(&test_box, &view, "turn.end", &stop), Some(0));
     let line = last_line(&record);
     assert_eq!(line["state"], "idle", "{line}");
     assert_eq!(wrote(&line), ["src/a.rs", "src/new.rs"], "{line}");
@@ -172,7 +172,7 @@ fn a_teammate_idle_is_recorded_as_idle() {
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     let (_, view) = test_box.start_and_edit(&repo);
     let idle = fixture("round-2/10-TeammateIdle-inter.json", "s-mate", &view);
-    assert_eq!(hook(&test_box, &view, "teammate-idle", &idle), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.wait", &idle), Some(0));
     let line = last_line(&repo.join(".git/bay/sessions/s-mate.jsonl"));
     assert_eq!(line["event"], "teammate_idle", "{line}");
     assert_eq!(line["state"], "idle", "{line}");
@@ -204,11 +204,11 @@ fn a_subagent_keeps_its_own_writes_while_the_parent_works() {
     let (_, view) = test_box.start_and_edit(&repo);
     let record = repo.join(".git/bay/sessions/s-sub.jsonl");
     let start = fixture("01-SessionStart.json", "s-sub", &view);
-    assert_eq!(hook(&test_box, &view, "session-start", &start), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &start), Some(0));
     let mut sub_start = fixture("21-SubagentStart-fg-subagent.json", "s-sub", &view);
     sub_start["agent_id"] = Value::from("af9b166e249d0c0a9");
     assert_eq!(
-        hook(&test_box, &view, "subagent-start", &sub_start),
+        hook(&test_box, &view, "subagent.start", &sub_start),
         Some(0)
     );
 
@@ -216,10 +216,10 @@ fn a_subagent_keeps_its_own_writes_while_the_parent_works() {
     // saw in the view (status cannot tell who wrote it); the subagent's stop lists it too.
     std::fs::write(view.join("src/c.rs"), "fn c() {}\n").unwrap();
     let batch = fixture("08-PostToolBatch.json", "s-sub", &view);
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     assert_eq!(wrote(&last_line(&record)), ["src/c.rs"]);
     let stop = fixture("13-SubagentStop.json", "s-sub", &view);
-    assert_eq!(hook(&test_box, &view, "subagent-stop", &stop), Some(0));
+    assert_eq!(hook(&test_box, &view, "subagent.end", &stop), Some(0));
     let line = last_line(&record);
     assert_eq!(line["agent"], "af9b166e249d0c0a9", "{line}");
     assert_eq!(wrote(&line), ["src/c.rs"], "{line}");
@@ -229,8 +229,8 @@ fn a_subagent_keeps_its_own_writes_while_the_parent_works() {
     std::fs::write(view.join("src/d.rs"), "fn d() {}\n").unwrap();
     let compact = fixture("round-3/07-SessionStart-interactive.json", "s-sub", &view);
     assert_eq!(compact["source"], "compact");
-    assert_eq!(hook(&test_box, &view, "session-start", &compact), Some(0));
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &compact), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     assert_eq!(wrote(&last_line(&record)), ["src/d.rs"]);
 }
 
@@ -258,7 +258,7 @@ fn a_hook_reads_only_what_changed_and_its_record_stays_small() {
             .unwrap();
     }
     let start = fixture("01-SessionStart.json", "s-cost", &view);
-    assert_eq!(hook(&test_box, &view, "session-start", &start), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &start), Some(0));
 
     // From here on, log every path the hook hashes.
     let log = test_box.path().join("hashed.log");
@@ -280,7 +280,7 @@ fn a_hook_reads_only_what_changed_and_its_record_stays_small() {
     );
     std::fs::write(view.join("src/a.rs"), "fn a() { 1; }\n").unwrap();
     let batch = fixture("08-PostToolBatch.json", "s-cost", &view);
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     let line = last_line(&record);
     assert_eq!(wrote(&line), ["src/a.rs"], "{line}");
     let hashed = std::fs::read_to_string(&log).unwrap_or_default();
@@ -299,7 +299,7 @@ fn a_hook_reads_only_what_changed_and_its_record_stays_small() {
         std::fs::write(view.join(format!("src/many{index}.rs")), "// many\n").unwrap();
     }
     std::fs::write(&log, "").unwrap();
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     let line = last_line(&record);
     assert_eq!(line["wrote_unknown"], "too_many_paths", "{line}");
     assert!(line.get("wrote").is_none(), "{line}");
@@ -325,7 +325,7 @@ fn deletions_ignored_paths_and_nested_repositories_are_named_truly() {
     let (_, view) = test_box.start_and_edit(&repo);
     let record = repo.join(".git/bay/sessions/s-kinds.jsonl");
     let start = fixture("01-SessionStart.json", "s-kinds", &view);
-    assert_eq!(hook(&test_box, &view, "session-start", &start), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &start), Some(0));
 
     // A staged deletion (`D.`), an ignored file, an untracked nested repository (`? dir/`) and
     // one ordinary write in the same step.
@@ -337,13 +337,13 @@ fn deletions_ignored_paths_and_nested_repositories_are_named_truly() {
     std::fs::write(nested.join("inner.rs"), "fn inner() {}\n").unwrap();
     std::fs::write(view.join("src/b.rs"), "fn b() { 2; }\n").unwrap();
     let batch = fixture("08-PostToolBatch.json", "s-kinds", &view);
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     let line = last_line(&record);
     assert_eq!(wrote(&line), ["src/a.rs", "src/b.rs"], "{line}");
 
     // The staged deletion stays deleted: the next step does not list it again.
     std::fs::write(view.join("src/b.rs"), "fn b() { 3; }\n").unwrap();
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     assert_eq!(wrote(&last_line(&record)), ["src/b.rs"]);
 }
 
@@ -364,11 +364,11 @@ fn a_file_name_that_is_not_utf8_does_not_stop_the_record() {
     }
     let record = repo.join(".git/bay/sessions/s-odd.jsonl");
     let start = fixture("01-SessionStart.json", "s-odd", &view);
-    assert_eq!(hook(&test_box, &view, "session-start", &start), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &start), Some(0));
     std::fs::write(view.join("src/a.rs"), "fn a() { 1; }\n").unwrap();
     std::fs::write(&odd, "odd 2\n").unwrap();
     let batch = fixture("08-PostToolBatch.json", "s-odd", &view);
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     let line = last_line(&record);
     assert_eq!(wrote(&line), ["src/a.rs", "src/odd-\u{fffd}.rs"], "{line}");
 }
@@ -386,7 +386,7 @@ fn a_session_start_with_an_env_file_binds_the_session() {
     let start = fixture("01-SessionStart.json", "s-env", &view);
     let envs: [(&str, &Path); 1] = [("CLAUDE_ENV_FILE", &env_file)];
     assert_eq!(
-        hook_env(&test_box, &view, "session-start", &start, &envs),
+        hook_env(&test_box, &view, "session.start", &start, &envs),
         Some(0)
     );
     let text = std::fs::read_to_string(&env_file).unwrap();
@@ -395,7 +395,7 @@ fn a_session_start_with_an_env_file_binds_the_session() {
     let record = repo.join(".git/bay/sessions/s-env.jsonl");
     assert_eq!(last_line(&record)["actor_link"], "bound");
     let batch = fixture("08-PostToolBatch.json", "s-env", &view);
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     assert_eq!(last_line(&record)["actor_link"], "bound");
 }
 
@@ -407,7 +407,7 @@ const MAP_TAKEOVER_S: u64 = 60;
 /// The fleet case's config: a 2 s lease, the takeover window and a 1 s heartbeat for the live
 /// pusher.
 fn fleet_config(takeover_s: u64) -> String {
-    format!("[executor]\nlease_s = 2\ntakeover_s = {takeover_s}\nheartbeat_s = 1\n")
+    format!("[runner]\nlease_s = 2\ntakeover_s = {takeover_s}\nheartbeat_s = 1\n")
 }
 
 /// The current UTC time as bay's records write it; such times compare as text.
@@ -444,7 +444,7 @@ fn heartbeat(test_box: &TestBox, bare: &Path, machine: &str, sessions: &[(&str, 
     loop {
         for (session, view) in sessions {
             let batch = fixture("08-PostToolBatch.json", session, view);
-            assert_eq!(hook(test_box, view, "post-tool", &batch), Some(0));
+            assert_eq!(hook(test_box, view, "step.end", &batch), Some(0));
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
         let fresh = remote_summary(test_box, bare, machine).is_some_and(|summary| {
@@ -499,7 +499,7 @@ fn two_machines(test_box: &TestBox, takeover_s: u64) -> (PathBuf, PathBuf, PathB
 
 fn session_start(test_box: &TestBox, session: &str, view: &Path) {
     let start = fixture("01-SessionStart.json", session, view);
-    assert_eq!(hook(test_box, view, "session-start", &start), Some(0));
+    assert_eq!(hook(test_box, view, "session.start", &start), Some(0));
 }
 
 #[test]
@@ -604,7 +604,7 @@ fn pusher_idle(repo: &Path) {
 /// One post-tool event of `session`: its local record line is fresh again.
 fn step(test_box: &TestBox, session: &str, view: &Path) {
     let batch = fixture("08-PostToolBatch.json", session, view);
-    assert_eq!(hook(test_box, view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(test_box, view, "step.end", &batch), Some(0));
 }
 
 #[test]
@@ -785,8 +785,7 @@ fn this_machines_sessions_come_from_its_records() {
     let (live, live_view) = test_box.start_and_edit(&a);
     let (ended, ended_view) = test_box.start_and_edit(&a);
     let (abandoned, abandoned_view) = test_box.start_and_edit(&a);
-    let (code, result) =
-        support::result_json(test_box.bay(&abandoned_view).args(["land", "--abandon"]));
+    let (code, result) = support::result_json(test_box.bay(&abandoned_view).args(["abandon"]));
     assert_eq!(code, 0, "{result}");
     // box-a's pushes fail from here on: its sessions never reach the remote's summary.
     test_box.git_ok(
@@ -803,7 +802,7 @@ fn this_machines_sessions_come_from_its_records() {
     step(&test_box, "s-live", &live_view);
     session_start(&test_box, "s-end", &ended_view);
     let end = fixture("16-SessionEnd.json", "s-end", &ended_view);
-    assert_eq!(hook(&test_box, &ended_view, "session-end", &end), Some(0));
+    assert_eq!(hook(&test_box, &ended_view, "session.end", &end), Some(0));
     test_box.bay_ok(&a, &["status"]);
     let result = fleet(&test_box, &a);
     let row = entry(&result, "session", "s-live").unwrap_or_else(|| panic!("{result}"));
@@ -1012,15 +1011,15 @@ fn a_stop_over_uncheckpointed_edits_is_refused_once() {
     let (id, view) = test_box.start_and_edit(&repo);
     let record = repo.join(".git/bay/sessions/s-stop.jsonl");
     let start = fixture("01-SessionStart.json", "s-stop", &view);
-    assert_eq!(hook(&test_box, &view, "session-start", &start), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &start), Some(0));
     std::fs::write(view.join("src/a.rs"), "fn a() { 1; }\n").unwrap();
 
     let stop = fixture("09-Stop.json", "s-stop", &view);
     assert_eq!(stop["stop_hook_active"], false);
-    let (code, stderr) = hook_output(&test_box, &view, "stop", &stop);
+    let (code, stderr) = hook_output(&test_box, &view, "turn.end", &stop);
     assert_eq!(code, 2, "{stderr}");
     assert!(
-        stderr.contains(&format!("bay start --resume {id}")) && stderr.contains("bay land"),
+        stderr.contains(&format!("bay start {id}")) && stderr.contains("bay merge"),
         "{stderr}"
     );
     let line = last_line(&record);
@@ -1032,7 +1031,7 @@ fn a_stop_over_uncheckpointed_edits_is_refused_once() {
 
     let mut again = stop.clone();
     again["stop_hook_active"] = Value::from(true);
-    let (code, stderr) = hook_output(&test_box, &view, "stop", &again);
+    let (code, stderr) = hook_output(&test_box, &view, "turn.end", &again);
     assert_eq!(code, 0, "{stderr}");
     assert_eq!(stderr, "");
     let line = last_line(&record);
@@ -1052,15 +1051,15 @@ fn a_clean_view_never_blocks_a_stop() {
     let (id, view) = test_box.start_and_edit(&repo);
     std::fs::write(view.join("src/a.rs"), "fn a() { 1; }\n").unwrap();
     std::fs::write(view.join("src/gone.rs"), "fn gone() {}\n").unwrap();
-    test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    test_box.bay_ok(&repo, &["start", &id]);
     let record = repo.join(".git/bay/sessions/s-clean.jsonl");
     let start = fixture("01-SessionStart.json", "s-clean", &view);
-    assert_eq!(hook(&test_box, &view, "session-start", &start), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &start), Some(0));
 
     for name in ["09-Stop.json", "20-Stop-denied.json"] {
         let stop = fixture(name, "s-clean", &view);
         assert_eq!(stop["stop_hook_active"], false);
-        let (code, stderr) = hook_output(&test_box, &view, "stop", &stop);
+        let (code, stderr) = hook_output(&test_box, &view, "turn.end", &stop);
         assert_eq!(code, 0, "{name}: {stderr}");
         let line = last_line(&record);
         assert_eq!(line["state"], "idle", "{line}");
@@ -1070,9 +1069,9 @@ fn a_clean_view_never_blocks_a_stop() {
     // Deleting a checkpointed file is an edit; putting it back makes the view clean again.
     std::fs::remove_file(view.join("src/gone.rs")).unwrap();
     let stop = fixture("20-Stop-denied.json", "s-clean", &view);
-    assert_eq!(hook_output(&test_box, &view, "stop", &stop).0, 2);
+    assert_eq!(hook_output(&test_box, &view, "turn.end", &stop).0, 2);
     std::fs::write(view.join("src/gone.rs"), "fn gone() {}\n").unwrap();
-    assert_eq!(hook_output(&test_box, &view, "stop", &stop).0, 0);
+    assert_eq!(hook_output(&test_box, &view, "turn.end", &stop).0, 0);
     assert_eq!(last_line(&record)["uncheckpointed"], false);
 }
 
@@ -1094,7 +1093,7 @@ impl StopView {
         let (id, view) = test_box.start_and_edit(&repo);
         let record = repo.join(format!(".git/bay/sessions/{session}.jsonl"));
         let start = fixture("01-SessionStart.json", session, &view);
-        assert_eq!(hook(&test_box, &view, "session-start", &start), Some(0));
+        assert_eq!(hook(&test_box, &view, "session.start", &start), Some(0));
         Self {
             test_box,
             repo,
@@ -1110,8 +1109,7 @@ impl StopView {
     }
 
     fn checkpoint(&self) {
-        self.test_box
-            .bay_ok(&self.repo, &["start", "--resume", &self.id]);
+        self.test_box.bay_ok(&self.repo, &["start", &self.id]);
     }
 }
 
@@ -1155,7 +1153,7 @@ fn a_stop_that_cannot_be_judged_is_never_refused() {
     assert!(line.get("stop_refused").is_none(), "{line}");
 
     let sub = fixture("13-SubagentStop.json", "s-unknown", &at.view);
-    assert_eq!(at.exit("subagent-stop", &sub), 0);
+    assert_eq!(at.exit("subagent.end", &sub), 0);
 
     for index in 0..2100 {
         std::fs::write(at.view.join(format!("src/many{index}.rs")), "// many\n").unwrap();
@@ -1169,7 +1167,7 @@ fn a_stop_that_cannot_be_judged_is_never_refused() {
 
 #[test]
 fn a_checkpointed_link_or_filtered_file_never_blocks_a_stop() {
-    // A checkpoint records what `bay start --resume` stages: a link's target, and a file as its
+    // A checkpoint records what `bay start` stages: a link's target, and a file as its
     // clean filter (here end-of-line conversion) stores it. The refusal names that command, so
     // after it the view is clean.
     let at = StopView::new("s-kinds");
@@ -1263,7 +1261,7 @@ struct NoticeView {
 }
 
 impl NoticeView {
-    /// The view; `start` runs the session's `session-start` before anything happens.
+    /// The view; `start` runs the session's `session.start` before anything happens.
     fn new(session: &str, start: bool) -> Self {
         let test_box = TestBox::new();
         let repo = test_box.repo_any("repo");
@@ -1293,7 +1291,7 @@ impl NoticeView {
 
     fn session_start(&self) -> String {
         let start = fixture("01-SessionStart.json", &self.session, &self.view);
-        let (code, out, _) = hook_io(&self.test_box, &self.view, "session-start", &start);
+        let (code, out, _) = hook_io(&self.test_box, &self.view, "session.start", &start);
         assert_eq!(code, 0, "{out}");
         out
     }
@@ -1301,11 +1299,11 @@ impl NoticeView {
     /// Submits the view and leaves; an executor on another machine runs it, the check fails,
     /// and the executor logs the event on the remote. Nothing here has fetched it yet.
     fn refused_elsewhere(&self) {
-        let (code, submitted) = support::result_json(self.test_box.bay(&self.view).arg("land"));
+        let (code, submitted) = support::result_json(self.test_box.bay(&self.view).arg("merge"));
         assert_eq!(code, 0, "{submitted}");
         let ran = self
             .test_box
-            .bay_ok(&self.executor, &["executor", "run", "--once"]);
+            .bay_ok(&self.executor, &["runner", "run", "--once"]);
         assert_eq!(ran["detail"]["ran"][0]["reason"], "CHECK_FAILED", "{ran}");
     }
 
@@ -1323,21 +1321,21 @@ impl NoticeView {
 
     fn post_tool(&self) -> (String, String) {
         let batch = fixture("08-PostToolBatch.json", &self.session, &self.view);
-        let (code, out, err) = hook_io(&self.test_box, &self.view, "post-tool", &batch);
+        let (code, out, err) = hook_io(&self.test_box, &self.view, "step.end", &batch);
         assert_eq!(code, 0, "{out}{err}");
         (out, err)
     }
 
     fn prompt(&self) -> (String, String) {
         let prompt = fixture("02-UserPromptSubmit.json", &self.session, &self.view);
-        let (code, out, err) = hook_io(&self.test_box, &self.view, "user-prompt-submit", &prompt);
+        let (code, out, err) = hook_io(&self.test_box, &self.view, "turn.start", &prompt);
         assert_eq!(code, 0, "{out}{err}");
         (out, err)
     }
 
-    /// The events `bay watch` lists for the view's change, oldest first.
+    /// The events `bay status --since` lists for the view's change, oldest first.
     fn watched(&self) -> Vec<Value> {
-        let watched = self.test_box.bay_ok(&self.view, &["watch"]);
+        let watched = self.test_box.bay_ok(&self.view, &["status", "--since"]);
         watched["detail"]["events"].as_array().unwrap().clone()
     }
 }
@@ -1412,7 +1410,7 @@ fn a_notice_reaches_the_next_prompt_and_only_the_sessions_own_agent() {
     // A subagent shares the session id; the notice waits for the agent that owns the change.
     let sub = fixture("12-PostToolBatch.json", &at.session, &at.view);
     assert!(sub["agent_id"].is_string(), "{sub}");
-    let (code, out, err) = hook_io(&at.test_box, &at.view, "post-tool", &sub);
+    let (code, out, err) = hook_io(&at.test_box, &at.view, "step.end", &sub);
     assert_eq!((code, out.as_str(), err.as_str()), (0, "", ""));
 
     let (out, err) = at.prompt();
@@ -1477,7 +1475,7 @@ fn notices_beyond_the_budget_are_counted_not_emitted_and_stay_on_watch() {
     let (out, _) = at.post_tool();
     assert_eq!(
         context(&out, "PostToolBatch"),
-        "bay: more notices than this hour's budget; `bay watch` lists them\n"
+        "bay: more notices than this hour's budget; `bay status --since` lists them\n"
     );
     let line = last_line(&at.record);
     assert_eq!(
@@ -1486,7 +1484,7 @@ fn notices_beyond_the_budget_are_counted_not_emitted_and_stay_on_watch() {
         "{line}"
     );
     assert!(line.get("notices").is_none(), "{line}");
-    // Counted once: the cursor passed it, and `bay watch` still lists it.
+    // Counted once: the cursor passed it, and `bay status --since` still lists it.
     assert_eq!(at.post_tool(), nothing());
     assert!(last_line(&at.record).get("notices_over_budget").is_none());
     assert_eq!(at.watched()[1]["id"], events[1]["id"]);
@@ -1544,7 +1542,7 @@ fn a_log_entry_anyone_wrote_reaches_the_agent_only_in_bays_own_words() {
     assert_eq!(
         text,
         format!(
-            "bay: change {}: refused an unknown reason on an operation: `bay watch` lists it\n",
+            "bay: change {}: refused an unknown reason on an operation: `bay status --since` lists it\n",
             at.id
         )
     );
@@ -1564,11 +1562,11 @@ fn a_session_of_the_changes_actor_outside_its_view_is_told_and_no_other_actor_is
         (out, err)
     };
     let other = Some("someone-else");
-    run("01-SessionStart.json", "session-start", "s-mine", None);
-    run("01-SessionStart.json", "session-start", "s-theirs", other);
+    run("01-SessionStart.json", "session.start", "s-mine", None);
+    run("01-SessionStart.json", "session.start", "s-theirs", other);
     at.refused_land();
 
-    let (out, _) = run("08-PostToolBatch.json", "post-tool", "s-mine", None);
+    let (out, _) = run("08-PostToolBatch.json", "step.end", "s-mine", None);
     let text = context(&out, "PostToolBatch");
     assert!(
         text.starts_with(&format!(
@@ -1577,9 +1575,9 @@ fn a_session_of_the_changes_actor_outside_its_view_is_told_and_no_other_actor_is
         )),
         "{text}"
     );
-    let again = run("08-PostToolBatch.json", "post-tool", "s-mine", None);
+    let again = run("08-PostToolBatch.json", "step.end", "s-mine", None);
     assert_eq!(again, nothing());
-    let theirs = run("08-PostToolBatch.json", "post-tool", "s-theirs", other);
+    let theirs = run("08-PostToolBatch.json", "step.end", "s-theirs", other);
     assert_eq!(theirs, nothing());
 }
 
@@ -1587,7 +1585,7 @@ fn a_session_of_the_changes_actor_outside_its_view_is_told_and_no_other_actor_is
 fn a_cursor_that_cannot_be_kept_tells_nothing_rather_than_repeating() {
     // A notice whose cursor cannot be written would be told again at every step, past any
     // budget: the hook tells nothing and the row says why; the notice waits for a writable
-    // state, and `bay watch` lists it meanwhile.
+    // state, and `bay status --since` lists it meanwhile.
     use std::os::unix::fs::PermissionsExt;
     let at = NoticeView::new("s-readonly", true);
     at.refused_land();
@@ -1623,7 +1621,7 @@ fn a_lost_cursor_starts_again_at_the_tips_and_the_row_says_so() {
 
     // The session's end takes its cursor with its state.
     let end = fixture("16-SessionEnd.json", &at.session, &at.view);
-    let (code, out, err) = hook_io(&at.test_box, &at.view, "session-end", &end);
+    let (code, out, err) = hook_io(&at.test_box, &at.view, "session.end", &end);
     assert_eq!(code, 0, "{out}{err}");
     assert!(!cursor.exists());
 }

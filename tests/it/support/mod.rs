@@ -529,14 +529,10 @@ impl TestBox {
             .map_or_else(String::new, |(_, text)| text.clone());
         let config = if config.contains("lease_s") {
             config
-        } else if config.contains("[executor]") {
-            config.replacen(
-                "[executor]\n",
-                "[executor]\nlease_s = 2\nheartbeat_s = 1\n",
-                1,
-            )
+        } else if config.contains("[runner]") {
+            config.replacen("[runner]\n", "[runner]\nlease_s = 2\nheartbeat_s = 1\n", 1)
         } else {
-            format!("{config}\n[executor]\nlease_s = 2\nheartbeat_s = 1\n")
+            format!("{config}\n[runner]\nlease_s = 2\nheartbeat_s = 1\n")
         };
         let mut all: Vec<(&str, &str)> = files.to_vec();
         all.extend(

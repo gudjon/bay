@@ -1,11 +1,11 @@
 //! G255 (NEW-4). A sandbox lane's work never reaches trunk.
 //!
 //! A change started with `bay start --lane research` runs its checks against the current trunk
-//! when it asks to land, holds no queue place, and is refused `LANE_NEVER_LANDS` with the
-//! verdicts; trunk does not move. A change of no lane whose view merged a commit of a research
+//! when it asks to land, holds no queue place, and ends `ok` with the verdicts (0.3.0: no
+//! refusal); trunk does not move. A change of no lane whose view merged a commit of a research
 //! branch is refused `LANE_LEAK`, naming the lane and the commit, while a plain change lands. On
 //! a forge, a merge of a research branch made outside bay is named under `unattributed` with
-//! the lane it leaked (`lane_leak`), in `bay status`, the fleet map and `bay watch`.
+//! the lane it leaked (`lane_leak`), in `bay status`, the fleet map and `bay status --since`.
 
 // Each case runs a check adapter (a shell script), so these run on Unix only.
 #![cfg(unix)]
@@ -85,13 +85,18 @@ fn a_lane_change_runs_its_checks_and_is_refused_lane_never_lands_with_its_verdic
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
 
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
-    assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["decision"], "blocked", "{refused}");
-    assert_eq!(refused["reason"], "LANE_NEVER_LANDS", "{refused}");
-    assert_eq!(refused["allowed"], json!(["read"]), "{refused}");
-    assert_eq!(refused["retry_when"], "never", "{refused}");
-    assert_eq!(refused["published"], false, "{refused}");
+    // 0.3.0: no refusal. The run ends `ok`, with its checks named, and nothing merges.
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{refused}");
+    assert_eq!(refused["decision"], "ok", "{refused}");
+    assert_eq!(refused["reason"], Value::Null, "{refused}");
+    assert_ne!(refused["decision"], "merged", "{refused}");
+    assert!(
+        refused["detail"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("never merges")),
+        "{refused}"
+    );
     let detail = &refused["detail"];
     assert_eq!(detail["lane"], "research", "{refused}");
     assert_eq!(
@@ -127,16 +132,16 @@ fn a_lane_change_runs_its_checks_and_is_refused_lane_never_lands_with_its_verdic
         ""
     );
 
-    // The operation is blocked on its outcome: an unchanged retry is refused with no work.
-    let (code, again) = result_json(test_box.bay(&view).args(["land", "--wait"]));
-    assert_eq!(code, 10, "{again}");
-    assert_eq!(again["reason"], "LANE_NEVER_LANDS", "{again}");
+    // The operation is held on its outcome: an unchanged retry says `ok` again with no work.
+    let (code, again) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["decision"], "ok", "{again}");
     assert_eq!(again["detail"]["unchanged"], true, "{again}");
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let row = &status["detail"]["changes"][0];
     assert_eq!(row["lane"], "research", "{status}");
     assert_eq!(row["landed"], Value::Null, "{status}");
-    assert_eq!(row["operation"]["outcome"], "LANE_NEVER_LANDS", "{status}");
+    assert_eq!(row["operation"]["outcome"], "lane_checked", "{status}");
     assert_eq!(row["operation"]["published"], false, "{status}");
 }
 
@@ -160,7 +165,7 @@ fn a_view_that_merged_a_lane_commit_is_refused_lane_leak_and_a_plain_change_land
             "research/x",
         ],
     );
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "LANE_LEAK", "{refused}");
     assert_eq!(refused["detail"]["lane"], "research", "{refused}");
@@ -176,16 +181,16 @@ fn a_view_that_merged_a_lane_commit_is_refused_lane_leak_and_a_plain_change_land
 
     // A plain change lands.
     let (_, plain) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&plain).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&plain).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 }
 
 #[test]
 fn a_forge_merge_of_a_lane_branch_is_named_as_a_lane_leak() {
     let test_box = TestBox::new();
     let repo = seeded(&test_box);
-    let cursor = test_box.bay_ok(&repo, &["watch"])["detail"]["cursor"]
+    let cursor = test_box.bay_ok(&repo, &["status", "--since"])["detail"]["cursor"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -223,8 +228,8 @@ fn a_forge_merge_of_a_lane_branch_is_named_as_a_lane_leak() {
     let fleet = test_box.bay_ok(&repo, &["status", "--fleet"]);
     assert_eq!(fleet["detail"]["unattributed"], *unattributed, "{fleet}");
 
-    // `bay watch` names the landing outside bay with the lane it leaked.
-    let watched = test_box.bay_ok(&repo, &["watch", "--since", &cursor]);
+    // `bay status --since` names the landing outside bay with the lane it leaked.
+    let watched = test_box.bay_ok(&repo, &["status", "--since", &cursor]);
     let events: Vec<&Value> = watched["detail"]["events"]
         .as_array()
         .unwrap_or_else(|| panic!("{watched}"))

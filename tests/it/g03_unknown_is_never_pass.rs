@@ -25,7 +25,7 @@ fn blocked_with(
         &check_files(before, result, expected_minimum, timeout_s),
     );
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(
         test_box.git_bare(&remote, &["rev-parse", "main"]),
@@ -142,7 +142,7 @@ fn land_with_mapped(
         ],
     );
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     let moved = test_box.git_bare(&remote, &["rev-parse", "main"]) != trunk;
     (code, result, moved)
 }
@@ -235,7 +235,7 @@ fn a_check_that_never_starts_is_unknown() {
         .collect();
     let trunk = test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "CHECK_UNKNOWN", "{result}");
     assert_eq!(
@@ -273,7 +273,7 @@ fn a_check_that_never_starts_in_the_sandbox_is_unknown() {
         .collect();
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "CHECK_UNKNOWN", "{result}");
     assert_eq!(
@@ -306,7 +306,7 @@ fn a_required_check_with_no_counted_result_is_unknown() {
     );
     test_box.use_keys(&repo, &keys);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "CHECK_UNKNOWN", "{result}");
     assert_eq!(
@@ -344,7 +344,7 @@ fn a_required_pair_this_box_does_not_serve_is_never_pass() {
         &["config", "--global", "bay.checkEnvironment", "local"],
     );
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["decision"], "queued", "{result}");
     assert_eq!(result["reason"], "CHECK_UNAVAILABLE", "{result}");
@@ -353,7 +353,7 @@ fn a_required_pair_this_box_does_not_serve_is_never_pass() {
         serde_json::json!(["env-b"]),
         "{result}"
     );
-    assert_ne!(result["published"], true, "{result}");
+    assert_ne!(result["decision"], "merged", "{result}");
     assert_eq!(
         test_box.git_bare(&remote, &["rev-parse", "main"]),
         trunk,

@@ -179,7 +179,7 @@ fn a_failed_check_and_its_operation_say_the_listed_next_step() {
     let (change, view) = start(&test_box, &repo, "CARD-1", "src/");
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
 
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_next_step(&refused, "CHECK_FAILED", &listed);
 
@@ -207,7 +207,7 @@ fn a_conflict_says_the_listed_next_step() {
     test_box.git_ok(&other, &["commit", "-q", "-am", "theirs"]);
     test_box.git_ok(&other, &["push", "-q", "origin", "main"]);
 
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_next_step(&refused, "MERGE_CONFLICT", &listed);
 }
@@ -237,7 +237,7 @@ fn an_approval_still_owed_says_the_listed_next_step() {
     let (_, view) = start(&test_box, &repo, "CARD-billing", "billing/");
     std::fs::write(view.join("billing/discount.txt"), "discount 1\n").unwrap();
 
-    let (code, waiting) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, waiting) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{waiting}");
     assert_next_step(&waiting, "APPROVAL_PENDING", &listed);
 }

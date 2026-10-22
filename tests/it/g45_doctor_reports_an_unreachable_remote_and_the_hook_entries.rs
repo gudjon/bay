@@ -87,8 +87,8 @@ fn missing_hook_entries_are_red_until_install_writes_them() {
     assert_eq!(hooks["unrelated_hooks_unchanged"], true);
 
     let after = std::fs::read_to_string(&settings_path).unwrap();
-    assert!(after.contains("bay hook pre-tool"), "{after}");
-    assert!(after.contains("bay hook session-start"), "{after}");
+    assert!(after.contains("bay hook tool.before"), "{after}");
+    assert!(after.contains("bay hook session.start"), "{after}");
     // The other tool's group keeps its bytes, and stays first.
     let indented: String = other_group
         .lines()
@@ -97,7 +97,7 @@ fn missing_hook_entries_are_red_until_install_writes_them() {
         .join("\n");
     assert!(after.contains(indented.trim_start()), "{after}");
     let other_at = after.find("other-tool check").unwrap();
-    let bay_at = after.find("bay hook pre-tool").unwrap();
+    let bay_at = after.find("bay hook tool.before").unwrap();
     assert!(other_at < bay_at);
     assert!(after.contains("\"Bash(ls)\""));
 

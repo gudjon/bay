@@ -4,7 +4,7 @@
 //! An outcome the executor reaches after the agent left is written as a `bay.event/1` record
 //! on the executor's log before anyone is told. The notify adapter is then called once with
 //! the event on stdin; exit 0 means delivered, and nothing is retried or written back into the
-//! record. Here the adapter fails every call. `bay watch --since <cursor>` still shows the
+//! record. Here the adapter fails every call. `bay status --since <cursor>` still shows the
 //! landing (read from trunk), the event (read from the log) and the invalidation (derived
 //! through the named inputs), and a watch from the cursor it returns shows nothing new.
 //! Neither the notice nor the watch changes what the change observed.
@@ -51,7 +51,7 @@ fn trunk(notify_exit: u8, result: &str) -> (TestBox, PathBuf, PathBuf, PathBuf) 
     }
     files.push((
         ".bay/config.toml".to_owned(),
-        "[notify]\ncommand = \"scripts/bay-notify\"\n".to_owned(),
+        "[plugin.notify]\ncommand = \"scripts/bay-notify\"\n".to_owned(),
     ));
     test_box.seed_with_check(
         &repo,
@@ -69,9 +69,9 @@ fn start(test_box: &TestBox, repo: &Path, args: &[&str]) -> (String, PathBuf) {
 }
 
 fn watch(test_box: &TestBox, view: &Path, since: Option<&str>) -> serde_json::Value {
-    let mut args = vec!["watch"];
+    let mut args = vec!["status", "--since"];
     if let Some(cursor) = since {
-        args.extend(["--since", cursor]);
+        args.push(cursor);
     }
     let watched = test_box.bay_ok(view, &args);
     assert_eq!(watched["decision"], "ok", "{watched}");
@@ -120,21 +120,21 @@ fn a_missed_notice_never_hides_a_landing_or_an_invalidation() {
         "{first}"
     );
     let cursor = first["detail"]["cursor"].as_str().unwrap().to_owned();
-    let (code, queued) = result_json(test_box.bay(&view_y).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view_y).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
 
     // X moves the contract to v18 and lands.
     let (x, view_x) = start(&test_box, &repo, &["start", "CARD-X", "--paths", "api/"]);
     std::fs::write(view_x.join("api/version"), "v18\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view_x).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view_x).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 
     // The executor, on another clone, refuses Y after its agent left: an event, and one notice
     // that fails.
     let executor = test_box.clone_of(&remote, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(ran["detail"]["ran"][0]["change"], y.as_str(), "{ran}");
     assert_eq!(
         ran["detail"]["ran"][0]["reason"], "INPUT_UNOBSERVED",
@@ -192,7 +192,7 @@ fn a_missed_notice_never_hides_a_landing_or_an_invalidation() {
     assert_eq!(again["detail"]["cursor"], next, "{again}");
 
     // A failed notice is never retried, and nothing changed what Y observed.
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(notices(&notified).len(), 1, "a notice is never retried");
     assert_eq!(
         observed(&test_box, &repo, &y),
@@ -210,10 +210,10 @@ fn a_check_that_fails_after_the_agent_left_is_an_event() {
         .as_str()
         .unwrap()
         .to_owned();
-    let (code, _) = result_json(test_box.bay(&view_y).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view_y).arg("merge"));
     assert_eq!(code, 0);
     let executor = test_box.clone_of(&remote, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(ran["detail"]["ran"][0]["reason"], "CHECK_FAILED", "{ran}");
     let told = notices(&notified);
     assert_eq!(told.len(), 1, "{told:?}");
@@ -234,7 +234,7 @@ fn a_malformed_cursor_is_a_usage_error() {
     let (test_box, repo, _remote, _notified) = trunk(0, &passing_result(1));
     let out = test_box
         .bay(&repo)
-        .args(["watch", "--since", "not a cursor"])
+        .args(["status", "--since", "not a cursor"])
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(2), "{out:?}");
@@ -272,14 +272,14 @@ fn an_executor_that_dies_before_the_event_leaves_it_to_the_next_pass() {
         .as_str()
         .unwrap()
         .to_owned();
-    let (code, _) = result_json(test_box.bay(&view_y).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view_y).arg("merge"));
     assert_eq!(code, 0);
 
     // The executor blocks the operation on its chain, then dies before its log holds the event.
     let executor = test_box.clone_of(&remote, "executor");
     let died = test_box
         .bay(&executor)
-        .args(["executor", "run", "--once"])
+        .args(["runner", "run", "--once"])
         .env("BAY_TEST_KILL_AT", "before-outcome-event")
         .output()
         .unwrap();
@@ -291,7 +291,7 @@ fn an_executor_that_dies_before_the_event_leaves_it_to_the_next_pass() {
     assert_eq!(notices(&notified), Vec::<serde_json::Value>::new());
 
     // The next pass writes the event the log lacks, and tells the adapter once.
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let events = logged_events(&test_box, &remote);
     assert_eq!(
         events.len(),
@@ -307,7 +307,7 @@ fn an_executor_that_dies_before_the_event_leaves_it_to_the_next_pass() {
     assert_eq!(seen["detail"]["events"][0]["id"], events[0]["id"], "{seen}");
 
     // Once held, the event is never written or told again.
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(logged_events(&test_box, &remote).len(), 1);
     assert_eq!(notices(&notified).len(), 1, "a notice is never retried");
 }
@@ -343,7 +343,7 @@ fn a_policy_changed_outside_bay_reaches_every_change_and_a_watch_outside_a_view(
     let (code, landed) = result_json(
         test_box
             .bay(&view_z)
-            .args(["land", "--wait"])
+            .args(["merge", "--wait"])
             .env("SSH_AUTH_SOCK", "/nonexistent/agent.sock"),
     );
     assert_eq!(code, 0, "{landed}");

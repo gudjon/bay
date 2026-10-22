@@ -4,13 +4,13 @@
 //! intent `undo of <Change-Id>` whose tree reverts the landed commit onto current trunk, and lands
 //! it through the normal publication: trunk's first-parent history before it is unchanged, the
 //! publication carries `Reverts: <Change-Id>`, and the undone intent's claims are untouched. An
-//! unlanded change is `CHANGE_NOT_LANDED`; an undo can itself be undone; a second undo of one
+//! unlanded change is `CHANGE_NOT_MERGED`; an undo can itself be undone; a second undo of one
 //! change claims generation 2 of its undo intent, and only after the first undo landed; a revert
 //! that does not merge is `MERGE_CONFLICT` with the view left open for repair. A remote that
-//! cannot be read is a failure, never `CHANGE_NOT_LANDED`; an undo whose effect is already gone
+//! cannot be read is a failure, never `CHANGE_NOT_MERGED`; an undo whose effect is already gone
 //! from trunk opens no change and says there is nothing to undo.
 //!
-//! The session-start case (ruling 8a moves it into increment 1): `bay hook session-start` prints
+//! The session-start case (ruling 8a moves it into increment 1): `bay hook session.start` prints
 //! the compact state of the view's change every time, also when nothing changed, and the open
 //! refusal an outcome left on it, with what to do next (`DESIGN` § 11, `INTERFACES` § 2); a later
 //! session of the same actor is told of its open refusals wherever it starts; the hook reads the
@@ -27,7 +27,7 @@ use std::process::Stdio;
 
 use support::{TestBox, check_files, passing_result, result_json};
 
-/// Runs `bay hook session-start` as Claude Code does: the payload on stdin, from `cwd`.
+/// Runs `bay hook session.start` as Claude Code does: the payload on stdin, from `cwd`.
 fn session_start(test_box: &TestBox, cwd: &Path, session: &str) -> (Option<i32>, String) {
     session_start_as(test_box, cwd, session, None)
 }
@@ -50,7 +50,7 @@ fn session_start_as(
         process.env("BAY_ACTOR", actor);
     }
     let mut child = process
-        .args(["hook", "session-start"])
+        .args(["hook", "session.start"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -135,7 +135,7 @@ fn session_start_prints_an_open_refusal_with_what_to_do_next() {
         &check_files("true", &failing, 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED");
 
@@ -163,7 +163,7 @@ fn a_landed_change_has_no_open_refusal() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
 
     let (code, out) = session_start(&test_box, &view, "s-after");
@@ -186,7 +186,7 @@ fn a_refusal_reaches_a_later_session_of_the_same_actor_outside_the_view() {
         &check_files("true", &failing, 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
 
     let (code, out) = session_start(&test_box, &repo, "s-root");
@@ -224,7 +224,7 @@ fn landed_change() -> (TestBox, PathBuf, PathBuf, String) {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     (test_box, repo, remote, id)
 }
@@ -276,7 +276,7 @@ fn undo_lands_a_compensating_change_and_keeps_history() {
 
     let (code, undone) = undo(&test_box, &repo, &id);
     assert_eq!(code, 0, "{undone}");
-    assert_eq!(undone["decision"], "landed", "{undone}");
+    assert_eq!(undone["decision"], "merged", "{undone}");
     let undo_id = undone["change"].as_str().unwrap();
     assert_ne!(undo_id, id);
 
@@ -317,7 +317,7 @@ fn undo_of_an_unlanded_change_is_change_not_landed() {
     let tip = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let (code, refused) = undo(&test_box, &repo, &id);
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "CHANGE_NOT_LANDED", "{refused}");
+    assert_eq!(refused["reason"], "CHANGE_NOT_MERGED", "{refused}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), tip);
 }
 
@@ -332,11 +332,7 @@ fn an_undo_can_be_undone_and_a_second_undo_claims_generation_two() {
     let (code, early) = undo(&test_box, &repo, &id);
     assert_eq!(code, 10, "{early}");
     assert_eq!(early["reason"], "CHANGE_SUPERSEDED", "{early}");
-    let (code, landed) = result_json(
-        test_box
-            .bay(&repo)
-            .args(["land", "--wait", "--change", &first]),
-    );
+    let (code, landed) = result_json(test_box.bay(&repo).args(["merge", "--wait", &first]));
     assert_eq!(code, 0, "{landed}");
     assert!(!has_file(&test_box, &remote, "src/new.rs"));
 
@@ -377,7 +373,7 @@ fn an_undo_that_does_not_merge_is_a_merge_conflict_with_the_view_open() {
         let started = test_box.bay_ok(&repo, &["start", intent, "--paths", "src/"]);
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join("src/a.rs"), text).unwrap();
-        let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+        let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{landed}");
         started["change"].as_str().unwrap().to_owned()
     };
@@ -398,7 +394,7 @@ fn an_undo_that_does_not_merge_is_a_merge_conflict_with_the_view_open() {
     let text = std::fs::read_to_string(view.join("src/a.rs")).unwrap();
     assert!(text.contains("<<<<<<<"), "{text}");
     std::fs::write(view.join("src/a.rs"), "fn a() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(tip_trailer(&test_box, &remote, "Reverts"), id);
 }
@@ -421,13 +417,13 @@ fn fail_marker_reads(test_box: &TestBox) {
 
 #[test]
 fn an_unreadable_remote_is_never_change_not_landed() {
-    // CHANGE_NOT_LANDED retries never: an agent told so gives up on a real landing.
+    // CHANGE_NOT_MERGED retries never: an agent told so gives up on a real landing.
     let (test_box, repo, remote, id) = landed_change();
     fail_marker_reads(&test_box);
     let (code, result) = undo(&test_box, &repo, &id);
     assert_eq!(code, 20, "{result}");
     assert_eq!(result["decision"], "failed", "{result}");
-    assert_ne!(result["reason"], "CHANGE_NOT_LANDED", "{result}");
+    assert_ne!(result["reason"], "CHANGE_NOT_MERGED", "{result}");
 
     // A remote gone altogether is reported the same way.
     let tip = test_box.git_bare(&remote, &["rev-parse", "main"]);
@@ -438,7 +434,7 @@ fn an_unreadable_remote_is_never_change_not_landed() {
     );
     let (code, result) = undo(&test_box, &repo, &id);
     assert_eq!(code, 20, "{result}");
-    assert_ne!(result["reason"], "CHANGE_NOT_LANDED", "{result}");
+    assert_ne!(result["reason"], "CHANGE_NOT_MERGED", "{result}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), tip);
 }
 
@@ -449,7 +445,7 @@ fn an_undo_whose_effect_is_already_gone_opens_no_change() {
     let started = test_box.bay_ok(&repo, &["start", "CARD-revert", "--paths", "src/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::remove_file(view.join("src/new.rs")).unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let tip = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let changes = refs(&test_box, &remote, "refs/bay/changes/");

@@ -4,14 +4,14 @@
 //! change adds or changes; `max_files`, how many files it touches; `max_added_lines`, the lines
 //! it adds, a binary file counted by its size alone. Each key is optional and a positive
 //! integer; an absent key is no limit. The limits are judged by the policy at the accepted base,
-//! like every policy key, so a change never lifts its own. `bay land` judges them at submit,
+//! like every policy key, so a change never lifts its own. `bay merge` judges them at submit,
 //! before anything is submitted, and the executor at candidate build, before any check runs. A
 //! change over one is refused `CHANGE_TOO_LARGE`, naming each limit exceeded, the value and the
 //! largest offenders.
 //!
 //! G310: `max_waiting_approvals`, also optional and a positive integer, caps the review queue:
 //! while that many live changes of the repository already wait for an approval
-//! (`APPROVAL_PENDING`), `bay land` of a change whose paths need an approval check is refused
+//! (`APPROVAL_PENDING`), `bay merge` of a change whose paths need an approval check is refused
 //! `WIP_LIMIT`, its detail `review` naming how many wait, the cap and the oldest of them. A
 //! change that needs no approval is never held by it.
 
@@ -266,7 +266,7 @@ pub fn refusal(limits: &Limits, exceeded: &[Value], base: &str, at: &str) -> Bay
         "policy": crate::policy::POLICY_PATH,
         "base": base,
         "at": at,
-        "recovery": "keep large files outside the repository (a shared drive, or a large-file store) or split the change, then bay land again",
+        "recovery": "keep large files outside the repository (a shared drive, or a large-file store) or split the change, then bay merge again",
     }))
 }
 

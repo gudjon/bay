@@ -29,7 +29,7 @@ fn edits_made_after_land_survive_the_publication_and_cleanup() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
 
     // The agent keeps working after submitting.
@@ -37,7 +37,7 @@ fn edits_made_after_land_survive_the_publication_and_cleanup() {
     std::fs::write(view.join("src/new.rs"), "fn new() { changed later }\n").unwrap();
 
     let executor = test_box.clone_of(&remote, "executor");
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     // What published is the submitted revision, not the later edits.
     assert_eq!(
         test_box.git_bare(&remote, &["show", "main:src/new.rs"]),
@@ -71,9 +71,9 @@ fn edits_made_after_land_survive_the_publication_and_cleanup() {
     );
 
     // More work on a landed change is a new change.
-    let (code, refused) = result_json(test_box.bay(&view).arg("land"));
+    let (code, refused) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "CHANGE_ALREADY_LANDED");
+    assert_eq!(refused["reason"], "CHANGE_ALREADY_MERGED");
 }
 
 #[test]
@@ -86,7 +86,7 @@ fn a_clean_view_becomes_releasable_after_its_landing() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, _) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0);
     let status = test_box.bay_ok(&repo, &["status"]);
     let clean = leftover(&status, &id);

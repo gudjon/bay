@@ -376,7 +376,7 @@ pub struct Operation {
     pub policy_changed: u32,
     /// Uncounted publish retries: pushes the trunk hook refused with `HOOK_TIMEOUT`, and
     /// releases the progress deadline created while this operation was publishing (§ 6). Five
-    /// end the operation as `PUBLISH_RETRY_EXHAUSTED`.
+    /// end the operation as `MERGE_RETRY_EXHAUSTED`.
     #[serde(default)]
     pub publish_retries: u32,
     /// The queue places whose deadline release came while this operation was publishing. Such a

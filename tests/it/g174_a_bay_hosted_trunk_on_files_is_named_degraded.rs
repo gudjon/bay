@@ -48,7 +48,7 @@ fn a_host_on_files_is_degraded_with_the_remedy_and_still_publishes() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(
         test_box.git_bare(&host, &["rev-parse", "main"]),

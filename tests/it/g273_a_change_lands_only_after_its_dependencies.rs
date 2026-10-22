@@ -3,7 +3,7 @@
 //! `bay start <intent> --paths ... --after <change>` (repeatable) records, in the change's
 //! record, the changes it depends on. The change may be checked and queued at once, but the
 //! executor publishes it only once every named change has landed on trunk. Until then `bay
-//! land` answers `queued` with `DEPENDENCY_PENDING` at once, and `bay land --wait` the same,
+//! land` answers `queued` with `DEPENDENCY_PENDING` at once, and `bay merge --wait` the same,
 //! naming each pending dependency and its state; trunk does not move and the operation holds no
 //! queue place. Once the dependency lands, the dependent lands after it, and its trunk commit
 //! carries `Bay-After: <dependency>`. A dependency that ends without landing refuses the
@@ -22,7 +22,7 @@
 //! - `crate::after::ended_unlanded` in `src/after.rs`: answer `false`, and the second case is
 //!   answered `DEPENDENCY_PENDING`;
 //! - `submit_land` in `src/publish.rs`, the call `dependency_unrun(&ctx, &op_id, &trunk)?`: drop
-//!   it, and the first case's plain `bay land` answers with no reason;
+//!   it, and the first case's plain `bay merge` answers with no reason;
 //! - `crate::after::trailers`: return an empty string, and the first case's `Bay-After:` is
 //!   missing;
 //! - `named_or_refused` in `src/start.rs`, `if !is_change_id(dependency)`: drop it, and the
@@ -84,9 +84,9 @@ fn start_writing(
     (started["change"].as_str().unwrap().to_owned(), view)
 }
 
-/// `bay land --wait` in `view`.
+/// `bay merge --wait` in `view`.
 fn land_wait(test_box: &TestBox, view: &Path) -> (i32, Value) {
-    result_json(test_box.bay(view).args(["land", "--wait"]))
+    result_json(test_box.bay(view).args(["merge", "--wait"]))
 }
 
 /// The change record at the host's head of change `id`'s chain.
@@ -104,7 +104,7 @@ fn pending(result: &Value, dependency: &str) {
     assert_eq!(result["reason"], "DEPENDENCY_PENDING", "{result}");
     assert_eq!(result["allowed"], json!(["wait"]), "{result}");
     assert_eq!(result["retry_when"], "dependencies_landed", "{result}");
-    assert_eq!(result["published"], false, "{result}");
+    assert_ne!(result["decision"], "merged", "{result}");
     let named = &result["detail"]["pending"][0];
     assert_eq!(named["change"], dependency, "{result}");
     let state = named["state"].as_str().unwrap_or_default();
@@ -127,7 +127,7 @@ fn a_dependent_waits_queued_until_its_dependency_lands_then_lands_after_it() {
     let before = test_box.trunk_change_ids(&host);
 
     // A plain land answers at once: queued, waiting on the dependency.
-    let (code, submitted) = result_json(test_box.bay(&second_view).arg("land"));
+    let (code, submitted) = result_json(test_box.bay(&second_view).arg("merge"));
     assert_eq!(code, 0, "{submitted}");
     pending(&submitted, &first);
 
@@ -142,10 +142,10 @@ fn a_dependent_waits_queued_until_its_dependency_lands_then_lands_after_it() {
     // The dependency lands; then the dependent lands after it.
     let (code, landed) = land_wait(&test_box, &first_view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let (code, landed) = land_wait(&test_box, &second_view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 
     let ids = test_box.trunk_change_ids(&host);
     assert_eq!(ids[..2], [second.as_str(), first.as_str()], "trunk order");
@@ -174,7 +174,7 @@ fn a_dependency_that_ends_without_landing_refuses_its_dependent() {
     );
     let before = test_box.trunk_change_ids(&host);
 
-    let (code, abandoned) = result_json(test_box.bay(&first_view).args(["land", "--abandon"]));
+    let (code, abandoned) = result_json(test_box.bay(&first_view).args(["abandon"]));
     assert_eq!(code, 0, "{abandoned}");
     assert_eq!(abandoned["detail"]["state"], "abandoned", "{abandoned}");
 
@@ -256,7 +256,7 @@ fn a_dependency_with_no_effect_is_met_and_its_dependent_lands() {
     );
     let (code, landed) = land_wait(&test_box, &second_view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert!(
         test_box
             .trunk_change_ids(&host)

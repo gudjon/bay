@@ -39,7 +39,7 @@ fn a_signed_landing_verifies_against_the_executor_file_of_its_registry() {
         signed_box(&check_files("true", &passing_result(1), 1, 60));
     let registry = test_box.git_ok(&repo, &["rev-parse", "refs/bay/registry"]);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
 
     let commit = landed["detail"]["commit"].as_str().unwrap();
@@ -138,7 +138,7 @@ fn a_publication_signed_outside_the_executor_file_is_an_anomaly_not_a_landing() 
 
     // The real landing still goes through, and only it counts.
     let view = Path::new(&repo).join(".git/bay/views").join(&id);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let tip = test_box.git_bare(&remote, &["rev-parse", "main"]);
     assert_eq!(landed["detail"]["commit"], tip.as_str());
@@ -166,7 +166,7 @@ fn a_pass_signed_with_an_agent_key_is_refused_as_evidence() {
     let (test_box, repo, _remote, keys) =
         signed_box(&check_files("true", &passing_result(0), 1, 60));
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{blocked}");
     assert_eq!(blocked["reason"], "CHECK_UNKNOWN");
 
@@ -200,7 +200,7 @@ fn a_pass_signed_with_an_agent_key_is_refused_as_evidence() {
     agent_signed.id = format!("{PRODUCER}/forged-by-agent");
     agent_signed.sign(&keys.agent).unwrap();
     evidence::append(&git, PRODUCER, &agent_signed).unwrap();
-    let (code, still) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, still) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{still}");
     assert_eq!(still["reason"], "CHECK_UNKNOWN");
 
@@ -209,7 +209,7 @@ fn a_pass_signed_with_an_agent_key_is_refused_as_evidence() {
     producer_signed.id = format!("{PRODUCER}/signed-by-producer");
     producer_signed.sign(&keys.producer).unwrap();
     evidence::append(&git, PRODUCER, &producer_signed).unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed");
+    assert_eq!(landed["decision"], "merged");
 }

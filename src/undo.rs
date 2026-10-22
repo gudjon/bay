@@ -8,7 +8,7 @@
 //! through the normal publication with a `Reverts: <Change-Id>` trailer. It never claims a
 //! generation of the undone change's intent. When the revert tree is trunk's own tree (the effect
 //! is already gone), no change is opened. A remote that cannot be read is a failure, never
-//! `CHANGE_NOT_LANDED`. An undo never moves a ref back (G199): trunk moves only by the
+//! `CHANGE_NOT_MERGED`. An undo never moves a ref back (G199): trunk moves only by the
 //! never-forced publishing push, and the undone change's chain is read beside this store's copy,
 //! which only ever moves forward.
 
@@ -30,7 +30,7 @@ use crate::start::{self, StartRequest};
 const UNDO_REVISION: &str = "1";
 
 /// `wait` runs the undo's publication here; `observe` (`--wait=SECONDS`) watches it that long
-/// at most, then returns while the run goes on, as `bay land --wait=SECONDS` does.
+/// at most, then returns while the run goes on, as `bay merge --wait=SECONDS` does.
 #[must_use]
 pub fn undo(dir: &Path, change: &str, wait: bool, observe: Option<Duration>) -> BayResult {
     run(dir, change, wait, observe).unwrap_or_else(BayResult::failed)
@@ -137,7 +137,7 @@ fn undo_in(
         .run(&["read-tree", "-u", "--reset", &tree])
         .map_err(|error| error.message())?;
     if let Some(conflicts) = conflicts {
-        // The view holds the revert with conflict markers, open for repair; `bay land` in it
+        // The view holds the revert with conflict markers, open for repair; `bay merge` in it
         // lands the repaired undo (INTERFACES § 2 MERGE_CONFLICT).
         let refused = BayResult::blocked(Reason::MergeConflict)
             .with_change(id.clone())
@@ -167,7 +167,7 @@ pub(crate) fn landed_commit(
     trunk: &str,
 ) -> Result<Option<String>, String> {
     // Only a marker the remote answered without is "not landed": a remote that cannot be read
-    // is a fault, never CHANGE_NOT_LANDED, whose retry is never.
+    // is a fault, never CHANGE_NOT_MERGED, whose retry is never.
     let unreadable = |error: crate::git::GitError| {
         format!(
             "the remote could not be read, so whether {change} landed is unknown: {}",

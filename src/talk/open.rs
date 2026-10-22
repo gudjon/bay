@@ -1,4 +1,4 @@
-//! Open talks named where a change lands (G56, ruling T9): `bay land` and `bay undo` fetch the
+//! Open talks named where a change lands (G56, ruling T9): `bay merge` and `bay undo` fetch the
 //! acting actor's talk refs (`refs/bay/talk/<actor>/*`, ruling T6) before they act, and their
 //! `bay.result/1` lists under `detail.open_talks` every talk to that actor, unread or open, whose
 //! target is the change: a delivery talk whose `change` names it. The fetch is not an accept: it

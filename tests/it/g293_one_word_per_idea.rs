@@ -7,17 +7,17 @@
 //! - a landed change closes its generation, so a plain `bay start <intent>` after the landing
 //!   claims the next generation, whose change supersedes the landed one and lands once;
 //!   `--new` is still accepted there and changes nothing;
-//! - `bay land --wait=SECONDS` watches the run that long, then returns `queued`/`running`
+//! - `bay merge --wait=SECONDS` watches the run that long, then returns `queued`/`running`
 //!   while the run goes on, as `--wait --observe SECONDS` does; `bay undo` takes the same flag;
-//! - `bay land <change>` names the change positionally, as `status`, `undo` and `share` do;
+//! - `bay merge <change>` names the change positionally, as `status`, `undo` and `share` do;
 //!   `--change <change>` still works.
 //!
 //! Guards to mutate:
-//! - `src/result.rs`, the `reasons!` table: put back `["edit_locally"]` on the `QUEUE_HELD`
+//! - `src/result.rs`, the `reasons!` table: put back `["edit_locally"]` on the `QUEUED`
 //!   row (or `["resume"]` on `WORKSPACE_INCOMPLETE`): the first case fails.
 //! - `src/start.rs` `open`: the arm `(true, _) => (generation + 1, Some(change.clone())),`
 //!   (make it `(true, _) => (*generation, Some(change.clone())),`, or put back the 0.2.6 pair
-//!   that refuses `(true, false)` with `CHANGE_ALREADY_LANDED`): the second case's plain start
+//!   that refuses `(true, false)` with `CHANGE_ALREADY_MERGED`): the second case's plain start
 //!   claims no next generation.
 //! - `src/main.rs` `WaitArgs::wait`: `let seconds = self.wait.flatten().or(self.observe);`
 //!   (make it `let seconds = self.observe;`): `--wait=2` waits for the whole run, and the third
@@ -111,7 +111,7 @@ fn a_plain_start_after_a_landing_opens_the_next_generation() {
         "src/one.rs",
     );
     let first_id = first["change"].as_str().unwrap().to_owned();
-    let (code, landed) = result_json(test_box.bay(&first_view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&first_view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
 
     // The same intent again, with no --new: the next generation, superseding the landing.
@@ -134,7 +134,7 @@ fn a_plain_start_after_a_landing_opens_the_next_generation() {
         first_id.as_str(),
         "{second}"
     );
-    let (code, landed) = result_json(test_box.bay(&second_view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&second_view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(
         test_box.trunk_change_ids(&remote),
@@ -153,9 +153,9 @@ fn a_plain_start_after_a_landing_opens_the_next_generation() {
 
     // Each generation lands once: the first change's view lands nothing again.
     std::fs::write(first_view.join("src/late.rs"), "fn late() {}\n").unwrap();
-    let (code, again) = result_json(test_box.bay(&first_view).args(["land", "--wait"]));
+    let (code, again) = result_json(test_box.bay(&first_view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{again}");
-    assert_eq!(again["reason"], "CHANGE_ALREADY_LANDED", "{again}");
+    assert_eq!(again["reason"], "CHANGE_ALREADY_MERGED", "{again}");
     assert_eq!(test_box.trunk_change_ids(&remote).len(), 2);
 
     // --new is still accepted after a landing, and does what a plain start does.
@@ -175,46 +175,35 @@ fn a_plain_start_after_a_landing_opens_the_next_generation() {
 }
 
 #[test]
-fn land_wait_seconds_observes_and_detaches_like_observe() {
+fn merge_wait_seconds_observes_and_detaches() {
     // The check outlasts the caller's bound by far, so a caller that waited for the run cannot
     // pass on a slow machine, and one that detached cannot fail on one.
     let (test_box, repo, remote) = seeded("sleep 15");
-    let mut outcomes = Vec::new();
-    for (intent, file, flags) in [
-        ("CARD-293a", "src/one.rs", &["--wait=2"][..]),
-        ("CARD-293b", "src/two.rs", &["--wait", "--observe", "2"][..]),
-    ] {
-        let (started, view) = start_and_write(&test_box, &repo, &[intent, "--paths", "src/"], file);
-        let id = started["change"].as_str().unwrap().to_owned();
-        let asked = Instant::now();
-        let (code, detached) = result_json(test_box.bay(&view).arg("land").args(flags));
-        let waited = asked.elapsed();
-        assert_eq!(code, 0, "{flags:?}: {detached}");
-        assert!(
-            waited < Duration::from_secs(10),
-            "{flags:?}: the caller waited for the run: {waited:?}"
-        );
-        assert_eq!(detached["decision"], "queued", "{flags:?}: {detached}");
-        assert_eq!(detached["state"], "running", "{flags:?}: {detached}");
-        assert_eq!(detached["published"], false, "{flags:?}: {detached}");
-        assert_eq!(
-            detached["detail"]["observation_timeout_s"], 2,
-            "{flags:?}: {detached}"
-        );
-        // The run goes on without its caller.
-        until_landed(&test_box, &remote, &id);
-        outcomes.push((
-            detached["decision"].clone(),
-            detached["state"].clone(),
-            detached["waiting_for"].clone(),
-        ));
-    }
-    assert_eq!(outcomes[0], outcomes[1], "--wait=2 is --wait --observe 2");
+    let (started, view) = start_and_write(
+        &test_box,
+        &repo,
+        &["CARD-293a", "--paths", "src/"],
+        "src/one.rs",
+    );
+    let id = started["change"].as_str().unwrap().to_owned();
+    let asked = Instant::now();
+    let (code, detached) = result_json(test_box.bay(&view).args(["merge", "--wait=2"]));
+    let waited = asked.elapsed();
+    assert_eq!(code, 0, "{detached}");
+    assert!(
+        waited < Duration::from_secs(10),
+        "the caller waited for the run: {waited:?}"
+    );
+    assert_eq!(detached["decision"], "queued", "{detached}");
+    assert_eq!(detached["state"], "running", "{detached}");
+    assert_eq!(detached["detail"]["observation_timeout_s"], 2, "{detached}");
+    // The run goes on without its caller.
+    until_landed(&test_box, &remote, &id);
 
     // `bay undo` takes the same flag: it parses, and the refusal is the undo's own.
     let (code, undo) = result_json(test_box.bay(&repo).args(["undo", "--wait=2", "abcd2345"]));
     assert_eq!(code, 10, "{undo}");
-    assert_eq!(undo["reason"], "CHANGE_NOT_LANDED", "{undo}");
+    assert_eq!(undo["reason"], "CHANGE_NOT_MERGED", "{undo}");
 }
 
 #[test]
@@ -228,9 +217,9 @@ fn land_takes_the_change_positionally() {
     );
     let first_id = first["change"].as_str().unwrap().to_owned();
     // Outside the change's view, the change is named positionally, before or after --wait.
-    let (code, landed) = result_json(test_box.bay(&repo).args(["land", &first_id, "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&repo).args(["merge", &first_id, "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(landed["change"], first_id.as_str(), "{landed}");
 
     let (second, _) = start_and_write(
@@ -240,7 +229,7 @@ fn land_takes_the_change_positionally() {
         "src/q.rs",
     );
     let second_id = second["change"].as_str().unwrap().to_owned();
-    let (code, landed) = result_json(test_box.bay(&repo).args(["land", "--wait", &second_id]));
+    let (code, landed) = result_json(test_box.bay(&repo).args(["merge", "--wait", &second_id]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(landed["change"], second_id.as_str(), "{landed}");
 
@@ -252,11 +241,7 @@ fn land_takes_the_change_positionally() {
         "src/r.rs",
     );
     let third_id = third["change"].as_str().unwrap().to_owned();
-    let (code, landed) = result_json(
-        test_box
-            .bay(&repo)
-            .args(["land", "--wait", "--change", &third_id]),
-    );
+    let (code, landed) = result_json(test_box.bay(&repo).args(["merge", "--wait", &third_id]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(landed["change"], third_id.as_str(), "{landed}");
     assert_eq!(

@@ -25,7 +25,7 @@ fn a_sparse_view_publishes_no_deletions() {
     );
     let (_, view) = test_box.start_and_edit(&repo);
     assert!(!view.join("docs/guide.md").exists() && !view.join("data/big.csv").exists());
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let changes = test_box.git_bare(&remote, &["diff", "--name-status", "main^", "main"]);
     assert_eq!(

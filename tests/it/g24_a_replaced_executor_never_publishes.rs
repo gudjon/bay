@@ -24,7 +24,7 @@ fn a_paused_executor_resumes_after_a_takeover_and_never_publishes() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
 
     let a = test_box.clone_of(&remote, "executor-a");
@@ -42,7 +42,7 @@ fn a_paused_executor_resumes_after_a_takeover_and_never_publishes() {
         .bay_process(&a)
         .env("BAY_TEST_PAUSE_AT", "after-persist")
         .env("BAY_TEST_PAUSE_FILE", &release)
-        .args(["--json", "executor", "run", "--once"])
+        .args(["--json", "runner", "run", "--once"])
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -56,9 +56,9 @@ fn a_paused_executor_resumes_after_a_takeover_and_never_publishes() {
     }
 
     // B takes over with a higher epoch and lands the change on its own candidate.
-    let ran = test_box.bay_ok(&b, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&b, &["runner", "run", "--once"]);
     let landed = &ran["detail"]["ran"][0];
-    assert_eq!(landed["decision"], "landed", "{ran}");
+    assert_eq!(landed["decision"], "merged", "{ran}");
     assert_ne!(landed["detail"]["existing"], true);
     let tip = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let epoch = test_box.git_bare(

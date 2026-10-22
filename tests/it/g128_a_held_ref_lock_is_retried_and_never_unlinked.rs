@@ -3,8 +3,8 @@
 //! Another process on the remote holding trunk's lock (`refs/heads/main.lock` on files,
 //! `reftable/tables.list.lock` on reftable) makes the publishing push fail with "cannot lock
 //! ref". Trunk did not move, so the same candidate is pushed again after a short wait,
-//! uncounted toward `TRUNK_MOVED`. A lock that is never released ends the operation
-//! `PUBLISH_RETRY_EXHAUSTED`, a stated refusal, and the lock is still where its owner left it.
+//! uncounted toward `MAIN_MOVED`. A lock that is never released ends the operation
+//! `MERGE_RETRY_EXHAUSTED`, a stated refusal, and the lock is still where its owner left it.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -51,7 +51,7 @@ fn paused_before_publish(
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, submitted) = result_json(test_box.bay(&view).arg("land"));
+    let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{submitted}");
     let executor = test_box.clone_of(&remote, "executor");
     let release = test_box.path().join("release");
@@ -61,7 +61,7 @@ fn paused_before_publish(
             .env("BAY_TEST_PAUSE_AT", "before-publish")
             .env("BAY_TEST_PAUSE_FILE", &release)
             .envs(env.iter().copied())
-            .args(["--json", "executor", "run", "--once"])
+            .args(["--json", "runner", "run", "--once"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -118,7 +118,7 @@ fn never_released(env: &[(&str, &str)]) {
     std::fs::write(&release, "go").unwrap();
     let output = child.0.take().unwrap().wait_with_output().unwrap();
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("PUBLISH_RETRY_EXHAUSTED"), "{text}");
+    assert!(text.contains("MERGE_RETRY_EXHAUSTED"), "{text}");
     assert!(
         !text.contains("\"decision\":\"failed\""),
         "never failed: {text}"

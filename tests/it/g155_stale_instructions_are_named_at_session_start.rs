@@ -1,7 +1,7 @@
 //! G155. Stale instructions are named at `SessionStart`.
 //!
 //! A session that starts on a tree behind trunk on its instruction files follows rules trunk
-//! has already changed. `bay hook session-start` names the files (`[agent] instructions` in the
+//! has already changed. `bay hook session.start` names the files (`[agent] instructions` in the
 //! config, default `AGENTS.md` and `CLAUDE.md`) and how many trunk commits since the tree's HEAD
 //! changed them, from local refs only (the trunk tracking ref; no fetch). The notice is given
 //! once per session for one trunk state, and recorded on the session's line.
@@ -18,13 +18,13 @@ use std::process::Stdio;
 use serde_json::{Value, json};
 use support::TestBox;
 
-/// `bay hook session-start` for `session` in `cwd`; returns its stdout.
+/// `bay hook session.start` for `session` in `cwd`; returns its stdout.
 fn start(test_box: &TestBox, cwd: &Path, session: &str) -> String {
     let payload = json!({"session_id": session, "hook_event_name": "SessionStart",
         "source": "startup", "cwd": cwd});
     let mut child = test_box
         .bay_process(cwd)
-        .args(["hook", "session-start"])
+        .args(["hook", "session.start"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

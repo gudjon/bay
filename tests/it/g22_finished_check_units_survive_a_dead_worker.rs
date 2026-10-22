@@ -56,14 +56,14 @@ fn a_worker_that_dies_after_five_of_six_units_resumes_with_the_sixth() {
         &six_units(&test_box, &runs),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
 
     let executor = test_box.clone_of(&remote, "executor");
     let died = test_box
         .bay(&executor)
         .env("BAY_TEST_KILL_AT", "after-check-5")
-        .args(["executor", "run", "--once"])
+        .args(["runner", "run", "--once"])
         .output()
         .unwrap();
     assert_eq!(died.status.code(), Some(137));
@@ -100,9 +100,9 @@ fn a_worker_that_dies_after_five_of_six_units_resumes_with_the_sixth() {
     assert!(kept.iter().all(|record| record["check"]["id"] != "unit-6"));
 
     // Resume runs only the sixth unit, and then the change publishes.
-    let resumed = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let resumed = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(
-        resumed["detail"]["ran"][0]["decision"], "landed",
+        resumed["detail"]["ran"][0]["decision"], "merged",
         "{resumed}"
     );
     let ran: Vec<String> = std::fs::read_to_string(&runs)
@@ -137,7 +137,7 @@ fn the_sixth_unit_is_unknown_and_the_aggregate_incomplete() {
     let registry = test_box.enroll(&repo, &keys);
     test_box.use_keys(&repo, &keys);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, submitted) = result_json(test_box.bay(&view).arg("land"));
+    let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{submitted}");
 
     let executor = test_box.clone_of(&host, "executor");
@@ -145,7 +145,7 @@ fn the_sixth_unit_is_unknown_and_the_aggregate_incomplete() {
     let died = test_box
         .bay(&executor)
         .env("BAY_TEST_KILL_AT", "after-check-5")
-        .args(["executor", "run", "--once"])
+        .args(["runner", "run", "--once"])
         .output()
         .unwrap();
     assert_eq!(died.status.code(), Some(137), "{died:?}");
@@ -214,9 +214,9 @@ fn the_sixth_unit_is_unknown_and_the_aggregate_incomplete() {
     assert_eq!(test_box.git_bare(&host, &["rev-parse", "main"]), trunk);
 
     // Resume runs only the sixth unit, and then the change publishes.
-    let resumed = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let resumed = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(
-        resumed["detail"]["ran"][0]["decision"], "landed",
+        resumed["detail"]["ran"][0]["decision"], "merged",
         "{resumed}"
     );
     let ran: Vec<String> = std::fs::read_to_string(&runs)

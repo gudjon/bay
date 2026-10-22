@@ -45,7 +45,7 @@ enum Adapter {
     Codex,
 }
 
-/// The trunk and remote `bay install --trunk --remote` names for this repository.
+/// The trunk and remote `bay install --main --remote` names for this repository.
 #[derive(Default)]
 pub struct Trunk {
     pub trunk: Option<String>,
@@ -183,7 +183,7 @@ fn write_bootstrap(git: &Git, trunk: &Trunk) -> Result<serde_json::Value, String
         return Ok(json!({
             "trunk": null,
             "remote": remote,
-            "note": "no trunk: run bay install --trunk <name>",
+            "note": "no trunk: run bay install --main <name>",
         }));
     };
     for (key, value) in [(REMOTE_KEY, remote.as_str()), (TRUNK_KEY, name.as_str())] {

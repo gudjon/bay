@@ -3,7 +3,7 @@
 //!
 //! The idle wait (`bay hook talk-wait`, run by an asynchronous hook) polls the actor's talks every
 //! `BAY_TALK_POLL_S` and exits 2, the wake, at the first talk it accepts. A live session's hooks
-//! (`user-prompt-submit`, `post-tool`) accept talks at most once per `BAY_TALK_POLL_S`. The
+//! (`turn.start`, `step.end`) accept talks at most once per `BAY_TALK_POLL_S`. The
 //! backoff (ten empty polls double the interval) is the unit test in `talk::poll`. A test build
 //! scales the schedule's second by `BAY_TEST_TALK_POLL_MS`.
 
@@ -95,15 +95,15 @@ fn a_live_session_fetches_at_most_once_per_interval() {
             .unwrap();
         assert!(out.status.code().is_some(), "{out:?}");
     };
-    hook("user-prompt-submit");
+    hook("turn.start");
     let id = send(&case, "Rename the flag");
     // Inside the interval: no fetch, so no accept.
-    hook("post-tool");
+    hook("step.end");
     assert!(!acked(&case, &id), "a second fetch inside one interval");
     // The interval passed (the state file says the last fetch was long ago).
     let state = case.clone_of("agent-b").join(".git/bay/talk-poll.json");
     std::fs::write(&state, r#"{"last": 0}"#).unwrap();
-    hook("post-tool");
+    hook("step.end");
     assert!(
         acked(&case, &id),
         "the next hook after the interval accepted it"

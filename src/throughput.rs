@@ -3,7 +3,7 @@
 //!
 //! One queue checks only its head, one check after another, so check slots, not merges, set a
 //! trunk's ceiling (`DESIGN` § 6: about 120 landings a day for a 12-minute check). Three levers
-//! raise it. Each is off by default behind a key of `[executor]` in `.bay/config.toml`, and each
+//! raise it. Each is off by default behind a key of `[runner]` in `.bay/config.toml`, and each
 //! is a rule of evidence reuse, never a new verdict: every one needs `[policy] evidence_reuse =
 //! "exact-inputs"` and a producer registry that signs everything, or, where evidence counts
 //! unsigned (no registry, or `signing = "approvals"`), `[policy] reuse_unsigned = true` in the
@@ -35,7 +35,7 @@
 //! records go to this executor's producer ref, and the operation's chain lists the check under
 //! `prechecks` (base, base tree, tree, verdict). It runs on one of two bases:
 //!
-//! - **Predicted** (`[executor] ahead = N`, entries 2 to N + 1). The base is what the entries
+//! - **Predicted** (`[runner] ahead = N`, entries 2 to N + 1). The base is what the entries
 //!   ahead predict ([`predict`]): from the trunk tip, each live entry ahead folds onto the base
 //!   in queue order ([`fold`]). A checked entry's persisted candidate is used as it is; any
 //!   other becomes an unsigned predicted commit of its merged tree on the base, never
@@ -53,13 +53,13 @@
 //!   the prediction misses (an entry ahead failed, conflicted or was replaced), the record is
 //!   about another tree or base and is ignored: up to N entries of work are wasted, never
 //!   trusted.
-//! - **The tip** (`[executor] footprint_lanes = true`, an entry beyond `ahead`). An entry
+//! - **The tip** (`[runner] footprint_lanes = true`, an entry beyond `ahead`). An entry
 //!   whose footprint is disjoint from every live entry's ahead of it is checked on the current
 //!   tip. Its exact tree will not be the one it lands with, so only footprint-keyed evidence
 //!   (below) carries it over.
 //!
 //! Capacity is the number of executors (each its own producer and check slot): an executor
-//! that does not hold the head does useful work instead of idling with `QUEUE_HELD`. Two
+//! that does not hold the head does useful work instead of idling with `QUEUED`. Two
 //! executors that pre-check one entry on one base run it at most twice, and the second finds
 //! the first's records through reuse before it runs anything.
 //!
@@ -100,7 +100,7 @@
 //! behind it was pre-checked meanwhile, so when it becomes head its evidence carries over and it
 //! lands with one merge and one push and no check.
 //!
-//! # Batching with bisection (`[executor] batch = { min, max, max_failure_rate }`)
+//! # Batching with bisection (`[runner] batch = { min, max, max_failure_rate }`)
 //!
 //! The head's executor takes the head and the live entries behind it, in queue order, while
 //! each folds onto the one before it ([`plan_batch`]); with footprint lanes, only while each
@@ -141,7 +141,7 @@ use crate::git::Git;
 use crate::merge::{Merge, merge_onto};
 use crate::policy::{CheckEntry, Policy};
 
-/// The most entries behind the head `[executor] ahead` may pre-check: each costs a check run
+/// The most entries behind the head `[runner] ahead` may pre-check: each costs a check run
 /// that a missed prediction wastes.
 pub const MAX_AHEAD: usize = 16;
 
@@ -597,7 +597,7 @@ impl CarriedApprovals {
 /// earlier candidate of the same change (`earlier`, as its chain names them), whose stamp is
 /// this candidate's: the check's `when_paths` content, byte for byte, in the candidate's `tree`
 /// and in its `base_tree` ([`stamp`], [`same_stamp`]). That is the footprint rule of NEW-10,
-/// applied to a person's yes without any `[executor]` setting.
+/// applied to a person's yes without any `[runner]` setting.
 ///
 /// A rejection never carries forward, and it outweighs every pass: a rejection of an earlier
 /// candidate with the same stamp (or with none, which bay cannot compare) carries nothing for
@@ -727,7 +727,7 @@ fn gated_changes(
     paths.into_iter().collect()
 }
 
-/// `[executor] batch` (`crate::config`): a batch has at least `min` members (and always two)
+/// `[runner] batch` (`crate::config`): a batch has at least `min` members (and always two)
 /// and at most `max`, and none forms while its lane's recent failure rate is above
 /// `max_failure_rate`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -737,13 +737,13 @@ pub struct Bounds {
     pub max_failure_rate: f64,
 }
 
-/// A batch's most members when `[executor] batch` names no `max`.
+/// A batch's most members when `[runner] batch` names no `max`.
 pub const DEFAULT_BATCH_MAX: usize = 8;
 
-/// The most members `[executor] batch` may allow: each one more is a longer bisection.
+/// The most members `[runner] batch` may allow: each one more is a longer bisection.
 pub const MAX_BATCH: usize = 64;
 
-/// The lane failure rate above which no batch forms, when `[executor] batch` names none.
+/// The lane failure rate above which no batch forms, when `[runner] batch` names none.
 pub const DEFAULT_MAX_FAILURE_RATE: f64 = 0.3;
 
 /// How many recent check outcomes of a lane its failure rate reads.

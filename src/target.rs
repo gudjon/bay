@@ -17,14 +17,14 @@
 //!   commit's tree, counted under the registry, under the manifest of the policy at its first
 //!   parent. A required id the policy does not declare is unknown, never green;
 //! - its committer time is at least `soak_s` old;
-//! - no `[[freeze]]` of the target is in force, or its landing carries `Fixes:` or `Reverts:`.
+//! - no `[[hold]]` of the target is in force, or its landing carries `Fixes:` or `Reverts:`.
 //!
 //! The rule is read from the config at the trunk's tip, and the `requires` and `soak_s` of the
 //! same target in the config at the target's own tip are added to it (the G26 analogue): a
 //! commit never weakens the criteria it is judged by. Freezes are read at the trunk's tip only,
 //! so one lifted there is lifted at once.
 //!
-//! Detection (`bay status`, the fleet map, `bay watch`) reads the remote's target refs into
+//! Detection (`bay status`, the fleet map, `bay status --since`) reads the remote's target refs into
 //! [`crate::names::TARGET`] and names, per target, its tip, whether that tip is on the source's
 //! first-parent line, the commits on it the source does not reach (`drift`), how far it lags,
 //! the required checks at its tip, the freeze in force, and the newest commit of the source
@@ -837,7 +837,7 @@ mod tests {
         // The G26 analogue: a promoted commit never weakens the criteria it is judged by.
         let trunk = Config::parse(
             "[[target]]\nname = \"staging\"\nrequires = [\"a\"]\n\
-             [[freeze]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"r\"\n",
+             [[hold]]\ntarget = \"staging\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"r\"\n",
         )
         .unwrap();
         let tip = Config::parse(

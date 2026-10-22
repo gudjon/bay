@@ -4,7 +4,7 @@
 //! Ruling R7's stop refusal covers only a clean stop: a session that is killed never stops. So
 //! the agent hook checkpoints the view of the session's change at the session's `SessionEnd`,
 //! and at any hook event `[hooks] checkpoint_idle_s` (default 600) after the session's last
-//! checkpoint, and pushes the checkpoint like any other (`bay start --resume`'s checkpoint,
+//! checkpoint, and pushes the checkpoint like any other (`bay start`'s checkpoint,
 //! without its fetch of trunk). The hook never waits for it: one detached `bay live checkpoint`
 //! does the work, and the session's line names it (`checkpoint`).
 
@@ -92,7 +92,7 @@ fn a_session_end_puts_the_draft_on_the_remote() {
     hook(
         &test_box,
         &view,
-        "session-start",
+        "session.start",
         "01-SessionStart.json",
         "s-end",
     );
@@ -102,7 +102,7 @@ fn a_session_end_puts_the_draft_on_the_remote() {
     hook(
         &test_box,
         &view,
-        "post-tool",
+        "step.end",
         "08-PostToolBatch.json",
         "s-end",
     );
@@ -118,7 +118,7 @@ fn a_session_end_puts_the_draft_on_the_remote() {
     hook(
         &test_box,
         &view,
-        "session-end",
+        "session.end",
         "16-SessionEnd.json",
         "s-end",
     );
@@ -149,7 +149,7 @@ fn an_idle_interval_puts_the_draft_on_the_remote_without_a_stop() {
     hook(
         &test_box,
         &view,
-        "session-start",
+        "session.start",
         "01-SessionStart.json",
         "s-idle",
     );
@@ -160,7 +160,7 @@ fn an_idle_interval_puts_the_draft_on_the_remote_without_a_stop() {
     hook(
         &test_box,
         &view,
-        "post-tool",
+        "step.end",
         "08-PostToolBatch.json",
         "s-idle",
     );

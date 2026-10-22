@@ -27,7 +27,7 @@ fn landed() -> (TestBox, PathBuf, String, String) {
     let files = check_files("true", &passing_result(1), 1, 60);
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     // A status fetches the evidence notes, and names the tree the check's record is on.
     let status = test_box.bay_ok(&repo, &["status", &id]);

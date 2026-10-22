@@ -1,4 +1,4 @@
-//! G195: `bay watch --since` and `bay evidence missing --since` scale with the commits after
+//! G195: `bay status --since` and `bay evidence missing --since` scale with the commits after
 //! their cursor, not with trunk's history (the grit-learnings measurement items).
 //!
 //! A watch from a cursor reads the landings after the cursor's trunk, and judges a red trunk
@@ -94,11 +94,11 @@ impl Trunk {
         assert_eq!(code, 0, "{written}");
     }
 
-    /// `bay watch` outside any view, from `since`: its detail.
+    /// `bay status --since` outside any view, from `since`: its detail.
     fn watch(&self, since: Option<&str>) -> Value {
-        let mut args = vec!["watch"];
+        let mut args = vec!["status", "--since"];
         if let Some(cursor) = since {
-            args.extend(["--since", cursor]);
+            args.push(cursor);
         }
         self.test_box.bay_ok(&self.repo, &args)["detail"].clone()
     }
@@ -180,7 +180,7 @@ fn after_one_new_commit(history: usize) -> (BTreeMap<String, usize>, BTreeMap<St
         trunk
             .test_box
             .bay(&trunk.repo)
-            .args(["watch", "--since", &since]),
+            .args(["status", "--since", &since]),
     );
     let landings = &watched["detail"]["landings"];
     assert_eq!(landings.as_array().map(Vec::len), Some(1), "{watched}");

@@ -3,7 +3,7 @@
 //! `[limits]` in `.bay/policy.toml`, judged at the accepted base, bounds one change:
 //! `max_file_mib` (any one file it adds or changes), `max_files` (files it touches) and
 //! `max_added_lines` (lines it adds; a binary file counts by its size alone). Each key is
-//! optional, and an absent key is no limit. `bay land` refuses a change over one at submit, and
+//! optional, and an absent key is no limit. `bay merge` refuses a change over one at submit, and
 //! the executor at candidate build, both before any check runs: `CHANGE_TOO_LARGE` (blocked,
 //! exit 10), naming each limit exceeded, its value and the largest offenders, with a plain
 //! `say`. A change within the limits lands. A limit that is not a positive integer is
@@ -98,7 +98,7 @@ fn a_change_over_each_limit_is_refused_before_any_check_and_one_within_lands() {
         "CARD-1",
         &[("src/big.bin".to_owned(), big)],
     );
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_too_large(&refused, "max_file_mib", 1, &["src/big.bin"]);
     assert_eq!(
@@ -123,7 +123,7 @@ fn a_change_over_each_limit_is_refused_before_any_check_and_one_within_lands() {
         })
         .collect();
     let view = change(&test_box, &repo, "CARD-2", &many);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_too_large(&refused, "max_files", 3, &["src/f1.rs", "src/f2.rs"]);
     assert_eq!(refused["detail"]["exceeded"][0]["value"], 4, "{refused}");
@@ -139,7 +139,7 @@ fn a_change_over_each_limit_is_refused_before_any_check_and_one_within_lands() {
         "CARD-3",
         &[("src/long.rs".to_owned(), sixty.into_bytes())],
     );
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_too_large(&refused, "max_added_lines", 50, &["src/long.rs"]);
     assert_eq!(refused["detail"]["exceeded"][0]["value"], 60, "{refused}");
@@ -154,9 +154,9 @@ fn a_change_over_each_limit_is_refused_before_any_check_and_one_within_lands() {
         "CARD-4",
         &[("src/small.rs".to_owned(), b"fn small() {}\n".to_vec())],
     );
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(runs(&log), 1);
 }
 
@@ -180,7 +180,7 @@ fn the_executor_refuses_a_change_over_the_limits_at_candidate_build() {
             ("src/c.rs".to_owned(), b"fn c() {}\n".to_vec()),
         ],
     );
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
     let id = queued["change"].as_str().unwrap().to_owned();
@@ -194,7 +194,7 @@ fn the_executor_refuses_a_change_over_the_limits_at_candidate_build() {
     let trunk = test_box.git_ok(&other, &["rev-parse", "HEAD"]);
 
     let executor = test_box.clone_of(&remote, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let one = &ran["detail"]["ran"][0];
     // The executor's summary of the run carries the decision, the reason and the detail.
     assert_eq!(one["decision"], "blocked", "{ran}");
@@ -244,7 +244,7 @@ fn a_limit_that_is_not_a_positive_integer_is_policy_invalid() {
             "CARD-1",
             &[("src/b.rs".to_owned(), b"fn b() {}\n".to_vec())],
         );
-        let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+        let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 10, "{limits}: {refused}");
         assert_eq!(refused["reason"], "POLICY_INVALID", "{limits}: {refused}");
     }

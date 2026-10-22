@@ -38,7 +38,7 @@ fn start_land_and_undo_carry_freshness() {
     let id = started["change"].as_str().unwrap().to_owned();
     let view = std::path::PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let commit = test_box.git_bare(&remote, &["rev-parse", "main"]);
     assert_eq!(landed["detail"]["commit"], commit.as_str());
@@ -51,7 +51,7 @@ fn start_land_and_undo_carry_freshness() {
 /// An asynchronous land, and `status` of its operation, say how long it has been under way,
 /// which evidence it has so far, and the state it moves to next.
 #[test]
-fn a_queued_land_says_elapsed_receipts_and_next() {
+fn a_queued_land_says_elapsed_evidence_and_state() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     test_box.seed_with_check(
@@ -60,18 +60,20 @@ fn a_queued_land_says_elapsed_receipts_and_next() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
     assert!(queued["elapsed_s"].is_u64(), "{queued}");
-    assert_eq!(queued["receipts"], serde_json::json!([]), "{queued}");
+    assert_eq!(queued["evidence"], serde_json::json!([]), "{queued}");
+    // 0.3.0: `state` already says where it is, so the result names no `next` and no `published`.
+    assert!(queued.get("next").is_none(), "{queued}");
+    assert!(queued.get("published").is_none(), "{queued}");
     let state = queued["state"].as_str().unwrap();
     let next = match state {
         "submitted" => "admitted",
         "admitted" => "running",
         other => panic!("a queued land in state {other}: {queued}"),
     };
-    assert_eq!(queued["next"], next, "{queued}");
 
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let operation = &status["detail"]["changes"][0]["operation"];

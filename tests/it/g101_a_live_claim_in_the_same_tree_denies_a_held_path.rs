@@ -3,7 +3,7 @@
 //! `DESIGN` § 11c, "Two sessions in one tree" (owner ruling, 2026-10-19): every change has its
 //! own isolated view, but two live sessions can still run in one tree (the main checkout, or a
 //! second session opened inside a view). There a session claims each path it writes (path,
-//! session, deadline, in the tree's one claims file), and `pre-tool` on `Edit`, `Write` and
+//! session, deadline, in the tree's one claims file), and `tool.before` on `Edit`, `Write` and
 //! `NotebookEdit`, and on `Bash` when the command names a path, denies a path another live
 //! session of the same tree holds, with the reason code, the holder and the path. A claim past
 //! its deadline is not live, the holder's stop releases its claims, a subagent works under its
@@ -98,7 +98,7 @@ fn batch(test_box: &TestBox, session: &str, agent: Option<&str>, cwd: &Path, fil
     if let Some(agent) = agent {
         batch["agent_id"] = json!(agent);
     }
-    assert_eq!(hook(test_box, cwd, "post-tool", &batch).0, Some(0));
+    assert_eq!(hook(test_box, cwd, "step.end", &batch).0, Some(0));
 }
 
 /// One step of `session` (of its subagent `agent`) that writes `file`: the file is written, then
@@ -117,7 +117,7 @@ fn stops(test_box: &TestBox, session: &str, cwd: &Path) {
         "stop_hook_active": true,
         "cwd": cwd,
     });
-    assert_eq!(hook(test_box, cwd, "stop", &stop).0, Some(0));
+    assert_eq!(hook(test_box, cwd, "turn.end", &stop).0, Some(0));
 }
 
 fn setup(config: Option<&str>) -> (TestBox, PathBuf) {
@@ -172,7 +172,7 @@ fn two_sessions_in_one_view_a_held_path_is_denied_and_an_unheld_path_is_allowed(
     let denied = hook(
         &test_box,
         &view,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-other", None, &view, &held),
     );
     assert_held(&denied, "s-holder", "src/a.rs");
@@ -181,7 +181,7 @@ fn two_sessions_in_one_view_a_held_path_is_denied_and_an_unheld_path_is_allowed(
         &hook(
             &test_box,
             &view,
-            "pre-tool",
+            "tool.before",
             &pre(
                 "s-other",
                 None,
@@ -196,14 +196,14 @@ fn two_sessions_in_one_view_a_held_path_is_denied_and_an_unheld_path_is_allowed(
     assert_allowed(&hook(
         &test_box,
         &view,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-other", None, &view, &view.join("src/b.rs")),
     ));
     // The holder itself writes its own path.
     assert_allowed(&hook(
         &test_box,
         &view,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-holder", None, &view, &held),
     ));
 
@@ -226,14 +226,14 @@ fn two_sessions_in_one_view_a_held_path_is_denied_and_an_unheld_path_is_allowed(
     assert_allowed(&hook(
         &test_box,
         &view,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-holder", None, &view, &held),
     ));
     assert_held(
         &hook(
             &test_box,
             &view,
-            "pre-tool",
+            "tool.before",
             &write_tool("s-holder", None, &view, &view.join("src/b.rs")),
         ),
         "s-other",
@@ -245,7 +245,7 @@ fn two_sessions_in_one_view_a_held_path_is_denied_and_an_unheld_path_is_allowed(
     assert_allowed(&hook(
         &test_box,
         &view,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-other", None, &view, &held),
     ));
 }
@@ -260,7 +260,7 @@ fn two_sessions_in_the_main_checkout_are_judged_the_same_way() {
         &hook(
             &test_box,
             &repo,
-            "pre-tool",
+            "tool.before",
             &write_tool("s-other", None, &repo, &held),
         ),
         "s-holder",
@@ -269,7 +269,7 @@ fn two_sessions_in_the_main_checkout_are_judged_the_same_way() {
     assert_allowed(&hook(
         &test_box,
         &repo,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-other", None, &repo, &repo.join("src/b.rs")),
     ));
 }
@@ -277,7 +277,7 @@ fn two_sessions_in_the_main_checkout_are_judged_the_same_way() {
 #[test]
 fn a_past_deadline_claim_is_not_live() {
     // A claim lives for the takeover window; a short one here.
-    let (test_box, repo) = setup(Some("[executor]\nlease_s = 1\ntakeover_s = 3\n"));
+    let (test_box, repo) = setup(Some("[runner]\nlease_s = 1\ntakeover_s = 3\n"));
     let view = view_of(&test_box, &repo, "CARD-1");
     let held = view.join("src/a.rs");
     writes(&test_box, "s-holder", None, &view, &held);
@@ -285,7 +285,7 @@ fn a_past_deadline_claim_is_not_live() {
     let denied = hook(
         &test_box,
         &view,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-other", None, &view, &held),
     );
     if claimed.elapsed() < std::time::Duration::from_secs(2) {
@@ -295,7 +295,7 @@ fn a_past_deadline_claim_is_not_live() {
     assert_allowed(&hook(
         &test_box,
         &view,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-other", None, &view, &held),
     ));
 }
@@ -317,7 +317,7 @@ fn a_bash_command_that_names_a_held_path_is_denied() {
             &hook(
                 &test_box,
                 &view,
-                "pre-tool",
+                "tool.before",
                 &bash("s-other", &view, &command),
             ),
             "s-holder",
@@ -328,14 +328,14 @@ fn a_bash_command_that_names_a_held_path_is_denied() {
         assert_allowed(&hook(
             &test_box,
             &view,
-            "pre-tool",
+            "tool.before",
             &bash("s-other", &view, command),
         ));
     }
     assert_allowed(&hook(
         &test_box,
         &view,
-        "pre-tool",
+        "tool.before",
         &bash("s-holder", &view, "echo x > src/a.rs"),
     ));
 }
@@ -350,19 +350,19 @@ fn the_same_path_in_another_view_is_allowed() {
     assert_allowed(&hook(
         &test_box,
         &two,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-other", None, &two, &two.join("src/a.rs")),
     ));
     assert_allowed(&hook(
         &test_box,
         &two,
-        "pre-tool",
+        "tool.before",
         &bash("s-other", &two, "echo x > src/a.rs"),
     ));
     assert_allowed(&hook(
         &test_box,
         &repo,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-other", None, &repo, &repo.join("src/a.rs")),
     ));
     // In the holder's own tree it is still held.
@@ -370,7 +370,7 @@ fn the_same_path_in_another_view_is_allowed() {
         &hook(
             &test_box,
             &one,
-            "pre-tool",
+            "tool.before",
             &write_tool("s-other", None, &one, &one.join("src/a.rs")),
         ),
         "s-holder",
@@ -387,7 +387,7 @@ fn a_subagent_of_the_holder_is_allowed() {
     assert_allowed(&hook(
         &test_box,
         &view,
-        "pre-tool",
+        "tool.before",
         &write_tool("s-holder", Some("agent-sub"), &view, &held),
     ));
     // What the subagent writes is held for its parent's session.
@@ -402,7 +402,7 @@ fn a_subagent_of_the_holder_is_allowed() {
         &hook(
             &test_box,
             &view,
-            "pre-tool",
+            "tool.before",
             &write_tool("s-other", None, &view, &view.join("src/c.rs")),
         ),
         "s-holder",
@@ -410,7 +410,7 @@ fn a_subagent_of_the_holder_is_allowed() {
     );
 }
 
-/// `bay hook pre-tool` with `payload` on stdin; returns (exit, stdout, stderr).
+/// `bay hook tool.before` with `payload` on stdin; returns (exit, stdout, stderr).
 fn pre_tool_output(
     test_box: &TestBox,
     cwd: &Path,
@@ -418,7 +418,7 @@ fn pre_tool_output(
 ) -> (Option<i32>, Value, String) {
     let mut child = test_box
         .bay_process(cwd)
-        .args(["hook", "pre-tool"])
+        .args(["hook", "tool.before"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -483,7 +483,7 @@ fn an_unreadable_claims_file_allows_with_a_recorded_coverage_unknown_notice() {
         &hook(
             &test_box,
             &repo,
-            "pre-tool",
+            "tool.before",
             &write_tool("s-other", None, &repo, &target),
         ),
         "s-holder",

@@ -57,7 +57,7 @@ pub fn from_result(change: &str, actor: Option<Actor>, step: &str, result: &BayR
         .reason
         .map_or_else(|| "fault".to_owned(), |reason| reason.code().to_owned());
     let recovery = result.retry_when.map_or_else(
-        || "fix the cause, then run bay land again".to_owned(),
+        || "fix the cause, then run bay merge again".to_owned(),
         str::to_owned,
     );
     Receipt {

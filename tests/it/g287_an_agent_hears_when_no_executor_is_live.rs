@@ -2,8 +2,8 @@
 //!
 //! When the repository has operations queued and no fresh executor presence, the rule of
 //! `bay status`'s `no_live_executor` warning (G67), the agent hook tells the session one line at
-//! `session-start` and `user-prompt-submit`: no executor is running, queued changes wait, and
-//! `bay executor run` or `bay executor install` starts one. It is said at most once per session
+//! `session.start` and `turn.start`: no executor is running, queued changes wait, and
+//! `bay runner run` or `bay runner install` starts one. It is said at most once per session
 //! for each change of that state: the session's notice cursor keeps that it was told, and an
 //! executor that comes (or a queue that empties) arms it again. The session's line records it
 //! (`no_executor_notice`).
@@ -27,7 +27,7 @@ use std::process::Stdio;
 use serde_json::Value;
 use support::{TestBox, result_json, unchecked_files};
 
-const LINE: &str = "bay: no executor is running for this repository; queued changes wait. Start one with `bay executor run`, or install it with `bay executor install`.";
+const LINE: &str = "bay: no runner is running for this repository; queued changes wait. Start one with `bay runner run`, or install it with `bay runner install`.";
 
 fn fixture(name: &str, session: &str, cwd: &Path) -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -43,7 +43,7 @@ fn fixture(name: &str, session: &str, cwd: &Path) -> Value {
 /// `bay hook <event>` for `session` in `cwd`, with the reader's presence clock `skew_s`
 /// seconds on: its stdout and stderr together.
 fn hook(test_box: &TestBox, cwd: &Path, session: &str, event: &str, skew_s: u64) -> String {
-    let name = if event == "session-start" {
+    let name = if event == "session.start" {
         "01-SessionStart.json"
     } else {
         "02-UserPromptSubmit.json"
@@ -74,7 +74,7 @@ fn hook(test_box: &TestBox, cwd: &Path, session: &str, event: &str, skew_s: u64)
 }
 
 fn prompt(test_box: &TestBox, repo: &Path, session: &str, skew_s: u64) -> String {
-    hook(test_box, repo, session, "user-prompt-submit", skew_s)
+    hook(test_box, repo, session, "turn.start", skew_s)
 }
 
 fn last_line(repo: &Path, session: &str) -> Value {
@@ -96,7 +96,7 @@ fn seeded() -> (TestBox, PathBuf, PathBuf) {
 /// Starts a change, edits it, and submits it: one operation queued.
 fn queue_one(test_box: &TestBox, repo: &Path) {
     let (_, view) = test_box.start_and_edit(repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
 }
@@ -105,7 +105,7 @@ fn queue_one(test_box: &TestBox, repo: &Path) {
 fn queued_work_with_no_executor_is_told_once_per_state() {
     let (test_box, repo, executor) = seeded();
     // Nothing queued: nothing to tell.
-    let started = hook(&test_box, &repo, "s-1", "session-start", 0);
+    let started = hook(&test_box, &repo, "s-1", "session.start", 0);
     assert!(!started.contains(LINE), "{started}");
     assert!(!prompt(&test_box, &repo, "s-1", 0).contains(LINE));
 
@@ -119,13 +119,13 @@ fn queued_work_with_no_executor_is_told_once_per_state() {
     assert!(last_line(&repo, "s-1").get("no_executor_notice").is_none());
 
     // A session that starts now hears it at its start.
-    let other = hook(&test_box, &repo, "s-2", "session-start", 0);
+    let other = hook(&test_box, &repo, "s-2", "session.start", 0);
     assert!(other.contains(LINE), "{other}");
     assert!(!prompt(&test_box, &repo, "s-2", 0).contains(LINE));
 
     // An executor runs and lands the work; a fetching command brings its presence and the
     // landed chain. Nothing waits, so nothing is told, and the cursor is armed again.
-    let (code, ran) = result_json(test_box.bay(&executor).args(["executor", "run", "--once"]));
+    let (code, ran) = result_json(test_box.bay(&executor).args(["runner", "run", "--once"]));
     assert_eq!(code, 0, "{ran}");
     let (code, status) = result_json(test_box.bay(&repo).arg("status"));
     assert_eq!(code, 0, "{status}");

@@ -1,7 +1,7 @@
 //! Overlapping changes (NEW-8): the live changes whose declared paths share files with a
 //! change's own.
 //!
-//! `bay start` lists them in its detail (`overlaps`), and the agent hook's `session-start`
+//! `bay start` lists them in its detail (`overlaps`), and the agent hook's `session.start`
 //! names them for the session's change, so two agents that declare the same files hear of each
 //! other before either lands. A listing never refuses: it is what the work may meet, not a
 //! claim. It reads the chains this repository already holds (`crate::change::Chain::read_all`,
@@ -73,7 +73,7 @@ pub fn held_by(repo: &Repo, actor: &str) -> Result<Vec<Value>, String> {
 /// Every chain this repository holds (`Chain::read_all`) and its landed markers: change id to
 /// the publication its `refs/bay/landed/<id>` names. No fetch. The one read of what counts as
 /// live: [`held_by`] (G264), [`overlaps`], `bay status`'s `detail.flow` (G309) and the review
-/// queue of `bay land` (G310) all judge [`counts_live`] on it.
+/// queue of `bay merge` (G310) all judge [`counts_live`] on it.
 ///
 /// # Errors
 ///

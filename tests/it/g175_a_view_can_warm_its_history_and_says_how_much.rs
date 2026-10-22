@@ -159,7 +159,7 @@ fn without_the_switch_nothing_old_is_fetched_until_resume_asks() {
 
     // The switch turned on at trunk: the next resume warms the change's declared paths.
     test_box.commit_config(&cache, WARM);
-    let resumed = test_box.bay_ok(&cache, &["start", "--resume", &id]);
+    let resumed = test_box.bay_ok(&cache, &["start", &id]);
     let history = &resumed["detail"]["history"];
     assert_eq!(history["state"], "warmed", "{resumed}");
     assert_eq!(history["fetched"], 2, "{history}");

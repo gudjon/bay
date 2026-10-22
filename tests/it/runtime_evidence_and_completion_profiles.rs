@@ -53,7 +53,7 @@ fn landed_as(
         test_box.use_keys(&repo, &keys);
     }
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let commit = landed["detail"]["commit"].as_str().unwrap().to_owned();
     let tree = test_box.git_ok(&repo, &["rev-parse", &format!("{commit}^{{tree}}")]);
@@ -195,7 +195,7 @@ fn a_running_record_without_an_artifact_or_for_another_commit_confirms_nothing()
 /// is signed, and the runtime adapter is not asked: nothing it prints could count.
 #[test]
 fn without_a_registry_no_runtime_record_counts_and_the_adapter_is_not_asked() {
-    let config = format!("{SELECT_DEPLOY}[runtime]\ncommand = \"scripts/bay-runtime\"\n");
+    let config = format!("{SELECT_DEPLOY}[plugin.runtime]\ncommand = \"scripts/bay-runtime\"\n");
     let (test_box, repo, keys, id, _, template) = landed_as(DEPLOY_PROFILE, &config, false);
     let marker = test_box.path().join("runtime-asked");
     support::write_executable(
@@ -228,7 +228,7 @@ fn the_runtime_adapter_is_asked_only_for_a_named_change_whose_profile_needs_it()
         );
         marker
     };
-    let plain = "[runtime]\ncommand = \"scripts/bay-runtime\"\n";
+    let plain = "[plugin.runtime]\ncommand = \"scripts/bay-runtime\"\n";
     let (test_box, repo, _, id, _, _) = landed("", plain);
     let marker = marker_script(&test_box, &repo);
     let out = completion(&test_box, &repo, &id);
@@ -347,7 +347,7 @@ fn a_profile_with_an_unknown_dimension_makes_the_policy_invalid() {
     }
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, blocked) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_ne!(code, 0, "{blocked}");
     assert_eq!(blocked["reason"], "POLICY_INVALID", "{blocked}");
 }
@@ -357,7 +357,7 @@ fn a_profile_with_an_unknown_dimension_makes_the_policy_invalid() {
 /// writes nothing to a producer's notes ref, which only that producer writes.
 #[test]
 fn the_runtime_adapter_counts_only_what_a_producer_signed_and_writes_nothing() {
-    let config = format!("{SELECT_DEPLOY}[runtime]\ncommand = \"scripts/bay-runtime\"\n");
+    let config = format!("{SELECT_DEPLOY}[plugin.runtime]\ncommand = \"scripts/bay-runtime\"\n");
     let (test_box, repo, keys, id, commit, template) = landed(DEPLOY_PROFILE, &config);
     let answer = test_box.path().join("runtime-answer.json");
     let request = test_box.path().join("runtime-request.json");

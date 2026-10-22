@@ -118,7 +118,7 @@ fn a_blobless_check_fetches_once_and_sees_the_exact_tree() {
         test_box
             .bay(&view)
             .env("GIT_TRACE2_EVENT", &trace)
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "{landed}");
     let fetches = object_fetches(&trace);

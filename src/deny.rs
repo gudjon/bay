@@ -1,6 +1,6 @@
 //! The shell deny list (`DESIGN` § 11, G39): a fixed list, not a plugin and not a verb.
 //!
-//! The host hook sees a push; it does not see a local shell command. `bay hook pre-tool` judges
+//! The host hook sees a push; it does not see a local shell command. `bay hook tool.before` judges
 //! a shell command an agent is about to run and denies only the shapes on this list. A normal
 //! push of `refs/bay/*` stays allowed: offline submission and the change ref need it.
 //!
@@ -553,12 +553,12 @@ fn denied_lane_git(words: &[String], lane_refs: &[String]) -> Option<Denial> {
     deny(shape)
 }
 
-/// `bay hook <event>` for the shell deny list: a `pre-tool` event on Claude Code's `Bash` tool.
+/// `bay hook <event>` for the shell deny list: a `tool.before` event on Claude Code's `Bash` tool.
 /// Returns the denial, or `None` to allow. The payload was read by the caller (G59): one this
 /// cannot read is never judged here.
 #[must_use]
 pub fn judge_hook(event: &str, input: &str, dir: &std::path::Path) -> Option<Denial> {
-    if event != "pre-tool" {
+    if event != "tool.before" {
         return None;
     }
     let payload: serde_json::Value = serde_json::from_str(input).ok()?;

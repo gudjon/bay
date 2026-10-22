@@ -1,6 +1,6 @@
 //! G39. A blocked shell command does not run.
 //!
-//! What this file tests is bay's half: `bay hook pre-tool` receives each shape on the deny list
+//! What this file tests is bay's half: `bay hook tool.before` receives each shape on the deny list
 //! (`DESIGN` § 11) and returns the product's deny exit (exit 2 for Claude Code, the exit of a
 //! stale write), also when the shape is wrapped in `bash -c`, `sh -c`, `env`, `xargs`, `sudo`,
 //! `command` or `exec`, or in a shell wrapper inside another. It returns the allow exit for a
@@ -26,7 +26,7 @@ fn pre_tool(test_box: &TestBox, repo: &std::path::Path, command: &str) -> (Optio
     });
     let mut child = test_box
         .bay_process(repo)
-        .args(["hook", "pre-tool"])
+        .args(["hook", "tool.before"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -83,7 +83,7 @@ fn a_bay_ref_push_ordinary_commands_and_other_tools_get_the_allow_exit() {
     // Other tools and other events are not judged by the deny list.
     let mut child = test_box
         .bay_process(&repo)
-        .args(["hook", "pre-tool"])
+        .args(["hook", "tool.before"])
         .stdin(Stdio::piped())
         .spawn()
         .unwrap();

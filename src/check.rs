@@ -334,7 +334,7 @@ pub struct Limits {
     /// N-3: what a check with `baseline = "base"` is judged against. `None` judges every check
     /// whole-green, as a run with no base to compare with does (the conformance kit, bisection).
     pub baseline: Option<Baseline>,
-    /// N-17: how many of the candidate's checks run at once (`[executor] parallel_checks`):
+    /// N-17: how many of the candidate's checks run at once (`[runner] parallel_checks`):
     /// 1 runs them one after another, as every run but a candidate's does.
     pub parallel: usize,
 }
@@ -864,7 +864,7 @@ struct ResultUnit {
     reason: Option<String>,
 }
 
-/// The most checks of one candidate `[executor] parallel_checks` may run at once.
+/// The most checks of one candidate `[runner] parallel_checks` may run at once.
 pub const MAX_PARALLEL_CHECKS: usize = 16;
 
 /// How often the main thread of a parallel run looks for a finished check and renews the lease.
@@ -1630,7 +1630,7 @@ fn against_base(
 
 /// What a run calls back into: `keep` takes each record as soon as its check ends; `beat`
 /// renews the executor's lease while a check runs; `seen`, when set, is shown each exchange
-/// with the adapter as it ended (the conformance kit, `bay adapter test check`).
+/// with the adapter as it ended (the conformance kit, `bay plugin test check`).
 pub struct Hooks<'a> {
     pub keep: &'a mut dyn FnMut(&mut EvidenceRecord) -> Result<(), String>,
     pub beat: &'a mut dyn FnMut(),

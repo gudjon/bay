@@ -2,7 +2,7 @@
 //!
 //! Pushes `refs/bay/changes/<id>` with every evidence notes ref to a remote, or writes them
 //! to a bundle. The receiver fetches them with plain Git and opens the change with
-//! `bay start --resume <id>`.
+//! `bay start <id>`.
 
 use std::path::Path;
 

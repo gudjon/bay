@@ -4,10 +4,10 @@
 //! `bay start --paths` lists in `detail.overlaps` the live changes this repository holds whose
 //! declared paths overlap the new change's own, each with its change id, intent, actor and the
 //! overlapping paths, from the chains already here (no fetch of their own); it never refuses.
-//! A change on other paths lists none. `bay hook session-start` in the view names the same
+//! A change on other paths lists none. `bay hook session.start` in the view names the same
 //! overlaps. When the executor's probe notes an early merge conflict on the view's queued
 //! operation (G177, `early_conflict` in its chain), the session's own agent is told once, with
-//! the paths, at its next `post-tool`, through the notice path of the refusals and failed
+//! the paths, at its next `step.end`, through the notice path of the refusals and failed
 //! checks, and never again in that session.
 
 // Each case runs the hook with a wrapper on PATH, so these run on Unix only.
@@ -204,7 +204,7 @@ fn the_second_start_lists_the_first_and_one_on_other_paths_lists_none() {
     let (out, _) = hook(
         &test_box,
         &view,
-        "session-start",
+        "session.start",
         "01-SessionStart.json",
         "s-ovl",
     );
@@ -223,34 +223,22 @@ fn a_queued_change_hears_of_its_early_conflict_once() {
     let id = started["change"].as_str().unwrap().to_owned();
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/b.rs"), "fn b() {}\n").unwrap();
-    let (code, submitted) = result_json(test_box.bay(&view).arg("land"));
+    let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{submitted}");
 
     hook(
         &test_box,
         &view,
-        "session-start",
+        "session.start",
         "01-SessionStart.json",
         "s-q",
     );
     // Nothing noted yet: no notice.
-    let (_, told) = hook(
-        &test_box,
-        &view,
-        "post-tool",
-        "08-PostToolBatch.json",
-        "s-q",
-    );
+    let (_, told) = hook(&test_box, &view, "step.end", "08-PostToolBatch.json", "s-q");
     assert_eq!(told, "");
 
     let op_id = note_early_conflict(&test_box, &repo, &id, &trunk, &["src/b.rs"]);
-    let (_, told) = hook(
-        &test_box,
-        &view,
-        "post-tool",
-        "08-PostToolBatch.json",
-        "s-q",
-    );
+    let (_, told) = hook(&test_box, &view, "step.end", "08-PostToolBatch.json", "s-q");
     let short = &trunk[..12];
     assert!(
         told.starts_with(&format!(
@@ -267,18 +255,12 @@ fn a_queued_change_hears_of_its_early_conflict_once() {
     );
 
     // Once: not at the next step, not at the next prompt.
-    let (_, again) = hook(
-        &test_box,
-        &view,
-        "post-tool",
-        "08-PostToolBatch.json",
-        "s-q",
-    );
+    let (_, again) = hook(&test_box, &view, "step.end", "08-PostToolBatch.json", "s-q");
     assert_eq!(again, "");
     let (prompt, _) = hook(
         &test_box,
         &view,
-        "user-prompt-submit",
+        "turn.start",
         "02-UserPromptSubmit.json",
         "s-q",
     );
@@ -290,7 +272,7 @@ fn a_queued_change_hears_of_its_early_conflict_once() {
     let (out, _) = hook(
         &test_box,
         &view,
-        "session-start",
+        "session.start",
         "01-SessionStart.json",
         "s-r",
     );
@@ -298,12 +280,6 @@ fn a_queued_change_hears_of_its_early_conflict_once() {
         out.contains("bay: MERGE_CONFLICT with trunk while it waits in the queue, on src/b.rs: "),
         "{out}"
     );
-    let (_, later) = hook(
-        &test_box,
-        &view,
-        "post-tool",
-        "08-PostToolBatch.json",
-        "s-r",
-    );
+    let (_, later) = hook(&test_box, &view, "step.end", "08-PostToolBatch.json", "s-r");
     assert_eq!(later, "");
 }

@@ -1,7 +1,7 @@
 //! G251: an update never waits for a running executor, and the executor moves to the new
 //! version between operations (owner ruling 2026-10-20).
 //!
-//! While `bay executor run` holds an operation, `bay update` installs at once: the release is
+//! While `bay runner run` holds an operation, `bay update` installs at once: the release is
 //! kept as its version's own file under `$XDG_DATA_HOME/bay/versions/`, and one rename points
 //! the install path at it. The executor pinned its own version's file there when it started and
 //! starts every child `bay` from it; the update neither replaces nor prunes that file, so the
@@ -59,7 +59,7 @@ fn an_update_never_waits_and_the_executor_moves_between_operations() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     let executor = test_box.clone_of(&remote, "executor");
 
@@ -118,7 +118,7 @@ fn an_update_never_waits_and_the_executor_moves_between_operations() {
     assert_eq!(result["decision"], "ok", "{result}");
     let ran = result["detail"]["ran"].as_array().unwrap();
     assert!(
-        ran.iter().any(|op| op["decision"] == "landed"),
+        ran.iter().any(|op| op["decision"] == "merged"),
         "the held operation landed before the move: {result}"
     );
     let reexec = &result["detail"]["reexec"];
@@ -138,10 +138,7 @@ fn an_update_never_waits_and_the_executor_moves_between_operations() {
     let args = std::fs::read_to_string(&ran_new).unwrap();
     assert_eq!(
         args.trim(),
-        format!(
-            "-C {} --json executor run --interval-s 1",
-            executor.display()
-        )
+        format!("-C {} --json runner run --interval-s 1", executor.display())
     );
     let status = child.0.wait().unwrap();
     assert_eq!(status.code(), Some(1), "the new version's own exit");
@@ -172,7 +169,7 @@ fn held_executor(test_box: &TestBox, installed: &Path, executor: &Path, release:
         Command::new(installed)
             .arg("-C")
             .arg(executor)
-            .args(["--json", "executor", "run", "--interval-s", "1"])
+            .args(["--json", "runner", "run", "--interval-s", "1"])
             .env_clear()
             .env("PATH", path)
             .env("HOME", &test_box.home)

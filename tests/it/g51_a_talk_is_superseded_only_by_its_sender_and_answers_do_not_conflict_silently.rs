@@ -1,11 +1,11 @@
 //! G51. A talk is superseded only by its sender, and answers do not conflict silently (`DESIGN`
 //! § 11c; rulings T1 and T2 in `plans/wave2.md`).
 //!
-//! Built so far: a supersede by a third actor is refused (`TALK_SUPERSEDE_REFUSED`), by that
+//! Built so far: a supersede by a third actor is refused (`TALK_REFUSED`), by that
 //! actor's bay and by the host; the original sender's supersede is accepted, and the recipient's
 //! accept closes the old talk as `superseded`, naming its successor; a second, different answer to
 //! a discovery talk without `supersedes` naming the standing answer is refused
-//! (`TALK_ANSWER_CONFLICT`), by the answering bay and by the host; one that names it stands. A
+//! (`TALK_REFUSED`), by the answering bay and by the host; one that names it stands. A
 //! talk takes one successor and a closed one none; a successor pushes a predecessor the host
 //! does not hold yet in the same push, and the host judges it against that push. The
 //! recipient's `SessionStart` notice naming the replaced talk comes with the hook notices.
@@ -59,7 +59,7 @@ fn only_the_sender_supersedes_and_the_recipient_closes_the_old_talk() {
     );
     let (code, third) = discovery(&case, "agent-c", "Pick cbor", &["--supersedes", &old]);
     assert_eq!(code, 10, "{third}");
-    assert_eq!(third["reason"], "TALK_SUPERSEDE_REFUSED", "{third}");
+    assert_eq!(third["reason"], "TALK_REFUSED", "{third}");
 
     // ... and so does the host, when the commit skips that bay.
     let (code, dry) = case.talk(
@@ -84,7 +84,7 @@ fn only_the_sender_supersedes_and_the_recipient_closes_the_old_talk() {
     let forged = bay::talk::root_commit(&git, &body, &case.c_key, "agent-c").unwrap();
     let name = talk_ref("agent-b", body["id"].as_str().unwrap());
     let stderr = case.refused(&case.c, &format!("{forged}:{name}"));
-    assert!(stderr.contains("TALK_SUPERSEDE_REFUSED"), "{stderr}");
+    assert!(stderr.contains("TALK_REFUSED"), "{stderr}");
 
     // The sender's own supersede is accepted.
     let (code, second) = discovery(
@@ -104,7 +104,7 @@ fn only_the_sender_supersedes_and_the_recipient_closes_the_old_talk() {
         &["--supersedes", &old],
     );
     assert_eq!(code, 10, "{twice}");
-    assert_eq!(twice["reason"], "TALK_SUPERSEDE_REFUSED", "{twice}");
+    assert_eq!(twice["reason"], "TALK_REFUSED", "{twice}");
     // The sender's bay refuses it before a commit, not only the host.
     let why = twice["detail"]["why"].as_str().unwrap();
     assert!(
@@ -121,7 +121,7 @@ fn only_the_sender_supersedes_and_the_recipient_closes_the_old_talk() {
     let twice_name = talk_ref("agent-b", body["id"].as_str().unwrap());
     let stderr = case.refused(&case.a, &format!("{forged}:{twice_name}"));
     assert!(
-        stderr.contains("TALK_SUPERSEDE_REFUSED") && stderr.contains(&new),
+        stderr.contains("TALK_REFUSED") && stderr.contains(&new),
         "{stderr}"
     );
 
@@ -150,10 +150,10 @@ fn only_the_sender_supersedes_and_the_recipient_closes_the_old_talk() {
     assert_eq!(close["by"], new.as_str(), "{close}");
     assert_eq!(close["actor"]["name"], "agent-b", "{close}");
 
-    // Closed means closed: the same ask again is `TALK_CLOSED`, naming the id.
+    // Closed means closed: the same ask again is `TALK_REFUSED`, naming the id.
     let (code, repeat) = discovery(&case, "agent", "Pick the wire format: json or cbor", &[]);
     assert_eq!(code, 10, "{repeat}");
-    assert_eq!(repeat["reason"], "TALK_CLOSED", "{repeat}");
+    assert_eq!(repeat["reason"], "TALK_REFUSED", "{repeat}");
     assert_eq!(repeat["detail"]["talk"], old.as_str(), "{repeat}");
     // A repeat that differs only outside the ask is still that closed talk.
     let (code, repeat) = discovery(
@@ -163,11 +163,11 @@ fn only_the_sender_supersedes_and_the_recipient_closes_the_old_talk() {
         &["--context", "asked again"],
     );
     assert_eq!(code, 10, "{repeat}");
-    assert_eq!(repeat["reason"], "TALK_CLOSED", "{repeat}");
+    assert_eq!(repeat["reason"], "TALK_REFUSED", "{repeat}");
     // A closed talk takes no successor either.
     let (code, late) = discovery(&case, "agent", "Pick msgpack", &["--supersedes", &old]);
     assert_eq!(code, 10, "{late}");
-    assert_eq!(late["reason"], "TALK_SUPERSEDE_REFUSED", "{late}");
+    assert_eq!(late["reason"], "TALK_REFUSED", "{late}");
     let why = late["detail"]["why"].as_str().unwrap();
     assert!(
         why.contains(&format!("talk {old} is closed")) && !why.contains("the host refused"),
@@ -241,7 +241,7 @@ fn a_second_different_answer_needs_to_supersede_the_first() {
     // `decides`, on its own machine, gives a different value without superseding: refused.
     let (code, conflict) = case.talk("agent-c", &["--answer", &id, "--value", "cbor"]);
     assert_eq!(code, 10, "{conflict}");
-    assert_eq!(conflict["reason"], "TALK_ANSWER_CONFLICT", "{conflict}");
+    assert_eq!(conflict["reason"], "TALK_REFUSED", "{conflict}");
     assert_eq!(conflict["detail"]["standing"]["commit"], standing.as_str());
     assert_eq!(conflict["detail"]["standing"]["value"], "json");
     assert_eq!(case.host_tip(&name).as_deref(), Some(standing.as_str()));
@@ -262,7 +262,7 @@ fn a_second_different_answer_needs_to_supersede_the_first() {
     };
     let forged = answer("cbor", None);
     let stderr = case.refused(&case.c, &format!("{forged}:{name}"));
-    assert!(stderr.contains("TALK_ANSWER_CONFLICT"), "{stderr}");
+    assert!(stderr.contains("TALK_REFUSED"), "{stderr}");
 
     // A third actor, neither `who` nor `decides`, cannot answer: not by its bay, not at the host.
     let (code, third) = case.talk("agent", &["--answer", &id, "--value", "cbor"]);

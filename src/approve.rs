@@ -334,7 +334,7 @@ fn item(git: &Git, held: &Held, rows: &[Value]) -> Result<Value, String> {
         "paths": paths_of(rows),
         "diff": diff_summary(git, &held.base, &held.commit)?,
         "approve": format!("bay approve {}", held.record.id),
-        "reject": format!("bay approve {} --reject --why <text>", held.record.id),
+        "reject": format!("bay reject {} --why <text>", held.record.id),
     });
     if let Some(why) = held.approval.get("why") {
         item["why"] = why.clone();
@@ -494,7 +494,7 @@ fn next_step(repo: &Repo, held: &Held, reject: bool) -> (&'static str, String) {
         return (
             "here",
             format!(
-                "this machine holds the change's view ({}): bay land --wait there lands it. bay approve runs nothing else",
+                "this machine holds the change's view ({}): bay merge --wait there lands it. bay approve runs nothing else",
                 view.display()
             ),
         );
@@ -507,13 +507,13 @@ fn next_step(repo: &Repo, held: &Held, reject: bool) -> (&'static str, String) {
     if live {
         (
             "executor",
-            "an executor runs: its next pass lands the change; nobody needs to run bay land again"
+            "an executor runs: its next pass lands the change; nobody needs to run bay merge again"
                 .to_owned(),
         )
     } else {
         (
             "author",
-            format!("{actor}, the change's author, runs bay land --wait, and the change lands"),
+            format!("{actor}, the change's author, runs bay merge --wait, and the change lands"),
         )
     }
 }
@@ -925,7 +925,7 @@ fn waive_in(
         (
             "here",
             format!(
-                "this machine holds the change's view ({}): bay land --wait there lands it, naming the waiver as a coverage gap",
+                "this machine holds the change's view ({}): bay merge --wait there lands it, naming the waiver as a coverage gap",
                 view.display()
             ),
         )
@@ -933,7 +933,7 @@ fn waive_in(
         (
             "author",
             format!(
-                "{actor}, the change's author, runs bay land --wait, and the change lands with the waiver named as a coverage gap"
+                "{actor}, the change's author, runs bay merge --wait, and the change lands with the waiver named as a coverage gap"
             ),
         )
     };

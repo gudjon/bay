@@ -179,7 +179,7 @@ impl Held {
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(full, text).unwrap();
         }
-        let (code, submitted) = result_json(self.test_box.bay(&view).arg("land"));
+        let (code, submitted) = result_json(self.test_box.bay(&view).arg("merge"));
         assert_eq!(code, 0, "{submitted}");
         let op_id = submitted["op_id"].as_str().unwrap().to_owned();
         let signer = bay::signing::Signer {
@@ -219,7 +219,7 @@ impl Held {
     pub fn spawn(&self, clone: &Path) -> std::process::Child {
         self.test_box
             .bay_process(clone)
-            .args(["--json", "executor", "run", "--once"])
+            .args(["--json", "runner", "run", "--once"])
             .stdout(std::process::Stdio::piped())
             .spawn()
             .unwrap()
@@ -228,7 +228,7 @@ impl Held {
     /// One `executor run --once` in `clone`: its result.
     #[must_use]
     pub fn pass(&self, clone: &Path) -> Value {
-        self.test_box.bay_ok(clone, &["executor", "run", "--once"])
+        self.test_box.bay_ok(clone, &["runner", "run", "--once"])
     }
 
     /// Waits until the first run holds.

@@ -120,7 +120,7 @@ fn doctor_outside_a_repository_is_red_below_the_git_floor() {
     test_box.fake_git_version("2.39.0");
     let (code, result) = result_json(test_box.bay(test_box.path()).arg("doctor"));
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "GIT_BELOW_FLOOR");
+    assert_eq!(result["reason"], "TOOL_BELOW_FLOOR");
     assert_eq!(row(&result, "git")["recovery"], "upgrade git");
 }
 

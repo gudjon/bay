@@ -9,7 +9,7 @@
 //! with plain Git to a plain bare remote. Then:
 //!
 //! - `bay status` warns `trunk_not_linear`, naming M, its parents and the 2 landings it pushed
-//!   off, with the hint to require linear history; `bay watch` names M once the same way;
+//!   off, with the hint to require linear history; `bay status --since` names M once the same way;
 //! - a `[[target]]` at B reads B as on its source's line, with no failure;
 //! - `bay undo A` lands its revert on the tip;
 //! - a post check that passed at A and failed at B is red, owned by B, B the culprit.
@@ -20,7 +20,7 @@
 //!   `if !expansion.landings.is_empty() {` to `if false {` (no warning, no event, and the red
 //!   is owned by M, not B);
 //! - the ancestry check in `src/undo.rs` `landed_commit`: `Ok(true)` to `Ok(false)` in the
-//!   `is_ancestor` match (the undo of A is refused `CHANGE_NOT_LANDED`);
+//!   `is_ancestor` match (the undo of A is refused `CHANGE_NOT_MERGED`);
 //! - `src/target.rs`: `crate::trunkline::on_line(git, from, tip)?` back to
 //!   `on_first_parent(git, from, tip)?` in `Read::row` (B reads as off its source).
 
@@ -84,7 +84,7 @@ impl Trunk {
         let id = started["change"].as_str().unwrap().to_owned();
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join(path), format!("{path}\n")).unwrap();
-        let (code, landed) = result_json(self.test_box.bay(&view).args(["land", "--wait"]));
+        let (code, landed) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{landed}");
         let commit = landed["detail"]["commit"].as_str().unwrap().to_owned();
         (id, commit)
@@ -139,7 +139,7 @@ fn landings_an_outside_merge_pushed_off_the_first_parent_line_are_still_found() 
     let test_box = &trunk.test_box;
     let (a, landed_a) = trunk.land("src/one.rs");
     let (b, landed_b) = trunk.land("src/two.rs");
-    let watched = test_box.bay_ok(&trunk.repo, &["watch"]);
+    let watched = test_box.bay_ok(&trunk.repo, &["status", "--since"]);
     let cursor = watched["detail"]["cursor"].as_str().unwrap().to_owned();
 
     // Outside bay, a merge whose first parent is the commit before A and whose second parent
@@ -200,14 +200,14 @@ fn landings_an_outside_merge_pushed_off_the_first_parent_line_are_still_found() 
         "{unattributed}"
     );
 
-    // `bay watch` names the merge once.
-    let watched = test_box.bay_ok(&trunk.repo, &["watch", "--since", &cursor]);
+    // `bay status --since` names the merge once.
+    let watched = test_box.bay_ok(&trunk.repo, &["status", "--since", &cursor]);
     let events = not_linear(&watched["detail"]["events"]);
     assert_eq!(events.len(), 1, "{watched}");
     assert_eq!(events[0]["commit"], merge.as_str(), "{watched}");
     assert_eq!(events[0]["landings"], 2, "{watched}");
     let next = watched["detail"]["cursor"].as_str().unwrap().to_owned();
-    let again = test_box.bay_ok(&trunk.repo, &["watch", "--since", &next]);
+    let again = test_box.bay_ok(&trunk.repo, &["status", "--since", &next]);
     assert!(
         not_linear(&again["detail"]["events"]).is_empty(),
         "named once: {again}"
@@ -227,7 +227,7 @@ fn landings_an_outside_merge_pushed_off_the_first_parent_line_are_still_found() 
     // `bay undo A` reverts A on the tip, above the merge.
     let (code, undone) = result_json(test_box.bay(&trunk.repo).args(["undo", &a, "--wait"]));
     assert_eq!(code, 0, "{undone}");
-    assert_eq!(undone["decision"], "landed", "{undone}");
+    assert_eq!(undone["decision"], "merged", "{undone}");
     assert_eq!(trunk.remote_git(&["rev-parse", "main^"]), merge, "{undone}");
     let reverts = trunk.remote_git(&[
         "log",

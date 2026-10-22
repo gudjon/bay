@@ -1,24 +1,21 @@
 //! G302. The read verb never deletes; one view shows every head.
 //!
-//! `bay prune` deletes the remote's branches landed by `ancestor` or `patch`, each archived on
-//! the remote first and its restore line logged, exactly as `bay status --heads --prune` does:
-//! both are one request through one function, so they prune the same branches, skip the same
-//! ones and write the same restore lines. `bay status --heads` alone deletes nothing, and its
-//! detail names, in `stranded`, the heads only this disk has: the local branches no
+//! `bay prune` deletes the remote's branches merged by `ancestor` or `patch`, each archived on
+//! the remote first and its restore line logged; a second prune after a restore reuses the same
+//! archives and writes the same restore lines. `bay status --heads` alone deletes nothing, and
+//! its detail names, in `stranded`, the heads only this disk has: the local branches no
 //! remote-tracking ref holds and the worktree records whose folder is gone, read from local refs
-//! only. The older spellings still work: `bay status --stranded` gives its own result as before,
-//! `bay status --heads --prune` prunes, and `bay help --json` lists `prune`.
+//! only. The older spellings are gone (0.3.0): `bay status --stranded` and `bay status --heads
+//! --prune` are usage errors, and `bay help --json` lists `prune`.
 //!
 //! Guards to mutate (each makes a case here fail):
 //!
 //! - `src/main.rs` `main`: `Command::Prune { stale_days } => heads(&cli.dir, true, stale_days),`
 //!   (make `true` `false`): `bay prune` deletes nothing, and the first case finds no pruned row;
-//! - `src/main.rs` `status`: `return heads(dir, prune, stale_days);` (make `prune` `true`):
-//!   `bay status --heads` deletes the landed branches, and the second case sees them gone;
+//! - `src/main.rs` `status`: `return heads(dir, false, stale_days);` (make `false` `true`):
+//!   `bay status --heads` deletes the merged branches, and the second case sees them gone;
 //! - `src/heads.rs` `run`: `"stranded": crate::stranded::local(git)?,` (drop it): the second
-//!   case's detail names no stranded branch or worktree;
-//! - `src/stranded.rs` `run`: `detail["fetched"] = json!(false);` (drop it): the third case's
-//!   `bay status --stranded` no longer says it never fetched.
+//!   case's detail names no stranded branch or worktree.
 
 // The box's git is a shell wrapper on PATH, so these run on Unix only.
 #![cfg(unix)]
@@ -148,7 +145,7 @@ fn names(result: &Value, key: &str) -> Vec<String> {
 }
 
 #[test]
-fn prune_deletes_what_status_heads_prune_deletes_with_the_same_archive_and_log() {
+fn prune_deletes_with_an_archive_and_a_log_and_prunes_the_same_again() {
     let fixture = fixture();
     let before = fixture.remote_heads();
 
@@ -176,11 +173,11 @@ fn prune_deletes_what_status_heads_prune_deletes_with_the_same_archive_and_log()
         assert!(lines.contains(&line.as_str()), "{first_log}");
     }
 
-    // Put both back from the log, then prune through the older spelling: the same rows, the
-    // same archive refs reused, the same restore lines once more.
+    // Put both back from the log, then prune again: the same rows, the same archive refs
+    // reused, the same restore lines once more.
     fixture.restore();
     assert_eq!(fixture.remote_heads(), before);
-    let alias = fixture.bay(&["status", "--heads", "--prune"]);
+    let alias = fixture.bay(&["prune"]);
     assert_eq!(names(&alias, "pruned"), names(&pruned, "pruned"), "{alias}");
     assert_eq!(
         names(&alias, "skipped"),
@@ -252,29 +249,21 @@ fn status_heads_deletes_nothing_and_names_the_stranded_heads_too() {
 }
 
 #[test]
-fn the_older_spellings_still_work_and_help_lists_prune() {
+fn the_older_spellings_are_refused_and_help_lists_prune() {
     let fixture = fixture();
-
-    // `--stranded` alone: its own result, as before.
-    let stranded = fixture.bay(&["status", "--stranded"]);
-    let detail = &stranded["detail"];
-    assert_eq!(detail["fetched"], false, "{stranded}");
-    assert!(detail["note"].is_string(), "{stranded}");
-    assert!(detail.get("heads").is_none(), "{stranded}");
-    assert_eq!(detail["branches"][0]["branch"], "local-only", "{stranded}");
-    assert_eq!(
-        detail["prunable_worktrees"][0]["branch"], "gone-branch",
-        "{stranded}"
-    );
-
-    // `--prune` still needs `--heads`; `bay prune` needs nothing else.
-    let out = fixture
-        .test_box
-        .bay(&fixture.repo)
-        .args(["status", "--prune"])
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    for args in [
+        &["status", "--stranded"][..],
+        &["status", "--heads", "--prune"][..],
+        &["status", "--prune"][..],
+    ] {
+        let out = fixture
+            .test_box
+            .bay(&fixture.repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+    }
 
     let help = fixture.bay(&["help"]);
     let commands = help["detail"]["commands"]

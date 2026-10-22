@@ -6,7 +6,7 @@
 //! `HEAD` through an index of its own, so the checkout's index and branch are never staged or
 //! committed in. The changed files are the declared paths of a normal `bay start`, whose first
 //! draft is that commit merged onto the current trunk the way `start --from` takes a branch in
-//! (`merge_onto`, with `HEAD` as the merge base). `bay land --wait` follows, with its result
+//! (`merge_onto`, with `HEAD` as the merge base). `bay merge --wait` follows, with its result
 //! semantics. On `landed` the checkout's trunk branch fast-forwards to the landing, once the
 //! saved files still hold what was saved, so no edit is lost. Any refusal leaves the checkout
 //! exactly as it was, and names the change when one was opened, for `bay start <change>`.
@@ -61,11 +61,11 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
     if request.intent.trim().is_empty() {
         return Err("bay save needs an intent: a card, issue or ticket id".to_owned());
     }
-    // G279: a view's edits land by `bay land`; a save is of the main checkout only.
+    // G279: a view's edits land by `bay merge`; a save is of the main checkout only.
     if let Some(change) = repo.view_change(dir) {
         return Err(format!(
             "bay save runs in the repository's main checkout, and this is the view of change \
-             {change}: use bay land here"
+             {change}: use bay merge here"
         ));
     }
     main_checkout_only(repo, dir)?;

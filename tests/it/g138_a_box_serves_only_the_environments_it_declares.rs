@@ -36,7 +36,7 @@ fn submitted(test_box: &TestBox) -> (String, PathBuf, PathBuf, PathBuf) {
     .collect();
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).arg("land"));
+    let (code, result) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{result}");
     (id, repo, remote, runs)
 }
@@ -67,7 +67,7 @@ fn a_box_serves_only_the_environments_it_declares() {
     let e1 = executor(&test_box, &remote, "exec-a", "env-a");
     let e2 = executor(&test_box, &remote, "exec-b", "env-b");
 
-    let first = test_box.bay_ok(&e1, &["executor", "run", "--once"]);
+    let first = test_box.bay_ok(&e1, &["runner", "run", "--once"]);
     let result = &first["detail"]["ran"][0];
     assert_eq!(result["decision"], "queued", "{first}");
     assert_eq!(result["reason"], "CHECK_UNAVAILABLE", "{first}");
@@ -87,16 +87,16 @@ fn a_box_serves_only_the_environments_it_declares() {
     // E1 keeps passing over the operation while E2 watches its lease: it never renews it.
     let mut looping = test_box
         .bay_process(&e1)
-        .args(["--json", "executor", "run", "--interval-s", "1"])
+        .args(["--json", "runner", "run", "--interval-s", "1"])
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
     std::thread::sleep(std::time::Duration::from_secs(2));
-    let second = test_box.bay_ok(&e2, &["executor", "run", "--once"]);
+    let second = test_box.bay_ok(&e2, &["runner", "run", "--once"]);
     let _ = looping.kill();
     let _ = looping.wait();
     let result = &second["detail"]["ran"][0];
-    assert_eq!(result["decision"], "landed", "{second}");
+    assert_eq!(result["decision"], "merged", "{second}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
     assert_eq!(line_count(&runs), 1, "one check ran, on E2");
     let log = test_box.git_bare(
@@ -131,8 +131,8 @@ fn a_box_that_declares_nothing_serves_every_environment() {
     assert_eq!(environments["state"], "green", "{result}");
     assert_eq!(code, 0, "{result}");
 
-    let ran = test_box.bay_ok(&clone, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    let ran = test_box.bay_ok(&clone, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
     // It ran the `env-b` check: at least once, since a lease that runs out under a loaded gate
     // box lets the operation be taken over and checked again. The cases that must not run
@@ -196,7 +196,7 @@ fn the_repository_config_cannot_declare_an_environment() {
     let mut files = check_files("", &passing_result(1), 1, 60);
     files.push((
         ".bay/config.toml".to_owned(),
-        "[executor]\nlease_s = 2\nheartbeat_s = 1\ncheck_environment = [\"env-b\"]\n".to_owned(),
+        "[runner]\nlease_s = 2\nheartbeat_s = 1\ncheck_environment = [\"env-b\"]\n".to_owned(),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (code, result) = result_json(

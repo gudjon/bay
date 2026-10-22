@@ -71,7 +71,7 @@ fn a_misspelled_check_key_refuses_the_landing_naming_it() {
     let (test_box, repo) = trunk(&format!("revision = 1\n{}", check("stagee = \"post\"\n")));
     let view = start(&test_box, &repo, "TYPO-1");
     std::fs::write(view.join("src/app.txt"), "app two\n").unwrap();
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
     assert_eq!(refused["detail"]["policy"], "base", "{refused}");
@@ -166,7 +166,7 @@ fn a_candidate_that_adds_an_unknown_key_to_its_own_policy_is_refused() {
         format!("revision = 2\n{}", check("network_access = true\n")),
     )
     .unwrap();
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
     assert_eq!(refused["detail"]["policy"], "candidate", "{refused}");

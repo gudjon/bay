@@ -73,14 +73,14 @@ fn land(held: &Held, file: &str) -> (String, PathBuf) {
     let id = started["change"].as_str().unwrap().to_owned();
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join(format!("src/{file}.rs")), "fn x() {}\n").unwrap();
-    let (code, submitted) = result_json(held.test_box.bay(&view).arg("land"));
+    let (code, submitted) = result_json(held.test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{submitted}");
     (id, view)
 }
 
 /// `land --wait` of a change while the queue is live: it holds a place at `position`.
 fn hold_place(held: &Held, view: &Path, position: u64) {
-    let (code, waiting) = result_json(held.test_box.bay(view).args(["land", "--wait"]));
+    let (code, waiting) = result_json(held.test_box.bay(view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{waiting}");
     assert_eq!(waiting["decision"], "queued", "{waiting}");
     assert_eq!(waiting["detail"]["position"], position, "{waiting}");
@@ -99,11 +99,8 @@ fn the_third_queued_change_sees_its_conflict_while_the_head_is_checked() {
     // Runs 1 and 2 move trunk: the first change joins the queue as its head.
     let queued = held
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(
-        queued["detail"]["ran"][0]["reason"], "PUBLICATION_QUEUED",
-        "{queued}"
-    );
+        .bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(queued["detail"]["ran"][0]["reason"], "QUEUED", "{queued}");
     let (second, second_view) = land(&held, "second");
     hold_place(&held, &second_view, 2);
     let (third, third_view) = land(&held, "third");
@@ -134,7 +131,7 @@ fn the_third_queued_change_sees_its_conflict_while_the_head_is_checked() {
     let child = held
         .test_box
         .bay_process(&executor)
-        .args(["--json", "executor", "run", "--once"])
+        .args(["--json", "runner", "run", "--once"])
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -164,7 +161,7 @@ fn the_third_queued_change_sees_its_conflict_while_the_head_is_checked() {
     );
     // It keeps its place: still queued, not blocked, and its reservation is not released.
     assert_eq!(third_op["state"], "admitted", "{third_op}");
-    assert_eq!(third_op["outcome"], "PUBLICATION_QUEUED", "{third_op}");
+    assert_eq!(third_op["outcome"], "QUEUED", "{third_op}");
     let released = held.test_box.git_bare(
         &held.remote,
         &[

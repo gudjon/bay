@@ -1,9 +1,9 @@
 //! G301. `bay abandon` gives a change up.
 //!
-//! `bay abandon` submits the abandon request `bay land --abandon` submits, by one code path:
+//! `bay abandon` submits the abandon request `bay abandon` submits, by one code path:
 //! with no argument, the change of the view it runs in; with an argument, that change, from
 //! anywhere in the repository. The change's state becomes `abandoned`, in the result and in
-//! `bay status`. `bay land --abandon` still works.
+//! `bay status`. `bay abandon` still works.
 //!
 //! Guards to mutate (each makes a case here fail):
 //!
@@ -77,7 +77,7 @@ fn bay_abandon_names_a_change_from_the_repository() {
 fn bay_land_abandon_still_works() {
     let (test_box, repo) = setup();
     let (id, view) = started(&test_box, &repo, "CARD-312");
-    let (code, abandoned) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    let (code, abandoned) = result_json(test_box.bay(&view).args(["abandon"]));
     assert_eq!(code, 0, "{abandoned}");
     assert_abandoned(&test_box, &repo, &id, &abandoned);
 }

@@ -136,7 +136,7 @@ fn a_change_given_up_frees_its_place() {
         test_box
             .bay(&view)
             .env("BAY_ACTOR", "alice")
-            .args(["land", "--abandon"]),
+            .args(["abandon"]),
     );
     assert_eq!(code, 0, "{abandoned}");
 

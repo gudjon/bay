@@ -29,7 +29,7 @@ fn a_rewound_remote_is_detected_before_publication() {
     // Someone rewinds the remote trunk to an ancestor of what the change saw.
     test_box.git_bare(&remote, &["update-ref", "refs/heads/main", &first]);
 
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 20, "{result}");
     assert!(
         result["detail"].as_str().unwrap().contains("rewound"),

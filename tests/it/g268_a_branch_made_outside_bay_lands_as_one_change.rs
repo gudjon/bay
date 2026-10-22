@@ -6,7 +6,7 @@
 //! only a ref the remote lacks is read here (N-5). The change's view starts at its base, and its
 //! first draft is the branch's net change since its merge base with trunk, merged onto the base
 //! by the merge a candidate is built with. The record keeps `from: {ref, commit, source}`
-//! (`source` is `remote` or `local`), which `bay start` and `bay status` show. `bay land`
+//! (`source` is `remote` or `local`), which `bay start` and `bay status` show. `bay merge`
 //! publishes it as one trunk commit with bay's trailers, so `bay status` lists no unattributed
 //! landing. A branch that conflicts with trunk is `MERGE_CONFLICT`, and one that changes a path
 //! `--paths` does not declare is the blocked `PATHS_UNDECLARED`, naming the uncovered paths; in
@@ -68,9 +68,9 @@ fn land_through_bay(test_box: &TestBox, repo: &Path, intent: &str, path: &str, t
     let started = test_box.bay_ok(repo, &["start", intent, "--paths", "src/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join(path), text).unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 }
 
 fn refs(test_box: &TestBox, remote: &Path, prefix: &str) -> Vec<String> {
@@ -129,9 +129,9 @@ fn a_two_commit_outside_branch_lands_as_one_attributed_trunk_commit() {
     );
     assert!(view.join("src/new.rs").exists(), "the view is of the base");
 
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 
     // Exactly one new trunk commit, on the old tip, holding both edits; the branch's own
     // commits never reach trunk.

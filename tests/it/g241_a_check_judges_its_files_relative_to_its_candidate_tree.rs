@@ -34,8 +34,8 @@ fn an_adapter_that_leaves_out_git_parts_relative_to_its_tree_passes_a_clean_cand
         &check_files(RELATIVE_JUDGE, &passing_result(1), 1, 60),
     );
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote).len(), 1);
 }

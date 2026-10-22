@@ -31,7 +31,7 @@ fn submitted() -> (TestBox, PathBuf, PathBuf) {
 }
 
 fn land(test_box: &TestBox, view: &Path) -> (i32, serde_json::Value) {
-    result_json(test_box.bay(view).args(["land", "--wait"]))
+    result_json(test_box.bay(view).args(["merge", "--wait"]))
 }
 
 #[test]
@@ -58,7 +58,7 @@ fn the_boxs_choice_runs_the_check_and_its_record_says_none() {
     test_box.choose_unsandboxed(true);
     let (code, result) = land(&test_box, &view);
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed", "{result}");
+    assert_eq!(result["decision"], "merged", "{result}");
     assert_eq!(test_box.trunk_change_ids(&remote).len(), 1);
     let notes = test_box.git_ok(
         &view,
@@ -113,7 +113,7 @@ fn a_repository_cannot_choose_to_run_checks_unconfined() {
     let mut check = check_files("", &passing_result(1), 1, 60);
     check.push((
         ".bay/config.toml".to_owned(),
-        "[executor]\nsandbox = \"none\"\n".to_owned(),
+        "[runner]\nsandbox = \"none\"\n".to_owned(),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &check);
     test_box.no_sandbox();

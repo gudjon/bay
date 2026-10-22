@@ -237,7 +237,7 @@ fn verify(
         {
             return Err(format!(
                 "{}: reviewer {from} holds open talk {} about change {}; a reviewer holds one open talk per change, and a later finding supersedes it",
-                Reason::TalkBacklog.code(),
+                Reason::TalkRefused.code(),
                 open.id,
                 talk.body["change"].as_str().unwrap_or_default()
             ));

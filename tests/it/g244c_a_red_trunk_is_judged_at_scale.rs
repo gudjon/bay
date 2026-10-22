@@ -2,7 +2,7 @@
 //!
 //! `[red] window = N` in `.bay/config.toml` sets how many trunk commits a red judgement reads
 //! back. A post check that no landing in the window answers is `pending_beyond_window` in
-//! `detail.red_pending` of `bay status`, the fleet map and `bay watch`: never green, though it
+//! `detail.red_pending` of `bay status`, the fleet map and `bay status --since`: never green, though it
 //! refuses no landing. A red check names its suspect range: the last landing it passed on, the
 //! first it failed on, and the landings in between, so an operator can bisect.
 
@@ -63,7 +63,7 @@ impl Trunk {
         let id = started["change"].as_str().unwrap().to_owned();
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join(path), format!("{path}\n")).unwrap();
-        let (code, landed) = result_json(self.test_box.bay(&view).args(["land", "--wait"]));
+        let (code, landed) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{landed}");
         (id, landed["detail"]["commit"].as_str().unwrap().to_owned())
     }
@@ -120,7 +120,7 @@ fn a_post_check_answered_only_behind_the_window_is_pending_never_green() {
     let fleet = trunk.test_box.bay_ok(&trunk.repo, &["status", "--fleet"]);
     assert_eq!(fleet["detail"]["red"], json!([]), "{fleet}");
     assert_eq!(fleet["detail"]["red_pending"], *pending, "{fleet}");
-    let watched = trunk.test_box.bay_ok(&trunk.repo, &["watch"]);
+    let watched = trunk.test_box.bay_ok(&trunk.repo, &["status", "--since"]);
     assert_eq!(watched["detail"]["red_pending"], *pending, "{watched}");
 
     // Pending is unknown, not a failure: a landing on its paths still lands.

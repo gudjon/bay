@@ -181,6 +181,13 @@ impl Fixture {
         result
     }
 
+    /// `bay prune`: the one command that deletes heads (G302).
+    fn prune(&self) -> Value {
+        let (code, result) = result_json(self.test_box.bay(&self.repo).arg("prune"));
+        assert_eq!(code, 0, "{result}");
+        result
+    }
+
     fn log(&self) -> String {
         std::fs::read_to_string(self.repo.join(".git/bay/pruned-heads.log")).unwrap_or_default()
     }
@@ -283,7 +290,7 @@ fn the_census_classes_every_remote_branch_and_deletes_nothing() {
 fn prune_deletes_only_the_landed_branches_and_the_log_restores_them() {
     let fixture = fixture();
     let before = fixture.remote_heads();
-    let result = fixture.heads(&["--prune"]);
+    let result = fixture.prune();
 
     assert_eq!(names(&result, "pruned"), ["ff", "squashed"], "{result}");
     assert_eq!(
@@ -386,7 +393,7 @@ fn prune_deletes_only_the_landed_branches_and_the_log_restores_them() {
     );
 
     // A second prune finds them landed again; nothing else is ever touched.
-    let again = fixture.heads(&["--prune"]);
+    let again = fixture.prune();
     assert_eq!(names(&again, "pruned"), ["ff", "squashed"], "{again}");
 }
 
@@ -418,7 +425,7 @@ fn a_landed_branch_moved_after_the_census_is_not_deleted() {
         remote = fixture.remote.display(),
     ));
 
-    let result = fixture.heads(&["--prune"]);
+    let result = fixture.prune();
     assert!(marker.exists(), "the delete of ff never ran: {result}");
     assert_eq!(names(&result, "pruned"), ["squashed"], "{result}");
     let skipped = result["detail"]["skipped"]

@@ -25,9 +25,15 @@ use support::TestBox;
 /// - 0.2.15: the counts bay had when the budget began.
 /// - G317, one reason (`BAY_BELOW_FLOOR`): a config that names a newer bay says "update bay"
 ///   instead of a config error someone must trace to a key an older bay does not know.
+/// - 0.3.0, one name per idea (G325): `watch` is `status --since` (one read command), and
+///   `approve --reject` is `reject` (the person's two words); `start --resume`, `land
+///   --abandon`, `status --stranded` and `status --heads --prune` are gone, each covered by the
+///   command that already did it. Fifteen reasons fold into four (a queue's turn, a tool below
+///   its floor, an absent tool, a refused talk), and a lane change's checks end `ok`, so its
+///   refusal is gone.
 const COMMANDS: usize = 28;
-const FLAGS: usize = 78;
-const REASONS: usize = 69;
+const FLAGS: usize = 74;
+const REASONS: usize = 57;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.

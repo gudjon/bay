@@ -2,7 +2,7 @@
 //!
 //! After the change closes, retention expires and `gc --prune=now` runs, `status` still
 //! explains the outcome; a retry of the expired op id is refused as ambiguous; a new operation
-//! on the same `Change-Id` is refused `CHANGE_ALREADY_LANDED`; a key revoked after a
+//! on the same `Change-Id` is refused `CHANGE_ALREADY_MERGED`; a key revoked after a
 //! publication does not make it unverifiable; the hook refuses a cut of an open change or one
 //! that drops the latest request; a cut racing a late publishing push keeps what the push needs.
 //! Past the ref budget an executor compacts the markers of a landed, cut change into the shard
@@ -50,17 +50,17 @@ fn the_outcome_is_explained_after_retention_and_gc() {
 
     // A draft that is superseded before the landing, then the landed revision.
     let (id, view) = test_box.start_and_edit(&repo);
-    test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    test_box.bay_ok(&repo, &["start", &id]);
     let superseded = test_box.git_ok(&repo, &["rev-parse", &format!("refs/bay/changes/{id}^2")]);
     std::fs::write(view.join("src/new.rs"), "fn new() { final }\n").unwrap();
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
 
     let executor = test_box.clone_of(&remote, "executor");
     test_box.use_keys(&executor, &keys);
-    let landed = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(landed["detail"]["ran"][0]["decision"], "landed", "{landed}");
-    let cut = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let landed = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(landed["detail"]["ran"][0]["decision"], "merged", "{landed}");
+    let cut = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert!(
         cut["detail"]["ran"][0]["retention_cut"].is_string(),
         "{cut}"
@@ -98,9 +98,9 @@ fn the_outcome_is_explained_after_retention_and_gc() {
 
     // A new operation on the same change is refused: the publication verifies by itself.
     std::fs::write(view.join("src/new.rs"), "fn new() { more }\n").unwrap();
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "CHANGE_ALREADY_LANDED");
+    assert_eq!(refused["reason"], "CHANGE_ALREADY_MERGED");
 
     // Revoking the executor key later does not make the publication unverifiable.
     test_box.enroll_executor(&repo, &keys, &keys.rogue);
@@ -134,7 +134,7 @@ fn the_hook_refuses_a_cut_of_an_open_change_or_one_dropping_the_latest_request()
 
     // An executor-signed cut of a chain whose change has not landed.
     let (open, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     let cut = |id: &str, keep_request: bool| {
         let git = bay::git::Git::new(&repo);
@@ -177,7 +177,7 @@ fn the_hook_refuses_a_cut_of_an_open_change_or_one_dropping_the_latest_request()
     // A landed change, cut without its latest request.
     let (landed, view) = test_box.start_and_edit(&repo);
     std::fs::write(view.join("src/other.rs"), "fn other() {}\n").unwrap();
-    let (code, _) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, _) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0);
     let head = cut(&landed, false);
     let out = test_box
@@ -206,7 +206,7 @@ fn a_cut_racing_a_late_publishing_push_keeps_what_the_push_needs() {
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
 
     // The executor stalls just before its publishing push.
@@ -217,7 +217,7 @@ fn a_cut_racing_a_late_publishing_push_keeps_what_the_push_needs() {
             .bay_process(&executor)
             .env("BAY_TEST_PAUSE_AT", "before-publish")
             .env("BAY_TEST_PAUSE_FILE", &release)
-            .args(["executor", "run", "--once"])
+            .args(["runner", "run", "--once"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -288,11 +288,11 @@ fn a_failed_chain_fetch_never_rewrites_another_change() {
     } else {
         ((two, two_view), one)
     };
-    let (code, landed) = result_json(test_box.bay(&cut_view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&cut_view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     // An executor elsewhere cuts the landed chain, so this clone's copy is behind a rewrite.
     let executor = test_box.clone_of(&remote, "executor");
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let remote_cut = test_box.git_bare(&remote, &["rev-parse", &format!("refs/bay/changes/{cut}")]);
     assert!(
         test_box
@@ -351,7 +351,7 @@ fn an_abandoned_change_is_cut_after_retention_and_keeps_its_draft() {
     test_box.use_keys(&repo, &keys);
 
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, abandoned) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    let (code, abandoned) = result_json(test_box.bay(&view).args(["abandon"]));
     assert_eq!(code, 0, "{abandoned}");
     let request = abandoned["detail"]["request"].as_str().unwrap().to_owned();
     let chain_ref = format!("refs/bay/changes/{id}");
@@ -359,7 +359,7 @@ fn an_abandoned_change_is_cut_after_retention_and_keeps_its_draft() {
 
     let executor = test_box.clone_of(&host, "executor");
     test_box.use_keys(&executor, &keys);
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let cut = &ran["detail"]["ran"][0];
     assert_eq!(cut["change"], id.as_str(), "{ran}");
     assert!(
@@ -422,7 +422,7 @@ fn a_compacted_marker_is_never_created_again_and_still_answers() {
     let view = std::path::PathBuf::from(started["detail"]["view"].as_str().unwrap());
     let intent = started["detail"]["intent"].as_str().unwrap().to_owned();
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let marker = format!("refs/bay/landed/{id}");
     let landed_intent = intent.replace("refs/bay/intent/", "refs/bay/landed-intent/");
@@ -454,7 +454,7 @@ fn a_compacted_marker_is_never_created_again_and_still_answers() {
     test_box.use_keys(&executor, &keys);
     let mut compacted = serde_json::Value::Null;
     for _ in 0..2 {
-        let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+        let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
         if let Some(entry) = ran["detail"]["ran"]
             .as_array()
             .unwrap()
@@ -669,7 +669,7 @@ fn compacted_markers_still_answer(
     test_box.use_keys(&fresh, keys);
     let (code, undone) = result_json(test_box.bay(&fresh).args(["undo", id]));
     assert_eq!(code, 0, "{undone}");
-    assert_ne!(undone["reason"], "CHANGE_NOT_LANDED", "{undone}");
+    assert_ne!(undone["reason"], "CHANGE_NOT_MERGED", "{undone}");
 
     // A start on the compacted intent still knows generation 1 landed: it claims generation 2,
     // which supersedes the landed change (G293), and never re-opens that change.
@@ -809,7 +809,7 @@ fn a_landed_claim_is_created_only_by_its_own_landing() {
         &["remote", "set-url", "origin", copy.to_str().unwrap()],
     );
     std::fs::write(view.join("src/c.rs"), "fn c() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     test_box.git_ok(
         &repo,

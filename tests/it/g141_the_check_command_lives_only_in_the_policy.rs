@@ -58,9 +58,9 @@ fn land_runs_only_the_policys_command_and_doctor_names_the_retired_key() {
     assert_ne!(status["reason"], "CONFIG_INVALID", "{status}");
 
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert!(!marker.exists(), "the config's command ran");
     let remote = test_box.path().join("repo-remote.git");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);

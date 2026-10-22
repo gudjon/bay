@@ -62,17 +62,17 @@ fn every_session_in_a_view_is_recorded_on_the_views_change() {
 
     // The lead, a subagent of the lead, and a teammate with its own session.
     let lead = json!({"session_id": "lead-1", "hook_event_name": "SessionStart", "source": "startup", "cwd": view});
-    assert_eq!(hook(&test_box, &view, "session-start", &lead), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &lead), Some(0));
     let batch = json!({"session_id": "lead-1", "hook_event_name": "PostToolBatch", "cwd": view, "tool_calls": []});
-    assert_eq!(hook(&test_box, &view, "post-tool", &batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &batch), Some(0));
     let sub = json!({"session_id": "lead-1", "agent_id": "a-sub", "agent_type": "general-purpose",
         "hook_event_name": "PostToolBatch", "cwd": view, "tool_calls": []});
-    assert_eq!(hook(&test_box, &view, "post-tool", &sub), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &sub), Some(0));
     let mate = json!({"session_id": "mate-2", "agent_type": "teammate", "hook_event_name": "SessionStart",
         "source": "startup", "cwd": view});
-    assert_eq!(hook(&test_box, &view, "session-start", &mate), Some(0));
+    assert_eq!(hook(&test_box, &view, "session.start", &mate), Some(0));
     let mate_batch = json!({"session_id": "mate-2", "hook_event_name": "PostToolBatch", "cwd": view, "tool_calls": []});
-    assert_eq!(hook(&test_box, &view, "post-tool", &mate_batch), Some(0));
+    assert_eq!(hook(&test_box, &view, "step.end", &mate_batch), Some(0));
 
     let lead_lines = lines(&sessions_dir(&repo).join("lead-1.jsonl"));
     let mate_lines = lines(&sessions_dir(&repo).join("mate-2.jsonl"));
@@ -107,7 +107,7 @@ fn a_session_outside_a_view_is_recorded_with_no_change() {
     let repo = test_box.repo_any("repo");
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     let payload = json!({"session_id": "root-1", "hook_event_name": "SessionStart", "cwd": repo});
-    assert_eq!(hook(&test_box, &repo, "session-start", &payload), Some(0));
+    assert_eq!(hook(&test_box, &repo, "session.start", &payload), Some(0));
     let recorded = lines(&sessions_dir(&repo).join("root-1.jsonl"));
     assert_eq!(recorded.len(), 1, "{recorded:?}");
     let line = &recorded[0];
@@ -129,7 +129,7 @@ fn pre_tool_appends_nothing() {
     let (_, view) = test_box.start_and_edit(&repo);
     let payload = json!({"session_id": "pre-1", "hook_event_name": "PreToolUse", "cwd": view,
         "tool_name": "Edit", "tool_input": {"file_path": view.join("src/a.rs")}});
-    assert_eq!(hook(&test_box, &view, "pre-tool", &payload), Some(0));
+    assert_eq!(hook(&test_box, &view, "tool.before", &payload), Some(0));
     assert!(!sessions_dir(&repo).join("pre-1.jsonl").exists());
 }
 
@@ -140,7 +140,7 @@ fn a_session_id_that_is_not_a_file_name_is_not_recorded() {
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     let (_, view) = test_box.start_and_edit(&repo);
     let payload = json!({"session_id": "../escape", "hook_event_name": "Stop", "cwd": view});
-    assert_eq!(hook(&test_box, &view, "stop", &payload), Some(0));
+    assert_eq!(hook(&test_box, &view, "turn.end", &payload), Some(0));
     assert!(!repo.join(".git/bay/escape.jsonl").exists());
     assert!(!sessions_dir(&repo).exists(), "nothing was recorded");
 }

@@ -77,7 +77,7 @@ fn racing_starts_for_one_generation_make_one_claim_and_refuse_the_rest() {
         test_box
             .bay(&view)
             .env("BAY_ACTOR", "agent-0")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "{landed}");
     let remote_dir = format!("--git-dir={}", remote.display());

@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.3.0
+
+One name per idea. Old names are removed, not aliased, so update scripts and settings files together.
+
+- `bay land` is `bay merge`; the decision `landed` is `merged`.
+- `bay watch` is `bay status --since [<cursor>]`; `--landed` is `--merged`.
+- `bay executor` is `bay runner`, and `[executor]` in the config is `[runner]`.
+- `bay adapter test` is `bay plugin test`; plugins are configured as `[plugin.<kind>] command, timeout_s`.
+- `bay approve --reject` is `bay reject <change>`; `--trunk` is `--main` on `bay install` and `bay host init`.
+- Gone: `start --resume`, `land --abandon`, `--observe`, `--intent-revision`, `status --stranded` and `status --heads --prune`.
+- `[[freeze]]` is `[[hold]]`; a hold with no `target` holds main.
+- Hook moments are renamed, such as `tool.before` and `turn.end`; `bay install` rewrites the entries.
+- `bay doctor` names hook entries an older bay wrote, under `old_names`; a tool call under an old name is refused.
+- A tool call refused under a wrong hook name says to run `bay install`, not to update bay.
+- Reason codes say main and merge: `MAIN_MOVED`, `MAIN_RED`, `MAIN_HELD`, `CHANGE_NOT_MERGED`, `OUTSIDE_MERGE`, `RUNNER_KEY_MISSING`.
+- `QUEUED` replaces two queue codes; `TALK_REFUSED` replaces seven talk codes, with `detail.why`.
+- `TOOL_BELOW_FLOOR` and `TOOL_ABSENT` name the tool in `detail.tool`: git, bay, claude or codex.
+- A lane change's checks end `ok` with the verdicts; it still never merges.
+- Results no longer carry `published` or `next`; `receipts` is `evidence`.
+- A throughput lever turns evidence reuse on; `evidence_reuse` is needed only for reuse alone.
+
 ## 0.2.17
 
 - `bay status --fleet` shows each machine's last `bay doctor` verdict, and `ready` counts the fleet's green and red.

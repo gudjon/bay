@@ -22,7 +22,7 @@ pub const DONE_PREFIX: &str = crate::names::QUEUE_DONE;
 
 /// The release reason of a head that could not start its check because no worker answered
 /// (`CHECK_UNAVAILABLE`, `DESIGN` § 6). It counts toward neither `QUEUE_DEADLINE_EXCEEDED`
-/// nor `PUBLISH_RETRY_EXHAUSTED`.
+/// nor `MERGE_RETRY_EXHAUSTED`.
 pub const UNAVAILABLE: &str = "unavailable";
 
 /// One reservation's entry.

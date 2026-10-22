@@ -1,14 +1,14 @@
 //! G35. Publication never livelocks.
 //!
-//! After two `TRUNK_MOVED` refusals an operation joins the queue and lands in order; an
+//! After two `MAIN_MOVED` refusals an operation joins the queue and lands in order; an
 //! operation arriving while a queue is live holds a place without running a check
-//! (`QUEUE_HELD`); a head whose check fails releases the queue at once; an executor killed
+//! (`QUEUED`); a head whose check fails releases the queue at once; an executor killed
 //! right after publishing leaves the queue free and the landed marker present (one atomic push);
 //! a newer revision of a queued entry replaces it in place; a head released by its deadline
 //! three times becomes `QUEUE_DEADLINE_EXCEEDED`; the hook refuses a reservation number that is
 //! not above every existing one; a `HOOK_TIMEOUT` retries the same candidate, and five
 //! uncounted retries (hook timeouts, deadline releases during a publish) end in
-//! `PUBLISH_RETRY_EXHAUSTED`; a policy landing during the head's check releases it with
+//! `MERGE_RETRY_EXHAUSTED`; a policy landing during the head's check releases it with
 //! `POLICY_CHANGED` while the queue keeps its order; 20 agents and three executors at once all
 //! land with bounded check time; a worker outage releases each head as `unavailable`, never
 //! by its deadline, and all three queued operations land once the workers return; a box that
@@ -92,7 +92,7 @@ fn land(queued: &Queued, file: &str) -> (String, PathBuf) {
     let id = started["change"].as_str().unwrap().to_owned();
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join(format!("src/{file}.rs")), "fn x() {}\n").unwrap();
-    let (code, queued_result) = result_json(queued.test_box.bay(&view).arg("land"));
+    let (code, queued_result) = result_json(queued.test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued_result}");
     (id, view)
 }
@@ -116,10 +116,10 @@ fn two_trunk_moves_put_the_operation_in_the_queue_and_it_lands_as_head() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     let first = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let result = &first["detail"]["ran"][0];
     assert_eq!(result["decision"], "queued", "{first}");
-    assert_eq!(result["reason"], "PUBLICATION_QUEUED");
+    assert_eq!(result["reason"], "QUEUED");
     assert_eq!(
         queue_refs(&queued.test_box, &queued.remote),
         "refs/bay/queue/1"
@@ -127,8 +127,8 @@ fn two_trunk_moves_put_the_operation_in_the_queue_and_it_lands_as_head() {
 
     let second = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(second["detail"]["ran"][0]["decision"], "landed", "{second}");
+        .bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(second["detail"]["ran"][0]["decision"], "merged", "{second}");
     assert_eq!(queued.test_box.trunk_change_ids(&queued.remote), vec![id]);
     // Trunk, the head's release and the landed marker moved together.
     assert_eq!(
@@ -149,24 +149,21 @@ fn an_arrival_while_the_queue_is_live_holds_a_place_without_a_check_and_lands_in
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let before = runs(&queued);
 
     let (second, view) = land(&queued, "second");
-    let (code, held) = result_json(queued.test_box.bay(&view).args(["land", "--wait"]));
+    let (code, held) = result_json(queued.test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{held}");
     assert_eq!(held["decision"], "queued");
-    assert!(
-        held["reason"] == "QUEUE_HELD" || held["reason"] == "PUBLICATION_QUEUED",
-        "{held}"
-    );
+    assert!(held["reason"] == "QUEUED", "{held}");
     assert_eq!(held["detail"]["position"], 2, "{held}");
     assert_eq!(runs(&queued), before, "no check ran for the arrival");
 
     for _ in 0..3 {
         queued
             .test_box
-            .bay_ok(&executor, &["executor", "run", "--once"]);
+            .bay_ok(&executor, &["runner", "run", "--once"]);
     }
     let ids = queued.test_box.trunk_change_ids(&queued.remote);
     assert_eq!(
@@ -184,10 +181,10 @@ fn a_head_whose_check_fails_releases_the_queue_at_once() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let failed = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let result = failed["detail"]["ran"]
         .as_array()
         .unwrap()
@@ -210,12 +207,12 @@ fn an_executor_killed_right_after_publishing_leaves_the_queue_free() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let killed = queued
         .test_box
         .bay(&executor)
         .env("BAY_TEST_KILL_AT", "after-publish")
-        .args(["executor", "run", "--once"])
+        .args(["runner", "run", "--once"])
         .output()
         .unwrap();
     assert_eq!(killed.status.code(), Some(137));
@@ -242,14 +239,14 @@ fn a_newer_revision_of_a_queued_entry_replaces_it_in_place() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     // A second change queues behind the head.
     let (second, view) = land(&queued, "second");
-    let (code, _) = result_json(queued.test_box.bay(&view).args(["land", "--wait"]));
+    let (code, _) = result_json(queued.test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0);
     // Its newer revision takes the same place.
     std::fs::write(view.join("src/second.rs"), "fn x() { newer }\n").unwrap();
-    let (code, newer) = result_json(queued.test_box.bay(&view).args(["land", "--wait"]));
+    let (code, newer) = result_json(queued.test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{newer}");
     assert_eq!(newer["detail"]["seq"], 2, "{newer}");
     assert_eq!(newer["op_id"], format!("{second}.2"));
@@ -321,7 +318,7 @@ fn a_head_released_by_its_deadline_three_times_is_queue_deadline_exceeded() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     let ran = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(
         ran["detail"]["ran"][0]["reason"], "QUEUE_DEADLINE_EXCEEDED",
         "{ran}"
@@ -419,7 +416,7 @@ fn executor_passes(
         }
         let out = test_box
             .bay_process(clone)
-            .args(["--json", "executor", "run", "--once"])
+            .args(["--json", "runner", "run", "--once"])
             .output()
             .unwrap();
         let pass: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|_| {
@@ -434,7 +431,7 @@ fn executor_passes(
 /// publications move trunk under each other's checks. Every operation reaches a stated
 /// outcome, here a landing, each change lands exactly once, no executor reports a failure,
 /// and worker time per landing stays bounded: the checks run are at most three per landing
-/// (two `TRUNK_MOVED` refusals before the queue, then one check as head) plus one per
+/// (two `MAIN_MOVED` refusals before the queue, then one check as head) plus one per
 /// executor for a head checked while a publisher that passed the gate before the queue was
 /// live landed (`DESIGN` § 6, `ROADMAP` G35). The 12-minute checks are scaled down to a
 /// fraction of a second; the arithmetic of the example load is the design's, not this test's.
@@ -461,7 +458,7 @@ fn twenty_agents_and_three_executors_all_land_with_bounded_check_time() {
     // check it again, which is worker time this bound does not count.
     files.push((
         ".bay/config.toml".to_owned(),
-        "[executor]\nlease_s = 60\n".to_owned(),
+        "[runner]\nlease_s = 60\n".to_owned(),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let mut ids = Vec::new();
@@ -470,7 +467,7 @@ fn twenty_agents_and_three_executors_all_land_with_bounded_check_time() {
         let started = test_box.bay_ok(&repo, &["start", &file, "--paths", "src/"]);
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join(format!("src/{file}.rs")), "fn x() {}\n").unwrap();
-        let (code, submitted) = result_json(test_box.bay(&view).arg("land"));
+        let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
         assert_eq!(code, 0, "{submitted}");
         ids.push(started["change"].as_str().unwrap().to_owned());
     }
@@ -544,7 +541,7 @@ fn a_head_whose_operation_already_landed_is_released_at_once() {
     for _ in 0..2 {
         queued
             .test_box
-            .bay_ok(&executor, &["executor", "run", "--once"]);
+            .bay_ok(&executor, &["runner", "run", "--once"]);
     }
     assert_eq!(
         queued.test_box.trunk_change_ids(&queued.remote),
@@ -558,7 +555,7 @@ fn a_head_whose_operation_already_landed_is_released_at_once() {
     let (second, _) = land(&queued, "second");
     let ran = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let result = ran["detail"]["ran"]
         .as_array()
         .unwrap()
@@ -566,7 +563,7 @@ fn a_head_whose_operation_already_landed_is_released_at_once() {
         .find(|r| r["change"] == second.as_str())
         .cloned()
         .unwrap();
-    assert_eq!(result["decision"], "landed", "{ran}");
+    assert_eq!(result["decision"], "merged", "{ran}");
     let release = queued.test_box.git_bare(
         &queued.remote,
         &["show", "refs/bay/queue-done/2:release.json"],
@@ -604,11 +601,11 @@ fn a_head_whose_change_the_retention_cut_closed_is_released_at_once() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     let landed = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(landed["detail"]["ran"][0]["decision"], "landed", "{landed}");
+        .bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(landed["detail"]["ran"][0]["decision"], "merged", "{landed}");
     let cut = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     assert!(
         cut["detail"]["ran"][0]["retention_cut"].is_string(),
         "{cut}"
@@ -621,7 +618,7 @@ fn a_head_whose_change_the_retention_cut_closed_is_released_at_once() {
     let (second, _) = land(&queued, "second");
     let ran = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let result = ran["detail"]["ran"]
         .as_array()
         .unwrap()
@@ -629,7 +626,7 @@ fn a_head_whose_change_the_retention_cut_closed_is_released_at_once() {
         .find(|r| r["change"] == second.as_str())
         .cloned()
         .unwrap();
-    assert_eq!(result["decision"], "landed", "{ran}");
+    assert_eq!(result["decision"], "merged", "{ran}");
     let release = queued.test_box.git_bare(
         &queued.remote,
         &["show", "refs/bay/queue-done/1:release.json"],
@@ -648,7 +645,7 @@ fn a_release_the_remote_refuses_is_reported_and_tried_again_on_the_next_pass() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(
         queued.test_box.trunk_change_ids(&queued.remote),
         vec![first.clone()]
@@ -667,7 +664,7 @@ fn a_release_the_remote_refuses_is_reported_and_tried_again_on_the_next_pass() {
     let (second, _) = land(&queued, "second");
     let held = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(held["decision"], "ok", "{held}");
     assert!(
         held["detail"]["unreleased"]
@@ -683,7 +680,7 @@ fn a_release_the_remote_refuses_is_reported_and_tried_again_on_the_next_pass() {
     std::fs::remove_file(&hook).unwrap();
     let ran = queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     assert!(ran["detail"]["unreleased"].is_null(), "{ran}");
     assert_eq!(
         queued.test_box.trunk_change_ids(&queued.remote),
@@ -752,7 +749,7 @@ const PUBLISH_WINDOW_S: u64 = 1;
 /// end it `unknown`, never queued. In the outage the adapter answers `unavailable` at once, so
 /// the scaled budget there only sets the progress deadline the outage must outlast.
 fn outage_config(scaled_deadline: bool) -> String {
-    let mut config = format!("[executor]\nlease_s = {LEASE_S}\nheartbeat_s = 1\ntakeover_s = 2\n");
+    let mut config = format!("[runner]\nlease_s = {LEASE_S}\nheartbeat_s = 1\ntakeover_s = 2\n");
     if scaled_deadline {
         use std::fmt::Write;
         let _ = write!(
@@ -856,7 +853,7 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(
         queue_refs(&queued.test_box, &queued.remote),
         "refs/bay/queue/1\nrefs/bay/queue/2\nrefs/bay/queue/3",
@@ -872,7 +869,7 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
     let mut looping = queued
         .test_box
         .bay_process(&executor)
-        .args(["--json", "executor", "run", "--interval-s", "1"])
+        .args(["--json", "runner", "run", "--interval-s", "1"])
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
@@ -908,7 +905,7 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
 
     // The workers return: further passes land all three, each once. A pass that began before
     // the unscaled config landed may meet trunk moved under its head's check: that head checks
-    // again, a `TRUNK_MOVED` retry, never a publish retry. The deadline only stops a stuck run.
+    // again, a `MAIN_MOVED` retry, never a publish retry. The deadline only stops a stuck run.
     queued
         .test_box
         .commit_config(&queued.repo, &outage_config(false));
@@ -970,7 +967,7 @@ fn a_worker_with_the_wrong_capabilities_is_not_a_substitute() {
     };
     declare("env-a");
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, waiting) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, waiting) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{waiting}");
     assert_eq!(waiting["decision"], "queued", "{waiting}");
     assert_eq!(waiting["reason"], "CHECK_UNAVAILABLE", "{waiting}");
@@ -998,8 +995,8 @@ fn a_worker_with_the_wrong_capabilities_is_not_a_substitute() {
 
     declare("env-b");
     let executor = test_box.clone_of(&remote, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(ran["detail"]["ran"][0]["decision"], "landed", "{ran}");
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
     let tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);
     let evidence: String = evidence_refs(&test_box, &remote)
@@ -1020,7 +1017,7 @@ fn a_worker_with_the_wrong_capabilities_is_not_a_substitute() {
 /// A policy change lands while the head checks: the head is released with `POLICY_CHANGED` and
 /// rejoins at the back; the queued entries keep their positions and are rechecked under the new
 /// policy when they become head; the release counts toward neither `QUEUE_DEADLINE_EXCEEDED`
-/// nor `PUBLISH_RETRY_EXHAUSTED` (`DESIGN` § 6, `ROADMAP` G35).
+/// nor `MERGE_RETRY_EXHAUSTED` (`DESIGN` § 6, `ROADMAP` G35).
 #[test]
 fn a_policy_landing_during_the_heads_check_releases_it_and_the_queue_keeps_its_order() {
     // Runs 1–2 move trunk, so the first change queues; its run 3 as head lands a policy edit.
@@ -1029,11 +1026,11 @@ fn a_policy_landing_during_the_heads_check_releases_it_and_the_queue_keeps_its_o
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let mut behind = Vec::new();
     for file in ["second", "third"] {
         let (id, view) = land(&queued, file);
-        let (code, held) = result_json(queued.test_box.bay(&view).args(["land", "--wait"]));
+        let (code, held) = result_json(queued.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{held}");
         assert_eq!(held["decision"], "queued", "{held}");
         behind.push((id, held["detail"]["seq"].as_u64().unwrap()));
@@ -1054,7 +1051,7 @@ fn a_policy_landing_during_the_heads_check_releases_it_and_the_queue_keeps_its_o
         }
         queued
             .test_box
-            .bay_ok(&executor, &["executor", "run", "--once"]);
+            .bay_ok(&executor, &["runner", "run", "--once"]);
     }
     let release = queued.test_box.git_bare(
         &queued.remote,
@@ -1152,10 +1149,10 @@ fn a_hook_timeout_retries_the_same_candidate_uncounted() {
         test_box
             .bay(&view)
             .env("BAY_TEST_HOOK_SLOW_PUSHES", "2")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
     let status = test_box.bay_ok(&view, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
@@ -1165,7 +1162,7 @@ fn a_hook_timeout_retries_the_same_candidate_uncounted() {
 }
 
 /// A trunk hook that always times out: after five uncounted retries the operation is blocked
-/// with `PUBLISH_RETRY_EXHAUSTED`, and trunk does not move (DESIGN § 6).
+/// with `MERGE_RETRY_EXHAUSTED`, and trunk does not move (DESIGN § 6).
 #[test]
 fn five_hook_timeouts_end_in_publish_retry_exhausted() {
     let (test_box, host, id, view) = hosted_with_hook_bound();
@@ -1174,15 +1171,15 @@ fn five_hook_timeouts_end_in_publish_retry_exhausted() {
         test_box
             .bay(&view)
             .env("BAY_TEST_HOOK_SLOW_PUSHES", "100")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 10, "{blocked}");
-    assert_eq!(blocked["reason"], "PUBLISH_RETRY_EXHAUSTED", "{blocked}");
+    assert_eq!(blocked["reason"], "MERGE_RETRY_EXHAUSTED", "{blocked}");
     assert_eq!(test_box.git_bare(&host, &["rev-parse", "main"]), trunk);
     let status = test_box.bay_ok(&view, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
     assert_eq!(op["publish_retries"], 5, "{status}");
-    assert_eq!(op["outcome"], "PUBLISH_RETRY_EXHAUSTED", "{status}");
+    assert_eq!(op["outcome"], "MERGE_RETRY_EXHAUSTED", "{status}");
 }
 
 /// Queues a change, then runs its head attempt paused just before the publishing push, and
@@ -1194,7 +1191,7 @@ fn head_released_mid_publish() -> (Queued, String, PathBuf, std::process::Child,
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let (child, go) = pause_head_and_release(&queued, &executor, &id, 1);
     (queued, id, executor, child, go)
 }
@@ -1225,7 +1222,7 @@ fn pause_head_and_release_as(
         .bay_process(executor)
         .env("BAY_TEST_PAUSE_AT", "before-publish")
         .env("BAY_TEST_PAUSE_FILE", &go)
-        .args(["--json", "executor", "run", "--once"])
+        .args(["--json", "runner", "run", "--once"])
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -1261,7 +1258,7 @@ fn pause_head_and_release_as(
 }
 
 /// A head whose release the progress deadline created while it was publishing has its push
-/// refused; it rejoins the queue, the release counts toward `PUBLISH_RETRY_EXHAUSTED` and not
+/// refused; it rejoins the queue, the release counts toward `MERGE_RETRY_EXHAUSTED` and not
 /// toward `QUEUE_DEADLINE_EXCEEDED`, and it lands (DESIGN § 6).
 #[test]
 fn a_deadline_release_mid_publish_rejoins_and_counts_as_a_publish_retry() {
@@ -1273,7 +1270,7 @@ fn a_deadline_release_mid_publish_rejoins_and_counts_as_a_publish_retry() {
     for _ in 0..2 {
         queued
             .test_box
-            .bay_ok(&executor, &["executor", "run", "--once"]);
+            .bay_ok(&executor, &["runner", "run", "--once"]);
     }
     assert_eq!(
         queued.test_box.trunk_change_ids(&queued.remote),
@@ -1287,7 +1284,7 @@ fn a_deadline_release_mid_publish_rejoins_and_counts_as_a_publish_retry() {
 /// The progress deadline releases the head while it publishes, five times in a row. Each
 /// release rejoins the queue and counts as an uncounted publish retry, never toward
 /// `QUEUE_DEADLINE_EXCEEDED`, so the third does not block it; the fifth ends the operation in
-/// `PUBLISH_RETRY_EXHAUSTED`, and trunk never moves (`DESIGN` § 6, `INTERFACES` § 2).
+/// `MERGE_RETRY_EXHAUSTED`, and trunk never moves (`DESIGN` § 6, `INTERFACES` § 2).
 #[test]
 fn the_fifth_deadline_release_mid_publish_ends_in_publish_retry_exhausted() {
     let queued = setup(2, 0);
@@ -1295,7 +1292,7 @@ fn the_fifth_deadline_release_mid_publish_ends_in_publish_retry_exhausted() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let trunk = queued
         .test_box
         .git_bare(&queued.remote, &["rev-parse", "main"]);
@@ -1306,13 +1303,10 @@ fn the_fifth_deadline_release_mid_publish_ends_in_publish_retry_exhausted() {
         let ran: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         let result = &ran["detail"]["ran"][0];
         if seq < 5 {
-            assert_eq!(
-                result["reason"], "PUBLICATION_QUEUED",
-                "release {seq}: {ran}"
-            );
+            assert_eq!(result["reason"], "QUEUED", "release {seq}: {ran}");
             assert_eq!(result["detail"]["seq"], seq + 1, "release {seq}: {ran}");
         } else {
-            assert_eq!(result["reason"], "PUBLISH_RETRY_EXHAUSTED", "{ran}");
+            assert_eq!(result["reason"], "MERGE_RETRY_EXHAUSTED", "{ran}");
         }
     }
     assert_eq!(
@@ -1324,7 +1318,7 @@ fn the_fifth_deadline_release_mid_publish_ends_in_publish_retry_exhausted() {
     let status = queued.test_box.bay_ok(&queued.repo, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
     assert_eq!(op["publish_retries"], 5, "{status}");
-    assert_eq!(op["outcome"], "PUBLISH_RETRY_EXHAUSTED", "{status}");
+    assert_eq!(op["outcome"], "MERGE_RETRY_EXHAUSTED", "{status}");
 }
 
 /// Only a release the progress deadline created is a publish retry (`DESIGN` § 6). A head
@@ -1338,7 +1332,7 @@ fn a_release_for_another_reason_mid_publish_is_no_publish_retry() {
     let executor = queued.test_box.clone_of(&queued.remote, "executor");
     queued
         .test_box
-        .bay_ok(&executor, &["executor", "run", "--once"]);
+        .bay_ok(&executor, &["runner", "run", "--once"]);
     let (child, go) = pause_head_and_release_as(&queued, &executor, &id, 1, "superseded");
     std::fs::write(&go, "go").unwrap();
     let out = child.wait_with_output().unwrap();

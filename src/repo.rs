@@ -20,7 +20,7 @@ use crate::config::{CONFIG_PATH, Config};
 use crate::git::{Git, GitError};
 use crate::result::{BayResult, Reason};
 
-/// The repository-local git config key naming the trunk (`bay install --trunk`).
+/// The repository-local git config key naming the trunk (`bay install --main`).
 pub const TRUNK_KEY: &str = "bay.trunk";
 /// The repository-local git config key naming the trunk's remote (`bay install --remote`).
 pub const REMOTE_KEY: &str = "bay.remote";
@@ -163,7 +163,7 @@ pub enum OpenError {
 }
 
 impl OpenError {
-    /// This error as a command's result: the `CONFIG_MISSING` or `BAY_BELOW_FLOOR` refusal, or
+    /// This error as a command's result: the `CONFIG_MISSING` or `TOOL_BELOW_FLOOR` refusal, or
     /// a failure.
     #[must_use]
     pub fn into_result(self) -> BayResult {
@@ -172,13 +172,13 @@ impl OpenError {
                 BayResult::blocked(Reason::ConfigMissing).with_detail(detail)
             }
             Self::BayBelowFloor(_, detail) => {
-                BayResult::blocked(Reason::BayBelowFloor).with_detail(detail)
+                BayResult::blocked(Reason::ToolBelowFloor).with_detail(detail)
             }
             Self::NoRepository(message) | Self::Known(_, message) => BayResult::failed(message),
         }
     }
 
-    /// This error as a message; a `CONFIG_MISSING` or `BAY_BELOW_FLOOR` one starts with its
+    /// This error as a message; a `CONFIG_MISSING` or `TOOL_BELOW_FLOOR` one starts with its
     /// code.
     #[must_use]
     pub fn message(&self) -> String {
@@ -192,7 +192,7 @@ impl OpenError {
         match self {
             Self::NoRepository(message) | Self::Known(_, message) => message.clone(),
             Self::ConfigMissing(_, detail) => coded(Reason::ConfigMissing, detail),
-            Self::BayBelowFloor(_, detail) => coded(Reason::BayBelowFloor, detail),
+            Self::BayBelowFloor(_, detail) => coded(Reason::ToolBelowFloor, detail),
         }
     }
 }
@@ -200,7 +200,7 @@ impl OpenError {
 fn missing_bootstrap(missing: &[String]) -> Value {
     json!({
         "message": format!(
-            "bay cannot tell this repository's trunk: neither {} names it; run bay install --trunk <name>, or git remote set-head <remote> --auto",
+            "bay cannot tell this repository's trunk: neither {} names it; run bay install --main <name>, or git remote set-head <remote> --auto",
             missing.join(" nor ")
         ),
         "missing": missing,
@@ -279,7 +279,7 @@ impl Repo {
 
     /// The `CONFIG_MISSING` refusal for a command that needs the trunk or policy, when `dir`
     /// is in a work repository with no bootstrap or no config at the trunk tip, and the
-    /// `BAY_BELOW_FLOOR` refusal when that config names a newer bay than this one (G317). Before
+    /// `TOOL_BELOW_FLOOR` refusal when that config names a newer bay than this one (G317). Before
     /// the first fetch it fetches trunk with the bootstrap's remote and trunk. `None` otherwise:
     /// the command opens the repository itself and reports any other fault.
     #[must_use]
@@ -708,7 +708,7 @@ fn committed_config(git: &Git, commit: &str) -> Result<Option<String>, String> {
     )
 }
 
-/// G317: `BAY_BELOW_FLOOR` when the config `text` read at `tracking` names a bay newer than
+/// G317: `TOOL_BELOW_FLOOR` when the config `text` read at `tracking` names a bay newer than
 /// this one.
 fn floor_met(text: &str, common_dir: &Path, tracking: &str) -> Result<(), OpenError> {
     match crate::config::unmet_floor(text) {
@@ -716,6 +716,7 @@ fn floor_met(text: &str, common_dir: &Path, tracking: &str) -> Result<(), OpenEr
             common_dir.to_path_buf(),
             json!({
                 "message": crate::config::below_floor(&floor),
+                "tool": "bay",
                 "floor": floor,
                 "bay": crate::version::BAY,
                 "ref": tracking,
@@ -749,8 +750,8 @@ mod tests {
     }
 
     const TRUNK: &str =
-        "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[executor]\ncommand = \"trunk-executor\"\n";
-    const DRAFT: &str = "trunk = \"decoy\"\n\n[policy]\nevidence_reuse = \"off\"\n\n[executor]\ncommand = \"draft-executor\"\n";
+        "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[runner]\ncommand = \"trunk-executor\"\n";
+    const DRAFT: &str = "trunk = \"decoy\"\n\n[policy]\nevidence_reuse = \"off\"\n\n[runner]\ncommand = \"draft-executor\"\n";
 
     #[test]
     fn every_setting_is_the_trunks_never_a_drafts() {

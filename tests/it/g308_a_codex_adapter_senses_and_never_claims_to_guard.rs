@@ -23,7 +23,7 @@
 //!   tool_input.command")?;` (make it `.unwrap_or_default();`): that call is allowed.
 //! - `src/install.rs` `run`: `Adapter::Codex => agent_settings::add_codex_entries(&mut
 //!   settings),` (make it `add_claude_entries`): `.codex/hooks.json` holds Claude-only events.
-//! - `src/agent_settings.rs` `CODEX_EVENTS`: `("PreToolUse", "pre-tool"),` (delete it): no
+//! - `src/agent_settings.rs` `CODEX_EVENTS`: `("PreToolUse", "tool.before"),` (delete it): no
 //!   pre-tool entry is written, and doctor's `hooks` row is red.
 //! - `src/doctor.rs` `codex_hooks_rows`: `if present { "fail_open" }` (make it `"fail_closed"`): the row claims
 //!   a guard Codex does not give.
@@ -47,14 +47,14 @@ const CLAUDE_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\
 
 /// Every recorded Codex event, with the `bay hook` event bay installs for it.
 const CODEX_EVENTS: [(&str, &str); 8] = [
-    ("SessionStart", "session-start"),
-    ("UserPromptSubmit", "user-prompt-submit"),
-    ("PreToolUse", "pre-tool"),
-    ("PostToolUse", "post-tool"),
-    ("Stop", "stop"),
-    ("SubagentStart", "subagent-start"),
-    ("SubagentStop", "subagent-stop"),
-    ("SessionEnd", "session-end"),
+    ("SessionStart", "session.start"),
+    ("UserPromptSubmit", "turn.start"),
+    ("PreToolUse", "tool.before"),
+    ("PostToolUse", "step.end"),
+    ("Stop", "turn.end"),
+    ("SubagentStart", "subagent.start"),
+    ("SubagentStop", "subagent.end"),
+    ("SessionEnd", "session.end"),
 ];
 
 const SESSION: &str = "s-g308";
@@ -141,8 +141,12 @@ fn a_trunk_push_is_denied_with_the_reason_claude_code_gets() {
         let mut payload = fixture(product, name, &repo);
         assert_eq!(payload["tool_name"], "Bash", "{product}: {payload}");
         payload["tool_input"]["command"] = json!(push);
-        let (code, stdout, stderr) =
-            hook(&test_box, &repo, "pre-tool", payload.to_string().as_bytes());
+        let (code, stdout, stderr) = hook(
+            &test_box,
+            &repo,
+            "tool.before",
+            payload.to_string().as_bytes(),
+        );
         assert_eq!(code, Some(2), "{product}: {push} was allowed: {stderr}");
         assert!(stdout.is_empty(), "{product}: {stdout}");
         assert!(stderr.contains("bay denies"), "{product}: {stderr}");
@@ -165,7 +169,7 @@ fn an_unreadable_pre_tool_payload_is_denied_and_a_recording_event_allows_one() {
             no_patch.to_string().into_bytes(),
         ),
     ] {
-        let (code, stdout, stderr) = hook(&test_box, &repo, "pre-tool", &input);
+        let (code, stdout, stderr) = hook(&test_box, &repo, "tool.before", &input);
         assert_eq!(code, Some(2), "{what} was allowed: {stderr}");
         assert_eq!(stderr.lines().count(), 1, "{what}: {stderr}");
         assert!(stderr.contains("HOOK_INPUT_INVALID"), "{what}: {stderr}");
@@ -173,7 +177,7 @@ fn an_unreadable_pre_tool_payload_is_denied_and_a_recording_event_allows_one() {
             .unwrap_or_else(|error| panic!("{what}: stdout {stdout:?}: {error}"));
         assert_eq!(result["reason"], "HOOK_INPUT_INVALID", "{what}: {result}");
     }
-    for event in ["post-tool", "stop", "session-end"] {
+    for event in ["step.end", "stop", "session.end"] {
         let (code, _, stderr) = hook(&test_box, &repo, event, b"not json");
         assert_eq!(code, Some(0), "{event}: {stderr}");
     }
@@ -202,7 +206,7 @@ fn every_recorded_event_is_answered_and_its_post_tool_ends_a_step() {
         // bay judges nothing here to deny: the probe's own hook denied fixture 07.
         assert_eq!(code, Some(0), "{name}: {stdout} {stderr}");
         assert!(!stderr.contains("HOOK_INPUT_INVALID"), "{name}: {stderr}");
-        if event != "session-start" {
+        if event != "session.start" {
             assert!(stdout.is_empty(), "{name}: Codex reads no stdout: {stdout}");
         }
     }
@@ -308,6 +312,7 @@ fn doctor_says_codex_hooks_fail_open_and_judges_its_floor() {
     fake_codex(&test_box, "0.152.9");
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "AGENT_BELOW_FLOOR", "{result}");
+    assert_eq!(result["reason"], "TOOL_BELOW_FLOOR", "{result}");
+    assert_eq!(result["detail"]["tool"], "codex", "{result}");
     assert_eq!(row(&result, "codex")["state"], "red", "{result}");
 }

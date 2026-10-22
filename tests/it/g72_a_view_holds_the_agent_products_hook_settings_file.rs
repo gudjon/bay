@@ -70,7 +70,7 @@ fn session_start_from_view(test_box: &TestBox, view: &Path, session: &str) -> Op
         .iter()
         .flat_map(|group| group["hooks"].as_array().unwrap())
         .filter_map(|hook| hook["command"].as_str())
-        .find(|command| command.ends_with("bay hook session-start"))
+        .find(|command| command.ends_with("bay hook session.start"))
         .unwrap()
         .to_owned();
     let payload = json!({"session_id": session, "hook_event_name": "SessionStart",
@@ -126,8 +126,8 @@ fn a_view_holds_the_hook_settings_and_a_hook_from_inside_it_is_recorded() {
     );
     assert!(!view.join(".claude/agents/reviewer.md").exists());
     let held = std::fs::read_to_string(view.join(SETTINGS)).unwrap();
-    assert!(held.contains("bay hook pre-tool"), "{held}");
-    assert!(held.contains("bay hook session-start"), "{held}");
+    assert!(held.contains("bay hook tool.before"), "{held}");
+    assert!(held.contains("bay hook session.start"), "{held}");
 
     assert_eq!(session_start_from_view(&test_box, &view, "s-1"), Some(0));
     let recorded = std::fs::read_to_string(repo.join(".git/bay/sessions/s-1.jsonl")).unwrap();
@@ -137,7 +137,7 @@ fn a_view_holds_the_hook_settings_and_a_hook_from_inside_it_is_recorded() {
 
     // The file is bay's, not an input the change read.
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    test_box.bay_ok(&repo, &["start", &id]);
     let record = change_record(&test_box, &repo, &id);
     assert!(record.get("observed_inputs").is_none(), "{record}");
 }
@@ -153,7 +153,7 @@ fn a_resumed_view_keeps_the_hook_settings() {
         &repo,
         &["worktree", "remove", "--force", view.to_str().unwrap()],
     );
-    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    let resumed = test_box.bay_ok(&repo, &["start", &id]);
     let view = PathBuf::from(resumed["detail"]["view"].as_str().unwrap());
     assert_eq!(
         sparse_set(&test_box, &view),
@@ -164,7 +164,7 @@ fn a_resumed_view_keeps_the_hook_settings() {
     // A view that lost the entry gets it back on resume.
     test_box.git_ok(&view, &["sparse-checkout", "set", "--no-cone", "/src/"]);
     assert!(!view.join(SETTINGS).exists());
-    test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    test_box.bay_ok(&repo, &["start", &id]);
     assert_eq!(
         sparse_set(&test_box, &view),
         ["/.claude/settings.json", "/src/"]

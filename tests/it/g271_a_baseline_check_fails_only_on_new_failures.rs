@@ -120,12 +120,12 @@ fn a_unit_failing_on_base_and_candidate_lands_named_under_baseline_failures() {
     let second = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(second.join("src/other.rs"), "fn other() {}\n").unwrap();
 
-    let (code, landed) = result_json(test_box.bay(&first).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&first).args(["merge", "--wait"]));
     assert_eq!(
         code, 0,
         "a pre-existing failure failed the candidate: {landed}"
     );
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let gap = landed["detail"]["coverage_gaps"]
         .as_array()
         .and_then(|gaps| gaps.iter().find(|gap| gap["check"] == "tests"))
@@ -166,9 +166,9 @@ fn a_unit_failing_on_base_and_candidate_lands_named_under_baseline_failures() {
     let first_landing = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let first_tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);
     let first_record = record["id"].clone();
-    let (code, landed) = result_json(test_box.bay(&second).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&second).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let on_first = records_on(&test_box, &remote, &first_tree);
     assert!(
         on_first
@@ -196,7 +196,7 @@ fn a_unit_failing_only_on_the_candidate_is_check_failed_naming_only_it() {
     );
     let seed = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), seed);
@@ -223,7 +223,7 @@ fn without_baseline_a_failing_unit_is_check_failed() {
     let (repo, remote) = trunk(&test_box, &failing, &failing, "");
     let seed = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), seed);
@@ -265,7 +265,7 @@ fn an_infra_failure_on_the_base_makes_the_candidate_unknown() {
     );
     let seed = test_box.git_bare(&remote, &["rev-parse", "main"]);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_ne!(code, 0, "{refused}");
     assert_eq!(refused["reason"], "CHECK_UNKNOWN", "{refused}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), seed);
@@ -288,7 +288,7 @@ fn a_baseline_other_than_base_makes_the_policy_invalid() {
     let failing = [("t", "pass"), ("u", "product_failure")];
     let (repo, _) = trunk(&test_box, &failing, &failing, "baseline = \"trunk\"\n");
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
 }

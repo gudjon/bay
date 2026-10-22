@@ -2,7 +2,7 @@
 //!
 //! `.claude/settings.json` is tracked, so it reaches every box that checks the repository out,
 //! with or without bay. Under `onFailure: "block"` a hook command that cannot start denies, so a
-//! bare `bay hook pre-tool` would deny every Edit, Write and Bash on a box without bay. bay's
+//! bare `bay hook tool.before` would deny every Edit, Write and Bash on a box without bay. bay's
 //! guarantee never rests on the client hook (land and the host hook judge again), and a box
 //! without bay runs no bay session to guard, so the entry bay installs exits 0 when `bay` does
 //! not resolve on `PATH`. Where bay resolves, the entry is bay's: a failing bay, or bay's deny,
@@ -43,7 +43,7 @@ fn commands(settings: &Value, event: &str) -> Vec<String> {
 fn pre_tool_command(repo: &Path) -> String {
     commands(&settings(repo), "PreToolUse")
         .into_iter()
-        .find(|command| command.ends_with("bay hook pre-tool"))
+        .find(|command| command.ends_with("bay hook tool.before"))
         .expect("bay's pre-tool entry")
 }
 
@@ -150,10 +150,10 @@ fn every_event_entry_tests_for_bay_and_keeps_its_timeout_and_on_failure() {
     let repo = installed(&test_box);
     let all = settings(&repo);
     for (event, bay_event) in [
-        ("SessionStart", "session-start"),
-        ("PreToolUse", "pre-tool"),
-        ("Stop", "stop"),
-        ("SessionEnd", "session-end"),
+        ("SessionStart", "session.start"),
+        ("PreToolUse", "tool.before"),
+        ("Stop", "turn.end"),
+        ("SessionEnd", "session.end"),
     ] {
         let wanted = format!("command -v bay >/dev/null 2>&1 || exit 0; exec bay hook {bay_event}");
         assert!(commands(&all, event).contains(&wanted), "{event}: {all}");
@@ -175,7 +175,7 @@ fn a_reinstall_replaces_the_bare_entry_an_earlier_bay_wrote() {
     std::fs::write(&path, &text).unwrap();
     assert_eq!(
         commands(&settings(&repo), "PreToolUse"),
-        ["bay hook pre-tool"]
+        ["bay hook tool.before"]
     );
 
     // Doctor recognises the bare entries as bay's and names them.

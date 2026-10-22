@@ -118,7 +118,7 @@ fn open(dir: &Path) -> Result<(Repo, Registry, Actor), Stop> {
 /// This machine's agent key, when the registry enrols it for `name`: the only key a talk or an
 /// entry is signed with (ruling T10).
 pub(crate) fn agent_key(git: &Git, registry: &Registry, name: &str) -> Result<PathBuf, Refusal> {
-    let not_actor = |why: String| Refusal::new(Reason::TalkSenderNotActor, why);
+    let not_actor = |why: String| Refusal::new(Reason::TalkRefused, why);
     let key = Keys::load(git).agent.ok_or_else(|| {
         not_actor(
             "this machine has no agent key (git config bay.agentKey): a talk is signed by its sender's agent key"
@@ -138,7 +138,7 @@ pub(crate) fn agent_key(git: &Git, registry: &Registry, name: &str) -> Result<Pa
 /// This machine's reviewer key (`bay.reviewerKey`), when the registry enrols it for `name`
 /// (G149): the key a reviewer's delivery talk is signed with.
 fn reviewer_key(git: &Git, registry: &Registry, name: &str) -> Result<PathBuf, Refusal> {
-    let not_actor = |why: String| Refusal::new(Reason::TalkSenderNotActor, why);
+    let not_actor = |why: String| Refusal::new(Reason::TalkRefused, why);
     let key = git
         .config_get("bay.reviewerKey")
         .ok()
@@ -335,7 +335,7 @@ fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Resul
     })?;
     if let Some((open, oldest)) = backlog(&talks, &[], &sender.name, supersedes) {
         return Err(Refusal::new(
-            Reason::TalkBacklog,
+            Reason::TalkRefused,
             format!(
                 "{} holds {open} open talks to {who} (BAY_TALK_OPEN_MAX {}); the oldest open one is {oldest}: close or supersede one first",
                 sender.name,
@@ -365,7 +365,7 @@ fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Resul
             // The host's refusal is the answer: the talk does not exist, here either.
             let _ = repo.git.run(&["update-ref", "-d", &name, &commit]);
             Err(Refusal::new(
-                reason.unwrap_or(Reason::TalkInvalid),
+                reason.unwrap_or(Reason::TalkRefused),
                 format!("the host refused the talk: {why}"),
             )
             .with("talk", json!(id))
@@ -378,7 +378,7 @@ fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Resul
 /// G149b: a reviewer holds one open talk per change, so its later finding on that change
 /// supersedes the open one. With no `--supersedes`, the body names the reviewer's open talk about
 /// the change; the same ask as that open talk is a retry of it, under its own `supersedes`. A
-/// `--supersedes` that leaves the open talk standing is `TALK_BACKLOG`, naming it.
+/// `--supersedes` that leaves the open talk standing is `TALK_REFUSED`, naming it.
 fn later_finding(
     repo: &Repo,
     ask: &Ask,
@@ -397,7 +397,7 @@ fn later_finding(
     let change = body["change"].as_str().unwrap_or_default();
     if ask.supersedes.is_some() {
         return Err(Refusal::new(
-            Reason::TalkBacklog,
+            Reason::TalkRefused,
             format!(
                 "{} holds open talk {} to {who} about change {change}; a reviewer holds one open talk per change: supersede {} (or leave out --supersedes)",
                 sender.name, open.id, open.id
@@ -449,7 +449,7 @@ fn resend(repo: &Repo, body: &Value, existing: &Talk, dry_run: bool) -> Result<B
     // A closed talk is closed whatever else differs: the id is the ask (ruling T7).
     if existing.closed() {
         return Err(Refusal::new(
-            Reason::TalkClosed,
+            Reason::TalkRefused,
             format!(
                 "talk {id} is closed; a repeat of it is refused: change follow_up for a new talk, or supersede it"
             ),
@@ -459,7 +459,7 @@ fn resend(repo: &Repo, body: &Value, existing: &Talk, dry_run: bool) -> Result<B
     }
     if ask_of(&existing.body) != ask_of(body) {
         return Err(Refusal::new(
-            Reason::TalkBodyConflict,
+            Reason::TalkRefused,
             format!(
                 "talk {id} already holds a different body; a different body under one id is refused: change the action, the target or follow_up for a new talk, or supersede {id}"
             ),
@@ -496,7 +496,7 @@ fn resend(repo: &Repo, body: &Value, existing: &Talk, dry_run: bool) -> Result<B
                     .run(&["update-ref", "-d", &existing.name, &existing.tip]);
             }
             Err(Refusal::new(
-                reason.unwrap_or(Reason::TalkInvalid),
+                reason.unwrap_or(Reason::TalkRefused),
                 format!("the host refused the talk: {why}"),
             )
             .with("talk", json!(id))
@@ -525,7 +525,7 @@ fn may_supersede(repo: &Repo, old: &str, sender: &str, name: &str) -> Result<(),
         ))
     })?;
     let refused = |why: String| -> Stop {
-        Refusal::new(Reason::TalkSupersedeRefused, why)
+        Refusal::new(Reason::TalkRefused, why)
             .with("talk", json!(old))
             .into()
     };
@@ -643,7 +643,7 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
                 .git
                 .run(&["update-ref", &talk.name, &talk.tip, &commit]);
             Err(Refusal::new(
-                reason.unwrap_or(Reason::TalkInvalid),
+                reason.unwrap_or(Reason::TalkRefused),
                 format!("the host refused the answer: {why}"),
             )
             .with("talk", json!(id))
@@ -653,11 +653,11 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
     }
 }
 
-/// `TALK_ANSWER_CONFLICT`, naming the standing answer.
+/// `TALK_REFUSED`, naming the standing answer.
 pub(crate) fn conflict(id: &str, commit: &str, prior: &Value) -> Refusal {
     let value = prior["value"].as_str().unwrap_or_default();
     Refusal::new(
-        Reason::TalkAnswerConflict,
+        Reason::TalkRefused,
         format!(
             "talk {id} already has the answer {value:?} ({commit}); a different answer supersedes it (--supersedes {commit})"
         ),

@@ -61,7 +61,7 @@ fn edit_and_land(
         test_box
             .bay(&view)
             .env("BAY_ACTOR", actor)
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     )
 }
 
@@ -195,7 +195,7 @@ fn another_actor_is_refused_while_the_holder_works_and_adopts_an_idle_change() {
         test_box
             .bay(&repo)
             .env("BAY_ACTOR", "agent-a")
-            .args(["start", "--resume", &id])
+            .args(["start", &id])
             .output()
             .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(300));
@@ -216,10 +216,10 @@ fn another_actor_is_refused_while_the_holder_works_and_adopts_an_idle_change() {
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
 
     // agent-a, back, is told its change was adopted.
-    let (code, told) = result_json(test_box.bay(&view).env("BAY_ACTOR", "agent-a").arg("land"));
+    let (code, told) = result_json(test_box.bay(&view).env("BAY_ACTOR", "agent-a").arg("merge"));
     assert_ne!(code, 0, "{told}");
     assert!(
-        told.to_string().contains("adopted") || told["reason"] == "CHANGE_ALREADY_LANDED",
+        told.to_string().contains("adopted") || told["reason"] == "CHANGE_ALREADY_MERGED",
         "{told}"
     );
 }
@@ -241,13 +241,13 @@ fn two_changes_holding_one_generation_land_once() {
         &repo,
         &["push", "-q", "origin", &format!("refs/bay/changes/{twin}")],
     );
-    let twin_view = test_box.bay_ok(&repo, &["start", "--resume", &twin]);
+    let twin_view = test_box.bay_ok(&repo, &["start", &twin]);
 
     let (code, _) = edit_and_land(&test_box, "agent-a", &first, "first");
     assert_eq!(code, 0);
     let (code, refused) = edit_and_land(&test_box, "agent-a", &twin_view, "twin");
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "CHANGE_ALREADY_LANDED");
+    assert_eq!(refused["reason"], "CHANGE_ALREADY_MERGED");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![first_id]);
 }
 
@@ -270,7 +270,7 @@ fn an_observer_reboot_delays_a_takeover_and_never_advances_it() {
     let mut files = check_files("true", &passing_result(1), 1, 60);
     files.push((
         ".bay/config.toml".to_owned(),
-        format!("[executor]\ntakeover_s = {TAKEOVER_S}\n"),
+        format!("[runner]\ntakeover_s = {TAKEOVER_S}\n"),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let started = test_box.bay_ok(&repo, &["start", "CARD-REBOOT", "--paths", "src/"]);
@@ -337,11 +337,11 @@ fn adopting_a_cut_chain_re_roots_it_and_lands_once() {
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/half.rs"), "fn half() {}\n").unwrap();
     // A checkpoint records the half-done work in a draft; abandoning keeps that draft.
-    test_box.bay_ok(&repo, &["start", "--resume", &id]);
-    let (code, abandoned) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    test_box.bay_ok(&repo, &["start", &id]);
+    let (code, abandoned) = result_json(test_box.bay(&view).args(["abandon"]));
     assert_eq!(code, 0, "{abandoned}");
     let executor = test_box.clone_of(&remote, "executor");
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert!(
         ran["detail"]["ran"][0]["retention_cut"].is_string(),
         "{ran}"
@@ -377,7 +377,7 @@ fn adopting_a_cut_chain_re_roots_it_and_lands_once() {
         test_box
             .bay(&adopted_view)
             .env("BAY_ACTOR", "agent-b")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
@@ -386,7 +386,7 @@ fn adopting_a_cut_chain_re_roots_it_and_lands_once() {
         "fn half() {}"
     );
     // Live again, the chain is cut once more after its landing.
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert!(
         ran["detail"]["ran"][0]["retention_cut"].is_string(),
         "{ran}"

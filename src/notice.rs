@@ -1,16 +1,16 @@
-//! Hook notices (`DESIGN` § 11 `post-tool`, § 11a's `UserPromptSubmit` and `PostToolBatch`
+//! Hook notices (`DESIGN` § 11 `step.end`, § 11a's `UserPromptSubmit` and `PostToolBatch`
 //! rows; `INTERFACES` § 2 and § 5; ruling R6).
 //!
 //! A refusal, a failed check or an unknown check of a change of the session's actor (a
 //! `refused`, `check_failed` or `check_unknown` event on an executor log) reaches the session's
-//! agent once, as one line, at its next `post-tool` or `user-prompt-submit`, and never again.
+//! agent once, as one line, at its next `step.end` or `turn.start`, and never again.
 //! `INTERFACES` § 2 delivers such an outcome to the change's actor, so a session is told of its
 //! view's change and of every other change whose chain names its actor, wherever in the
 //! repository it runs. The hook reads the executor logs this repository already holds: no
 //! fetch, so an event a remote executor wrote arrives after a fetching command (`bay status`,
-//! `bay watch`, `land`) brought the log (ruling R-hook-1). What the session was told is a
+//! `bay status --since`, `land`) brought the log (ruling R-hook-1). What the session was told is a
 //! delivered-notice cursor in the session's state, `notices.json`: the log tips read to, and the
-//! ids told. `session-start` sets it at the tips it finds, since its compact state already names
+//! ids told. `session.start` sets it at the tips it finds, since its compact state already names
 //! the actor's open refusals; a session whose start the hook never saw, or whose cursor cannot
 //! be read, starts at the tips it finds then, and the line records that (`notice_cursor`). A
 //! cursor that cannot be written tells nothing (`notice_cursor: "unwritable"`): a notice it
@@ -29,7 +29,7 @@
 //! `operation.conflict` by `bay status`) is one notice too, given once per note, at the same
 //! events and within the same budget, from the chain this repository holds (one local read per
 //! hook in a view; a fetching command brings the note). The cursor keeps the notes it passed
-//! (`conflicts`, `<op id> <trunk>`); `session-start` passes the notes that stand, since its
+//! (`conflicts`, `<op id> <trunk>`); `session.start` passes the notes that stand, since its
 //! compact state names them. No log event is written for it.
 //!
 //! NEW-10: a landing on trunk on paths the view's change declared (`--paths`) is one notice
@@ -56,7 +56,7 @@
 //! Each session has a budget of `[hooks] notice_budget_bytes` (default 2048) per hour, the hour
 //! starting at the first notice after the last one ended. A notice that does not fit is counted
 //! in the session's row (`notices_over_budget`) and in its state, not emitted; the cursor still
-//! passes it, and `bay watch` lists it. The first such notice in an hour adds one fixed line
+//! passes it, and `bay status --since` lists it. The first such notice in an hour adds one fixed line
 //! saying so, outside the budget, so a withheld refusal is never silent. Only the session's own
 //! agent is told: a subagent shares the session id, and a notice in its context would never
 //! reach the agent that owns the change.
@@ -92,7 +92,8 @@ const MAX_TOLD: usize = 256;
 const MAX_LINE: usize = 300;
 
 /// The line for notices withheld by the budget.
-const OVER_BUDGET: &str = "bay: more notices than this hour's budget; `bay watch` lists them\n";
+const OVER_BUDGET: &str =
+    "bay: more notices than this hour's budget; `bay status --since` lists them\n";
 
 /// What the session was told, and how much of its budget the current window used. A field a
 /// later bay adds is ignored, and one an earlier bay lacks is its default, so an update in the
@@ -703,7 +704,7 @@ fn landed_line(
         .collect();
     let text = format!(
         "bay: change {change}: landed_on_your_paths: change {landed} (intent {}, actor {}) \
-         landed on trunk on {}: refresh (`bay start --resume {change}`) and re-read them",
+         landed on trunk on {}: refresh (`bay start {change}`) and re-read them",
         theirs.intent.reference,
         theirs.actor.name,
         paths.join(", "),
@@ -877,9 +878,9 @@ pub fn instructions(repo: &Repo, tree: &Path, state_dir: &Path) -> Option<(Strin
 /// G287: the line a session is told when the repository has operations queued and no executor
 /// presence is fresh, the rule of `bay status`'s `no_live_executor`
 /// ([`crate::presence::no_live_executor`]).
-pub const NO_EXECUTOR: &str = "bay: no executor is running for this repository; queued changes wait. Start one with `bay executor run`, or install it with `bay executor install`.\n";
+pub const NO_EXECUTOR: &str = "bay: no runner is running for this repository; queued changes wait. Start one with `bay runner run`, or install it with `bay runner install`.\n";
 
-/// G287: at `session-start` and `user-prompt-submit`, [`NO_EXECUTOR`] when the repository has
+/// G287: at `session.start` and `turn.start`, [`NO_EXECUTOR`] when the repository has
 /// operations queued and no fresh executor presence, at most once per change of that state: the
 /// session's cursor in `state_dir` keeps whether it was told (`no_executor`), and a state that
 /// clears (an executor came, or nothing waits) arms it again. Local refs only, outside the
@@ -932,7 +933,7 @@ fn line(change: &str, kind: &str, event: &Value) -> String {
                 reason.retry_when()
             );
         }
-        None => text.push_str(": `bay watch` lists it"),
+        None => text.push_str(": `bay status --since` lists it"),
     }
     let mut out: String = text
         .chars()
@@ -1136,7 +1137,7 @@ mod tests {
         let told = tell(&mut cursor, VIEW, &nobody, &[bad], 2048, 0);
         assert_eq!(
             told.text,
-            "bay: change c1: refused an unknown reason on an operation: `bay watch` lists it\n"
+            "bay: change c1: refused an unknown reason on an operation: `bay status --since` lists it\n"
         );
         let other = json!({"id": "e2", "kind": "refused", "change": "c1", "op_id": "c2.1",
             "reason": "CHECK_FAILED"});

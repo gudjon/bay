@@ -76,9 +76,9 @@ fn a_trunk_changed_around_bay_turns_doctor_red_with_the_count() {
     let started = test_box.bay_ok(&repo, &["start", "CARD-305", "--paths", "src/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/through.rs"), "fn through() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     // Before anything goes around bay, doctor stays ok.
     test_box.git_ok(&repo, &["fetch", "-q", "origin"]);
     let (code, result, hooks) = doctor(&test_box, &repo);

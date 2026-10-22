@@ -7,9 +7,9 @@
 //!
 //! - detects: a merge outside bay ([`crate::unattributed`], G85) whose other parents bring a
 //!   lane ref's commits onto trunk names the lane and those commits (`lane_leak`, [`of_landing`])
-//!   in `bay status`, the fleet map and `bay watch`;
-//! - runs a lane change (`bay start --lane`) to its checks and never lands it
-//!   (`LANE_NEVER_LANDS`, refused by the executor and by the bay host hook);
+//!   in `bay status`, the fleet map and `bay status --since`;
+//! - runs a lane change (`bay start --lane`) to its checks and never lands it: its run ends `ok`
+//!   with the checks named ([`CHECKED`]), and the bay host hook refuses its publication;
 //! - refuses at land a change of no lane whose view reaches a lane ref's commits off trunk
 //!   (`LANE_LEAK`, [`reached`]), and denies the shell shapes that copy from a lane ref into a view
 //!   of no lane (`crate::deny`).
@@ -31,6 +31,14 @@ use serde_json::{Value, json};
 use crate::config::{Config, Lane};
 use crate::git::Git;
 use crate::repo::Repo;
+
+/// The outcome of a lane change's operation once its checks ran (0.3.0: no refusal, so no
+/// reason code). The operation stays blocked, so it never publishes; an unchanged retry runs
+/// nothing and says `ok` again.
+pub const CHECKED: &str = "lane_checked";
+
+/// What a lane change's `ok` says in `detail.note`.
+pub const NOTE: &str = "a lane change runs its checks against the current main and never merges";
 
 /// The most lane tips one judgement reads; past it, the rest are not judged and the reader is
 /// told (`truncated`).

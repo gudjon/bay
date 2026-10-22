@@ -4,7 +4,7 @@
 //! transactions). Its `refs/heads/<trunk>` is append-only, enforced by an `update` hook defined
 //! in configuration (Git ≥ 2.54) that refuses a non-fast-forward, a deletion or a recreation of
 //! trunk only. Below that floor Git ignores the hook, so `host init` refuses with
-//! `GIT_BELOW_FLOOR` and creates nothing. `refs/bay/*` and `refs/notes/bay/*` stay rewritable so retention cuts work; the
+//! `TOOL_BELOW_FLOOR` and creates nothing. `refs/bay/*` and `refs/notes/bay/*` stay rewritable so retention cuts work; the
 //! repository-wide `receive.denyNonFastForwards` / `receive.denyDeletes` are not used.
 //!
 //! Ref-prefix scoping by key class and the publication checks are kickstart item 19c.
@@ -47,7 +47,8 @@ fn run_init(
     let git_version = Version::parse(&git_line);
     if git_version < Version::parse(GIT_FLOOR_HOSTED_TRUNK) {
         return Ok(
-            BayResult::blocked(Reason::GitBelowFloor).with_detail(json!({
+            BayResult::blocked(Reason::ToolBelowFloor).with_detail(json!({
+                "tool": "git",
                 "role": "bay-hosted-trunk",
                 "version": git_version.to_string(),
                 "floor": GIT_FLOOR_HOSTED_TRUNK,

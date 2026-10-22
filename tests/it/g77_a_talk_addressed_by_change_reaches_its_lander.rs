@@ -5,8 +5,8 @@
 //! change. The recipient comes from bay's publication record only: the trunk commit must verify
 //! as an executor-signed publication, and the actor is read from that change's record, never
 //! from a trailer typed on a commit. A commit on trunk that is no bay publication is refused with
-//! `UNATTRIBUTED_LANDING`, naming the commit, and nothing is sent; a change or commit that is not
-//! on trunk is `CHANGE_NOT_LANDED`. `--to-change` names the recipient, so a recipient given
+//! `OUTSIDE_MERGE`, naming the commit, and nothing is sent; a change or commit that is not
+//! on trunk is `CHANGE_NOT_MERGED`. `--to-change` names the recipient, so a recipient given
 //! beside it is refused.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -29,7 +29,7 @@ fn land(case: &TalkCase, intent: &str, file: &str) -> (String, String) {
             .bay(&view)
             .env("BAY_ACTOR", "agent")
             .env("BAY_SESSION", "s-agent")
-            .args(["land", "--wait"]),
+            .args(["merge", "--wait"]),
     );
     assert_eq!(code, 0, "{landed}");
     (id, case.host_tip("refs/heads/main").unwrap())
@@ -136,7 +136,7 @@ fn a_typed_actor_trailer_outside_bay_never_routes_a_talk() {
 
     let (code, refused) = talk_to_change(&case, &forged, "Fix the crash in x", &x);
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "UNATTRIBUTED_LANDING", "{refused}");
+    assert_eq!(refused["reason"], "OUTSIDE_MERGE", "{refused}");
     assert_eq!(refused["detail"]["commit"], forged.as_str(), "{refused}");
     assert_eq!(talks_to(&case, "agent-b"), Vec::<String>::new());
 
@@ -160,7 +160,7 @@ fn an_unlanded_change_or_commit_is_change_not_landed_and_a_second_recipient_is_r
 
     let (code, refused) = talk_to_change(&case, &open, "Finish this", &open);
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "CHANGE_NOT_LANDED", "{refused}");
+    assert_eq!(refused["reason"], "CHANGE_NOT_MERGED", "{refused}");
 
     // A commit that is not on trunk.
     let off_trunk = case.test_box.git_ok(
@@ -176,7 +176,7 @@ fn an_unlanded_change_or_commit_is_change_not_landed_and_a_second_recipient_is_r
     );
     let (code, refused) = talk_to_change(&case, &off_trunk, "Finish this", &open);
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "CHANGE_NOT_LANDED", "{refused}");
+    assert_eq!(refused["reason"], "CHANGE_NOT_MERGED", "{refused}");
 
     // `--to-change` names the recipient: a recipient beside it is refused.
     let follow_up = from_now(3600);
@@ -196,6 +196,6 @@ fn an_unlanded_change_or_commit_is_change_not_landed_and_a_second_recipient_is_r
         ],
     );
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "TALK_INVALID", "{refused}");
+    assert_eq!(refused["reason"], "TALK_REFUSED", "{refused}");
     assert_eq!(talks_to(&case, "agent-b"), Vec::<String>::new());
 }

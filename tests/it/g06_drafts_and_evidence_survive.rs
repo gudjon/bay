@@ -159,7 +159,7 @@ fn a_change_with_evidence(test_box: &TestBox) -> (std::path::PathBuf, String, St
     assert!(!view.join("docs/b.md").exists(), "the view is sparse");
 
     edit(&view, "src/x.rs", "fn x() {}\n");
-    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    let resumed = test_box.bay_ok(&repo, &["start", &id]);
     assert_eq!(resumed["detail"]["checkpointed"], true);
 
     let git = Git::new(&repo);
@@ -181,7 +181,7 @@ fn a_change_with_evidence(test_box: &TestBox) -> (std::path::PathBuf, String, St
 
 /// Another actor opens the exact snapshot and its evidence in `other`.
 fn opens_exact_snapshot(test_box: &TestBox, other: &Path, id: &str, tree: &str) {
-    let opened = test_box.bay_ok(other, &["start", "--resume", id]);
+    let opened = test_box.bay_ok(other, &["start", id]);
     let view = Path::new(opened["detail"]["view"].as_str().unwrap()).to_path_buf();
     assert_eq!(
         std::fs::read_to_string(view.join("src/x.rs")).unwrap(),
@@ -295,7 +295,7 @@ fn resume_brings_in_a_newer_trunk_and_reports_what_moved() {
     test_box.git_ok(&other, &["commit", "-q", "-am", "trunk moves"]);
     test_box.git_ok(&other, &["push", "-q", "origin", "main"]);
 
-    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    let resumed = test_box.bay_ok(&repo, &["start", &id]);
     assert_eq!(resumed["detail"]["trunk_moved"], true);
     assert_eq!(
         resumed["detail"]["moved_paths"],

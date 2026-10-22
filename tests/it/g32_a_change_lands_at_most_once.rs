@@ -1,7 +1,7 @@
 //! G32. A change lands at most once, and a different revision is never reported as landed.
 //!
 //! Land revision r1; queue r2 of the same change before r1 publishes: r1's operation is
-//! superseded and r2 publishes; queue r3 after r2 landed: refused `CHANGE_ALREADY_LANDED`,
+//! superseded and r2 publishes; queue r3 after r2 landed: refused `CHANGE_ALREADY_MERGED`,
 //! never "landed"; an unsigned commit that quotes the `Change-Id` trailer is an anomaly, not
 //! a landing.
 
@@ -27,20 +27,20 @@ fn a_newer_revision_supersedes_and_a_later_one_is_refused() {
     test_box.use_keys(&repo, &keys);
     let (id, view) = test_box.start_and_edit(&repo);
 
-    let (code, r1) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r1) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r1}");
     std::fs::write(view.join("src/new.rs"), "fn new() { r2 }\n").unwrap();
-    let (code, r2) = result_json(test_box.bay(&view).arg("land"));
+    let (code, r2) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{r2}");
     assert_eq!(r2["op_id"], format!("{id}.2"));
 
     let executor = test_box.clone_of(&remote, "executor");
     test_box.use_keys(&executor, &keys);
-    let ran = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let results = ran["detail"]["ran"].as_array().unwrap();
     assert_eq!(results.len(), 1, "only r2 runs: {ran}");
     assert_eq!(results[0]["op_id"], format!("{id}.2"));
-    assert_eq!(results[0]["decision"], "landed");
+    assert_eq!(results[0]["decision"], "merged");
     assert_eq!(
         test_box.git_bare(&remote, &["show", "main:src/new.rs"]),
         "fn new() { r2 }"
@@ -58,9 +58,9 @@ fn a_newer_revision_supersedes_and_a_later_one_is_refused() {
 
     // r3 after r2 landed: refused, never reported as landed.
     std::fs::write(view.join("src/new.rs"), "fn new() { r3 }\n").unwrap();
-    let (code, r3) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, r3) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{r3}");
-    assert_eq!(r3["reason"], "CHANGE_ALREADY_LANDED");
+    assert_eq!(r3["reason"], "CHANGE_ALREADY_MERGED");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
 }
 

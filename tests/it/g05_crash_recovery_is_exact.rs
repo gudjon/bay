@@ -24,7 +24,7 @@ fn kill_then_resume(point: &str, expect_state: &str, expect_op: &str) {
     let killed = test_box
         .bay(&view)
         .env("BAY_TEST_KILL_AT", point)
-        .args(["land", "--wait"])
+        .args(["merge", "--wait"])
         .output()
         .unwrap();
     assert_eq!(killed.status.code(), Some(137), "{point}");
@@ -39,9 +39,9 @@ fn kill_then_resume(point: &str, expect_state: &str, expect_op: &str) {
         "{point}: {status}"
     );
 
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{point}: {result}");
-    assert_eq!(result["decision"], "landed", "{point}");
+    assert_eq!(result["decision"], "merged", "{point}");
     // Recovery continues the operation the crash interrupted; it never mints a second one.
     assert_eq!(result["op_id"], format!("{id}.1"), "{point}: {result}");
     assert_eq!(

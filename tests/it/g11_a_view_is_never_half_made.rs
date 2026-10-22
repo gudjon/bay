@@ -45,11 +45,7 @@ fn a_view_killed_mid_creation_builds_no_candidate_until_resumed() {
     assert!(!view.join("src/a.rs").exists(), "and it is empty");
 
     // An empty view would read as "delete everything"; bay builds nothing from it.
-    let (code, result) = result_json(
-        test_box
-            .bay(&repo)
-            .args(["land", "--wait", "--change", &id]),
-    );
+    let (code, result) = result_json(test_box.bay(&repo).args(["merge", "--wait", &id]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "WORKSPACE_INCOMPLETE");
     assert_eq!(result["allowed"], serde_json::json!(["refresh"]));
@@ -64,14 +60,14 @@ fn a_view_killed_mid_creation_builds_no_candidate_until_resumed() {
     );
 
     // --resume completes the view; then it lands like any other.
-    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    let resumed = test_box.bay_ok(&repo, &["start", &id]);
     let view = PathBuf::from(resumed["detail"]["view"].as_str().unwrap());
     assert!(view.join("src/a.rs").is_file());
     assert!(!view.join("docs/b.md").exists());
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed");
+    assert_eq!(result["decision"], "merged");
     assert_eq!(
         test_box.git_bare(&remote, &["show", "main:docs/b.md"]),
         "b",

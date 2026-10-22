@@ -6,7 +6,7 @@
 //! whose `supersedes` names the abandoned one, and that change lands. While the newest
 //! generation's change is live, `--new` is refused `CHANGE_SUPERSEDED`, and the refusal says the
 //! change is live and how to give it up or adopt it. A closed change behind a newer generation
-//! is never re-opened: `bay start --resume` of it is refused naming the newer change, and the
+//! is never re-opened: `bay start` of it is refused naming the newer change, and the
 //! host refuses a chain update that turns it live again. Plain `bay start` re-opening an
 //! abandoned change says how many trunk commits it is behind, and how to bring them in.
 //!
@@ -21,7 +21,7 @@
 //!   !ended_unlanded(record.state) && self.claim_exists(..)`: the third case's re-opening push
 //!   is taken.
 //! - start side, `src/start.rs` `resume`: `if let Some(newer) = newer_generation(repo, &record)?`:
-//!   the third case's `--resume` of the abandoned change succeeds.
+//!   the third case's `bay start` of the abandoned change succeeds.
 //! - start side, `src/start.rs` `add_behind`: the fourth case's `behind` is missing.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -65,7 +65,7 @@ fn start_and_abandon(test_box: &TestBox, repo: &Path, intent: &str, file: &str) 
     assert_eq!(code, 0, "{started}");
     let view = view_of(&started);
     std::fs::write(view.join(file), "fn half() {}\n").unwrap();
-    let (code, abandoned) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    let (code, abandoned) = result_json(test_box.bay(&view).args(["abandon"]));
     assert_eq!(code, 0, "{abandoned}");
     assert_eq!(abandoned["detail"]["state"], "abandoned", "{abandoned}");
     started["change"].as_str().unwrap().to_owned()
@@ -126,7 +126,7 @@ fn after_an_abandon_new_claims_the_next_generation_and_lands() {
 
     let view = view_of(&next);
     std::fs::write(view.join("src/again.rs"), "fn again() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![next_id]);
     let trailer = test_box.git_bare(
@@ -155,7 +155,7 @@ fn while_the_generation_is_live_new_is_refused_and_says_why() {
     let why = refused["detail"]["why"].as_str().unwrap_or_default();
     assert!(why.contains("is live"), "{refused}");
     let recovery = refused["detail"]["recovery"].as_str().unwrap_or_default();
-    assert!(recovery.contains("bay land --abandon"), "{refused}");
+    assert!(recovery.contains("bay abandon"), "{refused}");
     assert!(recovery.contains("bay start CARD-273"), "{refused}");
 
     // The host refuses a generation-2 claim while generation 1 is live, even one signed by the
@@ -198,7 +198,7 @@ fn a_closed_change_behind_a_newer_generation_is_never_re_opened() {
     assert_eq!(code, 0, "{next}");
     let next_id = next["change"].as_str().unwrap().to_owned();
 
-    let (code, refused) = start(&test_box, &repo, &["--resume", &abandoned]);
+    let (code, refused) = start(&test_box, &repo, &[&abandoned]);
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHANGE_SUPERSEDED", "{refused}");
     assert_eq!(refused["change"], abandoned.as_str(), "{refused}");
@@ -253,7 +253,7 @@ fn re_opening_an_abandoned_change_says_how_far_behind_it_is() {
 
     // Trunk moves past the abandoned change's base.
     let (_, other) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&other).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&other).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
 
     let (code, reopened) = start(&test_box, &repo, &["CARD-275", "--paths", "src/"]);
@@ -263,7 +263,7 @@ fn re_opening_an_abandoned_change_says_how_far_behind_it_is() {
     assert!(behind > 0, "{reopened}");
     let recovery = reopened["detail"]["recovery"].as_str().unwrap_or_default();
     assert!(
-        recovery.contains(&format!("bay start --resume {abandoned}")),
+        recovery.contains(&format!("bay start {abandoned}")),
         "{reopened}"
     );
 }

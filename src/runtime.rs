@@ -9,7 +9,7 @@
 //! subject and at least one artifact digest built from it; `effective` needs a `pass` on the
 //! same commit for an artifact a counted `running` record names.
 //!
-//! The runtime adapter (`[runtime] command` in `.bay/config.toml`) is asked for records about
+//! The runtime adapter (`[plugin.runtime] command` in `.bay/config.toml`) is asked for records about
 //! one landed commit; the records it prints that count are counted for that read and the rest
 //! are refused, each with why. `bay status` is a read: it writes no evidence, because only a
 //! producer writes its own notes ref. A producer that wants its observation kept writes it
@@ -161,21 +161,20 @@ pub fn observe(
     tree: &str,
     registry: Option<&Registry>,
 ) -> Result<Option<Observed>, String> {
-    let Some(command) = repo
-        .config
-        .runtime
-        .as_ref()
-        .and_then(|runtime| runtime.command.as_deref())
-    else {
+    let Some(plugin) = repo.config.plugin.runtime.as_ref() else {
         return Ok(None);
     };
+    let Some(command) = plugin.command.as_deref() else {
+        return Ok(None);
+    };
+    let timeout = plugin.timeout(RUNTIME_TIMEOUT);
     // A program path relative to the main work tree, then its arguments, with only `PATH` and
     // `HOME` from bay's environment, as the notify adapter has (`crate::run`).
     let cmd = crate::run::command(&repo.work_root, command)
-        .ok_or("[runtime] command is empty")?
+        .ok_or("[plugin.runtime] command is empty")?
         .map_err(|why| format!("the runtime adapter: {why}"))?;
     let request = json!({"change": change, "commit": commit, "tree": tree}).to_string();
-    let ran = crate::run::captured(cmd, Some(request.as_bytes()), RUNTIME_TIMEOUT)
+    let ran = crate::run::captured(cmd, Some(request.as_bytes()), timeout)
         .map_err(|fault| format!("the runtime adapter: {fault}"))?;
     if !ran.status.success() {
         return Err(format!(

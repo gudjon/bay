@@ -7,7 +7,7 @@
 //!
 //! Runbook: switching bay off.
 //!
-//! 1. Stop every `bay executor run`. A queued change stays unmerged, and its record stays under
+//! 1. Stop every `bay runner run`. A queued change stays unmerged, and its record stays under
 //!    `refs/bay/changes/`.
 //! 2. Bay-hosted main: on the host, `git config --remove-section hook.bay-trunk;
 //!    git config --remove-section hook.bay-scope; git config --unset bay.trunk`.
@@ -55,7 +55,7 @@ fn remove_the_agent_hooks(test_box: &TestBox, repo: &Path) {
     });
     let mut child = test_box
         .bay_process(repo)
-        .args(["hook", "pre-tool"])
+        .args(["hook", "tool.before"])
         .stdin(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -87,7 +87,7 @@ fn queue(test_box: &TestBox, repo: &Path) -> String {
     let id = started["change"].as_str().unwrap().to_owned();
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/queued.rs"), "// queued\n").unwrap();
-    let queued = test_box.bay_ok(&view, &["land"]);
+    let queued = test_box.bay_ok(&view, &["merge"]);
     assert_eq!(queued["decision"], "queued", "{queued}");
     id
 }
@@ -116,8 +116,8 @@ fn land(test_box: &TestBox, repo: &Path, intent: &str, file: &str) -> String {
     let started = test_box.bay_ok(repo, &["start", intent, "--paths", "src/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join(file), format!("// {intent}\n")).unwrap();
-    let landed = test_box.bay_ok(&view, &["land", "--wait"]);
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    let landed = test_box.bay_ok(&view, &["merge", "--wait"]);
+    assert_eq!(landed["decision"], "merged", "{landed}");
     landed["detail"]["commit"].as_str().unwrap().to_owned()
 }
 

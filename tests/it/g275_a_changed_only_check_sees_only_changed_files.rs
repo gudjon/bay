@@ -106,9 +106,9 @@ fn start(test_box: &TestBox, repo: &Path, intent: &str) -> PathBuf {
 
 /// Lands the change in `view` and asserts it landed.
 fn land(test_box: &TestBox, view: &Path) {
-    let (code, landed) = result_json(test_box.bay(view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 }
 
 /// The one run the check made, or every run when it made several: each saw the same.
@@ -216,7 +216,7 @@ fn a_changed_only_check_with_a_footprint_or_on_an_approval_makes_the_policy_inva
         let (repo, _) = trunk(&test_box, extra);
         let view = start(&test_box, &repo, "BAD-1");
         std::fs::write(view.join("src/one.txt"), "one, changed\n").unwrap();
-        let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+        let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 10, "{extra}: {refused}");
         assert_eq!(refused["reason"], "POLICY_INVALID", "{extra}: {refused}");
         let why = refused["detail"]["why"].as_str().unwrap_or_default();

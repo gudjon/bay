@@ -29,7 +29,7 @@ fn git_2_49_is_red_for_a_stated_executor_and_the_inferred_role_says_so() {
     let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["decision"], "blocked");
-    assert_eq!(result["reason"], "GIT_BELOW_FLOOR");
+    assert_eq!(result["reason"], "TOOL_BELOW_FLOOR");
     assert_eq!(result["detail"]["role"], "executor", "{result}");
     assert_eq!(result["detail"]["role_source"], "stated", "{result}");
     let git = row(&result, "git");
@@ -128,7 +128,7 @@ fn under_a_registry_a_stated_executor_needs_its_keys_enrolled() {
 
     let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "EXECUTOR_KEY_MISSING", "{result}");
+    assert_eq!(result["reason"], "RUNNER_KEY_MISSING", "{result}");
     let row_keys = row(&result, "executor-keys");
     assert_eq!(row_keys["state"], "red", "{result}");
     assert_eq!(row_keys["executor"], "not set", "{result}");

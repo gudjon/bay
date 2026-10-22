@@ -1,6 +1,6 @@
 //! G250: an adapter proves its contract (`INTERFACES` § 3, § 4, § 7).
 //!
-//! `bay adapter test <kind> -- <command...>` runs a fixed set of contract cases against a
+//! `bay plugin test <kind> -- <command...>` runs a fixed set of contract cases against a
 //! connector, through bay's own invocation code, with bay's environment baseline and time
 //! limits, and prints one `bay.result/1` whose `detail.cases` names each case with what was sent,
 //! what came back, its result and why. A conforming wake, check and notify adapter pass every
@@ -46,7 +46,7 @@ fn adapter_dir(test_box: &TestBox, name: &str, script: &str) -> PathBuf {
     dir
 }
 
-/// Runs `bay adapter test <kind> <flags> -- scripts/<name>` from `dir`, with `env` added.
+/// Runs `bay plugin test <kind> <flags> -- scripts/<name>` from `dir`, with `env` added.
 fn kit(
     test_box: &TestBox,
     dir: &Path,
@@ -56,7 +56,7 @@ fn kit(
     env: &[(&str, &str)],
 ) -> (i32, Value) {
     let mut cmd = test_box.bay(dir);
-    cmd.args(["adapter", "test", kind, "--json"])
+    cmd.args(["plugin", "test", kind, "--json"])
         .args(flags)
         .arg("--")
         .arg(format!("scripts/{name}"));

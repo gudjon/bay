@@ -89,7 +89,7 @@ fn submitted() -> (TestBox, std::path::PathBuf, std::path::PathBuf, String) {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     (test_box, repo, remote, id)
 }
@@ -119,7 +119,7 @@ fn a_write_whose_push_lost_leaves_the_chain_ref_and_the_next_pass_claims() {
     ));
     std::fs::write(&armed, "").unwrap();
 
-    let first = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let first = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert!(
         test_box.path().join("armed.fired").exists(),
         "the executor never pushed the chain: {first}"
@@ -134,9 +134,9 @@ fn a_write_whose_push_lost_leaves_the_chain_ref_and_the_next_pass_claims() {
 
     // The head's place goes; the waiting change is head, and the next pass claims it.
     bay::queue::release(&opened, None, place, &holder_op, "superseded").unwrap();
-    let second = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let second = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let ran = ran_for(&second, &id);
-    assert_eq!(ran["decision"], "landed", "{second}");
+    assert_eq!(ran["decision"], "merged", "{second}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
 }
 
@@ -168,9 +168,9 @@ fn a_dead_writers_head_apart_from_the_remote_is_set_aside_and_the_pass_lands() {
     let moved = another_write(&test_box, &remote, &read, "another executor's write");
     test_box.git_bare(&remote, &["update-ref", &chain, &moved, &read]);
 
-    let pass = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    let pass = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     let ran = ran_for(&pass, &id);
-    assert_eq!(ran["decision"], "landed", "{pass}");
+    assert_eq!(ran["decision"], "merged", "{pass}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
     let kept = format!("refs/bay/kept/{id}/{dead}");
     assert_eq!(

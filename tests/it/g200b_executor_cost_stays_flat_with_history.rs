@@ -29,12 +29,12 @@ fn history(closed: u64) -> (TestBox, PathBuf, PathBuf) {
     let remote = test_box.path().join("repo-remote.git");
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &unchecked_files());
     let (landed, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "landed", "{result}");
+    assert_eq!(result["decision"], "merged", "{result}");
     for _ in 0..closed {
         let (_, view) = test_box.start_and_edit(&repo);
-        let (code, result) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+        let (code, result) = result_json(test_box.bay(&view).args(["abandon"]));
         assert_eq!(code, 0, "{result}");
     }
     let (open, _) = test_box.start_and_edit(&repo);
@@ -51,14 +51,14 @@ fn history(closed: u64) -> (TestBox, PathBuf, PathBuf) {
     (test_box, remote, executor)
 }
 
-/// The subcommands one `bay executor run --once` in `dir` spawned, by count, from bay's own
+/// The subcommands one `bay runner run --once` in `dir` spawned, by count, from bay's own
 /// process only, and its result.
 fn pass(test_box: &TestBox, dir: &Path, name: &str) -> (BTreeMap<String, usize>, Value) {
     let trace = test_box.path().join(format!("{name}-trace.jsonl"));
     let (code, result) = result_json(
         test_box
             .bay(dir)
-            .args(["executor", "run", "--once"])
+            .args(["runner", "run", "--once"])
             .env("BAY_TEST_GIT_TRACE", &trace),
     );
     assert_eq!(code, 0, "{result}");
@@ -135,7 +135,7 @@ fn retention_removes_finished_pairs_below_the_head_and_keeps_the_highest_and_the
     // The retention window passes at once.
     test_box.commit_config(
         &executor,
-        "[retention]\nwindow_s = 0\n\n[executor]\nlease_s = 2\nheartbeat_s = 1\n",
+        "[retention]\nwindow_s = 0\n\n[runner]\nlease_s = 2\nheartbeat_s = 1\n",
     );
     let (_, ran) = pass(&test_box, &executor, "retention");
     let pruned: Vec<u64> = ran["detail"]["ran"]

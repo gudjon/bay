@@ -63,7 +63,7 @@ fn submitted(before: &str, result: &str, extra: &str) -> (TestBox, PathBuf, Path
 }
 
 fn land(test_box: &TestBox, view: &Path) -> (i32, serde_json::Value) {
-    result_json(test_box.bay(view).args(["land", "--wait"]))
+    result_json(test_box.bay(view).args(["merge", "--wait"]))
 }
 
 /// The record of the check names the sandbox it ran in.
@@ -119,7 +119,7 @@ fn a_check_cannot_see_home_a_temporary_file_or_the_repository() {
         code, 0,
         "the check saw a file outside its allow-list: {landed}"
     );
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote).len(), 1);
     assert_ran_in(&test_box, &repo, sandbox, &landed);
 }
@@ -137,7 +137,7 @@ fn a_check_reads_its_candidate_and_its_adapter() {
     let (test_box, repo, remote, view) = submitted(before, &passing_result(1), "");
     let (code, landed) = land(&test_box, &view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote).len(), 1);
     assert_ran_in(&test_box, &repo, sandbox, &landed);
 }
@@ -176,7 +176,7 @@ fn a_check_has_no_network_unless_its_entry_says_network_true() {
     let (test_box, repo, remote, view) = submitted(&before, &result, "network = true\n");
     let (code, landed) = land(&test_box, &view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote).len(), 1);
     assert_ran_in(&test_box, &repo, sandbox, &landed);
     drop(listener);

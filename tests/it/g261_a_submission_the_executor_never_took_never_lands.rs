@@ -1,6 +1,6 @@
 //! G261. A submission the executor never took never lands (`INTERFACES` § 3a).
 //!
-//! With `[executor] command` set, `bay land` persists the request, then asks that executor to
+//! With `[runner] command` set, `bay merge` persists the request, then asks that executor to
 //! `submit` it. When the command cannot be started, or it refuses, the land fails naming the
 //! executor command, never `git`, and the operation ends `failed` with a stated outcome, so no
 //! executor pass lands it later: a land that answered `failed` must not merge.
@@ -15,8 +15,8 @@ use crate::support;
 
 use support::{TestBox, check_files, passing_result, result_json};
 
-/// A repository whose `[executor] command` is `scripts/executor`, with `script` there when
-/// given; `bay land` on one change, then one executor pass. Returns the land result, the
+/// A repository whose `[runner] command` is `scripts/executor`, with `script` there when
+/// given; `bay merge` on one change, then one executor pass. Returns the land result, the
 /// operation `bay status` shows, and the change ids the pass put on trunk.
 fn land_with(script: Option<&str>) -> (serde_json::Value, serde_json::Value, Vec<String>) {
     let test_box = TestBox::new();
@@ -28,7 +28,7 @@ fn land_with(script: Option<&str>) -> (serde_json::Value, serde_json::Value, Vec
     }
     files.push((
         ".bay/config.toml".to_owned(),
-        "[executor]\ncommand = \"scripts/executor\"\n".to_owned(),
+        "[runner]\ncommand = \"scripts/executor\"\n".to_owned(),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     if script.is_some() {
@@ -39,12 +39,12 @@ fn land_with(script: Option<&str>) -> (serde_json::Value, serde_json::Value, Vec
         .unwrap();
     }
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, failed) = result_json(test_box.bay(&view).arg("land"));
+    let (code, failed) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 20, "{failed}");
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let op = status["detail"]["changes"][0]["operation"].clone();
     let executor = test_box.clone_of(&remote, "executor");
-    test_box.bay_ok(&executor, &["executor", "run", "--once"]);
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     (failed, op, test_box.trunk_change_ids(&remote))
 }
 

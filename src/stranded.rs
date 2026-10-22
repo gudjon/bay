@@ -1,4 +1,4 @@
-//! `bay status --stranded`: work that exists only on this disk (G156).
+//! `bay status --heads`: work that exists only on this disk (G156).
 //!
 //! A local branch whose tip no remote-tracking ref contains holds commits that no remote has:
 //! a disk that is lost loses them. Each one is listed with the commits it holds that no

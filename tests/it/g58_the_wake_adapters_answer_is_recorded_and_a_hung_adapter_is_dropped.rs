@@ -1,7 +1,7 @@
 //! G58 and G53: the wake adapter's answer is recorded on the ack, a hung adapter is dropped
 //! after 5 s, and the sender sees the wake outcome after a fetch (ruling T4; the wake contract).
 //!
-//! The recipient's machine asks `[wake] command` once, at accept. A fake adapter that marks the
+//! The recipient's machine asks `[plugin.wake] command` once, at accept. A fake adapter that marks the
 //! session blocked answers `skipped` / `SESSION_BLOCKED`; one that hangs is recorded `uncertain` /
 //! `WAKE_ADAPTER_FAILED` within the bound, and the accept still writes the ack.
 
@@ -31,7 +31,7 @@ fn with_wake() -> TalkCase {
                 ("src/a.rs", "fn a() {}\n"),
                 (
                     ".bay/config.toml",
-                    "[wake]\ncommand = \"scripts/bay-wake\"\n",
+                    "[plugin.wake]\ncommand = \"scripts/bay-wake\"\n",
                 ),
                 ("scripts/bay-wake", WAKE),
             ],

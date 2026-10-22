@@ -54,7 +54,7 @@ fn an_undo_racing_a_trunk_move_lands_on_top_and_rewinds_nothing() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     // This store's copy of the undone chain is one state commit ahead of the remote's, as
     // work not yet pushed is: the undo reads the remote's and keeps this one.
@@ -109,7 +109,7 @@ fn an_undo_racing_a_trunk_move_lands_on_top_and_rewinds_nothing() {
         )
     });
     assert_eq!(out.status.code(), Some(0), "{result}");
-    assert_eq!(result["decision"], "landed", "{result}");
+    assert_eq!(result["decision"], "merged", "{result}");
     let undo_id = result["change"].as_str().unwrap();
 
     trunk_moved_forward_only(&test_box, &remote, &trunk_before, &moved, undo_id);

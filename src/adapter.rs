@@ -1,4 +1,4 @@
-//! The adapter conformance kit: `bay adapter test <kind> -- <command...>` (G250; `INTERFACES`
+//! The adapter conformance kit: `bay plugin test <kind> -- <command...>` (G250; `INTERFACES`
 //! § 3, § 4 and § 7).
 //!
 //! A connector proves it is bay-compatible by passing a fixed set of contract cases, run the way
@@ -51,7 +51,7 @@ const CHECK_BASELINE: &str = "PATH from the policy's path, HOME and TMPDIR in th
      LANG=C.UTF-8, BAY_ADAPTER_DIR, and the names in env";
 const PATH_AND_HOME: &str = "PATH and HOME";
 
-/// One `bay adapter test` request.
+/// One `bay plugin test` request.
 pub struct Test {
     /// `check`, `wake` or `notify`.
     pub kind: String,
@@ -127,7 +127,7 @@ fn report(
     let count = |word: &str| cases.iter().filter(|case| case["result"] == word).count();
     let (passed, failed, not_judged) = (count("pass"), count("fail"), count("not_judged"));
     let mut human = format!(
-        "bay adapter test {kind}: {passed} passed, {failed} failed, {not_judged} not judged"
+        "bay plugin test {kind}: {passed} passed, {failed} failed, {not_judged} not judged"
     );
     for case in &cases {
         let field = |name: &str| case[name].as_str().unwrap_or_default().to_owned();
@@ -702,7 +702,7 @@ fn check_in(dir: &Path, command: &str, test: &Test, scratch: &Path) -> Result<Ba
     write(
         &work,
         "README.md",
-        "A scratch repository of bay adapter test.\n",
+        "A scratch repository of bay plugin test.\n",
     )?;
     let mut adapter = vec![program.clone()];
     copy(&dir.join(&program), &work.join(&program))?;
@@ -788,7 +788,7 @@ fn commit(git: &Git, message: &str) -> Result<String, String> {
         git,
         &[
             "-c",
-            "user.name=bay adapter test",
+            "user.name=bay plugin test",
             "-c",
             "user.email=adapter-test@example.invalid",
             "-c",

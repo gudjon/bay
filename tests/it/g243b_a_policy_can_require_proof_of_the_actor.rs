@@ -3,7 +3,7 @@
 //! G243: when several actors run sessions under one OS account, which can read a file-based
 //! agent key, any of them can sign as any other, and doctor's `key-custody` row says
 //! `actor_proof: "account"`. A policy at the base with `[agent] require_actor_proof = true` makes
-//! `bay land` refuse `ACTOR_UNPROVEN` there, before anything is signed, naming a hardware agent
+//! `bay merge` refuse `ACTOR_UNPROVEN` there, before anything is signed, naming a hardware agent
 //! key or one OS account per actor. A hardware agent key proves the actor, so it lands. Without
 //! the key in the policy nothing is refused. The key is a fake file and the session records fake
 //! lines; doctor and land read only paths, modes, owners and public halves.
@@ -75,7 +75,7 @@ fn a_shared_account_that_can_read_the_agent_key_is_refused_actor_unproven() {
     assert!(listed["actor_refusal"].is_string(), "{listed}");
 
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, result) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["decision"], "blocked", "{result}");
     assert_eq!(result["reason"], "ACTOR_UNPROVEN", "{result}");
@@ -116,9 +116,9 @@ fn a_hardware_agent_key_proves_the_actor_and_lands() {
     assert!(listed.get("actor_refusal").is_none(), "{listed}");
 
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
 }
 
@@ -131,8 +131,8 @@ fn without_the_policy_key_a_shared_account_lands() {
     assert!(listed.get("actor_refusal").is_none(), "{listed}");
 
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
 }

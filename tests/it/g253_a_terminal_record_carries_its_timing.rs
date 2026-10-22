@@ -50,16 +50,13 @@ fn a_queued_landing_records_its_queue_wait_and_check_time() {
     test_box.clone_of(&remote, "mover");
 
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, submitted) = result_json(test_box.bay(&view).arg("land"));
+    let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{submitted}");
     let executor = test_box.clone_of(&remote, "executor");
-    let queued = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(
-        queued["detail"]["ran"][0]["reason"], "PUBLICATION_QUEUED",
-        "{queued}"
-    );
-    let landed = test_box.bay_ok(&executor, &["executor", "run", "--once"]);
-    assert_eq!(landed["detail"]["ran"][0]["decision"], "landed", "{landed}");
+    let queued = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(queued["detail"]["ran"][0]["reason"], "QUEUED", "{queued}");
+    let landed = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(landed["detail"]["ran"][0]["decision"], "merged", "{landed}");
 
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let change = &status["detail"]["changes"][0];
@@ -133,14 +130,14 @@ fn a_queued_landing_records_its_queue_wait_and_check_time() {
     }
 }
 
-/// The `git log` spawns of bay's own process in one `bay executor run --once` in `dir`, read
+/// The `git log` spawns of bay's own process in one `bay runner run --once` in `dir`, read
 /// from the trace a test build writes (G171), and the run's result.
 fn log_spawns(test_box: &TestBox, dir: &Path, name: &str) -> (usize, Value) {
     let trace = test_box.path().join(format!("{name}-trace.jsonl"));
     let (code, result) = result_json(
         test_box
             .bay(dir)
-            .args(["executor", "run", "--once"])
+            .args(["runner", "run", "--once"])
             .env("BAY_TEST_GIT_TRACE", &trace),
     );
     assert_eq!(code, 0, "{result}");
@@ -207,10 +204,10 @@ fn the_timing_costs_the_same_spawns_however_many_heartbeats() {
             format!("fn {name}() {{}}\n"),
         )
         .unwrap();
-        let (code, submitted) = result_json(test_box.bay(&view).arg("land"));
+        let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
         assert_eq!(code, 0, "{submitted}");
         let (logs, result) = log_spawns(&test_box, &executor, name);
-        assert_eq!(result["detail"]["ran"][0]["decision"], "landed", "{result}");
+        assert_eq!(result["detail"]["ran"][0]["decision"], "merged", "{result}");
         spawns.push(logs);
         beats.push(heartbeats(&test_box, &remote, &id));
     }

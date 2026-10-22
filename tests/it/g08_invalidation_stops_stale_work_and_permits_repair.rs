@@ -9,10 +9,10 @@
 //! `expand` a change built on the old shape stays valid; only `contract` invalidates. A
 //! historical consumer never blocks. A change cannot supply its own provider. A provider that
 //! gives no version is a coverage gap, never a clear answer. The stale inputs of a change are
-//! read from local data only. The `pre-tool` hook refuses a write that a stale input covers,
+//! read from local data only. The `tool.before` hook refuses a write that a stale input covers,
 //! from the coordination cache a fetching command left (rulings R4, R5): a claim never refuses
 //! a write, an old cache allows with `COVERAGE_UNKNOWN`, and with the hooks removed land still
-//! refuses the same change (G23's hook clauses). A notice (`bay watch`, a hook event) changes
+//! refuses the same change (G23's hook clauses). A notice (`bay status --since`, a hook event) changes
 //! none of a change's versions, and a read in a view whose base is behind trunk never counts as
 //! observing: only `start --resume` writes `observed_versions` (ruling R3).
 
@@ -116,7 +116,7 @@ fn change_status(test_box: &TestBox, repo: &Path, id: &str) -> serde_json::Value
 }
 
 fn land(test_box: &TestBox, view: &Path) -> (i32, serde_json::Value) {
-    result_json(test_box.bay(view).args(["land", "--wait"]))
+    result_json(test_box.bay(view).args(["merge", "--wait"]))
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn an_unobserved_change_is_refused_then_repaired_and_lands_without_deadlock() {
     );
 
     // Observed after resume: edits are allowed, but no candidate is validated under v18 yet.
-    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    let resumed = test_box.bay_ok(&repo, &["start", &id]);
     assert_eq!(resumed["detail"]["observed_versions"][INPUT], "v18");
     let shown = change_status(&test_box, &repo, &id);
     assert_eq!(shown["state"], "repairing", "{shown}");
@@ -208,7 +208,7 @@ fn an_unobserved_change_is_refused_then_repaired_and_lands_without_deadlock() {
     std::fs::write(view.join("src/client.rs"), "uses v18\n").unwrap();
     let (code, landed) = land(&test_box, &view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote)[0], id);
     let shown = change_status(&test_box, &repo, &id);
     let validated = &shown["validated_candidate"];
@@ -226,10 +226,10 @@ fn a_resumed_change_whose_check_passes_lands_at_once() {
     std::fs::write(view.join("src/feature.rs"), "fn feature() {}\n").unwrap();
     std::fs::write(view.join("src/client.rs"), "uses v18\n").unwrap();
     move_trunk(&test_box, &repo, &[("api/version", "v18\n")]);
-    test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    test_box.bay_ok(&repo, &["start", &id]);
     let (code, landed) = land(&test_box, &view);
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 }
 
 #[test]
@@ -415,7 +415,7 @@ fn land_without_wait_refuses_an_unobserved_change_at_once() {
     let (_id, view) = start(&test_box, &repo, "CARD-1", &["src/"]);
     std::fs::write(view.join("src/feature.rs"), "fn feature() {}\n").unwrap();
     move_trunk(&test_box, &repo, &[("api/version", "v18\n")]);
-    let (code, refused) = result_json(test_box.bay(&view).args(["land"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge"]));
     assert_eq!(code, 10, "refused at admit, never queued: {refused}");
     assert_eq!(refused["reason"], "INPUT_UNOBSERVED", "{refused}");
     assert!(refused["op_id"].is_string(), "{refused}");
@@ -445,7 +445,7 @@ fn reading_the_required_version_rearms_a_refused_land() {
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "INPUT_UNOBSERVED", "{refused}");
     // Neither the revision nor trunk moves; the actor reads the required version.
-    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    let resumed = test_box.bay_ok(&repo, &["start", &id]);
     assert_eq!(resumed["detail"]["observed_versions"][INPUT], "v17");
     let (code, landed) = land(&test_box, &view);
     assert_eq!(code, 0, "never a deadlock: {landed}");
@@ -464,7 +464,7 @@ fn a_finished_change_keeps_its_state_and_runs_no_provider() {
     let (test_box, repo, _remote) = trunk_with(None, provider, &check_script());
     let (id, view) = start(&test_box, &repo, "CARD-1", &["src/"]);
     move_trunk(&test_box, &repo, &[("api/version", "v18\n")]);
-    let (code, abandoned) = result_json(test_box.bay(&view).args(["land", "--abandon"]));
+    let (code, abandoned) = result_json(test_box.bay(&view).args(["abandon"]));
     assert_eq!(code, 0, "{abandoned}");
     let ran = test_box.path().join("ran");
     let _ = std::fs::remove_file(&ran);
@@ -657,7 +657,7 @@ fn a_provider_outside_its_adapter_list_makes_the_policy_invalid() {
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
 }
 
-/// `bay hook pre-tool` with probed payload 03 (a `Write`), its tool, target and session
+/// `bay hook tool.before` with probed payload 03 (a `Write`), its tool, target and session
 /// rewritten; returns (exit, stdout, stderr).
 fn pre_tool(
     test_box: &TestBox,
@@ -685,7 +685,7 @@ fn hook_run(
     use std::io::Write as _;
     let mut child = test_box
         .bay_process(cwd)
-        .args(["hook", "pre-tool"])
+        .args(["hook", "tool.before"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -849,7 +849,7 @@ fn a_looping_executor_writes_the_cache_after_each_pass_that_fetched() {
     let (test_box, repo, remote) = trunk(None);
     let (id, view) = start(&test_box, &repo, "CARD-1", &["src/"]);
     std::fs::write(view.join("src/feature.rs"), "fn feature() {}\n").unwrap();
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     let clone = test_box.clone_of(&remote, "executor");
     test_box.git_ok(&clone, &["config", "bay.executorName", "exec"]);
@@ -857,7 +857,7 @@ fn a_looping_executor_writes_the_cache_after_each_pass_that_fetched() {
     let cache = clone.join(".git/bay/coord.json");
     let mut executor = test_box
         .bay_process(&clone)
-        .args(["executor", "run", "--interval-s", "1"])
+        .args(["runner", "run", "--interval-s", "1"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -892,10 +892,7 @@ fn the_hook_refuses_a_write_its_stale_input_covers() {
         assert_eq!(stderr.lines().count(), 1, "one line: {stderr}");
         assert!(stderr.contains("INPUT_UNOBSERVED"), "{stderr}");
         assert!(stderr.contains(INPUT), "{stderr}");
-        assert!(
-            stderr.contains(&format!("bay start --resume {id}")),
-            "{stderr}"
-        );
+        assert!(stderr.contains(&format!("bay start {id}")), "{stderr}");
     }
     // The refusal is recorded in the session's row.
     let row = last_row(&test_box, &repo, "s-1");
@@ -918,7 +915,7 @@ fn the_hook_refuses_a_write_its_stale_input_covers() {
     let (denied, _, _) = hook_run(&test_box, &view, &deny);
     assert_eq!(denied, Some(2));
     // Once the change observed the version, the repair is an edit: never a deadlock.
-    test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    test_box.bay_ok(&repo, &["start", &id]);
     let (code, stdout, stderr) = pre_tool(
         &test_box,
         &view,
@@ -1118,8 +1115,8 @@ fn a_notice_changes_none_of_the_versions() {
     );
     assert_eq!(before["invalidations"][0]["required"], "v18", "{before}");
 
-    // The notice in Y's view: `bay watch` names X's landing and Y's invalidation.
-    let watched = test_box.bay_ok(&view_y, &["watch"]);
+    // The notice in Y's view: `bay status --since` names X's landing and Y's invalidation.
+    let watched = test_box.bay_ok(&view_y, &["status", "--since"]);
     let landings = watched["detail"]["landings"].as_array().unwrap();
     assert!(
         landings
@@ -1131,13 +1128,17 @@ fn a_notice_changes_none_of_the_versions() {
         watched["detail"]["invalidations"][0]["reason"], "INPUT_UNOBSERVED",
         "{watched}"
     );
-    assert_eq!(versions(&test_box, &repo, &y), before, "after bay watch");
+    assert_eq!(
+        versions(&test_box, &repo, &y),
+        before,
+        "after bay status --since"
+    );
 
     // The same notice reaching Y's session through its hooks.
     for (event, name) in [
-        ("user-prompt-submit", "02-UserPromptSubmit.json"),
-        ("post-tool", "08-PostToolBatch.json"),
-        ("post-tool", "04-PostToolUse.json"),
+        ("turn.start", "02-UserPromptSubmit.json"),
+        ("step.end", "08-PostToolBatch.json"),
+        ("step.end", "04-PostToolUse.json"),
     ] {
         let code = hook_event(&test_box, &view_y, event, &payload(name, "s-y", &view_y));
         assert_eq!(code, 0, "{event} {name}");
@@ -1152,7 +1153,7 @@ fn a_notice_changes_none_of_the_versions() {
     assert_eq!(refused["reason"], "INPUT_UNOBSERVED", "{refused}");
 
     // Only `start --resume` moves what Y observed.
-    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &y]);
+    let resumed = test_box.bay_ok(&repo, &["start", &y]);
     assert_eq!(resumed["detail"]["observed_versions"][INPUT], "v18");
     let after = versions(&test_box, &repo, &y);
     assert_eq!(after["observed_versions"][INPUT], "v18", "{after}");
@@ -1189,16 +1190,16 @@ fn a_read_from_a_stale_view_never_counts_as_observed() {
         "tool_response": "v17\n",
     }]);
     for (event, payload) in [
-        ("pre-tool", &pre),
-        ("post-tool", &post),
-        ("post-tool", &batch),
+        ("tool.before", &pre),
+        ("step.end", &post),
+        ("step.end", &batch),
     ] {
         assert_eq!(hook_event(&test_box, &view, event, payload), 0, "{event}");
         assert_eq!(versions(&test_box, &repo, &id), before, "after {event}");
     }
     // The reads bay itself serves in that view observe nothing either.
     test_box.bay_ok(&view, &["status"]);
-    test_box.bay_ok(&view, &["watch"]);
+    test_box.bay_ok(&view, &["status", "--since"]);
     assert_eq!(
         versions(&test_box, &repo, &id),
         before,
@@ -1210,7 +1211,7 @@ fn a_read_from_a_stale_view_never_counts_as_observed() {
     assert_eq!(refused["reason"], "INPUT_UNOBSERVED", "{refused}");
     assert_eq!(refused["detail"]["observed"], "v17", "{refused}");
     // `start --resume` moves the view to trunk, and only then is v18 observed.
-    let resumed = test_box.bay_ok(&repo, &["start", "--resume", &id]);
+    let resumed = test_box.bay_ok(&repo, &["start", &id]);
     assert_eq!(resumed["detail"]["observed_versions"][INPUT], "v18");
     let (_, after) = land(&test_box, &view);
     assert_ne!(after["reason"], "INPUT_UNOBSERVED", "{after}");

@@ -1,6 +1,6 @@
 //! G19. Two executors never publish one operation twice: on one box too.
 //!
-//! An agent's `bay land --wait` and a background `bay executor run` on the same machine share
+//! An agent's `bay merge --wait` and a background `bay runner run` on the same machine share
 //! the local change chain ref, and every reader of the remote chain (an executor's pass, a
 //! claim's re-read) moves that ref to the remote's value. A write one process appended there,
 //! and had not pushed yet, is then gone from the ref. A push of the ref would succeed without
@@ -97,7 +97,7 @@ fn a_resubmission_rewound_off_the_local_chain_still_lands() {
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &broken_fails());
     let (id, view) = test_box.start_and_edit(&repo);
     std::fs::write(view.join("src/new.rs"), "broken\n").unwrap();
-    let (_, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (_, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(refused["decision"], "blocked", "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
@@ -111,10 +111,10 @@ fn a_resubmission_rewound_off_the_local_chain_still_lands() {
         repo.display(),
         rewinds.display()
     ));
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert!(rewinds.exists(), "the request push never ran");
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(landed["op_id"], format!("{id}.2"), "{landed}");
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
 }
@@ -136,7 +136,7 @@ fn a_claim_rewound_off_the_local_chain_is_never_taken_for_ownership() {
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     let submitted = remote_chain(&test_box, &remote, &id);
 
@@ -145,7 +145,7 @@ fn a_claim_rewound_off_the_local_chain_is_never_taken_for_ownership() {
         .bay_process(&view)
         .env("BAY_TEST_PAUSE_AT", "before-claim-push")
         .env("BAY_TEST_PAUSE_FILE", &release)
-        .args(["--json", "land", "--wait"])
+        .args(["--json", "merge", "--wait"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -168,7 +168,7 @@ fn a_claim_rewound_off_the_local_chain_is_never_taken_for_ownership() {
     let executor = test_box
         .bay(&repo)
         .env("BAY_TEST_KILL_AT", "before-publish")
-        .args(["--json", "executor", "run", "--once"])
+        .args(["--json", "runner", "run", "--once"])
         .output()
         .unwrap();
     assert_eq!(executor.status.code(), Some(137), "{executor:?}");
@@ -178,7 +178,7 @@ fn a_claim_rewound_off_the_local_chain_is_never_taken_for_ownership() {
     std::fs::write(&release, "go").unwrap();
     let (code, answer) = finished(&mut lander, "the lander");
     assert_eq!(code, Some(0), "{answer}");
-    assert_eq!(answer["decision"], "landed", "{answer}");
+    assert_eq!(answer["decision"], "merged", "{answer}");
     assert_eq!(answer["op_id"], format!("{id}.1"), "{answer}");
     let claims = claims_on_remote(&test_box, &remote, &id);
     assert_eq!(
@@ -194,7 +194,7 @@ fn a_claim_rewound_off_the_local_chain_is_never_taken_for_ownership() {
         "the lander never took the operation over: {claims:?}"
     );
 
-    test_box.bay_ok(&repo, &["executor", "run", "--once"]);
+    test_box.bay_ok(&repo, &["runner", "run", "--once"]);
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
 }
 
@@ -232,7 +232,7 @@ fn a_land_wait_that_loses_its_claim_to_a_live_executor_answers_with_the_outcome(
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (id, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
 
     // The lander has read the operation unclaimed and is held just before its claim.
@@ -241,7 +241,7 @@ fn a_land_wait_that_loses_its_claim_to_a_live_executor_answers_with_the_outcome(
         .bay_process(&view)
         .env("BAY_TEST_PAUSE_AT", "before-claim")
         .env("BAY_TEST_PAUSE_FILE", &release_lander)
-        .args(["--json", "land", "--wait"])
+        .args(["--json", "merge", "--wait"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -255,7 +255,7 @@ fn a_land_wait_that_loses_its_claim_to_a_live_executor_answers_with_the_outcome(
         .bay_process(&repo)
         .env("BAY_TEST_PAUSE_AT", "after-persist")
         .env("BAY_TEST_PAUSE_FILE", &release_executor)
-        .args(["--json", "executor", "run", "--once"])
+        .args(["--json", "runner", "run", "--once"])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
@@ -267,7 +267,7 @@ fn a_land_wait_that_loses_its_claim_to_a_live_executor_answers_with_the_outcome(
     std::fs::write(&release_lander, "go").unwrap();
     let (code, answer) = finished(&mut lander, "the lander");
     assert_eq!(
-        answer["decision"], "landed",
+        answer["decision"], "merged",
         "land --wait answered without the operation's outcome: {answer}"
     );
     assert_eq!(code, Some(0), "{answer}");

@@ -1,6 +1,6 @@
 //! G59. A pre-tool hook that cannot read its payload denies.
 //!
-//! Ruling R-H1 (AGENT-HOOKS-0.1 § 6.3, `context_invalid`, in bay's words): `bay hook pre-tool`
+//! Ruling R-H1 (AGENT-HOOKS-0.1 § 6.3, `context_invalid`, in bay's words): `bay hook tool.before`
 //! is the one event bay judges before the act, so a payload it cannot read is a deny, never a
 //! silent allow. A missing payload, one that is not JSON, not a JSON object, one with no string
 //! `tool_name`, and a `Bash` payload with no string `tool_input.command` each exit 2 (the deny
@@ -68,7 +68,7 @@ fn an_unreadable_pre_tool_payload_gets_the_deny_exit_and_names_hook_input_invali
             &br#"{"tool_name":"Bash","tool_input":{"command":["git","push"]}}"#[..],
         ),
     ] {
-        let (code, stdout, stderr) = hook(&test_box, &repo, "pre-tool", input);
+        let (code, stdout, stderr) = hook(&test_box, &repo, "tool.before", input);
         assert_eq!(code, Some(2), "{what} was allowed: {stderr}");
         assert_eq!(stderr.lines().count(), 1, "{what}: {stderr}");
         assert!(stderr.contains("HOOK_INPUT_INVALID"), "{what}: {stderr}");
@@ -103,8 +103,12 @@ fn every_recorded_pre_tool_payload_keeps_its_answer() {
             payload["tool_input"]["file_path"] =
                 file.replace("<repo>", &repo.display().to_string()).into();
         }
-        let (code, stdout, stderr) =
-            hook(&test_box, &repo, "pre-tool", payload.to_string().as_bytes());
+        let (code, stdout, stderr) = hook(
+            &test_box,
+            &repo,
+            "tool.before",
+            payload.to_string().as_bytes(),
+        );
         assert_eq!(code, Some(0), "{name}: {stdout} {stderr}");
         assert!(!stderr.contains("HOOK_INPUT_INVALID"), "{name}: {stderr}");
     }
@@ -112,7 +116,7 @@ fn every_recorded_pre_tool_payload_keeps_its_answer() {
     let (code, _, stderr) = hook(
         &test_box,
         &repo,
-        "pre-tool",
+        "tool.before",
         br#"{"tool_name":"mcp__search","tool_input":{}}"#,
     );
     assert_eq!(code, Some(0), "{stderr}");
@@ -125,7 +129,7 @@ fn an_event_that_only_records_still_allows_an_unreadable_payload() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
-    for event in ["post-tool", "stop", "user-prompt-submit", "session-end"] {
+    for event in ["step.end", "turn.end", "turn.start", "session.end"] {
         for input in [&b""[..], &b"not json"[..], &b"[]"[..]] {
             let (code, _, stderr) = hook(&test_box, &repo, event, input);
             assert_eq!(code, Some(0), "{event}: {stderr}");

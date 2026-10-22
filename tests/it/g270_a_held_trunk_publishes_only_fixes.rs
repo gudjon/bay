@@ -1,10 +1,10 @@
 //! G270 (N-8): a held trunk publishes only fixes.
 //!
 //! A team sometimes must hold its trunk: an incident, an infrastructure migration, a lock
-//! outside the repository. A `[[freeze]]` whose `target` is the trunk's own name holds it until
-//! its `end`; the hold adapter (`[hold] command`) holds it while it answers `held`. While trunk
+//! outside the repository. A `[[hold]]` whose `target` is the trunk's own name holds it until
+//! its `end`; the hold adapter (`[plugin.hold] command`) holds it while it answers `held`. While trunk
 //! is held, a landing that carries neither `Fixes:` nor `Reverts:` publishes nothing: it stays
-//! queued with `TRUNK_HELD`, naming the hold, and trunk does not move. A `--fixes` change lands
+//! queued with `MAIN_HELD`, naming the hold, and trunk does not move. A `--fixes` change lands
 //! through the hold. Once the hold clears, the queued change lands. An adapter that answers
 //! anything but its JSON is never read as clear: unknown is held, and the reason names the
 //! fault. `bay status` names the hold under `detail.hold`.
@@ -68,9 +68,9 @@ impl Trunk {
         (id, view)
     }
 
-    /// `bay land --wait` in `view`, which exits 0 for a landing and for a queued change alike.
+    /// `bay merge --wait` in `view`, which exits 0 for a landing and for a queued change alike.
     fn land(&self, view: &Path) -> Value {
-        let (code, result) = result_json(self.test_box.bay(view).args(["land", "--wait"]));
+        let (code, result) = result_json(self.test_box.bay(view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{result}");
         result
     }
@@ -95,7 +95,7 @@ impl Trunk {
 /// Asserts `result` is the change waiting on a held trunk, and returns its `detail.hold`.
 fn held(result: &Value) -> Value {
     assert_eq!(result["decision"], "queued", "{result}");
-    assert_eq!(result["reason"], "TRUNK_HELD", "{result}");
+    assert_eq!(result["reason"], "MAIN_HELD", "{result}");
     assert_eq!(result["allowed"], serde_json::json!(["wait"]), "{result}");
     assert_eq!(result["retry_when"], "hold_cleared", "{result}");
     result["detail"]["hold"].clone()
@@ -103,7 +103,7 @@ fn held(result: &Value) -> Value {
 
 fn freeze(end: &str) -> String {
     format!(
-        "{CONFIG}\n[[freeze]]\ntarget = \"main\"\nend = \"{end}\"\nreason = \"database migration\"\n"
+        "{CONFIG}\n[[hold]]\ntarget = \"main\"\nend = \"{end}\"\nreason = \"database migration\"\n"
     )
 }
 
@@ -112,7 +112,7 @@ fn a_trunk_freeze_holds_a_plain_landing_and_lets_a_fix_through() {
     let trunk = trunk(TestBox::new(), CONFIG, None);
     let (broke, view) = trunk.start("src/broke.rs", None);
     let landed = trunk.land(&view);
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
 
     let end = from_now(3600);
     trunk.test_box.commit_config(&trunk.repo, &freeze(&end));
@@ -122,12 +122,12 @@ fn a_trunk_freeze_holds_a_plain_landing_and_lets_a_fix_through() {
     let (_, plain) = trunk.start("src/plain.rs", None);
     let waiting = trunk.land(&plain);
     let hold = held(&waiting);
-    assert_eq!(hold["source"], "freeze", "{waiting}");
+    assert_eq!(hold["source"], "window", "{waiting}");
     assert_eq!(hold["reason"], "database migration", "{waiting}");
     assert_eq!(hold["end"], end.as_str(), "{waiting}");
     assert_eq!(trunk.tip(), before, "a held trunk takes no plain landing");
     let shown = trunk.hold();
-    assert_eq!(shown["source"], "freeze", "{shown}");
+    assert_eq!(shown["source"], "window", "{shown}");
     assert_eq!(shown["end"], end.as_str(), "{shown}");
 
     // Waiting again changes nothing while the freeze is in force, and counts toward no limit.
@@ -138,7 +138,7 @@ fn a_trunk_freeze_holds_a_plain_landing_and_lets_a_fix_through() {
     // A fix lands through the freeze.
     let (_, fix) = trunk.start("src/fix.rs", Some(&broke));
     let fixed = trunk.land(&fix);
-    assert_eq!(fixed["decision"], "landed", "{fixed}");
+    assert_eq!(fixed["decision"], "merged", "{fixed}");
     assert_ne!(trunk.tip(), before, "the fix moved trunk");
 
     // Once the freeze has ended, the queued change lands.
@@ -146,7 +146,7 @@ fn a_trunk_freeze_holds_a_plain_landing_and_lets_a_fix_through() {
     trunk.test_box.commit_config(&trunk.repo, &freeze(&ended));
     assert_eq!(trunk.hold(), Value::Null, "an ended freeze holds nothing");
     let cleared = trunk.land(&plain);
-    assert_eq!(cleared["decision"], "landed", "{cleared}");
+    assert_eq!(cleared["decision"], "merged", "{cleared}");
     assert_eq!(
         trunk.tip(),
         cleared["detail"]["commit"].as_str().unwrap(),
@@ -166,7 +166,8 @@ fn the_hold_adapter_holds_trunk_and_an_unreadable_answer_is_held() {
         "#!/bin/sh\n[ \"$1\" = status ] || exit 2\ncat '{}'\n",
         answer.display()
     );
-    let config = format!("{CONFIG}\n[hold]\ncommand = \"scripts/bay-hold\"\ntimeout_s = 10\n");
+    let config =
+        format!("{CONFIG}\n[plugin.hold]\ncommand = \"scripts/bay-hold\"\ntimeout_s = 10\n");
     let trunk = trunk(test_box, &config, Some(&script));
     let before = trunk.tip();
 
@@ -174,7 +175,7 @@ fn the_hold_adapter_holds_trunk_and_an_unreadable_answer_is_held() {
     let (_, view) = trunk.start("src/plain.rs", None);
     let waiting = trunk.land(&view);
     let hold = held(&waiting);
-    assert_eq!(hold["source"], "adapter", "{waiting}");
+    assert_eq!(hold["source"], "plugin", "{waiting}");
     assert_eq!(hold["reason"], "incident 7", "{waiting}");
     assert_eq!(trunk.tip(), before);
     assert_eq!(trunk.hold()["reason"], "incident 7");
@@ -183,7 +184,7 @@ fn the_hold_adapter_holds_trunk_and_an_unreadable_answer_is_held() {
     say("all clear, probably\n");
     let garbage = trunk.land(&view);
     let hold = held(&garbage);
-    assert_eq!(hold["source"], "adapter", "{garbage}");
+    assert_eq!(hold["source"], "plugin", "{garbage}");
     let reason = hold["reason"].as_str().unwrap_or_default();
     assert!(reason.contains("printed no JSON answer"), "{garbage}");
     assert_eq!(trunk.tip(), before);
@@ -192,6 +193,6 @@ fn the_hold_adapter_holds_trunk_and_an_unreadable_answer_is_held() {
     say("{\"held\": false, \"reason\": \"\"}\n");
     assert_eq!(trunk.hold(), Value::Null);
     let landed = trunk.land(&view);
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     assert_eq!(trunk.tip(), landed["detail"]["commit"].as_str().unwrap());
 }

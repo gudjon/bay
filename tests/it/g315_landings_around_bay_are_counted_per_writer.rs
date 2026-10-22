@@ -48,9 +48,9 @@ fn each_writer_who_landed_around_bay_is_counted() {
 
     // A change lands through bay.
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     test_box.git_ok(&repo, &["pull", "-q", "--ff-only", "origin", "main"]);
 
     // Then two writers push straight to the trunk, around bay: one twice, one once.

@@ -1,7 +1,7 @@
 //! An update never waits for an executor, and an executor moves to a new binary between
 //! operations (owner ruling 2026-10-20; G251 is the whole story).
 //!
-//! `bay executor run` names itself for as long as it runs: a file named by its pid in
+//! `bay runner run` names itself for as long as it runs: a file named by its pid in
 //! `$XDG_STATE_HOME/bay/executor.lock.d/`, holding its pid and its version, one per executor, so
 //! two executors on one box never erase each other's. `bay update` installs at once, keeps every
 //! version a live pid's file names (one it may not signal counts as live), and prunes the rest
@@ -165,7 +165,7 @@ fn an_executor_moves_to_its_new_binary_between_passes() {
         Command::new(&bay)
             .arg("-C")
             .arg(&repo)
-            .args(["--json", "executor", "run", "--interval-s", "1"])
+            .args(["--json", "runner", "run", "--interval-s", "1"])
             .env_clear()
             .env("PATH", path)
             .env("HOME", &test_box.home)
@@ -248,7 +248,7 @@ fn paused_executor(test_box: &TestBox, name: &str) -> (Reaped, std::path::PathBu
         &check_files("true", &passing_result(1), 1, 60),
     );
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, _) = result_json(test_box.bay(&view).arg("land"));
+    let (code, _) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0);
     let executor = test_box.clone_of(&remote, &format!("{name}-executor"));
     let release = test_box.path().join(format!("{name}-release"));
@@ -258,7 +258,7 @@ fn paused_executor(test_box: &TestBox, name: &str) -> (Reaped, std::path::PathBu
             .bay_process(&executor)
             .env("BAY_TEST_PAUSE_AT", "after-persist")
             .env("BAY_TEST_PAUSE_FILE", &release)
-            .args(["--json", "executor", "run", "--once"])
+            .args(["--json", "runner", "run", "--once"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn_busy(),

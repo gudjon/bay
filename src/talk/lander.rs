@@ -7,7 +7,7 @@
 //! trailer typed on a commit (a trailer on a forge commit is a claim, ruling T10). A change id
 //! resolves to its landing ([`crate::undo::landed_commit`]); a commit resolves to the change its
 //! signed `Change-Id` names. A commit on trunk that is no bay publication is
-//! `UNATTRIBUTED_LANDING`; a change or commit that is not on trunk is `CHANGE_NOT_LANDED`.
+//! `OUTSIDE_MERGE`; a change or commit that is not on trunk is `CHANGE_NOT_MERGED`.
 
 use serde_json::{Value, json};
 

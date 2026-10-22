@@ -24,7 +24,7 @@
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
-    <img alt="Agents run bay land and leave. An executor builds the merged candidate, checks that exact commit, and merges it into main if main has not moved, recording evidence in Git notes." src="docs/assets/how-it-works-light.svg" width="860">
+    <img alt="Agents run bay merge and leave. A runner builds the merged candidate, checks that exact commit, and merges it into main if main has not moved, recording evidence in Git notes." src="docs/assets/how-it-works-light.svg" width="860">
   </picture>
 </p>
 
@@ -34,7 +34,7 @@ Git is fine. The workflow around it was built for people. Run several coding age
 often in the same files, and branches go stale, merges collide and main breaks, while someone watches
 every merge. bay is a free, MIT-licensed command that takes that work off your agents and your team.
 An agent opens a change, edits, and submits it once. bay combines it with the latest main, runs your
-checks on that exact result, and merges only what passed. An executor finishes the merge, so the agent
+checks on that exact result, and merges only what passed. A runner finishes the merge, so the agent
 can start its next task. Your repository stays an ordinary Git repository, on the host you already have.
 
 <p align="center">
@@ -44,10 +44,10 @@ can start its next task. Your repository stays an ordinary Git repository, on th
 ```sh
 bay start CARD-123 --paths src/api   # a view of only the files this change needs
 # … the agent edits …
-bay land                             # submit: bay checks the exact result and merges it; returns at once
+bay merge                             # submit: bay checks the exact result and merges it; returns at once
 bay status                           # what every change is doing, what passed, and why it waits
 bay status --fleet                   # every machine and session on the repository, and whether each is ready
-bay watch                            # what changed that affects my work
+bay status --since                            # what changed that affects my work
 bay start c7k2m4qa                   # pick a change up again, on the newest main
 bay abandon                          # give the change up; another agent may adopt it
 bay talk <agent> "<what>" …          # ask another agent for one change, decision or check
@@ -59,14 +59,13 @@ People who are not developers use `bay save`, `bay waiting` and `bay approve`, u
 agent. Whoever runs bay for the team uses `bay enrol`, `bay prune` and `bay doctor`. See the
 [CLI reference](https://getbay.io/docs/cli).
 
-bay's commands call main `trunk` and a checked merge a landing (`bay land`, `landed`). Every command
-prints one JSON result on stdout, with `say`: one plain sentence on what happened and what to do next.
+Every command prints one JSON result on stdout, with `say`: one plain sentence on what happened and what to do next.
 At a terminal, a person sees that sentence first instead; a program or `--json` always gets the JSON.
 A refusal names its reason, what you can still do, when to retry, and its next step. There is no
 prompt to answer.
 
 ```json
-{"schema":"bay.result/1","op_id":"c7k2m4qa.1","candidate":"c7k2m4qa.1.2","decision":"queued","state":"admitted","published":false,"say":"Saved; it is in line and will be checked and added shortly.","waiting_for":"executor_capacity"}
+{"schema":"bay.result/1","op_id":"c7k2m4qa.1","candidate":"c7k2m4qa.1.2","decision":"queued","state":"admitted","say":"Saved; it is in line and will be checked and added shortly.","waiting_for":"executor_capacity"}
 ```
 
 bay is free for any team: no paid tier, no account, no sign-up. Version numbers are 0.x, so a minor
@@ -135,7 +134,7 @@ cargo build --release
 ```
 
 bay needs Git 2.40 or newer in an agent view (2.50 or newer is recommended), 2.50 or newer on a machine
-that runs an executor, and 2.54 or newer on a machine that hosts main with `bay host init`. `bay doctor`
+that runs a runner, and 2.54 or newer on a machine that hosts main with `bay host init`. `bay doctor`
 names any floor a machine is below. See [Install](https://getbay.io/docs/install) for every option.
 
 ### Teach your agent bay
@@ -155,7 +154,7 @@ The skill tells the agent how to install bay when it is missing. See [the skill 
 |---|---|
 | **What merges is what was checked** | bay builds the merged result first, checks that result, and merges it only if main has not moved. If main moved, bay builds and checks again. With batching on, a batch's last commit is the one that passed; a check with `footprint = true` may also cover a later tree that reads the same files. |
 | **Unknown is never a pass** | A check that crashed, timed out, or found fewer tests than its minimum blocks the merge. Checks that finished keep their results. |
-| **Agents can leave** | `bay land` returns at once. While an executor runs (`bay executor run`, or your CI through the same contract), it finishes the merge, recovers it, or asks for a precise repair. |
+| **Agents can leave** | `bay merge` returns at once. While a runner runs (`bay runner run`, or your CI through the same contract), it finishes the merge, recovers it, or asks for a precise repair. |
 | **A retry never merges twice** | Every operation has an id. A lost reply is reconciled, never sent again as a second merge. |
 | **Stale work is stopped, and repair stays open** | When an input that your change declared merges, bay tells you what changed, and states how much it could see. You can still edit; you cannot merge until you check again. |
 | **Every refusal says what to do next** | A stable reason, what you can still do, and when to retry. |
@@ -167,13 +166,13 @@ Each promise has a failure test that must pass before bay calls it done.
 ## How it works
 
 1. **`bay start`** opens a change: a sparse view of the declared paths.
-2. **`bay land`** records a request to merge and returns. The agent may leave.
-3. An **executor** (`bay executor run`; `bay executor install` keeps one running) merges the change
+2. **`bay merge`** records a request to merge and returns. The agent may leave.
+3. A **runner** (`bay runner run`; `bay runner install` keeps one running) merges the change
    with main without touching any working tree, runs the checks your `.bay/policy.toml` names on that
    exact candidate, and records each result as evidence in Git notes.
-4. If main has not moved, the executor merges the candidate. If it moved, the executor builds a new
+4. If main has not moved, the runner merges the candidate. If it moved, the runner builds a new
    candidate and checks again. After two such moves, the change joins a queue, and bay checks only the head.
-5. **`bay status`** and **`bay watch`** show every change, its evidence, and why it waits. `bay start <change>`
+5. **`bay status`** and **`bay status --since`** show every change, its evidence, and why it waits. `bay start <change>`
    picks a change up again, and `bay abandon` gives it up.
 
 bay reads `.bay/config.toml` and `.bay/policy.toml` only from main, so no change sets the rules it is
@@ -188,7 +187,7 @@ bay guards three things, and each holds only under its own condition:
 |---|---|
 | **Its own merges:** what bay merges into main is exactly the candidate it checked. | Always, unless you turn on batching or footprint reuse (see above). |
 | **An agent's Git commands:** the hook refuses a push to main, a force push, `git reset --hard` and the like. | Only with the hook: `[agent] product = "claude"` (or `"codex"`, which only senses) in `.bay/config.toml` on main, and bay's hook entries in the project's `.claude/settings.json`. One clone runs `bay install` and lands that file; every clone gets the hooks from main. |
-| **Everything that reaches main,** such as a merge in a forge's web page or a script's push. | Only on a main from `bay host init` with a key registry in the default signing mode, or on a forge main that only the executor's identity may push. Otherwise a bay-hosted main stays append-only, and anyone who can push may add commits. |
+| **Everything that reaches main,** such as a merge in a forge's web page or a script's push. | Only on a main from `bay host init` with a key registry in the default signing mode, or on a forge main that only the runner's identity may push. Otherwise a bay-hosted main stays append-only, and anyone who can push may add commits. |
 
 bay sees what went around it. `bay status` names each such commit under `detail.unattributed`. Without
 the hook, `bay doctor`'s `hooks` row reads `off`, and doctor turns red when main holds such commits beside
@@ -201,17 +200,17 @@ People and agents have held a rollout back because they did not know this, so he
 | Command | Writes | Never writes |
 |---|---|---|
 | `bay install --machine` | the `bay` program, and its guide (the skill) for your agent | hook entries, a project's settings, its Git config |
-| `bay install` in a clone | the above, plus bay's hook entries in the project's agent settings file and this clone's `bay.*` Git config | anything on main: you commit and land the settings file yourself |
+| `bay install` in a clone | the above, plus bay's hook entries in the project's agent settings file and this clone's `bay.*` Git config | anything on main: you commit and merge the settings file yourself |
 | `bay update` | a newer `bay` program, verified first | anything in a project |
-| `bay status`, `bay waiting`, `bay watch`, `bay help` | only fetched copies of the remote's refs, and bay's own cache under `.git/bay/` | your files, your branches, main |
+| `bay status`, `bay waiting`, `bay status --since`, `bay help` | only fetched copies of the remote's refs, and bay's own cache under `.git/bay/` | your files, your branches, main |
 | `bay doctor` | the above, and this machine's readiness on its presence record on the remote, so `bay status --fleet` shows it | your files, your branches, main, any settings or hook entries |
-| `bay start`, `bay land`, `bay save`, `bay approve`, `bay undo` | the change's record on the remote, its view (a separate folder), and evidence | your checkout's files, except `bay save`, which updates the main checkout to the new main |
+| `bay start`, `bay merge`, `bay save`, `bay approve`, `bay undo` | the change's record on the remote, its view (a separate folder), and evidence | your checkout's files, except `bay save`, which updates the main checkout to the new main |
 
 A hook entry that bay installs first checks that `bay` is on the machine: where it is not, the agent's action goes
 ahead. So rolling the hooks out is safe in this order:
 1. On every machine: `bay update`, then `bay install --machine`, which reaches every Claude config directory it finds.
 2. Put `[agent] product = "claude"` in `.bay/config.toml` on main. Doctor then reads the hooks red until step 3.
-3. In one clone, `bay install`, then land the change that commits `.claude/settings.json`.
+3. In one clone, `bay install`, then merge the change that commits `.claude/settings.json`.
 4. `bay doctor` on each machine as it takes that change; `bay status --fleet` shows every machine's verdict.
 
 ## Keys are optional
@@ -219,7 +218,7 @@ ahead. So rolling the hooks out is safe in this order:
 bay works without keys: with no key registry, it runs unsigned, every evidence record counts, and results
 say `trust: unsigned`. Add a registry, one key at a time, with `bay enrol <class> <name> <key.pub>` when
 only enrolled keys may sign. By default a registry signs everything: an agent signs a request to merge,
-only an executor moves main, a producer signs check evidence, a reviewer signs a review, an approver
+only a runner (with its `executor` key) moves main, a producer signs check evidence, a reviewer signs a review, an approver
 signs an approval, and a registry key adds and revokes keys. No one holds another actor's key, so an
 agent can leave. A small team can set `[policy] signing = "approvals"` instead: then only approvals are
 signed, and results say `trust: approvals`. See [Keys and the registry](https://getbay.io/docs/keys) and
@@ -230,7 +229,7 @@ signed, and results say `trust: approvals`. See [Keys and the registry](https://
 Most teams compare bay with what they run now: agents open pull requests, and a merge queue merges them.
 That can merge, and a good merge queue keeps going after the author leaves. What it does not give is a
 record that the merged commit is the exact one that passed, partial results kept when a worker dies,
-recovery when the executor dies, or a stop on work whose inputs moved.
+recovery when the runner dies, or a stop on work whose inputs moved.
 
 You keep the Git host you already have: GitHub, GitLab, a bare repository over SSH, or `bay host init`
 on any machine you can reach.
@@ -243,9 +242,9 @@ on any machine you can reach.
   the commands.
 - **Codex** with `[agent] product = "codex"`: bay reads its hooks as a sensor. Codex runs a tool when its
   hook fails, so main stays the guard; `bay doctor` says so.
-- **Other coding agents** through the same commands, JSON results and skill. Without a hook adapter, a
+- **Other coding agents** through the same commands, JSON results and skill. Without hook support, a
   stale change still cannot merge, but the agent's own Git commands are not guarded (see above).
-  `bay help --json` declares what each adapter can block. See [Agents and hooks](https://getbay.io/docs/agents).
+  `bay help --json` declares what each agent product's hooks can block. See [Agents and hooks](https://getbay.io/docs/agents).
 - **Any Git host.** GitHub, GitLab, a bare repository, or a bundle on a USB stick.
 - **Your checks.** Any command that returns a `bay.check.result/1` JSON document.
 
@@ -263,10 +262,10 @@ These are targets until the published results say otherwise.
 
 - [Overview](https://getbay.io/docs), [Quickstart](https://getbay.io/docs/quickstart),
   [Several agents, one repository](https://getbay.io/docs/several-agents),
-  [Adopt bay](https://getbay.io/docs/adopt) and [Run bay without an executor](https://getbay.io/docs/no-executor)
+  [Adopt bay](https://getbay.io/docs/adopt) and [Run bay without a runner](https://getbay.io/docs/no-executor)
 - [Concepts](https://getbay.io/docs/concepts): one meaning for each name
 - [Configuration](https://getbay.io/docs/configuration): `.bay/config.toml` and `.bay/policy.toml`
-- [Executors](https://getbay.io/docs/executors), [Merge more changes a day](https://getbay.io/docs/throughput) and
+- [Runners](https://getbay.io/docs/executors), [Merge more changes a day](https://getbay.io/docs/throughput) and
   [Undo](https://getbay.io/docs/undo)
 - [Sandbox lanes](https://getbay.io/docs/lanes), [Reviewers](https://getbay.io/docs/reviewers),
   [Approvals](https://getbay.io/docs/approvals) and [Promotion](https://getbay.io/docs/promote)

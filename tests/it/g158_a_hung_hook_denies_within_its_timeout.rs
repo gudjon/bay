@@ -23,7 +23,7 @@ fn settings(repo: &Path) -> Value {
     serde_json::from_str(&text).unwrap()
 }
 
-/// bay's `bay hook pre-tool` hook in the settings.
+/// bay's `bay hook tool.before` hook in the settings.
 fn pre_tool_hook(settings: &Value) -> Value {
     settings["hooks"]["PreToolUse"]
         .as_array()
@@ -33,7 +33,7 @@ fn pre_tool_hook(settings: &Value) -> Value {
         .find(|hook| {
             hook["command"]
                 .as_str()
-                .is_some_and(|command| command.ends_with("bay hook pre-tool"))
+                .is_some_and(|command| command.ends_with("bay hook tool.before"))
         })
         .cloned()
         .unwrap_or_else(|| panic!("no bay pre-tool hook: {settings}"))

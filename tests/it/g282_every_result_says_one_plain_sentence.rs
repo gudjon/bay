@@ -81,16 +81,16 @@ fn a_start_a_landing_and_a_queued_land_say_a_plain_sentence() {
     let (started, view) = start(&test_box, &repo, "CARD-1");
     assert_says(&started, "start");
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    assert_eq!(landed["decision"], "landed", "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
     let say = assert_says(&landed, "landed");
     // Ruling 2026-10-22 (ch. 35 R2): a person's word for the trunk is "main".
     assert!(say.contains("on main"), "{say}");
 
     let (_, view) = start(&test_box, &repo, "CARD-2");
     std::fs::write(view.join("src/later.rs"), "fn later() {}\n").unwrap();
-    let (code, queued) = result_json(test_box.bay(&view).arg("land"));
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
     assert_says(&queued, "queued");
@@ -103,7 +103,7 @@ fn a_failed_check_names_the_check_plainly() {
     let repo = seeded(&test_box, &failing);
     let (_, view) = start(&test_box, &repo, "CARD-1");
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     let say = assert_says(&refused, "CHECK_FAILED");
@@ -123,7 +123,7 @@ fn a_conflict_names_the_files_plainly() {
     test_box.git_ok(&other, &["commit", "-q", "-am", "theirs"]);
     test_box.git_ok(&other, &["push", "-q", "origin", "main"]);
 
-    let (code, refused) = result_json(test_box.bay(&view).args(["land", "--wait"]));
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "MERGE_CONFLICT", "{refused}");
     let say = assert_says(&refused, "MERGE_CONFLICT");
@@ -134,14 +134,14 @@ fn a_conflict_names_the_files_plainly() {
 fn a_failure_says_what_went_wrong_and_the_human_rendering_says_it_first() {
     let test_box = TestBox::new();
     let repo = seeded(&test_box, &passing_result(1));
-    // `bay land` outside any change's view, naming none, is a failure.
-    let (code, failed) = result_json(test_box.bay(&repo).arg("land"));
+    // `bay merge` outside any change's view, naming none, is a failure.
+    let (code, failed) = result_json(test_box.bay(&repo).arg("merge"));
     assert_eq!(code, 20, "{failed}");
     assert_eq!(failed["decision"], "failed", "{failed}");
     let say = assert_says(&failed, "failed");
     assert!(say.starts_with("Something went wrong"), "{say}");
 
-    let out = test_box.bay(&repo).arg("land").output().unwrap();
+    let out = test_box.bay(&repo).arg("merge").output().unwrap();
     let human = String::from_utf8(out.stderr).unwrap();
     let lines: Vec<&str> = human.lines().collect();
     let at = lines

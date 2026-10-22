@@ -709,9 +709,9 @@ pub fn request_inputs(judged: &[Judgement]) -> Vec<String> {
 }
 
 /// The stale inputs of `record` against the local cache of trunk, from local data only: no
-/// fetch, no network, and no provider run, only answers already cached (for the `pre-tool`
+/// fetch, no network, and no provider run, only answers already cached (for the `tool.before`
 /// refusal and any hook notice, which must stay cheap). `Unknown` inputs are not stale;
-/// [`judge`] reports them. `bay watch`, a read the caller asked for, uses [`stale_at`].
+/// [`judge`] reports them. `bay status --since`, a read the caller asked for, uses [`stale_at`].
 ///
 /// # Errors
 ///

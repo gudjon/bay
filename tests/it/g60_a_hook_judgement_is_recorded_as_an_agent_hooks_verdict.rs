@@ -1,6 +1,6 @@
 //! G60. A hook judgement is recorded as an AGENT-HOOKS-0.1 verdict.
 //!
-//! Ruling R-H2 (adapt): each judging `pre-tool` row of the session work record (`bay.session/1`)
+//! Ruling R-H2 (adapt): each judging `tool.before` row of the session work record (`bay.session/1`)
 //! carries a `verdict` in AGENT-HOOKS-0.1's words, `decision` `allow` or `deny`, `reason` a bay
 //! reason code (never a `host_error:*` one), and `warnings` for an allow with a notice.
 //! `bay.result/1` keeps its own words. The widening of H3: a shell deny is recorded too, with the
@@ -22,11 +22,11 @@ use support::TestBox;
 /// A string that appears in the commands below and nowhere in bay.
 const MARKER: &str = "g60-secret-q7x2kz";
 
-/// `bay hook pre-tool` with `payload` on stdin; returns (exit, stdout).
+/// `bay hook tool.before` with `payload` on stdin; returns (exit, stdout).
 fn pre_tool(test_box: &TestBox, cwd: &Path, payload: &Value) -> (Option<i32>, String) {
     let mut child = test_box
         .bay_process(cwd)
-        .args(["hook", "pre-tool"])
+        .args(["hook", "tool.before"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

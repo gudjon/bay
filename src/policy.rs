@@ -159,7 +159,7 @@ fn signing_in(text: &str) -> Signing {
 }
 
 /// The `[agent]` table: `require_actor = true` makes `bay start` refuse `ACTOR_UNNAMED` while
-/// the actor's name comes from a default (G152). `require_actor_proof = true` makes `bay land`
+/// the actor's name comes from a default (G152). `require_actor_proof = true` makes `bay merge`
 /// refuse `ACTOR_UNPROVEN` while the agent key cannot prove which actor signs: several actors
 /// run sessions under this OS account, which can read a file-based agent key (G243b).
 /// `max_live_changes = N` makes `bay start` refuse `WIP_LIMIT` while the actor already holds N

@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use crate::git::Git;
 
 /// The most loads one process keeps; past it the memo starts over, so a long-lived process (an
-/// executor, `bay watch`) that sees many trunk tips stays bounded.
+/// executor, `bay status --since`) that sees many trunk tips stays bounded.
 const CAPACITY: usize = 512;
 
 /// The load's kind, the repository's git directory, and the fixed revision.

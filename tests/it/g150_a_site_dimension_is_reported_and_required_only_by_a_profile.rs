@@ -82,7 +82,7 @@ impl Site {
         let id = started["change"].as_str().unwrap().to_owned();
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join("src").join(file), "fn landed() {}\n").unwrap();
-        let (code, landed) = result_json(self.test_box.bay(&view).args(["land", "--wait"]));
+        let (code, landed) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "lands before any review: {landed}");
         (id, landed["detail"]["commit"].as_str().unwrap().to_owned())
     }
