@@ -7,10 +7,12 @@
 - `bay help` names each argument by its placeholder, such as `<PUBLIC_KEY_FILE>`.
 - `bay share` and a talk's send push all their refs or none.
 - An unchecked merge no longer counts as a check run in `detail.flow`.
-- A clone refused for a config floor, or for no config, reads main once more before it refuses.
+- A config may no longer name the bay it needs: `bay = "<version>"` is an unknown key now.
 - A config that names another main says to run `bay install --main`.
 - A shell command the hook denies names `SHELL_DENIED` and its next step.
 - Every recorded agent payload is held to the hook contract: exits, reasons and time.
+- `POLICY_INVALID` and the skill say how to repair a broken policy: a merge signed by the registry key.
+- The skill says each agent sets `BAY_ACTOR` to its enrolled name under full signing.
 
 ## 0.3.0
 

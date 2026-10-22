@@ -10,12 +10,6 @@
 //! key or table bay does not know is a config error that names it, as is `evidence_reuse` set to anything but `"off"` or `"exact-inputs"`: a misspelled
 //! setting never loads as a silent default. A config written for a later bay is refused by
 //! this one, and the recovery is `bay update`.
-//!
-//! G317: the top-level `bay = "<version>"` names the oldest bay the config needs. It is read
-//! loosely first ([`unmet_floor`]), before the strict parse could refuse a key this bay does not
-//! know, so a bay older than the floor refuses `TOOL_BELOW_FLOOR`, never a confusing config
-//! error. A bay older than the release that brought `bay` cannot read it, and still names the
-//! newer key; so a team sets `bay` in the same commit as the first key the floor protects.
 
 use std::path::Path;
 
@@ -29,8 +23,6 @@ const EVIDENCE_REUSE: [&str; 2] = ["off", "exact-inputs"];
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// G317: the oldest bay this config needs, `bay = "0.2.19"` ([`unmet_floor`]).
-    pub bay: Option<String>,
     pub trunk: Option<String>,
     /// `[[target]]`: the promotion targets (NEW-5, `crate::target`). A promotion moves a ref
     /// such as `refs/heads/staging` to a commit already on its source; it is not a landing.
@@ -472,11 +464,6 @@ impl Config {
     ///
     /// The text is not a config this bay can honour.
     pub fn parse(text: &str) -> Result<Self, String> {
-        // G317: the floor is read before the strict parse, which refuses a key this bay does
-        // not know.
-        if let Some(floor) = unmet_floor(text) {
-            return Err(below_floor(&floor));
-        }
         let mut config: Self = toml::from_str(text).map_err(|error| error.to_string())?;
         // A `[[hold]]` with no target holds main.
         let main = config.trunk().to_owned();
@@ -484,13 +471,6 @@ impl Config {
             if hold.target.is_empty() {
                 hold.target.clone_from(&main);
             }
-        }
-        if let Some(floor) = &config.bay
-            && !is_version(floor)
-        {
-            return Err(format!(
-                "bay = \"{floor}\": the bay this config needs is a version such as \"0.2.19\""
-            ));
         }
         if let Some(reuse) = config
             .policy
@@ -1060,48 +1040,6 @@ impl Config {
     }
 }
 
-/// G317: the floor `text` names, its top-level `bay = "<version>"`, read loosely: any other key
-/// or table, known to this bay or not, is not looked at. `None` when the text is not TOML or
-/// names none; the strict parse ([`Config::parse`]) then says why.
-#[must_use]
-pub fn floor(text: &str) -> Option<String> {
-    let table: toml::Table = toml::from_str(text).ok()?;
-    table.get("bay")?.as_str().map(str::to_owned)
-}
-
-/// G317: the floor `text` names when this bay is older than it; `None` when it names none, or
-/// this bay meets it.
-#[must_use]
-pub fn unmet_floor(text: &str) -> Option<String> {
-    let floor = floor(text)?;
-    let needed = crate::version::Version::find(&floor)?;
-    (running() < needed).then_some(floor)
-}
-
-/// This bay's version as a floor is held against: its release number, without the suffix of a
-/// pre-release or build (`0.2.19-pilot.1` meets `0.2.19`).
-#[must_use]
-pub fn running() -> crate::version::Version {
-    let bay = crate::version::BAY;
-    crate::version::Version::parse(bay.split(['-', '+']).next().unwrap_or(bay))
-}
-
-/// The refusal's message when this bay is older than the config's floor `floor` (G317).
-#[must_use]
-pub fn below_floor(floor: &str) -> String {
-    format!(
-        "{CONFIG_PATH} needs bay {floor} or newer, and this is bay {}: run `bay update`, then \
-         run the command again",
-        crate::version::BAY
-    )
-}
-
-/// Whether `text` is a dotted version of numbers, `0.2.19`.
-fn is_version(text: &str) -> bool {
-    text.split('.')
-        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-}
-
 /// Whether `name` can be a target's ref: a full ref name under `refs/`, outside bay's own
 /// namespaces, in the characters Git takes in every ref, with no empty or dot-led component.
 fn is_target_ref(name: &str) -> bool {
@@ -1233,26 +1171,11 @@ product = "claude"                 # leave this table out when the box does not 
     }
 
     #[test]
-    fn a_floor_is_read_before_any_key_this_bay_does_not_know() {
-        // G317.
-        assert_eq!(
-            Config::parse("bay = \"0.0.1\"\n").unwrap().bay.as_deref(),
-            Some("0.0.1")
-        );
-        assert_eq!(super::unmet_floor("bay = \"0.0.1\"\n"), None);
-        assert_eq!(super::unmet_floor("trunk = \"main\"\n"), None);
-        let newer = "bay = \"99.0.0\"\n[later]\nkey = 1\n";
-        assert_eq!(super::unmet_floor(newer).as_deref(), Some("99.0.0"));
-        let error = Config::parse(newer).unwrap_err();
-        assert!(
-            error.contains("99.0.0") && error.contains("bay update"),
-            "{error}"
-        );
-        for bad in ["\"0.2.x\"", "\"\"", "\"latest\""] {
-            let error = Config::parse(&format!("bay = {bad}\n")).unwrap_err();
-            assert!(error.contains("a version"), "{bad}: {error}");
-        }
-        assert!(Config::parse("bay = 2\n").is_err());
+    fn a_project_floor_is_no_key() {
+        // Owner ruling (BACKLOG 54): no project floor; `bay = "<version>"` is a key bay does not
+        // know, so it is refused like any other.
+        let error = Config::parse("bay = \"0.0.1\"\n").unwrap_err();
+        assert!(error.contains("bay"), "{error}");
     }
 
     #[test]

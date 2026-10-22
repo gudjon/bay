@@ -23,8 +23,8 @@ use support::TestBox;
 /// The budget. Raise a number only in the commit that adds the surface, and add its line.
 ///
 /// - 0.2.15: the counts bay had when the budget began.
-/// - G317, one reason (`BAY_BELOW_FLOOR`): a config that names a newer bay says "update bay"
-///   instead of a config error someone must trace to a key an older bay does not know.
+/// - G317, one reason (`BAY_BELOW_FLOOR`), folded into `TOOL_BELOW_FLOOR` in 0.3.0; G317 itself
+///   is removed in 0.3.1 (owner ruling: no project floor), with no count of its own left.
 /// - 0.3.0, one name per idea (G325): `watch` is `status --since` (one read command), and
 ///   `approve --reject` is `reject` (the person's two words); `start --resume`, `land
 ///   --abandon`, `status --stranded` and `status --heads --prune` are gone, each covered by the

@@ -15,6 +15,7 @@ mod release_fixture;
 mod support;
 
 mod a_check_never_runs_unconfined_unless_the_box_chose_it;
+mod a_config_naming_another_main_says_install_main;
 mod a_landing_needs_a_policy_at_its_base;
 mod check_cost_is_reported;
 mod cli;
@@ -181,7 +182,6 @@ mod g313_a_person_at_a_terminal_reads_the_sentence;
 mod g314_the_fleet_shows_each_machines_readiness;
 mod g315_landings_around_bay_are_counted_per_writer;
 mod g316_the_flow_names_queue_wait_and_check_time;
-mod g317_a_config_names_the_bay_it_needs;
 mod g318_a_policy_may_reuse_unsigned_evidence;
 mod g319_the_skill_is_in_every_claude_config_dir;
 mod g31_a_dead_executor_is_replaced;

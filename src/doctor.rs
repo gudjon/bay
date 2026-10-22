@@ -216,13 +216,6 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
     let claude = program_rows(&config, &minimum, &mut report)?;
 
     if let Some(info) = &info {
-        // G317: a config that names a newer bay is red: every command here refuses.
-        if config_row
-            .as_ref()
-            .is_some_and(|row| row["reason"] == Reason::ToolBelowFloor.code())
-        {
-            report.red_tool(Reason::ToolBelowFloor, "bay", None);
-        }
         report.rows.extend(config_row);
         remote_row(&git, &config, info.bare, &mut report)?;
         hooks_row(&git, &config, info, &mut report)?;
@@ -485,12 +478,11 @@ fn codex_row(codex: &Program, report: &mut Report) {
     report.rows.push(row);
 }
 
-/// The config of the work repository at `dir`, and a `config` row when it has none, names
-/// the bay it needs, or carries retired keys ([`loaded_row`]). With none, or one that needs a
-/// newer bay (G317), the other rows name the bootstrap's remote and trunk where there is one,
-/// and otherwise the defaults. A missing config's row is not red: the box is ready, and the
-/// repository's commands refuse `CONFIG_MISSING` until trunk has a config. A config that needs
-/// a newer bay is red, `TOOL_BELOW_FLOOR`, as every command here refuses.
+/// The config of the work repository at `dir`, and a `config` row when it has none or carries
+/// retired keys ([`loaded_row`]). With none, the other rows name the bootstrap's remote and
+/// main where there is one, and otherwise the defaults. A missing config's row is not red: the
+/// machine is ready, and the repository's commands refuse `CONFIG_MISSING` until main has a
+/// config.
 fn repository_config(dir: &Path) -> Result<(Config, Option<Value>), String> {
     let bootstrapped = || {
         let mut config = Config::default();
@@ -510,39 +502,21 @@ fn repository_config(dir: &Path) -> Result<(Config, Option<Value>), String> {
                 "reason": Reason::ConfigMissing.code(), "detail": detail});
             Ok((bootstrapped(), Some(row)))
         }
-        Err(OpenError::BayBelowFloor(_, detail)) => {
-            let row = json!({"name": "config", "state": "red", "floor": detail["floor"].clone(),
-                "bay": crate::version::BAY, "meets_floor": false,
-                "reason": Reason::ToolBelowFloor.code(), "detail": detail});
-            Ok((bootstrapped(), Some(row)))
-        }
         Err(error) => Err(error.message()),
     }
 }
 
-/// A green `config` row, when the config names the bay it needs (G317: `floor`, which this bay
-/// meets, or the config would not load) or carries retired keys, which bay accepts and never
+/// A green `config` row, when the config carries retired keys, which bay accepts and never
 /// reads (ruling Q14). Green: the config loads, and the policy is the one source of every check
 /// command (G141).
 fn loaded_row(config: &Config) -> Option<Value> {
     let ignored = config.ignored();
-    if ignored.is_empty() && config.bay.is_none() {
+    if ignored.is_empty() {
         return None;
     }
-    let mut row = json!({"name": "config", "state": "green"});
-    if let Some(floor) = &config.bay {
-        row["floor"] = json!(floor);
-        row["bay"] = json!(crate::version::BAY);
-        row["meets_floor"] = json!(true);
-    }
-    if !ignored.is_empty() {
-        row["ignored"] = json!(ignored);
-        row["note"] = json!(
-            "ignored: checks and their commands are declared in .bay/policy.toml, and the \
-             update settings are the box's global Git config"
-        );
-    }
-    Some(row)
+    let note = "ignored: checks and their commands are declared in .bay/policy.toml, and the \
+                update settings are this machine's global Git config";
+    Some(json!({"name": "config", "state": "green", "ignored": ignored, "note": note}))
 }
 
 /// The Git rows: the floor for `role`, the shared cache and the recommended features. Returns

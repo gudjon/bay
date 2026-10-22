@@ -106,6 +106,7 @@ A few reasons need more than their next step:
 | `CHECK_FAILED` | A check with `baseline = "base"` names only new failures; pre-existing ones appear as `baseline_failures` in `coverage_gaps`: report them, never as passed. A check with `waivable = true` may instead get an approver's waiver (`bay waiting` lists it); then `bay merge --wait`. The waiver appears in `coverage_gaps` with the real verdict: report it, never as passed. |
 | `CHECK_FLAKY` | A merge may name one flaky in `coverage_gaps`: report it, never as passed. |
 | `WIP_LIMIT` | From `bay start`: you hold the most live changes (`detail.live_changes`). From `bay merge`: the review queue is full (`detail.review`: `waiting`, `max`, `oldest`); do `detail.next`. |
+| `POLICY_INVALID` | Every merge is judged by the policy on main, so a broken one blocks them all, its own repair too. The repair merges when signed by the registry key: tell the user; on the machine that holds it, `git config bay.agentKey <registry key>` for that one `bay merge`, then set it back. Never do this unasked. On a main from `bay host init` this path is not yet proven: tell the user so. |
 | `APPROVAL_PENDING` | Tell the user who can approve (`detail.approval.checks[].approvers`). An approval holds while its paths are unchanged (`checks[].set_aside` names the ones that changed). Never approve for them. |
 
 ## When the person is not a developer
@@ -154,8 +155,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    `[plugin.hold] command` that answers `{"held": true|false, "reason": "..."}` to `<command> status`.
    To act on the host when `bay prune` deletes a branch (close its pull request,
    say), add `[plugin.prune] command`: it runs as `<command> pruned <branch> <sha> <archive ref>`.
-   When you add a key a newer bay introduced, set `bay = "<version>"` in the same commit: an
-   older bay then refuses `TOOL_BELOW_FLOOR` and its next step is `bay update`.
+   A key a newer bay brought is a config error on an older bay, naming the key: run `bay update` there.
 2. `.bay/policy.toml` lists the required checks. Each `[[check]]` needs `expected_minimum`. A
    repository that wants no checks says `unchecked = true`. Paths that need a person's approval
    get a `[[check]]` with `kind = "approval"` and `when_paths`, and no command; each approver is
@@ -176,13 +176,15 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    prove it: `bay plugin test check|wake|notify -- <command>`. It runs bay's contract cases the
    way bay runs it, changes nothing, and exits 0 only when every case passes.
    `detail.cases` names each failing case and why.
-4. In each clone: `bay install --main <name> --remote <name>`. It puts this skill in every Claude
+4. With full signing, each agent's machine sets `bay.agentKey`, and the agent runs with `BAY_ACTOR=<its enrolled
+   name>`: the host refuses a change signed by one agent for another actor (the default actor is Git's user name).
+5. In each clone: `bay install --main <name> --remote <name>`. It puts this skill in every Claude
    config directory it finds on the machine. Name any other one with
    `git config --global --add bay.claudeConfigDirs <dir>` (each value is one config directory).
-5. Run a runner: `bay runner run`, under a supervisor. `bay runner install` writes one for
+6. Run a runner: `bay runner run`, under a supervisor. `bay runner install` writes one for
    this repository (a launchd agent on macOS, a systemd user unit on Linux) and prints the one
    command that starts it; it starts nothing. Tell the user that command. `--print` only shows it.
-6. A check that must read a directory outside its tree (a package store) needs it named on the
+7. A check that must read a directory outside its tree (a package store) needs it named on the
    machine that runs checks: `git config --global --add bay.checkReadPath ~/<dir>`. It is read-only.
 
 ## What bay guards, and when

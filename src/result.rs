@@ -780,7 +780,7 @@ impl Reason {
                 "Run `bay start <change>`, then `bay merge` again: the change is checked under the current policy."
             }
             Self::PolicyInvalid => {
-                "Tell the user `.bay/policy.toml` on main is invalid, as `detail` says; once it is repaired, `bay merge` again."
+                "Tell the user `.bay/policy.toml` on main is invalid, as `detail` says; its repair merges when signed by the registry key."
             }
             Self::PolicyMissing => {
                 "Tell the user main has no `.bay/policy.toml`, so nothing can merge; set it up only if they ask."
@@ -828,9 +828,8 @@ impl Reason {
             Self::ConfigMissing => {
                 "Tell the user bay is not set up here; commit `.bay/config.toml` to main only if they ask."
             }
-            // G317: for `bay` itself, the step is `bay update`.
             Self::ToolBelowFloor => {
-                "Update the tool `detail.tool` names to `detail.floor` (`bay update` for bay), or remove its `[agent]` product, then run the command again."
+                "Update the tool `detail.tool` names to `detail.floor`, or remove its `[agent]` product, then run the command again."
             }
             Self::ToolAbsent => {
                 "Tell the user to install the tool `detail.tool` names, or remove its `[agent]` product, then run `bay doctor` again."
@@ -1150,7 +1149,6 @@ impl Reason {
                 "bay could not read what the assistant asked to do, so it stopped it.".to_owned()
             }
             Self::ToolBelowFloor => match text_at(detail, &["/tool"]) {
-                Some("bay") => "This project needs a newer bay; update it, then try again.",
                 Some("git") => "The Git program on this computer is too old; update it, then try again.",
                 Some("claude") => "Claude Code on this computer is too old for bay; update it.",
                 _ => "The coding assistant on this computer is too old for bay; update it.",
