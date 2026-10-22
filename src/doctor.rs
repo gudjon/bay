@@ -501,7 +501,7 @@ fn unguarded(git: &Git, config: &Config, report: &mut Report) {
         "name": "hooks",
         "state": "off",
         "note": "no agent adapter is declared, so bay does not judge an agent's Git commands here: an agent can push the trunk around bay",
-        "recovery": "add [agent] product = \"claude\" to .bay/config.toml on the trunk, then run bay install",
+        "recovery": "add [agent] product = \"claude\" (or \"codex\") to .bay/config.toml on the trunk, then run bay install",
     });
     let mut guard = json!({"hook": "off"});
     if let Some((count, through)) = around_bay(git, config)
@@ -530,6 +530,23 @@ fn around_bay(git: &Git, config: &Config) -> Option<(u64, u64)> {
     let trunk = git.run(&["rev-parse", "--verify", "-q", &tracking]).ok()?;
     let scan = crate::unattributed::scan(git, trunk.trim()).ok()?;
     Some((scan["count"].as_u64()?, scan["through_bay"].as_u64()?))
+}
+
+/// G320 (learned in a fleet rollout): the step that puts bay's hook entries in place. When the
+/// repository tracks the agent settings `file`, the entries reach every clone only with the
+/// change that commits them, so the step is to land that change: `bay install` here would
+/// only leave an uncommitted edit. Otherwise `bay install` writes them in this clone.
+fn hooks_recovery(git: &Git, file: &str) -> String {
+    let tracked = git
+        .run(&["ls-files", "--error-unmatch", "--", file])
+        .is_ok();
+    if tracked {
+        format!(
+            "{file} is tracked: run bay install in one clone, then land the change that commits its entries; each clone gets them when it takes that change"
+        )
+    } else {
+        "run install again".to_owned()
+    }
 }
 
 fn hooks_row(
@@ -567,7 +584,7 @@ fn hooks_row(
     let mut row = json!({"name": "hooks", "state": state(missing.is_empty())});
     if !missing.is_empty() {
         row["missing"] = json!(missing);
-        row["recovery"] = json!("run install again");
+        row["recovery"] = json!(hooks_recovery(git, agent_settings::CLAUDE_SETTINGS_FILE));
         report.red(Reason::HooksMissing, Some("hooks missing"));
     }
     // G158: the entry's timeout bounds a hung hook; without it the product's default holds the
@@ -628,7 +645,7 @@ fn codex_hooks_rows(git: &Git, info: &RepoInfo, report: &mut Report) -> Result<(
     });
     if !present {
         row["missing"] = json!(missing);
-        row["recovery"] = json!("run install again");
+        row["recovery"] = json!(hooks_recovery(git, agent_settings::CODEX_HOOKS_FILE));
         report.red(Reason::HooksMissing, Some("hooks missing"));
     }
     if let Some(timeout) = agent_settings::pre_tool_timeout(&settings) {

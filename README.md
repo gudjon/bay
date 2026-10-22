@@ -187,12 +187,31 @@ bay guards three things, and each holds only under its own condition:
 | What bay guards | When it holds |
 |---|---|
 | **Its own merges:** what bay merges into main is exactly the candidate it checked. | Always, unless you turn on batching or footprint reuse (see above). |
-| **An agent's Git commands:** the hook refuses a push to main, a force push, `git reset --hard` and the like. | Only with the hook: `[agent] product = "claude"` in `.bay/config.toml` on main, then `bay install` in each clone. |
+| **An agent's Git commands:** the hook refuses a push to main, a force push, `git reset --hard` and the like. | Only with the hook: `[agent] product = "claude"` (or `"codex"`, which only senses) in `.bay/config.toml` on main, and bay's hook entries in the project's `.claude/settings.json`. One clone runs `bay install` and lands that file; every clone gets the hooks from main. |
 | **Everything that reaches main,** such as a merge in a forge's web page or a script's push. | Only on a main from `bay host init` with a key registry in the default signing mode, or on a forge main that only the executor's identity may push. Otherwise a bay-hosted main stays append-only, and anyone who can push may add commits. |
 
 bay sees what went around it. `bay status` names each such commit under `detail.unattributed`. Without
 the hook, `bay doctor`'s `hooks` row reads `off`, and doctor turns red when main holds such commits beside
 bay's merges. See [Security and privacy](https://getbay.io/docs/security#what-bay-guards-and-when).
+
+## What bay writes on your machine
+
+People and agents have held a rollout back because they did not know this, so here it is plainly:
+
+| Command | Writes | Never writes |
+|---|---|---|
+| `bay install --machine` | the `bay` program, and its guide (the skill) for your agent | hook entries, a project's settings, its Git config |
+| `bay install` in a clone | the above, plus bay's hook entries in the project's agent settings file and this clone's `bay.*` Git config | anything on main: you commit and land the settings file yourself |
+| `bay update` | a newer `bay` program, verified first | anything in a project |
+| `bay doctor`, `bay status`, `bay waiting`, `bay watch`, `bay help` | only fetched copies of the remote's refs, and bay's own cache under `.git/bay/` | your files, your branches, main |
+| `bay start`, `bay land`, `bay save`, `bay approve`, `bay undo` | the change's record on the remote, its view (a separate folder), and evidence | your checkout's files, except `bay save`, which updates the main checkout to the new main |
+
+A hook entry that bay installs first checks that `bay` is on the machine: where it is not, the agent's action goes
+ahead. So rolling the hooks out is safe in this order:
+1. On every machine: `bay update`, then `bay install --machine` for each Claude config directory in use.
+2. Put `[agent] product = "claude"` in `.bay/config.toml` on main. Doctor then reads the hooks red until step 3.
+3. In one clone, `bay install`, then land the change that commits `.claude/settings.json`.
+4. `bay doctor` on each machine as it takes that change.
 
 ## Keys are optional
 

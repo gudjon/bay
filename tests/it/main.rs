@@ -179,6 +179,7 @@ mod g311_one_word_list;
 mod g312_a_complexity_budget;
 mod g313_a_person_at_a_terminal_reads_the_sentence;
 mod g31_a_dead_executor_is_replaced;
+mod g320_install_says_what_it_writes_and_doctor_names_the_real_step;
 mod g32_a_change_lands_at_most_once;
 mod g33_executors_publish_without_agent_keys_under_the_scoped_hook;
 mod g34_a_moved_base_never_hides_an_earlier_landing;

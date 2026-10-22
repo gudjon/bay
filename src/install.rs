@@ -82,6 +82,13 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
     let mut detail = json!({"binary": target.display().to_string(),
         "skill": skill_dir.display().to_string()});
     if machine {
+        // G320: what this install writes, and what it never does, said on its result.
+        detail["scope"] = json!("machine");
+        detail["never"] = json!([
+            "hook entries",
+            "a repository's agent settings",
+            "a repository's Git config"
+        ]);
         return Ok(BayResult::ok(detail));
     }
 

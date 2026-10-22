@@ -287,7 +287,9 @@ impl WaitArgs {
 
 #[derive(Args)]
 struct InstallArgs {
-    /// Only the box's part: the binary and the skill, never a repository's settings or Git config
+    /// Only the box's part: the binary and the skill. It never writes hook entries, a
+    /// repository's agent settings or its Git config: hooks reach a clone with the project's
+    /// tracked settings file
     #[arg(long)]
     machine: bool,
     /// The repository's main branch, written to git config bay.trunk (default: what it holds,

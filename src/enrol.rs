@@ -130,8 +130,12 @@ fn principal(class: KeyClass, name: &str) -> Result<(), String> {
         class,
         KeyClass::Executor | KeyClass::Producer | KeyClass::Reviewer | KeyClass::Approver
     ) {
-        crate::names::operator_name(name)
-            .map_err(|why| format!("A {} name is a short lower-case word: {why}.", class.file()))?;
+        crate::names::operator_name(name).map_err(|why| {
+            format!(
+                "The {} name is a short lower-case word: {why}.",
+                class.file()
+            )
+        })?;
     }
     Ok(())
 }

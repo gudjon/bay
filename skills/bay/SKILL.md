@@ -191,6 +191,19 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 - bay sees what went around it: `bay status` counts it in `detail.unattributed`, and `bay doctor` is red when main
   bay lands on also holds such landings. Tell the user; do not work around it.
 
+## Roll bay's hooks out to many machines
+
+The order, learned in a fleet rollout:
+1. On every machine: `bay update`, then `bay install --machine` for each Claude config directory in use
+   (`CLAUDE_CONFIG_DIR=<dir> bay install --machine`). It writes only the bay program and its guide. It never
+   writes hook entries, a repository's settings or its Git config, so it is safe to run on a busy machine.
+2. Put `[agent] product = "claude"` in `.bay/config.toml` on main. Each machine's `bay doctor` now reads hooks red,
+   with the recovery that names step 3: that is expected, not a fault.
+3. In one clone, run `bay install`, and land the change that commits `.claude/settings.json` with bay's entries.
+   Every machine gets the hooks as it takes that change. A machine without bay is unaffected: each entry first
+   checks that bay is present.
+4. Run `bay doctor` on each machine after it takes the change, and fix what it names; do not guess.
+
 ## Set up bay for a team (agent-led)
 
 When the user asks to set bay up for a small team, do each step for them. Tell them `say` after each.

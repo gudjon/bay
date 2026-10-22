@@ -1317,6 +1317,10 @@ fn ok_say(result: &BayResult) -> &'static str {
     if let Some(sentence) = answered_say(detail) {
         return sentence;
     }
+    // G320: `bay install --machine` writes the program and its guide, never hook settings.
+    if detail.is_some_and(|detail| detail.get("scope") == Some(&Value::from("machine"))) {
+        return "bay and its guide are installed on this computer; safety settings come with the project itself.";
+    }
     let view = detail.is_some_and(|detail| detail.get("view").is_some());
     let nothing_saved = detail
         .and_then(|detail| detail.get("saved"))

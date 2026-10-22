@@ -49,36 +49,62 @@ pub fn contract(mut cli: clap::Command) -> BayResult {
 /// the payload version and doctor's floor, the presence test, and what the hook does not judge.
 fn adapters() -> Vec<Value> {
     use crate::agent_settings::{
-        CLAUDE_EVENTS, CLAUDE_SETTINGS_FILE, DEFAULT_ON_FAILURE, PRESENCE_GUARD, WITHOUT_BAY,
-        entry_shape,
+        CLAUDE_EVENTS, CLAUDE_SETTINGS_FILE, CODEX_EVENTS, CODEX_HOOKS_FILE, CODEX_WITHOUT_BAY,
+        PRESENCE_GUARD, WITHOUT_BAY, codex_entry_shape, entry_shape,
     };
-    let events: Vec<Value> = CLAUDE_EVENTS
+    let events = adapter_events(CLAUDE_EVENTS, entry_shape);
+    let codex_events = adapter_events(CODEX_EVENTS, codex_entry_shape);
+    vec![
+        json!({
+            "product": crate::config::CLAUDE_PRODUCT,
+            // The hook events were read against this version's payloads
+            // (`tests/fixtures/claude-code-<version>`), and doctor requires it as the floor.
+            "payload_version": crate::version::CLAUDE_HOOK_MINIMUM,
+            "floor": crate::version::CLAUDE_HOOK_MINIMUM,
+            "settings_file": CLAUDE_SETTINGS_FILE,
+            "events": events,
+            "presence_test": true,
+            "presence_guard": PRESENCE_GUARD,
+            "without_bay": WITHOUT_BAY,
+            "cannot_see": crate::agent_hook::CANNOT_SEE,
+        }),
+        json!({
+            "product": crate::config::CODEX_PRODUCT,
+            // Read against `tests/fixtures/codex-<version>`; doctor requires it as the floor.
+            "payload_version": crate::version::CODEX_HOOK_MINIMUM,
+            "floor": crate::version::CODEX_HOOK_MINIMUM,
+            "settings_file": CODEX_HOOKS_FILE,
+            "events": codex_events,
+            "presence_test": false,
+            "presence_guard": null,
+            "without_bay": CODEX_WITHOUT_BAY,
+            // Codex runs the tool when bay's hook fails, so its deny is advisory: main is the guard.
+            "fails_open": true,
+            "cannot_see": crate::agent_hook::CANNOT_SEE,
+        }),
+    ]
+}
+
+/// The declared events of one adapter: each of `table`'s `(product_event, bay_event)` with the
+/// entry `shape` gives it, the shape the writer uses.
+fn adapter_events(
+    table: &[(&str, &str)],
+    shape: fn(&str) -> crate::agent_settings::EntryShape,
+) -> Vec<Value> {
+    table
         .iter()
         .map(|(product_event, bay_event)| {
-            let shape = entry_shape(product_event);
+            let shape = shape(product_event);
             json!({
                 "product_event": product_event,
                 "bay_event": bay_event,
                 "blocks": shape.blocks,
-                "on_failure": shape.on_failure.unwrap_or(DEFAULT_ON_FAILURE),
+                "on_failure": shape.on_failure.unwrap_or(crate::agent_settings::DEFAULT_ON_FAILURE),
                 "timeout_s": shape.timeout_s,
                 "matcher": shape.matcher,
             })
         })
-        .collect();
-    vec![json!({
-        "product": crate::config::CLAUDE_PRODUCT,
-        // The hook events were read against this version's payloads
-        // (`tests/fixtures/claude-code-<version>`), and doctor requires it as the floor.
-        "payload_version": crate::version::CLAUDE_HOOK_MINIMUM,
-        "floor": crate::version::CLAUDE_HOOK_MINIMUM,
-        "settings_file": CLAUDE_SETTINGS_FILE,
-        "events": events,
-        "presence_test": true,
-        "presence_guard": PRESENCE_GUARD,
-        "without_bay": WITHOUT_BAY,
-        "cannot_see": crate::agent_hook::CANNOT_SEE,
-    })]
+        .collect()
 }
 
 /// `command` and, after it, each of its subcommands, depth first.

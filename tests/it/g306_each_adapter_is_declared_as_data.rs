@@ -12,6 +12,9 @@
 //! - `src/contract.rs`: `"on_failure": shape.on_failure.unwrap_or(DEFAULT_ON_FAILURE),`,
 //!   `"timeout_s": shape.timeout_s,` and `"matcher": shape.matcher,` (a fixed value: the
 //!   `PreToolUse` entry differs from the written one).
+//! - `src/contract.rs` `adapters`: drop the Codex entry (the Codex case finds no adapter).
+//! - `src/agent_settings.rs` `codex_group`: write its own timeout instead of
+//!   `codex_entry_shape(event).timeout_s` (the declared timeout differs from the written one).
 //! - `src/agent_settings.rs` `bay_group`: `hook["onFailure"] = json!(on_failure);`,
 //!   `hook["timeout"] = json!(timeout_s);` and
 //!   `group.insert("matcher".to_owned(), json!(matcher));` (the writer leaving the shape:
@@ -124,5 +127,47 @@ fn the_contract_declares_each_event_install_writes_and_no_other() {
     for event in events {
         let blocks = matches!(event["product_event"].as_str(), Some("PreToolUse" | "Stop"));
         assert_eq!(event["blocks"], blocks, "{event}");
+    }
+}
+
+const CODEX_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"codex\"\n";
+
+#[test]
+fn the_codex_adapter_is_declared_as_install_writes_it_and_as_failing_open() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.commit_config(&repo, CODEX_ADAPTER);
+    test_box.bay_ok(&repo, &["install"]);
+    let text = std::fs::read_to_string(repo.join(".codex/hooks.json")).unwrap();
+    let settings: Value = serde_json::from_str(&text).unwrap();
+    let written = installed(&settings);
+    assert!(!written.is_empty(), "{settings}");
+
+    let contract = test_box.bay_ok(test_box.path(), &["help"]);
+    let codex = contract["detail"]["adapters"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|adapter| adapter["product"] == "codex")
+        .unwrap_or_else(|| panic!("no codex adapter: {contract}"))
+        .clone();
+    assert_eq!(codex["settings_file"], ".codex/hooks.json", "{codex}");
+    assert_eq!(codex["fails_open"], true, "{codex}");
+    assert_eq!(codex["presence_test"], false, "{codex}");
+    let events = codex["events"].as_array().unwrap();
+    assert_eq!(events.len(), written.len(), "{codex} vs {settings}");
+    for (product_event, bay_event, hook, _) in &written {
+        let declared = events
+            .iter()
+            .find(|event| {
+                event["product_event"] == *product_event && event["bay_event"] == *bay_event
+            })
+            .unwrap_or_else(|| panic!("{product_event} ({bay_event}) is not declared: {codex}"));
+        assert_eq!(declared["on_failure"], "allow", "{declared}");
+        assert_eq!(
+            declared["timeout_s"], hook["timeout"],
+            "{product_event}: {declared} vs {hook}"
+        );
+        assert_eq!(declared["matcher"], Value::Null, "{declared}");
     }
 }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.2.16
+
+- `bay help --json` declares the Codex adapter too: its events, timeout, and that its hooks fail open.
+- Doctor's `off` hooks row names both agent products, `claude` and `codex`.
+- A refused enrolment says "The approver name is a short lower-case word", not "A approver".
+- `bay install --machine` says what it writes, and that it never writes hook entries or a project's settings.
+- With a tracked `.claude/settings.json`, doctor's hooks recovery names landing the change that commits bay's entries.
+- The skill gives the order for rolling bay's hooks out to many machines.
+
 ## 0.2.15
 
 - One word list: `bay help --json` exports the words a person never sees, and the word said instead.

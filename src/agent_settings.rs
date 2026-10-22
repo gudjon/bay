@@ -241,10 +241,32 @@ fn bay_group(event: &str, bay_event: &str) -> Value {
 fn codex_group(event: &str, bay_event: &str) -> Value {
     let mut hook =
         json!({"type": "command", "command": format!("{BAY_COMMAND_PREFIX}{bay_event}")});
-    if event == "PreToolUse" {
-        hook["timeout"] = json!(PRE_TOOL_TIMEOUT_S);
+    if let Some(timeout_s) = codex_entry_shape(event).timeout_s {
+        hook["timeout"] = json!(timeout_s);
     }
     json!({"hooks": [hook]})
+}
+
+/// What Codex does with bay's entry when the hook fails, crashes or times out: it runs the tool
+/// (probed on Codex 0.153.2), and no setting changes it.
+pub const CODEX_ON_FAILURE: &str = "allow";
+
+/// What a Codex entry does on a machine without bay: it names a bare `bay hook` (no presence
+/// test: no probe shows Codex running the command through a shell), so the hook fails and
+/// Codex runs the tool.
+pub const CODEX_WITHOUT_BAY: &str = "the hook fails, and the tool runs";
+
+/// G306: the shape of bay's Codex entry for `event`, the one table [`codex_group`] writes and
+/// `bay help --json` declares. A pre-tool exit 2 denies, but every entry fails open, and no
+/// entry has a matcher: Codex runs it for every tool.
+#[must_use]
+pub fn codex_entry_shape(event: &str) -> EntryShape {
+    EntryShape {
+        blocks: event == "PreToolUse",
+        on_failure: Some(CODEX_ON_FAILURE),
+        timeout_s: (event == "PreToolUse").then_some(PRE_TOOL_TIMEOUT_S),
+        matcher: None,
+    }
 }
 
 /// bay's hooks under `event` that run `bay hook <bay_event>`, in groups bay owns.
