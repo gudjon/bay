@@ -24,12 +24,11 @@ cargo clippy --all-targets
 cargo test
 ```
 
-The integration tests live in `tests/it/`, one file per guarantee. `gNN_*.rs` is the failure test for
-guarantee GNN, named for what it proves.
+The integration tests live in `tests/it/`. Most files test one promise, and each is named for what it proves.
 
 ## What a good pull request looks like
 
-- **One change, one reason.** Small pull requests land faster.
+- **One change, one reason.** Small pull requests merge faster.
 - **A new promise comes with a failure test** that fails without your change and passes with it.
 - **A bug fix comes with a test** that reproduces the bug.
 - **Every refusal says what to do next.** A new refusal has a stable reason, what the caller can still
@@ -42,9 +41,9 @@ guarantee GNN, named for what it proves.
 ## Organisation-neutral
 
 bay is a general tool. Nothing in this repository is specific to one organisation: no
-organisation-specific names, hosts, paths, trunk names, trailers, commands, defaults, examples or test
+organisation-specific names, hosts, paths, branch names, trailers, commands, defaults, examples or test
 fixtures. What one organisation needs goes in its own `.bay/config.toml` and `.bay/policy.toml`, or in
-an adapter behind a public contract.
+a plugin behind a public contract.
 
 ## How code reaches `main`
 
@@ -58,7 +57,7 @@ git fetch origin 'refs/notes/bay/*:refs/notes/bay/*'
 scripts/gate.sh --verify <commit>
 ```
 
-So your pull request is reviewed here, then landed through the gate by a maintainer. You do not need a
+So your pull request is reviewed here, then merged through the gate by a maintainer. You do not need a
 signing key to contribute.
 
 ## Licence

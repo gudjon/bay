@@ -1,6 +1,6 @@
 # Security
 
-bay decides what lands on trunk, signs evidence, and updates its own binary. We take reports about any
+bay decides what merges into main, signs evidence, and updates its own binary. We take reports about any
 of that seriously.
 
 ## Report a vulnerability
@@ -18,7 +18,7 @@ you ask us not to.
 
 Anything that breaks one of bay's promises counts. For example:
 
-- a commit lands that is not the one that was checked
+- a commit merges that is not the one that was checked
 - a check reads outside its sandbox, or reaches the network when its policy says no
 - evidence verifies when it should not, or an actor acts with a key that is not theirs
 - `bay update` or `install.sh` installs a binary that is not a signed release

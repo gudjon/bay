@@ -12,6 +12,9 @@ bay merges coding agents' changes into main, so several agents can work in one c
 branches, colliding merges or a broken main. You open a change, edit in its view, and submit it once. A
 runner checks the exact candidate and merges it, even after you leave. A few field and event names still
 say `trunk` for main.
+Main is the one branch bay serves, whatever its name (`bay install --main dev`). Create no branches: a
+change is bay's own record, and its view is a folder bay makes. Branches after main, as in
+`dev → staging → production`, are `[[target]]`s; work that must never merge goes in a `[[lane]]`.
 Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its URL).
 
 ## Before you start

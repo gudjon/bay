@@ -33,4 +33,4 @@ EOF
 chmod +x scripts/bay-check
 echo "port = 443" > services/gateway.conf
 git add -A; git commit -qm "start"; git push -q origin main 2>/dev/null
-"$HOME/.local/bin/bay" install --trunk main --remote origin --json >/dev/null 2>&1
+"$HOME/.local/bin/bay" install --main main --remote origin --json >/dev/null 2>&1
