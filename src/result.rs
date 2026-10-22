@@ -548,6 +548,16 @@ fn plain(text: &str) -> String {
 /// records", with the punctuation around it kept; any other token word by word.
 fn plain_token(token: &str) -> String {
     let core = token.trim_matches(|c: char| "()`'\".,;:".contains(c));
+    // `<rev>:<file>`, as Git names a file at a commit: the file is what a person can open, so
+    // it is named alone when its own path is plain (`.bay/config.toml`).
+    if let Some((rev, file)) = core.rsplit_once(':')
+        && rev.contains('/')
+        && !file.is_empty()
+        && !file.split(|c: char| !c.is_ascii_alphabetic()).any(unplain)
+    {
+        let start = token.find(core).unwrap_or(0);
+        return format!("{}{file}{}", &token[..start], &token[start + core.len()..]);
+    }
     if core.contains('/') && core.split(|c: char| !c.is_ascii_alphabetic()).any(unplain) {
         let start = token.find(core).unwrap_or(0);
         return format!(
@@ -1530,6 +1540,15 @@ mod tests {
         assert_eq!(
             plain("see src/a.rs and `docs/x.md`."),
             "see src/a.rs and `docs/x.md`."
+        );
+        // 0.3.2: a file at a commit is named by its file, which a person can open.
+        assert_eq!(
+            plain("refs/remotes/origin/main:.bay/config.toml: TOML parse error"),
+            ".bay/config.toml: TOML parse error"
+        );
+        assert_eq!(
+            plain("due 2026-10-19T12:00:00Z"),
+            "due 2026-10-19T12:00:00Z"
         );
         assert!(unplain("Commits") && unplain("rebasing") && unplain("refs"));
         assert!(!unplain("refused") && !unplain("refresh") && !unplain("committee"));

@@ -13,6 +13,14 @@
 //! it appends one key to its class file, checks the new files by these rules, signs the new
 //! version with this machine's registry key and pushes it.
 //!
+//! A key leaves its class file through `bay enrol --remove` (owner ruling 2026-10-22), which
+//! records the removal in the tree's `removed` file, one line each: `<class> <name> <reason>
+//! <time> <key type> <key>`. The reason is `rotated` or `revoked`. A rotated key's records made
+//! before its removal still verify, judged at their signing time ([`Registry::class_file_at`]);
+//! a revoked key's records verify nowhere, also under an older version a merge was signed
+//! under ([`Registry::without_revoked`]). The file only grows: the host refuses a version that
+//! drops a line of it, and a removed key is never enrolled again.
+//!
 //! What a registry signs is the policy's to say (N-21, `[policy] signing` at the accepted base,
 //! [`crate::policy::Signing`]): `all`, the default, signs every landing, request, chain and
 //! record; `approvals` signs only `approval` records, and everything else runs as with no
@@ -20,12 +28,106 @@
 //! repository judges by; [`Registry::signs_all`] is the guard every other signing rule asks.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use crate::git::Git;
 use crate::policy::Signing;
 
 pub const REGISTRY_REF: &str = crate::names::REGISTRY;
+
+/// The registry tree's file of removed keys.
+pub const REMOVED_FILE: &str = "removed";
+
+/// Why a key was removed (owner ruling 2026-10-22).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Removed {
+    /// Replaced in the ordinary course: its records made before the removal still verify.
+    Rotated,
+    /// Compromised: none of its records verifies, wherever it is read.
+    Revoked,
+}
+
+impl Removed {
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Rotated => "rotated",
+            Self::Revoked => "revoked",
+        }
+    }
+
+    #[must_use]
+    pub fn named(word: &str) -> Option<Self> {
+        [Self::Rotated, Self::Revoked]
+            .into_iter()
+            .find(|reason| reason.word() == word)
+    }
+}
+
+/// One line of the `removed` file.
+#[derive(Clone, Debug)]
+pub struct Removal {
+    pub class: KeyClass,
+    pub principal: String,
+    pub reason: Removed,
+    /// When it was removed, RFC 3339 UTC to the second.
+    pub at: String,
+    pub key_type: String,
+    pub blob: String,
+}
+
+impl Removal {
+    /// The line the `removed` file holds for it.
+    #[must_use]
+    pub fn line(&self) -> String {
+        format!(
+            "{} {} {} {} {} {}",
+            self.class.file(),
+            self.principal,
+            self.reason.word(),
+            self.at,
+            self.key_type,
+            self.blob
+        )
+    }
+}
+
+/// The removals `text` holds, or the first line no removal can be.
+fn parse_removed(text: &str) -> Result<Vec<Removal>, String> {
+    let mut removals = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let where_ = format!("registry {REMOVED_FILE} line {}", number + 1);
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let [class, principal, reason, at, key_type, blob] = words.as_slice() else {
+            return Err(format!(
+                "{where_}: expected `<class> <name> <rotated|revoked> <time> <key type> <key>`"
+            ));
+        };
+        let class = KeyClass::named(class).ok_or_else(|| format!("{where_}: no class {class}"))?;
+        let reason = Removed::named(reason)
+            .ok_or_else(|| format!("{where_}: the reason is rotated or revoked, not {reason}"))?;
+        if crate::clock::unix_of(at).is_none() {
+            return Err(format!("{where_}: {at} is no RFC 3339 time"));
+        }
+        if !KEY_TYPES.contains(key_type) {
+            return Err(format!("{where_}: {key_type} is no key type"));
+        }
+        removals.push(Removal {
+            class,
+            principal: (*principal).to_owned(),
+            reason,
+            at: (*at).to_owned(),
+            key_type: (*key_type).to_owned(),
+            blob: (*blob).to_owned(),
+        });
+    }
+    Ok(removals)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyClass {
@@ -102,6 +204,8 @@ pub fn is_key_type(word: &str) -> bool {
 pub struct Registry {
     pub commit: String,
     files: HashMap<KeyClass, String>,
+    /// The `removed` file's lines (`bay enrol --remove`).
+    removed: Vec<Removal>,
     /// What this registry signs (N-21): `all` from [`Registry::load_at`], the mode of the
     /// policy at the accepted base from [`Registry::current`].
     mode: Signing,
@@ -160,9 +264,14 @@ impl Registry {
             || read_files(git, commit),
         )
         .0?;
+        let removed = match git.file_at(commit, REMOVED_FILE) {
+            Ok(text) => parse_removed(&text.unwrap_or_default())?,
+            Err(error) => return Err(error.message()),
+        };
         let registry = Self {
             commit: commit.to_owned(),
             files,
+            removed,
             mode: Signing::All,
         };
         registry.validate()?;
@@ -244,6 +353,7 @@ impl Registry {
                 .into_iter()
                 .map(|class| (class, file(class)))
                 .collect(),
+            removed: Vec::new(),
             mode: Signing::All,
         };
         registry.validate()
@@ -302,6 +412,20 @@ impl Registry {
                         }
                     }
                 }
+            }
+        }
+        // A removed key is never enrolled again: a revoked one must stay out, and a rotated
+        // one is replaced, not brought back.
+        for removal in &self.removed {
+            let key = (removal.key_type.clone(), removal.blob.clone());
+            if let Some((class, principal)) = seen.get(&key) {
+                return Err(format!(
+                    "registry {REMOVED_FILE}: the key of {} {}, removed as {}, is enrolled again in {} under {principal}; a removed key is never enrolled again",
+                    removal.class.file(),
+                    removal.principal,
+                    removal.reason.word(),
+                    class.file()
+                ));
             }
         }
         Ok(())
@@ -394,6 +518,116 @@ impl Registry {
             Self::load_at(git, named).map(Some)
         } else {
             Ok(None)
+        }
+    }
+
+    /// The keys this version records as removed (`bay enrol --remove`).
+    #[must_use]
+    pub fn removed(&self) -> &[Removal] {
+        &self.removed
+    }
+
+    /// The `removed` file this version holds, as its lines.
+    #[must_use]
+    pub fn removed_text(&self) -> String {
+        self.removed
+            .iter()
+            .fold(String::new(), |mut text, removal| {
+                let _ = writeln!(text, "{}", removal.line());
+                text
+            })
+    }
+
+    /// Class file `class` for a record signed at `at` (RFC 3339): the keys enrolled now, and the
+    /// keys rotated out after `at`, which were enrolled when it was signed (owner ruling
+    /// 2026-10-22). A revoked key is in neither. Written next to [`Self::class_file`].
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be written.
+    pub fn class_file_at(&self, git: &Git, class: KeyClass, at: &str) -> Result<PathBuf, String> {
+        let class_path = self.class_file(git, class)?;
+        let signed = crate::clock::unix_of(at);
+        let rotated: Vec<&Removal> = self
+            .removed
+            .iter()
+            .filter(|removal| {
+                removal.class == class
+                    && removal.reason == Removed::Rotated
+                    && signed.is_some_and(|signed| {
+                        crate::clock::unix_of(&removal.at).is_some_and(|removed| signed < removed)
+                    })
+            })
+            .collect();
+        if rotated.is_empty() {
+            return Ok(class_path);
+        }
+        let mut text = self.files[&class].clone();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        for removal in &rotated {
+            let _ = writeln!(
+                text,
+                "{} {} {}",
+                removal.principal, removal.key_type, removal.blob
+            );
+        }
+        let name = format!(
+            "{}.at.{}",
+            class.file(),
+            crate::agent_settings::hex(at.as_bytes())
+        );
+        let path = class_path.with_file_name(&name);
+        if !path.exists() {
+            let tmp = class_path.with_file_name(format!(".{name}.tmp"));
+            std::fs::write(&tmp, text).map_err(|error| error.to_string())?;
+            crate::durable::rename(&tmp, &path).map_err(|error| error.to_string())?;
+        }
+        Ok(path)
+    }
+
+    /// This version without the keys `current` revokes: what a record signed under this older
+    /// version is judged against now, so a revoked key verifies under no version (owner ruling
+    /// 2026-10-22). This version itself when `current` revokes none of its keys.
+    #[must_use]
+    pub fn without_revoked(&self, current: &Self) -> Self {
+        let revoked: Vec<&str> = current
+            .removed
+            .iter()
+            .filter(|removal| removal.reason == Removed::Revoked)
+            .map(|removal| removal.blob.as_str())
+            .collect();
+        let held = |line: &str| {
+            line.split_whitespace()
+                .nth(2)
+                .is_some_and(|blob| revoked.contains(&blob))
+        };
+        if !KeyClass::ALL
+            .iter()
+            .any(|class| self.files[class].lines().any(held))
+        {
+            return self.clone();
+        }
+        let files = self
+            .files
+            .iter()
+            .map(|(class, text)| {
+                let kept = text.lines().filter(|line| !held(line)).fold(
+                    String::new(),
+                    |mut kept, line| {
+                        let _ = writeln!(kept, "{line}");
+                        kept
+                    },
+                );
+                (*class, kept)
+            })
+            .collect();
+        Self {
+            commit: format!("{}-without-{}", self.commit, current.commit),
+            files,
+            removed: self.removed.clone(),
+            mode: self.mode,
         }
     }
 

@@ -174,7 +174,10 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
     ),
     (
         "enrol",
-        &["one key in the key registry, signed with this machine's registry key and pushed"],
+        &[
+            "one key in the key registry, signed with this machine's registry key and pushed",
+            "with --remove, the name's keys out of its class and into the registry's removed file",
+        ],
         &["main"],
     ),
     (

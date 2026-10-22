@@ -41,6 +41,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Approve one, or say no, when the approver asks you to | `bay approve <change> [--why <text>]`, `bay reject <change> [--why <text>]` |
 | Waive one failed check marked `waivable`, when the approver asks you to | `bay approve <change> --waive <check> --why <text>` (that candidate only; never a pass) |
 | Add one key to the key registry, when the user sets up keys | `bay enrol <class> <name> <key.pub>` (class `registry`, `approver`, `reviewer`, `producer`, `executor` or `agent`; signed by `bay.registryKey`) |
+| Remove a key, when the user asks: `rotated` keeps its past records valid, `revoked` (compromised) voids them all | `bay enrol --remove <class> <name> --reason rotated\|revoked` (signed by `bay.registryKey`; the last registry key is never removed) |
 | Give the change up, so another agent may adopt it | `bay abandon [<change>]` (default: the view's change) |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
 | Read state, and main commits that did not merge through bay (`unattributed`; `by_writer` counts them per committer) | `bay status` |

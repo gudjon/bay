@@ -13,6 +13,11 @@
 //!   when the version before it enrols the key that signed it ([`crate::hook`]).
 //! - The first enrolment creates the registry. It must be of class `registry`, with the public
 //!   half of `bay.registryKey`, so the first version already enrols the key that signs the next.
+//! - `bay enrol --remove <class> <name> --reason rotated|revoked` (owner ruling 2026-10-22) takes
+//!   every key of `name` out of the class file and records each in the `removed` file with the
+//!   reason and the time, in one version signed and pushed the same way. A rotated key's records
+//!   made before then still verify; a revoked key's never do ([`crate::registry`]). The last
+//!   registry key is never removed: nobody could sign the registry after it.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -20,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde_json::json;
 
 use crate::git::{Git, GitError};
-use crate::registry::{KeyClass, REGISTRY_REF, Registry};
+use crate::registry::{KeyClass, REGISTRY_REF, REMOVED_FILE, Registry, Removal, Removed};
 use crate::repo::Repo;
 use crate::result::BayResult;
 use crate::signing::Signer;
@@ -35,8 +40,11 @@ pub struct Enrol {
     pub class: String,
     /// The principal the key is enrolled under.
     pub name: String,
-    /// The OpenSSH public key file (`<key>.pub`), relative to the directory bay runs in.
-    pub public_key: PathBuf,
+    /// The OpenSSH public key file (`<key>.pub`), relative to the directory bay runs in; none
+    /// for a removal.
+    pub public_key: Option<PathBuf>,
+    /// `--remove --reason <reason>`: take the name's keys out instead.
+    pub remove: Option<Removed>,
 }
 
 /// One public key: its key type and key blob, as a registry line holds them.
@@ -65,7 +73,14 @@ fn enrol_in(dir: &Path, repo: &Repo, request: &Enrol) -> Result<BayResult, Strin
     })?;
     let name = request.name.as_str();
     principal(class, name)?;
-    let public = read_public(&dir.join(&request.public_key))?;
+    if let Some(reason) = request.remove {
+        return remove(repo, class, name, reason);
+    }
+    let public_key = request
+        .public_key
+        .as_ref()
+        .ok_or("Name the public key file to enrol: bay enrol <class> <name> <key.pub>.")?;
+    let public = read_public(&dir.join(public_key))?;
     let (signing_key, signer_public) = registry_key(&repo.git)?;
     let parent = remote_registry(repo)?;
     let current = parent
@@ -99,7 +114,7 @@ fn enrol_in(dir: &Path, repo: &Repo, request: &Enrol) -> Result<BayResult, Strin
         }
     })
     .map_err(|why| format!("Nothing was enrolled: {why}."))?;
-    let tree = new_tree(&repo.git, parent.as_deref(), class, &text)?;
+    let tree = new_tree(&repo.git, parent.as_deref(), &[(class.file(), &text)])?;
     let signer = Signer {
         key: signing_key,
         name: registrar,
@@ -112,6 +127,88 @@ fn enrol_in(dir: &Path, repo: &Repo, request: &Enrol) -> Result<BayResult, Strin
         "name": name,
         "registry": commit,
     })))
+}
+
+/// `bay enrol --remove`: every key of `name` out of class file `class`, each recorded in the
+/// `removed` file with `reason` and now, in one version signed with this machine's registry key.
+fn remove(repo: &Repo, class: KeyClass, name: &str, reason: Removed) -> Result<BayResult, String> {
+    let (signing_key, signer_public) = registry_key(&repo.git)?;
+    let parent =
+        remote_registry(repo)?.ok_or("There is no registry yet, so there is no key to remove.")?;
+    let current = Registry::load_at(&repo.git, &parent)?;
+    let registrar = registrar(&current, &signer_public)?;
+    let at = crate::clock::rfc3339_of(crate::live::unix_now());
+    let mut kept = String::new();
+    let mut removals = Vec::new();
+    for line in current.text(class).lines() {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        match words.as_slice() {
+            [principal, key_type, blob, ..] if *principal == name => removals.push(Removal {
+                class,
+                principal: name.to_owned(),
+                reason,
+                at: at.clone(),
+                key_type: (*key_type).to_owned(),
+                blob: (*blob).to_owned(),
+            }),
+            _ => {
+                kept.push_str(line);
+                kept.push('\n');
+            }
+        }
+    }
+    if removals.is_empty() {
+        return Err(format!(
+            "{name} is not enrolled as {} {}, so nothing was removed.",
+            article(class),
+            class.file()
+        ));
+    }
+    if class == KeyClass::Registry && kept.lines().all(|line| line.trim().is_empty()) {
+        return Err(
+            "That is the last registry key: without it nobody could sign the registry again, so nothing was removed. Enrol another registry key first."
+                .to_owned(),
+        );
+    }
+    let mut removed = current.removed_text();
+    for removal in &removals {
+        removed.push_str(&removal.line());
+        removed.push('\n');
+    }
+    let tree = new_tree(
+        &repo.git,
+        Some(&parent),
+        &[(class.file(), &kept), (REMOVED_FILE, &removed)],
+    )?;
+    let signer = Signer {
+        key: signing_key,
+        name: registrar,
+    };
+    let message = format!("remove {} {name} ({})", class.file(), reason.word());
+    let commit = signed_commit(&repo.git, &tree, Some(&parent), &signer, &message)?;
+    // The rules the host applies, here first: nothing is pushed that it would refuse.
+    Registry::load_at(&repo.git, &commit).map_err(|why| format!("Nothing was removed: {why}."))?;
+    push(repo, &commit)?;
+    Ok(BayResult::ok(json!({
+        "class": class.file(),
+        "name": name,
+        "removed": reason.word(),
+        "keys": removals.len(),
+        "at": at,
+        "registry": commit,
+    })))
+}
+
+/// "a" or "an" before the class's name.
+fn article(class: KeyClass) -> &'static str {
+    if matches!(
+        class,
+        KeyClass::Agent | KeyClass::Executor | KeyClass::Approver
+    ) {
+        "an"
+    } else {
+        "a"
+    }
 }
 
 /// Refuses a name no registry line can hold, and, for a class whose name is also an evidence
@@ -254,33 +351,30 @@ fn class_text(
     text
 }
 
-/// The tree of `parent` (none: empty) with class file `class` holding `text`; every other
-/// entry is kept as it is.
-fn new_tree(
-    git: &Git,
-    parent: Option<&str>,
-    class: KeyClass,
-    text: &str,
-) -> Result<String, String> {
+/// The tree of `parent` (none: empty) with each named file of `files` holding its text; every
+/// other entry is kept as it is.
+fn new_tree(git: &Git, parent: Option<&str>, files: &[(&str, &str)]) -> Result<String, String> {
     let fault = |error: GitError| error.message();
-    let blob = git
-        .run_with(
-            &["hash-object", "-w", "--stdin"],
-            &[],
-            Some(text.as_bytes()),
-        )
-        .map_err(fault)?;
     let listed = match parent {
         Some(parent) => git.run(&["ls-tree", "-z", parent]).map_err(fault)?,
         None => String::new(),
     };
-    let own = format!("\t{}", class.file());
+    let names: Vec<String> = files.iter().map(|(name, _)| format!("\t{name}")).collect();
     let mut entries: Vec<String> = listed
         .split('\0')
-        .filter(|entry| !entry.is_empty() && !entry.ends_with(&own))
+        .filter(|entry| !entry.is_empty() && !names.iter().any(|own| entry.ends_with(own)))
         .map(str::to_owned)
         .collect();
-    entries.push(format!("100644 blob {blob}{own}"));
+    for (name, text) in files {
+        let blob = git
+            .run_with(
+                &["hash-object", "-w", "--stdin"],
+                &[],
+                Some(text.as_bytes()),
+            )
+            .map_err(fault)?;
+        entries.push(format!("100644 blob {blob}\t{name}"));
+    }
     let mut input = entries.join("\0");
     input.push('\0');
     git.run_with(&["mktree", "-z"], &[], Some(input.as_bytes()))

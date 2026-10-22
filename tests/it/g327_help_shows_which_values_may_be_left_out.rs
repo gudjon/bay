@@ -6,7 +6,7 @@
 //! So `bay help --json` marks each such flag `value_optional` (with `require_equals` when the
 //! value is written `--flag=VALUE`), and the page writes `--wait[=<SECONDS>]` and `--since
 //! [<CURSOR>]`. A positional argument shows its placeholder, as `--help` does:
-//! `<PUBLIC_KEY_FILE>`, not the field name.
+//! `[PUBLIC_KEY_FILE]`, not the field name.
 //!
 //! Guards to mutate (each makes a case here fail):
 //! - `src/contract.rs` `argument`: `range.min_values() == 0` to `false` (no flag is optional).
@@ -54,7 +54,7 @@ fn optional_values_are_marked_and_shown_as_optional() {
     assert!(page.contains("--since [<CURSOR>]"), "{page}");
     assert!(page.contains("--paths <PATHS>..."), "{page}");
     assert!(
-        page.contains("bay enrol <CLASS> <NAME> <PUBLIC_KEY_FILE>"),
+        page.contains("bay enrol <CLASS> <NAME> [PUBLIC_KEY_FILE]"),
         "{page}"
     );
 }

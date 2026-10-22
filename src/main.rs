@@ -154,7 +154,7 @@ enum Command {
     Talk(Box<TalkArgs>),
     /// Admin: add one key to the key registry: append it to its class file, sign the new
     /// registry with this machine's registry key (`bay.registryKey`) and push it. The first
-    /// key enrolled is that registry key
+    /// key enrolled is that registry key. With --remove, take a name's keys out instead
     Enrol(EnrolArgs),
     /// Admin: probe this machine (git and Claude Code floors, remote, hook entries, installed skill)
     Doctor {
@@ -241,8 +241,15 @@ struct EnrolArgs {
     /// The name the key is enrolled under
     name: String,
     /// The public key file (`<key>.pub`)
-    #[arg(value_name = "PUBLIC_KEY_FILE")]
-    public_key: PathBuf,
+    #[arg(value_name = "PUBLIC_KEY_FILE", required_unless_present = "remove")]
+    public_key: Option<PathBuf>,
+    /// Remove the name's keys from its class instead, each recorded with --reason
+    #[arg(long, requires = "reason", conflicts_with = "public_key")]
+    remove: bool,
+    /// With --remove: `rotated` keeps the key's past records verified; `revoked` (compromised)
+    /// makes every record it signed unverified
+    #[arg(long, value_name = "REASON", value_parser = ["rotated", "revoked"], requires = "remove")]
+    reason: Option<String>,
 }
 
 /// `--wait[=SECONDS]`, the one flag `bay merge` and `bay undo` share. `Option<Option<_>>` is
@@ -620,6 +627,10 @@ fn enrol(dir: &std::path::Path, args: EnrolArgs) -> BayResult {
             class: args.class,
             name: args.name,
             public_key: args.public_key,
+            remove: args
+                .reason
+                .as_deref()
+                .and_then(bay::registry::Removed::named),
         },
     )
 }

@@ -78,10 +78,8 @@ fn run(dir: &Path, request: &Missing) -> Result<BayResult, String> {
     let registry = Registry::current(git)?;
     let producers = registry
         .as_ref()
-        .filter(|registry| evidence::signed_kind(registry, &request.kind))
-        .map(|registry| registry.class_file(git, evidence::signer_class(&request.kind)))
-        .transpose()?;
-    let (checked, rows) = uncovered(git, request, &trunk, since.as_deref(), producers.as_deref())?;
+        .filter(|registry| evidence::signed_kind(registry, &request.kind));
+    let (checked, rows) = uncovered(git, request, &trunk, since.as_deref(), producers)?;
 
     let mut result = BayResult::ok(json!({
         "kind": request.kind,
@@ -101,13 +99,13 @@ fn run(dir: &Path, request: &Missing) -> Result<BayResult, String> {
 }
 
 /// The first-parent commits of `trunk` after `since` and, of those, the rows no counted
-/// record covers. `producers` is the producer class file under a registry.
+/// record covers. `producers` is the registry a record must verify under, when it signs.
 fn uncovered(
     git: &Git,
     request: &Missing,
     trunk: &str,
     since: Option<&str>,
-    producers: Option<&Path>,
+    producers: Option<&Registry>,
 ) -> Result<(usize, Vec<serde_json::Value>), String> {
     let mut args = vec![
         "log".to_owned(),
@@ -156,7 +154,14 @@ fn uncovered(
         let trust = match producers {
             None if covering.is_empty() => "unsigned",
             None => continue,
-            Some(file) if covering.iter().any(|record| record.verifies(file)) => continue,
+            // Each record is judged at its signing time: a key rotated out since still counts.
+            Some(registry)
+                if covering
+                    .iter()
+                    .any(|record| record.verifies_in(git, registry).unwrap_or(false)) =>
+            {
+                continue;
+            }
             Some(_) if covering.is_empty() => "signed",
             Some(_) => "unverifiable",
         };

@@ -31,8 +31,10 @@ use support::TestBox;
 ///   command that already did it. Fifteen reasons fold into four (a queue's turn, a tool below
 ///   its floor, an absent tool, a refused talk), and a lane change's checks end `ok`, so its
 ///   refusal is gone.
+/// - 0.3.2, two flags (`enrol --remove`, `--reason`): removing a key was a hand-built, registry
+///   signed Git commit; now it is one command that records why (owner ruling 2026-10-22).
 const COMMANDS: usize = 28;
-const FLAGS: usize = 74;
+const FLAGS: usize = 76;
 const REASONS: usize = 57;
 const WORDS: usize = 7;
 

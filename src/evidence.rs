@@ -332,12 +332,14 @@ impl EvidenceRecord {
 
     /// Whether the record verifies under `registry` against the one class file its kind names
     /// (Q12): a `review` against the reviewer file, every other kind against the producer file.
+    /// It is judged at its signing time, `at`: a key rotated out since still verifies it, and a
+    /// revoked one never does (owner ruling 2026-10-22).
     ///
     /// # Errors
     ///
     /// The class file cannot be written.
     pub fn verifies_in(&self, git: &Git, registry: &Registry) -> Result<bool, String> {
-        let file = registry.class_file(git, signer_class(&self.kind))?;
+        let file = registry.class_file_at(git, signer_class(&self.kind), &self.at)?;
         Ok(self.verifies(&file))
     }
 }

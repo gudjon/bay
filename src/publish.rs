@@ -385,8 +385,16 @@ pub fn verify_publication(git: &Git, commit: &str, registry_id: &str, committer:
     if registry_id.is_empty() || registry_id == "none" {
         return !crate::registry::landing_signed(git, commit);
     }
-    Registry::load_at(git, registry_id)
-        .is_ok_and(|registry| verifies_under(git, commit, &registry, committer))
+    // A key revoked since (owner ruling 2026-10-22) verifies under no version, also the one the
+    // merge was signed under.
+    let current = Registry::current(git).ok().flatten();
+    Registry::load_at(git, registry_id).is_ok_and(|registry| {
+        let registry = match &current {
+            Some(current) => registry.without_revoked(current),
+            None => registry,
+        };
+        verifies_under(git, commit, &registry, committer)
+    })
 }
 
 /// Whether `commit` verifies against `registry`'s executor file, under the executor that

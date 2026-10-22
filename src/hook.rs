@@ -1701,7 +1701,19 @@ impl Judge<'_> {
             {
                 return Err(format!("{commit} is not signed by a registry key"));
             }
-            Registry::load_at(self.git, commit)?;
+            let next = Registry::load_at(self.git, commit)?;
+            // A removal stands (owner ruling 2026-10-22): a revoked key is never trusted again.
+            let kept = next.removed_text();
+            if let Some(dropped) = previous
+                .removed()
+                .iter()
+                .map(crate::registry::Removal::line)
+                .find(|line| !kept.lines().any(|kept| kept == line))
+            {
+                return Err(format!(
+                    "{commit} drops the removal `{dropped}`; a removal is never undone"
+                ));
+            }
         }
         Ok(())
     }

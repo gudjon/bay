@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.2
+
+- `bay enrol --remove <class> <name> --reason rotated|revoked` removes a key, and records why.
+- A rotated key's records made before its removal still count; a revoked key's records count nowhere.
+- The host refuses a registry version that undoes a removal, and a removed key is never enrolled again.
+- A plain sentence names a broken file by its path, such as `.bay/config.toml`, not as bay's records.
+
 ## 0.3.1
 
 - Every help text, next step, doctor note and the skill say merge, main, runner, plugin and machine.
