@@ -226,18 +226,22 @@ fn every_reason_in_the_table_is_listed_and_no_other() {
     );
 }
 
-/// The command names in the `Commands:` section of `bay -h`.
+/// The top-level command names `bay -h` shows: since 0.2.15 (G313, R6) the grouped page, one
+/// `  bay <command>` heading per command.
 fn help_commands(test_box: &TestBox) -> Vec<String> {
     let out = test_box.bay(test_box.path()).arg("-h").output().unwrap();
     assert!(out.status.success(), "{out:?}");
     let help = String::from_utf8(out.stdout).unwrap();
-    let section = help.split_once("Commands:\n").expect("no Commands:").1;
-    section
+    let mut names: Vec<String> = help
         .lines()
-        .take_while(|line| !line.trim().is_empty())
-        .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
-        .map(|line| line.split_whitespace().next().unwrap().to_owned())
-        .collect()
+        .filter_map(|line| line.strip_prefix("  bay "))
+        .filter_map(|rest| rest.split_whitespace().next())
+        .filter(|name| !name.starts_with('<') && !name.starts_with('['))
+        .map(str::to_owned)
+        .collect();
+    names.dedup();
+    assert!(!names.is_empty(), "no commands on the page: {help}");
+    names
 }
 
 #[test]

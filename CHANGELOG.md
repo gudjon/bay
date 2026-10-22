@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.15
+
+- One word list: `bay help --json` exports the words a person never sees, and the word said instead.
+- A plain sentence says "main" for the trunk, never "the shared copy"; help text says main too.
+- At a terminal, bay shows the plain sentence first and no JSON; a pipe or `--json` gets the document.
+- `bay --help` is the same grouped page as `bay help`.
+- "view" joins the words a person never sees; it is said as "folder".
+- `bay help` shows `bay update --version`; next steps say `bay start <change>`, the one verb.
+- A test budgets bay's commands, flags, reason codes and plain words; growth must say what it simplifies.
+
 ## 0.2.14
 
 - `bay help --json` declares each agent adapter: its events, which can block, how each fails, and what it cannot see.

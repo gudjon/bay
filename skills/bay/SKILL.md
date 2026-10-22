@@ -62,8 +62,9 @@ It also lists each agent adapter's events and what each can block.
 
 ## Read the result
 
-- stdout is one `bay.result/1` JSON document. Text on stderr is not the result. Add `--json` to
-  print the document alone. bay never prompts.
+- Always pass `--json`. stdout is then one `bay.result/1` JSON document, and text on stderr is
+  not the result. Without it, a terminal shows a person the plain sentence instead. bay never
+  prompts.
 - `say` is one plain sentence for a person who does not know Git: what happened and the next
   step. Tell it to such a user as it stands.
 - `decision`: `landed`, `queued` and `ok` exit 0; `blocked` exits 10; `failed` exits 20; a usage

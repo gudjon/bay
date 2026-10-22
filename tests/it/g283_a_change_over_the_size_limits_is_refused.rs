@@ -185,7 +185,7 @@ fn the_executor_refuses_a_change_over_the_limits_at_candidate_build() {
     assert_eq!(queued["decision"], "queued", "{queued}");
     let id = queued["change"].as_str().unwrap().to_owned();
 
-    // The policy at the shared copy then sets a limit the change is over.
+    // The policy on main then sets a limit the change is over.
     let other = test_box.clone_of(&remote, "other");
     let policy = "revision = 2\nunchecked = true\n\n[limits]\nmax_files = 1\n";
     std::fs::write(other.join(".bay/policy.toml"), policy).unwrap();

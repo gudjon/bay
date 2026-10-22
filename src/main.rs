@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open a change: a fresh trunk, a sparse view of the declared paths, the change record;
+    /// Open a change: a fresh main, a sparse view of the declared paths, the change record;
     /// or, named by its id, pick up an existing change, as --resume does
     Start {
         /// The intent (a card, issue or ticket id), or an existing change's id to pick it up
@@ -38,7 +38,7 @@ enum Command {
         /// A named input this change depends on, `<kind>:<name>` (repeatable)
         #[arg(long = "input", value_name = "KIND:NAME", value_parser = bay::inputs::InputName::parse)]
         inputs: Vec<bay::inputs::InputName>,
-        /// Restore an existing change: checkpoint its draft, bring in newer trunk (the same as
+        /// Restore an existing change: checkpoint its draft, bring in newer main (the same as
         /// `bay start <CHANGE>`)
         #[arg(long, value_name = "CHANGE", conflicts_with = "intent")]
         resume: Option<String>,
@@ -83,11 +83,11 @@ enum Command {
         change: Option<String>,
     },
     /// Land the edits made in the main checkout as one change: start, land --wait, then move
-    /// the checkout to the new trunk tip. Never in a view (use land there)
+    /// the checkout to the new tip of main. Never in a view (use land there)
     Save {
         /// The intent: a card, issue or ticket id
         intent: String,
-        /// The first draft's commit message, kept in the change's chain (trunk keeps bay's own)
+        /// The first draft's commit message, kept in the change's chain (main keeps bay's own)
         #[arg(long)]
         message: Option<String>,
     },
@@ -119,7 +119,7 @@ enum Command {
         #[command(flatten)]
         wait: WaitArgs,
     },
-    /// Current state, derived on read from trunk and refs
+    /// Current state, derived on read from main and refs
     Status {
         /// One change (default: the view's change, else every local change)
         change: Option<String>,
@@ -130,7 +130,7 @@ enum Command {
         /// gone; local refs only, never a fetch, a prune or a delete
         #[arg(long, conflicts_with_all = ["change", "fleet"])]
         stranded: bool,
-        /// The Reverts:, Supersedes: and Fixes: pairs of a first-parent range (default: trunk);
+        /// The Reverts:, Supersedes: and Fixes: pairs of a first-parent range (default: main);
         /// local refs only, never a fetch
         #[arg(long, value_name = "RANGE", num_args = 0..=1, default_missing_value = "",
             conflicts_with_all = ["change", "fleet", "stranded"])]
@@ -143,7 +143,7 @@ enum Command {
         /// With --heads: the same as `bay prune`, kept for older scripts
         #[arg(long, requires = "heads")]
         prune: bool,
-        /// With --heads: a branch with commits off trunk whose tip is older than this is stale
+        /// With --heads: a branch with commits off main whose tip is older than this is stale
         /// (default 30)
         #[arg(long, value_name = "DAYS", requires = "heads")]
         stale_days: Option<u64>,
@@ -153,12 +153,12 @@ enum Command {
     /// bay/pruned-heads.log in the repository's common directory; then runs the config's
     /// `[heads] on_prune` adapter, when set, once per deleted branch
     Prune {
-        /// A branch with commits off trunk whose tip is older than this is stale, and kept
+        /// A branch with commits off main whose tip is older than this is stale, and kept
         /// (default 30)
         #[arg(long, value_name = "DAYS")]
         stale_days: Option<u64>,
     },
-    /// What happened after a cursor: trunk landings, log events, new invalidations of the
+    /// What happened after a cursor: landings on main, log events, new invalidations of the
     /// view's change
     Watch {
         /// The cursor a previous watch returned (`detail.cursor`)
@@ -184,7 +184,7 @@ enum Command {
     },
     /// Admin: place bay at $HOME/.local/bin/bay, its skill and its project hook entries
     Install(InstallArgs),
-    /// Admin: a bay-hosted trunk
+    /// Admin: a bay-hosted main
     Host {
         #[command(subcommand)]
         action: HostAction,
@@ -290,11 +290,11 @@ struct InstallArgs {
     /// Only the box's part: the binary and the skill, never a repository's settings or Git config
     #[arg(long)]
     machine: bool,
-    /// The repository's trunk branch, written to git config bay.trunk (default: what it holds,
+    /// The repository's main branch, written to git config bay.trunk (default: what it holds,
     /// else the remote's default branch)
     #[arg(long, conflicts_with = "machine")]
     trunk: Option<String>,
-    /// The trunk's remote, written to git config bay.remote (default: what it holds, else
+    /// Main's remote, written to git config bay.remote (default: what it holds, else
     /// origin)
     #[arg(long, conflicts_with = "machine")]
     remote: Option<String>,
@@ -305,7 +305,7 @@ struct TalkArgs {
     /// The agent who owes the reply (a person's name works too)
     #[arg(value_name = "AGENT")]
     actor: Option<String>,
-    /// Send to the agent that landed this change (a change id or its trunk commit), read from
+    /// Send to the agent that landed this change (a change id or its commit on main), read from
     /// bay's publication record; then the one argument is the action
     #[arg(long, value_name = "CHANGE")]
     to_change: Option<String>,
@@ -384,7 +384,7 @@ struct TalkArgs {
 
 #[derive(Subcommand)]
 enum HostAction {
-    /// Create a bare repository on reftable whose trunk is append-only
+    /// Create a bare repository on reftable whose main is append-only
     Init {
         path: PathBuf,
         #[arg(long, default_value = "main")]
@@ -422,7 +422,7 @@ enum EvidenceAction {
         #[arg(long, value_name = "REV")]
         since: Option<String>,
     },
-    /// Write a signed record about trunk landings, as an outside producer or reviewer, or about
+    /// Write a signed record about landings on main, as an outside producer or reviewer, or about
     /// a candidate, as an approver: one record per --commit, pushed once (a rerun with the same
     /// content writes nothing)
     Record {
@@ -551,11 +551,43 @@ fn install(dir: &std::path::Path, args: InstallArgs) -> BayResult {
 /// The command line. The file every child `bay` starts from is resolved now, before an update
 /// can replace the running one; the executor pins its own first (`bay::update::pin_own_binary`).
 fn parse() -> Cli {
+    // R6 (ruling 2026-10-22): `bay --help` is the page `bay help` prints (G303), grouped for
+    // people, agents and admins; `bay <command> --help` stays clap's help of that command.
+    if asks_for_the_page() {
+        print!("{}", bay::guide::guide(Cli::command()));
+        std::process::exit(0);
+    }
     let cli = Cli::parse();
     if !matches!(cli.command, Command::Executor { .. }) {
         let _ = bay::update::own_binary();
     }
     cli
+}
+
+/// Whether the command line is `bay --help` (or `-h`) with no command: only bay's global
+/// options (`-C <PATH>`, `--json`) beside it.
+fn asks_for_the_page() -> bool {
+    let mut words = std::env::args_os().skip(1);
+    let mut help = false;
+    while let Some(word) = words.next() {
+        if word == "--help" || word == "-h" {
+            help = true;
+        } else if word == "-C" {
+            let _ = words.next();
+        } else if word != "--json" && !word.to_string_lossy().starts_with("-C") {
+            return false;
+        }
+    }
+    help
+}
+
+/// Whether stdout is a terminal a person reads. A debug build's tests say so with
+/// `BAY_TEST_STDOUT_TERMINAL`, since a test holds no terminal; a release build never reads it.
+fn stdout_is_terminal() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+        || (option_env!("BAY_RELEASE_VERSION").is_none()
+            && std::env::var_os("BAY_TEST_STDOUT_TERMINAL").is_some())
 }
 
 /// `bay executor run`: its result, then, between operations, the new version in its place.
@@ -916,7 +948,13 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
 }
 
 fn render(result: &BayResult, json: bool) -> ExitCode {
-    // Stdout is always the result document; human text goes to stderr (`INTERFACES` § 1).
+    // G313 (ruling 2026-10-22, ch. 35 R5): a person at a terminal reads the plain sentence
+    // first, with no document; a program reads stdout through a pipe, or passes `--json`, and
+    // always gets the result document, with human text on stderr (`INTERFACES` § 1).
+    if !json && stdout_is_terminal() {
+        print!("{}", result.to_terminal());
+        return ExitCode::from(u8::try_from(result.decision.exit_code()).unwrap_or(20));
+    }
     match result.to_json() {
         Ok(text) => print!("{text}"),
         Err(error) => {

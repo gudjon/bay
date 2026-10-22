@@ -6,9 +6,7 @@
 //! attempt first scans `base_first..B` for an earlier publication of the change.
 //!
 //! `bay land` does the agent's part and returns at once; `bay executor run` (or `land --wait`)
-//! does the rest. Not yet: signatures (item 11), so the scan matches trailers only; the
-//! publication queue (item 19d), so a third trunk move returns `TRUNK_MOVED`; the
-//! landed-intent marker (item 19e).
+//! does the rest. After two moves of trunk the operation joins the publication queue (§ 6).
 
 use std::cell::Cell;
 use std::collections::BTreeSet;

@@ -480,6 +480,25 @@ impl BayResult {
     }
 }
 
+impl BayResult {
+    /// G313 (owner ruling 2026-10-22, ch. 35 R5): what a person at a terminal reads: the plain
+    /// sentence, the change it is about, and how to see the rest. No document, no reason code
+    /// and no field a person need not read; `--json` prints all of it.
+    #[must_use]
+    pub fn to_terminal(&self) -> String {
+        if let Some(line) = &self.human {
+            return format!("{line}\n");
+        }
+        let mut lines = vec![self.say()];
+        if let Some(change) = &self.change {
+            lines.push(format!("change: {change}"));
+        }
+        lines.push("(add --json to see everything)".to_owned());
+        lines.push(String::new());
+        lines.join("\n")
+    }
+}
+
 fn push_detail(lines: &mut Vec<String>, detail: &Value) {
     match detail {
         Value::Object(map) => {
@@ -496,16 +515,27 @@ fn push_detail(lines: &mut Vec<String>, detail: &Value) {
     }
 }
 
-/// The words a person who does not know Git need not know (owner ruling 2026-10-21): no `say`
-/// sentence holds one, nor an inflection of one ([`unplain`]).
-pub const UNPLAIN: &[&str] = &["branch", "commit", "merge", "trunk", "rebase", "ref"];
+/// G311 (owner ruling 2026-10-22, research ch. 35 R1): the one word list. Each word a person
+/// who does not know Git need not know (owner ruling 2026-10-21), with the plain word said
+/// instead. No `say` sentence holds one, nor an inflection of one ([`unplain`]); `bay help
+/// --json` exports the list (`detail.words`), and the skill's "never say" line and the site's
+/// copy checker are held to it, so the list has one home.
+pub const PLAIN_WORDS: &[(&str, &str)] = &[
+    ("branch", "copy"),
+    ("commit", "saved version"),
+    ("merge", "combine"),
+    ("trunk", "main"),
+    ("rebase", "update"),
+    ("ref", "name"),
+    ("view", "folder"),
+];
 
-/// Whether `word` is one of [`UNPLAIN`] or an inflection of one (`commits`, `merged`,
+/// Whether `word` is one of [`PLAIN_WORDS`] or an inflection of one (`commits`, `merged`,
 /// `committing`), compared without case.
 #[must_use]
 pub fn unplain(word: &str) -> bool {
     let word = word.to_ascii_lowercase();
-    UNPLAIN.iter().any(|&stem| {
+    PLAIN_WORDS.iter().any(|&(stem, _)| {
         let bare = stem.strip_suffix('e').unwrap_or(stem);
         let rest = word.strip_prefix(stem).or_else(|| word.strip_prefix(bare));
         rest.is_some_and(|rest| ["", "s", "es", "d", "ed", "ing", "ted", "ting"].contains(&rest))
@@ -586,7 +616,13 @@ fn plain_word(word: &str) -> &str {
         "rebasing" => "updating",
         "ref" => "name",
         "refs" => "names",
-        _ => "that",
+        "view" => "folder",
+        "views" => "folders",
+        // Another inflection: the stand-in of its stem.
+        other => PLAIN_WORDS
+            .iter()
+            .find(|(stem, _)| other.starts_with(stem))
+            .map_or("that", |(_, plain)| plain),
     }
 }
 
@@ -716,13 +752,13 @@ impl Reason {
     pub const fn next(self) -> &'static str {
         match self {
             Self::InputChanged => {
-                "Read the new version `detail` names, run `bay start --resume <change>`, adjust the view, then `bay land` again."
+                "Read the new version `detail` names, run `bay start <change>`, adjust the view, then `bay land` again."
             }
             Self::InputUnobserved => {
-                "Read the required version `detail` names, then run `bay start --resume <change>` and `bay land` again."
+                "Read the required version `detail` names, then run `bay start <change>` and `bay land` again."
             }
             Self::MergeConflict => {
-                "Run `bay start --resume <change>`, resolve the listed paths in the view, then `bay land` again."
+                "Run `bay start <change>`, resolve the listed paths in the view, then `bay land` again."
             }
             Self::TrunkMoved => {
                 "Do nothing: bay retries once more, then queues the change. `bay land --wait` shows the outcome."
@@ -761,7 +797,7 @@ impl Reason {
                 "Wait for the check's result with `bay land --wait`; never treat it as a pass. Repair the change if the check cannot answer."
             }
             Self::PolicyChanged => {
-                "Run `bay start --resume <change>`, then `bay land` again: the change is checked under the current policy."
+                "Run `bay start <change>`, then `bay land` again: the change is checked under the current policy."
             }
             Self::PolicyInvalid => {
                 "Tell the user `.bay/policy.toml` on main is invalid, as `detail` says; once it is repaired, `bay land` again."
@@ -770,7 +806,7 @@ impl Reason {
                 "Tell the user main has no `.bay/policy.toml`, so nothing can land; set it up only if they ask."
             }
             Self::WorkspaceIncomplete => {
-                "Run `bay start --resume <change>` to finish the interrupted step, then go on."
+                "Run `bay start <change>` to finish the interrupted step, then go on."
             }
             Self::PublishOutcomeUnknown => {
                 "Do nothing yet: bay reads main again. Never report it landed; `bay status <change>` shows the outcome."
@@ -940,7 +976,7 @@ impl Reason {
             | Self::ChangeTooLarge
             | Self::WipLimit => return None,
             Self::TrunkMoved => {
-                "The shared copy moved on while saving; bay tries once more on its own, nothing to do."
+                "Main moved on while saving; bay tries once more on its own, nothing to do."
             }
             Self::PublishRetryExhausted => {
                 "Adding the change kept failing, so nothing was added; ask whoever runs bay here to look."
@@ -948,9 +984,7 @@ impl Reason {
             Self::RegistryChanged => {
                 "The list of trusted keys changed while saving; bay tries again once it is signed, nothing to do."
             }
-            Self::ChangeNotLanded => {
-                "That change is not in the shared copy yet; wait until it is added."
-            }
+            Self::ChangeNotLanded => "That change is not on main yet; wait until it is added.",
             Self::HookTimeout => {
                 "bay took too long to answer and tries again shortly; nothing to do."
             }
@@ -982,7 +1016,7 @@ impl Reason {
                 "bay cannot tell yet whether the change was added; it looks again, so do not report it as saved."
             }
             Self::ChangeAlreadyLanded => {
-                "This change is already in the shared copy; start a new one for more edits."
+                "This change is already on main; start a new one for more edits."
             }
             Self::ChangeSuperseded => {
                 "Someone else's change took over this work; read it before going on."
@@ -1007,7 +1041,7 @@ impl Reason {
                 "That command could lose work, so bay stopped it; it is never allowed."
             }
             Self::RemoteNotFetched => {
-                "bay could not get the latest shared copy; check the network, then try again."
+                "bay could not get the latest main; check the network, then try again."
             }
             Self::ConfigMissing => {
                 "bay is not set up in this project yet; ask whoever runs it, or set it up."
@@ -1026,7 +1060,7 @@ impl Reason {
                 "The coding assistant bay expects is not installed here; install it."
             }
             Self::RemoteUnreachable => {
-                "bay cannot reach the shared copy from here; check the network and the access key."
+                "bay cannot reach main from here; check the network and the access key."
             }
             Self::HooksMissing => "bay's safety settings are missing here; run bay install.",
             Self::SkillMismatch => "The bay guide installed here is out of date; run bay install.",
@@ -1070,7 +1104,7 @@ impl Reason {
                 "That version is not ready for the next stage yet; use the one bay status names, or wait."
             }
             Self::LaneNeverLands => {
-                "This was a try-out: its checks ran, and it is never added to the shared copy."
+                "This was a try-out: its checks ran, and it is never added to main."
             }
             Self::DiskLow => {
                 "This computer is almost out of disk space; free some, then try again."
@@ -1138,7 +1172,7 @@ impl Reason {
                 check()
             ),
             Self::TrunkRed => format!(
-                "The shared copy is broken on these files{}; wait for the fix, or help fix it.",
+                "Main is broken on these files{}; wait for the fix, or help fix it.",
                 paths()
             ),
             Self::PathHeld => format!(
@@ -1163,7 +1197,7 @@ impl Reason {
                 format!("Saved, but it waits for {who}{because}.")
             }
             Self::TrunkHeld => format!(
-                "The shared copy is on hold{}; your change waits.",
+                "Main is on hold{}; your change waits.",
                 named(text_at(detail, &["/hold/reason"]).map(plain))
             ),
             Self::PathsUndeclared => format!(
@@ -1190,7 +1224,7 @@ impl Reason {
 
 impl BayResult {
     /// One plain sentence for a person who does not know Git (owner ruling 2026-10-21): what
-    /// happened and the one next step, at most about 25 words, with none of [`UNPLAIN`]. Made
+    /// happened and the one next step, at most about 25 words, with none of [`PLAIN_WORDS`]. Made
     /// here from the decision, the reason and a few detail fields, never at a call site.
     #[must_use]
     pub fn say(&self) -> String {
@@ -1200,17 +1234,17 @@ impl BayResult {
         }
         match self.decision {
             Decision::Landed if text_at(detail, &["/unchecked"]).is_some() => {
-                "Saved and added to the shared copy; no checks are set up here, so nothing was checked."
+                "Saved and added to main; no checks are set up here, so nothing was checked."
                     .to_owned()
             }
             // N-9: a waived check did not pass, and the sentence never says it did.
             Decision::Landed if waived(detail).is_some() => format!(
-                "Saved and added to the shared copy; a check{} did not pass and was waived by a person.",
+                "Saved and added to main; a check{} did not pass and was waived by a person.",
                 named(waived(detail))
             ),
-            Decision::Landed => "Saved and checked; it is now in the shared copy.".to_owned(),
+            Decision::Landed => "Saved and checked; it is now on main.".to_owned(),
             Decision::Queued if self.waiting_for.as_deref() == Some("remote") => {
-                "Saved here; it is sent and checked once the shared copy can be reached.".to_owned()
+                "Saved here; it is sent and checked once main can be reached.".to_owned()
             }
             Decision::Queued => {
                 "Saved; it is in line and will be checked and added shortly.".to_owned()
@@ -1246,8 +1280,8 @@ fn answered_say(detail: Option<&Value>) -> Option<&'static str> {
     let waived = detail.get("waived").is_some();
     Some(match (lands_by, waived) {
         ("author_repairs", _) => "You said no; the change waits until its author fixes it.",
-        ("executor", _) => "Approved; the change is added to the shared copy on its own.",
-        ("here", false) => "Approved; save the change again here to add it to the shared copy.",
+        ("executor", _) => "Approved; the change is added to main on its own.",
+        ("here", false) => "Approved; save the change again here to add it to main.",
         ("here", true) => {
             "Waived; save the change again here to add it, with that check named as not passed."
         }
@@ -1264,7 +1298,7 @@ fn ok_say(result: &BayResult) -> &'static str {
     // The publication's `no_effect` and `superseded` states (`crate::publish`).
     match result.state.as_deref() {
         Some("no_effect") => {
-            return "Nothing new to add; the shared copy already has these edits.";
+            return "Nothing new to add; main already has these edits.";
         }
         Some("superseded") => {
             return "A newer save of this change took over; nothing else to do here.";
@@ -1278,7 +1312,7 @@ fn ok_say(result: &BayResult) -> &'static str {
     }) {
         return "bay works here, but it does not guard this project yet: changes can reach main without its checks. Turn on its safety settings to guard it.";
     }
-    // G304: an approval or a waiver is given, and the change is not in the shared copy yet;
+    // G304: an approval or a waiver is given, and the change is not on main yet;
     // the sentence says who adds it (`lands_by`, written by `bay approve`).
     if let Some(sentence) = answered_say(detail) {
         return sentence;
@@ -1515,7 +1549,7 @@ mod tests {
             .with_detail(json!({"hold": {"reason": "trunk migration"}}));
         assert_eq!(
             held.say(),
-            "The shared copy is on hold (main migration); your change waits."
+            "Main is on hold (main migration); your change waits."
         );
         let large = BayResult::blocked(Reason::ChangeTooLarge).with_detail(json!({"exceeded": [
             {"limit": "max_file_mib", "max": 1, "value": 3 * 1024 * 1024, "paths": ["a.bin"]},

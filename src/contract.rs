@@ -34,6 +34,11 @@ pub fn contract(mut cli: clap::Command) -> BayResult {
         "commands": commands,
         "decisions": decisions(),
         "reasons": reasons(),
+        // G311: the one word list: each word a person need not know, and the word said instead.
+        "words": crate::result::PLAIN_WORDS
+            .iter()
+            .map(|(word, plain)| json!({"word": word, "say": plain}))
+            .collect::<Vec<_>>(),
         "schema": schema(),
         "adapters": adapters(),
     }))

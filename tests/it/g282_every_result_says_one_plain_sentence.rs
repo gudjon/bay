@@ -85,7 +85,8 @@ fn a_start_a_landing_and_a_queued_land_say_a_plain_sentence() {
     assert_eq!(code, 0, "{landed}");
     assert_eq!(landed["decision"], "landed", "{landed}");
     let say = assert_says(&landed, "landed");
-    assert!(say.contains("shared copy"), "{say}");
+    // Ruling 2026-10-22 (ch. 35 R2): a person's word for the trunk is "main".
+    assert!(say.contains("on main"), "{say}");
 
     let (_, view) = start(&test_box, &repo, "CARD-2");
     std::fs::write(view.join("src/later.rs"), "fn later() {}\n").unwrap();
@@ -116,7 +117,7 @@ fn a_conflict_names_the_files_plainly() {
     let remote = test_box.path().join("repo-remote.git");
     let (_, view) = start(&test_box, &repo, "CARD-1");
     std::fs::write(view.join("src/a.rs"), "fn a() { mine }\n").unwrap();
-    // Someone else changes the same line on the shared copy.
+    // Someone else changes the same line on main.
     let other = test_box.clone_of(&remote, "other");
     std::fs::write(other.join("src/a.rs"), "fn a() { theirs }\n").unwrap();
     test_box.git_ok(&other, &["commit", "-q", "-am", "theirs"]);

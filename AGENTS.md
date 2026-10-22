@@ -50,6 +50,9 @@ learn.
   - The skill holds the agent's guide.
   - The CHANGELOG holds the release notes.
 - A new command or flag must take a step away from someone, not add one.
+- The surface is budgeted: G312 counts the commands, flags, reason codes and plain words `bay help --json` lists. Growth
+  raises the budget in the same commit, with one line on the step it takes away. The words a person never sees live
+  in one list (`PLAIN_WORDS`, G311); the skill and the site are held to it.
 - When a feature would need a second surface or a copy, extend the one home instead.
 
 ## Organisation-neutral

@@ -74,7 +74,10 @@ fn every_command_and_flag_the_contract_lists_is_on_the_page() {
             let Some(long) = arg["long"].as_str() else {
                 continue;
             };
-            if arg["hidden"] == true || matches!(arg["name"].as_str(), Some("help" | "version")) {
+            if arg["hidden"] == true
+                || (matches!(arg["name"].as_str(), Some("help" | "version"))
+                    && arg["takes_value"] != true)
+            {
                 continue;
             }
             assert!(
@@ -93,7 +96,8 @@ fn every_command_and_flag_the_contract_lists_is_on_the_page() {
     for global in contract["detail"]["global"].as_array().unwrap() {
         if let Some(long) = global["long"].as_str()
             && global["hidden"] != true
-            && !matches!(global["name"].as_str(), Some("help" | "version"))
+            && !(matches!(global["name"].as_str(), Some("help" | "version"))
+                && global["takes_value"] != true)
         {
             assert!(page.contains(long), "the page never names {long}:\n{page}");
         }

@@ -1,7 +1,7 @@
 //! G304: the plain sentence of `bay approve` says who adds the change next, and a path in a
 //! sentence is never rewritten inside.
 //!
-//! An approval or a waiver is given, and the change is not in the shared copy yet: `say`
+//! An approval or a waiver is given, and the change is not on main yet: `say`
 //! never reads "nothing else is needed" while `detail.next` names a step someone still owes.
 //! `bay approve` writes who adds the change (`lands_by`: `executor`, `here`, `author`, or
 //! `author_repairs` after a no), and `say` is derived from it. A fault's message that names a

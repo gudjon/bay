@@ -85,20 +85,16 @@ pub fn guide(cli: clap::Command) -> String {
         .map(|all| {
             all.iter()
                 .filter(|arg| shown(arg))
-                .map(|arg| {
-                    format!(
-                        "{}: {}",
-                        flag(arg),
-                        lower_first(&first_sentence(&arg["help"]))
-                    )
-                })
+                .map(|arg| format!("  {:<28} {}", flag(arg), first_sentence(&arg["help"])))
                 .collect()
         })
         .unwrap_or_default();
     let _ = write!(
         out,
-        "\nEvery command also takes:\n  {}\n`bay <command> --help` says more about one command, and `bay --version` names this bay. `bay help --json` is the same list for programs, with every result code.\n",
-        globals.join("\n  ")
+        "\nEvery command also takes\n{}\n  {:<28} Say more about one command: bay <command> --help\n  {:<28} Name this bay's version\n\n`bay help --json` is the same list for programs, with every result code.\n",
+        globals.join("\n"),
+        "--help",
+        "--version"
     );
     out
 }
@@ -177,7 +173,13 @@ fn positional(arg: &Value) -> String {
 /// Whether the guide names `arg`: not hidden, and not clap's own `--help` or `--version`, which
 /// every command takes and the last line of the page names.
 fn shown(arg: &Value) -> bool {
-    !hidden(arg) && !matches!(arg["name"].as_str(), Some("help" | "version"))
+    !hidden(arg) && !builtin(arg)
+}
+
+/// Whether `arg` is clap's own `--help` or `--version`, which take no value. A command's own
+/// `--version <VERSION>`, such as `bay update`'s, is shown.
+fn builtin(arg: &Value) -> bool {
+    matches!(arg["name"].as_str(), Some("help" | "version")) && arg["takes_value"] != true
 }
 
 /// Whether a command or a flag of the contract is hidden.
@@ -190,14 +192,6 @@ fn upper_first(text: &str) -> String {
     let mut chars = text.chars();
     chars.next().map_or_else(String::new, |first| {
         first.to_uppercase().chain(chars).collect()
-    })
-}
-
-/// `text` with its first letter in lower case, to follow a colon.
-fn lower_first(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_lowercase().chain(chars).collect()
     })
 }
 
