@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.13
+
+- `bay help` shows every command, subcommand and flag on one page, grouped for people, agents and admins.
+- `bay enrol <class> <name> <key.pub>` adds one key to the key registry; no Git plumbing is needed.
+- The skill has an agent-led section for setting up bay for a team.
+- `bay start <change>` picks up an existing change; `--resume` still works.
+- `bay abandon [<change>]` gives a change up; `bay land --abandon` still works.
+- `bay prune` deletes landed branches; `bay status` never deletes, and `status --heads --prune` still works.
+- `bay status --heads` also names stranded local branches and worktrees whose folder is gone.
+- After `bay approve`, `say` names who adds the change next; it no longer says nothing else is needed.
+- A plain sentence names a Git path as "bay's records", never as a path that does not exist.
+- `bay doctor` no longer calls a repository with no agent hook green; its hooks row reads `off`.
+- Doctor is red when a trunk bay lands on also holds landings that went around bay, and counts them.
+- `bay status` names `guard.hook`, and `unattributed` counts the landings that came `through_bay`.
+
 ## 0.2.12
 
 - A land that loses a race on its change chain reads the chain again; it no longer fails.

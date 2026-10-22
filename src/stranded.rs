@@ -7,6 +7,9 @@
 //! `prunable`) is listed too. The read uses local refs only: no fetch, so a remote-tracking ref
 //! is as new as this clone's last fetch, and no prune and no delete, so every branch and record
 //! it names is still there to recover or remove by hand.
+//!
+//! `bay status --heads` carries the same findings in its `detail.stranded` (G302), read by
+//! [`local`], so one view shows every head: the remote's and those only this disk has.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -26,7 +29,24 @@ fn run(dir: &Path) -> Result<BayResult, String> {
     if git.outside_repository().map_err(|error| error.message())? {
         return Err(format!("{} is not in a git repository", dir.display()));
     }
-    let worktrees = worktrees(&git)?;
+    let mut detail = local(&git)?;
+    detail["fetched"] = json!(false);
+    detail["note"] = json!(
+        "read from local refs only: no fetch, no prune, nothing deleted; a remote-tracking ref is as new as the last fetch"
+    );
+    Ok(BayResult::ok(detail))
+}
+
+/// The stranded findings of the repository `git` runs in, from local refs only: `branches`
+/// (each local branch with commits no remote-tracking ref reaches), `prunable_worktrees` (each
+/// worktree record whose folder is gone) and `remote_refs` (how many remote-tracking refs the
+/// read compared against). Never a fetch, a prune or a delete.
+///
+/// # Errors
+///
+/// When Git cannot list the worktrees or the refs, or count a branch's commits.
+pub fn local(git: &Git) -> Result<Value, String> {
+    let worktrees = worktrees(git)?;
     let checked_out: BTreeMap<&str, &str> = worktrees
         .iter()
         .filter_map(|worktree| Some((worktree.branch.as_deref()?, worktree.path.as_str())))
@@ -85,13 +105,11 @@ fn run(dir: &Path) -> Result<BayResult, String> {
             }))
         })
         .collect();
-    Ok(BayResult::ok(json!({
+    Ok(json!({
         "branches": branches,
         "prunable_worktrees": prunable,
         "remote_refs": remote_refs,
-        "fetched": false,
-        "note": "read from local refs only: no fetch, no prune, nothing deleted; a remote-tracking ref is as new as the last fetch",
-    })))
+    }))
 }
 
 /// One record of `git worktree list --porcelain`.

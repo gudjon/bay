@@ -195,6 +195,10 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         "targets": targets,
         "trunk": trunk,
         "unattributed": unattributed_rows(&repo, &trunk),
+        // G305: whether bay's hook judges agents' Git commands in this repository: `on` when
+        // the config at trunk declares an agent adapter (`bay doctor` checks this box has its
+        // entries). Off, `unattributed` counts what went around bay.
+        "guard": {"hook": if repo.config.claude_adapter() { "on" } else { "off" }},
     }));
     if let (Some(detail), Some(accept)) = (result.detail.as_mut(), talk_accept) {
         detail["talk_accept"] = accept;

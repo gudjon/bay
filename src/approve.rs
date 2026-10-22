@@ -476,20 +476,27 @@ const fn op_state(op: &crate::change::Operation) -> &'static str {
     }
 }
 
-/// What happens after the answer, in plain words. A running executor lands an approved change
-/// on its next pass (G284); without one, the change's author lands it.
-fn next_step(repo: &Repo, held: &Held, reject: bool) -> String {
+/// What happens after the answer: who lands the change (G304, `lands_by`: `executor`, `here`,
+/// `author`, or `author_repairs` after a no), and the step in words. A running executor lands
+/// an approved change on its next pass (G284); without one, the change's author lands it.
+fn next_step(repo: &Repo, held: &Held, reject: bool) -> (&'static str, String) {
     let actor = &held.record.actor.name;
     if reject {
-        return format!(
-            "the change is blocked: {actor}, its author, repairs it and lands it again, and the new candidate waits for an approval"
+        return (
+            "author_repairs",
+            format!(
+                "the change is blocked: {actor}, its author, repairs it and lands it again, and the new candidate waits for an approval"
+            ),
         );
     }
     let view = repo.view_path(&held.record.id);
     if view.is_dir() {
-        return format!(
-            "this machine holds the change's view ({}): bay land --wait there lands it. bay approve runs nothing else",
-            view.display()
+        return (
+            "here",
+            format!(
+                "this machine holds the change's view ({}): bay land --wait there lands it. bay approve runs nothing else",
+                view.display()
+            ),
         );
     }
     crate::fleet::fetch(repo);
@@ -498,10 +505,16 @@ fn next_step(repo: &Repo, held: &Held, reject: bool) -> String {
         Ok(Some(rows)) if crate::presence::any_fresh(&rows)
     );
     if live {
-        "an executor runs: its next pass lands the change; nobody needs to run bay land again"
-            .to_owned()
+        (
+            "executor",
+            "an executor runs: its next pass lands the change; nobody needs to run bay land again"
+                .to_owned(),
+        )
     } else {
-        format!("{actor}, the change's author, runs bay land --wait, and the change lands")
+        (
+            "author",
+            format!("{actor}, the change's author, runs bay land --wait, and the change lands"),
+        )
     }
 }
 
@@ -588,6 +601,7 @@ fn approve_in(dir: &Path, repo: &Repo, request: &Approve) -> Result<BayResult, S
             Some(json!({"records": records, "commit": found.commit})),
         ));
     }
+    let (lands_by, next) = next_step(repo, &found, request.reject);
     Ok(BayResult::ok(json!({
         "approver": name,
         "verdict": verdict,
@@ -596,7 +610,8 @@ fn approve_in(dir: &Path, repo: &Repo, request: &Approve) -> Result<BayResult, S
         "tree": found.tree,
         "records": records,
         "why": request.why,
-        "next": next_step(repo, &found, request.reject),
+        "lands_by": lands_by,
+        "next": next,
     }))
     .with_change(id.to_owned())
     .with_op(found.op_id.clone()))
@@ -906,14 +921,20 @@ fn waive_in(
     }
     let view = repo.view_path(id);
     let actor = &found.record.actor.name;
-    let next = if view.is_dir() {
-        format!(
-            "this machine holds the change's view ({}): bay land --wait there lands it, naming the waiver as a coverage gap",
-            view.display()
+    let (lands_by, next) = if view.is_dir() {
+        (
+            "here",
+            format!(
+                "this machine holds the change's view ({}): bay land --wait there lands it, naming the waiver as a coverage gap",
+                view.display()
+            ),
         )
     } else {
-        format!(
-            "{actor}, the change's author, runs bay land --wait, and the change lands with the waiver named as a coverage gap"
+        (
+            "author",
+            format!(
+                "{actor}, the change's author, runs bay land --wait, and the change lands with the waiver named as a coverage gap"
+            ),
         )
     };
     Ok(BayResult::ok(json!({
@@ -925,6 +946,7 @@ fn waive_in(
         "tree": found.tree,
         "records": records,
         "why": why,
+        "lands_by": lands_by,
         "next": next,
     }))
     .with_change(id.to_owned())

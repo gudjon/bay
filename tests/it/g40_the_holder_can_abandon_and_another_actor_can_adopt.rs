@@ -1,8 +1,8 @@
 //! G40. The holder can abandon and another actor can adopt.
 //!
-//! The current actor submits request kind `abandon` on an unlanded change (`bay land
-//! --abandon`; there is no `bay abandon` verb) and the state becomes `abandoned`. A second
-//! actor adopts that intent with `bay start`. Another actor's abandon request is refused with
+//! The current actor submits request kind `abandon` on an unlanded change (`bay abandon`, or
+//! `bay land --abandon`, G301) and the state becomes `abandoned`. A second actor adopts that
+//! intent with `bay start`. Another actor's abandon request is refused with
 //! `ABANDON_REFUSED`. Trunk does not move. The view remains.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.

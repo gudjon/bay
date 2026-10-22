@@ -31,7 +31,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Submit the change | `bay land` (returns at once; an executor checks and merges it) |
 | Wait for the outcome here | `bay land --wait` (`--wait=<seconds>`: watch that long, then return; the run goes on) |
 | Submit a change from outside its view | `bay land <change>` |
-| Bring in newer main and see what moved | `bay start --resume <change>` |
+| Pick a change up again: bring in newer main and see what moved | `bay start <change>` |
 | Fix a change that already merged | `bay start <intent> --fixes <change>` (the merge names it in a `Fixes:` trailer) |
 | Try work that must never merge, in a sandbox lane the config declares | `bay start <intent> --paths <paths> --lane <lane>` (`bay land` runs its checks; it never merges) |
 | Take in a branch made outside bay (a bot's or a person's) as one change | `bay start <intent> --paths <paths> --from <branch>` (the remote's tip when the remote has the branch; `--paths` must cover every file it changes; then `bay land`) |
@@ -40,7 +40,8 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | See the changes waiting for this machine's approver: candidate, paths, diff summary | `bay waiting` (`detail.waiting`) |
 | Approve one, or say no, when the approver asks you to | `bay approve <change> [--reject] [--why <text>]` |
 | Waive one failed check marked `waivable`, when the approver asks you to | `bay approve <change> --waive <check> --why <text>` (that candidate only; never a pass) |
-| Give the change up, so another agent may adopt it | `bay land --abandon` |
+| Add one key to the key registry, when the user sets up keys | `bay enrol <class> <name> <key.pub>` (class `registry`, `approver`, `reviewer`, `producer`, `executor` or `agent`; signed by `bay.registryKey`) |
+| Give the change up, so another agent may adopt it | `bay abandon [<change>]` (default: the view's change) |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
 | Read state, and main commits that did not merge through bay (`unattributed`) | `bay status` |
 | See each promotion target (`staging`): its tip, `drift`, `lag`, checks, freeze and the `promotable` commit | `bay status` (`detail.targets`) |
@@ -48,11 +49,14 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Reverse a merged change with a new, checked change | `bay undo <change> [--wait[=<seconds>]]` |
 
 After a merge, a plain `bay start <intent>` opens the next change; `--new` is no longer needed there.
+`bay start <intent|change>` picks up the change when it names an existing one; `bay start --resume
+<change>` and `bay land --abandon` still work.
 `<intent>` is the card, issue or ticket id. `--paths` lists every path the change reads and writes:
 the view holds only those. `bay start` lists in `detail.overlaps` the live changes whose
 declared paths overlap yours (change, intent, actor, paths). It does not refuse; talk to them, or
-narrow your paths. Run `bay <command> --help` for every flag. `bay help --json` lists every
-command, flag and reason code, with the JSON Schema of `bay.result/1`.
+narrow your paths. `bay help` shows every command and flag on one page, and `bay <command> --help`
+says more about one. `bay help --json` is the same list for programs, with every reason code and
+the JSON Schema of `bay.result/1`.
 
 ## Read the result
 
@@ -86,7 +90,7 @@ command, flag and reason code, with the JSON Schema of `bay.result/1`.
 | Action | Do |
 | --- | --- |
 | `read` | Read what `detail` names, such as the new version of an input. |
-| `refresh` | `bay start --resume <change>`: brings in newer main and reports what moved. |
+| `refresh` | `bay start <change>`: brings in newer main and reports what moved. |
 | `repair` | Edit in the view, then `bay land` again. |
 | `wait` | Nothing yet. `bay land --wait`, or `bay status` later. |
 
@@ -120,7 +124,8 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 | When | Run |
 | --- | --- |
 | See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the executors with their age (`executors`; `stale`) | `bay status --fleet` |
-| See every branch on the remote, classed `trunk`, `target`, `lane`, `landed`, `stale` or `unique`; delete only those `landed` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[heads] on_prune` adapter runs after each delete (`detail.pruned[].on_prune`) | `bay status --heads [--stale-days <n>] [--prune]` |
+| See every head: each branch on the remote, classed `trunk`, `target`, `lane`, `landed`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --heads [--stale-days <n>]` |
+| Delete only the remote branches `landed` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[heads] on_prune` adapter runs after each delete (`detail.pruned[].on_prune`). `bay status --heads --prune` and `bay status --stranded` still work | `bay prune [--stale-days <n>]` |
 | See merges, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`, `trunk_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`) and invalidations since you last looked | `bay watch --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
@@ -137,12 +142,12 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    main. https://getbay.io/docs/configuration lists every key. To hold main (an incident, a
    migration), add a `[[freeze]]` whose `target` is main's name, with `end` and `reason`, or a
    `[hold] command` that answers `{"held": true|false, "reason": "..."}` to `<command> status`.
-   To act on the host when `bay status --heads --prune` deletes a branch (close its pull request,
+   To act on the host when `bay prune` deletes a branch (close its pull request,
    say), add `[heads] on_prune`: it runs as `<command> pruned <branch> <sha> <archive ref>`.
 2. `.bay/policy.toml` lists the required checks. Each `[[check]]` needs `expected_minimum`. A
    repository that wants no checks says `unchecked = true`. Paths that need a person's approval
    get a `[[check]]` with `kind = "approval"` and `when_paths`, and no command; each approver is
-   enrolled in the registry's `approver` file and approves with `bay approve <change>`.
+   enrolled with `bay enrol approver <name> <key.pub>` and approves with `bay approve <change>`.
    It records a signed approval record of the exact candidate.
    A run check may say `waivable = true` (never an approval check): an enrolled approver may then
    waive it on one candidate with `bay approve <change> --waive <check> --why <text>`. A waiver
@@ -163,6 +168,35 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 6. A check that must read a directory outside its tree (a package store) needs it named on the
    box that runs checks: `git config --global --add bay.checkReadPath ~/<dir>`. It is read-only.
 
+## What bay guards, and when
+
+- **Its own landings, always:** what lands through bay is exactly what was checked.
+- **An agent's Git commands, only with the hook:** `[agent] product = "claude"` in `.bay/config.toml`, then
+  `bay install`. The hook then refuses a push to main, a force push, `reset --hard` and the like. Without it,
+  `bay doctor`'s `hooks` row reads `off` and an agent can push main around bay.
+- **Everything that reaches main, only on a bay-hosted main** (`bay host init`). On a forge such as GitHub, a merge
+  made in its web page or API, and a script's push, never pass a local hook; protect main there so that only the
+  executor may push it.
+- bay sees what went around it: `bay status` counts it in `detail.unattributed`, and `bay doctor` is red when main
+  bay lands on also holds such landings. Tell the user; do not work around it.
+
+## Set up bay for a team (agent-led)
+
+When the user asks to set bay up for a small team, do each step for them. Tell them `say` after each.
+
+1. On each person's machine: install bay (see "Before you start"), then `bay install` in their copy.
+2. Put `.bay/config.toml` and `.bay/policy.toml` on main and push them. The policy says
+   `[policy] signing = "approvals"`, with an approval `[[check]]` for the paths that need a yes.
+3. On the machine that keeps the registry key: `git config bay.registryKey <private key path>`.
+   Then `bay enrol registry <name> <key.pub>`. The first key is always this registry key.
+4. For each person who approves: `bay enrol approver <name> <their key.pub>`. Ask only for the
+   public key, the `.pub` file. A name is a short lower-case word.
+5. On each approver's machine: `git config bay.approverName <name>` and
+   `git config bay.approverKey <their private key path>`.
+6. `bay doctor` on each machine. It names anything missing, with its fix.
+
+`bay enrol` refuses a key that is already enrolled, and says why. Nothing is written then.
+
 ## Never
 
 - Never push main, merge into main, or move main yourself. bay merges.
@@ -174,6 +208,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 - Never approve on your own, or ask for an approver's key. Only the person approves: run
   `bay approve` only when they ask, on their machine, where their key signs it.
 - Never grant a key, widen the policy, quarantine a check, or set `allow_flaky` to get a change through.
+  Run `bay enrol` only when the user sets up keys.
 - Never run `bay install` to merge work. It sets up a machine or a clone.
 - Never report a change as merged until the result says `landed`.
 

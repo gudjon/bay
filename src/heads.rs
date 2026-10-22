@@ -1,5 +1,5 @@
-//! `bay status --heads`: a census of the remote's branches, and `--prune` of the landed ones
-//! (G269).
+//! `bay status --heads`: a census of the remote's branches, and `bay prune` of the landed ones
+//! (G269, G302).
 //!
 //! A repository many agents share gathers branches on its remote: one per agent, task or
 //! experiment, most of them merged long ago. The census lists every `refs/heads/*` on the
@@ -22,10 +22,15 @@
 //! The read costs one `ls-remote`, one fetch of the tips it listed (exactly those objects, into
 //! `refs/bay/census/heads/*`, removed when the census ends), two `for-each-ref`s, one `git
 //! cherry` per branch the trunk does not contain, one `git log` of their unmatched commits and,
-//! only when one of those carries a `Change-Id`, one read of the landed markers.
+//! only when one of those carries a `Change-Id`, one read of the landed markers. The census
+//! also carries, in `detail.stranded`, the heads only this disk has (`crate::stranded::local`:
+//! local branches no remote-tracking ref holds, worktree records whose folder is gone), read
+//! from local refs only, so one view shows every head (G302).
 //!
-//! `--prune` deletes the `landed` branches proven by `ancestor` or `patch`, and nothing else:
-//! never the trunk, a target, a lane ref, a stale or a unique branch, and never one landed by
+//! `bay prune` deletes; `bay status --heads` alone never does (G302). Its older
+//! spelling `bay status --heads --prune` is the same request, through the same `heads`. It
+//! deletes the `landed` branches proven by `ancestor` or `patch`, and nothing else: never the
+//! trunk, a target, a lane ref, a stale or a unique branch, and never one landed by
 //! `change` alone (a branch can carry a landed change's `Change-Id` and still hold edits that
 //! never landed). For each branch it deletes, in this order:
 //!
@@ -80,9 +85,9 @@ pub const DEFAULT_ON_PRUNE_TIMEOUT_S: u64 = 30;
 /// The first argument the prune adapter is run with (N-19).
 pub const PRUNED: &str = "pruned";
 
-/// What `bay status --heads` was asked.
+/// What `bay status --heads` or `bay prune` was asked.
 pub struct Request {
-    /// Delete the landed branches.
+    /// Delete the landed branches: `bay prune`, or `bay status --heads --prune`.
     pub prune: bool,
     /// The stale age in days; [`DEFAULT_STALE_DAYS`] when `None`.
     pub stale_days: Option<u64>,
@@ -182,6 +187,8 @@ impl Head {
     }
 }
 
+/// The census of the remote's branches; with [`Request::prune`], the prune of the landed ones.
+/// `bay status --heads`, `bay prune` and `bay status --heads --prune` all come here.
 #[must_use]
 pub fn heads(dir: &Path, request: &Request) -> BayResult {
     run(dir, request).unwrap_or_else(BayResult::failed)
@@ -277,6 +284,8 @@ fn run(dir: &Path, request: &Request) -> Result<BayResult, String> {
         "heads": rows.iter().map(Head::to_json).collect::<Vec<_>>(),
         "counts": counts,
         "fetched": true,
+        // The heads only this disk has (G302): local refs only, no second fetch.
+        "stranded": crate::stranded::local(git)?,
     });
     if request.prune {
         let log = repo.common_dir.join("bay").join(LOG_FILE);
@@ -288,9 +297,7 @@ fn run(dir: &Path, request: &Request) -> Result<BayResult, String> {
             "each pruned branch's restore line is in the log; remote-tracking refs stay until git fetch --prune"
         );
     } else {
-        detail["note"] = json!(
-            "read only: nothing deleted; bay status --heads --prune deletes the landed branches"
-        );
+        detail["note"] = json!("read only: nothing deleted; bay prune deletes the landed branches");
     }
     Ok(BayResult::ok(detail))
 }

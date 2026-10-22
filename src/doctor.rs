@@ -38,6 +38,8 @@ struct Report {
     first_red: Option<Reason>,
     /// The first red row that is not a version, as the doctor field names it.
     doctor_note: Option<&'static str>,
+    /// G305: whether bay guards this repository's Git here (`detail.guard`).
+    guard: Option<Value>,
 }
 
 impl Report {
@@ -209,6 +211,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
         "role": role,
         "role_source": role_source,
         "rows": report.rows,
+        "guard": report.guard,
     });
     let mut result = match report.first_red {
         None => BayResult::new(Decision::Ok),
@@ -449,6 +452,47 @@ fn remote_row(git: &Git, config: &Config, bare: bool, report: &mut Report) -> Re
     Ok(())
 }
 
+/// G305 (owner ruling 2026-10-21, red only on evidence): with no agent adapter declared, bay's
+/// hook never judges an agent's Git command here, so an agent can push the trunk around bay.
+/// That is a choice, and `off` alone is advisory; trunk landings that went around bay, on a
+/// trunk bay also lands on, are the evidence that it costs something, and turn it red. The landings are the trunk's newest
+/// window as the last fetch left it (`crate::unattributed`), the count `bay status` names.
+fn unguarded(git: &Git, config: &Config, report: &mut Report) {
+    let mut row = json!({
+        "name": "hooks",
+        "state": "off",
+        "note": "no agent adapter is declared, so bay does not judge an agent's Git commands here: an agent can push the trunk around bay",
+        "recovery": "add [agent] product = \"claude\" to .bay/config.toml on the trunk, then run bay install",
+    });
+    let mut guard = json!({"hook": "off"});
+    if let Some((count, through)) = around_bay(git, config)
+        && count > 0
+        && through > 0
+    {
+        let around = json!({"count": count, "of": count + through});
+        row["state"] = json!("red");
+        row["around_bay"] = around.clone();
+        guard["around_bay"] = around;
+        report.red(
+            Reason::HooksMissing,
+            Some("bay does not guard this repository, and trunk landings went around it"),
+        );
+    }
+    report.guard = Some(guard);
+    report.rows.push(row);
+}
+
+/// G305: of the trunk's newest window of landings, as the last fetch left the trunk, how many
+/// went around bay and how many came through it: `(around, through)`. Only a trunk bay lands
+/// on can be gone around: one with no bay landing in the window has not taken bay up yet.
+/// `None` when the trunk cannot be read here.
+fn around_bay(git: &Git, config: &Config) -> Option<(u64, u64)> {
+    let tracking = format!("refs/remotes/{}/{}", config.remote(), config.trunk());
+    let trunk = git.run(&["rev-parse", "--verify", "-q", &tracking]).ok()?;
+    let scan = crate::unattributed::scan(git, trunk.trim()).ok()?;
+    Some((scan["count"].as_u64()?, scan["through_bay"].as_u64()?))
+}
+
 fn hooks_row(
     git: &Git,
     config: &Config,
@@ -471,11 +515,10 @@ fn hooks_row(
         return Ok(());
     }
     if !config.claude_adapter() {
-        report.rows.push(
-            json!({"name": "hooks", "state": "green", "note": "no Claude adapter configured"}),
-        );
+        unguarded(git, config, report);
         return Ok(());
     }
+    report.guard = Some(json!({"hook": "on"}));
     let path = agent_settings::claude_settings_path(Path::new(&info.toplevel));
     let settings = agent_settings::read(&path)?;
     let missing = agent_settings::missing_claude_events(&settings);

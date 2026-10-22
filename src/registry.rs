@@ -9,8 +9,9 @@
 //! exactly one principal, and options or `cert-authority` lines are refused. A reviewer or an
 //! approver name is neither a producer name (they all write `refs/notes/bay/evidence/<name>`)
 //! nor an agent name (an author never reviews or approves its own landing under one name, Q7),
-//! and no name is both a reviewer and an approver. Enrolment is plain Git: whoever runs the
-//! repository commits the files with a registry key and pushes.
+//! and no name is both a reviewer and an approver. Enrolment is `bay enrol` ([`crate::enrol`]):
+//! it appends one key to its class file, checks the new files by these rules, signs the new
+//! version with this machine's registry key and pushes it.
 //!
 //! What a registry signs is the policy's to say (N-21, `[policy] signing` at the accepted base,
 //! [`crate::policy::Signing`]): `all`, the default, signs every landing, request, chain and
@@ -60,6 +61,12 @@ impl KeyClass {
         }
     }
 
+    /// The class whose file is `name`, if any.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|class| class.file() == name)
+    }
+
     /// The `ssh-keygen -Y` namespace for objects that are not Git objects.
     #[must_use]
     pub const fn namespace(self) -> &'static str {
@@ -83,6 +90,12 @@ const KEY_TYPES: &[&str] = &[
     "sk-ssh-ed25519@openssh.com",
     "sk-ecdsa-sha2-nistp256@openssh.com",
 ];
+
+/// Whether `word` is a key type a registry line may carry.
+#[must_use]
+pub fn is_key_type(word: &str) -> bool {
+    KEY_TYPES.contains(&word)
+}
 
 /// One registry version: the commit and its class files.
 #[derive(Clone, Debug)]
@@ -209,6 +222,31 @@ impl Registry {
             Signing::All => self.commit.clone(),
             Signing::Approvals => format!("{}/{}", self.commit, Signing::Approvals.name()),
         }
+    }
+
+    /// The text of class file `class`, empty when the version holds none.
+    #[must_use]
+    pub fn text(&self, class: KeyClass) -> &str {
+        &self.files[&class]
+    }
+
+    /// Checks the class files `file` gives, one per class, by the rules [`Registry::load_at`]
+    /// applies, before they are committed (`bay enrol`, G299).
+    ///
+    /// # Errors
+    ///
+    /// The first rule the files break: a line rule, one key in two places, or a name enrolled
+    /// in two classes that may not share it.
+    pub fn check_files(file: impl Fn(KeyClass) -> String) -> Result<(), String> {
+        let registry = Self {
+            commit: String::new(),
+            files: KeyClass::ALL
+                .into_iter()
+                .map(|class| (class, file(class)))
+                .collect(),
+            mode: Signing::All,
+        };
+        registry.validate()
     }
 
     fn validate(&self) -> Result<(), String> {

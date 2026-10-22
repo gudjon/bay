@@ -65,7 +65,7 @@ fn is_zero(oid: &str) -> bool {
 }
 
 /// G269: a pruned branch's archive (`refs/bay/archive/heads/<branch>`) is created once and
-/// never moved or deleted: it is what the restore line of `bay status --heads --prune` reads.
+/// never moved or deleted: it is what the restore line of `bay prune` reads.
 fn archive(update: &Update) -> Result<(), String> {
     if is_zero(&update.old) {
         Ok(())

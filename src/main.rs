@@ -23,13 +23,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open a change: a fresh trunk, a sparse view of the declared paths, the change record
+    /// Open a change: a fresh trunk, a sparse view of the declared paths, the change record;
+    /// or, named by its id, pick up an existing change, as --resume does
     Start {
-        /// The intent: a card, issue or ticket id
+        /// The intent (a card, issue or ticket id), or an existing change's id to pick it up
         #[arg(required_unless_present = "resume")]
         intent: Option<String>,
         /// The revision of the intent's external reference
-        #[arg(long, default_value = "1")]
+        #[arg(long, default_value = "1", hide = true)]
         intent_revision: String,
         /// The paths this change reads and writes (its declared inputs)
         #[arg(long, num_args = 1..)]
@@ -37,7 +38,8 @@ enum Command {
         /// A named input this change depends on, `<kind>:<name>` (repeatable)
         #[arg(long = "input", value_name = "KIND:NAME", value_parser = bay::inputs::InputName::parse)]
         inputs: Vec<bay::inputs::InputName>,
-        /// Restore an existing change: checkpoint its draft, bring in newer trunk
+        /// Restore an existing change: checkpoint its draft, bring in newer trunk (the same as
+        /// `bay start <CHANGE>`)
         #[arg(long, value_name = "CHANGE", conflicts_with = "intent")]
         resume: Option<String>,
         /// No longer needed after a landing: plain start takes the intent's next generation.
@@ -74,6 +76,11 @@ enum Command {
         /// Submit the abandon request instead: the change is given up, any actor may adopt it
         #[arg(long, conflicts_with_all = ["wait", "observe"])]
         abandon: bool,
+    },
+    /// Give a change up: the abandon request `bay land --abandon` submits; any actor may adopt it
+    Abandon {
+        /// The change (default: the change of the view bay runs in)
+        change: Option<String>,
     },
     /// Land the edits made in the main checkout as one change: start, land --wait, then move
     /// the checkout to the new trunk tip. Never in a view (use land there)
@@ -129,18 +136,26 @@ enum Command {
             conflicts_with_all = ["change", "fleet", "stranded"])]
         lineage: Option<String>,
         /// Every branch on the remote, classed trunk, target, lane, landed (with its proof),
-        /// stale or unique; one ls-remote and one fetch, nothing deleted
+        /// stale or unique, and the stranded heads of --stranded; one ls-remote and one fetch,
+        /// nothing deleted
         #[arg(long, conflicts_with_all = ["change", "fleet", "stranded", "lineage"])]
         heads: bool,
-        /// With --heads: delete the branches landed by ancestor or patch, each under a lease of
-        /// the tip judged, after archiving the tip on the remote and logging the push that
-        /// restores it to bay/pruned-heads.log in the repository's common directory; then runs
-        /// the config's `[heads] on_prune` adapter, when set, once per deleted branch
+        /// With --heads: the same as `bay prune`, kept for older scripts
         #[arg(long, requires = "heads")]
         prune: bool,
         /// With --heads: a branch with commits off trunk whose tip is older than this is stale
         /// (default 30)
         #[arg(long, value_name = "DAYS", requires = "heads")]
+        stale_days: Option<u64>,
+    },
+    /// Delete the remote's branches landed by ancestor or patch, each under a lease of the tip
+    /// judged, after archiving the tip on the remote and logging the push that restores it to
+    /// bay/pruned-heads.log in the repository's common directory; then runs the config's
+    /// `[heads] on_prune` adapter, when set, once per deleted branch
+    Prune {
+        /// A branch with commits off trunk whose tip is older than this is stale, and kept
+        /// (default 30)
+        #[arg(long, value_name = "DAYS")]
         stale_days: Option<u64>,
     },
     /// What happened after a cursor: trunk landings, log events, new invalidations of the
@@ -157,6 +172,10 @@ enum Command {
     /// Send one talk to one agent: one action, one target, the time the reply is owed. Arrival is
     /// the recipient's ack, written when its bay fetches
     Talk(Box<TalkArgs>),
+    /// Admin: add one key to the key registry: append it to its class file, sign the new
+    /// registry with this machine's registry key (`bay.registryKey`) and push it. The first
+    /// key enrolled is that registry key
+    Enrol(EnrolArgs),
     /// Admin: probe this box (git and Claude Code floors, remote, hook entries, installed skill)
     Doctor {
         /// Judge this box in this role instead of the one doctor infers
@@ -218,13 +237,27 @@ enum Command {
         /// The agent product's event, for example `pre-tool`
         event: String,
     },
-    /// The help of bay or of one command. With --json: every command, flag and reason code,
-    /// and the JSON Schema of bay.result/1
+    /// Every command and flag on one page, grouped by who runs it; or the help of one command.
+    /// With --json: the same list for programs, every reason code, and the JSON Schema of
+    /// bay.result/1
     Help {
         /// The command, for example `host init` (default: bay itself)
         #[arg(value_name = "COMMAND")]
         command: Vec<String>,
     },
+}
+
+/// `bay enrol <class> <name> <public-key-file>`.
+#[derive(Args)]
+struct EnrolArgs {
+    /// The key's class
+    #[arg(value_parser = ["agent", "executor", "producer", "reviewer", "approver", "registry"])]
+    class: String,
+    /// The name the key is enrolled under
+    name: String,
+    /// The public key file (`<key>.pub`)
+    #[arg(value_name = "PUBLIC_KEY_FILE")]
+    public_key: PathBuf,
 }
 
 /// `--wait[=SECONDS]`, the one flag `bay land` and `bay undo` share. `Option<Option<_>>` is
@@ -557,6 +590,29 @@ fn approve_change(dir: &std::path::Path, command: Command) -> BayResult {
     )
 }
 
+/// `bay abandon [CHANGE]` (G301): the abandon request `bay land --abandon` submits, by the same
+/// call; with no change, the change of the view bay runs in.
+fn abandon(dir: &std::path::Path, change: Option<&str>) -> BayResult {
+    bay::publish::land(dir, change, false, None, true)
+}
+
+/// `bay save`: the request its arguments make.
+fn save(dir: &std::path::Path, intent: String, message: Option<String>) -> BayResult {
+    bay::save::save(dir, &bay::save::SaveRequest { intent, message })
+}
+
+/// `bay enrol`: the key its arguments name.
+fn enrol(dir: &std::path::Path, args: EnrolArgs) -> BayResult {
+    bay::enrol::enrol(
+        dir,
+        &bay::enrol::Enrol {
+            class: args.class,
+            name: args.name,
+            public_key: args.public_key,
+        },
+    )
+}
+
 /// `bay start`: the request its arguments make.
 fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
     let Command::Start {
@@ -600,9 +656,7 @@ fn main() -> ExitCode {
     }
     let result = match cli.command {
         start @ Command::Start { .. } => start_change(&cli.dir, start),
-        Command::Save { intent, message } => {
-            bay::save::save(&cli.dir, &bay::save::SaveRequest { intent, message })
-        }
+        Command::Save { intent, message } => save(&cli.dir, intent, message),
         Command::Waiting => bay::approve::waiting(&cli.dir),
         approve @ Command::Approve { .. } => approve_change(&cli.dir, approve),
         Command::Undo { change, wait } => {
@@ -629,6 +683,7 @@ fn main() -> ExitCode {
                 abandon,
             )
         }
+        Command::Abandon { change } => abandon(&cli.dir, change.as_deref()),
         Command::Host {
             action:
                 HostAction::Init {
@@ -647,29 +702,14 @@ fn main() -> ExitCode {
             action: ExecutorAction::Install { print, force },
         } => bay::service::install(&cli.dir, &bay::service::Request { print, force }),
         Command::Live { action } => live(&cli.dir, action),
-        Command::Status {
-            heads: true,
-            prune,
-            stale_days,
-            ..
-        } => bay::heads::heads(&cli.dir, &bay::heads::Request { prune, stale_days }),
-        Command::Status {
-            change,
-            fleet,
-            stranded,
-            lineage,
-            ..
-        } => status(
-            &cli.dir,
-            change.as_deref(),
-            fleet,
-            stranded,
-            lineage.as_deref(),
-        ),
+        command @ Command::Status { .. } => status(&cli.dir, command),
+        // The one prune: the same request `status --heads --prune` makes (G302).
+        Command::Prune { stale_days } => heads(&cli.dir, true, stale_days),
         Command::Watch { since, landed } if landed => bay::watch::landed(&cli.dir, since.as_ref()),
         Command::Watch { since, .. } => bay::watch::watch(&cli.dir, since.as_ref()),
         Command::Talk(args) => talk(&cli.dir, *args),
         Command::Evidence { action } => evidence(&cli.dir, action),
+        Command::Enrol(args) => enrol(&cli.dir, args),
         Command::Doctor { role } => doctor(&cli.dir, role.as_deref()),
         Command::Install(args) => install(&cli.dir, args),
         Command::Update {
@@ -697,11 +737,16 @@ fn main() -> ExitCode {
     render(&result, cli.json)
 }
 
-/// `bay help [COMMAND]`: the help `bay [COMMAND] --help` prints; with `--json`, the contract
-/// (`bay::contract`), read from this command line.
+/// `bay help [COMMAND]`: with no command, every command, subcommand and flag on one page
+/// (`bay::guide`, G303); with one, the help `bay COMMAND --help` prints; with `--json`, the
+/// contract (`bay::contract`). All three are read from this command line.
 fn help(command: &[String], json: bool) -> ExitCode {
     if json {
         return render(&bay::contract::contract(Cli::command()), true);
+    }
+    if command.is_empty() {
+        print!("{}", bay::guide::guide(Cli::command()));
+        return ExitCode::SUCCESS;
     }
     let args = std::iter::once("bay".to_owned())
         .chain(command.iter().cloned())
@@ -744,15 +789,30 @@ fn live(dir: &std::path::Path, action: LiveAction) -> BayResult {
     }
 }
 
-/// `bay status` and its read-only views: the fleet map, stranded work, lineage pairs, or one
-/// change's state (which alone may start the daily update check).
-fn status(
-    dir: &std::path::Path,
-    change: Option<&str>,
-    fleet: bool,
-    stranded: bool,
-    lineage: Option<&str>,
-) -> BayResult {
+/// The census of the remote's branches, and with `prune` the prune of the landed ones: the one
+/// path of `bay status --heads`, `bay prune` and `bay status --heads --prune` (G302).
+fn heads(dir: &std::path::Path, prune: bool, stale_days: Option<u64>) -> BayResult {
+    bay::heads::heads(dir, &bay::heads::Request { prune, stale_days })
+}
+
+/// `bay status` and its read-only views: the fleet map, stranded work, lineage pairs, every
+/// head, or one change's state (which alone may start the daily update check).
+fn status(dir: &std::path::Path, command: Command) -> BayResult {
+    let Command::Status {
+        change,
+        fleet,
+        stranded,
+        lineage,
+        heads: every_head,
+        prune,
+        stale_days,
+    } = command
+    else {
+        unreachable!("status takes a status command");
+    };
+    if every_head {
+        return heads(dir, prune, stale_days);
+    }
     if fleet {
         return bay::fleet::fleet(dir);
     }
@@ -760,9 +820,9 @@ fn status(
         return bay::stranded::stranded(dir);
     }
     if let Some(range) = lineage {
-        return bay::lineage::lineage(dir, Some(range));
+        return bay::lineage::lineage(dir, Some(range.as_str()));
     }
-    let result = bay::status::status(dir, change);
+    let result = bay::status::status(dir, change.as_deref());
     bay::update::auto();
     result
 }

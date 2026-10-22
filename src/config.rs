@@ -48,7 +48,7 @@ pub struct Config {
     /// `[hold] command`: the hold adapter (N-8, `crate::hold`), asked before each publication.
     pub hold: Option<HoldAdapter>,
     /// `[heads] on_prune`: the prune adapter (N-19, `crate::heads`), run after each branch
-    /// `bay status --heads --prune` deletes.
+    /// `bay prune` deletes.
     pub heads: Option<Heads>,
     pub runtime: Option<Runtime>,
     pub policy: Option<PolicyProfile>,
@@ -150,7 +150,7 @@ pub struct HoldAdapter {
 }
 
 /// `[heads]` (N-19, `crate::heads`): `on_prune`, the prune adapter, a program path relative to
-/// the work tree, then its arguments. After each branch `bay status --heads --prune` deletes,
+/// the work tree, then its arguments. After each branch `bay prune` deletes,
 /// bay runs it, materialized from the trunk's tip, as `<on_prune> pruned <branch> <sha>
 /// <archive ref>`, within `timeout_s` (30 s unless set). It is where a team reaches outside
 /// the repository, to close the branch's open pull request on its host for example; bay

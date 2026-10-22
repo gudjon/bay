@@ -7,7 +7,9 @@
 use std::path::{Path, PathBuf};
 
 use super::talk::fresh_key;
-use super::{AGENT, REGISTRAR, TestBox, check_files, key_line, passing_result, result_json};
+use super::{
+    AGENT, REGISTRAR, TestBox, TestKeys, check_files, key_line, passing_result, result_json,
+};
 
 pub const APPROVER: &str = "approver-a";
 pub const STRANGER: &str = "approver-b";
@@ -42,6 +44,27 @@ pub fn trunk_with(tests: &str) -> Trunk {
 /// [`trunk_with`], with `config` as the trunk's `.bay/config.toml` (empty: none).
 #[must_use]
 pub fn trunk_with_config(tests: &str, config: &str) -> Trunk {
+    trunk_enrolled_by(tests, config, |test_box, repo, keys, approver_key| {
+        test_box.enroll_files(
+            repo,
+            keys,
+            &[
+                ("agent", key_line(AGENT, &keys.agent)),
+                ("approver", key_line(APPROVER, approver_key)),
+                ("registry", key_line(REGISTRAR, &keys.registry)),
+            ],
+        );
+    })
+}
+
+/// [`trunk_with_config`], with the registry made by `enrol` (G299: `bay enrol`), given the
+/// work repository, the test keys and approver `approver-a`'s key; it may enrol nothing.
+#[must_use]
+pub fn trunk_enrolled_by(
+    tests: &str,
+    config: &str,
+    enrol: impl FnOnce(&TestBox, &Path, &TestKeys, &Path),
+) -> Trunk {
     let test_box = TestBox::new();
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
@@ -76,15 +99,7 @@ pub fn trunk_with_config(tests: &str, config: &str) -> Trunk {
     let keys = test_box.keys();
     let approver_key = fresh_key(&test_box, APPROVER);
     let stranger_key = fresh_key(&test_box, STRANGER);
-    test_box.enroll_files(
-        &repo,
-        &keys,
-        &[
-            ("agent", key_line(AGENT, &keys.agent)),
-            ("approver", key_line(APPROVER, &approver_key)),
-            ("registry", key_line(REGISTRAR, &keys.registry)),
-        ],
-    );
+    enrol(&test_box, &repo, &keys, &approver_key);
     let approver_box = test_box.clone_of(&host, "approver-box");
     let stranger_box = test_box.clone_of(&host, "stranger-box");
     for (dir, name, key) in [

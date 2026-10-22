@@ -509,8 +509,41 @@ pub fn unplain(word: &str) -> bool {
 }
 
 /// `text` with each [`unplain`] word put plainly: for a message bay did not write as a
-/// sentence, such as a fault's.
+/// sentence, such as a fault's. A path that holds one, such as `refs/bay/registry`, becomes
+/// "bay's records" whole: a word changed inside it would name a path that does not exist (G304).
 fn plain(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut token = String::new();
+    for c in text.chars() {
+        if c.is_whitespace() {
+            out.push_str(&plain_token(&token));
+            token.clear();
+            out.push(c);
+        } else {
+            token.push(c);
+        }
+    }
+    out.push_str(&plain_token(&token));
+    out
+}
+
+/// One whitespace-free token of [`plain`]: a path holding an [`unplain`] word as "bay's
+/// records", with the punctuation around it kept; any other token word by word.
+fn plain_token(token: &str) -> String {
+    let core = token.trim_matches(|c: char| "()`'\".,;:".contains(c));
+    if core.contains('/') && core.split(|c: char| !c.is_ascii_alphabetic()).any(unplain) {
+        let start = token.find(core).unwrap_or(0);
+        return format!(
+            "{}bay's records{}",
+            &token[..start],
+            &token[start + core.len()..]
+        );
+    }
+    plain_words(token)
+}
+
+/// `text` with each [`unplain`] word put plainly, word by word.
+fn plain_words(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut word = String::new();
     for c in text.chars() {
@@ -1038,6 +1071,21 @@ impl Reason {
     /// happened and the one next step, with what `detail` names when it is there.
     #[must_use]
     pub fn say(self, detail: Option<&Value>) -> String {
+        // G305: doctor's evidence that the trunk changes around bay.
+        if self == Self::HooksMissing
+            && let (Some(count), Some(window)) = (
+                detail
+                    .and_then(|detail| detail.pointer("/guard/around_bay/count"))
+                    .and_then(Value::as_u64),
+                detail
+                    .and_then(|detail| detail.pointer("/guard/around_bay/of"))
+                    .and_then(Value::as_u64),
+            )
+        {
+            return format!(
+                "bay does not guard this project yet: {count} of the last {window} changes reached main without its checks. Turn on its safety settings, then run bay install."
+            );
+        }
         if let Some(fixed) = self.fixed_say() {
             return fixed.to_owned();
         }
@@ -1166,6 +1214,26 @@ fn waived(detail: Option<&Value>) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// G304: the sentence of `bay approve`'s `ok`, by who adds the change next (`lands_by`), and
+/// whether it was a yes, a no or a waiver.
+fn answered_say(detail: Option<&Value>) -> Option<&'static str> {
+    let detail = detail?;
+    let lands_by = detail.get("lands_by")?.as_str()?;
+    let waived = detail.get("waived").is_some();
+    Some(match (lands_by, waived) {
+        ("author_repairs", _) => "You said no; the change waits until its author fixes it.",
+        ("executor", _) => "Approved; the change is added to the shared copy on its own.",
+        ("here", false) => "Approved; save the change again here to add it to the shared copy.",
+        ("here", true) => {
+            "Waived; save the change again here to add it, with that check named as not passed."
+        }
+        (_, false) => "Approved; the change is added once its author saves it again.",
+        (_, true) => {
+            "Waived; the change is added once its author saves it again, with that check named as not passed."
+        }
+    })
+}
+
 /// The sentence of an `ok` result with no reason, by what it carries.
 fn ok_say(result: &BayResult) -> &'static str {
     let detail = result.detail.as_ref();
@@ -1178,6 +1246,18 @@ fn ok_say(result: &BayResult) -> &'static str {
             return "A newer save of this change took over; nothing else to do here.";
         }
         _ => {}
+    }
+    // G305: doctor (whose detail names the box's `role`) is ready, but bay does not guard this
+    // repository's Git here.
+    if detail.is_some_and(|detail| {
+        detail.get("role").is_some() && detail.pointer("/guard/hook") == Some(&Value::from("off"))
+    }) {
+        return "bay works here, but it does not guard this project yet: changes can reach main without its checks. Turn on its safety settings to guard it.";
+    }
+    // G304: an approval or a waiver is given, and the change is not in the shared copy yet;
+    // the sentence says who adds it (`lands_by`, written by `bay approve`).
+    if let Some(sentence) = answered_say(detail) {
+        return sentence;
     }
     let view = detail.is_some_and(|detail| detail.get("view").is_some());
     let nothing_saved = detail
@@ -1270,9 +1350,9 @@ mod tests {
     /// bay's top-level commands, as `src/main.rs` names them (the library cannot see the
     /// binary's command line; G295 checks each `next` against `bay help --json` itself).
     const COMMANDS: &[&str] = &[
-        "start", "land", "save", "waiting", "approve", "undo", "status", "watch", "talk", "doctor",
-        "install", "host", "executor", "live", "share", "evidence", "update", "adapter", "hook",
-        "help",
+        "start", "land", "abandon", "save", "waiting", "approve", "enrol", "undo", "status",
+        "prune", "watch", "talk", "doctor", "install", "host", "executor", "live", "share",
+        "evidence", "update", "adapter", "hook", "help",
     ];
 
     #[test]
@@ -1434,6 +1514,15 @@ mod tests {
         assert_eq!(
             plain("merged onto trunk's branch"),
             "combined onto main's copy"
+        );
+        // G304: a path is never rewritten inside; it is named plainly, whole.
+        assert_eq!(
+            plain("no key registry (refs/bay/registry), so the trunk waits"),
+            "no key registry (bay's records), so the main waits"
+        );
+        assert_eq!(
+            plain("see src/a.rs and `docs/x.md`."),
+            "see src/a.rs and `docs/x.md`."
         );
         assert!(unplain("Commits") && unplain("rebasing") && unplain("refs"));
         assert!(!unplain("refused") && !unplain("refresh") && !unplain("committee"));

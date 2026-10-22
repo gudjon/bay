@@ -83,6 +83,13 @@ fn argument(arg: &Arg) -> Value {
             .map(|value| value.get_name().to_owned())
             .collect::<Vec<_>>(),
         "help": arg.get_help().map(ToString::to_string),
+        // The placeholder `--help` shows for the value, such as `CHANGE` or `SECONDS`; null when
+        // the flag takes none.
+        "value_name": action.takes_values().then(|| {
+            arg.get_value_names()
+                .and_then(|names| names.first())
+                .map_or_else(|| arg.get_id().as_str().to_uppercase(), ToString::to_string)
+        }),
     })
 }
 

@@ -60,7 +60,7 @@ pub const FETCH_WAITING: &str = "refs/bay/fetch-waiting/";
 /// `refs/bay/census/heads/<branch>`: `bay status --heads`'s copy of the remote's branches,
 /// local only, removed when the census ends.
 pub const CENSUS: &str = "refs/bay/census/";
-/// `refs/bay/archive/heads/<branch>`: the tip of a branch `bay status --heads --prune` deleted,
+/// `refs/bay/archive/heads/<branch>`: the tip of a branch `bay prune` deleted,
 /// pushed before the delete so the remote keeps its objects. Create-only on a bay host.
 pub const ARCHIVE_HEADS: &str = "refs/bay/archive/heads/";
 /// The enrolment registry.

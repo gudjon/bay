@@ -82,13 +82,17 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         }
         Err(why) => return BayResult::failed(why),
     }
-    let result = match &request.resume {
+    let resumed = request
+        .resume
+        .clone()
+        .or_else(|| names_change(&repo, request));
+    let result = match &resumed {
         Some(id) => resume(&repo, id),
         None => open(&repo, request),
     };
     let mut result = result.unwrap_or_else(BayResult::failed);
     // NEW-8: a change opened or adopted hears of the live changes that declare its files.
-    if request.resume.is_none() {
+    if resumed.is_none() {
         list_overlaps(&repo, &mut result);
     }
     // G175: the opt-in warm-up of the view's history, once the view is made.
@@ -108,6 +112,26 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
     // G80: every result says which trunk it reflects, and when that trunk was fetched.
     result.freshness = result.freshness.or_else(|| repo.freshness());
     result
+}
+
+/// G300: the change a plain `bay start <CHANGE>` picks up, as `--resume <CHANGE>` does. The
+/// positional names a change when it is a change id and that change's ref is here or on the
+/// remote; otherwise it is an intent, as before. A start that asks for what only a new change
+/// takes (`--new`, `--fixes`, `--lane`, `--from`, `--after`, a save) always opens one.
+fn names_change(repo: &Repo, request: &StartRequest) -> Option<String> {
+    let id = request.intent.as_deref().filter(|id| is_change_id(id))?;
+    if request.new
+        || request.reverts.is_some()
+        || request.fixes.is_some()
+        || request.lane.is_some()
+        || request.from.is_some()
+        || !request.after.is_empty()
+        || request.saved.is_some()
+    {
+        return None;
+    }
+    let here = Chain::new(&repo.git).head(id).ok().flatten().is_some();
+    (here || repo.fetch_refs(&[change_ref(id)]).is_ok()).then(|| id.to_owned())
 }
 
 /// NEW-8: a start that opened or adopted a change lists, in its detail, the live changes whose

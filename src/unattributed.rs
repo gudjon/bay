@@ -125,6 +125,8 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
     let mut off_first_parent: u64 = 0;
     let mut pushed_off: u64 = 0;
     let mut lane_leaks: u64 = 0;
+    // G305: the window's landings that came through bay, beside the ones that went around it.
+    let mut through_bay: u64 = 0;
     for entry in &line.entries {
         let [time, subject] = entry.extra.as_slice() else {
             continue;
@@ -140,6 +142,7 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
                 &entry.committer,
             )
         {
+            through_bay += 1;
             continue;
         }
         let foreign = line.merges.iter().find(|merge| merge.commit == commit);
@@ -177,6 +180,7 @@ pub fn scan(git: &Git, trunk: &str) -> Result<Value, String> {
     let mut scanned = json!({
         "window": window,
         "count": landings.len(),
+        "through_bay": through_bay,
         "off_first_parent": off_first_parent,
         "landings_off_first_parent": pushed_off,
         "landings": landings,
