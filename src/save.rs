@@ -29,7 +29,7 @@ use crate::result::{BayResult, Decision, Reason};
 use crate::start::{self, Saved, StartRequest};
 
 pub struct SaveRequest {
-    /// The intent: a card, issue or ticket id. Required.
+    /// What this work is, in a few words (or a card id). Required.
     pub intent: String,
     /// The first draft's commit message; `bay save <intent>` when not given.
     pub message: Option<String>,
@@ -59,7 +59,10 @@ pub fn save(dir: &Path, request: &SaveRequest) -> BayResult {
 
 fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, String> {
     if request.intent.trim().is_empty() {
-        return Err("bay save needs an intent: a card, issue or ticket id".to_owned());
+        return Err(
+            "bay save needs to know what this work is: say it in a few words (or a card id)"
+                .to_owned(),
+        );
     }
     // G279: a view's edits land by `bay merge`; a save is of the main checkout only.
     if let Some(change) = repo.view_change(dir) {
@@ -81,8 +84,8 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
     if !repo.git.is_ancestor(&head, &trunk)? {
         return Err(format!(
-            "the main checkout's HEAD {head} is not on the history of trunk {} ({trunk}): \
-             bay save lands only edits made on trunk's history",
+            "the main checkout's HEAD {head} is not on the history of main {} ({trunk}): \
+             bay save merges only edits made on main's history",
             repo.trunk()
         ));
     }
@@ -139,7 +142,7 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         .map(str::to_owned);
     let moved = match &commit {
         Some(commit) => bring_checkout(repo, &checkout, &head, &tree, &saved, commit),
-        None => json!({"moved": false, "why": "the landing named no trunk commit"}),
+        None => json!({"moved": false, "why": "the merge named no commit on main"}),
     };
     let mut result = landed;
     let detail = with_fields(
@@ -525,8 +528,8 @@ fn may_move(
             "a detached HEAD".to_owned()
         };
         return Ok(Some(format!(
-            "the main checkout is on {on}, not trunk's branch {branch}: HEAD stays, and the \
-             landing {commit} holds the saved edits"
+            "the main checkout is on {on}, not main's branch {branch}: HEAD stays, and the \
+             merge {commit} holds the saved edits"
         )));
     }
     let now = checkout
@@ -633,7 +636,7 @@ fn move_checkout(repo: &Repo, checkout: &Git, head: &str, commit: &str) -> Resul
         .map_err(|error| MoveError::Unmoved(error.message()))?;
     let partly = |why: String| {
         MoveError::Partly(format!(
-            "{why}; HEAD is at the landing, so git status may list trunk's changes until the \
+            "{why}; HEAD is at the merge, so git status may list main's changes until the \
              files are checked out (git checkout HEAD -- <path>)"
         ))
     };

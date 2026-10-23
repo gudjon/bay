@@ -662,22 +662,69 @@ fn push_detail(lines: &mut Vec<String>, detail: &Value) {
 /// instead. No `say` sentence holds one, nor an inflection of one ([`unplain`]); `bay help
 /// --json` exports the list (`detail.words`), and the skill's "never say" line and the site's
 /// copy checker are held to it, so the list has one home.
-pub const PLAIN_WORDS: &[(&str, &str)] = &[
-    ("branch", "copy"),
-    ("commit", "saved version"),
-    ("merge", "combine"),
-    ("trunk", "main"),
-    ("rebase", "update"),
-    ("ref", "name"),
-    ("view", "folder"),
+pub const PLAIN_WORDS: &[PlainWord] = &[
+    PlainWord {
+        word: "branch",
+        say: "copy",
+        avoid: &["fork"],
+        means: "A separate line of the project's history. bay keeps each change apart, so you never make one.",
+    },
+    PlainWord {
+        word: "commit",
+        say: "saved version",
+        avoid: &["snapshot", "revision"],
+        means: "One saved state of the files, kept in the project's history.",
+    },
+    PlainWord {
+        word: "merge",
+        say: "combine",
+        avoid: &["integrate"],
+        means: "Putting two sets of edits to the same files together.",
+    },
+    PlainWord {
+        word: "trunk",
+        say: "main",
+        avoid: &["master", "default branch", "upstream", "shared copy"],
+        means: "The one version of the project that everyone's work is added to.",
+    },
+    PlainWord {
+        word: "rebase",
+        say: "update",
+        avoid: &["replay"],
+        means: "Bringing a change up to date with main, so it starts from main's newest files.",
+    },
+    PlainWord {
+        word: "ref",
+        say: "name",
+        avoid: &["pointer"],
+        means: "What bay calls one of the records it keeps in the project's history.",
+    },
+    PlainWord {
+        word: "view",
+        say: "folder",
+        avoid: &["workspace", "worktree", "checkout"],
+        means: "The folder bay makes for one change, holding only the files it works on.",
+    },
 ];
+
+/// One entry of [`PLAIN_WORDS`] (research ch. 35 § 8): the technical `word` a person never
+/// reads, the word `say` puts in its place, the other names `avoid` lists for the same idea, and
+/// what it `means`, in one line of plain words.
+#[derive(Clone, Copy, Debug)]
+pub struct PlainWord {
+    pub word: &'static str,
+    pub say: &'static str,
+    pub avoid: &'static [&'static str],
+    pub means: &'static str,
+}
 
 /// Whether `word` is one of [`PLAIN_WORDS`] or an inflection of one (`commits`, `merged`,
 /// `committing`), compared without case.
 #[must_use]
 pub fn unplain(word: &str) -> bool {
     let word = word.to_ascii_lowercase();
-    PLAIN_WORDS.iter().any(|&(stem, _)| {
+    PLAIN_WORDS.iter().any(|entry| {
+        let stem = entry.word;
         let bare = stem.strip_suffix('e').unwrap_or(stem);
         let rest = word.strip_prefix(stem).or_else(|| word.strip_prefix(bare));
         rest.is_some_and(|rest| ["", "s", "es", "d", "ed", "ing", "ted", "ting"].contains(&rest))
@@ -773,8 +820,8 @@ fn plain_word(word: &str) -> &str {
         // Another inflection: the stand-in of its stem.
         other => PLAIN_WORDS
             .iter()
-            .find(|(stem, _)| other.starts_with(stem))
-            .map_or("that", |(_, plain)| plain),
+            .find(|entry| other.starts_with(entry.word))
+            .map_or("that", |entry| entry.say),
     }
 }
 
@@ -1260,7 +1307,7 @@ impl Reason {
                 check()
             ),
             Self::CheckFailed => format!(
-                "A check failed{}; nothing was added. Fix it and save again.",
+                "Nothing was added: a check{} did not pass. Fix it, then save again.",
                 check()
             ),
             Self::CheckUnknown => format!(
@@ -1268,7 +1315,7 @@ impl Reason {
                 check()
             ),
             Self::TrunkRed => format!(
-                "Main is broken on these files{}; wait for the fix, or help fix it.",
+                "Nothing can be added yet: main is broken in these files{}. Wait for the fix, or help fix it.",
                 paths()
             ),
             Self::PathHeld => format!(
@@ -1363,16 +1410,14 @@ impl BayResult {
             Decision::Queued if self.waiting_for.as_deref() == Some("remote") => {
                 "Saved here; it is sent and checked once main can be reached.".to_owned()
             }
-            Decision::Queued => {
-                "Saved; it is in line and will be checked and added shortly.".to_owned()
-            }
+            Decision::Queued => "Saved. bay checks it and adds it to main next.".to_owned(),
             Decision::Ok => ok_say(self).to_owned(),
             Decision::Blocked => {
                 "Not done yet; read the detail for what is needed, then try again.".to_owned()
             }
             Decision::Failed => match short(detail) {
-                Some(short) => format!("Something went wrong: {short}. Nothing was changed."),
-                None => "Something went wrong. Nothing was changed.".to_owned(),
+                Some(short) => format!("Nothing was changed: {short}."),
+                None => "Nothing was changed: bay could not finish.".to_owned(),
             },
         }
     }
@@ -1654,7 +1699,7 @@ mod tests {
             .with_detail(json!({"checks": [{"check": "tests", "verdict": "product_failure"}]}));
         assert_eq!(
             failed.say(),
-            "A check failed (tests); nothing was added. Fix it and save again."
+            "Nothing was added: a check (tests) did not pass. Fix it, then save again."
         );
         let conflict = BayResult::blocked(Reason::MergeConflict)
             .with_detail(json!({"conflicts": ["src/a.rs", "src/b.rs", "src/c.rs"]}));
@@ -1686,7 +1731,7 @@ mod tests {
         let fault = BayResult::failed("could not read the trunk commit\nmore");
         assert_eq!(
             fault.say(),
-            "Something went wrong: could not read the main saved version. Nothing was changed."
+            "Nothing was changed: could not read the main saved version."
         );
         assert_plain(&fault.say(), "failed");
     }

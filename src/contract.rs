@@ -34,10 +34,16 @@ pub fn contract(mut cli: clap::Command) -> BayResult {
         "commands": commands,
         "decisions": decisions(),
         "reasons": reasons(),
-        // G311: the one word list: each word a person need not know, and the word said instead.
+        // G311: the one word list: each word a person need not know, the word said instead,
+        // the other names to avoid, and what it means.
         "words": crate::result::PLAIN_WORDS
             .iter()
-            .map(|(word, plain)| json!({"word": word, "say": plain}))
+            .map(|entry| json!({
+                "word": entry.word,
+                "say": entry.say,
+                "avoid": entry.avoid,
+                "means": entry.means,
+            }))
             .collect::<Vec<_>>(),
         "schema": schema(),
         "adapters": adapters(),
@@ -407,6 +413,26 @@ mod tests {
     use super::schema;
     use crate::result::{BayResult, Decision, Freshness, Reason, SCHEMA};
     use serde_json::{Value, json};
+
+    /// BACKLOG 52 H5: every agent product `bay hook` reads is declared in `detail.adapters`. The
+    /// match names each variant, so a new product does not compile until it is listed here, and
+    /// then fails here until the contract declares it.
+    #[test]
+    fn every_agent_product_is_declared() {
+        use crate::agent_hook::Product;
+        for product in [Product::Claude, Product::Codex] {
+            let name = match product {
+                Product::Claude => crate::config::CLAUDE_PRODUCT,
+                Product::Codex => crate::config::CODEX_PRODUCT,
+            };
+            assert!(
+                super::adapters()
+                    .iter()
+                    .any(|adapter| adapter["product"] == name),
+                "{name} is not declared"
+            );
+        }
+    }
 
     #[test]
     fn the_schema_names_every_field_of_a_result_in_its_order() {

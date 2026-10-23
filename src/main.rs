@@ -26,7 +26,8 @@ enum Command {
     /// Open a change: a fresh main, a sparse view of the declared paths, the change record;
     /// or, named by its id, pick up an existing change: checkpoint its draft, bring in newer main
     Start {
-        /// The intent (a card, issue or ticket id), or an existing change's id to pick it up
+        /// What this work is, in a few words (or a card id), or an existing change's id to pick
+        /// it up
         intent: String,
         /// The paths this change reads and writes (its declared inputs)
         #[arg(long, num_args = 1..)]
@@ -66,7 +67,7 @@ enum Command {
     /// Merge the edits made in the main checkout as one change: start, merge --wait, then move
     /// the checkout to the new tip of main. Never in a view (use merge there)
     Save {
-        /// The intent: a card, issue or ticket id
+        /// What this work is, in a few words (or a card id)
         intent: String,
         /// The first draft's commit message, kept in the change's chain (main keeps bay's own)
         #[arg(long)]

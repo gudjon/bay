@@ -66,7 +66,7 @@ pub const RECORD_IDENTITY: &[(&str, &str)] = &[
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Intent {
-    /// The external reference: a card, issue or ticket id.
+    /// What the work is, in a few words (or a card id).
     pub reference: String,
     /// The revision of that reference (not a draft's `Revision-Id`).
     pub revision: String,

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.7
+
+- `bay save` and `bay start` take what the work is, in a few words; a card id still works.
+- Saving again with the same words goes on with the same change.
+- Each entry of `bay help --json`'s word list now says what it `means` and which names to `avoid`.
+- Plain sentences lead with the effect: "Nothing was added: a check did not pass."
+- A refusal without a code says "Nothing was changed:" and why, not "Something went wrong".
+
 ## 0.3.6
 
 - `[locks] paths` in `.bay/policy.toml` names files that never merge, such as images or binaries.

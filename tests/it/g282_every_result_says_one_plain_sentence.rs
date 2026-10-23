@@ -139,7 +139,7 @@ fn a_failure_says_what_went_wrong_and_the_human_rendering_says_it_first() {
     assert_eq!(code, 20, "{failed}");
     assert_eq!(failed["decision"], "failed", "{failed}");
     let say = assert_says(&failed, "failed");
-    assert!(say.starts_with("Something went wrong"), "{say}");
+    assert!(say.starts_with("Nothing was changed: "), "{say}");
 
     let out = test_box.bay(&repo).arg("merge").output().unwrap();
     let human = String::from_utf8(out.stderr).unwrap();

@@ -8,8 +8,10 @@
 //!
 //! Guards to mutate (each makes a case here fail):
 //! - `src/contract.rs` `contract`: drop `"words"` (the contract exports no list).
-//! - `src/result.rs` `PLAIN_WORDS`: drop `("view", "folder"),` (the skill's line names a word
-//!   the list does not hold).
+//! - `src/result.rs` `PLAIN_WORDS`: drop the `view` entry (the skill's line names a word the
+//!   list does not hold).
+//! - `src/contract.rs` `contract`: drop `"means"` from an entry (R1: each entry says what it
+//!   means, and lists the other names to avoid).
 
 use crate::support;
 
@@ -54,6 +56,20 @@ fn the_contract_exports_the_one_word_list_and_the_skill_names_exactly_it() {
         .map(|entry| {
             let say = entry["say"].as_str().unwrap_or_default();
             assert!(!say.is_empty(), "a word with nothing said instead: {entry}");
+            // R1 (ch. 35 § 8): each entry says what it means, in plain words, and lists the
+            // other names to avoid.
+            let means = entry["means"].as_str().unwrap_or_default();
+            assert!(!means.is_empty(), "a word with no meaning: {entry}");
+            assert!(
+                !means
+                    .split(|c: char| !c.is_ascii_alphabetic())
+                    .any(bay::result::unplain),
+                "a meaning that is not plain: {entry}"
+            );
+            assert!(
+                entry["avoid"].is_array(),
+                "a word with no avoid list: {entry}"
+            );
             entry["word"].as_str().unwrap().to_owned()
         })
         .collect();

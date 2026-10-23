@@ -54,7 +54,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 
 After a merge, a plain `bay start <intent>` opens the next change. `bay start <change>` picks up an
 existing change.
-`<intent>` is the card, issue or ticket id. `--paths` lists every path the change reads and writes:
+`<intent>` says what the work is, in a few words (or a card id). `--paths` lists every path the change reads and writes:
 the view holds only those. `bay start` lists in `detail.overlaps` the live changes whose
 declared paths overlap yours (change, intent, actor, paths). It does not refuse; talk to them, or
 narrow your paths. `bay help` shows every command and flag on one page, with what each one writes and

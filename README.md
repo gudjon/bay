@@ -92,7 +92,7 @@ happened, and what to do next. At a terminal, a person sees that sentence; `--js
 document. There is never a prompt to answer. This is `bay merge` in bay 0.3.1:
 
 ```json
-{"schema":"bay.result/1","op_id":"c7k2m4qa.1","decision":"queued","state":"submitted","say":"Saved; it is in line and will be checked and added shortly.","change":"c7k2m4qa","waiting_for":"executor","elapsed_s":1,"evidence":[],"freshness":{"trunk":"2222be8…","fetched_at":"2026-10-22T20:21:53Z"}}
+{"schema":"bay.result/1","op_id":"c7k2m4qa.1","decision":"queued","state":"submitted","say":"Saved. bay checks it and adds it to main next.","change":"c7k2m4qa","waiting_for":"runner","elapsed_s":1,"evidence":[],"freshness":{"main":"2222be8…","fetched_at":"2026-10-22T20:21:53Z"}}
 ```
 
 `queued` means the merge has not happened yet; only `merged` means it has. A refusal names a stable
