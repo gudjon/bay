@@ -992,7 +992,7 @@ impl Reason {
                 "Do not run that command again; it is never allowed. Ask the user if the work truly needs it."
             }
             Self::PathHeld => {
-                "Another session in this tree holds the path: wait until it stops, or edit other paths."
+                "Another session holds the path: wait until it stops, or edit other paths."
             }
             Self::RemoteNotFetched => {
                 "Check the network and the remote, then run the command again; `bay doctor` names what is wrong."

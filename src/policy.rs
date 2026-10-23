@@ -59,6 +59,9 @@ struct PolicyFile {
     /// The `[limits]` table (owner ruling 2026-10-21): how big one change may be.
     #[serde(default)]
     limits: crate::limits::Limits,
+    /// The `[locks]` table (BACKLOG 57): the paths one session at a time may edit.
+    #[serde(default)]
+    locks: crate::locks::Locks,
 }
 
 /// The `[policy]` table: `signing = "all"` (the default) or `"approvals"` (N-21). Any other value
@@ -1043,6 +1046,8 @@ pub struct Policy {
     pub reuse_unsigned: bool,
     /// `[limits]` (owner ruling 2026-10-21): how big one change may be.
     pub limits: crate::limits::Limits,
+    /// `[locks]` (BACKLOG 57): the paths one session at a time may edit (`crate::locks`).
+    pub locks: crate::locks::Locks,
 }
 
 /// Why a policy could not be loaded.
@@ -1190,6 +1195,7 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
         signing: file.policy.signing,
         reuse_unsigned: file.policy.reuse_unsigned,
         limits: file.limits,
+        locks: file.locks,
     }))
 }
 
@@ -1249,6 +1255,26 @@ pub fn limits_at(git: &Git, commit: &str) -> Result<crate::limits::Limits, Strin
         Ok(Some(policy)) => Ok(policy.limits),
         Ok(None) | Err(LoadError::Invalid(_)) => Ok(crate::limits::Limits::default()),
         Err(LoadError::Git(why)) => Err(why),
+    }
+}
+
+/// The lockable paths of the policy at `commit` (`[locks]`, BACKLOG 57), judged at the base like
+/// every other policy key. No policy, or no table, locks none. An invalid policy still locks
+/// what its text names: a typo elsewhere never lifts a lock.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn locks_at(git: &Git, commit: &str) -> Result<crate::locks::Locks, String> {
+    match load_at(git, commit) {
+        Ok(policy) => Ok(policy.map(|policy| policy.locks).unwrap_or_default()),
+        Err(LoadError::Git(why)) => Err(why),
+        Err(LoadError::Invalid(_)) => Ok(git
+            .file_at(commit, POLICY_PATH)
+            .map_err(|error| error.message())?
+            .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+            .and_then(|table| table.get("locks")?.clone().try_into().ok())
+            .unwrap_or_default()),
     }
 }
 
@@ -1317,6 +1343,7 @@ fn parse_error(text: &str, error: &toml::de::Error) -> String {
 fn validate_shape(file: &PolicyFile) -> Result<(), String> {
     // Owner ruling 2026-10-21: each `[limits]` key is a positive integer.
     file.limits.validate()?;
+    file.locks.validate()?;
     // Ruling 8c: a quarantine that names no check, or whose end is neither a date nor a
     // Change-Id, would set nothing aside or never show as overdue: a typo is never silent.
     for quarantine in &file.quarantine {

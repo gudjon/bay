@@ -338,7 +338,7 @@ pub fn prune(repo: &Repo, queue: &Queue, seqs: &[u64]) -> Result<Vec<u64>, Strin
     Ok(pruned)
 }
 
-fn commit(
+pub(crate) fn commit(
     git: &Git,
     signer: Option<&Signer>,
     file: &str,

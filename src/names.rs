@@ -38,6 +38,8 @@ pub const LOG: &str = "refs/bay/log/";
 pub const EXECUTOR: &str = "refs/bay/executor/";
 /// `refs/bay/talk/<agent>/<id>`: talks.
 pub const TALK: &str = "refs/bay/talk/";
+/// `refs/bay/locks/<hash>`: the lock of one lockable path (`crate::locks`).
+pub const LOCKS: &str = "refs/bay/locks/";
 /// `refs/bay/fleet/<machine>`: `bay status`'s copy of the remote's live refs.
 pub const FLEET: &str = "refs/bay/fleet/";
 /// `refs/bay/fleet-executor/<executor>`: `bay status`'s copy of the remote's executor
@@ -138,6 +140,13 @@ pub fn bay_ref(name: &str) -> Result<(), String> {
                 Ok(())
             } else {
                 refuse("an intent claim is <32 hex>/<generation>")
+            }
+        }
+        ["locks", hash] => {
+            if hex32(hash) {
+                Ok(())
+            } else {
+                refuse("a lock is named by 32 hex characters")
             }
         }
         ["landed-index", shard] => {

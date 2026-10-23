@@ -254,7 +254,7 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
 }
 
 /// The hook's own state of `session`: `<git-common-dir>/bay/session-state/<session>`.
-fn state_dir(repo: &Repo, session: &SessionId) -> PathBuf {
+pub(crate) fn state_dir(repo: &Repo, session: &SessionId) -> PathBuf {
     repo.common_dir
         .join("bay")
         .join("session-state")
@@ -394,11 +394,12 @@ fn start_checkpoint(cwd: &Path, id: &str) -> bool {
     cmd.spawn().is_ok()
 }
 
-/// The session's claims in its trees (`DESIGN` § 11c, G101; `crate::claims`). A post-tool step
-/// claims what it wrote: its edit-tool targets and, in a view, the files its line lists as
-/// written, for the takeover window from now; a subagent's step claims for its parent's session.
-/// The session's own stop releases its claims, unless ruling R7 refused that stop (the session
-/// goes on working), and so does its end.
+/// The session's claims in its trees (`DESIGN` § 11c, G101; `crate::claims`) and its locks
+/// (`crate::locks`). A post-tool step claims what it wrote: its edit-tool targets and, in a
+/// view, the files its line lists as written, for the takeover window from now; a subagent's
+/// step claims for its parent's session. The step also renews the session's locks. The
+/// session's own stop releases its claims and locks, unless ruling R7 refused that stop (the
+/// session goes on working), and so does its end.
 fn claims(
     repo: &Repo,
     payload: &Payload,
@@ -429,11 +430,16 @@ fn claims(
                 repo.config.takeover().as_secs(),
                 state_dir,
             );
+            crate::locks::renew(repo, state_dir, crate::live::unix_now());
         }
         Event::Stop if payload.agent.is_none() && !stop_refused => {
             crate::claims::release(session.as_str(), state_dir);
+            crate::locks::release(repo, state_dir);
         }
-        Event::SessionEnd => crate::claims::release(session.as_str(), state_dir),
+        Event::SessionEnd => {
+            crate::claims::release(session.as_str(), state_dir);
+            crate::locks::release(repo, state_dir);
+        }
         _ => {}
     }
 }

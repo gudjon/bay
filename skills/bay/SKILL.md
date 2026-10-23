@@ -178,6 +178,10 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    To keep changes small, add `[limits]` with `max_file_mib`, `max_files` or `max_added_lines`
    (positive integers; each optional). To cap the review queue, add `max_waiting_approvals`:
    with that many changes waiting for a yes, a change that needs one more is refused `WIP_LIMIT`.
+   For files that never merge (images, models, binaries), add `[locks] paths = ["art/"]`
+   (globs): one session at a time edits each. Your first edit of one takes its lock on the
+   remote; elsewhere the edit is refused `PATH_HELD`, naming the holder. Edit other paths, or
+   wait until that session stops. Offline, the edit is refused `REMOTE_UNREACHABLE`.
 3. Before you commit a `[[check]]` command or a plugin (`[plugin.wake]`, `[plugin.notify]`),
    prove it: `bay plugin test check|wake|notify -- <command>`. It runs bay's contract cases the
    way bay runs it, changes nothing, and exits 0 only when every case passes.

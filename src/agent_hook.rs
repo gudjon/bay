@@ -391,7 +391,8 @@ fn dispatch_as(product: Product, event: &str, input: &str, dir: &Path) -> Outcom
 }
 
 /// `tool.before`: a payload bay cannot read is denied (G59); else the claims of other sessions
-/// (G101), then the stale-write judgement of an edit tool or the shell deny list (G39).
+/// (G101), the locks of an edit tool's lockable paths (G336), then the stale-write judgement of
+/// an edit tool or the shell deny list (G39).
 fn pre_tool(product: Product, input: &str, dir: &Path) -> Outcome {
     let (value, call) = match pre_tool_call(product, input) {
         Ok(read) => read,
@@ -401,6 +402,11 @@ fn pre_tool(product: Product, input: &str, dir: &Path) -> Outcome {
         Ok(unknown) => unknown,
         Err(denied) => return denied,
     };
+    if let Call::Edit(targets) = &call
+        && let Err(denied) = pre_tool_lock(product, input, dir, &value, targets)
+    {
+        return denied;
+    }
     let outcome = match &call {
         Call::Edit(targets) => pre_tool_write(product, input, dir, &value, targets),
         Call::Shell(_) | Call::Other => shell_deny(product, "tool.before", input, dir),
@@ -675,6 +681,70 @@ fn pre_tool_claim(
             held.path,
             held.holder,
         ),
+    })
+}
+
+/// `tool.before` on an edit tool: takes the lock of each lockable target (`crate::locks`, G336).
+/// Denied, exit 2 with one line, when another session holds one (`PATH_HELD`, naming the
+/// holder and the lock's age) or the remote does not answer (`REMOTE_UNREACHABLE`: unknown is
+/// never free); the row in the session's work record is a G60 verdict.
+fn pre_tool_lock(
+    product: Product,
+    input: &str,
+    dir: &Path,
+    value: &Value,
+    targets: &[PathBuf],
+) -> Result<(), Outcome> {
+    let cwd = crate::session::hook_cwd(value, dir);
+    let session = value["session_id"].as_str().and_then(SessionId::parse);
+    let session = session.as_ref().map(SessionId::as_str);
+    let refused = match crate::locks::take(&cwd, targets, session, crate::live::unix_now()) {
+        Ok(()) => return Ok(()),
+        Err(refused) => refused,
+    };
+    let (reason, detail, line) = match refused {
+        crate::locks::Refused::Held { lock, age_s } => (
+            Reason::PathHeld,
+            serde_json::json!({
+                "reason": Reason::PathHeld.code(),
+                "path": lock.path,
+                "holder": lock.session,
+                "actor": lock.actor,
+                "held_s": age_s,
+            }),
+            format!(
+                "{} is locked by {} (session {}) for {age_s} s; edit another path, or wait until                  that session stops",
+                lock.path,
+                lock.actor,
+                lock.session.as_deref().unwrap_or("unknown"),
+            ),
+        ),
+        crate::locks::Refused::Unreachable { path, why } => (
+            Reason::RemoteUnreachable,
+            serde_json::json!({
+                "reason": Reason::RemoteUnreachable.code(),
+                "path": path,
+                "why": why,
+            }),
+            format!(
+                "{path} is lockable and the remote did not answer ({why}), so whether another                  session holds it is unknown; edit another path, or try again once the remote                  answers"
+            ),
+        ),
+    };
+    record_pre_tool(
+        product,
+        input,
+        dir,
+        serde_json::json!({
+            "state": format!("blocked({})", reason.code()),
+            "refused": detail,
+            "verdict": deny_verdict(reason),
+        }),
+    );
+    Err(Outcome {
+        exit: 2,
+        stdout: String::new(),
+        stderr: format!("bay: refused {}: {line}\n", reason.code()),
     })
 }
 

@@ -43,6 +43,7 @@ pub mod lane;
 pub mod limits;
 pub mod lineage;
 pub mod live;
+pub mod locks;
 pub mod log;
 pub mod materialize;
 pub mod memo;

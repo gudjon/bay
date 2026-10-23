@@ -99,6 +99,13 @@ fn tree_of(target: &Path) -> Option<Tree> {
     })
 }
 
+/// The top level of the tree that holds the resolved path `target`, and `target`'s path in it.
+pub(crate) fn tree_path(target: &Path) -> Option<(PathBuf, String)> {
+    let tree = tree_of(target)?;
+    let path = relative(&tree, target)?;
+    Some((tree.root, path))
+}
+
 /// `target`'s path in `tree`, `/`-separated; `None` for the top level itself or a path that
 /// does not name a file by plain components.
 fn relative(tree: &Tree, target: &Path) -> Option<String> {

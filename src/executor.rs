@@ -20,7 +20,9 @@
 //! (`crate::update::pin_own_binary`), so an operation that began on one version ends on it.
 //! Between operations, an executor whose binary changed since it started moves to the new one:
 //! on Unix its result names the move (`detail.reexec`) and the process execs the new binary
-//! with the same arguments; elsewhere it says so and keeps running until it is restarted.
+//! with the same arguments; elsewhere it says so and keeps running until it is restarted. A new
+//! binary that does not take those arguments (a bay without this command) is never moved to
+//! (G337): the executor says so once and keeps running.
 //!
 //! Beside that box-local file, each pass publishes the executor's presence to the remote
 //! (`crate::presence`, G67), so a box that runs no executor, or one that stopped, can be seen
@@ -87,7 +89,10 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         };
         // Between passes, never inside an operation: the re-exec point.
         if !once && binary.changed() {
-            if let Some(next) = binary.version().filter(|_| moves) {
+            if let Some(next) = binary
+                .version()
+                .filter(|_| moves && binary.takes_arguments())
+            {
                 return BayResult::ok(json!({"ran": ran, "reexec": {
                     "from": crate::version::BAY,
                     "to": next,
@@ -204,6 +209,21 @@ impl Binary {
         words.next().map(str::to_owned)
     }
 
+    /// Whether the file at the path takes this executor's own arguments (G337): they and
+    /// `--help` exit 0. A bay that lacks this command would only exit, and its supervisor start
+    /// it again and again, so it is never started in this executor's place.
+    fn takes_arguments(&self) -> bool {
+        let Some(path) = self.path.as_deref() else {
+            return false;
+        };
+        let mut probe = Command::new(path);
+        probe
+            .args(std::env::args_os().skip(1))
+            .arg("--help")
+            .stdin(std::process::Stdio::null());
+        crate::git::run_bounded(probe, "bay --help").is_ok_and(|output| output.status.success())
+    }
+
     /// Takes the file now at the path as this executor's own, so one change is told once.
     fn accept(&mut self) {
         self.stamp = self.path.as_deref().and_then(stamp);
@@ -216,7 +236,7 @@ impl Binary {
             .as_deref()
             .map_or_else(String::new, |path| path.display().to_string());
         let why = if MOVES {
-            "does not answer as bay"
+            "does not answer as bay, or does not take this runner's command"
         } else {
             "changed, and this platform cannot start it in this process's place"
         };

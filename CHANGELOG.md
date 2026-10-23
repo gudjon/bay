@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.6
+
+- `[locks] paths` in `.bay/policy.toml` names files that never merge, such as images or binaries.
+- Each such file is edited in one session at a time, across machines.
+- The first edit takes its lock on the remote; another machine's edit is refused `PATH_HELD`, naming the holder.
+- A lock ends when its session stops, or after the takeover window.
+- Offline, an edit of a locked path is refused `REMOTE_UNREACHABLE`.
+- A runner never moves to a new bay that lacks its command; it keeps running and says why.
+
 ## 0.3.5
 
 Results print the new words everywhere; scripts that read the old field names need the new ones.
