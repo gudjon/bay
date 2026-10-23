@@ -207,11 +207,11 @@ fn missing_config(
     fetch_error: Option<String>,
 ) -> Value {
     let mut message = format!(
-        "no {CONFIG_PATH} committed at {read} (trunk {} from {}); commit one to trunk: bay reads the config only there, never from a work tree",
+        "no {CONFIG_PATH} committed at {read} (main {} from {}); commit one to main: bay reads the config only there, never from a work tree",
         bootstrap.trunk, bootstrap.source
     );
     if let Some(error) = &fetch_error {
-        message = format!("{message}; the fetch of trunk failed: {error}");
+        message = format!("{message}; the fetch of main failed: {error}");
     }
     let mut detail = json!({
         "message": message,

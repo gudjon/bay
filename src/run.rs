@@ -309,6 +309,6 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         let _ = std::fs::remove_dir_all(&dir);
-        assert!(!alive(), "the adapter's child {pid} outlived the bound");
+        assert!(!alive(), "the plugin's child {pid} outlived the bound");
     }
 }

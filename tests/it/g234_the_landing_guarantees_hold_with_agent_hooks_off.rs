@@ -206,7 +206,7 @@ fn an_executor_publishes_and_an_agent_cannot_push_trunk_with_hooks_off() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "the host accepted an agent's push");
     assert!(
-        stderr.contains("trunk takes only commits signed by an executor key"),
+        stderr.contains("main takes only commits signed by a runner key"),
         "{stderr}"
     );
     assert_eq!(test_box.git_bare(&host, &["rev-parse", "main"]), tip);

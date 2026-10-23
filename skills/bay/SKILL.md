@@ -184,11 +184,17 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    For files that never merge (images, models, binaries), add `[locks] paths = ["art/"]`
    (globs): one session at a time edits each. Your first edit of one takes its lock on the
    remote; elsewhere the edit is refused `PATH_HELD`, naming the holder. Edit other paths, or
-   wait until that session's turn ends. Offline, the edit is refused `REMOTE_UNREACHABLE`.
+   wait until that session's turn ends. Offline, the edit is refused `REMOTE_UNREACHABLE`. A
+   lock needs the newest copy: when main changed the file after your work began, the edit is
+   refused `INPUT_CHANGED`; bring in main (`bay start <change>`), then edit. A change to such a
+   file merges only if it held the lock; one made without it is refused `LOCK_NOT_HELD`.
+   `bay save` takes the locks of the files it saves.
    To keep large files out of Git, add `[plugin.assets] command = "<your store's script>"` and
    `over_limit = "offload"` to `.bay/config.toml`: a new file over `max_file_mib` goes to that
    store, and `.bay-assets` names its bytes (`sha256:<hex> <size> <path>`). The file stays in
-   the folder; never add it by hand.
+   the folder; never add it by hand. Other clones get it at `bay install`, views and checks
+   when they are made. bay ships a store for any folder or shared drive:
+   `examples/assets/folder-store`, named as `command = "scripts/folder-store <folder>"`.
 3. Before you commit a `[[check]]` command or a plugin (`[plugin.wake]`, `[plugin.notify]`,
    `[plugin.assets]`), prove it: `bay plugin test check|wake|notify|assets -- <command>`. It runs bay's contract cases the
    way bay runs it, changes nothing, and exits 0 only when every case passes.

@@ -739,6 +739,19 @@ fn pre_tool_lock(
                 line,
             )
         }
+        // BACKLOG 57, the successor rule: an edit from an older base would drop main's change.
+        crate::locks::Refused::Stale { path, last } => (
+            Reason::InputChanged,
+            serde_json::json!({
+                "reason": Reason::InputChanged.code(),
+                "path": path,
+                "main_commit": last,
+            }),
+            format!(
+                "{path} is lockable and main changed it ({last}) after this work began; bring \
+                 in the newest main first (bay start <change> in a view), then edit it"
+            ),
+        ),
     };
     record_pre_tool(
         product,

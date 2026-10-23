@@ -283,7 +283,7 @@ pub fn rows(git: &Git, config: &Config, held: &[Held], now: u64) -> Result<Vec<V
                     Ok(record)
                 } else {
                     Err(format!(
-                        "it holds no {PRESENCE_SCHEMA} record of this executor"
+                        "it holds no {PRESENCE_SCHEMA} record of this runner"
                     ))
                 }
             })
@@ -336,8 +336,8 @@ fn verified(
         .map_err(|error| format!("its signature cannot be checked: {}", error.message()))?
     {
         Some(principal) if principal == executor => Ok(()),
-        Some(principal) => Err(format!("it is signed by executor {principal}")),
-        None => Err("its signature does not verify against the executor keys".to_owned()),
+        Some(principal) => Err(format!("it is signed by runner {principal}")),
+        None => Err("its signature does not verify against the runner keys".to_owned()),
     }
 }
 

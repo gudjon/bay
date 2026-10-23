@@ -244,7 +244,7 @@ fn the_hook_refuses_what_a_key_class_may_not_write() {
         ],
     );
     assert!(
-        why.contains("trunk takes only commits signed by an executor key"),
+        why.contains("main takes only commits signed by a runner key"),
         "{why}"
     );
 
@@ -415,7 +415,7 @@ fn the_hook_refuses_what_a_key_class_may_not_write() {
         &[&format!("{entry}:refs/bay/log/someone-else")],
     );
     assert!(
-        why.contains("is not signed by executor someone-else"),
+        why.contains("is not signed by runner someone-else"),
         "{why}"
     );
     let why = refused(&test_box, &repo, &[&format!(":refs/bay/changes/{id}")]);
@@ -870,7 +870,7 @@ fn a_publication_naming_a_registry_off_the_chain_is_refused() {
     test_box.enroll_executor(&repo, &keys, &rotated);
     let why = push(&off_chain);
     assert!(
-        why.contains("trunk takes only commits signed by an executor key"),
+        why.contains("main takes only commits signed by a runner key"),
         "{why}"
     );
     assert!(!why.contains("REGISTRY_CHANGED"), "{why}");

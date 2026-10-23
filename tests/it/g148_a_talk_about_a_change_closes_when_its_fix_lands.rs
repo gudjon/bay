@@ -216,7 +216,7 @@ fn the_host_refuses_an_answered_close_whose_landing_does_not_name_the_change() {
         &case.a,
         &forged_close(&case, &about_x, "fixed_by", &fix, &y_landing),
     );
-    assert!(stderr.contains("is not the landing of"), "{stderr}");
+    assert!(stderr.contains("is not the merge of"), "{stderr}");
 
     // The true close is taken.
     let out = case

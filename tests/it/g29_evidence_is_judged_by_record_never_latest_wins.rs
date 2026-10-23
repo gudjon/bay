@@ -134,7 +134,7 @@ fn one_producer_name_used_by_two_executors_is_a_collision() {
         result["detail"]
             .as_str()
             .unwrap()
-            .contains("collides with another executor"),
+            .contains("collides with another runner"),
         "{ran}"
     );
 }

@@ -534,7 +534,7 @@ impl Config {
             && !(1..=MAX_RED_WINDOW).contains(&window)
         {
             return Err(format!(
-                "[red] window = {window}: the window is 1 to {MAX_RED_WINDOW} trunk commits"
+                "[red] window = {window}: the window is 1 to {MAX_RED_WINDOW} main commits"
             ));
         }
         config.validate_targets()?;
@@ -629,14 +629,14 @@ impl Config {
             crate::names::operator_name(&target.name).map_err(named)?;
             if target.name == trunk {
                 return Err(named(format!(
-                    "a target is never named as the trunk {trunk:?}"
+                    "a target is never named as main ({trunk:?})"
                 )));
             }
             let reference = target.reference();
             if !is_target_ref(&reference) || reference == trunk_ref {
                 return Err(named(format!(
                     "ref = {reference:?}: a target's ref is a full ref name under refs/, \
-                     never the trunk's and never under {} or {}",
+                     never main's and never under {} or {}",
                     crate::names::BAY,
                     crate::names::NOTES
                 )));
@@ -654,7 +654,7 @@ impl Config {
                 && !self.targets.iter().any(|other| other.name == from)
             {
                 return Err(named(format!(
-                    "from = {from:?} is neither the trunk {trunk:?} nor a [[target]]"
+                    "from = {from:?} is neither main ({trunk:?}) nor a [[target]]"
                 )));
             }
             if target.requires.iter().any(String::is_empty) {
@@ -663,7 +663,7 @@ impl Config {
             if target.advance && target.requires.is_empty() {
                 return Err(named(
                     "advance = true needs requires: with no required check, the ref the \
-                     executor advances would name the last commit, never the last green one"
+                     runner advances would name the last commit, never the last green one"
                         .to_owned(),
                 ));
             }
@@ -680,7 +680,7 @@ impl Config {
             }
             if source.from_target(trunk).is_some() {
                 return Err(named(
-                    "its from chain never reaches the trunk: a cycle".to_owned(),
+                    "its from chain never reaches main: a cycle".to_owned(),
                 ));
             }
         }
@@ -693,7 +693,7 @@ impl Config {
                     .any(|target| target.name == freeze.target)
             {
                 return Err(format!(
-                    "[[hold]] target = {:?} names neither the trunk {trunk:?} nor a [[target]]",
+                    "[[hold]] target = {:?} names neither main ({trunk:?}) nor a [[target]]",
                     freeze.target
                 ));
             }
@@ -751,7 +751,7 @@ impl Config {
                 }
                 if crate::lane::matches(pattern, &trunk) {
                     return Err(format!(
-                        "[[lane]] {name}: ref pattern \"{pattern}\" matches trunk ({trunk})"
+                        "[[lane]] {name}: ref pattern \"{pattern}\" matches main ({trunk})"
                     ));
                 }
             }
@@ -1454,11 +1454,11 @@ product = "claude"                 # leave this table out when the box does not 
             ),
             (
                 "[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/*\"]\n",
-                "trunk",
+                "main",
             ),
             (
                 "[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/main\"]\n",
-                "trunk",
+                "main",
             ),
             (
                 "[[lane]]\nname = \"r\"\nrefs = [\"refs/heads/r/*\"]\nwindow_s = 604800\n",

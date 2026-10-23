@@ -1394,7 +1394,7 @@ fn validate_shape(file: &PolicyFile) -> Result<(), String> {
             .any(|other| other.id == entry.id && other.stage != entry.stage)
     }) {
         return Err(format!(
-            "check {} is in both stages, pre and post; give the post-publication check its own id",
+            "check {} is in both stages, pre and post; give the post-merge check its own id",
             entry.id
         ));
     }
@@ -1623,7 +1623,7 @@ fn validate_kind(entry: &CheckEntry) -> Result<(), String> {
     }
     if entry.stage == Stage::Post {
         return Err(format!(
-            "check {} is kind = \"approval\" and stage = \"post\"; an approval is given before a landing, never after it",
+            "check {} is kind = \"approval\" and stage = \"post\"; an approval is given before a merge, never after it",
             entry.id
         ));
     }
@@ -1675,7 +1675,7 @@ fn validate_retry(entry: &CheckEntry) -> Result<(), String> {
     }
     if entry.stage == Stage::Post && (entry.retry_on_failure > 0 || entry.allow_flaky) {
         return Err(format!(
-            "check {} runs after publication; retry_on_failure and allow_flaky apply only to a pre-publication check",
+            "check {} runs after the merge; retry_on_failure and allow_flaky apply only to a pre-merge check",
             entry.id
         ));
     }
@@ -1683,7 +1683,7 @@ fn validate_retry(entry: &CheckEntry) -> Result<(), String> {
     // nothing, and a typo is never silent.
     if entry.stage == Stage::Post && entry.baseline.is_some() {
         return Err(format!(
-            "check {} runs after publication; baseline applies only to a pre-publication check",
+            "check {} runs after the merge; baseline applies only to a pre-merge check",
             entry.id
         ));
     }

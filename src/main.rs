@@ -383,7 +383,11 @@ enum HostAction {
 /// `bay host <path>` (0.4.0, BACKLOG 51 R7: one word for one step), and the hidden host hook
 /// that a host's own hook files call.
 #[derive(Args)]
-#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+#[command(
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
+    override_usage = "bay host <PATH> [--main <BRANCH>] [--object-format <FORMAT>]"
+)]
 struct HostArgs {
     #[command(subcommand)]
     action: Option<HostAction>,

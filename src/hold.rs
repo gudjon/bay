@@ -73,7 +73,7 @@ pub fn held(repo: &Repo, trunk: &str) -> Option<Hold> {
             return Some(Hold {
                 source: "config",
                 reason: format!(
-                    "the {} at trunk {trunk} cannot be read, so whether trunk is held is unknown: {why}",
+                    "the {} on main ({trunk}) cannot be read, so whether main is held is unknown: {why}",
                     crate::config::CONFIG_PATH
                 ),
                 end: None,
@@ -90,7 +90,7 @@ pub fn held(repo: &Repo, trunk: &str) -> Option<Hold> {
         Ok(answer) => answer,
         Err(fault) => Some(Hold {
             source: "plugin",
-            reason: format!("the hold adapter {command:?} gave no answer bay can read: {fault}"),
+            reason: format!("the hold plugin {command:?} gave no answer bay can read: {fault}"),
             end: None,
         }),
     }
@@ -196,7 +196,7 @@ fn run_in(
     .map_err(|unmade| match unmade {
         crate::materialize::Unmade::TimedOut => {
             format!(
-                "materializing {program} from trunk took more than {}s",
+                "materializing {program} from main took more than {}s",
                 timeout.as_secs()
             )
         }
@@ -204,7 +204,7 @@ fn run_in(
         crate::materialize::Unmade::DiskLow(low) => low.message(),
     })?;
     if !scratch.join(program).is_file() {
-        return Err(format!("{program} is not in trunk {trunk}"));
+        return Err(format!("{program} is not in main ({trunk})"));
     }
     let mut cmd =
         crate::run::command(scratch, command).ok_or_else(|| format!("{what} is empty"))??;
@@ -238,7 +238,7 @@ pub fn read_answer(stdout: &[u8]) -> Result<Option<Hold>, String> {
     let reason = answer["reason"]
         .as_str()
         .filter(|reason| !reason.trim().is_empty())
-        .unwrap_or("the hold adapter answers held and names no reason")
+        .unwrap_or("the hold plugin answers held and names no reason")
         .to_owned();
     Ok(Some(Hold {
         source: "plugin",

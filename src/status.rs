@@ -1282,7 +1282,7 @@ fn describe(
         "operation": operation,
         "anomalies": found.anomalies.iter().map(|anomaly| json!({
             "commit": anomaly.commit,
-            "why": "carries the Change-Id but is not a verified publication",
+            "why": "carries the Change-Id but is not a verified merge",
         })).collect::<Vec<_>>(),
         "completion": completion(repo, record, trunk, landed, read)?,
         "evidence": evidence_read(repo, record, landed, read)?,

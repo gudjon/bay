@@ -350,7 +350,7 @@ fn time_and_checks(
         failed.push(failure(
             "freeze",
             format!(
-                "{name} is frozen until {} ({}), and the landing of {commit} carries no Fixes: or Reverts:",
+                "{name} is frozen until {} ({}), and the merge of {commit} carries no Fixes: or Reverts:",
                 freeze.end, freeze.reason
             ),
             json!({"end": freeze.end, "reason": freeze.reason}),

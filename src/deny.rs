@@ -350,7 +350,7 @@ fn denied_push(
     if args.iter().any(|arg| *arg == "--all" || *arg == "--mirror") {
         return denial(
             "git push --all",
-            "bay denies pushing every branch, trunk with them, from an agent shell".to_owned(),
+            "bay denies pushing every branch, main with them, from an agent shell".to_owned(),
         );
     }
     let trunk = match trunk {
@@ -387,8 +387,8 @@ fn denied_push(
         return None;
     }
     denial(
-        "git push of trunk",
-        format!("bay denies a push of trunk ({trunk}) from an agent shell; bay publishes trunk"),
+        "git push of main",
+        format!("bay denies a push of main ({trunk}) from an agent shell; bay merges into main"),
     )
 }
 
@@ -810,18 +810,14 @@ mod tests {
                 "git restore .",
                 Some("zsh -c"),
             ),
-            (
-                "env A=1 B=2 git push origin main",
-                "git push of trunk",
-                None,
-            ),
+            ("env A=1 B=2 git push origin main", "git push of main", None),
             ("xargs -0 git checkout .", "git checkout .", None),
             ("sudo -E git reset --hard", "git reset --hard", None),
             ("command git push --all", "git push --all", None),
             ("exec git push --mirror", "git push --all", None),
             (
                 "bash -c \"env git push origin main\"",
-                "git push of trunk",
+                "git push of main",
                 Some("bash -c"),
             ),
             (

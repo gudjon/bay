@@ -273,7 +273,7 @@ fn the_trunk_push_denial_holds_with_a_decoy_trunk_in_the_draft() {
         ] {
             let (code, reason) = pre_tool(&test_box, cwd, command);
             assert_eq!(code, Some(2), "{command} in {}: {reason}", cwd.display());
-            assert!(reason.contains("trunk (main)"), "{reason}");
+            assert!(reason.contains("main (main)"), "{reason}");
         }
         let (code, reason) = pre_tool(&test_box, cwd, "git push origin topic");
         assert_eq!(code, Some(0), "{reason}");

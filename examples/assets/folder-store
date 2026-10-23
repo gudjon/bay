@@ -1,0 +1,52 @@
+#!/bin/sh
+# bay's reference assets plugin: keeps each large file's bytes in one folder, named by its
+# SHA-256. The folder can be any directory every machine of the team reaches: a disk, a NAS, a
+# mounted shared drive. Copy this file into the repository (for example scripts/folder-store),
+# make it executable, and name the folder after it in .bay/config.toml:
+#
+#   [plugin.assets]
+#   command = "scripts/folder-store /Volumes/studio/bay-assets"
+#   over_limit = "offload"
+#
+# bay runs it as `<command> put <file>` and `<command> get <sha256:hex> <file>` (crate::assets),
+# and hashes every file itself. Check it with: bay plugin test assets -- scripts/folder-store <folder>
+set -eu
+
+store=${1:?"name the store's folder after the command"}
+action=${2:-}
+
+hash() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | cut -d' ' -f1
+    else
+        shasum -a 256 "$1" | cut -d' ' -f1
+    fi
+}
+
+case "$action" in
+put)
+    file=${3:?"put needs a file"}
+    mkdir -p "$store"
+    hex=$(hash "$file")
+    if [ ! -f "$store/$hex" ]; then
+        # Written beside its place, then renamed: a reader never sees half a file.
+        cp "$file" "$store/.$hex.$$"
+        mv "$store/.$hex.$$" "$store/$hex"
+    fi
+    echo "sha256:$hex"
+    ;;
+get)
+    id=${3:?"get needs an identity"}
+    out=${4:?"get needs a file to write"}
+    hex=${id#sha256:}
+    if [ ! -f "$store/$hex" ]; then
+        echo "folder-store: $id is not in $store" >&2
+        exit 1
+    fi
+    cp "$store/$hex" "$out"
+    ;;
+*)
+    echo "folder-store: the actions are put and get" >&2
+    exit 2
+    ;;
+esac

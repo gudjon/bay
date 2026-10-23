@@ -581,7 +581,7 @@ pub fn reviewed(git: &Git, registry: &Registry, trunk: &str, body: &Value) -> Re
     });
     let Some(landing) = landing else {
         return Err(refuse(format!(
-            "change {change} has no bay landing on trunk: a reviewer talks only about a landing it reviewed"
+            "change {change} has no bay merge on main: a reviewer talks only about a merge it reviewed"
         )));
     };
     let tree = git
@@ -598,7 +598,7 @@ pub fn reviewed(git: &Git, registry: &Registry, trunk: &str, body: &Value) -> Re
         }
     }
     Err(refuse(format!(
-        "reviewer {from} holds no review record of its own on {landing}, change {change}'s landing: a reviewer talks only about a landing it reviewed (bay evidence record --kind review)"
+        "reviewer {from} holds no review record of its own on {landing}, change {change}'s merge: a reviewer talks only about a merge it reviewed (bay evidence record --kind review)"
     )))
 }
 

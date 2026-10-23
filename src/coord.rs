@@ -398,7 +398,7 @@ fn judge_change(
             return refusal(&change.change, path, stale);
         }
         let why = format!(
-            "the tool names no file_path, so bay cannot say whether {}, which trunk moved past \
+            "the tool names no file_path, so bay cannot say whether {}, which main moved past \
              what this change observed, covers its write",
             stale.input
         );

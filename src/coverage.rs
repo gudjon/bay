@@ -61,7 +61,7 @@ fn run(dir: &Path, request: &Missing) -> Result<BayResult, String> {
     let git = &repo.git;
     let trunk = git
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
-        .map_err(|error| format!("the local cache holds no trunk: {}", error.message()))?;
+        .map_err(|error| format!("the local cache holds no main branch: {}", error.message()))?;
     let since = request
         .since
         .as_deref()

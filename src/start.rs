@@ -280,7 +280,7 @@ fn named_or_refused(
             .map(|lane| lane.name.as_str())
             .collect();
         return Err(format!(
-            "--lane {lane}: the {} at trunk declares no such [[lane]] (it declares {declared:?})",
+            "--lane {lane}: the {} on main declares no such [[lane]] (it declares {declared:?})",
             crate::config::CONFIG_PATH
         ));
     }
@@ -294,7 +294,7 @@ fn named_or_refused(
                 BayResult::blocked(Reason::ChangeNotLanded)
                     .with_change(fixed.clone())
                     .with_detail(json!({"trunk": base, "fixes": fixed,
-                    "why": "a fix names a change that landed"})),
+                    "why": "a fix names a change that merged"})),
             ));
         }
     }
@@ -320,7 +320,7 @@ fn named_or_refused(
 fn after_itself(repo: &Repo, request: &StartRequest, change: &str) -> Option<String> {
     if request.after.iter().any(|dependency| dependency == change) {
         return Some(format!(
-            "--after {change} names the change itself: a change cannot land after itself"
+            "--after {change} names the change itself: a change cannot merge after itself"
         ));
     }
     let mut seen: Vec<String> = Vec::new();
@@ -336,8 +336,8 @@ fn after_itself(repo: &Repo, request: &StartRequest, change: &str) -> Option<Str
         };
         if record.after.iter().any(|named| named == change) {
             return Some(format!(
-                "--after {dependency}: change {dependency} lands only after {change}, so \
-                 neither could land"
+                "--after {dependency}: change {dependency} merges only after {change}, so \
+                 neither could merge"
             ));
         }
         next.extend(record.after);
@@ -407,7 +407,7 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
                             .with_change(change.clone())
                             .with_detail(json!({"intent": intent, "generation": generation,
                                 "why": format!("change {change} of generation {generation} is \
-                                    live: the next generation needs it landed or given up"),
+                                    live: the next generation needs it merged or given up"),
                                 "recovery": format!("bay abandon from its view gives it \
                                     up; bay start {intent} without --new adopts it")})));
                     }
@@ -479,7 +479,7 @@ fn wip_limit(
         "live_changes": live,
         "policy": crate::policy::POLICY_PATH,
         "base": base,
-        "recovery": "land one of the live changes, or give one up with bay abandon, then start again",
+        "recovery": "merge one of the live changes, or give one up with bay abandon, then start again",
     }))))
 }
 
@@ -573,7 +573,7 @@ fn superseded_by_newer(id: &str, record: &ChangeRecord, newer: &(u64, String)) -
             "state": record.state,
             "superseded_by": change,
             "generation": generation,
-            "why": format!("change {id} ended without landing and generation {generation} of \
+            "why": format!("change {id} ended without merging and generation {generation} of \
                 its intent is change {change}"),
             "recovery": format!("bay start {change} continues the intent"),
         }))
@@ -612,7 +612,7 @@ fn compacted_claims(
         }
         .ok_or_else(|| {
             format!(
-                "{} is compacted without its landed claim",
+                "{} is compacted without its merged claim",
                 claim.intent_ref()
             )
         })?;
@@ -628,7 +628,7 @@ fn compacted_claims(
         let change = change.trim();
         if !is_change_id(change) {
             return Err(format!(
-                "the publication {landed} of {} names no one change",
+                "the merge {landed} of {} names no one change",
                 claim.landed_ref()
             ));
         }
@@ -664,10 +664,9 @@ fn take_in(
         commit: commit.clone(),
         source: Some(source.to_owned()),
     };
-    let merge_base = repo
-        .git
-        .run(&["merge-base", base, &commit])
-        .map_err(|_| format!("--from {reference}: {commit} shares no history with trunk {base}"))?;
+    let merge_base = repo.git.run(&["merge-base", base, &commit]).map_err(|_| {
+        format!("--from {reference}: {commit} shares no history with main ({base})")
+    })?;
     // `--no-renames`: which paths changed is read from trees alone, never from blob contents.
     let changed = repo
         .git
@@ -706,7 +705,7 @@ fn take_in(
                 "conflicts": conflicts,
                 "from": from,
                 "trunk": base,
-                "next": "bring trunk into the branch outside bay, then start again",
+                "next": "bring main into the branch outside bay, then start again",
             })))),
         Merge::Clean(tree) => {
             let draft = commit_on(&repo.git, &tree, base, &format!("start --from {reference}"))
@@ -735,8 +734,8 @@ fn take_saved(
             .with_detail(json!({
                 "conflicts": conflicts,
                 "trunk": base,
-                "next": "trunk changed the same lines since the main checkout's HEAD: bring \
-                    those files up to trunk, redo the edits there, then save again",
+                "next": "main changed the same lines since the main checkout's HEAD: bring \
+                    those files up to main, redo the edits there, then save again",
             })))),
         Merge::Clean(tree) => {
             let draft = commit_on(&repo.git, &tree, base, &saved.message)
@@ -1126,7 +1125,7 @@ fn add_behind(
         .map_err(|_| "git rev-list --count printed no count".to_owned())?;
     detail["behind"] = json!(behind);
     if behind > 0 {
-        detail["recovery"] = json!(format!("bay start {change} brings in newer trunk"));
+        detail["recovery"] = json!(format!("bay start {change} brings in the newer main"));
     }
     Ok(())
 }

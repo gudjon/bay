@@ -71,6 +71,7 @@
         "HOOK_INPUT_INVALID",
         "SHELL_DENIED",
         "PATH_HELD",
+        "LOCK_NOT_HELD",
         "REMOTE_NOT_FETCHED",
         "CONFIG_MISSING",
         "TOOL_BELOW_FLOOR",

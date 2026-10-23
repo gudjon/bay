@@ -150,6 +150,14 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
                 ));
             }
         }
+        // BACKLOG 49 phase 2: a clone gets the files its main keeps outside Git.
+        if let Ok(repo) = Repo::open_with(dir, Fetch::Never) {
+            match crate::assets::fill_tree(&repo, root, "HEAD", &|_| true) {
+                Ok(written) if !written.is_empty() => detail["assets"] = json!(written),
+                Ok(_) => {}
+                Err(why) => detail["assets"] = json!({"missing": why}),
+            }
+        }
         // § 11a, ruling R1: the name this machine's live summary ref carries.
         detail["machine"] = json!(crate::live::ensure_machine(&git)?);
         // G193: this clone (an executor's, or the store its views share) keeps a commit-graph

@@ -176,7 +176,7 @@ pub fn judge_update(
         ])?;
         if !landed.is_empty() {
             return Ok(Some(format!(
-                "{refname} is append-only: it held landed changes, so recreating it is refused"
+                "{refname} is append-only: it held merged changes, so recreating it is refused"
             )));
         }
         return Ok(None);
@@ -218,7 +218,7 @@ fn pre_receive_bounded(git: &Git, dir: &Path, input: String) -> u8 {
         }
         Err(_) => {
             eprintln!(
-                "bay: HOOK_TIMEOUT: the trunk hook exceeded its {}s bound",
+                "bay: HOOK_TIMEOUT: the hook on main exceeded its {}s bound",
                 bound.as_secs()
             );
             1

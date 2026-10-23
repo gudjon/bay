@@ -18,9 +18,14 @@ The last renames before the first user; scripts and configs that use the old nam
 - A bay host no longer refuses a push when it judges two pushes at once.
 - Every result sentence says what happened first, then why, then one step.
 - Lock and offline refusals print one clean line.
+- A lock is granted only on the newest copy of its file; an older copy is refused `INPUT_CHANGED`.
+- A change to a lockable file merges only if it held the lock; otherwise `LOCK_NOT_HELD`.
+- `bay save` takes the locks of the lockable files it saves; a released lock keeps its history.
 - With `[plugin.assets]` and `over_limit = "offload"`, a new file over `max_file_mib` never enters Git.
 - The plugin stores its bytes; `.bay-assets` names them by SHA-256 and size, at save, merge and checkpoint.
 - `bay plugin test assets -- <command>` checks a store plugin: put, put again, get, unknown.
+- Saved large files come back by hash: in another clone at `bay install`, in views, and read-only in checks.
+- `examples/assets/folder-store` keeps large files in any folder, such as a shared drive.
 
 ## 0.3.7
 

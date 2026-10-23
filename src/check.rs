@@ -1797,7 +1797,7 @@ fn run_one(
             return Judged::without_units(
                 Verdict::InfraFailure,
                 Some(format!(
-                    "the policy declares {name} in env, and this executor does not set it"
+                    "the policy declares {name} in env, and this runner does not set it"
                 )),
             );
         };
@@ -1848,7 +1848,7 @@ fn run_one(
     let outside = || {
         Judged::without_units(
             Verdict::InfraFailure,
-            Some("the check read or wrote outside its adapter and candidate".to_owned()),
+            Some("the check read or wrote outside its plugin and candidate".to_owned()),
         )
     };
     if !reached_out && let Some(reason) = unavailable_answer(&output) {
@@ -2239,18 +2239,33 @@ fn prepare(
             &mut tick,
         )
     });
+    // BACKLOG 49 phase 2: the files the manifest keeps outside Git, by their bytes.
+    let made = made.map(|()| {
+        crate::assets::fill_check(
+            git,
+            candidate.commit,
+            candidate.base,
+            tree_dir,
+            kept.as_deref(),
+            deadline,
+        )
+    });
     match made {
-        Ok(()) => {
+        Ok(Err(why)) => Ok(Some(Judged::without_units(
+            Verdict::InfraFailure,
+            Some(why),
+        ))),
+        Ok(Ok(())) => {
             make_read_only(adapter_dir);
             Ok(None)
         }
         Err(Unmade::TimedOut) if by_budget => Ok(budget_out(
-            "while materializing the candidate and the adapter; the check did not run",
+            "while materializing the candidate and the plugin; the check did not run",
         )),
         Err(Unmade::TimedOut) => Ok(Some(Judged::without_units(
             Verdict::InfraFailure,
             Some(format!(
-                "materializing the candidate and the adapter exceeded the check's materialize_timeout_s ({seconds}s); the check did not run"
+                "materializing the candidate and the plugin exceeded the check's materialize_timeout_s ({seconds}s); the check did not run"
             )),
         ))),
         Err(Unmade::Refused(why)) => Ok(Some(Judged::without_units(

@@ -75,7 +75,7 @@ pub fn test(dir: &Path, test: &Test) -> BayResult {
     let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     let command = test.command.join(" ");
     if command.trim().is_empty() {
-        return refused(&test.kind, "name the adapter's command after --");
+        return refused(&test.kind, "name the plugin's command after --");
     }
     match test.kind.as_str() {
         "check" => test_check(&dir, &command, test),
@@ -85,7 +85,7 @@ pub fn test(dir: &Path, test: &Test) -> BayResult {
         other => refused(
             other,
             &format!(
-                "bay has no {other} adapter with a stdin and stdout contract; the kinds are {}",
+                "bay has no {other} plugin with a stdin and stdout contract; the kinds are {}",
                 KINDS.join(", ")
             ),
         ),
@@ -359,7 +359,7 @@ fn test_wake(dir: &Path, command: &str) -> BayResult {
     ) {
         (Some(Ok(cmd)), Some(Ok(callers))) => (cmd, callers),
         (Some(Err(why)), _) | (_, Some(Err(why))) => return refused("wake", &why),
-        _ => return refused("wake", "name the adapter's command after --"),
+        _ => return refused("wake", "name the plugin's command after --"),
     };
     let me = Actor {
         name: "adapter-test".to_owned(),
@@ -600,7 +600,7 @@ fn test_notify(dir: &Path, command: &str) -> BayResult {
         sent: event.clone(),
         came_back: json!({
             "exit": exit_code(sent.status), "elapsed_s": seconds(sent.elapsed),
-            "stdout": "bay sends the adapter's stdout and stderr nowhere",
+            "stdout": "bay sends the plugin's stdout and stderr nowhere",
         }),
     };
     let ran = (first.status.is_some() || first.elapsed >= bound).then_some(first.elapsed);
@@ -626,7 +626,7 @@ fn test_notify(dir: &Path, command: &str) -> BayResult {
             notify_exit(
                 &again,
                 bound,
-                "it took the same event id again: the id is the adapter's to deduplicate",
+                "it took the same event id again: the id is the plugin's to deduplicate",
             ),
         ),
         case(
@@ -1019,7 +1019,7 @@ fn check_report(command: &str, first: &Run, again: Option<&Run>) -> BayResult {
             .record
             .as_ref()
             .and_then(|record| record.why.clone())
-            .unwrap_or_else(|| "bay did not run the adapter".to_owned());
+            .unwrap_or_else(|| "bay did not run the plugin".to_owned());
         let shown = Shown {
             sent: Value::Null,
             came_back: Value::Null,

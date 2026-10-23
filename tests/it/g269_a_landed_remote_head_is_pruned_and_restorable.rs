@@ -314,7 +314,7 @@ fn prune_deletes_only_the_landed_branches_and_the_log_restores_them() {
     assert_eq!(skipped["class"], "merged", "{skipped}");
     assert_eq!(skipped["proof"], "change", "{skipped}");
     assert_eq!(
-        skipped["why"], "landed by Change-Id only; its commits may differ from what landed",
+        skipped["why"], "merged by Change-Id only; its commits may differ from what merged",
         "{skipped}"
     );
     let after = fixture.remote_heads();

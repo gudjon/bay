@@ -524,7 +524,7 @@ fn conflict_line(change: &str, op: &str, found: &crate::change::EarlyConflict) -
         .filter(|path| !path.chars().any(char::is_control))
         .collect();
     let text = format!(
-        "bay: change {change}: {} with trunk{trunk} on {} while it waits in the queue, on {}: \
+        "bay: change {change}: {} with main{trunk} on {} while it waits in the queue, on {}: \
          allowed {}; retry when {}",
         reason.code(),
         plain_op(change, op).unwrap_or("an operation"),
@@ -857,7 +857,7 @@ pub fn instructions(repo: &Repo, tree: &Path, state_dir: &Path) -> Option<(Strin
             .unwrap_or(0);
         if count > 0 {
             let plural = if count == 1 { "" } else { "s" };
-            named.push(format!("{file} ({count} trunk commit{plural})"));
+            named.push(format!("{file} ({count} main commit{plural})"));
             files.insert(file, Value::from(count));
         }
     }
@@ -868,8 +868,8 @@ pub fn instructions(repo: &Repo, tree: &Path, state_dir: &Path) -> Option<(Strin
         let _ = std::fs::write(&marker, &trunk);
     }
     let text = format!(
-        "bay: this tree is behind trunk on its instruction files: {} since its HEAD; read \
-         them at trunk (`git show {trunk_ref}:<file>`) before you follow them\n",
+        "bay: this tree is behind main on its instruction files: {} since its HEAD; read \
+         them on main (`git show {trunk_ref}:<file>`) before you follow them\n",
         named.join(", ")
     );
     Some((text, serde_json::json!({"trunk": trunk, "files": files})))

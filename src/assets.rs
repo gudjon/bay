@@ -23,8 +23,15 @@
 //! bay hashes every file itself: a `put` that prints another identity, or a `get` whose bytes
 //! hash to another one, is refused, never trusted. A `put` that fails refuses the save before
 //! anything is made (unknown is never a pass). The saved file stays in the work tree, and the
-//! clone's own `info/exclude` names it, so Git leaves it alone there. Phase 2 gives checks the
-//! bytes by identity and lets views fetch them on demand.
+//! clone's own `info/exclude` names it, so Git leaves it alone there.
+//!
+//! The bytes come back wherever the tree is used (phase 2): a view gets each manifest file its
+//! declared paths cover when it is made; the main checkout gets the ones it lacks at `bay
+//! install` and when `bay save` moves it to a merge; a check gets the ones it sees, read-only,
+//! with the plugin's program taken from the candidate's base. Each is hashed before it is used:
+//! a `get` whose bytes are not the manifest's is refused, and a check whose files cannot all be
+//! fetched is an `infra_failure`, never a pass. A file already there with the manifest's size is
+//! kept as it is.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -197,6 +204,168 @@ impl Plugin<'_> {
         }
         Ok(())
     }
+}
+
+/// The assets plugin `config` names, run from `work_root`, whatever `over_limit` says: getting
+/// bytes back needs only the plugin.
+#[must_use]
+pub fn plugin_of<'a>(config: &'a crate::config::Config, work_root: &'a Path) -> Option<Plugin<'a>> {
+    config.plugin.assets.as_ref().map(|assets| Plugin {
+        work_root,
+        command: &assets.command,
+        timeout: Duration::from_secs(assets.timeout_s.unwrap_or(DEFAULT_TIMEOUT_S)),
+    })
+}
+
+/// The manifest of `commit`, empty when it has none.
+///
+/// # Errors
+///
+/// The manifest cannot be read or parsed.
+pub fn manifest_at(git: &Git, commit: &str) -> Result<Vec<Entry>, String> {
+    match git
+        .file_at(commit, MANIFEST)
+        .map_err(|error| error.message())?
+    {
+        Some(text) => parse(&text),
+        None => Ok(Vec::new()),
+    }
+}
+
+/// Writes into `root` each file of `commit`'s manifest that `covered` takes and `root` lacks
+/// (a file there with the manifest's size is kept), through `plugin`'s `get`, hashed before it
+/// is moved into place; names each in `exclude` when given. Returns the paths written.
+///
+/// # Errors
+///
+/// The manifest cannot be read, or a `get` fails or writes other bytes: nothing of that file
+/// is left behind.
+pub fn fill(
+    plugin: &Plugin<'_>,
+    git: &Git,
+    commit: &str,
+    root: &Path,
+    covered: &dyn Fn(&str) -> bool,
+    exclude: Option<&Path>,
+) -> Result<Vec<String>, String> {
+    let wanted: Vec<Entry> = manifest_at(git, commit)?
+        .into_iter()
+        .filter(|entry| covered(&entry.path))
+        .collect();
+    let mut written = Vec::new();
+    for entry in &wanted {
+        let file = root.join(&entry.path);
+        if std::fs::metadata(&file).is_ok_and(|meta| meta.is_file() && meta.len() == entry.size) {
+            continue;
+        }
+        if let Some(dir) = file.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|error| format!("{} cannot be made: {error}", dir.display()))?;
+        }
+        let name = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("asset");
+        let tmp = file.with_file_name(format!(".{name}.{}.get", std::process::id()));
+        if let Err(why) = plugin.get(&entry.id, &tmp) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("{} could not be fetched: {why}", entry.path));
+        }
+        crate::durable::rename(&tmp, &file).map_err(|error| {
+            let _ = std::fs::remove_file(&tmp);
+            format!("{} cannot be written: {error}", file.display())
+        })?;
+        written.push(entry.path.clone());
+    }
+    if let Some(exclude) = exclude {
+        exclude_paths(exclude, &wanted)?;
+    }
+    Ok(written)
+}
+
+/// [`fill`] for one of `repo`'s own trees (its main checkout or a view): the plugin of its
+/// config, run from its main checkout, the files `covered` takes, named in the clone's
+/// `info/exclude`. A config with no assets plugin, or a commit with no manifest, writes nothing.
+///
+/// # Errors
+///
+/// As [`fill`].
+pub fn fill_tree(
+    repo: &Repo,
+    root: &Path,
+    commit: &str,
+    covered: &dyn Fn(&str) -> bool,
+) -> Result<Vec<String>, String> {
+    let Some(plugin) = plugin_of(&repo.config, &repo.work_root) else {
+        return Ok(Vec::new());
+    };
+    fill(
+        &plugin,
+        &repo.git,
+        commit,
+        root,
+        covered,
+        Some(&exclude_file(repo)),
+    )
+}
+
+/// A check's files (phase 2): each manifest file of `commit` that `kept` covers (all, when it
+/// is `None`) written into the check's `tree_dir`, through the assets plugin the config at
+/// `base` names, its program materialized from `base` into a scratch directory beside
+/// `tree_dir`, as the hold plugin's is. The check sees them read-only, with the rest of its tree.
+///
+/// # Errors
+///
+/// The config or manifest cannot be read, the plugin cannot be materialized, or a `get` fails.
+pub fn fill_check(
+    git: &Git,
+    commit: &str,
+    base: &str,
+    tree_dir: &Path,
+    kept: Option<&[String]>,
+    deadline: std::time::Instant,
+) -> Result<(), String> {
+    let covered = |path: &str| {
+        kept.is_none_or(|kept| kept.iter().any(|outer| crate::inputs::within(outer, path)))
+    };
+    if !manifest_at(git, commit)?
+        .iter()
+        .any(|entry| covered(&entry.path))
+    {
+        return Ok(());
+    }
+    let config = crate::config::Config::at(git, base)?;
+    let Some(assets) = config.plugin.assets.as_ref() else {
+        return Err(format!(
+            "the candidate's {MANIFEST} names files, and the config at its base names no [plugin.assets] to fetch them"
+        ));
+    };
+    let program = assets
+        .command
+        .split_whitespace()
+        .next()
+        .ok_or("[plugin.assets] command is empty")?
+        .to_owned();
+    let scratch = tree_dir.with_extension("assets-plugin");
+    let _ = std::fs::remove_dir_all(&scratch);
+    crate::materialize::materialize(git, base, Some(&[program]), &scratch, deadline, &mut || {})
+        .map_err(|unmade| format!("the assets plugin could not be materialized: {unmade:?}"))?;
+    let plugin = Plugin {
+        work_root: &scratch,
+        command: &assets.command,
+        timeout: Duration::from_secs(assets.timeout_s.unwrap_or(DEFAULT_TIMEOUT_S)),
+    };
+    let filled = fill(&plugin, git, commit, tree_dir, &covered, None);
+    let _ = std::fs::remove_dir_all(&scratch);
+    for path in filled? {
+        let file = tree_dir.join(&path);
+        if let Ok(meta) = std::fs::metadata(&file) {
+            let mut permissions = meta.permissions();
+            permissions.set_readonly(true);
+            let _ = std::fs::set_permissions(&file, permissions);
+        }
+    }
+    Ok(())
 }
 
 /// The assets plugin of `repo`'s config and the policy's file limit at `trunk` in bytes, when

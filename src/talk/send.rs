@@ -277,7 +277,7 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
     };
     if ask.who.is_some() {
         return Err(Refusal::invalid(
-            "`--to-change` names the recipient (the actor that landed the change): give the action alone, not a recipient beside it",
+            "`--to-change` names the recipient (the actor that merged the change): give the action alone, not a recipient beside it",
         )
         .into());
     }

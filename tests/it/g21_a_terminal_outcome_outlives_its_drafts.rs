@@ -191,7 +191,7 @@ fn the_hook_refuses_a_cut_of_an_open_change_or_one_dropping_the_latest_request()
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("keeps the latest land request"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("keeps the latest merge request"));
 }
 
 #[test]
@@ -537,7 +537,7 @@ fn an_uncut_marker_is_not_compacted(
     );
     assert!(!pushed, "a marker of an uncut change was compacted");
     assert!(
-        stderr.contains("has not landed with its chain cut by retention"),
+        stderr.contains("has not merged with its chain cut by retention"),
         "{stderr}"
     );
 }
@@ -587,7 +587,7 @@ fn shard_guards_refuse(
     refused(&forged, &shard, "takes only a fast-forward");
     // An append that no executor key signed.
     let forged = forge_shard(test_box, repo, None, Some(&tip), Some(&tip), &[]);
-    refused(&forged, &shard, "signed by an executor key");
+    refused(&forged, &shard, "signed by a runner key");
     // An append that changes a record it already holds.
     let forged = forge_shard(
         test_box,
@@ -870,7 +870,7 @@ fn a_landed_claim_is_created_only_by_its_own_landing() {
     let (pushed, stderr) = replay(&with_stray);
     assert!(!pushed, "{stray} was created by another change's landing");
     assert!(
-        stderr.contains("only by the landing of a change that holds"),
+        stderr.contains("only by the merge of a change that holds"),
         "{stderr}"
     );
     // The same landing without the stray landed claim is taken: the refusal was for it alone.

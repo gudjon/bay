@@ -126,11 +126,11 @@ impl Class {
     /// Why a branch of this class is never pruned; `None` for `landed`.
     fn kept(self) -> Option<&'static str> {
         match self {
-            Self::Trunk => Some("the trunk is never pruned"),
+            Self::Trunk => Some("main is never pruned"),
             Self::Target => Some("a [[target]] ref is never pruned"),
             Self::Lane => Some("a [[lane]] ref is never pruned"),
-            Self::Stale => Some("it holds commits the trunk does not; stale, but never pruned"),
-            Self::Unique => Some("it holds commits the trunk does not"),
+            Self::Stale => Some("it holds commits main does not; stale, but never pruned"),
+            Self::Unique => Some("it holds commits main does not"),
             Self::Landed => None,
         }
     }
@@ -234,9 +234,7 @@ fn run(dir: &Path, request: &Request) -> Result<BayResult, String> {
 
     let remote_heads = list(git, &remote)?;
     let Some(trunk_tip) = remote_heads.get(&trunk).cloned() else {
-        return Err(format!(
-            "the remote {remote} has no branch {trunk}, the trunk"
-        ));
+        return Err(format!("the remote {remote} has no main branch {trunk}"));
     };
 
     // One fetch of exactly the tips listed, so every judgement and every lease is of the tip
@@ -496,7 +494,7 @@ fn prove_by_change(repo: &Repo, trunk_tip: &str, rows: &mut [Head], unmatched: &
 }
 
 /// Why a landed branch proven by its `Change-Id` alone is never pruned.
-const CHANGE_ONLY: &str = "landed by Change-Id only; its commits may differ from what landed";
+const CHANGE_ONLY: &str = "merged by Change-Id only; its commits may differ from what merged";
 
 /// The archive refs, name to tip: those this clone holds (one `for-each-ref`) and those the
 /// remote holds (one `ls-remote`).

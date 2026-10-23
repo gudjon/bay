@@ -229,7 +229,7 @@ fn start_refuses_an_after_that_is_no_other_change() {
         start_writing(&test_box, &repo, "CARD-2737", "src/dep.rs", &[own.as_str()]);
     failed_with(
         &["CARD-2736", "--paths", "src/", "--after", &dependent],
-        "neither could land",
+        "neither could merge",
     );
     assert_eq!(host_record(&test_box, &host, &own)["after"], Value::Null);
 }

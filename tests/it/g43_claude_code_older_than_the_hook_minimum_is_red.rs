@@ -26,7 +26,7 @@ fn claude_older_than_2_1_302_is_red() {
     assert_eq!(claude["floor"], "2.1.302");
     assert_eq!(
         claude["recovery"],
-        "upgrade Claude Code or run without the Claude adapter"
+        "upgrade Claude Code, or remove [agent] product = \"claude\" from the config"
     );
 
     let line = test_box.bay(&repo).arg("doctor").output().unwrap();
@@ -34,7 +34,7 @@ fn claude_older_than_2_1_302_is_red() {
     let line = String::from_utf8(line.stderr).unwrap();
     assert!(
         line.contains(
-            "claude 2.1.200 (floor 2.1.302, upgrade Claude Code or run without the Claude adapter)"
+            "claude 2.1.200 (floor 2.1.302, upgrade Claude Code, or remove [agent] product = \"claude\" from the config)"
         ),
         "{line}"
     );

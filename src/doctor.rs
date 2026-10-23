@@ -26,9 +26,10 @@ use crate::version::{
 /// Where `bay install` records the digest of the hook entries that are not bay's.
 pub const UNRELATED_HOOKS_KEY: &str = "bay.unrelated-hooks-digest";
 
-const CLAUDE_RECOVERY: &str = "upgrade Claude Code or run without the Claude adapter";
+const CLAUDE_RECOVERY: &str =
+    "upgrade Claude Code, or remove [agent] product = \"claude\" from the config";
 
-const CODEX_RECOVERY: &str = "upgrade Codex or run without the Codex adapter";
+const CODEX_RECOVERY: &str = "upgrade Codex or run without the Codex plugin";
 
 /// An agent product's program on this box, where its adapter is configured.
 enum Program {
@@ -434,7 +435,7 @@ fn ref_format_row(ref_format: &str) -> Value {
 fn claude_row(claude: &Program, minimum: &Version, report: &mut Report) {
     let row = match claude {
         Program::NotConfigured => {
-            json!({"name": "claude", "state": "green", "note": "Claude adapter not configured"})
+            json!({"name": "claude", "state": "green", "note": "Claude Code is not the configured agent product"})
         }
         Program::Absent => {
             report.red_tool(Reason::ToolAbsent, "claude", None);
@@ -603,7 +604,7 @@ fn unguarded(git: &Git, config: &Config, report: &mut Report) {
     let mut row = json!({
         "name": "hooks",
         "state": "off",
-        "note": "no agent adapter is declared, so bay does not judge an agent's Git commands here: an agent can push main around bay",
+        "note": "no agent product is declared, so bay does not judge an agent's Git commands here: an agent can push main around bay",
         "recovery": "add [agent] product = \"claude\" (or \"codex\") to .bay/config.toml on main, run bay install in one clone, and merge the settings file it writes",
     });
     let mut guard = json!({"hook": "off"});
@@ -665,7 +666,7 @@ fn hooks_row(
                 .rows
                 .push(json!({"name": "trunk-hook", "state": "green"}));
         } else {
-            report.red(Reason::HooksMissing, Some("host has no trunk hook"));
+            report.red(Reason::HooksMissing, Some("host has no hook on main"));
             report
                 .rows
                 .push(json!({"name": "trunk-hook", "state": "red",
@@ -942,7 +943,7 @@ fn repository_row(git: &Git, config: &Config, report: &mut Report) {
     let mut notes = Vec::new();
     match distance {
         None => notes.push(format!(
-            "no distance from {trunk}: HEAD or the trunk tracking ref is missing"
+            "no distance from {trunk}: HEAD or the main tracking ref is missing"
         )),
         Some((_, behind)) if behind > 0 => notes.push(format!(
             "HEAD is {behind} commits behind {trunk} as of the last fetch"
@@ -1106,7 +1107,7 @@ fn check_env_row(git: &Git, config: &Config, report: &mut Report) {
         Ok(None) => {
             report.rows.push(
                 json!({"name": "check-env", "required": true, "state": "green",
-                "note": "no policy at trunk"}),
+                "note": "no policy on main"}),
             );
             return;
         }
@@ -1141,7 +1142,7 @@ fn check_env_row(git: &Git, config: &Config, report: &mut Report) {
     report.red(Reason::CheckEnvUnset, Some("a check's env name is unset"));
     report.rows.push(
         json!({"name": "check-env", "required": true, "state": "red",
-        "unset": unset, "recovery": "set each named variable in the executor's environment"}),
+        "unset": unset, "recovery": "set each named variable in the runner's environment"}),
     );
 }
 
@@ -1184,14 +1185,14 @@ fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report
             report
                 .rows
                 .push(json!({"name": "runner-keys", "required": false,
-                "state": "green", "note": "no registry: the executor publishes unsigned"}));
+                "state": "green", "note": "no registry: the runner merges unsigned"}));
             return;
         }
         // N-21: under `[policy] signing = "approvals"` no executor or producer key signs.
         Ok(Some(registry)) if !registry.signs_all() => {
             report.rows.push(json!({"name": "runner-keys", "required": false,
                 "state": "green", "signing": registry.mode().name(),
-                "note": "the policy at trunk says [policy] signing = \"approvals\": the executor publishes unsigned, and only approvals are signed"}));
+                "note": "the policy on main says [policy] signing = \"approvals\": the runner merges unsigned, and only approvals are signed"}));
             return;
         }
         Ok(Some(registry)) => registry,
@@ -1224,10 +1225,7 @@ fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report
         "executor": executor, "executor_name": keys.executor_name,
         "producer": producer, "producer_name": keys.producer_name});
     if !green {
-        report.red(
-            Reason::ExecutorKeyMissing,
-            Some("executor keys not enrolled"),
-        );
+        report.red(Reason::ExecutorKeyMissing, Some("runner keys not enrolled"));
         row["recovery"] = json!(
             "set bay.runnerKey and bay.producerKey, under the names bay.runnerName and bay.producerName that the registry enrols"
         );
@@ -1252,7 +1250,7 @@ fn presence_row(git: &Git, config: &Config, keys: &crate::signing::Keys, report:
         None => {
             row["state"] = json!("none");
             row["note"] = json!(
-                "this executor has published no presence here yet; each pass of bay runner run publishes it"
+                "this runner has written no presence here yet; each pass of bay runner run writes it"
             );
         }
         Some(record) => {
@@ -1447,7 +1445,7 @@ fn status_line(
         (false, false) => format!("git {git_version} (floor {floor}, upgrade git)"),
     };
     let claude_field = match claude {
-        Program::NotConfigured => "claude adapter not configured".to_owned(),
+        Program::NotConfigured => "Claude Code is not the configured agent product".to_owned(),
         Program::Absent => format!("claude absent ({CLAUDE_RECOVERY})"),
         Program::Found(version) if version < minimum => {
             format!("claude {version} (floor {CLAUDE_HOOK_MINIMUM}, {CLAUDE_RECOVERY})")

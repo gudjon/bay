@@ -387,7 +387,7 @@ fn approvals_only(git: &Git, registry: &Registry, updates: &[Update]) -> Result<
 fn never_a_lane(record: &crate::change::ChangeRecord, commit: &str) -> Result<(), String> {
     match &record.lane {
         Some(lane) => Err(format!(
-            "{commit} publishes change {} of lane {lane}; a lane change never merges",
+            "{commit} carries change {} of lane {lane}; a lane change never merges",
             record.id
         )),
         None => Ok(()),
@@ -491,7 +491,7 @@ impl Judge<'_> {
             if let Some(claim) = update.name.strip_prefix(crate::names::INTENT) {
                 let publication = self
                     .marker(&format!("{}{claim}", crate::names::LANDED_INTENT))?
-                    .ok_or("a claim is compacted only once its generation landed")?;
+                    .ok_or("a claim is compacted only once its generation merged")?;
                 (claim, publication)
             } else if let Some(claim) = update.name.strip_prefix(crate::names::LANDED_INTENT) {
                 (claim, update.old.clone())
@@ -505,7 +505,7 @@ impl Judge<'_> {
     /// § 10a: change `id` landed and retention cut its chain, so its markers may be compacted.
     /// With `claim` (`<hash>/<generation>`), the change also held that claim.
     fn cut_landing(&self, id: &str, claim: Option<&str>) -> Result<(), String> {
-        let refused = || format!("change {id} has not landed with its chain cut by retention");
+        let refused = || format!("change {id} has not merged with its chain cut by retention");
         let chain = format!("{}{id}", crate::names::CHANGES);
         crate::names::bay_ref(&chain).map_err(|_| refused())?;
         if self
@@ -589,7 +589,7 @@ impl Judge<'_> {
             self.signer(&update.new, &[KeyClass::Runner])?,
             Some((KeyClass::Runner, _))
         ) {
-            return Err("a shard index commit is signed by an executor key".to_owned());
+            return Err("a shard index commit is signed by a runner key".to_owned());
         }
         for (name, target) in self.appended(update)?.iter() {
             let deletes = self
@@ -731,7 +731,7 @@ impl Judge<'_> {
                         .is_none()
                     {
                         return Err(format!(
-                            "{commit} lands a batch, and the config at its base {base} sets no [runner] batch"
+                            "{commit} merges a batch, and the config at its base {base} sets no [runner] batch"
                         ));
                     }
                     Judged::BatchBase(base)
@@ -774,7 +774,7 @@ impl Judge<'_> {
             .is_some()
             || self.recorded(&marker)?.is_some()
         {
-            return Err(format!("change {change} already landed"));
+            return Err(format!("change {change} already merged"));
         }
         Ok(())
     }
@@ -793,7 +793,7 @@ impl Judge<'_> {
             .map_err(|error| message(&error))?;
         let not_a_publication = || {
             format!(
-                "{commit} is not a publication: trunk takes only commits signed by an executor key"
+                "{commit} is not a merge by bay: main takes only commits signed by a runner key"
             )
         };
         if change.is_empty() {
@@ -822,7 +822,7 @@ impl Judge<'_> {
         let request = self.request(&request_id, &change)?;
         if request.revision != revision {
             return Err(format!(
-                "{commit} publishes {revision}, but its request names {}",
+                "{commit} merges {revision}, but its request names {}",
                 request.revision
             ));
         }
@@ -833,7 +833,7 @@ impl Judge<'_> {
         let latest = self.request(&latest, &change)?;
         if latest.revision != revision {
             return Err(format!(
-                "{commit} publishes a revision a newer request superseded"
+                "{commit} merges a revision a newer request superseded"
             ));
         }
         // The operation is not cancelled, and the change is of no lane.
@@ -854,14 +854,14 @@ impl Judge<'_> {
                     .iter()
                     .any(|op| op.revision == revision && op.state != OpState::Superseded)
             {
-                return Err(format!("{commit} publishes a cancelled operation"));
+                return Err(format!("{commit} merges a cancelled operation"));
             }
         }
         self.creates_marker(commit, &change)?;
         // `crate::throughput`: a policy repair is judged by its own policy, never in a batch.
         if request.repair && *judged != Judged::Parent {
             return Err(format!(
-                "{commit} is a policy repair, which never lands in a batch"
+                "{commit} is a policy repair, which never merges in a batch"
             ));
         }
         // § 10a, G33: evidence counts only under the current registry. Evidence that passes
@@ -879,12 +879,12 @@ impl Judge<'_> {
             return evidence;
         }
         let revoked = match (key_revoked, producer_revoked) {
-            (true, true) => "its executor key and a producer key behind its evidence are",
-            (true, false) => "its executor key is",
+            (true, true) => "its runner key and a producer key behind its evidence are",
+            (true, false) => "its runner key is",
             _ => "a producer key behind its evidence is",
         };
         Err(format!(
-            "REGISTRY_CHANGED: {commit} was signed under registry {registry_id}, and {revoked} not valid in the current registry {}; an executor with a valid key re-signs it",
+            "REGISTRY_CHANGED: {commit} was signed under registry {registry_id}, and {revoked} not valid in the current registry {}; a runner with a valid key re-signs it",
             self.registry.commit
         ))
     }
@@ -1036,7 +1036,7 @@ impl Judge<'_> {
 
     fn landed(&self, update: &Update, id: &str, trunk: &str) -> Result<(), String> {
         if !is_zero(&update.old) {
-            return Err("a landed marker is never moved or deleted".to_owned());
+            return Err("a merge marker is never moved or deleted".to_owned());
         }
         let mut with_trunk = false;
         for other in self.updates.iter().filter(|other| other.name == trunk) {
@@ -1047,7 +1047,7 @@ impl Judge<'_> {
         }
         if !with_trunk {
             return Err(format!(
-                "is created only together with the trunk update that lands {id}"
+                "is created only together with the update of main that merges {id}"
             ));
         }
         Ok(())
@@ -1133,7 +1133,7 @@ impl Judge<'_> {
                     .marker(&format!("{}{id}", crate::names::LANDED))?
                     .is_some()
                 {
-                    return Err(format!("{commit} adopts a change that already landed"));
+                    return Err(format!("{commit} adopts a change that already merged"));
                 }
                 if !matches!(
                     before.state,
@@ -1149,7 +1149,7 @@ impl Judge<'_> {
                     .marker(&format!("{}{id}", crate::names::LANDED))?
                     .is_some()
             {
-                return Err(format!("{commit} abandons a change that already landed"));
+                return Err(format!("{commit} abandons a change that already merged"));
             }
             match self.signer(
                 &commit,
@@ -1169,7 +1169,7 @@ impl Judge<'_> {
                 Some(_) => {}
                 None => {
                     return Err(format!(
-                        "{commit} is not signed by an agent, executor or registry key"
+                        "{commit} is not signed by an agent, runner or registry key"
                     ));
                 }
             }
@@ -1364,7 +1364,7 @@ impl Judge<'_> {
                     .is_some_and(|summary| summary["key"] == key.as_str())
             }) {
                 return Err(format!(
-                    "agent {signer}'s key already holds {other}; one key publishes one machine's live ref"
+                    "agent {signer}'s key already holds {other}; one key writes one machine's live ref"
                 ));
             }
         } else if let Some((bound, bound_key)) =
@@ -1385,15 +1385,12 @@ impl Judge<'_> {
     /// the ref is named for and signed by that executor's key, so no executor speaks for another.
     fn presence(&self, update: &Update, executor: &str) -> Result<(), String> {
         if is_zero(&update.new) {
-            return Err("an executor presence ref is never deleted".to_owned());
+            return Err("a runner presence ref is never deleted".to_owned());
         }
         match self.signer(&update.new, &[KeyClass::Runner])? {
             Some((_, principal)) if principal == executor => {}
             _ => {
-                return Err(format!(
-                    "{} is not signed by executor {executor}",
-                    update.new
-                ));
+                return Err(format!("{} is not signed by runner {executor}", update.new));
             }
         }
         let parents = self
@@ -1432,7 +1429,7 @@ impl Judge<'_> {
                 )
             })?;
         if record["executor"] != executor {
-            return Err(format!("{} names another executor", update.new));
+            return Err(format!("{} names another runner", update.new));
         }
         Ok(())
     }
@@ -1469,7 +1466,7 @@ impl Judge<'_> {
             self.signer(&update.new, &[KeyClass::Runner])?,
             Some((KeyClass::Runner, _))
         ) {
-            return Err("a retention cut is signed by an executor key".to_owned());
+            return Err("a retention cut is signed by a runner key".to_owned());
         }
         // § 10a: only a landed change, or one whose chain (before the cut) is abandoned.
         let landed = self
@@ -1495,7 +1492,7 @@ impl Judge<'_> {
                 .any(|parent| parent == latest)
         });
         if !keeps_latest && (landed || latest.is_some()) {
-            return Err("a retention cut keeps the latest land request".to_owned());
+            return Err("a retention cut keeps the latest merge request".to_owned());
         }
         Ok(())
     }
@@ -1646,13 +1643,13 @@ impl Judge<'_> {
 
     fn log(&self, update: &Update, executor: &str) -> Result<(), String> {
         if is_zero(&update.new) {
-            return Err("an executor log is never deleted".to_owned());
+            return Err("a runner log is never deleted".to_owned());
         }
         let range = if is_zero(&update.old) {
             update.new.clone()
         } else {
             if !self.git.is_ancestor(&update.old, &update.new)? {
-                return Err("an executor log only appends".to_owned());
+                return Err("a runner log only appends".to_owned());
             }
             format!("{}..{}", update.old, update.new)
         };
@@ -1663,7 +1660,7 @@ impl Judge<'_> {
         for commit in commits.lines() {
             match self.signer(commit, &[KeyClass::Runner])? {
                 Some((_, principal)) if principal == executor => {}
-                _ => return Err(format!("{commit} is not signed by executor {executor}")),
+                _ => return Err(format!("{commit} is not signed by runner {executor}")),
             }
         }
         Ok(())
@@ -1729,7 +1726,7 @@ impl Judge<'_> {
             self.signer(&update.new, &[KeyClass::Runner])?,
             Some((KeyClass::Runner, _))
         ) {
-            return Err("a reservation is signed by an executor key".to_owned());
+            return Err("a reservation is signed by a runner key".to_owned());
         }
         let queue = crate::queue::Queue::local(self.git)?;
         if is_zero(&update.old) {
@@ -1802,7 +1799,7 @@ impl Judge<'_> {
         }
         if generation > 1 && !self.generation_closed(hash, generation - 1)? {
             return Err(format!(
-                "generation {generation} needs generation {} landed or given up",
+                "generation {generation} needs generation {} merged or given up",
                 generation - 1
             ));
         }
@@ -1869,7 +1866,7 @@ impl Judge<'_> {
     /// lands names it).
     fn landed_intent(&self, update: &Update, claim: &str, trunk: &str) -> Result<(), String> {
         if !is_zero(&update.old) {
-            return Err("this generation of the intent already landed".to_owned());
+            return Err("this generation of the intent already merged".to_owned());
         }
         // `crate::throughput`: a batch member's marker names its own commit, which the trunk
         // update lands as part of its whole batch (`Judge::trunk` judges the batch).
@@ -1877,12 +1874,14 @@ impl Judge<'_> {
             other.new == update.new || self.lands_in_batch(&update.new, other).unwrap_or(false)
         });
         if !with_trunk {
-            return Err("is created only together with the trunk update that lands it".to_owned());
+            return Err(
+                "is created only together with the update of main that merges it".to_owned(),
+            );
         }
         let change = self.trailer(&update.new, "Change-Id")?;
         let chain = format!("{}{change}", crate::names::CHANGES);
         let names_holder =
-            || format!("is created only by the landing of a change that holds {claim}");
+            || format!("is created only by the merge of a change that holds {claim}");
         crate::names::bay_ref(&chain).map_err(|_| names_holder())?;
         let head = self.after(&chain)?.ok_or_else(names_holder)?;
         let record = Chain::new(self.git)
@@ -1919,7 +1918,7 @@ impl Judge<'_> {
             self.signer(&update.new, &[KeyClass::Runner])?,
             Some((KeyClass::Runner, _))
         ) {
-            return Err("a release is signed by an executor key".to_owned());
+            return Err("a release is signed by a runner key".to_owned());
         }
         let reserved = format!("{}{seq}", crate::queue::QUEUE_PREFIX);
         if self.after(&reserved)?.is_none() {

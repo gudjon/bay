@@ -434,11 +434,11 @@ fn claims(
         }
         Event::Stop if payload.agent.is_none() && !stop_refused => {
             crate::claims::release(session.as_str(), state_dir);
-            crate::locks::release(repo, state_dir);
+            crate::locks::release(repo, state_dir, crate::live::unix_now());
         }
         Event::SessionEnd => {
             crate::claims::release(session.as_str(), state_dir);
-            crate::locks::release(repo, state_dir);
+            crate::locks::release(repo, state_dir, crate::live::unix_now());
         }
         _ => {}
     }
@@ -748,7 +748,7 @@ fn early_conflict(operation: &Value) -> Option<String> {
         .filter(|path| !path.chars().any(char::is_control))
         .collect();
     Some(format!(
-        "bay: {} with trunk while it waits in the queue, on {}: allowed {}; retry when {}\n",
+        "bay: {} with main while it waits in the queue, on {}: allowed {}; retry when {}\n",
         reason.code(),
         paths.join(", "),
         reason.allowed().join(", "),

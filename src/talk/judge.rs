@@ -910,7 +910,7 @@ fn expired(push: &Push, talk: &Talk, entry: &Value, known: &Known) -> Result<(),
 fn answered(push: &Push, talk: &Talk, entry: &Value) -> Result<(), String> {
     let Some(change) = talk.about_change() else {
         return Err(format!(
-            "talk {} asks about no change, so no landing answers it",
+            "talk {} asks about no change, so no merge answers it",
             talk.id
         ));
     };
@@ -930,14 +930,14 @@ fn answered(push: &Push, talk: &Talk, entry: &Value) -> Result<(), String> {
         return Err(format!("`{field}` {by:?} is not a change id"));
     }
     if (push.marker)(&format!("{}{by}", crate::names::LANDED))?.as_deref() != Some(landing) {
-        return Err(format!("{landing} is not the landing of change {by}"));
+        return Err(format!("{landing} is not the merge of change {by}"));
     }
     if !trailer_values(push.git, landing, trailer)?
         .iter()
         .any(|value| value == change)
     {
         return Err(format!(
-            "the landing {landing} of {by} does not name change {change} in `{trailer}:`, so it is not `{field}`"
+            "the merge {landing} of {by} does not name change {change} in `{trailer}:`, so it is not `{field}`"
         ));
     }
     Ok(())

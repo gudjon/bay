@@ -90,8 +90,8 @@ fn a_tree_behind_trunk_on_its_instructions_is_told_once() {
         .lines()
         .find(|line| line.contains("instruction"))
         .unwrap_or_else(|| panic!("no notice: {out}"));
-    assert!(line.contains("AGENTS.md (2 trunk commits)"), "{line}");
-    assert!(line.contains("CLAUDE.md (1 trunk commit)"), "{line}");
+    assert!(line.contains("AGENTS.md (2 main commits)"), "{line}");
+    assert!(line.contains("CLAUDE.md (1 main commit)"), "{line}");
     let recorded = last_line(&repo, "s-1");
     let behind = &recorded["instructions_behind"];
     assert_eq!(behind["files"]["AGENTS.md"], 2, "{recorded}");
@@ -103,7 +103,7 @@ fn a_tree_behind_trunk_on_its_instructions_is_told_once() {
     assert!(!again.contains("instruction"), "{again}");
     assert!(last_line(&repo, "s-1").get("instructions_behind").is_none());
     // Another session is told.
-    assert!(start(&test_box, &repo, "s-2").contains("AGENTS.md (2 trunk commits)"));
+    assert!(start(&test_box, &repo, "s-2").contains("AGENTS.md (2 main commits)"));
 }
 
 #[test]
@@ -148,6 +148,6 @@ fn the_config_names_the_instruction_files() {
         .lines()
         .find(|line| line.contains("instruction"))
         .unwrap_or_else(|| panic!("no notice: {out}"));
-    assert!(line.contains("docs/RULES.md (1 trunk commit)"), "{line}");
+    assert!(line.contains("docs/RULES.md (1 main commit)"), "{line}");
     assert!(!line.contains("AGENTS.md"), "{line}");
 }

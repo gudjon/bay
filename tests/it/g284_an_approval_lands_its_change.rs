@@ -197,7 +197,7 @@ fn an_approval_lands_the_approved_candidate_with_no_second_land() {
     let next = waiting["detail"]["approval"]["once_approved"]
         .as_str()
         .unwrap_or_default();
-    assert!(next.contains("executor"), "{waiting}");
+    assert!(next.contains("runner"), "{waiting}");
     assert!(next.contains("bay merge --wait"), "{waiting}");
     let candidate = held(&waiting, "pending");
     assert_eq!(trunk.runs(), 1);

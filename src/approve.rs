@@ -485,7 +485,7 @@ fn next_step(repo: &Repo, held: &Held, reject: bool) -> (&'static str, String) {
         return (
             "author_repairs",
             format!(
-                "the change is blocked: {actor}, its author, repairs it and lands it again, and the new candidate waits for an approval"
+                "the change is blocked: {actor}, its author, repairs it and merges it again, and the new candidate waits for an approval"
             ),
         );
     }
@@ -494,7 +494,7 @@ fn next_step(repo: &Repo, held: &Held, reject: bool) -> (&'static str, String) {
         return (
             "here",
             format!(
-                "this machine holds the change's view ({}): bay merge --wait there lands it. bay approve runs nothing else",
+                "this machine holds the change's view ({}): bay merge --wait there merges it. bay approve runs nothing else",
                 view.display()
             ),
         );
@@ -507,13 +507,13 @@ fn next_step(repo: &Repo, held: &Held, reject: bool) -> (&'static str, String) {
     if live {
         (
             "executor",
-            "an executor runs: its next pass lands the change; nobody needs to run bay merge again"
+            "a runner runs: its next pass merges the change; nobody needs to run bay merge again"
                 .to_owned(),
         )
     } else {
         (
             "author",
-            format!("{actor}, the change's author, runs bay merge --wait, and the change lands"),
+            format!("{actor}, the change's author, runs bay merge --wait, and the change merges"),
         )
     }
 }
@@ -762,7 +762,7 @@ fn waiver_item(git: &Git, found: &Waivable) -> Result<Value, String> {
         "commit": found.commit,
         "tree": found.tree,
         "diff": diff_summary(git, &found.base, &found.commit)?,
-        "note": "a waiver is never a pass: the check lands as a named coverage gap, on this candidate only",
+        "note": "a waiver is never a pass: the change merges with the check named as a coverage gap, on this candidate only",
     }))
 }
 
@@ -925,7 +925,7 @@ fn waive_in(
         (
             "here",
             format!(
-                "this machine holds the change's view ({}): bay merge --wait there lands it, naming the waiver as a coverage gap",
+                "this machine holds the change's view ({}): bay merge --wait there merges it, naming the waiver as a coverage gap",
                 view.display()
             ),
         )
@@ -933,7 +933,7 @@ fn waive_in(
         (
             "author",
             format!(
-                "{actor}, the change's author, runs bay merge --wait, and the change lands with the waiver named as a coverage gap"
+                "{actor}, the change's author, runs bay merge --wait, and the change merges with the waiver named as a coverage gap"
             ),
         )
     };

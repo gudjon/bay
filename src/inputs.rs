@@ -584,7 +584,7 @@ pub fn judge(
             };
             let Some(entry) = entry else {
                 judgement.why = Some(format!(
-                    "the policy at trunk has no [[input]] entry for {name}"
+                    "the policy on main has no [[input]] entry for {name}"
                 ));
                 return judgement;
             };
@@ -720,7 +720,7 @@ pub fn stale_inputs(repo: &Repo, record: &ChangeRecord) -> Result<Vec<Judgement>
     let trunk = repo
         .git
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
-        .map_err(|error| format!("the local cache holds no trunk: {}", error.message()))?;
+        .map_err(|error| format!("the local cache holds no main branch: {}", error.message()))?;
     stale_at(repo, record, &trunk, Probe::Cached)
 }
 

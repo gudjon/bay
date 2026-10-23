@@ -242,7 +242,7 @@ fn a_queued_change_hears_of_its_early_conflict_once() {
     let short = &trunk[..12];
     assert!(
         told.starts_with(&format!(
-            "bay: change {id}: MERGE_CONFLICT with trunk {short} on {op_id} while it waits in \
+            "bay: change {id}: MERGE_CONFLICT with main {short} on {op_id} while it waits in \
              the queue, on src/b.rs: allowed "
         )),
         "{told}"
@@ -277,7 +277,7 @@ fn a_queued_change_hears_of_its_early_conflict_once() {
         "s-r",
     );
     assert!(
-        out.contains("bay: MERGE_CONFLICT with trunk while it waits in the queue, on src/b.rs: "),
+        out.contains("bay: MERGE_CONFLICT with main while it waits in the queue, on src/b.rs: "),
         "{out}"
     );
     let (_, later) = hook(&test_box, &view, "step.end", "08-PostToolBatch.json", "s-r");

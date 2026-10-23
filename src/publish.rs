@@ -530,7 +530,7 @@ impl<'a> Ctx<'a> {
             return Ok(None);
         }
         self.keys.executor.clone().map(Some).ok_or_else(|| {
-            "the repository has a key registry and this machine has no executor key (git config bay.runnerKey)".to_owned()
+            "the repository has a key registry and this machine has no runner key (git config bay.runnerKey)".to_owned()
         })
     }
 
@@ -559,7 +559,7 @@ impl<'a> Ctx<'a> {
             .is_ancestor(&self.record.observed_remote, &trunk)?
         {
             return Ok(Err(BayResult::failed(format!(
-                "trunk was rewound: {} is no longer an ancestor of the remote trunk {trunk}; bay never forces",
+                "main was rewound: {} is no longer an ancestor of the remote main ({trunk}); bay never forces",
                 self.record.observed_remote
             ))
             .with_change(self.id.clone())));
@@ -996,7 +996,7 @@ fn actor_unproven(repo: &Repo, id: &str, trunk: &str) -> Result<Option<BayResult
                 "actors": proof.actors,
                 "policy": policy::POLICY_PATH,
                 "base": trunk,
-                "recovery": "give each actor its own OS account, or a hardware agent key (ssh-keygen -t ed25519-sk, which signs only with a touch), enrol it, then land again",
+                "recovery": "give each actor its own OS account, or a hardware agent key (ssh-keygen -t ed25519-sk, which signs only with a touch), enrol it, then merge again",
             })),
     ))
 }
@@ -1297,7 +1297,7 @@ pub fn recover_events(repo: &Repo, records: &[ChangeRecord]) -> Result<usize, St
     let signer = match Registry::current(&repo.git)?.filter(Registry::signs_all) {
         None => None,
         Some(_) => Some(keys.executor.clone().ok_or(
-            "the repository has a key registry and this machine has no executor key (git config bay.runnerKey)",
+            "the repository has a key registry and this machine has no runner key (git config bay.runnerKey)",
         )?),
     };
     let mut written = 0;
@@ -2107,7 +2107,7 @@ fn after_refused_push(
         *seq = None;
         return Ok(Some(
             BayResult::failed(format!(
-                "the publishing push was refused: this head's queue place was released ({reason}) while it published; nothing was published"
+                "the merging push was refused: this head's queue place was released ({reason}) while it merged; nothing was merged"
             ))
             .with_change(ctx.id.clone())
             .with_op(op_id),
@@ -2226,7 +2226,7 @@ fn registry_changed(
         ),
     )?;
     if !ctx.push_chain() {
-        return Err("the change chain could not be pushed; nothing was published".to_owned());
+        return Err("the change chain could not be pushed; nothing was merged".to_owned());
     }
     Ok(None)
 }
@@ -3352,7 +3352,7 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
         Some(Err(why)) => Err(("submission_failed", why)),
         None => Err((
             "submission_failed",
-            "the executor command is empty".to_owned(),
+            "the runner command is empty".to_owned(),
         )),
     }
     .and_then(|mut cmd| {
@@ -3366,13 +3366,13 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
                 crate::run::Fault::Timeout(_) => (
                     "submission_timeout",
                     format!(
-                        "the executor did not admit {op_id} within the submission timeout of {}s",
+                        "the runner did not admit {op_id} within the submission timeout of {}s",
                         timeout.as_secs()
                     ),
                 ),
                 crate::run::Fault::Spawn(error) => (
                     "submission_failed",
-                    format!("the executor command {name} could not be started: {error}"),
+                    format!("the runner command {name} could not be started: {error}"),
                 ),
                 other => ("submission_failed", other.to_string()),
             }
@@ -3385,7 +3385,7 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
             Err((
                 "submission_refused",
                 format!(
-                    "the executor refused the submission: {}",
+                    "the runner refused the submission: {}",
                     String::from_utf8_lossy(&output.stderr).trim()
                 ),
             ))
@@ -3395,12 +3395,12 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
         let reply: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
             (
                 "submission_refused",
-                format!("the executor's submit reply is not JSON: {error}"),
+                format!("the runner's submit reply is not JSON: {error}"),
             )
         })?;
         reply["job"].as_str().map(str::to_owned).ok_or((
             "submission_refused",
-            "the executor's submit reply has no job".to_owned(),
+            "the runner's submit reply has no job".to_owned(),
         ))
     });
     // A submission the executor never took ends the operation with a stated outcome (§ 9a),
@@ -3609,8 +3609,8 @@ fn red_gate(
             .with_detail(json!({
                 "red": blocking.iter().map(|red| red.to_json()).collect::<Vec<_>>(),
                 "ways_out": [
-                    "land a change that names the owner: bay start --fixes <owner>, or bay undo <owner>",
-                    "a later run of the post check passes on trunk",
+                    "merge a change that names the owner: bay start --fixes <owner>, or bay undo <owner>",
+                    "a later run of the post check passes on main",
                     "quarantine the check in the policy",
                 ],
                 "owners": owners,
@@ -3651,11 +3651,11 @@ fn hold_gate(
     )?;
     let why = match &hold.end {
         Some(end) => format!(
-            "trunk is held until {end} ({}), and this change carries no Fixes: or Reverts:",
+            "main is held until {end} ({}), and this change carries no Fixes: or Reverts:",
             hold.reason
         ),
         None => format!(
-            "trunk is held ({}), and this change carries no Fixes: or Reverts:",
+            "main is held ({}), and this change carries no Fixes: or Reverts:",
             hold.reason
         ),
     };
@@ -3667,8 +3667,8 @@ fn hold_gate(
             "why": why,
             "trunk": trunk,
             "ways_out": [
-                "wait: the operation stays queued and lands once the hold clears (bay merge --wait again, or an executor pass)",
-                "land a fix or a revert: bay start --fixes <change>, or bay undo <change>",
+                "wait: the operation stays queued and merges once the hold clears (bay merge --wait again, or a runner pass)",
+                "merge a fix or a revert: bay start --fixes <change>, or bay undo <change>",
             ],
         }));
     result.waiting_for = Some("hold".to_owned());
@@ -3822,7 +3822,7 @@ fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayR
                 "ended": ended.iter().copied().map(crate::after::Dependency::to_json).collect::<Vec<_>>(),
                 "after": after,
                 "why": format!(
-                    "this change lands only after {named}, which ended without landing, so it can never publish"
+                    "this change merges only after {named}, which ended without merging, so it can never merge"
                 ),
                 "trunk": trunk,
                 "recovery": format!(
@@ -3849,13 +3849,13 @@ fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayR
             "pending": pending.iter().copied().map(crate::after::Dependency::to_json).collect::<Vec<_>>(),
             "after": after,
             "why": format!(
-                "this change lands only after {}, not yet landed on trunk",
+                "this change merges only after {}, not yet merged into main",
                 names.join(", ")
             ),
             "trunk": trunk,
             "ways_out": [
-                "wait: the operation stays queued and lands once every change it names has landed (bay merge --wait again, or an executor pass)",
-                "land the changes it names first",
+                "wait: the operation stays queued and merges once every change it names has merged (bay merge --wait again, or a runner pass)",
+                "merge the changes it names first",
             ],
         }));
     result.waiting_for = Some("dependencies".to_owned());
@@ -3918,6 +3918,44 @@ fn too_large(
         crate::limits::refusal(&limits, &exceeded, trunk, "candidate")
             .with_change(ctx.id.clone())
             .with_op(op_id),
+    ))
+}
+
+/// `LOCK_NOT_HELD` at candidate build (BACKLOG 57): the merged `tree` changes a path the policy
+/// at `trunk` names lockable (`[locks] paths`), and no commit of that path's lock names this
+/// change (or, for a save of a main checkout, which names no change, its actor). Such an edit
+/// went around the lock, and two copies of a file that never merges cannot be combined. The
+/// operation is blocked, as on a conflict; no candidate is committed and no check runs.
+fn lock_not_held(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+    tree: &str,
+) -> Result<Option<BayResult>, String> {
+    let repo = ctx.repo;
+    let paths = crate::locks::not_held(repo, trunk, tree, &ctx.id, &ctx.record.actor.name)?;
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let condition = condition(
+        &repo.git,
+        revision,
+        trunk,
+        None,
+        &ctx.record.observed_versions,
+    )?;
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Blocked;
+    op.outcome = Some(Reason::LockNotHeld.code().to_owned());
+    op.blocked_on = Some(condition);
+    ctx.save(revision, None, "blocked: lock not held")?;
+    ctx.push_chain();
+    Ok(Some(
+        BayResult::blocked(Reason::LockNotHeld)
+            .with_change(ctx.id.clone())
+            .with_op(op_id)
+            .with_detail(json!({"paths": paths, "main": trunk})),
     ))
 }
 
@@ -3995,6 +4033,11 @@ fn build_and_check(
         // Owner ruling 2026-10-21: the candidate's change to trunk, over a size limit of the
         // policy at trunk, is refused before it is committed or checked.
         if let Some(refusal) = too_large(ctx, op_id, revision, trunk, &tree)? {
+            return Ok(Err(refusal));
+        }
+        // BACKLOG 57: a file that never merges reaches main only from the change that held
+        // its lock.
+        if let Some(refusal) = lock_not_held(ctx, op_id, revision, trunk, &tree)? {
             return Ok(Err(refusal));
         }
         if let Some(no_effect) = no_effect(ctx, op_id, revision, trunk, &tree)? {
@@ -4124,7 +4167,7 @@ fn persist_attempt(
         (Persisted::Lost(result), _) => Ok(Err(*result)),
         (_, Some(refusal)) => Ok(Err(refusal)),
         (Persisted::Unpushed, None) => {
-            Err("the change chain could not be pushed; nothing was published".to_owned())
+            Err("the change chain could not be pushed; nothing was merged".to_owned())
         }
         (Persisted::Pushed, None) => {
             kill_point("after-persist");
@@ -4270,7 +4313,7 @@ fn input_gate(
             .with_detail(json!({
                 "input": unknown.input,
                 "why": unknown.why,
-                "repair": format!("make trunk's provider for {} answer", unknown.input),
+                "repair": format!("make main's provider for {} answer", unknown.input),
                 "inputs": inputs::to_json(judged.iter()),
             }))));
     }
@@ -4498,7 +4541,7 @@ fn policy_missing(ctx: &Ctx, op_id: &str, base: &str) -> (bool, &'static str, Op
                     "base": base,
                     "path": policy::POLICY_PATH,
                     "why": format!(
-                        "the base {base} has no {}, so the criteria are unknown; add a policy there, or declare unchecked = true in it to land without checks",
+                        "the base {base} has no {}, so the criteria are unknown; add a policy there, or declare unchecked = true in it to merge without checks",
                         policy::POLICY_PATH
                     ),
                 })),
@@ -4905,7 +4948,7 @@ fn approval_detail(
     let mut detail = json!({"checks": rows, "commit": commit, "tree": tree});
     // G284: what lands it once an approver said yes; nothing else asks the change again.
     detail["once_approved"] = json!(
-        "an executor's next pass lands this candidate; without an executor, the author's bay merge --wait lands it"
+        "a runner's next pass merges this candidate; without a runner, the author's bay merge --wait merges it"
     );
     if registry.is_none() {
         detail["why"] = json!(format!(
@@ -4960,7 +5003,7 @@ fn unavailable(
         Some(reason) => detail["unavailable"] = json!(reason),
         None => {
             detail["recovery"] = json!(format!(
-                "an executor whose box serves them claims this operation; a box declares each with git config --global --add {} <environment>",
+                "a runner whose box serves them claims this operation; a box declares each with git config --global --add {} <environment>",
                 check::ENVIRONMENT_KEY
             ));
         }
@@ -5680,7 +5723,7 @@ fn push_and_read_back_evidence(repo: &Repo, producer: &str) -> Result<(), String
             if message.contains("non-fast-forward") || message.contains("fetch first") || message.contains("rejected") {
                 // § 7: one producer name used by two executors is a collision.
                 format!(
-                    "producer {producer} collides with another executor: the remote's {notes} holds records this executor never wrote; give each executor its own bay.producerName"
+                    "producer {producer} collides with another runner: the remote's {notes} holds records this runner never wrote; give each runner its own bay.producerName"
                 )
             } else {
                 format!("evidence could not be pushed: {message}")
@@ -5694,7 +5737,7 @@ fn push_and_read_back_evidence(repo: &Repo, producer: &str) -> Result<(), String
         Ok(())
     } else {
         Err(format!(
-            "the remote does not hold the evidence for {notes}; nothing was published"
+            "the remote does not hold the evidence for {notes}; nothing was merged"
         ))
     }
 }

@@ -26,17 +26,9 @@ use std::path::{Path, PathBuf};
 
 use support::{TestBox, UNCHECKED_POLICY, result_json};
 
-/// A plugin that keeps each file's bytes in `$HOME/asset-store/<hex>`.
-const STORE_PLUGIN: &str = r#"#!/bin/sh
-store="$HOME/asset-store"
-mkdir -p "$store"
-hash() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
-case "$1" in
-  put) hex=$(hash "$2"); cp "$2" "$store/$hex"; echo "sha256:$hex" ;;
-  get) f="$store/${2#sha256:}"; [ -f "$f" ] || { echo "unknown $2" >&2; exit 1; }; cp "$f" "$3" ;;
-  *) exit 2 ;;
-esac
-"#;
+/// The reference plugin bay ships (`examples/assets/folder-store`): each file's bytes in a
+/// folder named after the command, here `$HOME/asset-store`.
+pub(crate) const STORE_PLUGIN: &str = include_str!("../../examples/assets/folder-store");
 
 /// A plugin that stores nothing and names bytes it was not given.
 const LYING_PLUGIN: &str =
@@ -44,30 +36,46 @@ const LYING_PLUGIN: &str =
 
 const FAILING_PLUGIN: &str = "#!/bin/sh\necho 'the store is offline' >&2\nexit 1\n";
 
-const MIB: usize = 1024 * 1024;
+pub(crate) const MIB: usize = 1024 * 1024;
+
+/// The folder the reference plugin keeps bytes in.
+pub(crate) fn store(test_box: &TestBox) -> PathBuf {
+    test_box.home.join("asset-store")
+}
 
 /// A main checkout whose policy limits a file to 1 MiB and whose config offloads, with `plugin`
 /// as `scripts/assets`; `over_limit` is the config's line, or none.
-fn trunk(plugin: &str, over_limit: Option<&str>) -> (TestBox, PathBuf, PathBuf) {
+pub(crate) fn trunk(plugin: &str, over_limit: Option<&str>) -> (TestBox, PathBuf, PathBuf) {
+    trunk_with(
+        plugin,
+        over_limit,
+        &[(
+            ".bay/policy.toml".to_owned(),
+            format!("{UNCHECKED_POLICY}\n[limits]\nmax_file_mib = 1\n"),
+        )],
+    )
+}
+
+/// [`trunk`] with `files` (a policy, a check) in place of the unchecked policy.
+pub(crate) fn trunk_with(
+    plugin: &str,
+    over_limit: Option<&str>,
+    files: &[(String, String)],
+) -> (TestBox, PathBuf, PathBuf) {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
     let over = over_limit.map_or_else(String::new, |value| format!("over_limit = \"{value}\"\n"));
-    test_box.seed_with_check(
-        &repo,
-        &[("src/a.rs", "fn a() {}\n")],
-        &[
-            (
-                ".bay/policy.toml".to_owned(),
-                format!("{UNCHECKED_POLICY}\n[limits]\nmax_file_mib = 1\n"),
-            ),
-            (
-                ".bay/config.toml".to_owned(),
-                format!("[plugin.assets]\ncommand = \"scripts/assets\"\n{over}"),
-            ),
-            ("scripts/assets".to_owned(), plugin.to_owned()),
-        ],
-    );
+    let mut seeded = files.to_vec();
+    seeded.push((
+        ".bay/config.toml".to_owned(),
+        format!(
+            "[plugin.assets]\ncommand = \"scripts/assets {}\"\n{over}",
+            store(&test_box).display()
+        ),
+    ));
+    seeded.push(("scripts/assets".to_owned(), plugin.to_owned()));
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &seeded);
     std::fs::set_permissions(
         repo.join("scripts/assets"),
         std::fs::Permissions::from_mode(0o755),
@@ -80,13 +88,13 @@ fn trunk(plugin: &str, over_limit: Option<&str>) -> (TestBox, PathBuf, PathBuf) 
 }
 
 /// 3 MiB of bytes no compression folds away.
-fn video() -> Vec<u8> {
+pub(crate) fn video() -> Vec<u8> {
     (0..3 * MIB)
         .map(|n| n.wrapping_mul(2_654_435_761).to_le_bytes()[1])
         .collect()
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
     Sha256::digest(bytes)
@@ -182,7 +190,8 @@ fn without_offload_a_file_over_the_limit_is_refused() {
 fn kit(test_box: &TestBox, repo: &Path, command: &str) -> (i32, serde_json::Value) {
     let out = test_box
         .bay(repo)
-        .args(["plugin", "test", "assets", "--json", "--", command])
+        .args(["plugin", "test", "assets", "--json", "--"])
+        .args(command.split_whitespace())
         .output()
         .unwrap();
     let result = serde_json::from_slice(&out.stdout).unwrap_or_else(|error| {
@@ -197,7 +206,8 @@ fn kit(test_box: &TestBox, repo: &Path, command: &str) -> (i32, serde_json::Valu
 #[test]
 fn the_plugin_test_holds_a_plugin_to_the_contract() {
     let (test_box, repo, _remote) = trunk(STORE_PLUGIN, Some("offload"));
-    let (code, tested) = kit(&test_box, &repo, "scripts/assets");
+    let command = format!("scripts/assets {}", store(&test_box).display());
+    let (code, tested) = kit(&test_box, &repo, &command);
     assert_eq!(code, 0, "{tested}");
     assert_eq!(tested["detail"]["passed"], 4, "{tested}");
 

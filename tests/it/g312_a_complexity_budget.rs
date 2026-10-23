@@ -39,7 +39,9 @@ const COMMANDS: usize = 26;
 const FLAGS: usize = 76;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
-const REASONS: usize = 58;
+/// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,
+///   made around its lock, reached the merge and lost someone's work there; it is refused first.
+const REASONS: usize = 59;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.

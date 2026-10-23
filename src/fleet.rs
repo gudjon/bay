@@ -67,7 +67,7 @@ fn run(dir: &Path) -> Result<BayResult, String> {
                     "remote": remote,
                     "fetched": false,
                     "config": detail,
-                    "note": "this repository's trunk was never fetched, so the local cache is not the fleet",
+                    "note": "this repository's main was never fetched, so the local cache is not the fleet",
                 })),
             );
         }

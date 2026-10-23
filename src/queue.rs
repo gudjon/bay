@@ -452,7 +452,7 @@ pub fn join(
         }
     }
     Err(format!(
-        "{op_id} could not reserve a place in the publication queue"
+        "{op_id} could not reserve a place in the merge queue"
     ))
 }
 

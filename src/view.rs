@@ -333,6 +333,17 @@ pub fn create(repo: &Repo, id: &str, commit: &str, paths: &[String]) -> Result<P
         view.run(&args)?;
     }
     view.run(&["checkout", "-q", "--detach", commit])?;
+    // BACKLOG 49 phase 2: the declared files the manifest keeps outside Git.
+    let covered = |file: &str| {
+        paths.is_empty()
+            || paths
+                .iter()
+                .any(|declared| crate::inputs::within(declared, file))
+    };
+    crate::assets::fill_tree(repo, &path, commit, &covered).map_err(|why| GitError::Failed {
+        args: "assets".to_owned(),
+        stderr: why,
+    })?;
     set_journal(repo, id, Journal::Ready).map_err(journal_error)?;
     Ok(path)
 }

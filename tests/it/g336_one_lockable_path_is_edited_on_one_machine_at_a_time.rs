@@ -14,6 +14,7 @@
 //! - `src/locks.rs` `take_one`: the held arm's `now.saturating_sub(lock.at_s) < window_s` to
 //!   `true` (a lock never expires).
 //! - `src/session.rs` `claims`: drop `crate::locks::release` at the stop (the lock outlives it).
+//! - `src/locks.rs` `take_one`: drop the `lock.released` arm (a released lock still holds).
 //! - `src/names.rs` `bay_ref`: drop the `locks` namespace (a bay host refuses the lock).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -103,13 +104,22 @@ fn stops(test_box: &TestBox, session: &str, cwd: &Path) {
     assert_eq!(hook(test_box, cwd, "turn.end", &stop).0, Some(0));
 }
 
-/// The lock refs the remote holds.
+/// The locks the remote holds now: lock refs whose tip is not released (a released lock keeps
+/// its ref, so the ref's history names who held it).
 fn locks(test_box: &TestBox, remote: &Path) -> Vec<String> {
     let listed = test_box.git_bare(
         remote,
         &["for-each-ref", "--format=%(refname)", "refs/bay/locks/"],
     );
-    listed.lines().map(str::to_owned).collect()
+    listed
+        .lines()
+        .filter(|name| {
+            let lock = test_box.git_bare(remote, &["show", &format!("{name}:lock.json")]);
+            let lock: serde_json::Value = serde_json::from_str(&lock).unwrap();
+            lock["released"] != true
+        })
+        .map(str::to_owned)
+        .collect()
 }
 
 #[test]

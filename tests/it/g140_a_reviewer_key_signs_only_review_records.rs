@@ -428,7 +428,7 @@ fn a_reviewer_key_cannot_push_trunk_or_a_change_chain() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "a reviewer-signed trunk: {stderr}");
     assert!(
-        stderr.contains("trunk takes only commits signed by an executor key"),
+        stderr.contains("main takes only commits signed by a runner key"),
         "{stderr}"
     );
     let chain_ref = format!("refs/bay/changes/{id}");
@@ -456,7 +456,7 @@ fn a_reviewer_key_cannot_push_trunk_or_a_change_chain() {
         "a reviewer-signed change chain: {stderr}"
     );
     assert!(
-        stderr.contains("is not signed by an agent, executor or registry key"),
+        stderr.contains("is not signed by an agent, runner or registry key"),
         "{stderr}"
     );
 }

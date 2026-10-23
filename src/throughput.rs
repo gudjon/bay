@@ -1016,7 +1016,7 @@ pub fn roles(tags: &[Option<&str>]) -> Result<Vec<Role>, String> {
             });
         if !whole {
             return Err(format!(
-                "batch {} lands whole: its {} members, in order, in one push",
+                "batch {} merges whole: its {} members, in order, in one push",
                 batch.id, batch.size
             ));
         }

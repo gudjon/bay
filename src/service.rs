@@ -332,7 +332,7 @@ fn install_in(dir: &Path, request: &Request) -> Result<BayResult, String> {
     detail["replaced"] = json!(exists);
     detail["load"] = json!(load);
     let mut note = format!(
-        "wrote {}; bay started nothing. To start the executor now and at each login, run:\n  {load}",
+        "wrote {}; bay started nothing. To start the runner now and at each login, run:\n  {load}",
         service.path.display()
     );
     if kind == Kind::Systemd {

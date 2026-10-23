@@ -117,7 +117,7 @@ fn refusal(
         return Some(format!("kind {} is not running or effective", record.kind));
     }
     if record.subject.commit != commit || record.subject.tree != tree {
-        return Some("its subject is not the landed commit and tree".to_owned());
+        return Some("its subject is not the merged commit and tree".to_owned());
     }
     if producer.is_empty()
         || producer.contains(['/', ' ', ':'])
@@ -172,13 +172,13 @@ pub fn observe(
     // `HOME` from bay's environment, as the notify adapter has (`crate::run`).
     let cmd = crate::run::command(&repo.work_root, command)
         .ok_or("[plugin.runtime] command is empty")?
-        .map_err(|why| format!("the runtime adapter: {why}"))?;
+        .map_err(|why| format!("the runtime plugin: {why}"))?;
     let request = json!({"change": change, "commit": commit, "tree": tree}).to_string();
     let ran = crate::run::captured(cmd, Some(request.as_bytes()), timeout)
-        .map_err(|fault| format!("the runtime adapter: {fault}"))?;
+        .map_err(|fault| format!("the runtime plugin: {fault}"))?;
     if !ran.status.success() {
         return Err(format!(
-            "the runtime adapter exited with {}: {}",
+            "the runtime plugin exited with {}: {}",
             ran.status,
             String::from_utf8_lossy(&ran.stderr).trim()
         ));
@@ -203,19 +203,19 @@ pub fn observe(
 fn parse(stdout: &[u8]) -> Result<Vec<EvidenceRecord>, String> {
     if stdout.len() > RUNTIME_MAX_BYTES {
         return Err(format!(
-            "the runtime adapter printed more than {RUNTIME_MAX_BYTES} bytes"
+            "the runtime plugin printed more than {RUNTIME_MAX_BYTES} bytes"
         ));
     }
     let list: Vec<Value> = serde_json::from_slice(stdout)
-        .map_err(|error| format!("the runtime adapter printed no list of records: {error}"))?;
+        .map_err(|error| format!("the runtime plugin printed no list of records: {error}"))?;
     if list.len() > RUNTIME_MAX_RECORDS {
         return Err(format!(
-            "the runtime adapter printed {} records; one read judges at most {RUNTIME_MAX_RECORDS}",
+            "the runtime plugin printed {} records; one read judges at most {RUNTIME_MAX_RECORDS}",
             list.len()
         ));
     }
     list.into_iter()
         .map(serde_json::from_value)
         .collect::<Result<_, _>>()
-        .map_err(|error| format!("the runtime adapter printed a record bay cannot read: {error}"))
+        .map_err(|error| format!("the runtime plugin printed a record bay cannot read: {error}"))
 }

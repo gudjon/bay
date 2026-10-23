@@ -192,7 +192,7 @@ fn run(dir: &Path, since: Option<&Cursor>, landed_only: bool) -> Result<BayResul
     let trunk = repo
         .git
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
-        .map_err(|error| format!("the local cache holds no trunk: {}", error.message()))?;
+        .map_err(|error| format!("the local cache holds no main branch: {}", error.message()))?;
     // G244b: a red trunk turns on records a runner elsewhere writes after the landing, so a
     // watch over a policy with post checks reads the other producers' evidence first.
     if !landed_only
@@ -490,7 +490,7 @@ fn start(
             .is_err()
     {
         return Err(format!(
-            "the cursor's trunk {from} is not in this repository; watch without --since for the current state"
+            "the cursor's main commit {from} is not in this repository; watch without --since for the current state"
         ));
     }
     Ok(from)

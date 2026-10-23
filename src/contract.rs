@@ -212,7 +212,7 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
     ),
     (
         "host",
-        &["init: a new bare repository whose main only moves forward"],
+        &["a new bare repository whose main only moves forward"],
         &["an existing repository"],
     ),
     (

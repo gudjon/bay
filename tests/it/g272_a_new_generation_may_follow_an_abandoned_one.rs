@@ -185,7 +185,7 @@ fn while_the_generation_is_live_new_is_refused_and_says_why() {
         "generation 2 was claimed while generation 1 is live"
     );
     assert!(
-        stderr.contains("needs generation 1 landed or given up"),
+        stderr.contains("needs generation 1 merged or given up"),
         "{stderr}"
     );
 }

@@ -72,8 +72,12 @@ pub struct Lock {
     pub actor: String,
     pub session: Option<String>,
     pub change: Option<String>,
-    /// When it was taken or last renewed, in Unix seconds.
+    /// When it was taken, last renewed or released, in Unix seconds.
     pub at_s: u64,
+    /// Whether the session released it: the ref stays, so its history names every change that
+    /// held the path (the merge guard, [`held_by`]), and a released lock is free to take.
+    #[serde(default)]
+    pub released: bool,
 }
 
 /// Why a lockable edit is refused.
@@ -83,6 +87,9 @@ pub enum Refused {
     Held { lock: Box<Lock>, age_s: u64 },
     /// The remote did not answer, so whether the path is free is unknown.
     Unreachable { path: String, why: String },
+    /// The successor rule: main changed the path after this work's base, so an edit from here
+    /// would drop that change. `last` is main's last commit to it.
+    Stale { path: String, last: String },
 }
 
 /// The ref a lock of `path` lives at.
@@ -126,6 +133,7 @@ pub fn take(
         if !locks.covers(&path) {
             continue;
         }
+        successor(&repo, &root, &path)?;
         let me = Lock {
             schema: SCHEMA.to_owned(),
             path,
@@ -133,10 +141,59 @@ pub fn take(
             session: session.map(str::to_owned),
             change: repo.view_change(&root),
             at_s: now,
+            released: false,
         };
         take_one(&repo, &me, now)?;
     }
     Ok(())
+}
+
+/// The successor rule (BACKLOG 57): the work in the tree at `root` may take `path`'s lock only
+/// when its base holds main's last change to the path, as main stands on the remote now.
+fn successor(repo: &Repo, root: &Path, path: &str) -> Result<(), Refused> {
+    let main = repo.fetch_trunk().map_err(|error| Refused::Unreachable {
+        path: path.to_owned(),
+        why: error.message(),
+    })?;
+    let last = repo
+        .git
+        .run(&["log", "-1", "--format=%H", &main, "--", path])
+        .unwrap_or_default();
+    if last.is_empty() {
+        return Ok(());
+    }
+    let base = crate::git::Git::new(root)
+        .run(&["rev-parse", "HEAD"])
+        .unwrap_or_default();
+    if !base.is_empty() && repo.git.is_ancestor(&last, &base).unwrap_or(false) {
+        return Ok(());
+    }
+    Err(Refused::Stale {
+        path: path.to_owned(),
+        last,
+    })
+}
+
+/// A lock refusal as a command's result (`bay save`): `PATH_HELD` naming the holder,
+/// `REMOTE_UNREACHABLE`, or `INPUT_CHANGED` when main changed the path after this work began.
+#[must_use]
+pub fn refusal(refused: Refused) -> crate::result::BayResult {
+    use crate::result::{BayResult, Reason};
+    use serde_json::json;
+    match refused {
+        Refused::Held { lock, age_s } => BayResult::blocked(Reason::PathHeld).with_detail(json!({
+            "paths": [lock.path],
+            "holder": lock.session,
+            "actor": lock.actor,
+            "held_s": age_s,
+        })),
+        Refused::Unreachable { path, why } => BayResult::blocked(Reason::RemoteUnreachable)
+            .with_detail(json!({"paths": [path], "why": why})),
+        Refused::Stale { path, last } => BayResult::blocked(Reason::InputChanged).with_detail(
+            json!({"paths": [path], "main_commit": last,
+                "why": "main changed this lockable file after this copy was taken; get the newest main first"}),
+        ),
+    }
 }
 
 /// What the remote holds at a lock's ref.
@@ -181,6 +238,7 @@ fn take_one(repo: &Repo, me: &Lock, now: u64) -> Result<(), Refused> {
     let window_s = repo.config.takeover().as_secs();
     let lease = match read_remote(repo, &name, &me.path)? {
         Remote::Free => String::new(),
+        Remote::Taken(commit, Some(lock)) if lock.released => commit,
         Remote::Taken(commit, Some(lock)) if mine(&lock, me) => {
             if now.saturating_sub(lock.at_s) * 2 < window_s {
                 return Ok(());
@@ -223,12 +281,44 @@ fn mine(lock: &Lock, me: &Lock) -> bool {
     lock.actor == me.actor && lock.session.is_some() && lock.session == me.session
 }
 
-/// Pushes `lock` to `name` with a lease on `lease` (empty: no ref), and remembers it in the
-/// session's state directory.
+/// The commit of `lock` on `parent` (none for a new ref), so the ref's history keeps every
+/// holder.
+fn lock_commit(repo: &Repo, lock: &Lock, parent: &str) -> Result<String, String> {
+    let fault = |error: crate::git::GitError| error.message();
+    let mut text = serde_json::to_string_pretty(lock).map_err(|error| error.to_string())?;
+    text.push('\n');
+    let blob = repo
+        .git
+        .run_with(
+            &["hash-object", "-w", "--stdin"],
+            &[],
+            Some(text.as_bytes()),
+        )
+        .map_err(fault)?;
+    let entry = format!("100644 blob {blob}\t{FILE}\n");
+    let tree = repo
+        .git
+        .run_with(&["mktree"], &[], Some(entry.as_bytes()))
+        .map_err(fault)?;
+    let message = format!(
+        "{} {}",
+        if lock.released { "release" } else { "lock" },
+        lock.path
+    );
+    let mut args = vec!["commit-tree", tree.as_str()];
+    if !parent.is_empty() {
+        args.extend(["-p", parent]);
+    }
+    args.extend(["--no-gpg-sign", "-m", message.as_str()]);
+    repo.git
+        .run_with(&args, crate::change::RECORD_IDENTITY, None)
+        .map_err(fault)
+}
+
+/// Pushes `lock` to `name` with a lease on `lease` (empty: no ref), its commit on `lease`, and
+/// remembers it in the session's state directory while it is held.
 fn push(repo: &Repo, name: &str, lease: &str, lock: &Lock) -> Result<(), String> {
-    let body = serde_json::to_value(lock).map_err(|error| error.to_string())?;
-    let commit =
-        crate::queue::commit(&repo.git, None, FILE, &body, &format!("lock {}", lock.path))?;
+    let commit = lock_commit(repo, lock, lease)?;
     repo.git
         .run(&[
             "push",
@@ -243,6 +333,7 @@ fn push(repo: &Repo, name: &str, lease: &str, lock: &Lock) -> Result<(), String>
         .session
         .as_deref()
         .and_then(crate::session::SessionId::parse)
+        .filter(|_| !lock.released)
     {
         remember(&crate::session::state_dir(repo, &session), name, &commit);
     }
@@ -312,20 +403,96 @@ pub fn renew(repo: &Repo, state_dir: &Path, now: u64) {
     }
 }
 
-/// The session's stop or end: deletes each lock it holds on the remote, with a lease on the
-/// commit it pushed, so a lock another session took over is left alone.
-pub fn release(repo: &Repo, state_dir: &Path) {
+/// The session's stop or end: releases each lock it holds on the remote, a commit marked
+/// released on the one it pushed, with a lease on it, so a lock another session took over is
+/// left alone and the ref keeps who held it.
+pub fn release(repo: &Repo, state_dir: &Path, now: u64) {
     for (name, commit) in remembered(state_dir) {
-        let _ = repo.git.run(&[
-            "push",
-            "-q",
-            &format!("--force-with-lease={name}:{commit}"),
-            repo.remote(),
-            &format!(":{name}"),
-        ]);
-        let _ = repo.git.run(&["update-ref", "-d", &name, &commit]);
+        let Some(lock) = lock_at(repo, &commit) else {
+            continue;
+        };
+        let released = Lock {
+            at_s: now,
+            released: true,
+            ..lock
+        };
+        let _ = push(repo, &name, &commit, &released);
     }
     write_remembered(state_dir, &[]);
+}
+
+fn lock_at(repo: &Repo, commit: &str) -> Option<Lock> {
+    repo.git
+        .file_at(commit, FILE)
+        .ok()
+        .flatten()
+        .and_then(|text| serde_json::from_str::<Lock>(&text).ok())
+        .filter(|lock| lock.schema == SCHEMA)
+}
+
+/// Whether change `change` (or, for a save of a main checkout, which names no change, its
+/// `actor`) held `path`'s lock at some time: some commit of the lock ref's history, as this
+/// clone fetched it, names it.
+#[must_use]
+pub fn held_by(repo: &Repo, path: &str, change: &str, actor: &str) -> bool {
+    let name = lock_ref(path);
+    let Ok(history) = repo.git.run(&["rev-list", &name]) else {
+        return false;
+    };
+    history
+        .lines()
+        .filter_map(|commit| lock_at(repo, commit))
+        .any(|lock| {
+            lock.path == path
+                && match lock.change.as_deref() {
+                    Some(held) => held == change,
+                    None => lock.actor == actor,
+                }
+        })
+}
+
+/// The merge guard (BACKLOG 57): the lockable paths, under the policy at `trunk`, that `tree`
+/// changes from `trunk` and whose lock change `change` (or its `actor`) never held. The lock
+/// refs are fetched first; a fetch that fails holds nothing, so the guard refuses, never
+/// passes, when it cannot tell.
+///
+/// # Errors
+///
+/// The policy or the diff cannot be read.
+pub fn not_held(
+    repo: &Repo,
+    trunk: &str,
+    tree: &str,
+    change: &str,
+    actor: &str,
+) -> Result<Vec<String>, String> {
+    let locks = crate::policy::locks_at(&repo.git, trunk)?;
+    if locks.paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let changed = repo
+        .git
+        .run(&["diff", "--name-only", "--no-renames", "-z", trunk, tree])
+        .map_err(|error| error.message())?;
+    let lockable: Vec<&str> = changed
+        .split('\0')
+        .filter(|path| !path.is_empty() && locks.covers(path))
+        .collect();
+    if lockable.is_empty() {
+        return Ok(Vec::new());
+    }
+    let _ = repo.git.run(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        repo.remote(),
+        &format!("+{}*:{}*", crate::names::LOCKS, crate::names::LOCKS),
+    ]);
+    Ok(lockable
+        .into_iter()
+        .filter(|path| !held_by(repo, path, change, actor))
+        .map(str::to_owned)
+        .collect())
 }
 
 #[cfg(test)]

@@ -37,14 +37,16 @@ pub(crate) fn resolve(repo: &Repo, target: &str) -> Result<Result<Lander, Refusa
         Err(_) => repo
             .git
             .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
-            .map_err(|error| format!("the local cache holds no trunk: {}", error.message()))?,
+            .map_err(|error| {
+                format!("the local cache holds no main branch: {}", error.message())
+            })?,
     };
     let not_landed =
         |why: String| Refusal::new(Reason::ChangeNotLanded, why).with("to_change", json!(target));
     if is_change_id(target) {
         let Some(landing) = crate::undo::landed_commit(repo, target, &trunk)? else {
             return Ok(Err(not_landed(format!(
-                "change {target} is not on trunk: a talk addressed by change goes to the actor that landed it"
+                "change {target} is not on main: a talk addressed by change goes to the actor that merged it"
             ))));
         };
         return lander_of(repo, target, landing).map(Ok);
@@ -61,7 +63,7 @@ pub(crate) fn resolve(repo: &Repo, target: &str) -> Result<Result<Lander, Refusa
     };
     if !repo.git.is_ancestor(&commit, &trunk)? {
         return Ok(Err(not_landed(format!(
-            "commit {commit} is not on trunk: a talk addressed by change goes to the actor that landed it"
+            "commit {commit} is not on main: a talk addressed by change goes to the actor that merged it"
         ))));
     }
     let fields = repo
@@ -83,7 +85,7 @@ pub(crate) fn resolve(repo: &Repo, target: &str) -> Result<Result<Lander, Refusa
         return Ok(Err(Refusal::new(
             Reason::UnattributedLanding,
             format!(
-                "commit {commit} is on trunk but is no bay publication (no executor signature under the registry): it has no lander, and a trailer typed on it is a claim"
+                "commit {commit} is on main but is no bay merge (no runner signature under the registry): it has no lander, and a trailer typed on it is a claim"
             ),
         )
         .with("commit", json!(commit))));

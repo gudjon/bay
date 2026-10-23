@@ -90,6 +90,9 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         ));
     }
     let changed = changes(&checkout)?;
+    if let Some(refused) = take_locks(repo, &changed) {
+        return Ok(refused);
+    }
     let (saved, offloaded) = offload(repo, &trunk, &changed)?;
     if saved.is_empty() {
         return Ok(BayResult::ok(json!({
@@ -140,10 +143,7 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         .as_ref()
         .and_then(|detail| detail["commit"].as_str())
         .map(str::to_owned);
-    let moved = match &commit {
-        Some(commit) => bring_checkout(repo, &checkout, &head, &tree, &saved, commit),
-        None => json!({"moved": false, "why": "the merge named no commit on main"}),
-    };
+    let moved = checkout_to_merge(repo, &checkout, (&head, &tree), &saved, commit.as_deref());
     let mut result = landed;
     let detail = with_fields(
         result.detail.take(),
@@ -156,6 +156,39 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         ],
     );
     Ok(result.with_detail(detail))
+}
+
+/// The main checkout moved to the merge `commit` ([`bring_checkout`]), with the files of the
+/// merge kept outside Git that it lacks (BACKLOG 49 phase 2); a file that cannot be fetched is
+/// named in `assets`, never a failed save, since the save already merged.
+fn checkout_to_merge(
+    repo: &Repo,
+    checkout: &Git,
+    (head, tree): (&str, &str),
+    saved: &[String],
+    commit: Option<&str>,
+) -> Value {
+    let Some(commit) = commit else {
+        return json!({"moved": false, "why": "the merge named no commit on main"});
+    };
+    let mut moved = bring_checkout(repo, checkout, head, tree, saved, commit);
+    if let Err(why) = crate::assets::fill_tree(repo, &repo.work_root, commit, &|_| true) {
+        moved["assets"] = json!(why);
+    }
+    moved
+}
+
+/// BACKLOG 57: a person saving takes the lock of each lockable file the save changes, as an
+/// agent's edit does, so the merge guard finds it held and a second saver is stopped first.
+/// The refusal when one cannot be taken.
+fn take_locks(repo: &Repo, changed: &[Entry]) -> Option<BayResult> {
+    let targets: Vec<PathBuf> = changed
+        .iter()
+        .map(|entry| repo.work_root.join(&entry.path))
+        .collect();
+    crate::locks::take(&repo.work_root, &targets, None, crate::live::unix_now())
+        .err()
+        .map(crate::locks::refusal)
 }
 
 /// BACKLOG 49: with `[plugin.assets] over_limit = "offload"` in the config, each new file over
@@ -494,7 +527,7 @@ fn untouched(mut result: BayResult, saved: &[String]) -> BayResult {
         fields.push((
             "waiting",
             json!(
-                "queued: the change waits for a person's approval and lands once approved; \
+                "queued: the change waits for a person's approval and merges once approved; \
                  nothing is lost meanwhile"
             ),
         ));
@@ -584,7 +617,7 @@ fn may_move(
     }
     if !repo.git.is_ancestor(head, commit)? {
         return Ok(Some(format!(
-            "HEAD {head} is not an ancestor of the landing {commit}: HEAD and the files stay"
+            "HEAD {head} is not an ancestor of the merge {commit}: HEAD and the files stay"
         )));
     }
     let entries = changes(checkout)?;
@@ -596,13 +629,13 @@ fn may_move(
     if !others.is_empty() {
         return Ok(Some(format!(
             "files changed during the save that it did not include: {others:?}; HEAD and the \
-             files stay, and bay save again lands them"
+             files stay, and bay save again merges them"
         )));
     }
     if snapshot_tree(repo, checkout, head, saved)? != tree {
         return Ok(Some(
             "a saved file changed during the save: HEAD and the files stay, and bay save again \
-             lands the change"
+             merges the change"
                 .to_owned(),
         ));
     }
@@ -612,7 +645,7 @@ fn may_move(
         }
         if in_the_way(&repo.work_root, &path) {
             return Ok(Some(format!(
-                "{path} is in the working tree, untracked, and the landing adds it: HEAD and \
+                "{path} is in the working tree, untracked, and the merge adds it: HEAD and \
                  the files stay"
             )));
         }

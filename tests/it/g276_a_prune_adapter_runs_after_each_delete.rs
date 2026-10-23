@@ -231,6 +231,6 @@ fn without_an_adapter_nothing_runs_and_a_missing_one_is_recorded() {
         let row = pruned(&result, name);
         assert_eq!(row["on_prune"]["ok"], false, "{row}");
         let why = row["on_prune"]["why"].as_str().unwrap_or_default();
-        assert!(why.contains("not in trunk"), "{row}");
+        assert!(why.contains("not in main"), "{row}");
     }
 }

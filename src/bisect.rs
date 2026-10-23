@@ -86,7 +86,7 @@ fn all(repo: &Repo) -> Result<Vec<Value>, String> {
         if suspect.passed.is_none() {
             reports.push(not_run(
                 red,
-                "no landing in the window passes the check, so the range has no good end",
+                "no merge in the window passes the check, so the range has no good end",
                 &[],
             ));
             continue;

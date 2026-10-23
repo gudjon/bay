@@ -170,14 +170,14 @@ pub(crate) fn landed_commit(
     // is a fault, never CHANGE_NOT_MERGED, whose retry is never.
     let unreadable = |error: crate::git::GitError| {
         format!(
-            "the remote could not be read, so whether {change} landed is unknown: {}",
+            "the remote could not be read, so whether {change} merged is unknown: {}",
             error.message()
         )
     };
     // § 10a: a compacted marker's shard index record stands in for the ref.
     let marker = format!("{}{change}", crate::names::LANDED);
     let Some(landed) = crate::compact::remote_marker(repo, &marker).map_err(|error| {
-        format!("the remote could not be read, so whether {change} landed is unknown: {error}")
+        format!("the remote could not be read, so whether {change} merged is unknown: {error}")
     })?
     else {
         return Ok(None);

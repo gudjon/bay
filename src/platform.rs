@@ -173,7 +173,7 @@ pub fn sh_candidates(exec_path: &Path) -> Vec<PathBuf> {
 }
 
 /// Why a shebang adapter does not start on Windows when no `sh.exe` is found.
-pub const NO_SH: &str = "the adapter is a #! script, and Windows runs one only through \
+pub const NO_SH: &str = "the plugin is a #! script, and Windows runs one only through \
      Git for Windows' sh.exe, which was not found above git --exec-path";
 
 /// The command that starts the adapter program at `program`. On Unix the program itself. On
@@ -201,7 +201,7 @@ pub fn script(program: &Path) -> Result<Command, String> {
             Ok(cmd)
         }
         Launch::Other(line) => Err(format!(
-            "{}: the adapter's #! line names {line}, and on Windows bay runs only a sh or bash \
+            "{}: the plugin's #! line names {line}, and on Windows bay runs only a sh or bash \
              script (through Git for Windows' sh.exe) or a program that starts by itself",
             program.display()
         )),
