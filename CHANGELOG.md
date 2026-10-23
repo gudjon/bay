@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.8
+
+- A bay host no longer refuses a push when it judges two pushes at once.
+
 ## 0.3.7
 
 - `bay save` and `bay start` take what the work is, in a few words; a card id still works.
