@@ -60,7 +60,7 @@ pub fn save(dir: &Path, request: &SaveRequest) -> BayResult {
 fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, String> {
     if request.intent.trim().is_empty() {
         return Err(
-            "bay save needs to know what this work is: say it in a few words (or a card id)"
+            "bay save needs to know what this work is; say it in a few words (or a card id)"
                 .to_owned(),
         );
     }

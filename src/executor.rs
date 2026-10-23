@@ -241,7 +241,7 @@ impl Binary {
             "changed, and this platform cannot start it in this process's place"
         };
         format!(
-            "{path} {why}; this executor keeps running bay {} until it is restarted",
+            "{path} {why}; this runner keeps running bay {} until it is restarted",
             crate::version::BAY
         )
     }

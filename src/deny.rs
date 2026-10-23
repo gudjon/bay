@@ -367,8 +367,8 @@ fn denied_push(
                 return None;
             }
             return denial(
-                "git push, trunk unknown",
-                "bay cannot tell this repository's trunk (CONFIG_MISSING: no git config bay.main and no remote default branch), so it denies a push that could be of trunk from an agent shell".to_owned(),
+                "git push, main unknown",
+                "bay cannot tell which branch is this repository's main (CONFIG_MISSING: no git config bay.main and no remote default branch), so it denies a push that could be of main from an agent shell".to_owned(),
             );
         }
     };

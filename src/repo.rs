@@ -191,7 +191,7 @@ impl OpenError {
 fn missing_bootstrap(missing: &[String]) -> Value {
     json!({
         "message": format!(
-            "bay cannot tell this repository's trunk: neither {} names it; run bay install --main <name>, or git remote set-head <remote> --auto",
+            "bay cannot tell which branch is this repository's main: neither {} names it; run bay install --main <name>, or git remote set-head <remote> --auto",
             missing.join(" nor ")
         ),
         "missing": missing,

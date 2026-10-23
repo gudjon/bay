@@ -679,7 +679,7 @@ pub const PLAIN_WORDS: &[PlainWord] = &[
         word: "merge",
         say: "combine",
         avoid: &["integrate"],
-        means: "Putting two sets of edits to the same files together.",
+        means: "Adding a checked change to main, together with the work already there.",
     },
     PlainWord {
         word: "trunk",
@@ -1147,111 +1147,117 @@ impl Reason {
             | Self::ToolAbsent
             | Self::HookInputInvalid => return None,
             Self::TrunkMoved => {
-                "Main moved on while saving; bay tries once more on its own, nothing to do."
+                "Saved. Main moved on meanwhile, so bay tries once more on its own; nothing to do."
             }
             Self::PublishRetryExhausted => {
-                "Adding the change kept failing, so nothing was added; ask whoever runs bay here to look."
+                "Nothing was added: adding the change kept failing. Ask whoever runs bay here to look."
             }
             Self::RegistryUnreadable => {
-                "The project's list of trusted keys has a mistake, so nothing signed can be checked; ask whoever holds its key to fix it."
+                "Nothing signed can be checked: the project's list of trusted keys has a mistake. Ask whoever holds its key to fix it."
             }
             Self::RegistryChanged => {
-                "The list of trusted keys changed while saving; bay tries again once it is signed, nothing to do."
+                "Saved. The list of trusted keys changed meanwhile; bay tries again once it is signed, nothing to do."
             }
-            Self::ChangeNotLanded => "That change is not on main yet; wait until it is added.",
+            Self::ChangeNotLanded => {
+                "Not on main yet: that change is still waiting. Wait until it is added."
+            }
             Self::HookTimeout => {
-                "bay took too long to answer and tries again shortly; nothing to do."
+                "Not answered yet: bay took too long, and it tries again shortly; nothing to do."
             }
-            Self::Queued => {
-                "Saved; it waits in line behind other changes, so keep working meanwhile."
-            }
+            Self::Queued => "Saved. It waits in line behind other changes; keep working meanwhile.",
             Self::QueueDeadlineExceeded => {
-                "This change waited in line too long and was stopped; make it smaller or ask for more time."
+                "Nothing was added: this change waited in line too long. Make it smaller, or ask for more time."
             }
             Self::CheckUnavailable => {
-                "Saved; it waits for a machine that can run its checks, nothing to do."
+                "Saved. It waits for a machine that can run its checks; nothing to do."
             }
             Self::PolicyChanged => {
-                "The rules changed while this was checked; it is checked again under the new rules."
+                "Not added yet: the rules changed while this was checked. bay checks it again under the new rules."
             }
             Self::PolicyInvalid => {
-                "The project's rules file (.bay/policy.toml) has a mistake; nothing is added until it is fixed."
+                "Nothing can be added: the project's rules file (.bay/policy.toml) has a mistake. Fix it first."
             }
             Self::PolicyMissing => {
-                "This project has no rules file (.bay/policy.toml) yet, so nothing can be added; ask whoever set it up."
+                "Nothing can be added: this project has no rules file (.bay/policy.toml) yet. Ask whoever set it up."
             }
-            Self::ViewIncomplete => "An earlier step was interrupted; resume it before going on.",
+            Self::ViewIncomplete => {
+                "Not done yet: an earlier step was interrupted. Resume it before going on."
+            }
             Self::PublishOutcomeUnknown => {
-                "bay cannot tell yet whether the change was added; it looks again, so do not report it as saved."
+                "Not known yet: bay cannot tell whether the change was added. It looks again; do not report it as saved."
             }
             Self::ChangeAlreadyLanded => {
-                "This change is already on main; start a new one for more edits."
+                "Nothing to add: this change is already on main. Start a new one for more edits."
             }
             Self::ChangeSuperseded => {
-                "Someone else's change took over this work; read it before going on."
+                "Nothing was added: someone else's change took over this work. Read it before going on."
             }
             Self::ChangeHeld => {
-                "Another session is working on this change right now; wait for it to finish."
+                "Not now: another session is working on this change. Wait for it to finish."
             }
-            Self::AbandonRefused => "Only the person who owns this change can give it up.",
-            Self::ActorUnnamed => {
-                "bay needs to know who you are; set your name in BAY_ACTOR, then try again."
+            Self::AbandonRefused => {
+                "Nothing was given up: only the person who owns this change can give it up."
             }
+            Self::ActorUnnamed => "To save, set your name in BAY_ACTOR, then try again.",
             Self::ActorUnproven => {
-                "bay cannot prove who is saving on this computer; ask for a separate account or a hardware key."
+                "Nothing was saved: bay cannot prove who is saving on this computer. Ask for a separate account or a hardware key."
             }
             Self::CoverageUnknown => {
-                "bay cannot reach its shared notes right now; keep working and save again later."
+                "Allowed, unchecked: bay cannot reach its shared notes right now. Keep working, and save again later."
             }
-            Self::ShellDenied => {
-                "That command could lose work, so bay stopped it; it is never allowed."
-            }
+            Self::ShellDenied => "Stopped: that command could lose work, and it is never allowed.",
             Self::RemoteNotFetched => {
-                "bay could not get the latest main; check the network, then try again."
+                "Nothing was done: bay could not get the latest main. Check the network, then try again."
             }
             Self::ConfigMissing => {
-                "bay is not set up in this project yet; ask whoever runs it, or set it up."
+                "Nothing was done: bay is not set up in this project yet. Ask whoever runs it, or set it up."
             }
             Self::RemoteUnreachable => {
-                "bay cannot reach main from here; check the network and the access key."
+                "Nothing was done: bay cannot reach main from here. Check the network and the access key."
             }
-            Self::HooksMissing => "bay's safety settings are missing here; run bay install.",
-            Self::SkillMismatch => "The bay guide installed here is out of date; run bay install.",
+            Self::HooksMissing => {
+                "Not guarded yet: bay's safety settings are missing here. Run bay install."
+            }
+            Self::SkillMismatch => {
+                "Out of date: the bay guide installed here is older than bay. Run bay install."
+            }
             Self::SandboxAbsent => {
-                "The safe space bay runs checks in is missing on this computer; ask whoever runs bay."
+                "No checks can run here: the safe space bay runs them in is missing. Ask whoever runs bay."
             }
             Self::CheckEnvUnset => {
-                "This checking machine lacks settings its checks need; ask whoever runs it."
+                "No checks can run here: this checking machine lacks settings they need. Ask whoever runs it."
             }
             Self::ExecutorKeyMissing => {
-                "This checking machine has no key to sign with; ask whoever runs it."
+                "Nothing can be added from here: this checking machine has no key to sign with. Ask whoever runs it."
             }
             Self::KeyExposed => {
-                "A secret key here can be read by the assistant's account; ask whoever runs bay to move it."
+                "At risk: a secret key here can be read by the assistant's account. Ask whoever runs bay to move it."
             }
-            Self::UpdateUnavailable => "No bay update could be reached right now; try again later.",
+            Self::UpdateUnavailable => {
+                "Not updated: no bay update could be reached right now. Try again later."
+            }
             Self::UpdateUnverified => {
-                "The bay update could not be verified, so it was not installed."
+                "Not updated: the bay update could not be verified, so it was not installed."
             }
-            Self::UpdatePinned => {
-                "This project keeps bay at a fixed version, so it was not updated."
-            }
+            Self::UpdatePinned => "Not updated: this project keeps bay at a fixed version.",
             Self::TalkRefused => {
-                "That message was not sent; read why in the detail, fix it, then send it again."
+                "Not sent: read why in the detail, fix the message, then send it again."
             }
             Self::UnattributedLanding => {
-                "That change did not come through bay, so bay cannot say who made it."
+                "Not through bay: that change reached main another way, so bay cannot say who made it."
             }
-            Self::EvidenceWithdrawn => "A saved record of checks can never be removed or changed.",
+            Self::EvidenceWithdrawn => {
+                "Refused: a saved record of checks can never be removed or changed."
+            }
             Self::PromotionRefused => {
-                "That version is not ready for the next stage yet; use the one bay status names, or wait."
+                "Not promoted: that version is not ready for the next stage. Use the one bay status names, or wait."
             }
             Self::DiskLow => {
-                "This computer is almost out of disk space; free some, then try again."
+                "Nothing was done: this computer is almost out of disk space. Free some, then try again."
             }
-            Self::DependencyPending => "Saved; it waits until the change it depends on is added.",
+            Self::DependencyPending => "Saved. It waits until the change it depends on is added.",
             Self::DependencyAbandoned => {
-                "A change this one depends on was dropped, so this one cannot be added; start it again without it."
+                "Nothing can be added: a change this one depends on was dropped. Start it again without it."
             }
         })
     }
@@ -1289,19 +1295,19 @@ impl Reason {
         let input = || named(text_at(detail, &["/input", "/inputs/0/input"]).map(str::to_owned));
         match self {
             Self::InputChanged => format!(
-                "Something this change relies on was updated{}; read the new version, adjust, then save again.",
+                "Nothing was added: something this change relies on was updated{}. Read the new version, adjust, then save again.",
                 input()
             ),
             Self::InputUnobserved => format!(
-                "This change must first read the latest version of something it relies on{}, then save again.",
+                "Not added yet: this change must first read the latest version of something it relies on{}. Then save again.",
                 input()
             ),
             Self::MergeConflict => format!(
-                "Someone changed the same lines{}; the changes must be combined first.",
+                "Nothing was added: someone changed the same lines{}. The changes must be combined first.",
                 paths()
             ),
             Self::CheckFlaky => format!(
-                "A check{} gave two answers for the same change; ask a developer to fix that check.",
+                "Nothing was added: a check{} gave two answers for the same change. Ask a developer to fix that check.",
                 check()
             ),
             Self::CheckFailed => format!(
@@ -1309,7 +1315,7 @@ impl Reason {
                 check()
             ),
             Self::CheckUnknown => format!(
-                "A check gave no clear answer{}; nothing was added yet, so wait for it.",
+                "Not added yet: a check gave no clear answer{}. Wait for it.",
                 check()
             ),
             Self::TrunkRed => format!(
@@ -1317,11 +1323,11 @@ impl Reason {
                 paths()
             ),
             Self::PathHeld => format!(
-                "Another session is editing these files{}; wait for it to finish.",
+                "Not now: another session is editing these files{}. Wait for it to finish.",
                 paths()
             ),
             Self::LaneLeak => format!(
-                "This change holds try-out work that must not be added{}; redo it without that work.",
+                "Nothing was added: this change holds try-out work that must not be added{}. Redo it without that work.",
                 paths()
             ),
             Self::ApprovalPending => {
@@ -1335,48 +1341,48 @@ impl Reason {
                     Some(paths) => format!(" because it changes {paths}"),
                     None => String::new(),
                 };
-                format!("Saved, but it waits for {who}{because}.")
+                format!("Saved, not added yet: it waits for {who}{because}.")
             }
             Self::TrunkHeld => format!(
-                "Main is on hold{}; your change waits.",
+                "Not added yet: main is on hold{}. Your change waits.",
                 named(text_at(detail, &["/hold/reason"]).map(plain))
             ),
             Self::PathsUndeclared => format!(
-                "The work touches files it did not list{}; start again listing them.",
+                "Nothing was added: the work touches files it did not list{}. Start again, listing them.",
                 paths()
             ),
             Self::ChangeTooLarge => format!(
-                "This change is too big to save here{}; keep large files elsewhere, such as a shared drive.",
+                "Nothing was saved: this change is too big{}. Keep large files elsewhere, such as a shared drive.",
                 named(too_large(detail))
             ),
             // G310: a full review queue is named apart from the actor's own live changes.
             Self::WipLimit if detail.is_some_and(|detail| detail.get("review").is_some()) => {
-                "Too many changes already wait for a person's OK; answer or finish those first, then save again."
+                "Not added yet: too many changes already wait for a person's OK. Answer or finish those first, then save again."
                     .to_owned()
             }
             Self::WipLimit => {
-                "You already have the most open changes allowed; finish or give one up, then start again."
+                "Nothing was started: you already have the most open changes allowed. Finish or give one up, then start again."
                     .to_owned()
             }
             // A hook entry under an old name: the fix is the entry, not a newer bay.
             Self::HookInputInvalid
                 if detail.and_then(|detail| detail.get("misnamed")) == Some(&Value::Bool(true)) =>
             {
-                "bay's safety settings here call it by an old name, so it stopped the assistant; run bay install."
+                "Stopped: bay's safety settings here call it by an old name. Run bay install."
                     .to_owned()
             }
             Self::HookInputInvalid => {
-                "bay could not read what the assistant asked to do, so it stopped it.".to_owned()
+                "Stopped: bay could not read what the assistant asked to do.".to_owned()
             }
             Self::ToolBelowFloor => match text_at(detail, &["/tool"]) {
-                Some("git") => "The Git program on this computer is too old; update it, then try again.",
-                Some("claude") => "Claude Code on this computer is too old for bay; update it.",
-                _ => "The coding assistant on this computer is too old for bay; update it.",
+                Some("git") => "Nothing was done: the Git program on this computer is too old. Update it, then try again.",
+                Some("claude") => "Nothing was done: Claude Code on this computer is too old for bay. Update it.",
+                _ => "Nothing was done: the coding assistant on this computer is too old for bay. Update it.",
             }
             .to_owned(),
             Self::ToolAbsent => match text_at(detail, &["/tool"]) {
-                Some("claude") => "Claude Code is not installed here, but bay expects it; install it.",
-                _ => "The coding assistant bay expects is not installed here; install it.",
+                Some("claude") => "Nothing was done: Claude Code is not installed here, but bay expects it. Install it.",
+                _ => "Nothing was done: the coding assistant bay expects is not installed here. Install it.",
             }
             .to_owned(),
             _ => "Not done yet; read the detail for what is needed, then try again.".to_owned(),
@@ -1726,20 +1732,23 @@ mod tests {
             .with_detail(json!({"conflicts": ["src/a.rs", "src/b.rs", "src/c.rs"]}));
         assert_eq!(
             conflict.say(),
-            "Someone changed the same lines (src/a.rs, src/b.rs and 1 more); the changes must be combined first."
+            "Nothing was added: someone changed the same lines (src/a.rs, src/b.rs and 1 more). The changes must be combined first."
         );
         let approval = BayResult::blocked(Reason::ApprovalPending)
             .with_detail(json!({"approval": {"checks": [{"approvers": ["alice"]}]}}));
-        assert_eq!(approval.say(), "Saved, but it waits for alice's OK.");
+        assert_eq!(
+            approval.say(),
+            "Saved, not added yet: it waits for alice's OK."
+        );
         assert_eq!(
             BayResult::blocked(Reason::ApprovalPending).say(),
-            "Saved, but it waits for a person's OK."
+            "Saved, not added yet: it waits for a person's OK."
         );
         let held = BayResult::blocked(Reason::TrunkHeld)
             .with_detail(json!({"hold": {"reason": "trunk migration"}}));
         assert_eq!(
             held.say(),
-            "Main is on hold (main migration); your change waits."
+            "Not added yet: main is on hold (main migration). Your change waits."
         );
         let large = BayResult::blocked(Reason::ChangeTooLarge).with_detail(json!({"exceeded": [
             {"limit": "max_file_mib", "max": 1, "value": 3 * 1024 * 1024, "paths": ["a.bin"]},
@@ -1747,7 +1756,7 @@ mod tests {
         ]}));
         assert_eq!(
             large.say(),
-            "This change is too big to save here (a.bin is 3.0 MiB, over 1 MiB, and one more limit); keep large files elsewhere, such as a shared drive."
+            "Nothing was saved: this change is too big (a.bin is 3.0 MiB, over 1 MiB, and one more limit). Keep large files elsewhere, such as a shared drive."
         );
         let fault = BayResult::failed("could not read the trunk commit\nmore");
         assert_eq!(

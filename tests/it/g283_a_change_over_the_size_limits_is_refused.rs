@@ -79,7 +79,7 @@ fn assert_too_large(refused: &Value, limit: &str, max: u64, paths: &[&str]) {
     assert_eq!(&named[..paths.len()], paths, "{refused}");
     let say = refused["say"].as_str().unwrap();
     assert!(
-        say.starts_with("This change is too big to save here ("),
+        say.starts_with("Nothing was saved: this change is too big ("),
         "{say}"
     );
     assert!(say.contains("shared drive"), "{say}");

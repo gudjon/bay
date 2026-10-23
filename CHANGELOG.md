@@ -16,6 +16,8 @@ The last renames before the first user; scripts and configs that use the old nam
 - `bay help --json` lists agent products in `detail.agents`, not `detail.adapters`.
 - Every change record is written as `bay.change/1`; records stored as `/2` to `/4` are still read.
 - A bay host no longer refuses a push when it judges two pushes at once.
+- Every result sentence says what happened first, then why, then one step.
+- Lock and offline refusals print one clean line.
 
 ## 0.3.7
 

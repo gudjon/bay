@@ -713,23 +713,32 @@ fn pre_tool_lock(
                 "held_s": age_s,
             }),
             format!(
-                "{} is locked by {} (session {}) for {age_s} s; edit another path, or wait until                  that session stops",
+                "{} is locked by {} (session {}) for {age_s} s; edit another path, or wait until \
+                 that session's turn ends",
                 lock.path,
                 lock.actor,
                 lock.session.as_deref().unwrap_or("unknown"),
             ),
         ),
-        crate::locks::Refused::Unreachable { path, why } => (
-            Reason::RemoteUnreachable,
-            serde_json::json!({
-                "reason": Reason::RemoteUnreachable.code(),
-                "path": path,
-                "why": why,
-            }),
-            format!(
-                "{path} is lockable and the remote did not answer ({why}), so whether another                  session holds it is unknown; edit another path, or try again once the remote                  answers"
-            ),
-        ),
+        crate::locks::Refused::Unreachable { path, why } => {
+            // One line: Git's message can run over several.
+            let first = why.lines().map(str::trim).find(|line| !line.is_empty());
+            let line = format!(
+                "{path} is lockable and the remote did not answer ({}), so whether another \
+                 session holds it is unknown; edit another path, or try again once the remote \
+                 answers",
+                first.unwrap_or("no answer")
+            );
+            (
+                Reason::RemoteUnreachable,
+                serde_json::json!({
+                    "reason": Reason::RemoteUnreachable.code(),
+                    "path": path,
+                    "why": why,
+                }),
+                line,
+            )
+        }
     };
     record_pre_tool(
         product,
