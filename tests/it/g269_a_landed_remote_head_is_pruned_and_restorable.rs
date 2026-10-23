@@ -1,6 +1,6 @@
 //! G269. A landed remote head is pruned, and restorable.
 //!
-//! `bay status --heads` lists every branch on the remote with its tip, the time of its tip and
+//! `bay status --branches` lists every branch on the remote with its tip, the time of its tip and
 //! one class: the trunk, a `[[target]]` ref, a `[[lane]]` ref, `landed` with its proof
 //! (`ancestor`: merged by fast-forward; `patch`: landed as an equal patch; `change`: its commit
 //! carries a landed change's `Change-Id`), `stale` or `unique`. It deletes nothing and leaves no
@@ -174,7 +174,7 @@ impl Fixture {
     }
 
     fn heads(&self, args: &[&str]) -> Value {
-        let mut all = vec!["status", "--heads"];
+        let mut all = vec!["status", "--branches"];
         all.extend_from_slice(args);
         let (code, result) = result_json(self.test_box.bay(&self.repo).args(&all));
         assert_eq!(code, 0, "{result}");
@@ -216,7 +216,7 @@ impl Fixture {
 }
 
 fn row<'a>(result: &'a Value, name: &str) -> &'a Value {
-    result["detail"]["heads"]
+    result["detail"]["branches"]
         .as_array()
         .unwrap_or_else(|| panic!("no detail.heads: {result}"))
         .iter()
@@ -450,7 +450,7 @@ fn prune_and_stale_days_need_heads() {
     for args in [
         &["status", "--prune"][..],
         &["status", "--stale-days", "3"][..],
-        &["status", "--heads", "--stranded"][..],
+        &["status", "--branches", "--stranded"][..],
     ] {
         let out = fixture
             .test_box

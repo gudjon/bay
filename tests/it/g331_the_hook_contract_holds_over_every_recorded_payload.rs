@@ -2,7 +2,7 @@
 //! payload the agent products were recorded sending.
 //!
 //! For each recorded payload of a product (`tests/fixtures/<product>-<version>/`) whose event bay
-//! declares for that product in `bay help --json` (`detail.adapters[].events`), `bay hook
+//! declares for that product in `bay help --json` (`detail.agents[].events`), `bay hook
 //! <moment>` runs as the product runs it, in a repository set up for that product:
 //! - conformance: it exits 0 or 2, nothing else (H2: allow, or deny with a reason); exit 2 only
 //!   at a moment the declaration says `blocks`, and its stdout then names a reason code the
@@ -108,7 +108,7 @@ fn every_recorded_payload_gets_a_declared_answer_in_time() {
     let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let mut ran = 0;
     let mut faults = Vec::new();
-    for adapter in contract["detail"]["adapters"].as_array().unwrap() {
+    for adapter in contract["detail"]["agents"].as_array().unwrap() {
         let product = adapter["product"].as_str().unwrap();
         let version = adapter["payload_version"].as_str().unwrap();
         let dir = fixtures.join(format!(

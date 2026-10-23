@@ -294,7 +294,7 @@ fn an_invalid_policy_on_trunk_is_policy_invalid_until_a_registry_signed_repair()
     let (code, refused) = repair_at(&keys.agent, "REPAIR-1", 8);
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
-    assert_eq!(refused["retry_when"], "policy_repaired");
+    assert_eq!(refused["retry_when"], "after_new_main");
 
     // An invalid policy still states its revision: a repair below it would move revision
     // back, so it is refused.

@@ -503,7 +503,7 @@ fn agent_signer(push: &Push, commit: &str) -> Result<Option<String>, String> {
 /// The class other than agent a commit verifies as, if any.
 fn other_class(push: &Push, commit: &str) -> Result<Option<&'static str>, String> {
     for class in [
-        KeyClass::Executor,
+        KeyClass::Runner,
         KeyClass::Producer,
         KeyClass::Reviewer,
         KeyClass::Approver,

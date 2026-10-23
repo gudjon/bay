@@ -193,7 +193,7 @@ fn a_hardware_key_an_agent_key_or_no_key_is_green() {
     std::fs::remove_file(test_box.path().join("keys/gh-token")).unwrap();
     test_box.git_ok(
         &repo,
-        &["config", "bay.executorKey", executor.to_str().unwrap()],
+        &["config", "bay.runnerKey", executor.to_str().unwrap()],
     );
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 0, "{result}");
@@ -203,7 +203,7 @@ fn a_hardware_key_an_agent_key_or_no_key_is_green() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|key| key["setting"] == "bay.executorKey")
+        .find(|key| key["setting"] == "bay.runnerKey")
         .unwrap();
     assert_eq!(listed["hardware"], true, "{custody}");
 }

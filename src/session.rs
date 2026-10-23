@@ -279,7 +279,7 @@ fn payload_fields(line: &mut Value, payload: &Payload, state_dir: &Path) {
 const STARTED_FILE: &str = "started";
 
 /// When the session started (G166): the time of the first event the hook recorded for it, kept
-/// in its state, so `bay status --fleet` shows each session's age. `at` is this line's time; it
+/// in its state, so `bay status --all` shows each session's age. `at` is this line's time; it
 /// is kept when the session has none yet. A resumed session starts again, as its state does.
 fn started(state_dir: &Path, at: &Value) -> Option<String> {
     let path = state_dir.join(STARTED_FILE);
@@ -774,7 +774,9 @@ mod tests {
             "{text}"
         );
         assert!(
-            text.contains("bay: refused CHECK_FAILED on abcd2345.1: allowed repair; retry when candidate_changed\n"),
+            text.contains(
+                "bay: refused CHECK_FAILED on abcd2345.1: allowed repair; retry when after_fix\n"
+            ),
             "{text}"
         );
     }

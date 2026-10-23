@@ -116,8 +116,8 @@ fn every_result_prints_the_new_words() {
         &["status", id.as_str()][..],
         &["status", "--since"][..],
         &["status", "--since", "--merged"][..],
-        &["status", "--heads"][..],
-        &["status", "--fleet"][..],
+        &["status", "--branches"][..],
+        &["status", "--all"][..],
         &["doctor"][..],
     ] {
         let (_, result) = result_json(test_box.bay(&repo).args(args));

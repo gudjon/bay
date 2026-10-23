@@ -117,7 +117,7 @@ fn a_post_check_answered_only_behind_the_window_is_pending_never_green() {
     assert_eq!(status["unattributed"]["window"], 3, "{status}");
 
     // The fleet map and watch say the same.
-    let fleet = trunk.test_box.bay_ok(&trunk.repo, &["status", "--fleet"]);
+    let fleet = trunk.test_box.bay_ok(&trunk.repo, &["status", "--all"]);
     assert_eq!(fleet["detail"]["red"], json!([]), "{fleet}");
     assert_eq!(fleet["detail"]["red_pending"], *pending, "{fleet}");
     let watched = trunk.test_box.bay_ok(&trunk.repo, &["status", "--since"]);

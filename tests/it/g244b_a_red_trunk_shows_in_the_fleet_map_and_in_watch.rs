@@ -1,7 +1,7 @@
 //! G244b: a red trunk shows in the fleet map and in `bay status --since` (the pilot-gaps analysis of
 //! 2026-10-20, plan item A1).
 //!
-//! `bay status --fleet` lists the post checks trunk is red on, as `bay status` does, and marks
+//! `bay status --all` lists the post checks trunk is red on, as `bay status` does, and marks
 //! each entry whose change works on red paths (`on_red`). `bay status --since` lists a `trunk_red` event
 //! when a check turns red after the cursor, and a `trunk_red_cleared` event when a fix clears it.
 
@@ -104,7 +104,7 @@ impl Trunk {
     fn fleet(&self) -> Value {
         self.test_box.bay_ok(&self.repo, &["status"]);
         self.test_box
-            .bay_ok(&self.repo, &["status", "--fleet"])
+            .bay_ok(&self.repo, &["status", "--all"])
             .get("detail")
             .cloned()
             .unwrap()

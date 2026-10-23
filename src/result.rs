@@ -92,83 +92,83 @@ macro_rules! reasons {
 
 reasons! {
     // INTERFACES § 2
-    InputChanged => "INPUT_CHANGED", ["read", "refresh", "repair"], "candidate_validated_against_required_versions", false;
-    InputUnobserved => "INPUT_UNOBSERVED", ["read", "refresh"], "required_version_read", false;
-    MergeConflict => "MERGE_CONFLICT", ["read", "refresh", "repair"], "conflict_paths_changed", false;
-    TrunkMoved => "MAIN_MOVED", [], "retried_once_then_queued", true;
-    PublishRetryExhausted => "MERGE_RETRY_EXHAUSTED", ["read", "repair"], "cause_fixed", false;
-    RegistryChanged => "REGISTRY_CHANGED", [], "resigned_by_valid_executor", false;
+    InputChanged => "INPUT_CHANGED", ["read", "refresh", "repair"], "after_fix", false;
+    InputUnobserved => "INPUT_UNOBSERVED", ["read", "refresh"], "after_fix", false;
+    MergeConflict => "MERGE_CONFLICT", ["read", "refresh", "repair"], "after_fix", false;
+    TrunkMoved => "MAIN_MOVED", [], "by_itself", true;
+    PublishRetryExhausted => "MERGE_RETRY_EXHAUSTED", ["read", "repair"], "after_fix", false;
+    RegistryChanged => "REGISTRY_CHANGED", [], "by_itself", false;
     // 0.3.3 (the Mac's 0.3.2 finding): `refs/bay/registry` breaks a rule a version is loaded by,
     // so nothing signed can be judged; `bay doctor` names it and the line.
-    RegistryUnreadable => "REGISTRY_UNREADABLE", ["read"], "registry_repaired", false;
-    CheckFlaky => "CHECK_FLAKY", ["repair"], "check_fixed_or_quarantined", false;
-    ChangeNotLanded => "CHANGE_NOT_MERGED", ["read"], "change_landed", false;
-    HookTimeout => "HOOK_TIMEOUT", [], "retried_after_short_wait", true;
+    RegistryUnreadable => "REGISTRY_UNREADABLE", ["read"], "after_setup", false;
+    CheckFlaky => "CHECK_FLAKY", ["repair"], "after_fix", false;
+    ChangeNotLanded => "CHANGE_NOT_MERGED", ["read"], "after_wait", false;
+    HookTimeout => "HOOK_TIMEOUT", [], "by_itself", true;
     // 0.3.0: `QUEUE_HELD` and `PUBLICATION_QUEUED` are one code; `waiting_for` says `queue`.
-    Queued => "QUEUED", ["wait"], "reached_queue_head", false;
-    QueueDeadlineExceeded => "QUEUE_DEADLINE_EXCEEDED", ["read", "repair"], "operation_changed_or_budget_raised", false;
-    CheckFailed => "CHECK_FAILED", ["repair"], "candidate_changed", false;
-    CheckUnavailable => "CHECK_UNAVAILABLE", ["wait"], "capable_worker_reachable", true;
-    CheckUnknown => "CHECK_UNKNOWN", ["wait", "repair"], "check_produced_result", false;
-    PolicyChanged => "POLICY_CHANGED", ["refresh"], "rechecked_under_current_policy", false;
-    PolicyInvalid => "POLICY_INVALID", ["repair"], "policy_repaired", false;
+    Queued => "QUEUED", ["wait"], "by_itself", false;
+    QueueDeadlineExceeded => "QUEUE_DEADLINE_EXCEEDED", ["read", "repair"], "after_fix", false;
+    CheckFailed => "CHECK_FAILED", ["repair"], "after_fix", false;
+    CheckUnavailable => "CHECK_UNAVAILABLE", ["wait"], "after_setup", true;
+    CheckUnknown => "CHECK_UNKNOWN", ["wait", "repair"], "after_wait", false;
+    PolicyChanged => "POLICY_CHANGED", ["refresh"], "after_fix", false;
+    PolicyInvalid => "POLICY_INVALID", ["repair"], "after_new_main", false;
     // The missing-policy ruling; not yet in INTERFACES § 2: no `.bay/policy.toml` at the base.
-    PolicyMissing => "POLICY_MISSING", ["read"], "policy_added", false;
-    WorkspaceIncomplete => "WORKSPACE_INCOMPLETE", ["refresh"], "journal_ready", false;
-    PublishOutcomeUnknown => "MERGE_OUTCOME_UNKNOWN", [], "trunk_read_again", false;
+    PolicyMissing => "POLICY_MISSING", ["read"], "after_setup", false;
+    ViewIncomplete => "VIEW_INCOMPLETE", ["refresh"], "after_fix", false;
+    PublishOutcomeUnknown => "MERGE_OUTCOME_UNKNOWN", [], "by_itself", false;
     // G244: a post-publication check failed on a landing that touches the same paths.
-    TrunkRed => "MAIN_RED", ["read", "repair"], "trunk_green_or_change_names_the_owner", false;
+    TrunkRed => "MAIN_RED", ["read", "repair"], "after_new_main", false;
     ChangeAlreadyLanded => "CHANGE_ALREADY_MERGED", ["read"], "never", false;
-    ChangeSuperseded => "CHANGE_SUPERSEDED", ["read"], "existing_change_landed_abandoned_or_past_takeover", false;
+    ChangeSuperseded => "CHANGE_SUPERSEDED", ["read"], "after_wait", false;
     // Ruled 2026-10-19 (rulings-open-questions.md Q8): another live session of the same actor
     // name holds the change.
-    ChangeHeld => "CHANGE_HELD", ["read", "wait"], "holder_session_ended_or_heartbeat_past_takeover_window", false;
-    AbandonRefused => "ABANDON_REFUSED", ["read"], "current_actor_abandons_or_adopt_rules_apply", false;
+    ChangeHeld => "CHANGE_HELD", ["read", "wait"], "after_wait", false;
+    AbandonRefused => "ABANDON_REFUSED", ["read"], "after_wait", false;
     // G152; not yet in INTERFACES § 2: the policy at the base sets `[agent] require_actor` and
     // the actor's name came from a default, not `BAY_ACTOR`.
-    ActorUnnamed => "ACTOR_UNNAMED", ["read"], "bay_actor_set", false;
+    ActorUnnamed => "ACTOR_UNNAMED", ["read"], "after_setup", false;
     // G243b; not yet in INTERFACES § 2: the policy at the base sets `[agent]
     // require_actor_proof` and the agent key cannot prove which actor signs: several actors run
     // sessions under this OS account, which can read a file-based agent key.
-    ActorUnproven => "ACTOR_UNPROVEN", ["read"], "actor_key_on_hardware_or_own_account", false;
-    CoverageUnknown => "COVERAGE_UNKNOWN", ["wait"], "coordination_data_reachable", false;
+    ActorUnproven => "ACTOR_UNPROVEN", ["read"], "after_setup", false;
+    CoverageUnknown => "COVERAGE_UNKNOWN", ["wait"], "after_setup", false;
     // Ruling R-H1 (AGENT-HOOKS-0.1 § 6.3, `context_invalid`); not yet in INTERFACES § 2: a
     // `tool.before` payload bay cannot read is denied.
-    HookInputInvalid => "HOOK_INPUT_INVALID", ["read"], "hook_payload_readable_by_this_bay", false;
+    HookInputInvalid => "HOOK_INPUT_INVALID", ["read"], "after_setup", false;
     // Ruling R-H2 widened (H3, G60); not yet in INTERFACES § 2: a shell command on the deny list
     // (G39), as its `tool.before` row's verdict reason. The same command is never allowed.
     ShellDenied => "SHELL_DENIED", ["read"], "never", false;
     // `DESIGN` § 11c, "Two sessions in one tree" (G101); not yet in INTERFACES § 2: a write of a
     // path another live session of the same tree holds, as its `tool.before` deny.
-    PathHeld => "PATH_HELD", ["read", "wait"], "holder_session_stopped_or_claim_past_deadline", false;
-    RemoteNotFetched => "REMOTE_NOT_FETCHED", ["read"], "remote_fetched", false;
+    PathHeld => "PATH_HELD", ["read", "wait"], "after_wait", false;
+    RemoteNotFetched => "REMOTE_NOT_FETCHED", ["read"], "after_setup", false;
     // Ruling: config location (a repository with no `.bay/config.toml` anywhere bay looks);
     // not yet in INTERFACES § 2
-    ConfigMissing => "CONFIG_MISSING", ["read"], "config_added", false;
+    ConfigMissing => "CONFIG_MISSING", ["read"], "after_setup", false;
     // INTERFACES § 8 (doctor)
     // 0.3.0: one code for every tool below its floor (git, bay, an agent product) and one for
     // an absent agent product; `detail.tool` names the tool (`git`, `bay`, `claude`, `codex`).
-    ToolBelowFloor => "TOOL_BELOW_FLOOR", ["read"], "tool_upgraded_or_adapter_removed", false;
-    ToolAbsent => "TOOL_ABSENT", ["read"], "tool_installed_or_adapter_removed", false;
-    RemoteUnreachable => "REMOTE_UNREACHABLE", ["read"], "remote_answers_with_box_key", false;
-    HooksMissing => "HOOKS_MISSING", ["read"], "install_wrote_hook_entries", false;
-    SkillMismatch => "SKILL_MISMATCH", ["read"], "install_copied_skill_for_this_version", false;
-    SandboxAbsent => "SANDBOX_ABSENT", ["read"], "sandbox_present_or_executor_sandbox_none", false;
-    // `bay doctor --role executor` (G63); not yet in INTERFACES § 8
-    CheckEnvUnset => "CHECK_ENV_UNSET", ["read"], "executor_sets_the_named_variables", false;
-    ExecutorKeyMissing => "RUNNER_KEY_MISSING", ["read"], "executor_and_producer_keys_set_and_enrolled", false;
+    ToolBelowFloor => "TOOL_BELOW_FLOOR", ["read"], "after_setup", false;
+    ToolAbsent => "TOOL_ABSENT", ["read"], "after_setup", false;
+    RemoteUnreachable => "REMOTE_UNREACHABLE", ["read"], "after_setup", false;
+    HooksMissing => "HOOKS_MISSING", ["read"], "after_setup", false;
+    SkillMismatch => "SKILL_MISMATCH", ["read"], "after_setup", false;
+    SandboxAbsent => "SANDBOX_ABSENT", ["read"], "after_setup", false;
+    // `bay doctor --role runner` (G63); not yet in INTERFACES § 8
+    CheckEnvUnset => "CHECK_ENV_UNSET", ["read"], "after_setup", false;
+    ExecutorKeyMissing => "RUNNER_KEY_MISSING", ["read"], "after_setup", false;
     // G145; not yet in INTERFACES § 8: a file-based release, producer, executor or registry key,
     // or a token beside it, that the account running agent sessions can read.
-    KeyExposed => "KEY_EXPOSED", ["read"], "keys_on_hardware_or_outside_the_session_account", false;
+    KeyExposed => "KEY_EXPOSED", ["read"], "after_setup", false;
     // INTERFACES § 2 (`bay update`, the binary's lifecycle in `DESIGN`)
-    UpdateUnavailable => "UPDATE_UNAVAILABLE", ["read"], "release_reachable", false;
-    UpdateUnverified => "UPDATE_UNVERIFIED", ["read"], "release_republished", false;
-    UpdatePinned => "UPDATE_PINNED", ["read"], "pin_moved", false;
+    UpdateUnavailable => "UPDATE_UNAVAILABLE", ["read"], "after_setup", false;
+    UpdateUnverified => "UPDATE_UNVERIFIED", ["read"], "after_wait", false;
+    UpdatePinned => "UPDATE_PINNED", ["read"], "after_setup", false;
     // `DESIGN` § 11c and rulings R9, T1, T7 and T10 (`bay talk`); not yet in INTERFACES § 2
     // 0.3.0: one code for a talk bay will not send; `detail.why` says why (it was invalid, a
     // different body under one id, closed, a supersede only its sender or `decides` may make, a
     // second answer, a sender who is no actor, or too many open talks).
-    TalkRefused => "TALK_REFUSED", ["read", "repair"], "talk_corrected_or_superseded", false;
+    TalkRefused => "TALK_REFUSED", ["read", "repair"], "after_fix", false;
     // G77 (the review dossier's K6); not yet in INTERFACES § 2: `bay talk --to-change` names a
     // trunk commit that is no executor-signed bay publication, so no lander can be read from it.
     UnattributedLanding => "OUTSIDE_MERGE", ["read"], "never", false;
@@ -179,39 +179,39 @@ reasons! {
     // push that moves a promotion target to a commit that is not promotable (off its source's
     // first-parent line, not a fast-forward, a required check not passing, inside its soak, or
     // frozen without Fixes:/Reverts:). `bay status` names the promotable commit.
-    PromotionRefused => "PROMOTION_REFUSED", ["read", "wait", "repair"], "pushed_commit_promotable", false;
+    PromotionRefused => "PROMOTION_REFUSED", ["read", "wait", "repair"], "after_wait", false;
     // NEW-4; not yet in INTERFACES § 2: a change of no lane whose view reaches commits of a lane
     // ref that are not on trunk.
-    LaneLeak => "LANE_LEAK", ["read", "repair"], "view_reaches_no_lane_commit", false;
+    LaneLeak => "LANE_LEAK", ["read", "repair"], "after_fix", false;
     // G245 (owner ruling 2026-10-20); not yet in INTERFACES § 2: every other required check
     // passed, and an approval check the candidate's paths wake has no pass yet from an enrolled
     // approver's key for this exact tree.
-    ApprovalPending => "APPROVAL_PENDING", ["wait"], "approved", false;
+    ApprovalPending => "APPROVAL_PENDING", ["wait"], "after_person", false;
     // G264 (N-11); not yet in INTERFACES § 2: the policy at the base sets `[agent]
     // max_live_changes` and the actor already holds that many live changes; or (G310) it sets
     // `[limits] max_waiting_approvals` and that many live changes already wait for a yes.
-    WipLimit => "WIP_LIMIT", ["read"], "a_live_change_lands_or_is_abandoned", false;
+    WipLimit => "WIP_LIMIT", ["read"], "after_wait", false;
     // G265 (N-13); not yet in INTERFACES § 2: the box's `bay.minFreeMiB` floor is above the free
     // space of the filesystem a view or a materialized tree would be written to.
-    DiskLow => "DISK_LOW", ["read"], "free_space_above_floor", false;
+    DiskLow => "DISK_LOW", ["read"], "after_setup", false;
     // N-8; not yet in INTERFACES § 2: trunk is held, by a `[[hold]]` of the trunk or the
     // hold adapter (`crate::hold`), and the change carries neither `Fixes:` nor `Reverts:`. The
     // operation stays queued, publishes nothing, and is tried again once the hold clears.
-    TrunkHeld => "MAIN_HELD", ["wait"], "hold_cleared", false;
+    TrunkHeld => "MAIN_HELD", ["wait"], "after_person", false;
     // N-5; not yet in INTERFACES § 2: `bay start --from <branch>` names a branch that changes
     // paths `--paths` does not declare. Nothing is created; a start whose paths cover them can.
-    PathsUndeclared => "PATHS_UNDECLARED", ["read", "repair"], "paths_declared", false;
+    PathsUndeclared => "PATHS_UNDECLARED", ["read", "repair"], "after_fix", false;
     // G273 (N-16); not yet in INTERFACES § 2: the change was started `--after` a change that has
     // not landed on trunk yet. The operation stays queued, publishes nothing, holds no queue
     // place, and is tried again once every change it names has landed.
-    DependencyPending => "DEPENDENCY_PENDING", ["wait"], "dependencies_landed", false;
+    DependencyPending => "DEPENDENCY_PENDING", ["wait"], "after_wait", false;
     // G273 (N-16); not yet in INTERFACES § 2: a change this one was started `--after` ended
     // without landing (abandoned, superseded or no effect), so this one can never publish.
-    DependencyAbandoned => "DEPENDENCY_ABANDONED", ["read", "repair"], "dependency_dropped_or_restarted", false;
+    DependencyAbandoned => "DEPENDENCY_ABANDONED", ["read", "repair"], "after_fix", false;
     // Owner ruling 2026-10-21; not yet in INTERFACES § 2: the change is over a `[limits]` size
     // limit of the policy at the base (`crate::limits`), refused at submit and at candidate
     // build, before any check runs.
-    ChangeTooLarge => "CHANGE_TOO_LARGE", ["read", "repair"], "change_within_limits", false;
+    ChangeTooLarge => "CHANGE_TOO_LARGE", ["read", "repair"], "after_fix", false;
 }
 
 impl Reason {
@@ -386,8 +386,8 @@ const PRINTED_VALUES: &[(&str, &str)] = &[
     ("no_live_executor", "no_live_runner"),
 ];
 
-/// The runner's role words, printed only under the keys that name a role, never under a key
-/// class (`bay enrol executor` stays the key class's name).
+/// The runner's role words, printed under the keys that name a role (the key class itself is
+/// `runner` since 0.4.0).
 const PRINTED_ROLE_KEYS: &[&str] = &["waiting_for", "lands_by"];
 const PRINTED_ROLES: &[(&str, &str)] = &[
     ("executor", "runner"),
@@ -990,7 +990,7 @@ impl Reason {
                 "Read the failing check in `detail`, repair the change in the view, then `bay merge` again."
             }
             Self::CheckUnavailable => {
-                "Wait: bay retries once a worker can run the check. If `bay status --fleet` shows no live runner, tell the user."
+                "Wait: bay retries once a worker can run the check. If `bay status --all` shows no live runner, tell the user."
             }
             Self::CheckUnknown => {
                 "Wait for the check's result with `bay merge --wait`; never treat it as a pass. Repair the change if the check cannot answer."
@@ -1004,7 +1004,7 @@ impl Reason {
             Self::PolicyMissing => {
                 "Tell the user main has no `.bay/policy.toml`, so nothing can merge; set it up only if they ask."
             }
-            Self::WorkspaceIncomplete => {
+            Self::ViewIncomplete => {
                 "Run `bay start <change>` to finish the interrupted step, then go on."
             }
             Self::PublishOutcomeUnknown => {
@@ -1020,7 +1020,7 @@ impl Reason {
                 "Read the change that took over in `detail`; work in it, or `bay start` again once it merges or is abandoned."
             }
             Self::ChangeHeld => {
-                "Another live session holds this change: wait until it ends, or work on another change. `bay status --fleet` shows the holder."
+                "Another live session holds this change: wait until it ends, or work on another change. `bay status --all` shows the holder."
             }
             Self::AbandonRefused => {
                 "Only the change's own actor may abandon it: ask that actor, or leave the change as it is."
@@ -1066,10 +1066,10 @@ impl Reason {
                 "Tell the user to install the sandbox `detail` names, or set the runner's sandbox to none."
             }
             Self::CheckEnvUnset => {
-                "Tell the user to set the variables `detail` names for the runner, then run `bay doctor --role executor` again."
+                "Tell the user to set the variables `detail` names for the runner, then run `bay doctor --role runner` again."
             }
             Self::ExecutorKeyMissing => {
-                "Tell the user to set and enroll the runner's `executor` and `producer` keys, then run `bay doctor --role executor` again."
+                "Tell the user to set and enroll the runner's `runner` and `producer` keys, then run `bay doctor --role runner` again."
             }
             Self::KeyExposed => {
                 "Tell the user to move the key `detail` names onto hardware, or out of the account agent sessions run as."
@@ -1180,9 +1180,7 @@ impl Reason {
             Self::PolicyMissing => {
                 "This project has no rules file (.bay/policy.toml) yet, so nothing can be added; ask whoever set it up."
             }
-            Self::WorkspaceIncomplete => {
-                "An earlier step was interrupted; resume it before going on."
-            }
+            Self::ViewIncomplete => "An earlier step was interrupted; resume it before going on.",
             Self::PublishOutcomeUnknown => {
                 "bay cannot tell yet whether the change was added; it looks again, so do not report it as saved."
             }
@@ -1546,6 +1544,29 @@ mod tests {
         assert_eq!(result.decision, Decision::Failed);
         assert_eq!(result.decision.exit_code(), 20);
         assert!(result.to_human().contains("decision: failed"));
+    }
+
+    /// BACKLOG 53 C (0.4.0): `retry_when` is one of seven, each a kind of lift; the exact
+    /// condition is `next_step`'s.
+    #[test]
+    fn retry_when_is_one_of_seven() {
+        const SEVEN: [&str; 7] = [
+            "by_itself",
+            "after_wait",
+            "after_fix",
+            "after_person",
+            "after_setup",
+            "after_new_main",
+            "never",
+        ];
+        for reason in Reason::ALL {
+            assert!(
+                SEVEN.contains(&reason.retry_when()),
+                "{} retries when {}",
+                reason.code(),
+                reason.retry_when()
+            );
+        }
     }
 
     #[test]

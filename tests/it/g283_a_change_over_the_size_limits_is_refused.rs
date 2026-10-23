@@ -65,7 +65,7 @@ fn assert_too_large(refused: &Value, limit: &str, max: u64, paths: &[&str]) {
     assert_eq!(refused["decision"], "blocked", "{refused}");
     assert_eq!(refused["reason"], "CHANGE_TOO_LARGE", "{refused}");
     assert_eq!(refused["allowed"], json!(["read", "repair"]), "{refused}");
-    assert_eq!(refused["retry_when"], "change_within_limits", "{refused}");
+    assert_eq!(refused["retry_when"], "after_fix", "{refused}");
     let exceeded = refused["detail"]["exceeded"].as_array().unwrap();
     assert_eq!(exceeded.len(), 1, "only {limit} is exceeded: {refused}");
     assert_eq!(exceeded[0]["limit"], limit, "{refused}");

@@ -78,7 +78,7 @@ fn a_corrupt_archive_is_refused_and_the_binary_is_unchanged() {
     let (code, result) = fixture.update(fixture.path(), &[]);
     assert_eq!(code, 20, "{result}");
     assert_eq!(result["reason"], "UPDATE_UNVERIFIED");
-    assert_eq!(result["retry_when"], "release_republished");
+    assert_eq!(result["retry_when"], "after_wait");
     fixture.assert_untouched();
 }
 
@@ -119,7 +119,7 @@ fn a_downgrade_is_refused_pinned() {
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "UPDATE_PINNED");
     assert_eq!(result["allowed"], serde_json::json!(["read"]));
-    assert_eq!(result["retry_when"], "pin_moved");
+    assert_eq!(result["retry_when"], "after_setup");
     fixture.assert_untouched();
 
     // The newest release being older is a downgrade too.
@@ -243,7 +243,7 @@ fn no_release_or_no_build_for_the_platform_is_unavailable() {
     let (code, result) = fixture.update(fixture.path(), &[]);
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "UPDATE_UNAVAILABLE");
-    assert_eq!(result["retry_when"], "release_reachable");
+    assert_eq!(result["retry_when"], "after_setup");
     fixture.assert_untouched();
 
     let build = Build {

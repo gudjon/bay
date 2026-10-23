@@ -115,7 +115,7 @@ fn one_producer_name_used_by_two_executors_is_a_collision() {
     let one = test_box.clone_of(&remote, "executor-one");
     let two = test_box.clone_of(&remote, "executor-two");
     for (clone, name) in [(&one, "exec-one"), (&two, "exec-two")] {
-        test_box.git_ok(clone, &["config", "bay.executorName", name]);
+        test_box.git_ok(clone, &["config", "bay.runnerName", name]);
         test_box.git_ok(clone, &["config", "bay.producerName", "shared-checks"]);
     }
     let (_, first) = test_box.start_and_edit(&repo);

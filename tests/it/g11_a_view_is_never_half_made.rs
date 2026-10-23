@@ -47,7 +47,7 @@ fn a_view_killed_mid_creation_builds_no_candidate_until_resumed() {
     // An empty view would read as "delete everything"; bay builds nothing from it.
     let (code, result) = result_json(test_box.bay(&repo).args(["merge", "--wait", &id]));
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["reason"], "WORKSPACE_INCOMPLETE");
+    assert_eq!(result["reason"], "VIEW_INCOMPLETE");
     assert_eq!(result["allowed"], serde_json::json!(["refresh"]));
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
     let chain = test_box.git_ok(

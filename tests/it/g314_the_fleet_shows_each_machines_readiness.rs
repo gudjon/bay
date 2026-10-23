@@ -1,10 +1,10 @@
-//! G314. Each machine's readiness travels with its presence, and `bay status --fleet` shows
+//! G314. Each machine's readiness travels with its presence, and `bay status --all` shows
 //! the whole fleet's.
 //!
 //! When `bay doctor` runs in a work repository whose remote answers, it publishes this
 //! machine's verdict on the machine's live summary, `refs/bay/live/<machine>`, the ref its
 //! sessions already travel on: `doctor: {at, bay_version, decision, reason, red, hooks,
-//! sandbox, role}`, with no path and no secret. `bay status --fleet` lists each machine's
+//! sandbox, role}`, with no path and no secret. `bay status --all` lists each machine's
 //! `doctor` block as the machine last published it, with its age (`null` for a machine that
 //! never ran doctor), and `ready` counts the machines that are green, red or never ran doctor,
 //! with the lowest bay version seen. No new command and no new flag.
@@ -111,9 +111,9 @@ fn the_fleet_map_shows_each_machines_last_doctor_verdict_and_a_ready_count() {
     // A machine whose summary carries no verdict never ran doctor.
     publish_without_doctor(&test_box, &green, "box-never");
 
-    // The fleet map reads the last fetch: `bay status` fetches, `--fleet` reads it.
+    // The fleet map reads the last fetch: `bay status` fetches, `--all` reads it.
     test_box.bay_ok(&red, &["status"]);
-    let fleet = test_box.bay_ok(&red, &["status", "--fleet"]);
+    let fleet = test_box.bay_ok(&red, &["status", "--all"]);
 
     let seen = &row_of(&fleet, "box-green")["doctor"];
     assert_eq!(seen["decision"], "ok", "{fleet}");

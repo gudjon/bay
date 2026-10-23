@@ -856,7 +856,7 @@ impl Git {
     /// Whether `remote` answers a ref listing within the call timeout.
     #[must_use]
     pub fn remote_answers(&self, remote: &str) -> bool {
-        self.run(&["ls-remote", "--heads", remote]).is_ok()
+        self.run(&["ls-remote", "--branches", remote]).is_ok()
     }
 }
 

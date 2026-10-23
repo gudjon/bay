@@ -225,7 +225,7 @@ fn a_forge_merge_of_a_lane_branch_is_named_as_a_lane_leak() {
     assert_eq!(leak["commits"], json!([research]), "{status}");
 
     // The fleet map reads the same from the cache `bay status` fetched.
-    let fleet = test_box.bay_ok(&repo, &["status", "--fleet"]);
+    let fleet = test_box.bay_ok(&repo, &["status", "--all"]);
     assert_eq!(fleet["detail"]["unattributed"], *unattributed, "{fleet}");
 
     // `bay status --since` names the landing outside bay with the lane it leaked.

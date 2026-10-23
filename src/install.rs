@@ -88,6 +88,10 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
 
     let mut detail = json!({"binary": target.display().to_string(),
         "skill": skill_dir.display().to_string(), "skills": written});
+    let moved = carry_over(&git, if machine { "--global" } else { "--local" })?;
+    if !moved.is_empty() {
+        detail["renamed_keys"] = json!(moved);
+    }
     if machine {
         // G320: what this install writes, and what it never does, said on its result.
         detail["scope"] = json!("machine");
@@ -158,6 +162,34 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
     Ok(BayResult::ok(detail))
 }
 
+/// Moves each renamed Git config key (`crate::signing::RENAMED_KEYS`) set in `scope`
+/// (`--global` or `--local`) to its new name there, unless the new name is already set, and
+/// unsets the old one. Returns each move as `{from, to}`.
+fn carry_over(git: &Git, scope: &str) -> Result<Vec<serde_json::Value>, String> {
+    if scope == "--local" && git.repo_info().is_err() {
+        return Ok(Vec::new());
+    }
+    let get = |key: &str| {
+        git.run(&["config", scope, "--get", key])
+            .ok()
+            .filter(|value| !value.is_empty())
+    };
+    let mut moved = Vec::new();
+    for (old, new) in crate::signing::RENAMED_KEYS {
+        let Some(value) = get(old) else {
+            continue;
+        };
+        if get(new).is_none() {
+            git.run(&["config", scope, new, &value])
+                .map_err(|error| error.message())?;
+        }
+        git.run(&["config", scope, "--unset-all", old])
+            .map_err(|error| error.message())?;
+        moved.push(json!({"from": old, "to": new}));
+    }
+    Ok(moved)
+}
+
 /// Writes `bay.main` and `bay.remote` (repository-local): the names given, else what they
 /// hold, else the remote's default branch and `origin`. With no trunk to write, writes nothing
 /// and says so: bay's commands are `CONFIG_MISSING` until one is set.
@@ -207,7 +239,7 @@ fn signing_identity(git: &Git) -> Result<Option<String>, String> {
     let class = if keys.agent.is_some() {
         KeyClass::Agent
     } else if keys.executor.is_some() {
-        KeyClass::Executor
+        KeyClass::Runner
     } else if keys.producer.is_some() {
         KeyClass::Producer
     } else {

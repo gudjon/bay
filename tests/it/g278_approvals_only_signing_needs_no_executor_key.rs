@@ -11,7 +11,7 @@
 //!
 //! Guards to mutate (each makes a case here fail):
 //! - `src/publish.rs` `Ctx::executor_signer`: `if self.signing().is_none()` back to
-//!   `if self.registry.is_none()` (the land refuses for want of `bay.executorKey`).
+//!   `if self.registry.is_none()` (the land refuses for want of `bay.runnerKey`).
 //! - `src/evidence.rs` `signed_kind`: `registry.signs_all() || kind == KIND_APPROVAL` to `true`
 //!   (unsigned check evidence never counts), or to `registry.signs_all()` (the forged and the
 //!   unsigned approval count).
@@ -19,7 +19,7 @@
 //!   to `false &&` (the host takes a forged approval), and `pre_receive`'s
 //!   `if !registry.signs_all()` to `if false` (the host refuses the unsigned chain).
 //! - `src/policy.rs` `signing_at`: `policy.map_or(Signing::All, |policy| policy.signing)` to
-//!   `Signing::Approvals` (the control is no longer refused for want of `bay.executorKey`).
+//!   `Signing::Approvals` (the control is no longer refused for want of `bay.runnerKey`).
 //!   The text reader `signing_in` is held by the unit test
 //!   `signing_is_all_or_approvals_and_unknown_is_all`.
 //! - `src/registry.rs` `Registry::current`: drop `registry.mode = ...` (every case runs signed).
@@ -154,7 +154,7 @@ impl Trunk {
         result_json(
             self.test_box
                 .bay(&self.repo)
-                .args(["doctor", "--role", "executor"]),
+                .args(["doctor", "--role", "runner"]),
         )
         .1
     }
@@ -165,13 +165,13 @@ impl Trunk {
 fn approvals_only_lands_without_executor_keys_and_counts_only_an_approvers_signature() {
     let trunk = trunk(true);
     // No key on this machine: doctor names the mode and needs no executor or producer key.
-    for key in ["bay.agentKey", "bay.executorKey", "bay.producerKey"] {
+    for key in ["bay.agentKey", "bay.runnerKey", "bay.producerKey"] {
         let (code, _, _) = trunk_config(&trunk, key);
         assert_ne!(code, 0, "{key} is set");
     }
     let doctor = trunk.doctor();
     assert_eq!(row(&doctor, "signing")["mode"], "approvals", "{doctor}");
-    assert_eq!(row(&doctor, "executor-keys")["state"], "green", "{doctor}");
+    assert_eq!(row(&doctor, "runner-keys")["state"], "green", "{doctor}");
 
     // A change off the gated path lands unsigned, its evidence counted unsigned.
     let (id, view) = trunk.start("CARD-src", "src/other.rs", "fn other() {}\n");
@@ -289,7 +289,7 @@ fn with_signing_absent_the_same_machine_is_refused_and_a_candidate_never_switche
     let trunk = trunk(false);
     let doctor = trunk.doctor();
     assert_eq!(row(&doctor, "signing")["mode"], "all", "{doctor}");
-    assert_eq!(row(&doctor, "executor-keys")["state"], "red", "{doctor}");
+    assert_eq!(row(&doctor, "runner-keys")["state"], "red", "{doctor}");
 
     // As before: with no agent key the change cannot even start.
     let (code, refused) = trunk.try_start("CARD-src", "src/other.rs");
@@ -318,7 +318,7 @@ fn with_signing_absent_the_same_machine_is_refused_and_a_candidate_never_switche
     let (code, refused) = trunk.land(&view);
     assert_ne!(code, 0, "{refused}");
     assert_ne!(refused["decision"], "merged", "{refused}");
-    assert!(refused.to_string().contains("bay.executorKey"), "{refused}");
+    assert!(refused.to_string().contains("bay.runnerKey"), "{refused}");
     assert_eq!(trunk.trunk_tip(), before, "trunk did not move");
 }
 

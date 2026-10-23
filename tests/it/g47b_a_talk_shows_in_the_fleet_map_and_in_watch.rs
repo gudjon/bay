@@ -1,7 +1,7 @@
 //! G47b: a talk shows in the fleet map and in `bay status --since` (`DESIGN` § 11a, § 11c; `INTERFACES`
 //! § 5, § 5a).
 //!
-//! `bay status --fleet` lists every open talk the local cache holds, as `bay status` lists them:
+//! `bay status --all` lists every open talk the local cache holds, as `bay status` lists them:
 //! who owes the reply, the ages and the standing. Each session entry counts the open talks its
 //! actor owes (`owes_talks`) and is owed (`owed_talks`), and a talk's sender is an actor the map
 //! knows. `bay status --since` from a cursor lists `talk_arrived` once when a talk to its actor arrives,
@@ -37,7 +37,7 @@ fn watch(case: &TalkCase, since: Option<&str>) -> (Vec<Value>, String) {
 fn fleet(case: &TalkCase) -> Value {
     let (code, status) = case.status("agent");
     assert_eq!(code, 0, "{status}");
-    let (code, map) = result_json(case.bay_as("agent").args(["status", "--fleet"]));
+    let (code, map) = result_json(case.bay_as("agent").args(["status", "--all"]));
     assert_eq!(code, 0, "{map}");
     map["detail"].clone()
 }

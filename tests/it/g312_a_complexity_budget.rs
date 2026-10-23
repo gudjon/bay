@@ -33,7 +33,9 @@ use support::TestBox;
 ///   refusal is gone.
 /// - 0.3.2, two flags (`enrol --remove`, `--reason`): removing a key was a hand-built, registry
 ///   signed Git commit; now it is one command that records why (owner ruling 2026-10-22).
-const COMMANDS: usize = 28;
+/// - 0.4.0, two commands fewer: `host init` is `host` (one word for the one step), and the
+///   agent hook `bay hook`, which `bay install` writes and no one types, is hidden from `--help`.
+const COMMANDS: usize = 26;
 const FLAGS: usize = 76;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.

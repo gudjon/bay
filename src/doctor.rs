@@ -3,7 +3,7 @@
 //!
 //! Doctor reads. It writes no settings file and no Git config. In a work repository whose
 //! remote answers, it publishes its verdict on this machine's live summary (G314,
-//! `crate::live::publish_doctor`), so `bay status --fleet` shows every machine's readiness.
+//! `crate::live::publish_doctor`), so `bay status --all` shows every machine's readiness.
 
 use std::path::Path;
 use std::process::Command;
@@ -72,7 +72,7 @@ pub fn doctor(dir: &Path) -> BayResult {
     doctor_as(dir, false)
 }
 
-/// `bay doctor`, or with `executor` `bay doctor --role executor`: the box is judged as an
+/// `bay doctor`, or with `executor` `bay doctor --role runner`: the box is judged as an
 /// executor box whatever role doctor would infer (G63). The role is the operator's statement;
 /// an unsigned executor box holds no key doctor could infer it from.
 #[must_use]
@@ -143,10 +143,10 @@ fn publish(dir: &Path, result: &BayResult) {
 enum Role {
     /// A repository that is not a bay-hosted trunk.
     AgentView,
-    /// The bare repository `bay host init` creates (§ 10a).
+    /// The bare repository `bay host` creates (§ 10a).
     HostedTrunk,
-    /// A box that runs `bay runner run`, as `--role executor` states (G63).
-    Executor,
+    /// A box that runs `bay runner run`, as `--role runner` states (G63).
+    Runner,
     /// Doctor runs outside every repository: only the machine rows apply, at the floor of any
     /// machine running bay.
     NoRepository,
@@ -158,7 +158,7 @@ impl Role {
         match self {
             Self::AgentView => Some("agent-view"),
             Self::HostedTrunk => Some("bay-hosted-trunk"),
-            Self::Executor => Some("executor"),
+            Self::Runner => Some("runner"),
             Self::NoRepository => None,
         }
     }
@@ -167,10 +167,28 @@ impl Role {
         match self {
             Self::AgentView => GIT_FLOOR_AGENT_VIEW,
             Self::HostedTrunk => GIT_FLOOR_HOSTED_TRUNK,
-            Self::Executor => GIT_FLOOR_EXECUTOR,
+            Self::Runner => GIT_FLOOR_EXECUTOR,
             Self::NoRepository => GIT_FLOOR_ANY,
         }
     }
+}
+
+/// BACKLOG 53 (0.4.0): the old Git config key names bay no longer reads, still set where this
+/// machine's Git reads its config.
+fn renamed_keys_row(git: &Git) -> Option<Value> {
+    let renamed = crate::signing::renamed_keys_set(git);
+    (!renamed.is_empty()).then(|| {
+        json!({
+            "name": "renamed-keys",
+            "required": false,
+            "state": "renamed",
+            "keys": renamed
+                .iter()
+                .map(|(old, new)| json!({"from": old, "to": new}))
+                .collect::<Vec<_>>(),
+            "note": "bay reads only the new names; run bay install in this clone, and bay install --machine for global keys",
+        })
+    })
 }
 
 /// The repository doctor runs in; `None` outside one, where the machine rows still answer and
@@ -197,9 +215,10 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
 
     let mut report = Report::default();
     report.rows.push(crate::update::doctor_row());
+    report.rows.extend(renamed_keys_row(&git));
 
     let role = match &info {
-        _ if executor => Role::Executor,
+        _ if executor => Role::Runner,
         None => Role::NoRepository,
         Some(info) if info.bare => Role::HostedTrunk,
         Some(_) => Role::AgentView,
@@ -650,7 +669,7 @@ fn hooks_row(
             report
                 .rows
                 .push(json!({"name": "trunk-hook", "state": "red",
-                "recovery": "create the host with bay host init"}));
+                "recovery": "create the host with bay host"}));
         }
         return Ok(());
     }
@@ -1164,13 +1183,13 @@ fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report
         Ok(None) => {
             report
                 .rows
-                .push(json!({"name": "executor-keys", "required": false,
+                .push(json!({"name": "runner-keys", "required": false,
                 "state": "green", "note": "no registry: the executor publishes unsigned"}));
             return;
         }
         // N-21: under `[policy] signing = "approvals"` no executor or producer key signs.
         Ok(Some(registry)) if !registry.signs_all() => {
-            report.rows.push(json!({"name": "executor-keys", "required": false,
+            report.rows.push(json!({"name": "runner-keys", "required": false,
                 "state": "green", "signing": registry.mode().name(),
                 "note": "the policy at trunk says [policy] signing = \"approvals\": the executor publishes unsigned, and only approvals are signed"}));
             return;
@@ -1180,7 +1199,7 @@ fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report
             report.red(Reason::ExecutorKeyMissing, Some("registry unreadable"));
             report
                 .rows
-                .push(json!({"name": "executor-keys", "required": true,
+                .push(json!({"name": "runner-keys", "required": true,
                 "state": "red", "note": why}));
             return;
         }
@@ -1192,7 +1211,7 @@ fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report
     };
     let executor = judge(
         keys.executor.is_some(),
-        KeyClass::Executor,
+        KeyClass::Runner,
         &keys.executor_name,
     );
     let producer = judge(
@@ -1201,7 +1220,7 @@ fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report
         &keys.producer_name,
     );
     let green = executor == "enrolled" && producer == "enrolled";
-    let mut row = json!({"name": "executor-keys", "required": true, "state": state(green),
+    let mut row = json!({"name": "runner-keys", "required": true, "state": state(green),
         "executor": executor, "executor_name": keys.executor_name,
         "producer": producer, "producer_name": keys.producer_name});
     if !green {
@@ -1210,7 +1229,7 @@ fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report
             Some("executor keys not enrolled"),
         );
         row["recovery"] = json!(
-            "set bay.executorKey and bay.producerKey, under the names bay.executorName and bay.producerName that the registry enrols"
+            "set bay.runnerKey and bay.producerKey, under the names bay.runnerName and bay.producerName that the registry enrols"
         );
     }
     report.rows.push(row);
@@ -1269,13 +1288,13 @@ fn presence_row(git: &Git, config: &Config, keys: &crate::signing::Keys, report:
 }
 
 /// The check sandbox (ruling R14): red with `SANDBOX_ABSENT` on a box in the executor or
-/// producer role (it has `bay.executorKey` or `bay.producerKey`) where no check would run for
+/// producer role (it has `bay.runnerKey` or `bay.producerKey`) where no check would run for
 /// want of a sandbox. A box in the agent-view role runs no checks, so it is not red there.
 fn sandbox_row(sandbox: &crate::check::Sandbox, runs_checks: bool, report: &mut Report) {
     let row = match (&sandbox.refusal, runs_checks) {
         (None, _) if sandbox.kind == "none" => json!({"name": "sandbox", "kind": "none",
             "required": runs_checks, "state": "green",
-            "note": "no check sandbox; this box chose to run checks without one (bay.executorSandbox = none)"}),
+            "note": "no check sandbox; this box chose to run checks without one (bay.runnerSandbox = none)"}),
         (None, _) => json!({"name": "sandbox", "kind": sandbox.kind, "required": runs_checks,
             "state": "green"}),
         (Some(_), false) => json!({"name": "sandbox", "kind": sandbox.kind, "required": false,
@@ -1283,7 +1302,7 @@ fn sandbox_row(sandbox: &crate::check::Sandbox, runs_checks: bool, report: &mut 
         (Some(why), true) => {
             report.red(Reason::SandboxAbsent, Some("no check sandbox"));
             let recovery = crate::check::apparmor_remedy_here().unwrap_or_else(|| {
-                "install the check sandbox, or choose to run checks without one: git config --global bay.executorSandbox none".to_owned()
+                "install the check sandbox, or choose to run checks without one: git config --global bay.runnerSandbox none".to_owned()
             });
             json!({"name": "sandbox", "kind": sandbox.kind, "required": true, "state": "red",
                 "note": why, "recovery": recovery})

@@ -54,7 +54,7 @@ struct Trunk {
 fn files(keys: &TestKeys, approvers: &str) -> Vec<(&'static str, String)> {
     vec![
         ("agent", key_line(AGENT, &keys.agent)),
-        ("executor", key_line(EXECUTOR, &keys.executor)),
+        ("runner", key_line(EXECUTOR, &keys.executor)),
         ("producer", key_line(PRODUCER, &keys.producer)),
         ("approver", approvers.to_owned()),
         ("registry", key_line(REGISTRAR, &keys.registry)),
@@ -193,7 +193,7 @@ fn an_approval_lands_the_approved_candidate_with_no_second_land() {
     let (code, waiting) = trunk.land(&view);
     assert_eq!(code, 10, "{waiting}");
     assert_eq!(waiting["reason"], "APPROVAL_PENDING", "{waiting}");
-    assert_eq!(waiting["retry_when"], "approved", "{waiting}");
+    assert_eq!(waiting["retry_when"], "after_person", "{waiting}");
     let next = waiting["detail"]["approval"]["once_approved"]
         .as_str()
         .unwrap_or_default();

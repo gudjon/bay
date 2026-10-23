@@ -1,4 +1,4 @@
-//! `bay status --heads`: work that exists only on this disk (G156).
+//! `bay status --branches`: work that exists only on this disk (G156).
 //!
 //! A local branch whose tip no remote-tracking ref contains holds commits that no remote has:
 //! a disk that is lost loses them. Each one is listed with the commits it holds that no
@@ -8,7 +8,7 @@
 //! is as new as this clone's last fetch, and no prune and no delete, so every branch and record
 //! it names is still there to recover or remove by hand.
 //!
-//! `bay status --heads` carries the same findings in its `detail.stranded` (G302), read by
+//! `bay status --branches` carries the same findings in its `detail.stranded` (G302), read by
 //! [`local`], so one view shows every head: the remote's and those only this disk has.
 
 use std::collections::BTreeMap;

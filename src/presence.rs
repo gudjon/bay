@@ -14,7 +14,7 @@
 //! costs a fixed number of git spawns (one config read, four plumbing calls, one push) whatever
 //! the queue or the history holds, and a pass within a heartbeat of the last write spawns none.
 //! The write is best effort: a failure never stops the executor, and its outcome is kept in
-//! `<git-common-dir>/bay/presence-push.json`, which `bay doctor --role executor` shows.
+//! `<git-common-dir>/bay/presence-push.json`, which `bay doctor --role runner` shows.
 //!
 //! A reader judges a presence by its age: the larger of its age on the reader's clock since the
 //! fetch that first brought it, and its own time against the reader's clock. So a presence first
@@ -127,7 +127,7 @@ impl Beat {
 /// its name and the commit.
 fn write(repo: &Repo, keys: &Keys, record: &Value) -> Result<(String, String), String> {
     let executor = keys.executor_name.as_str();
-    crate::names::operator_name(executor).map_err(|why| format!("bay.executorName: {why}"))?;
+    crate::names::operator_name(executor).map_err(|why| format!("bay.runnerName: {why}"))?;
     let git = &repo.git;
     let mut text = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
     text.push('\n');
@@ -267,7 +267,7 @@ pub fn rows(git: &Git, config: &Config, held: &[Held], now: u64) -> Result<Vec<V
     let commits: Vec<String> = held.iter().map(|held| held.commit.clone()).collect();
     let reads = crate::live::files_at(git, &commits, PRESENCE_FILE, PRESENCE_MAX_BYTES)?;
     let executors = match Registry::current(git)?.filter(Registry::signs_all) {
-        Some(registry) => Some(registry.class_file(git, KeyClass::Executor)?),
+        Some(registry) => Some(registry.class_file(git, KeyClass::Runner)?),
         None => None,
     };
     let window = config.takeover().as_secs();

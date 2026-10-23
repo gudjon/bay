@@ -74,10 +74,7 @@ fn assert_wip_limit(refused: &Value, limit: u64, live: &[(&str, &str)]) {
     assert_eq!(refused["decision"], "blocked", "{refused}");
     assert_eq!(refused["reason"], "WIP_LIMIT", "{refused}");
     assert_eq!(refused["allowed"], serde_json::json!(["read"]), "{refused}");
-    assert_eq!(
-        refused["retry_when"], "a_live_change_lands_or_is_abandoned",
-        "{refused}"
-    );
+    assert_eq!(refused["retry_when"], "after_wait", "{refused}");
     let detail = &refused["detail"];
     assert_eq!(detail["max_live_changes"], limit, "{refused}");
     let named = detail["live_changes"].as_array().unwrap();

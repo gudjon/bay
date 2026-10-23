@@ -58,7 +58,7 @@ struct Trunk {
 fn files(keys: &TestKeys, approvers: &str) -> Vec<(&'static str, String)> {
     vec![
         ("agent", key_line(AGENT, &keys.agent)),
-        ("executor", key_line(EXECUTOR, &keys.executor)),
+        ("runner", key_line(EXECUTOR, &keys.executor)),
         ("producer", key_line(PRODUCER, &keys.producer)),
         ("approver", approvers.to_owned()),
         ("registry", key_line(REGISTRAR, &keys.registry)),

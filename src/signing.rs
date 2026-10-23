@@ -4,13 +4,33 @@
 //! `git verify-commit` against the class file the commit must verify against; the exit code
 //! is the only accept signal, and the principal must equal the actor the commit names.
 //! Evidence records are signed with `ssh-keygen -Y sign -n bay-producer` over their canonical
-//! JSON. Keys are this machine's: local Git config `bay.agentKey`, `bay.executorKey`,
-//! `bay.producerKey`, with `bay.executorName` and `bay.producerName`.
+//! JSON. Keys are this machine's: local Git config `bay.agentKey`, `bay.runnerKey`,
+//! `bay.producerKey`, with `bay.runnerName` and `bay.producerName`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::git::{self, Git, GitError};
+
+/// The Git config keys 0.4.0 renamed (owner ruling 2026-10-23, BACKLOG 53): each old name and
+/// the one bay reads. bay never reads an old name; `bay install` moves its value to the new one
+/// (`--machine` in global config, else in the clone's), and `bay doctor` names one still set.
+pub const RENAMED_KEYS: &[(&str, &str)] = &[
+    ("bay.executorKey", "bay.runnerKey"),
+    ("bay.executorName", "bay.runnerName"),
+    ("bay.executorSandbox", "bay.runnerSandbox"),
+];
+
+/// The [`RENAMED_KEYS`] whose old name is still set where `git` reads its config, each with the
+/// new name.
+#[must_use]
+pub fn renamed_keys_set(git: &Git) -> Vec<(&'static str, &'static str)> {
+    RENAMED_KEYS
+        .iter()
+        .copied()
+        .filter(|(old, _)| config(git, old).is_some())
+        .collect()
+}
 
 /// A key and the principal it signs as.
 #[derive(Clone, Debug)]
@@ -97,7 +117,7 @@ impl Keys {
     /// The executor or producer name is not a valid bay name.
     pub fn validate(&self) -> Result<(), String> {
         crate::names::operator_name(&self.executor_name)
-            .map_err(|why| format!("bay.executorName: {why}"))?;
+            .map_err(|why| format!("bay.runnerName: {why}"))?;
         crate::names::operator_name(&self.producer_name)
             .map_err(|why| format!("bay.producerName: {why}"))
     }
@@ -112,9 +132,9 @@ impl Keys {
         };
         Self {
             agent: config(git, "bay.agentKey").map(PathBuf::from),
-            executor: named("bay.executorKey", "bay.executorName"),
+            executor: named("bay.runnerKey", "bay.runnerName"),
             producer: named("bay.producerKey", "bay.producerName"),
-            executor_name: config(git, "bay.executorName").unwrap_or_else(|| "local".to_owned()),
+            executor_name: config(git, "bay.runnerName").unwrap_or_else(|| "local".to_owned()),
             producer_name: config(git, "bay.producerName").unwrap_or_else(|| "local".to_owned()),
             reviewer_name: config(git, "bay.reviewerName"),
             approver_name: config(git, "bay.approverName"),

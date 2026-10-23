@@ -256,7 +256,7 @@ fn a_registry_that_enrols_a_removed_key_is_named_and_repaired() {
         &keys,
         &[
             ("agent", key_line(AGENT, &keys.agent)),
-            ("executor", key_line(EXECUTOR, &keys.executor)),
+            ("runner", key_line(EXECUTOR, &keys.executor)),
             ("producer", key_line("ci-2", &keys.producer)),
             ("registry", key_line(REGISTRAR, &keys.registry)),
             ("removed", format!("{removed_file}\n")),

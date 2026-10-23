@@ -111,29 +111,30 @@ enum Command {
     Status {
         /// One change (default: the view's change, else every local change)
         change: Option<String>,
-        /// The fleet map from the local cache `bay status` fetches; fails closed without that fetch
+        /// Every machine and runner of the repository, from the local cache `bay status` fetches;
+        /// fails closed without that fetch
         #[arg(long, conflicts_with = "change")]
-        fleet: bool,
+        all: bool,
         /// The Reverts:, Supersedes: and Fixes: pairs of a first-parent range (default: main);
         /// local refs only, never a fetch
         #[arg(long, value_name = "RANGE", num_args = 0..=1, default_missing_value = "",
-            conflicts_with_all = ["change", "fleet"])]
+            conflicts_with_all = ["change", "all"])]
         lineage: Option<String>,
-        /// Every branch on the remote, classed `trunk`, `target`, `lane`, `landed` (with its proof),
+        /// Every branch on the remote, classed `main`, `target`, `lane`, `merged` (with its proof),
         /// stale or unique, and the local branches no remote holds and worktrees whose folder
         /// is gone; one ls-remote and one fetch, nothing deleted
-        #[arg(long, conflicts_with_all = ["change", "fleet", "lineage"])]
-        heads: bool,
-        /// With --heads: a branch with commits off main whose tip is older than this is stale
+        #[arg(long, conflicts_with_all = ["change", "all", "lineage"])]
+        branches: bool,
+        /// With --branches: a branch with commits off main whose tip is older than this is stale
         /// (default 30)
-        #[arg(long, value_name = "DAYS", requires = "heads")]
+        #[arg(long, value_name = "DAYS", requires = "branches")]
         stale_days: Option<u64>,
         /// What happened after a cursor: merges into main, log events, new invalidations of the
         /// view's change; with no cursor, from the start. Each answer names the next cursor
         /// (`detail.cursor`)
         #[arg(long, value_name = "CURSOR", num_args = 0..=1, default_missing_value = "",
             value_parser = since_cursor,
-            conflicts_with_all = ["change", "fleet", "lineage", "heads"])]
+            conflicts_with_all = ["change", "all", "lineage", "branches"])]
         since: Option<String>,
         /// With --since: only the merges, each with its base, committer time and whether it
         /// merged outside bay, and the count of commits off the first-parent line
@@ -160,16 +161,13 @@ enum Command {
     /// Admin: probe this machine (git and Claude Code floors, remote, hook entries, installed skill)
     Doctor {
         /// Judge this machine in this role instead of the one doctor infers
-        #[arg(long, value_parser = ["executor"])]
+        #[arg(long, value_parser = ["runner"])]
         role: Option<String>,
     },
     /// Admin: place bay at $HOME/.local/bin/bay, its skill and its project hook entries
     Install(InstallArgs),
-    /// Admin: a bay-hosted main
-    Host {
-        #[command(subcommand)]
-        action: HostAction,
-    },
+    /// Admin: create a bay-hosted main: a bare repository on reftable whose main is append-only
+    Host(HostArgs),
     /// Admin: the runner that finishes operations after their agents leave
     Runner {
         #[command(subcommand)]
@@ -210,7 +208,9 @@ enum Command {
         #[command(subcommand)]
         action: PluginAction,
     },
-    /// Admin: the agent hook entry point (`bay hook <event>`)
+    /// Admin: the agent hook entry point (`bay hook <event>`), which `bay install` writes into the
+    /// agent's settings; no one runs it by hand, so `bay --help` does not list it (0.4.0)
+    #[command(hide = true)]
     Hook {
         /// The agent product's event, for example `tool.before`
         event: String,
@@ -219,7 +219,7 @@ enum Command {
     /// With --json: the same list for programs, every reason code, and the JSON Schema of
     /// bay.result/1
     Help {
-        /// The command, for example `host init` (default: bay itself)
+        /// The command, for example `bay host` (default: bay itself)
         #[arg(value_name = "COMMAND")]
         command: Vec<String>,
     },
@@ -237,7 +237,7 @@ fn since_cursor(text: &str) -> Result<String, String> {
 #[derive(Args)]
 struct EnrolArgs {
     /// The key's class
-    #[arg(value_parser = ["agent", "executor", "producer", "reviewer", "approver", "registry"])]
+    #[arg(value_parser = ["agent", "runner", "producer", "reviewer", "approver", "registry"])]
     class: String,
     /// The name the key is enrolled under
     name: String,
@@ -375,19 +375,27 @@ struct TalkArgs {
 
 #[derive(Subcommand)]
 enum HostAction {
-    /// Create a bare repository on reftable whose main is append-only
-    Init {
-        path: PathBuf,
-        /// The name of main
-        #[arg(long = "main", value_name = "BRANCH", default_value = "main")]
-        trunk: String,
-        /// By default the object format of the repository bay runs in, else Git's default
-        #[arg(long, value_parser = ["sha1", "sha256"])]
-        object_format: Option<String>,
-    },
-    /// The host hook Git runs on a push (configured by `host init`)
+    /// The host hook Git runs on a push (configured by `bay host`)
     #[command(hide = true)]
     Hook { event: String, args: Vec<String> },
+}
+
+/// `bay host <path>` (0.4.0, BACKLOG 51 R7: one word for one step), and the hidden host hook
+/// that a host's own hook files call.
+#[derive(Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+struct HostArgs {
+    #[command(subcommand)]
+    action: Option<HostAction>,
+    /// The bare repository to create
+    #[arg(required = true)]
+    path: Option<PathBuf>,
+    /// The name of main
+    #[arg(long = "main", value_name = "BRANCH", default_value = "main")]
+    trunk: String,
+    /// By default the object format of the repository bay runs in, else Git's default
+    #[arg(long, value_parser = ["sha1", "sha256"])]
+    object_format: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -514,11 +522,11 @@ enum RunnerAction {
 /// command does.
 /// The host, doctor's box rows, install, update and the agent hook do not.
 fn config_refusal(cli: &Cli) -> Option<BayResult> {
-    // `status --fleet` never fetches (G49): it reads the config without a fetch itself.
+    // `status --all` never fetches (G49): it reads the config without a fetch itself.
     let needs_config = !matches!(
         cli.command,
-        Command::Status { fleet: true, .. }
-            | Command::Host { .. }
+        Command::Status { all: true, .. }
+            | Command::Host(_)
             | Command::Doctor { .. }
             | Command::Install(_)
             | Command::Update { .. }
@@ -696,17 +704,19 @@ fn main() -> ExitCode {
             bay::publish::land(&cli.dir, change.as_deref(), wait, observe, false)
         }
         Command::Abandon { change } => abandon(&cli.dir, change.as_deref()),
-        Command::Host {
-            action:
-                HostAction::Init {
-                    path,
-                    trunk,
-                    object_format,
-                },
-        } => bay::host::init(&cli.dir, &path, &trunk, object_format.as_deref()),
-        Command::Host {
-            action: HostAction::Hook { event, args },
-        } => return ExitCode::from(bay::host::hook(&event, &args)),
+        Command::Host(HostArgs {
+            action: Some(HostAction::Hook { event, args }),
+            ..
+        }) => return ExitCode::from(bay::host::hook(&event, &args)),
+        Command::Host(HostArgs {
+            path,
+            trunk,
+            object_format,
+            ..
+        }) => {
+            let path = path.expect("clap requires the path without a subcommand");
+            bay::host::init(&cli.dir, &path, &trunk, object_format.as_deref())
+        }
         Command::Runner {
             action: RunnerAction::Run { once, interval_s },
         } => return executor_run(&cli.dir, cli.json, once, interval_s),
@@ -715,7 +725,7 @@ fn main() -> ExitCode {
         } => bay::service::install(&cli.dir, &bay::service::Request { print, force }),
         Command::Live { action } => live(&cli.dir, action),
         command @ Command::Status { .. } => status(&cli.dir, command),
-        // The one prune: the same request `status --heads --prune` makes (G302).
+        // The one prune: the request `status --branches` makes, deleting (G302).
         Command::Prune { stale_days } => heads(&cli.dir, true, stale_days),
         Command::Talk(args) => talk(&cli.dir, *args),
         Command::Evidence { action } => evidence(&cli.dir, action),
@@ -766,7 +776,7 @@ fn help(command: &[String], json: bool) -> ExitCode {
 
 /// `bay doctor`, then the daily update check.
 fn doctor(dir: &std::path::Path, role: Option<&str>) -> BayResult {
-    let result = bay::doctor::doctor_as(dir, role == Some("executor"));
+    let result = bay::doctor::doctor_as(dir, role == Some("runner"));
     bay::update::auto();
     result
 }
@@ -798,7 +808,7 @@ fn live(dir: &std::path::Path, action: LiveAction) -> BayResult {
 }
 
 /// The census of the remote's branches, and with `prune` the prune of the landed ones: the one
-/// path of `bay status --heads`, `bay prune` and `bay prune` (G302).
+/// path of `bay status --branches` and `bay prune` (G302).
 fn heads(dir: &std::path::Path, prune: bool, stale_days: Option<u64>) -> BayResult {
     bay::heads::heads(dir, &bay::heads::Request { prune, stale_days })
 }
@@ -808,9 +818,9 @@ fn heads(dir: &std::path::Path, prune: bool, stale_days: Option<u64>) -> BayResu
 fn status(dir: &std::path::Path, command: Command) -> BayResult {
     let Command::Status {
         change,
-        fleet,
+        all,
         lineage,
-        heads: every_head,
+        branches: every_branch,
         stale_days,
         since,
         merged,
@@ -818,10 +828,10 @@ fn status(dir: &std::path::Path, command: Command) -> BayResult {
     else {
         unreachable!("status takes a status command");
     };
-    if every_head {
+    if every_branch {
         return heads(dir, false, stale_days);
     }
-    if fleet {
+    if all {
         return bay::fleet::fleet(dir);
     }
     // 0.3.0: what `bay status --since` was; an empty cursor reads from the start.

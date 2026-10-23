@@ -77,7 +77,7 @@ fn assert_config_missing(result: &serde_json::Value) {
     assert_eq!(result["decision"], "blocked", "{result}");
     assert_eq!(result["reason"], "CONFIG_MISSING", "{result}");
     assert_eq!(result["allowed"], serde_json::json!(["read"]), "{result}");
-    assert_eq!(result["retry_when"], "config_added", "{result}");
+    assert_eq!(result["retry_when"], "after_setup", "{result}");
 }
 
 #[test]

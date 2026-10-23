@@ -111,7 +111,7 @@ fn local_config(git: &Git, key: &str) -> Result<Option<String>, BootstrapError> 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Fetch {
     /// Never: a reader that must not touch the network (the agent hook, `bay doctor`,
-    /// `bay install`, `bay status --fleet`).
+    /// `bay install`, `bay status --all`).
     Never,
     /// Only when the tracking ref does not exist yet (before the first fetch).
     IfMissing,

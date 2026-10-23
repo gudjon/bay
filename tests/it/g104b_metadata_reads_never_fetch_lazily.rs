@@ -300,7 +300,7 @@ fn a_live_summary_the_cache_cannot_read_is_named_never_a_missing_one() {
 
     // The fleet map names the machine whose summary it could not read, and why: never a
     // summary that is missing.
-    let (code, fleet) = result_json(test_box.bay(&view).args(["status", "--fleet"]));
+    let (code, fleet) = result_json(test_box.bay(&view).args(["status", "--all"]));
     assert_eq!(code, 0, "{fleet}");
     let far = fleet["detail"]["machines"]
         .as_array()

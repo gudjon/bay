@@ -97,7 +97,7 @@ fn held(result: &Value) -> Value {
     assert_eq!(result["decision"], "queued", "{result}");
     assert_eq!(result["reason"], "MAIN_HELD", "{result}");
     assert_eq!(result["allowed"], serde_json::json!(["wait"]), "{result}");
-    assert_eq!(result["retry_when"], "hold_cleared", "{result}");
+    assert_eq!(result["retry_when"], "after_person", "{result}");
     result["detail"]["hold"].clone()
 }
 

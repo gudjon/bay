@@ -82,7 +82,7 @@ fn the_agent_leaves_and_returns_to_a_precise_repair_request() {
     assert_eq!(op["state"], "blocked", "{status}");
     assert_eq!(op["outcome"], "CHECK_FAILED");
     assert_eq!(op["allowed"], serde_json::json!(["repair"]));
-    assert_eq!(op["retry_when"], "candidate_changed");
+    assert_eq!(op["retry_when"], "after_fix");
 
     // A blocked operation waits for repair; the executor does not loop on it.
     let again = test_box.bay_ok(&executor, &["runner", "run", "--once"]);

@@ -1,9 +1,9 @@
-//! G156. `bay status --heads` names work that exists only on this disk.
+//! G156. `bay status --branches` names work that exists only on this disk.
 //!
 //! A local branch whose tip no remote-tracking ref contains holds commits no remote has: the
 //! list names it with the commits it is ahead, the age of its tip and the worktree it is
 //! checked out in. A worktree record whose folder is gone is listed too, in `detail.stranded`
-//! (0.3.0: `bay status --stranded` is gone; `--heads` shows every head). That part of the read
+//! (0.3.0: `bay status --stranded` is gone; `--branches` shows every head). That part of the read
 //! uses local refs only, and nothing is pruned or deleted.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -80,7 +80,7 @@ fn branches_no_remote_holds_and_worktrees_whose_folder_is_gone_are_listed() {
     std::fs::remove_dir_all(&gone).unwrap();
     let refs_before = test_box.git_ok(&repo, &["for-each-ref"]);
 
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--heads"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--branches"]));
     assert_eq!(code, 0, "{result}");
     let stranded = branch(&result, "local-only").unwrap_or_else(|| panic!("{result}"));
     assert_eq!(stranded["ahead"], 2, "{stranded}");
@@ -128,8 +128,8 @@ fn heads_conflicts_with_a_change_and_with_fleet() {
     let repo = test_box.repo_any("repo");
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     for args in [
-        &["status", "--heads", "--fleet"][..],
-        &["status", "abcdefgh", "--heads"][..],
+        &["status", "--branches", "--all"][..],
+        &["status", "abcdefgh", "--branches"][..],
     ] {
         let out = test_box.bay(&repo).args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");

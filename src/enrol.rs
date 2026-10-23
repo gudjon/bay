@@ -221,7 +221,7 @@ fn remove(repo: &Repo, class: KeyClass, name: &str, reason: Removed) -> Result<B
 fn article(class: KeyClass) -> &'static str {
     if matches!(
         class,
-        KeyClass::Agent | KeyClass::Executor | KeyClass::Approver
+        KeyClass::Agent | KeyClass::Runner | KeyClass::Approver
     ) {
         "an"
     } else {
@@ -243,7 +243,7 @@ fn principal(class: KeyClass, name: &str) -> Result<(), String> {
     }
     if matches!(
         class,
-        KeyClass::Executor | KeyClass::Producer | KeyClass::Reviewer | KeyClass::Approver
+        KeyClass::Runner | KeyClass::Producer | KeyClass::Reviewer | KeyClass::Approver
     ) {
         crate::names::operator_name(name).map_err(|why| {
             format!(
@@ -377,7 +377,15 @@ fn new_tree(git: &Git, parent: Option<&str>, files: &[(&str, &str)]) -> Result<S
         Some(parent) => git.run(&["ls-tree", "-z", parent]).map_err(fault)?,
         None => String::new(),
     };
-    let names: Vec<String> = files.iter().map(|(name, _)| format!("\t{name}")).collect();
+    let mut names: Vec<String> = files.iter().map(|(name, _)| format!("\t{name}")).collect();
+    // The runner class's file replaces the one a registry stored before 0.4.0, whose lines the
+    // new text already holds (`Registry::text`).
+    if files
+        .iter()
+        .any(|(name, _)| *name == KeyClass::Runner.file())
+    {
+        names.push(format!("\t{}", crate::registry::OLD_RUNNER_FILE));
+    }
     let mut entries: Vec<String> = listed
         .split('\0')
         .filter(|entry| !entry.is_empty() && !names.iter().any(|own| entry.ends_with(own)))

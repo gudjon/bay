@@ -1,6 +1,6 @@
 //! G15. A bay-hosted trunk is append-only without a forge.
 //!
-//! On a `bay host init` repository a force push, a deletion and a recreation of trunk are
+//! On a `bay host` repository a force push, a deletion and a recreation of trunk are
 //! refused by the trunk-scoped hook; bay's own refs (`refs/bay/*`, `refs/notes/bay/*`) can
 //! still be pruned by a retention cut; `bay doctor` refuses a host without the trunk hook.
 
@@ -114,12 +114,11 @@ fn host_init_below_2_54_is_refused_and_creates_nothing() {
     let test_box = TestBox::new();
     test_box.fake_git_version("2.53.0");
     let host = test_box.path().join("host.git");
-    let (code, result) =
-        result_json(
-            test_box
-                .bay(test_box.path())
-                .args(["host", "init", host.to_str().unwrap()]),
-        );
+    let (code, result) = result_json(
+        test_box
+            .bay(test_box.path())
+            .args(["host", host.to_str().unwrap()]),
+    );
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["decision"], "blocked");
     assert_eq!(result["reason"], "TOOL_BELOW_FLOOR");

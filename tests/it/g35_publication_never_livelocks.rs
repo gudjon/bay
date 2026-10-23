@@ -474,10 +474,7 @@ fn twenty_agents_and_three_executors_all_land_with_bounded_check_time() {
     let executors: Vec<PathBuf> = (0..EXECUTORS)
         .map(|n| {
             let clone = test_box.clone_of(&remote, &format!("executor-{n}"));
-            test_box.git_ok(
-                &clone,
-                &["config", "bay.executorName", &format!("exec-{n}")],
-            );
+            test_box.git_ok(&clone, &["config", "bay.runnerName", &format!("exec-{n}")]);
             test_box.git_ok(
                 &clone,
                 &["config", "bay.producerName", &format!("exec-{n}-checks")],

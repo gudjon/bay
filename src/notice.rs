@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(told.told, ["e1"]);
         assert_eq!(
             told.text,
-            "bay: change c1: check_failed CHECK_FAILED on c1.1: allowed repair; retry when candidate_changed\n"
+            "bay: change c1: check_failed CHECK_FAILED on c1.1: allowed repair; retry when after_fix\n"
         );
         let again = tell(&mut cursor, VIEW, &nobody, &events, 2048, 11);
         assert!(again.text.is_empty() && again.told.is_empty(), "{again:?}");

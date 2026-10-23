@@ -372,7 +372,7 @@ fn the_hook_refuses_what_a_key_class_may_not_write() {
             &repo,
             &[
                 ("agent", &format!("agent {key_line}\n")),
-                ("executor", &format!("exec-1 {key_line}\n")),
+                ("runner", &format!("exec-1 {key_line}\n")),
                 ("registry", &registry_line),
             ],
         ),
@@ -471,7 +471,7 @@ fn forged_registry(test_box: &TestBox, repo: &Path, agent: &Path, keys: &TestKey
         repo,
         &[
             ("agent", &line(support::AGENT, agent)),
-            ("executor", &line(EXECUTOR, &keys.executor)),
+            ("runner", &line(EXECUTOR, &keys.executor)),
             ("registry", &line(support::REGISTRAR, &keys.registry)),
         ],
     );
@@ -928,10 +928,7 @@ fn other_executor(
 ) -> PathBuf {
     let clone = test_box.clone_of(host, "executor-2");
     test_box.use_keys(&clone, keys);
-    test_box.git_ok(
-        &clone,
-        &["config", "bay.executorKey", key.to_str().unwrap()],
-    );
+    test_box.git_ok(&clone, &["config", "bay.runnerKey", key.to_str().unwrap()]);
     test_box.git_ok(&clone, &["config", "bay.producerName", producer.0]);
     test_box.git_ok(
         &clone,
@@ -1052,7 +1049,7 @@ fn a_registry_change_the_executor_cannot_read_yet_leaves_the_operation_waiting()
     let executor = test_box.path().join("executor");
     test_box.git_ok(
         &executor,
-        &["config", "bay.executorKey", rotated.to_str().unwrap()],
+        &["config", "bay.runnerKey", rotated.to_str().unwrap()],
     );
     // The host serves every ref but the registry to fetches; its hook still reads it.
     test_box.git_bare(
@@ -1099,7 +1096,7 @@ fn an_executor_whose_box_holds_a_valid_key_re_signs_c_itself() {
     let executor = test_box.path().join("executor");
     test_box.git_ok(
         &executor,
-        &["config", "bay.executorKey", rotated.to_str().unwrap()],
+        &["config", "bay.runnerKey", rotated.to_str().unwrap()],
     );
 
     let ran = finish(held, &release);

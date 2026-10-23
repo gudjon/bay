@@ -229,7 +229,7 @@ fn an_outside_branch_that_changes_an_undeclared_path_is_refused_and_creates_noth
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["decision"], "blocked", "{refused}");
     assert_eq!(refused["reason"], "PATHS_UNDECLARED", "{refused}");
-    assert_eq!(refused["retry_when"], "paths_declared", "{refused}");
+    assert_eq!(refused["retry_when"], "after_fix", "{refused}");
     assert_eq!(
         refused["allowed"],
         serde_json::json!(["read", "repair"]),

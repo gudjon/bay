@@ -150,7 +150,7 @@ fn session_start_prints_an_open_refusal_with_what_to_do_next() {
     assert!(line.contains("CHECK_FAILED"), "{line}");
     assert!(line.contains(&format!("{id}.1")), "{line}");
     assert!(line.contains("repair"), "{line}");
-    assert!(line.contains("candidate_changed"), "{line}");
+    assert!(line.contains("after_fix"), "{line}");
 }
 
 #[test]

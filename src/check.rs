@@ -163,7 +163,7 @@ fn about(
 /// revision. The adapter reads every object through it; what it writes there stays in the
 /// scratch and is removed with it. The object directory and its own alternates are bound
 /// read-only in the sandbox (`sandbox-exec`, `bwrap`), so no write reaches the store; with no
-/// sandbox (`bay.executorSandbox = none`) read-only is not enforced, and the record says
+/// sandbox (`bay.runnerSandbox = none`) read-only is not enforced, and the record says
 /// `sandbox: "none"`.
 pub(crate) struct History {
     /// The temporary bare repository: `GIT_DIR` for the adapter.
@@ -434,15 +434,15 @@ pub fn apparmor_remedy_here() -> Option<String> {
 
 /// The box's choice to run checks with no sandbox (ruling R14): global Git config, never a
 /// repository's, as the update pin is the box's. Its one value is `none`.
-pub const UNSANDBOXED_KEY: &str = "bay.executorSandbox";
+pub const UNSANDBOXED_KEY: &str = "bay.runnerSandbox";
 
 /// Why a check does not run on a machine with no sandbox (ruling R14).
 pub const NO_SANDBOX: &str = "this machine has no check sandbox, so the check did not run; \
      to run checks without one, the box chooses it with git config --global \
-     bay.executorSandbox none (each record then says sandbox \"none\")";
+     bay.runnerSandbox none (each record then says sandbox \"none\")";
 
 /// The sandbox checks run in on this machine, and, where there is none and the box has not
-/// chosen `bay.executorSandbox = none`, why no check runs (ruling R14): a check never runs
+/// chosen `bay.runnerSandbox = none`, why no check runs (ruling R14): a check never runs
 /// unconfined unless the box chose that.
 #[derive(Clone, Debug)]
 pub struct Sandbox {
@@ -588,7 +588,7 @@ fn read_path_overlap(read: &[PathBuf], hidden: &[PathBuf]) -> Option<String> {
     })
 }
 
-/// Whether this box chose to run checks with no sandbox: `bay.executorSandbox` in global Git
+/// Whether this box chose to run checks with no sandbox: `bay.runnerSandbox` in global Git
 /// config is `none`. Unset is `false`; any other value, or a Git that does not answer, is an
 /// error, so the caller refuses.
 ///
@@ -2484,10 +2484,10 @@ mod tests {
         assert_eq!(refused.kind, "none");
         assert_eq!(refused.refusal.as_deref(), Some(NO_SANDBOX));
         // An unreadable or unknown choice is no choice, and the refusal says why.
-        let unknown = Sandbox::judge("none", Err("bay.executorSandbox = \"off\"".to_owned()));
+        let unknown = Sandbox::judge("none", Err("bay.runnerSandbox = \"off\"".to_owned()));
         let why = unknown.refusal.unwrap();
         assert!(why.contains("\"off\"") && why.contains(NO_SANDBOX), "{why}");
-        // The box's `bay.executorSandbox = none` runs the check, recorded as `none`.
+        // The box's `bay.runnerSandbox = none` runs the check, recorded as `none`.
         assert!(Sandbox::judge("none", Ok(true)).refusal.is_none());
         // With a sandbox the choice does not matter.
         assert!(Sandbox::judge("bwrap", Ok(false)).refusal.is_none());
@@ -2499,7 +2499,7 @@ mod tests {
     }
 
     /// Ruling R14 on a real run: an adapter that passes, run where there is no sandbox and the
-    /// box did not choose `bay.executorSandbox = none`, is `infra_failure`, never a pass;
+    /// box did not choose `bay.runnerSandbox = none`, is `infra_failure`, never a pass;
     /// with that choice the same adapter passes and its record says `none`. The adapter is a
     /// shell script, so this runs where a shell runs adapters (plan W5 brings `sh.exe`).
     #[cfg(unix)]

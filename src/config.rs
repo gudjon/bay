@@ -328,7 +328,7 @@ pub struct Executor {
     /// an executor that serves its environment runs it on the range's midpoints. Default off.
     pub bisect_post: Option<bool>,
     /// Never a repository's setting (ruling R14): whether checks run with no sandbox is the
-    /// box's choice, global Git config `bay.executorSandbox = none`. Read only to refuse it.
+    /// box's choice, global Git config `bay.runnerSandbox = none`. Read only to refuse it.
     pub sandbox: Option<toml::Value>,
     /// NEW-2 (`crate::throughput`): how many queue entries behind the head an executor that is
     /// not running the head checks ahead of their turn, each on the base the entries before it
@@ -495,7 +495,7 @@ impl Config {
             return Err(
                 "[runner] sandbox is not a repository setting (ruling R14): running \
                  checks with no sandbox is the box's choice, git config --global \
-                 bay.executorSandbox none"
+                 bay.runnerSandbox none"
                     .to_owned(),
             );
         }
@@ -1227,10 +1227,7 @@ product = "claude"                 # leave this table out when the box does not 
         assert!(Config::parse("[runner]\nlease_s = 5\n").is_ok());
         for value in ["\"none\"", "\"bwrap\"", "\"\"", "true"] {
             let refused = Config::parse(&format!("[runner]\nsandbox = {value}\n")).unwrap_err();
-            assert!(
-                refused.contains("bay.executorSandbox"),
-                "{value}: {refused}"
-            );
+            assert!(refused.contains("bay.runnerSandbox"), "{value}: {refused}");
         }
     }
 

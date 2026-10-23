@@ -1,4 +1,4 @@
-//! `bay status --fleet`: the fleet map read from the local cache (`DESIGN` § 11a,
+//! `bay status --all`: the fleet map read from the local cache (`DESIGN` § 11a,
 //! `INTERFACES` § 5a; G23, G49).
 //!
 //! `bay status` is the fetch ([`fetch`]): after its trunk fetch it copies the remote's
@@ -44,7 +44,7 @@ pub const FLEET_EXECUTOR_PREFIX: &str = crate::names::FLEET_EXECUTOR;
 /// The most live summaries the map reads; the host refuses more (`crate::hook`).
 const FLEET_MAX_MACHINES: usize = 256;
 
-/// `bay status --fleet`: the fleet map from the local cache. A cache with no recorded fetch of
+/// `bay status --all`: the fleet map from the local cache. A cache with no recorded fetch of
 /// the configured remote's live refs is not the fleet: the result is `blocked` with
 /// `REMOTE_NOT_FETCHED`, and its detail lists no machines, actors, talks or sessions.
 #[must_use]
@@ -106,7 +106,7 @@ struct Fetched {
 }
 
 /// Where bay records a fetch of the remote's live refs: a local file beside the views, never
-/// pushed (ruling: what "fetched" means for `--fleet`).
+/// pushed (ruling: what "fetched" means for `--all`).
 fn record_path(repo: &Repo) -> PathBuf {
     repo.common_dir
         .join("bay")
@@ -156,7 +156,7 @@ fn recorded(repo: &Repo, remote: &str, url: &str) -> Result<Option<Fetched>, Str
 
 /// `bay status`'s fetch of the remote's live refs into [`FLEET_PREFIX`], pruned to what the
 /// remote holds, then the record [`recorded`] reads. Best effort, as the trunk fetch is: a
-/// failed fetch keeps the earlier record, whose age `--fleet` shows. A summary commit the
+/// failed fetch keeps the earlier record, whose age `--all` shows. A summary commit the
 /// earlier record already held keeps the time it was first fetched.
 pub fn fetch(repo: &Repo) {
     let Ok(Some(url)) = repo.git.remote_url(repo.remote()) else {

@@ -1,10 +1,10 @@
 //! Ruling R14: a check never runs unconfined unless the box chose it.
 //!
 //! On a machine with no check sandbox, a check is `infra_failure` and an input provider does
-//! not run, unless the box has chosen `git config --global bay.executorSandbox none`; each
+//! not run, unless the box has chosen `git config --global bay.runnerSandbox none`; each
 //! record of a run under that choice says `sandbox: none`. A repository cannot make that
 //! choice: it is the box's, like its update pin. Doctor's sandbox row is red on a box that runs
-//! checks (`bay.executorKey` or `bay.producerKey`) and has neither a sandbox nor the choice,
+//! checks (`bay.runnerKey` or `bay.producerKey`) and has neither a sandbox nor the choice,
 //! and outside a repository the result still names `REMOTE_UNREACHABLE` first.
 //!
 //! The sandbox is hidden by a `bwrap` on `PATH` that fails its probe, so these cases run on
@@ -45,7 +45,7 @@ fn a_passing_check_with_no_sandbox_and_no_choice_is_infra_failure() {
     let check = &result["detail"]["checks"][0];
     assert_eq!(check["verdict"], "infra_failure", "{result}");
     assert!(
-        result.to_string().contains("bay.executorSandbox"),
+        result.to_string().contains("bay.runnerSandbox"),
         "the refusal does not name the box's choice: {result}"
     );
     assert_eq!(test_box.trunk_change_ids(&remote), Vec::<String>::new());
@@ -93,7 +93,7 @@ fn a_value_other_than_none_is_never_the_choice() {
     test_box.no_sandbox();
     test_box.git_ok(
         test_box.path(),
-        &["config", "--global", "bay.executorSandbox", "off"],
+        &["config", "--global", "bay.runnerSandbox", "off"],
     );
     let (code, result) = land(&test_box, &view);
     assert_eq!(code, 10, "{result}");
@@ -125,23 +125,18 @@ fn a_repository_cannot_choose_to_run_checks_unconfined() {
     );
     assert_ne!(code, 0, "{result}");
     assert!(
-        result.to_string().contains("bay.executorSandbox"),
+        result.to_string().contains("bay.runnerSandbox"),
         "the refusal does not name the box's own setting: {result}"
     );
 }
 
-/// A box in the executor role: `bay.executorKey` in its global Git config.
+/// A box in the executor role: `bay.runnerKey` in its global Git config.
 fn executor_box() -> TestBox {
     let test_box = TestBox::new();
     let key = test_box.path().join("executor-key");
     test_box.git_ok(
         test_box.path(),
-        &[
-            "config",
-            "--global",
-            "bay.executorKey",
-            key.to_str().unwrap(),
-        ],
+        &["config", "--global", "bay.runnerKey", key.to_str().unwrap()],
     );
     test_box
 }

@@ -42,7 +42,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | See the changes waiting for this machine's approver: candidate, paths, diff summary | `bay waiting` (`detail.waiting`) |
 | Approve one, or say no, when the approver asks you to | `bay approve <change> [--why <text>]`, `bay reject <change> [--why <text>]` |
 | Waive one failed check marked `waivable`, when the approver asks you to | `bay approve <change> --waive <check> --why <text>` (that candidate only; never a pass) |
-| Add one key to the key registry, when the user sets up keys | `bay enrol <class> <name> <key.pub>` (class `registry`, `approver`, `reviewer`, `producer`, `executor` or `agent`; signed by `bay.registryKey`) |
+| Add one key to the key registry, when the user sets up keys | `bay enrol <class> <name> <key.pub>` (class `registry`, `approver`, `reviewer`, `producer`, `runner` or `agent`; signed by `bay.registryKey`) |
 | Remove a key, when the user asks: `rotated` keeps its past records valid, `revoked` (compromised) voids them all | `bay enrol --remove <class> <name> --reason rotated\|revoked` (signed by `bay.registryKey`; the last registry key is never removed) |
 | Give the change up, so another agent may adopt it | `bay abandon [<change>]` (default: the view's change) |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
@@ -86,9 +86,12 @@ It also lists each agent product's hook moments and what each can block.
 - `bay status` with `detail.warnings` naming `main_not_linear`: a merge pushed outside bay put
   merges off main's first-parent line. bay still finds them. Tell the user to require linear
   history on the host.
-- A `blocked` or `failed` result names a `reason`, the actions still `allowed`, and `retry_when`:
-  the condition under which a retry can succeed. bay refuses an unchanged retry, except for a few
-  transient reasons that it retries itself.
+- A `blocked` or `failed` result names a `reason`, the actions still `allowed`, and `retry_when`,
+  one of seven: `by_itself` (bay retries; do nothing), `after_wait` (another change, session or
+  holder finishes first), `after_fix` (repair the change), `after_person` (a person approves or
+  lifts a hold), `after_setup` (install, keys, config, an upgrade or the network), `after_new_main`
+  (main must change first), `never`. `next_step` says the exact step. bay refuses an unchanged
+  retry, except where it retries itself.
 - Unknown is not success. A missing, unreadable or unexpected result is a failure to report.
 
 `allowed` uses four words. What each one means:
@@ -109,7 +112,7 @@ A few reasons need more than their next step:
 | `CHECK_FAILED` | A check with `baseline = "base"` names only new failures; pre-existing ones appear as `baseline_failures` in `coverage_gaps`: report them, never as passed. A check with `waivable = true` may instead get an approver's waiver (`bay waiting` lists it); then `bay merge --wait`. The waiver appears in `coverage_gaps` with the real verdict: report it, never as passed. |
 | `CHECK_FLAKY` | A merge may name one flaky in `coverage_gaps`: report it, never as passed. |
 | `WIP_LIMIT` | From `bay start`: you hold the most live changes (`detail.live_changes`). From `bay merge`: the review queue is full (`detail.review`: `waiting`, `max`, `oldest`); do `detail.next`. |
-| `POLICY_INVALID` | Every merge is judged by the policy on main, so a broken one blocks them all, its own repair too. The repair merges when signed by the registry key: tell the user; on the machine that holds it, `git config bay.agentKey <registry key>` for that one `bay merge`, then set it back. Never do this unasked. On a main from `bay host init` this path is not yet proven: tell the user so. |
+| `POLICY_INVALID` | Every merge is judged by the policy on main, so a broken one blocks them all, its own repair too. The repair merges when signed by the registry key: tell the user; on the machine that holds it, `git config bay.agentKey <registry key>` for that one `bay merge`, then set it back. Never do this unasked. On a main from `bay host` this path is not yet proven: tell the user so. |
 | `APPROVAL_PENDING` | Tell the user who can approve (`detail.approval.checks[].approvers`). An approval holds while its paths are unchanged (`checks[].set_aside` names the ones that changed). Never approve for them. |
 
 ## When the person is not a developer
@@ -131,8 +134,8 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 
 | When | Run |
 | --- | --- |
-| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the runners with their age (`runners`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --fleet` |
-| See every head: each branch on the remote, classed `main`, `target`, `lane`, `merged`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --heads [--stale-days <n>]` |
+| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the runners with their age (`runners`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --all` |
+| See every head: each branch on the remote, classed `main`, `target`, `lane`, `merged`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --branches [--stale-days <n>]` |
 | Delete only the remote branches `merged` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[plugin.prune]` plugin runs after each delete (`detail.pruned[].on_prune`) | `bay prune [--stale-days <n>]` |
 | See merges, events (`main_red`, `main_red_cleared`, `outside_merge`, `main_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
@@ -171,7 +174,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    waive it on one candidate with `bay approve <change> --waive <check> --why <text>`. A waiver
    is never a pass; the merge names it in `coverage_gaps`. Without a registry no waiver counts.
    A small team with no runner host sets `[policy] signing = "approvals"`: only approvals are
-   signed, and no machine needs an `executor`, `producer` or `agent` key. Each clone takes its own
+   signed, and no machine needs a `runner`, `producer` or `agent` key. Each clone takes its own
    producer name (`local-<id>` in its git config); set `bay.producerName` only to choose one.
    There, and with no registry, evidence reuse and batching stay off unless the policy also says
    `[policy] reuse_unsigned = true`. Results still name their trust: `unsigned` or `approvals`.
@@ -203,7 +206,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 - **An agent's Git commands, only with the hook:** `[agent] product = "claude"` in `.bay/config.toml`, then
   `bay install`. The hook then refuses a push to main, a force push, `reset --hard` and the like. Without it,
   `bay doctor`'s `hooks` row reads `off` and an agent can push main around bay.
-- **Everything that reaches main, only on a bay-hosted main** (`bay host init`). On a forge such as GitHub, a merge
+- **Everything that reaches main, only on a bay-hosted main** (`bay host`). On a forge such as GitHub, a merge
   made in its web page or API, and a script's push, never pass a local hook; protect main there so that only the
   runner may push it.
 - bay sees what went around it: `bay status` counts it in `detail.unattributed` (per committer in `by_writer`), and `bay doctor` is red when main
@@ -220,7 +223,7 @@ The order, learned in a fleet rollout:
 3. In one clone, run `bay install`, and merge the change that commits `.claude/settings.json` with bay's entries.
    Every machine gets the hooks as it takes that change. A machine without bay is unaffected: each entry first
    checks that bay is present.
-4. Run `bay doctor` on each machine after it takes the change. `bay status --fleet` then shows every machine's
+4. Run `bay doctor` on each machine after it takes the change. `bay status --all` then shows every machine's
    verdict in one place (`ready`); fix each red machine it names, and do not guess.
 
 ## Set up bay for a team (agent-led)
@@ -237,7 +240,7 @@ When the user asks to set bay up for a small team, do each step for them. Tell t
 5. On each approver's machine: `git config bay.approverName <name>` and
    `git config bay.approverKey <their private key path>`.
 6. `bay doctor` on each machine. It names anything missing, with its fix, and publishes its verdict, so
-   `bay status` then `bay status --fleet` on any one machine shows every machine's (`ready`).
+   `bay status` then `bay status --all` on any one machine shows every machine's (`ready`).
 
 `bay enrol` refuses a key that is already enrolled, and says why. Nothing is written then.
 

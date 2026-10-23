@@ -32,7 +32,7 @@ const REVIEWER: &str = "review-1";
 fn files(keys: &TestKeys, reviewers: &str) -> Vec<(&'static str, String)> {
     vec![
         ("agent", key_line(AGENT, &keys.agent)),
-        ("executor", key_line(EXECUTOR, &keys.executor)),
+        ("runner", key_line(EXECUTOR, &keys.executor)),
         ("producer", key_line(PRODUCER, &keys.producer)),
         ("reviewer", reviewers.to_owned()),
         ("registry", key_line(REGISTRAR, &keys.registry)),

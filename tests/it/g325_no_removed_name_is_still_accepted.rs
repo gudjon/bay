@@ -9,7 +9,7 @@
 //! Guards to mutate (each makes a case here fail):
 //! - `src/main.rs` `Command`: give `Merge` the alias `#[command(alias = "land")]` (`bay land`
 //!   parses).
-//! - `src/main.rs` `Command::Status`: give `heads` the alias `#[arg(alias = "stranded")]`
+//! - `src/main.rs` `Command::Status`: give `branches` the alias `#[arg(alias = "stranded")]`
 //!   (`status --stranded` parses).
 //! - `src/result.rs` `Decision::word`: `"merged"` back to `"landed"` (the contract lists it).
 //! - `src/contract.rs` `schema`: put back the `published` property.
@@ -31,8 +31,17 @@ const REMOVED: &[(&[&str], &str)] = &[
     (&["merge", "--observe", "5"], "bay merge --wait=5"),
     (&["merge", "--change", "abcd2345"], "bay merge <change>"),
     (&["approve", "abcd2345", "--reject"], "bay reject <change>"),
-    (&["status", "--stranded"], "bay status --heads"),
+    (&["status", "--stranded"], "bay status --branches"),
     (&["status", "--heads", "--prune"], "bay prune"),
+    // 0.4.0 (BACKLOG 53, 51 R7).
+    (&["status", "--heads"], "bay status --branches"),
+    (&["status", "--fleet"], "bay status --all"),
+    (&["enrol", "executor", "r1", "k.pub"], "bay enrol runner"),
+    (
+        &["doctor", "--role", "executor"],
+        "bay doctor --role runner",
+    ),
+    (&["host", "init", "h.git"], "bay host h.git"),
     (
         &["status", "--since", "--landed"],
         "bay status --since --merged",
@@ -40,7 +49,7 @@ const REMOVED: &[(&[&str], &str)] = &[
     (&["install", "--trunk", "main"], "bay install --main"),
     (
         &["host", "init", "h.git", "--trunk", "main"],
-        "bay host init --main",
+        "bay host --main",
     ),
     (&["update", "--channel", "stable"], "nothing"),
 ];
@@ -72,6 +81,7 @@ const REMOVED_CODES: &[&str] = &[
     "LANE_NEVER_LANDS",
     "UNATTRIBUTED_LANDING",
     "EXECUTOR_KEY_MISSING",
+    "WORKSPACE_INCOMPLETE",
 ];
 
 #[test]

@@ -1,7 +1,7 @@
 //! G334 (BACKLOG 55, owner 2026-10-22: "we will never know what people will call the main
 //! branch"): a bay host guards the branch it serves, whatever its name.
 //!
-//! `bay host init <path> --main <branch>` serves that branch (`dev`, `master`, any name): git
+//! `bay host <path> --main <branch>` serves that branch (`dev`, `master`, any name): git
 //! config `bay.main`, and the host's `HEAD`. The host hook judges pushes to that branch. When
 //! `bay.main` is not set (a host made before 0.3.3 wrote `bay.trunk` instead), the hook reads the
 //! branch `HEAD` names, never a fixed `main`, so the host's own branch stays guarded.
@@ -25,7 +25,6 @@ fn a_host_for_master_guards_master_even_without_bay_main() {
         test_box.path(),
         &[
             "host",
-            "init",
             host.to_str().unwrap(),
             "--main",
             "master",

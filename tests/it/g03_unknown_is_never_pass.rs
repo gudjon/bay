@@ -208,7 +208,7 @@ fn a_policy_with_no_check_above_zero_is_policy_invalid() {
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "POLICY_INVALID", "{result}");
     assert_eq!(result["allowed"], serde_json::json!(["repair"]));
-    assert_eq!(result["retry_when"], "policy_repaired");
+    assert_eq!(result["retry_when"], "after_new_main");
     assert!(!moved, "trunk moved");
 }
 

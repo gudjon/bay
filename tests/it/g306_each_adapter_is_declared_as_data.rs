@@ -1,12 +1,12 @@
 //! G306. Each agent adapter is declared as data in the contract.
 //!
-//! `bay help --json` lists, in `detail.adapters`, one entry per agent product bay has an adapter
+//! `bay help --json` lists, in `detail.agents`, one entry per agent product bay has an adapter
 //! for. The Claude entry names every event `bay install` writes into `.claude/settings.json`,
 //! each with the `onFailure`, `timeout` and `matcher` the written entry carries, and no event
 //! bay does not install: the declaration and the settings come from one table.
 //!
 //! Guards to mutate (each makes a case here fail):
-//! - `src/contract.rs`: `"adapters": adapters(),` (no adapters: no `claude` entry).
+//! - `src/contract.rs`: `"agents": agents(),` (no adapters: no `claude` entry).
 //! - `src/contract.rs`: `let events: Vec<Value> = CLAUDE_EVENTS` (a list other than the one
 //!   install writes: an event missing or extra).
 //! - `src/contract.rs`: `"on_failure": shape.on_failure.unwrap_or(DEFAULT_ON_FAILURE),`,
@@ -68,9 +68,9 @@ fn the_contract_declares_each_event_install_writes_and_no_other() {
     assert!(!written.is_empty(), "{settings}");
 
     let contract = test_box.bay_ok(test_box.path(), &["help"]);
-    let adapters = contract["detail"]["adapters"]
+    let adapters = contract["detail"]["agents"]
         .as_array()
-        .unwrap_or_else(|| panic!("no detail.adapters: {contract}"));
+        .unwrap_or_else(|| panic!("no detail.agents: {contract}"));
     let claude = adapters
         .iter()
         .find(|adapter| adapter["product"] == "claude")
@@ -144,7 +144,7 @@ fn the_codex_adapter_is_declared_as_install_writes_it_and_as_failing_open() {
     assert!(!written.is_empty(), "{settings}");
 
     let contract = test_box.bay_ok(test_box.path(), &["help"]);
-    let codex = contract["detail"]["adapters"]
+    let codex = contract["detail"]["agents"]
         .as_array()
         .unwrap()
         .iter()

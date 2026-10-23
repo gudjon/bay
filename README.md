@@ -157,10 +157,10 @@ binary to `~/.local/bin/bay`. When that folder is on your `PATH`, it then runs `
 
 There is no ready Windows binary. Run the install command inside WSL, the tested path, or build bay from
 source on Windows. Windows has no check sandbox, so a check there does not run unless the machine's owner
-chooses `git config --global bay.executorSandbox none`.
+chooses `git config --global bay.runnerSandbox none`.
 
 bay needs Git 2.40 or newer in an agent view (2.50 or newer is recommended), 2.50 or newer on a machine
-that runs a runner, and 2.54 or newer on a machine that hosts main with `bay host init`. `bay doctor`
+that runs a runner, and 2.54 or newer on a machine that hosts main with `bay host`. `bay doctor`
 names any floor a machine is below. See [Install](https://getbay.io/docs/install) for every option.
 
 ### Set up a repository
@@ -221,7 +221,7 @@ bay guards three things, and each holds only under its own condition:
 |---|---|
 | **Its own merges:** what bay merges into main is exactly the candidate it checked. | Always, unless you turn on batching or footprint reuse (see above). |
 | **An agent's Git commands:** the hook refuses a push to main or a target, a force push, `git reset --hard` and the like. | Only with the hook: `[agent] product = "claude"` (or `"codex"`, which only senses) in `.bay/config.toml` on main, and bay's hook entries in the project's `.claude/settings.json`. One clone runs `bay install` and merges that file; every clone gets the hooks from main. |
-| **Everything that reaches main,** such as a merge in a forge's web page or a script's push. | Only on a main from `bay host init` with a key registry in the default signing mode, or on a forge main that only the runner's identity may push. Otherwise a bay-hosted main stays append-only, and anyone who can push may add commits. |
+| **Everything that reaches main,** such as a merge in a forge's web page or a script's push. | Only on a main from `bay host` with a key registry in the default signing mode, or on a forge main that only the runner's identity may push. Otherwise a bay-hosted main stays append-only, and anyone who can push may add commits. |
 
 bay sees what went around it. `bay status` names each such commit under `detail.unattributed`. Without
 the hook, `bay doctor`'s `hooks` row reads `off`, and doctor turns red when main holds such commits beside
@@ -235,7 +235,7 @@ bay's merges. See [Security and privacy](https://getbay.io/docs/security#what-ba
 | `bay install` in a clone | the above, plus bay's hook entries in the project's agent settings file and this clone's `bay.*` Git config | anything on main: you commit and merge the settings file yourself |
 | `bay update` | a newer `bay` program, verified first | anything in a project |
 | `bay status`, `bay waiting`, `bay help` | only fetched copies of the remote's refs, and bay's own cache under `.git/bay/` | your files, your branches, main |
-| `bay doctor` | the above, and this machine's readiness on its presence record on the remote, so `bay status --fleet` shows it | your files, your branches, main, any settings or hook entries |
+| `bay doctor` | the above, and this machine's readiness on its presence record on the remote, so `bay status --all` shows it | your files, your branches, main, any settings or hook entries |
 | `bay start`, `bay merge`, `bay save`, `bay approve`, `bay undo` | the change's record on the remote, its view (a separate folder), and evidence | your checkout's files, except `bay save`, which updates the main checkout to the new main |
 
 `bay help` says the same for every command. A hook entry that bay installs first checks that `bay` is on
@@ -247,7 +247,7 @@ gives the safe order for many machines.
 bay works without keys: with no key registry, it runs unsigned, every evidence record counts, and results
 say `trust: unsigned`. Add a registry, one key at a time, with `bay enrol <class> <name> <key.pub>`, when
 only enrolled keys may sign. By default a registry signs everything: an agent signs a request to merge,
-only a runner (with its `executor` key) moves main, a producer signs check evidence, a reviewer signs a
+only a runner (with its `runner` key) moves main, a producer signs check evidence, a reviewer signs a
 review, an approver signs an approval, and a registry key adds and revokes keys. No one holds another
 actor's key, so an agent can leave. A small team can set `[policy] signing = "approvals"` instead: then
 only approvals are signed, and results say `trust: approvals`. See [Keys and the registry](https://getbay.io/docs/keys)
@@ -270,7 +270,7 @@ recovery when the runner dies, or a stop on work whose inputs moved.
 - **Other coding agents** through the same commands, JSON results and skill. Without hook support, a
   stale change still cannot merge, but the agent's own Git commands are not guarded (see above).
   `bay help --json` declares what each agent product's hooks can block. See [Agents and hooks](https://getbay.io/docs/agents).
-- **Any Git host.** GitHub, GitLab, a bare repository over SSH, `bay host init` on any machine you can
+- **Any Git host.** GitHub, GitLab, a bare repository over SSH, `bay host` on any machine you can
   reach, or a bundle on a USB stick.
 - **Your checks.** Any command that returns a `bay.check.result/1` JSON document. Test one first with
   `bay plugin test check -- <command>`.

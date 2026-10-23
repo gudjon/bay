@@ -40,7 +40,7 @@ fn assert_policy_missing(result: &serde_json::Value, base: &str) {
     assert_eq!(result["decision"], "blocked", "{result}");
     assert_eq!(result["reason"], "POLICY_MISSING", "{result}");
     assert_eq!(result["allowed"], json!(["read"]), "{result}");
-    assert_eq!(result["retry_when"], "policy_added", "{result}");
+    assert_eq!(result["retry_when"], "after_setup", "{result}");
     assert_eq!(result["detail"]["base"], base, "{result}");
     assert_eq!(result["detail"]["path"], POLICY, "{result}");
 }
@@ -75,7 +75,7 @@ fn the_executors_publish_without_a_policy_at_the_base_is_policy_missing() {
     let op = &status["detail"]["changes"][0]["operation"];
     assert_eq!(op["outcome"], "POLICY_MISSING", "{status}");
     assert_eq!(op["allowed"], json!(["read"]), "{status}");
-    assert_eq!(op["retry_when"], "policy_added", "{status}");
+    assert_eq!(op["retry_when"], "after_setup", "{status}");
 }
 
 /// Judged at the base: a candidate that brings its own `unchecked = true` to a base without

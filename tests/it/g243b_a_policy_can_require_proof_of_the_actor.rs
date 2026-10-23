@@ -81,10 +81,7 @@ fn a_shared_account_that_can_read_the_agent_key_is_refused_actor_unproven() {
     assert_eq!(result["reason"], "ACTOR_UNPROVEN", "{result}");
     assert_eq!(result["change"], id, "{result}");
     assert_eq!(result["allowed"], json!(["read"]), "{result}");
-    assert_eq!(
-        result["retry_when"], "actor_key_on_hardware_or_own_account",
-        "{result}"
-    );
+    assert_eq!(result["retry_when"], "after_setup", "{result}");
     let detail = &result["detail"];
     assert_eq!(detail["actor_proof"], "account", "{result}");
     assert_eq!(detail["actors"], json!(["actor-a", "actor-b"]), "{result}");

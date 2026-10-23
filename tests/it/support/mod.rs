@@ -17,12 +17,12 @@ pub mod relay;
 pub mod talk;
 
 /// What a new test box's global Git config holds: the box's choice of no check sandbox.
-pub const UNSANDBOXED_CHOICE: &str = "[bay]\n\texecutorSandbox = none\n";
+pub const UNSANDBOXED_CHOICE: &str = "[bay]\n\trunnerSandbox = none\n";
 
 /// The box's global Git config: [`UNSANDBOXED_CHOICE`], and the producer name `local` every
 /// clone of the box writes evidence under, as an operator names one (G297 clears it to see a
 /// clone take its own).
-pub const BOX_CONFIG: &str = "[bay]\n\texecutorSandbox = none\n\tproducerName = local\n";
+pub const BOX_CONFIG: &str = "[bay]\n\trunnerSandbox = none\n\tproducerName = local\n";
 
 /// The config a new work repository starts with.
 pub const MINIMAL_CONFIG: &str = "main = \"main\"\n";
@@ -131,15 +131,15 @@ impl TestBox {
     }
 
     /// Sets or clears this box's choice to run checks with no sandbox, the global Git config
-    /// `bay.executorSandbox = none` (ruling R14). A new test box has made that choice, so a
+    /// `bay.runnerSandbox = none` (ruling R14). A new test box has made that choice, so a
     /// machine without a sandbox still runs the suite's checks.
     pub fn choose_unsandboxed(&self, chosen: bool) {
         let mut cmd = self.git(self.path());
         cmd.args(["config", "--global"]);
         if chosen {
-            cmd.args(["bay.executorSandbox", "none"]);
+            cmd.args(["bay.runnerSandbox", "none"]);
         } else {
-            cmd.args(["--unset-all", "bay.executorSandbox"]);
+            cmd.args(["--unset-all", "bay.runnerSandbox"]);
         }
         let out = cmd.output().unwrap();
         assert!(out.status.success() || !chosen, "{out:?}");
@@ -320,15 +320,14 @@ impl TestBox {
         self.repo_without_remote(name, &object_format, &ref_format)
     }
 
-    /// `bay host init <path>` in the object format of [`formats`]. Run outside any repository,
-    /// `host init` takes Git's default format, so a host and its repositories are given one.
+    /// `bay host <path>` in the object format of [`formats`]. Run outside any repository,
+    /// `bay host` takes Git's default format, so a host and its repositories are given one.
     pub fn host_init(&self, path: &Path) -> serde_json::Value {
         let (object_format, _) = formats();
         self.bay_ok(
             self.path(),
             &[
                 "host",
-                "init",
                 path.to_str().unwrap(),
                 "--object-format",
                 &object_format,
@@ -755,7 +754,7 @@ impl TestBox {
             .collect();
         let files = [
             ("agent", agents),
-            ("executor", key_line(EXECUTOR, executor)),
+            ("runner", key_line(EXECUTOR, executor)),
             ("producer", producers),
             ("registry", key_line(REGISTRAR, &keys.registry)),
         ];
@@ -874,8 +873,8 @@ impl TestBox {
     pub fn use_keys(&self, repo: &Path, keys: &TestKeys) {
         for (key, value) in [
             ("bay.agentKey", keys.agent.display().to_string()),
-            ("bay.executorKey", keys.executor.display().to_string()),
-            ("bay.executorName", EXECUTOR.to_owned()),
+            ("bay.runnerKey", keys.executor.display().to_string()),
+            ("bay.runnerName", EXECUTOR.to_owned()),
             ("bay.producerKey", keys.producer.display().to_string()),
             ("bay.producerName", PRODUCER.to_owned()),
         ] {

@@ -66,7 +66,7 @@ fn a_start_below_the_floor_refuses_disk_low_and_makes_no_view() {
     assert_eq!(refused["decision"], "blocked", "{refused}");
     assert_eq!(refused["reason"], "DISK_LOW", "{refused}");
     assert_eq!(refused["allowed"], serde_json::json!(["read"]), "{refused}");
-    assert_eq!(refused["retry_when"], "free_space_above_floor", "{refused}");
+    assert_eq!(refused["retry_when"], "after_setup", "{refused}");
     let detail = &refused["detail"];
     assert_eq!(detail["floor_mib"], ABSURD_FLOOR, "{refused}");
     let free = detail["free_mib"]

@@ -3,8 +3,8 @@
 //! Each `bay runner run` pass publishes the executor's presence, `refs/bay/executor/<name>`:
 //! one parentless commit whose `presence.json` names the executor, its machine, its bay and Git,
 //! the environments the box serves, the time of the pass, the operation it drives first and the
-//! queue depth it saw. `bay status` fetches it with the fleet refs, `bay status --fleet` lists
-//! it with its age and `stale`, and `bay doctor --role executor` shows the box's own. With
+//! queue depth it saw. `bay status` fetches it with the fleet refs, `bay status --all` lists
+//! it with its age and `stale`, and `bay doctor --role runner` shows the box's own. With
 //! operations queued and no fresh presence, `bay status` warns `no_live_executor`: never a
 //! refusal, and never a first fetch of an old presence read as a live executor.
 
@@ -109,7 +109,7 @@ fn the_fleet_map_lists_each_executor_with_its_version_and_environments() {
     once(&test_box, &executor);
 
     status(&test_box, &repo, 0);
-    let (code, fleet) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, fleet) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 0, "{fleet}");
     let executors = fleet["detail"]["runners"]
         .as_array()
@@ -135,11 +135,7 @@ fn the_fleet_map_lists_each_executor_with_its_version_and_environments() {
     assert!(seen["last_pass"].is_string(), "{fleet}");
 
     // The box's own presence, in doctor.
-    let (_, doctor) = result_json(
-        test_box
-            .bay(&executor)
-            .args(["doctor", "--role", "executor"]),
-    );
+    let (_, doctor) = result_json(test_box.bay(&executor).args(["doctor", "--role", "runner"]));
     let own = row(&doctor, "presence");
     assert_eq!(own["state"], "green", "{doctor}");
     assert_eq!(own["runner"], "local", "{doctor}");

@@ -3,7 +3,7 @@
 //! Built so far: the per-session work record's writes. A shell tool reports no changed files
 //! (`tests/fixtures/claude-code-2.1.302`), so the files a step wrote are the difference between
 //! the view's Git status at this post-tool or stop event and the snapshot the record kept at the
-//! previous one, kept per agent, at a bounded cost. `bay status --fleet` lists every session the
+//! previous one, kept per agent, at a bounded cost. `bay status --all` lists every session the
 //! fetched live summaries name, with its machine, actor, change, state, last write, age and
 //! whether trunk moved past its change's base; a row a takeover window old drops out, judged
 //! without comparing two machines' clocks; this machine's sessions come from its own records; a
@@ -468,7 +468,7 @@ fn heartbeat(test_box: &TestBox, bare: &Path, machine: &str, sessions: &[(&str, 
 }
 
 fn fleet(test_box: &TestBox, repo: &Path) -> Value {
-    let (code, result) = support::result_json(test_box.bay(repo).args(["status", "--fleet"]));
+    let (code, result) = support::result_json(test_box.bay(repo).args(["status", "--all"]));
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["decision"], "ok", "{result}");
     result

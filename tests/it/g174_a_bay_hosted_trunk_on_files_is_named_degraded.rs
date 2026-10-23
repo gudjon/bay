@@ -1,6 +1,6 @@
 //! G174: a bay-hosted trunk on the `files` ref backend is named degraded (`DESIGN` § 15.2).
 //!
-//! `bay host init` makes a reftable repository, where a multi-ref update is one atomic write.
+//! `bay host` makes a reftable repository, where a multi-ref update is one atomic write.
 //! On `files` a reader can see half of one. Doctor names that on the host, with the remedy,
 //! as advisory: publication still works there, through trunk as the commit point.
 

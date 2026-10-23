@@ -1,4 +1,4 @@
-//! `bay status --heads`: a census of the remote's branches, and `bay prune` of the landed ones
+//! `bay status --branches`: a census of the remote's branches, and `bay prune` of the landed ones
 //! (G269, G302).
 //!
 //! A repository many agents share gathers branches on its remote: one per agent, task or
@@ -27,7 +27,7 @@
 //! local branches no remote-tracking ref holds, worktree records whose folder is gone), read
 //! from local refs only, so one view shows every head (G302).
 //!
-//! `bay prune` deletes; `bay status --heads` alone never does (G302). Both go through the same
+//! `bay prune` deletes; `bay status --branches` alone never does (G302). Both go through the same
 //! `heads`. `bay prune` deletes the `landed` branches proven by `ancestor` or `patch`, and nothing else: never the
 //! trunk, a target, a lane ref, a stale or a unique branch, and never one landed by
 //! `change` alone (a branch can carry a landed change's `Change-Id` and still hold edits that
@@ -84,7 +84,7 @@ pub const DEFAULT_ON_PRUNE_TIMEOUT_S: u64 = 30;
 /// The first argument the prune adapter is run with (N-19).
 pub const PRUNED: &str = "pruned";
 
-/// What `bay status --heads` or `bay prune` was asked.
+/// What `bay status --branches` or `bay prune` was asked.
 pub struct Request {
     /// Delete the landed branches: `bay prune`, or `bay prune`.
     pub prune: bool,
@@ -187,7 +187,7 @@ impl Head {
 }
 
 /// The census of the remote's branches; with [`Request::prune`], the prune of the landed ones.
-/// `bay status --heads`, `bay prune` and `bay prune` all come here.
+/// `bay status --branches`, `bay prune` and `bay prune` all come here.
 #[must_use]
 pub fn heads(dir: &Path, request: &Request) -> BayResult {
     run(dir, request).unwrap_or_else(BayResult::failed)
@@ -280,7 +280,7 @@ fn run(dir: &Path, request: &Request) -> Result<BayResult, String> {
         "trunk": &trunk,
         "trunk_tip": &trunk_tip,
         "stale_days": stale_days,
-        "heads": rows.iter().map(Head::to_json).collect::<Vec<_>>(),
+        "branches": rows.iter().map(Head::to_json).collect::<Vec<_>>(),
         "counts": counts,
         "fetched": true,
         // The heads only this disk has (G302): local refs only, no second fetch.

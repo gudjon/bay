@@ -5,7 +5,7 @@
 //! where Git would not, and doctor reports it (G192). It is a disposable index and never a
 //! source of truth: a missing or stale graph only makes a walk slower, never its answer
 //! different. bay runs no maintenance (G172). A host's graph is refreshed by Git's own
-//! maintenance after a push (the commit-graph task `bay host init` enables), and a clone's by
+//! maintenance after a push (the commit-graph task `bay host` enables), and a clone's by
 //! `fetch.writeCommitGraph`.
 //!
 //! Git versions: changed-path filters 2.27; corrected commit dates (generation v2) 2.31, the
@@ -32,7 +32,7 @@ pub const CHANGED_PATHS_CONFIG_SINCE: &str = "2.52";
 /// The bound on the first graph a clone gets: one write over all of its history.
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// The settings `bay host init` writes on a host (whose floor, 2.54, has every one).
+/// The settings `bay host` writes on a host (whose floor, 2.54, has every one).
 pub const HOST_SETTINGS: [(&str, &str); 5] = [
     ("core.commitGraph", "true"),
     ("gc.writeCommitGraph", "true"),

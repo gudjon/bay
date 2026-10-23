@@ -14,41 +14,19 @@ use crate::signing::Signer;
 
 pub const CHANGES_PREFIX: &str = crate::names::CHANGES;
 pub const RECORD_FILE: &str = "change.json";
+/// The one schema a change record is written under (0.4.0, BACKLOG 53 D): a named input, a
+/// lane and dependencies are optional fields of it. A bay before 0.4.0 refuses a `/1` record
+/// that holds one of them (it expected `/2`, `/3` or `/4` there), so it never misreads one.
 pub const RECORD_SCHEMA: &str = "bay.change/1";
-/// The schema of a record that declares a named input (`INTERFACES`: a consumer refuses a
-/// major version it does not know). A bay that cannot read `{"input": …}` entries refuses such
-/// a record, instead of rewriting it without its `observed_versions` and `validated_candidate`.
-pub const RECORD_SCHEMA_INPUTS: &str = "bay.change/2";
-/// The schema of a lane change's record (NEW-4), named inputs or not. A bay that does not know
-/// lanes refuses such a record, so it never runs a lane change as one that lands.
-pub const RECORD_SCHEMA_LANE: &str = "bay.change/3";
-/// The schema of a record that lands only after other changes (`bay start --after`, G273),
-/// named inputs or not. A bay that does not know dependencies refuses such a record, so it
-/// never publishes the change before the changes it names.
-pub const RECORD_SCHEMA_AFTER: &str = "bay.change/4";
+/// The schemas a bay before 0.4.0 wrote a record with a named input, a lane or dependencies
+/// under: a stored one is still read.
+pub const STORED_SCHEMAS: &[&str] = &["bay.change/2", "bay.change/3", "bay.change/4"];
 
-/// The schema `record` is written under: [`RECORD_SCHEMA_LANE`] for a lane change,
-/// [`RECORD_SCHEMA_AFTER`] when it lands after other changes, [`RECORD_SCHEMA_INPUTS`] when it
-/// declares a named input, else [`RECORD_SCHEMA`], so a record without any of them stays
-/// readable by every bay. A lane change never lands, so its dependencies never hold it.
-#[must_use]
-pub fn schema_for(record: &ChangeRecord) -> &'static str {
-    if record.lane.is_some() {
-        RECORD_SCHEMA_LANE
-    } else if !record.after.is_empty() {
-        RECORD_SCHEMA_AFTER
-    } else if crate::inputs::names(&record.declared_inputs).is_empty() {
-        RECORD_SCHEMA
-    } else {
-        RECORD_SCHEMA_INPUTS
-    }
-}
-
-/// `record` as the pretty JSON a state commit holds, under [`schema_for`].
+/// `record` as the pretty JSON a state commit holds, under [`RECORD_SCHEMA`].
 fn record_text(record: &ChangeRecord) -> Result<String, ChainError> {
     let mut value =
         serde_json::to_value(record).map_err(|error| ChainError::BadRecord(error.to_string()))?;
-    value["schema"] = serde_json::Value::String(schema_for(record).to_owned());
+    value["schema"] = serde_json::Value::String(RECORD_SCHEMA.to_owned());
     let mut json = serde_json::to_string_pretty(&value)
         .map_err(|error| ChainError::BadRecord(error.to_string()))?;
     json.push('\n');
@@ -520,22 +498,13 @@ pub fn change_ref(id: &str) -> String {
 ///
 /// # Errors
 ///
-/// A record that does not parse, or one whose schema does not match its fields.
+/// A record that does not parse, or one under a schema no bay wrote a change record with.
 fn parse_record(text: &str) -> Result<ChangeRecord, ChainError> {
     let record: ChangeRecord =
         serde_json::from_str(text).map_err(|error| ChainError::BadRecord(error.to_string()))?;
-    if record.schema != schema_for(&record) {
-        let holds = if record.lane.is_some() {
-            "of a lane change"
-        } else if !record.after.is_empty() {
-            "that lands after other changes"
-        } else if schema_for(&record) == RECORD_SCHEMA {
-            "without named inputs"
-        } else {
-            "with named inputs"
-        };
+    if record.schema != RECORD_SCHEMA && !STORED_SCHEMAS.contains(&record.schema.as_str()) {
         return Err(ChainError::BadRecord(format!(
-            "schema {} for a record {holds}",
+            "schema {} is not a change record's",
             record.schema
         )));
     }

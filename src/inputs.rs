@@ -378,7 +378,7 @@ fn run_provider(
     // and this machine's keys are hidden; its own scratch is all of them it sees.
     let hidden = crate::check::hidden_for(repo, &crate::signing::Keys::load(git));
     // Ruling R14: where this machine has no sandbox, a provider runs only by the box's own
-    // choice, global `bay.executorSandbox = none`.
+    // choice, global `bay.runnerSandbox = none`.
     let sandbox = crate::check::Sandbox::here();
     if let Some(why) = sandbox.refusal {
         return Err(format!("the provider for {}: {why}", entry.name));

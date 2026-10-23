@@ -60,7 +60,7 @@ fn an_unchanged_retry_is_refused_without_work() {
     assert_eq!(again["reason"], "CHECK_FAILED");
     assert_eq!(again["detail"]["unchanged"], true);
     assert_eq!(again["allowed"], serde_json::json!(["repair"]));
-    assert_eq!(again["retry_when"], "candidate_changed");
+    assert_eq!(again["retry_when"], "after_fix");
     assert_eq!(
         std::fs::read_to_string(&runs).unwrap().lines().count(),
         1,

@@ -79,7 +79,7 @@ fn a_killed_owner_is_replaced_after_its_lease_by_a_supervisor_that_waited_a_full
     let a = test_box.clone_of(&remote, "executor-a");
     let b = test_box.clone_of(&remote, "executor-b");
     for (clone, name) in [(&a, "exec-a"), (&b, "exec-b")] {
-        test_box.git_ok(clone, &["config", "bay.executorName", name]);
+        test_box.git_ok(clone, &["config", "bay.runnerName", name]);
         test_box.git_ok(
             clone,
             &["config", "bay.producerName", &format!("{name}-checks")],

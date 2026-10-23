@@ -141,7 +141,7 @@ fn below_floor(line: &str) -> Option<BayResult> {
     (version < Version::parse(GIT_FLOOR_EXECUTOR)).then(|| {
         BayResult::blocked(crate::result::Reason::ToolBelowFloor).with_detail(json!({
             "tool": "git",
-            "role": "executor",
+            "role": "runner",
             "version": version.to_string(),
             "floor": GIT_FLOOR_EXECUTOR,
             "recovery": "upgrade git",

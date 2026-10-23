@@ -401,7 +401,7 @@ pub fn verify_publication(git: &Git, commit: &str, registry_id: &str, committer:
 /// committed it.
 #[must_use]
 pub fn verifies_under(git: &Git, commit: &str, registry: &Registry, committer: &str) -> bool {
-    let Ok(executors) = registry.class_file(git, KeyClass::Executor) else {
+    let Ok(executors) = registry.class_file(git, KeyClass::Runner) else {
         return false;
     };
     matches!(signing::verify_commit(git, commit, &executors), Ok(Some(principal)) if principal == committer)
@@ -530,7 +530,7 @@ impl<'a> Ctx<'a> {
             return Ok(None);
         }
         self.keys.executor.clone().map(Some).ok_or_else(|| {
-            "the repository has a key registry and this machine has no executor key (git config bay.executorKey)".to_owned()
+            "the repository has a key registry and this machine has no executor key (git config bay.runnerKey)".to_owned()
         })
     }
 
@@ -1297,7 +1297,7 @@ pub fn recover_events(repo: &Repo, records: &[ChangeRecord]) -> Result<usize, St
     let signer = match Registry::current(&repo.git)?.filter(Registry::signs_all) {
         None => None,
         Some(_) => Some(keys.executor.clone().ok_or(
-            "the repository has a key registry and this machine has no executor key (git config bay.executorKey)",
+            "the repository has a key registry and this machine has no executor key (git config bay.runnerKey)",
         )?),
     };
     let mut written = 0;
@@ -2252,7 +2252,7 @@ fn executor_key_valid(ctx: &Ctx, registry: &Registry) -> Result<bool, String> {
         return Ok(false);
     };
     let (key_type, blob) = signing::public_key(&signer.key)?;
-    Ok(registry.holds(KeyClass::Executor, &signer.name, &key_type, &blob))
+    Ok(registry.holds(KeyClass::Runner, &signer.name, &key_type, &blob))
 }
 
 /// After this many uncounted publish retries an operation is `MERGE_RETRY_EXHAUSTED` (§ 6).
@@ -3158,7 +3158,7 @@ fn verify_request(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, Strin
 fn freeze(ctx: &Ctx) -> Result<Result<String, BayResult>, String> {
     let (repo, id) = (ctx.repo, ctx.id.as_str());
     if !view::journal(repo, id).is_some_and(view::Journal::is_complete) {
-        return Ok(Err(BayResult::blocked(Reason::WorkspaceIncomplete)
+        return Ok(Err(BayResult::blocked(Reason::ViewIncomplete)
             .with_change(id)
             .with_detail(
                 json!({"view": repo.view_path(id).display().to_string()}),

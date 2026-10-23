@@ -132,7 +132,7 @@ fn parse_removed(text: &str) -> Result<Vec<Removal>, String> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyClass {
     Agent,
-    Executor,
+    Runner,
     Producer,
     Reviewer,
     /// A person whose signed `approval` record lets a change through an approval check (G245):
@@ -144,7 +144,7 @@ pub enum KeyClass {
 impl KeyClass {
     pub const ALL: [Self; 6] = [
         Self::Agent,
-        Self::Executor,
+        Self::Runner,
         Self::Producer,
         Self::Reviewer,
         Self::Approver,
@@ -155,7 +155,7 @@ impl KeyClass {
     pub const fn file(self) -> &'static str {
         match self {
             Self::Agent => "agent",
-            Self::Executor => "executor",
+            Self::Runner => "runner",
             Self::Producer => "producer",
             Self::Reviewer => "reviewer",
             Self::Approver => "approver",
@@ -163,9 +163,13 @@ impl KeyClass {
         }
     }
 
-    /// The class whose file is `name`, if any.
+    /// The class whose file is `name`, if any. `executor`, the runner class's file before 0.4.0,
+    /// still names it where a stored registry or removal line says it.
     #[must_use]
     pub fn named(name: &str) -> Option<Self> {
+        if name == OLD_RUNNER_FILE {
+            return Some(Self::Runner);
+        }
         Self::ALL.into_iter().find(|class| class.file() == name)
     }
 
@@ -174,7 +178,9 @@ impl KeyClass {
     pub const fn namespace(self) -> &'static str {
         match self {
             Self::Agent => "bay-agent",
-            Self::Executor => "bay-executor",
+            // The namespace signatures were made under before the class was named runner:
+            // renaming it would leave every earlier signature unverifiable.
+            Self::Runner => "bay-executor",
             Self::Producer => "bay-producer",
             Self::Reviewer => "bay-reviewer",
             Self::Approver => "bay-approver",
@@ -182,6 +188,10 @@ impl KeyClass {
         }
     }
 }
+
+/// The runner class's file before 0.4.0 (owner ruling 2026-10-23, BACKLOG 53): a registry
+/// stored with it is read as the runner class, and the next enrol rewrites it as `runner`.
+pub const OLD_RUNNER_FILE: &str = "executor";
 
 const KEY_TYPES: &[&str] = &[
     "ssh-ed25519",
@@ -223,20 +233,26 @@ fn read_files(git: &Git, commit: &str) -> (Result<HashMap<KeyClass, String>, Str
         .unwrap_or_default();
     let mut files = HashMap::new();
     for class in KeyClass::ALL {
-        // A file the listed tree does not hold is absent: no read to fail.
-        if complete && !present.contains(&class.file()) {
-            files.insert(class, String::new());
-            continue;
-        }
-        let text = match git.file_at(commit, class.file()) {
-            Ok(Some(text)) => text,
-            // Only an unlisted tree reaches here without the file: absent, the read incomplete.
-            Ok(None) => {
-                complete = false;
-                String::new()
-            }
-            Err(error) => return (Err(error.message()), false),
+        // The runner class also reads the file a registry stored before 0.4.0 held it in.
+        let names: &[&str] = if class == KeyClass::Runner {
+            &[OLD_RUNNER_FILE, "runner"]
+        } else {
+            &[class.file()]
         };
+        let mut text = String::new();
+        for name in names {
+            // A file the listed tree does not hold is absent: no read to fail.
+            if complete && !present.contains(name) {
+                continue;
+            }
+            match git.file_at(commit, name) {
+                Ok(Some(read)) => text.push_str(&read),
+                // Only an unlisted tree reaches here without the file: absent, the read
+                // incomplete.
+                Ok(None) => complete = false,
+                Err(error) => return (Err(error.message()), false),
+            }
+        }
         files.insert(class, text);
     }
     (Ok(files), complete)

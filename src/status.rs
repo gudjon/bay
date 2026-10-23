@@ -6,7 +6,7 @@
 //! (`DESIGN` § 8): `invalidated` while trunk requires a version it has not observed, `repairing`
 //! while no candidate is validated under an observed one. Leftovers (G41) are a later item.
 //! `bay status` also fetches the remote's `refs/bay/live/*` and records that fetch, from which
-//! `--fleet` reads the fleet map ([`crate::fleet`], G23), failing closed without it (G49).
+//! `--all` reads the fleet map ([`crate::fleet`], G23), failing closed without it (G49).
 //! Completion is reported per dimension, `running` and `effective` from counted runtime
 //! records ([`crate::runtime`]), with the selected profile's verdict ([`crate::completion`]).
 //! After a fetch it accepts and acks this actor's talks ([`crate::talk::receive`], § 11c), and

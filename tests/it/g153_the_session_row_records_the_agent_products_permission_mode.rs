@@ -4,7 +4,7 @@
 //! `bypassPermissions` in `tests/fixtures/claude-code-2.1.302`). The session's work record line
 //! carries it, and keeps the last mode the session named on a line whose payload names none
 //! (`SessionStart` and `Stop` payloads may lack it), so the latest line always says.
-//! `bay status --fleet` shows it per session, and doctor's `agent-hooks` row says that bay's
+//! `bay status --all` shows it per session, and doctor's `agent-hooks` row says that bay's
 //! deny holds under `bypassPermissions` (the G61 probes P5a and P5b).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -100,7 +100,7 @@ fn the_row_carries_the_mode_the_payload_names_and_the_fleet_shows_it() {
     assert!(odd_line.get("permission_mode").is_none(), "{odd_line}");
 
     test_box.bay_ok(&repo, &["status"]);
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 0, "{result}");
     let sessions = result["detail"]["sessions"].as_array().unwrap();
     let mode = |id: &str| {

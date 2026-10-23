@@ -46,14 +46,14 @@ pub fn contract(mut cli: clap::Command) -> BayResult {
             }))
             .collect::<Vec<_>>(),
         "schema": schema(),
-        "adapters": adapters(),
+        "agents": agents(),
     }))
 }
 
 /// Every agent product bay has an adapter for (G306), each declared from the tables its code
 /// uses: the events `bay install` writes with each entry's shape (`agent_settings::entry_shape`),
 /// the payload version and doctor's floor, the presence test, and what the hook does not judge.
-fn adapters() -> Vec<Value> {
+fn agents() -> Vec<Value> {
     use crate::agent_settings::{
         CLAUDE_EVENTS, CLAUDE_SETTINGS_FILE, CODEX_EVENTS, CODEX_HOOKS_FILE, CODEX_WITHOUT_BAY,
         PRESENCE_GUARD, WITHOUT_BAY, codex_entry_shape, entry_shape,
@@ -190,7 +190,7 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
         "doctor",
         &[
             "bay's cache under .git/bay",
-            "this machine's readiness on its presence record on the remote, for bay status --fleet",
+            "this machine's readiness on its presence record on the remote, for bay status --all",
         ],
         &[
             "your files",
@@ -414,7 +414,7 @@ mod tests {
     use crate::result::{BayResult, Decision, Freshness, Reason, SCHEMA};
     use serde_json::{Value, json};
 
-    /// BACKLOG 52 H5: every agent product `bay hook` reads is declared in `detail.adapters`. The
+    /// BACKLOG 52 H5: every agent product `bay hook` reads is declared in `detail.agents`. The
     /// match names each variant, so a new product does not compile until it is listed here, and
     /// then fails here until the contract declares it.
     #[test]
@@ -426,7 +426,7 @@ mod tests {
                 Product::Codex => crate::config::CODEX_PRODUCT,
             };
             assert!(
-                super::adapters()
+                super::agents()
                     .iter()
                     .any(|adapter| adapter["product"] == name),
                 "{name} is not declared"

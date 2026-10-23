@@ -2,10 +2,10 @@
 //!
 //! `bay prune` deletes the remote's branches merged by `ancestor` or `patch`, each archived on
 //! the remote first and its restore line logged; a second prune after a restore reuses the same
-//! archives and writes the same restore lines. `bay status --heads` alone deletes nothing, and
+//! archives and writes the same restore lines. `bay status --branches` alone deletes nothing, and
 //! its detail names, in `stranded`, the heads only this disk has: the local branches no
 //! remote-tracking ref holds and the worktree records whose folder is gone, read from local refs
-//! only. The older spellings are gone (0.3.0): `bay status --stranded` and `bay status --heads
+//! only. The older spellings are gone (0.3.0): `bay status --stranded` and `bay status --branches
 //! --prune` are usage errors, and `bay help --json` lists `prune`.
 //!
 //! Guards to mutate (each makes a case here fail):
@@ -13,7 +13,7 @@
 //! - `src/main.rs` `main`: `Command::Prune { stale_days } => heads(&cli.dir, true, stale_days),`
 //!   (make `true` `false`): `bay prune` deletes nothing, and the first case finds no pruned row;
 //! - `src/main.rs` `status`: `return heads(dir, false, stale_days);` (make `false` `true`):
-//!   `bay status --heads` deletes the merged branches, and the second case sees them gone;
+//!   `bay status --branches` deletes the merged branches, and the second case sees them gone;
 //! - `src/heads.rs` `run`: `"stranded": crate::stranded::local(git)?,` (drop it): the second
 //!   case's detail names no stranded branch or worktree.
 
@@ -212,7 +212,7 @@ fn status_heads_deletes_nothing_and_names_the_stranded_heads_too() {
         .test_box
         .git_ok(&fixture.repo, &["for-each-ref", "refs/heads/"]);
 
-    let result = fixture.bay(&["status", "--heads"]);
+    let result = fixture.bay(&["status", "--branches"]);
     assert_eq!(result["detail"]["counts"]["merged"], 2, "{result}");
     assert!(result["detail"].get("pruned").is_none(), "{result}");
 
@@ -253,7 +253,7 @@ fn the_older_spellings_are_refused_and_help_lists_prune() {
     let fixture = fixture();
     for args in [
         &["status", "--stranded"][..],
-        &["status", "--heads", "--prune"][..],
+        &["status", "--branches", "--prune"][..],
         &["status", "--prune"][..],
     ] {
         let out = fixture

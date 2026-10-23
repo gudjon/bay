@@ -586,8 +586,8 @@ impl Judge<'_> {
             return Err("a shard index takes only a fast-forward".to_owned());
         }
         if !matches!(
-            self.signer(&update.new, &[KeyClass::Executor])?,
-            Some((KeyClass::Executor, _))
+            self.signer(&update.new, &[KeyClass::Runner])?,
+            Some((KeyClass::Runner, _))
         ) {
             return Err("a shard index commit is signed by an executor key".to_owned());
         }
@@ -1153,7 +1153,7 @@ impl Judge<'_> {
             }
             match self.signer(
                 &commit,
-                &[KeyClass::Agent, KeyClass::Executor, KeyClass::Registry],
+                &[KeyClass::Agent, KeyClass::Runner, KeyClass::Registry],
             )? {
                 Some((KeyClass::Agent, principal)) if principal != record.actor.name => {
                     let code = if record.state == crate::change::ChangeState::Abandoned {
@@ -1387,7 +1387,7 @@ impl Judge<'_> {
         if is_zero(&update.new) {
             return Err("an executor presence ref is never deleted".to_owned());
         }
-        match self.signer(&update.new, &[KeyClass::Executor])? {
+        match self.signer(&update.new, &[KeyClass::Runner])? {
             Some((_, principal)) if principal == executor => {}
             _ => {
                 return Err(format!(
@@ -1466,8 +1466,8 @@ impl Judge<'_> {
             return Err("a chain only appends; its one rewrite is the retention cut".to_owned());
         }
         if !matches!(
-            self.signer(&update.new, &[KeyClass::Executor])?,
-            Some((KeyClass::Executor, _))
+            self.signer(&update.new, &[KeyClass::Runner])?,
+            Some((KeyClass::Runner, _))
         ) {
             return Err("a retention cut is signed by an executor key".to_owned());
         }
@@ -1661,7 +1661,7 @@ impl Judge<'_> {
             .run(&["rev-list", &range])
             .map_err(|error| message(&error))?;
         for commit in commits.lines() {
-            match self.signer(commit, &[KeyClass::Executor])? {
+            match self.signer(commit, &[KeyClass::Runner])? {
                 Some((_, principal)) if principal == executor => {}
                 _ => return Err(format!("{commit} is not signed by executor {executor}")),
             }
@@ -1726,8 +1726,8 @@ impl Judge<'_> {
             return self.queue_retention(update, seq);
         }
         if !matches!(
-            self.signer(&update.new, &[KeyClass::Executor])?,
-            Some((KeyClass::Executor, _))
+            self.signer(&update.new, &[KeyClass::Runner])?,
+            Some((KeyClass::Runner, _))
         ) {
             return Err("a reservation is signed by an executor key".to_owned());
         }
@@ -1916,8 +1916,8 @@ impl Judge<'_> {
             return Err("a release is created once and never moved".to_owned());
         }
         if !matches!(
-            self.signer(&update.new, &[KeyClass::Executor])?,
-            Some((KeyClass::Executor, _))
+            self.signer(&update.new, &[KeyClass::Runner])?,
+            Some((KeyClass::Runner, _))
         ) {
             return Err("a release is signed by an executor key".to_owned());
         }

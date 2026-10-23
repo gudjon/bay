@@ -95,7 +95,7 @@ fn a_merge_and_a_push_outside_bay_are_named_and_counted_and_bays_landing_is_not(
     assert_eq!(pushed["merged_count"], 0, "{pushed}");
 
     // The fleet map reads the same from the cache `bay status` fetched.
-    let fleet = test_box.bay_ok(&repo, &["status", "--fleet"]);
+    let fleet = test_box.bay_ok(&repo, &["status", "--all"]);
     assert_eq!(fleet["detail"]["unattributed"], *unattributed, "{fleet}");
 
     // `bay status --since` names each as an event, and never bay's landing.

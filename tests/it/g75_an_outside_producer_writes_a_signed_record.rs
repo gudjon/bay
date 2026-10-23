@@ -44,7 +44,7 @@ fn reviewed() -> (TestBox, PathBuf, PathBuf, [String; 2], PathBuf, TestKeys) {
         &keys,
         &[
             ("agent", key_line(AGENT, &keys.agent)),
-            ("executor", key_line(EXECUTOR, &keys.executor)),
+            ("runner", key_line(EXECUTOR, &keys.executor)),
             ("producer", key_line(PRODUCER, &keys.producer)),
             ("reviewer", key_line(REVIEWER, &reviewer)),
             ("registry", key_line(REGISTRAR, &keys.registry)),

@@ -26,7 +26,7 @@
 //!   merge's other parents reach that a lane ref this clone holds reaches too; `lane` is the
 //!   first lane named, and `lane_leaks` counts the landings that name one.
 //!
-//! `bay status` lists them under `detail.unattributed`, `bay status --fleet` the same from the
+//! `bay status` lists them under `detail.unattributed`, `bay status --all` the same from the
 //! local cache, and `bay status --since` names each listed landing outside bay as an
 //! `unattributed_landing` event ([`event`]).
 

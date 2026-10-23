@@ -1,9 +1,9 @@
-//! A bay-hosted trunk (`DESIGN` § 10a): `bay host init` and the host hook.
+//! A bay-hosted trunk (`DESIGN` § 10a): `bay host` and the host hook.
 //!
 //! The host is a bare repository on the reftable backend (atomic, crash-safe multi-ref
 //! transactions). Its `refs/heads/<trunk>` is append-only, enforced by an `update` hook defined
 //! in configuration (Git ≥ 2.54) that refuses a non-fast-forward, a deletion or a recreation of
-//! trunk only. Below that floor Git ignores the hook, so `host init` refuses with
+//! trunk only. Below that floor Git ignores the hook, so `bay host` refuses with
 //! `TOOL_BELOW_FLOOR` and creates nothing. `refs/bay/*` and `refs/notes/bay/*` stay rewritable so retention cuts work; the
 //! repository-wide `receive.denyNonFastForwards` / `receive.denyDeletes` are not used.
 //!
@@ -25,7 +25,7 @@ pub const SCOPE_HOOK: &str = "bay-scope";
 pub const TRUNK_KEY: &str = "bay.main";
 
 /// The branch this host serves, whatever its name (`main`, `dev`, `master`; BACKLOG 55):
-/// git config `bay.main`, else the branch the host's `HEAD` names, which `bay host init` sets
+/// git config `bay.main`, else the branch the host's `HEAD` names, which `bay host` sets
 /// to it, else `main`. A host made before `bay.main` (with `bay.trunk`) is still guarded on its
 /// own branch: `HEAD` names it.
 #[must_use]
@@ -38,7 +38,7 @@ pub fn served_branch(git: &Git) -> String {
         .unwrap_or_else(|| "main".to_owned())
 }
 
-/// `bay host init`, run in `dir`. With no `object_format` the host takes the object format of
+/// `bay host`, run in `dir`. With no `object_format` the host takes the object format of
 /// the repository that holds `dir`, so that repository can push to it; outside one, Git's own
 /// default (`init.defaultObjectFormat`, SHA-256 from Git 3.0). SHA-1 and SHA-256 repositories
 /// cannot exchange objects, so a fixed default would refuse every push from the other kind.

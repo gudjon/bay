@@ -22,9 +22,9 @@ const FLAGS: &[(&[&str], &[&str])] = &[
     (&["start"], &["--paths", "--new", "--fixes"]),
     (&["merge"], &["--wait"]),
     (&["undo"], &["--wait"]),
-    (&["status"], &["--fleet"]),
+    (&["status"], &["--all"]),
     (&["update"], &["--version", "--check"]),
-    (&["host", "init"], &["--main", "--object-format"]),
+    (&["host"], &["--main", "--object-format"]),
     (&["runner", "run"], &["--once", "--interval-s"]),
     (&["share"], &["--remote", "--bundle"]),
 ];

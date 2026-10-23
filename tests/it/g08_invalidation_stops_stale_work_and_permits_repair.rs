@@ -132,9 +132,9 @@ fn start_records_the_declared_input_and_the_version_it_observed() {
         ],
     );
     let record: serde_json::Value = serde_json::from_str(&record).unwrap();
-    // A record with a named input is a new major version: a bay that cannot read named inputs
-    // refuses it instead of dropping its observed versions on a rewrite.
-    assert_eq!(record["schema"], "bay.change/2", "{record}");
+    // 0.4.0 (BACKLOG 53 D): one schema, a named input an optional field of it; a bay before
+    // 0.4.0 refuses a `/1` record with a named input instead of dropping it on a rewrite.
+    assert_eq!(record["schema"], "bay.change/1", "{record}");
     assert_eq!(
         record["declared_inputs"],
         serde_json::json!(["src/", {"input": INPUT}]),
@@ -524,7 +524,7 @@ fn a_provider_runs_in_the_check_sandbox() {
 }
 
 /// Ruling R14: on a machine with no check sandbox a provider runs only by the box's own choice,
-/// `git config --global bay.executorSandbox none`. The sandbox is hidden by a failing `bwrap`
+/// `git config --global bay.runnerSandbox none`. The sandbox is hidden by a failing `bwrap`
 /// on `PATH`, so this runs on Linux.
 #[cfg(target_os = "linux")]
 #[test]
@@ -852,7 +852,7 @@ fn a_looping_executor_writes_the_cache_after_each_pass_that_fetched() {
     let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
     let clone = test_box.clone_of(&remote, "executor");
-    test_box.git_ok(&clone, &["config", "bay.executorName", "exec"]);
+    test_box.git_ok(&clone, &["config", "bay.runnerName", "exec"]);
     test_box.git_ok(&clone, &["config", "bay.producerName", "exec-checks"]);
     let cache = clone.join(".git/bay/coord.json");
     let mut executor = test_box

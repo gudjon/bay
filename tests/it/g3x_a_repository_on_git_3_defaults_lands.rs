@@ -2,7 +2,7 @@
 //!
 //! The box's global config sets every Git 3.0 default that Git 2.x can emulate: `main` as the
 //! initial branch, SHA-256 objects, the reftable backend and `safe.bareRepository=explicit`.
-//! A work repository is made with a plain `git init`; `bay host init`, run there with no
+//! A work repository is made with a plain `git init`; `bay host`, run there with no
 //! `--object-format`, makes a host that repository can push to, and outside any repository
 //! takes Git's own default. Then the core flow runs: start, land through an executor, status,
 //! watch, and the host hook still refuses a rewrite of trunk.
@@ -48,7 +48,7 @@ fn plain_repo(test_box: &TestBox, name: &str) -> std::path::PathBuf {
 }
 
 fn host_init(test_box: &TestBox, dir: &Path, host: &Path) -> serde_json::Value {
-    test_box.bay_ok(dir, &["host", "init", host.to_str().unwrap()])
+    test_box.bay_ok(dir, &["host", host.to_str().unwrap()])
 }
 
 #[test]
@@ -117,7 +117,7 @@ fn the_core_flow_lands_on_git_3_defaults() {
     assert_eq!(test_box.git_bare(&host, &["rev-parse", "main"]), landing);
 }
 
-/// Outside any repository, `host init` takes Git's default object format, never a fixed one.
+/// Outside any repository, `bay host` takes Git's default object format, never a fixed one.
 #[test]
 fn host_init_outside_a_repository_takes_gits_default_object_format() {
     let test_box = git_3_box();
@@ -145,13 +145,7 @@ fn host_init_follows_the_repository_it_runs_in_unless_told() {
     let told = test_box.path().join("told.git");
     let made = test_box.bay_ok(
         &repo,
-        &[
-            "host",
-            "init",
-            told.to_str().unwrap(),
-            "--object-format",
-            "sha256",
-        ],
+        &["host", told.to_str().unwrap(), "--object-format", "sha256"],
     );
     assert_eq!(made["detail"]["object format"], "sha256", "{made}");
 }

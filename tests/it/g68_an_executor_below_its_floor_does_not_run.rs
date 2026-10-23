@@ -32,7 +32,7 @@ fn an_executor_on_git_2_49_refuses_and_claims_nothing() {
     assert_eq!(result["decision"], "blocked", "{result}");
     assert_eq!(result["reason"], "TOOL_BELOW_FLOOR", "{result}");
     assert_eq!(result["detail"]["tool"], "git", "{result}");
-    assert_eq!(result["detail"]["role"], "executor", "{result}");
+    assert_eq!(result["detail"]["role"], "runner", "{result}");
     assert_eq!(result["detail"]["version"], "2.49.0", "{result}");
     assert_eq!(result["detail"]["floor"], "2.50", "{result}");
     assert_eq!(test_box.git_bare(&remote, &["for-each-ref"]), refs_before);

@@ -3,7 +3,7 @@
 //! With `BAY_ACTOR` unset bay names the actor by the user name, else `agent`, so on an account
 //! that many sessions share every session is one actor. The change record, the results that
 //! name an actor and every session row say where the name came from (`actor_source`: `env`,
-//! `user-default` or `default`); `bay status --fleet` counts the sessions whose actor came from
+//! `user-default` or `default`); `bay status --all` counts the sessions whose actor came from
 //! a default; and a policy at the base with `[agent] require_actor = true` makes `bay start`
 //! refuse `ACTOR_UNNAMED` while `BAY_ACTOR` is unset.
 
@@ -107,7 +107,7 @@ fn session_rows_carry_the_source_and_the_fleet_counts_the_defaults() {
     }
 
     test_box.bay_ok(&repo, &["status"]);
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 0, "{result}");
     let detail = &result["detail"];
     assert_eq!(detail["default_actor_sessions"], 2, "{result}");

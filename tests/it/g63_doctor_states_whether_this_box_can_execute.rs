@@ -1,6 +1,6 @@
 //! G63. Doctor states whether this box can execute.
 //!
-//! `bay doctor --role executor` judges the box as an executor box whatever role doctor would
+//! `bay doctor --role runner` judges the box as an executor box whatever role doctor would
 //! infer: the executor's Git floor (2.50, `GIT-FEATURES` § 1), a check sandbox or the box's
 //! choice to run without one (ruling R14), the remote, each `env` name of a required check set
 //! here, and, under a registry, the executor and producer keys set and enrolled. Without
@@ -26,19 +26,19 @@ fn git_2_49_is_red_for_a_stated_executor_and_the_inferred_role_says_so() {
     assert_eq!(result["detail"]["role_source"], "inferred", "{result}");
     assert_eq!(row(&result, "git")["floor"], "2.40", "{result}");
 
-    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["decision"], "blocked");
     assert_eq!(result["reason"], "TOOL_BELOW_FLOOR");
-    assert_eq!(result["detail"]["role"], "executor", "{result}");
+    assert_eq!(result["detail"]["role"], "runner", "{result}");
     assert_eq!(result["detail"]["role_source"], "stated", "{result}");
     let git = row(&result, "git");
-    assert_eq!(git["role"], "executor");
+    assert_eq!(git["role"], "runner");
     assert_eq!(git["floor"], "2.50");
     assert_eq!(git["state"], "red");
 
     test_box.fake_git_version("2.50.0");
-    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
     assert_eq!(code, 0, "{result}");
     assert_eq!(row(&result, "git")["state"], "green");
 }
@@ -57,7 +57,7 @@ fn a_stated_executor_with_no_sandbox_and_no_choice_is_red() {
     assert_eq!(code, 0, "{result}");
     assert_eq!(row(&result, "sandbox")["required"], false, "{result}");
 
-    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "SANDBOX_ABSENT", "{result}");
     let sandbox = row(&result, "sandbox");
@@ -69,18 +69,18 @@ fn a_stated_executor_with_no_sandbox_and_no_choice_is_red() {
     // G62b: under the kernel's user-namespace restriction, the red row names its fix, and still
     // the choice to run without a sandbox.
     test_box.userns_restricted(true);
-    let (_, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let (_, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
     let recovery = row(&result, "sandbox")["recovery"]
         .as_str()
         .unwrap()
         .to_owned();
     assert!(recovery.contains("AppArmor"), "{result}");
     assert!(recovery.contains("/fakebin/bwrap"), "{result}");
-    assert!(recovery.contains("bay.executorSandbox none"), "{result}");
+    assert!(recovery.contains("bay.runnerSandbox none"), "{result}");
     test_box.userns_restricted(false);
 
     test_box.choose_unsandboxed(true);
-    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
     assert_eq!(code, 0, "{result}");
 }
 
@@ -96,7 +96,7 @@ fn a_required_checks_env_name_unset_here_is_red_and_set_is_green() {
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 0, "{result}");
 
-    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "CHECK_ENV_UNSET", "{result}");
     let env = row(&result, "check-env");
@@ -111,11 +111,11 @@ fn a_required_checks_env_name_unset_here_is_red_and_set_is_green() {
         test_box
             .bay(&repo)
             .env("CHECK_TOKEN", "set")
-            .args(["doctor", "--role", "executor"]),
+            .args(["doctor", "--role", "runner"]),
     );
     assert_eq!(code, 0, "a ready executor box: {result}");
     assert_eq!(row(&result, "check-env")["state"], "green", "{result}");
-    assert_eq!(row(&result, "git")["role"], "executor", "{result}");
+    assert_eq!(row(&result, "git")["role"], "runner", "{result}");
 }
 
 #[test]
@@ -126,27 +126,27 @@ fn under_a_registry_a_stated_executor_needs_its_keys_enrolled() {
     let keys = test_box.keys();
     test_box.enroll(&repo, &keys);
 
-    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "RUNNER_KEY_MISSING", "{result}");
-    let row_keys = row(&result, "executor-keys");
+    let row_keys = row(&result, "runner-keys");
     assert_eq!(row_keys["state"], "red", "{result}");
     assert_eq!(row_keys["runner"], "not set", "{result}");
     assert_eq!(row_keys["producer"], "not set", "{result}");
 
     test_box.use_keys(&repo, &keys);
-    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
     assert_eq!(code, 0, "{result}");
-    let row_keys = row(&result, "executor-keys");
+    let row_keys = row(&result, "runner-keys");
     assert_eq!(row_keys["runner"], "enrolled", "{result}");
     assert_eq!(row_keys["producer"], "enrolled", "{result}");
 
     // A name the registry does not enrol is red too.
     test_box.git_ok(&repo, &["config", "bay.producerName", "ci-9"]);
-    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(
-        row(&result, "executor-keys")["producer"],
+        row(&result, "runner-keys")["producer"],
         "not enrolled",
         "{result}"
     );

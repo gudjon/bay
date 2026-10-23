@@ -1,4 +1,4 @@
-//! G49. `bay status --fleet` fails closed without a fetch, and doctor checks the installed
+//! G49. `bay status --all` fails closed without a fetch, and doctor checks the installed
 //! skill path.
 //!
 //! `ROADMAP` § 1; `DESIGN` § 11a, § 15.2, § 15.3, § 15.4.
@@ -190,7 +190,7 @@ fn a_non_directory_at_the_skill_path_is_a_mismatch_install_repairs() {
     }
 }
 
-/// Never fetched: `--fleet` is blocked with `REMOTE_NOT_FETCHED`, exit 10, and its detail does
+/// Never fetched: `--all` is blocked with `REMOTE_NOT_FETCHED`, exit 10, and its detail does
 /// not present the local cache as the fleet. It opens no SSH and starts no session.
 #[test]
 fn status_fleet_fails_closed_when_the_remote_was_never_fetched() {
@@ -217,7 +217,7 @@ fn status_fleet_fails_closed_when_the_remote_was_never_fetched() {
         ],
     );
 
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["schema"], "bay.result/1");
     assert_eq!(result["decision"], "blocked");
@@ -225,8 +225,8 @@ fn status_fleet_fails_closed_when_the_remote_was_never_fetched() {
     for key in ["machines", "actors", "talks", "sessions"] {
         assert!(result["detail"].get(key).is_none(), "{result}");
     }
-    assert!(!ssh_marker.exists(), "status --fleet opened SSH");
-    assert!(!claude_marker.exists(), "status --fleet started a session");
+    assert!(!ssh_marker.exists(), "status --all opened SSH");
+    assert!(!claude_marker.exists(), "status --all started a session");
 }
 
 /// With no remote configured there is no fetch of it either.
@@ -234,13 +234,13 @@ fn status_fleet_fails_closed_when_the_remote_was_never_fetched() {
 fn status_fleet_fails_closed_without_a_configured_remote() {
     let test_box = TestBox::new();
     let repo = test_box.repo_without_remote_any("repo");
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "REMOTE_NOT_FETCHED");
 }
 
 /// A trunk tracking ref is not a fetch of the fleet: a plain push writes it, and a fetch of the
-/// trunk brings no `refs/bay/live`. `--fleet` still fails closed.
+/// trunk brings no `refs/bay/live`. `--all` still fails closed.
 #[test]
 fn status_fleet_fails_closed_after_a_push_or_a_trunk_fetch() {
     let test_box = TestBox::new();
@@ -251,11 +251,11 @@ fn status_fleet_fails_closed_after_a_push_or_a_trunk_fetch() {
         &["rev-parse", "--verify", "refs/remotes/origin/main"],
     );
     assert_ne!(tracking, "");
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 10, "after a push: {result}");
     assert_eq!(result["reason"], "REMOTE_NOT_FETCHED");
     test_box.git_ok(&repo, &["fetch", "-q", "origin"]);
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 10, "after a trunk fetch: {result}");
     assert_eq!(result["reason"], "REMOTE_NOT_FETCHED");
 }
@@ -277,13 +277,13 @@ fn status_fleet_passes_the_guard_only_for_a_fetch_of_this_remote() {
     let other = serde_json::json!({"remote": "origin", "url": format!("{url}-other"), "at": at});
     for text in [other.to_string(), "{not json".to_owned()] {
         std::fs::write(&record, &text).unwrap();
-        let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+        let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
         assert_eq!(code, 10, "{text}: {result}");
         assert_eq!(result["reason"], "REMOTE_NOT_FETCHED");
     }
     let text = serde_json::json!({"remote": "origin", "url": url, "at": at}).to_string();
     std::fs::write(&record, text).unwrap();
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 0, "{result}");
     assert_eq!(result["decision"], "ok");
     assert_eq!(
@@ -295,16 +295,16 @@ fn status_fleet_passes_the_guard_only_for_a_fetch_of_this_remote() {
     assert_eq!(result["detail"]["behind"], true, "{result}");
 }
 
-/// `bay status` is the fetch of the fleet refs: after it, `--fleet` no longer fails closed.
+/// `bay status` is the fetch of the fleet refs: after it, `--all` no longer fails closed.
 #[test]
 fn bay_status_records_the_fetch_of_the_fleet_refs() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     test_box.seed_trunk(&repo, &[("README", "trunk\n")]);
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 10, "{result}");
     test_box.bay_ok(&repo, &["status"]);
-    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 0, "{result}");
     // Whether the remote moved since is unknown to a read that never asks it: never `false`.
     assert!(result["detail"]["behind"].is_null(), "{result}");

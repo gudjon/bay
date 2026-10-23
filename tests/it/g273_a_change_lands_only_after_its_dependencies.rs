@@ -103,7 +103,7 @@ fn pending(result: &Value, dependency: &str) {
     assert_eq!(result["decision"], "queued", "{result}");
     assert_eq!(result["reason"], "DEPENDENCY_PENDING", "{result}");
     assert_eq!(result["allowed"], json!(["wait"]), "{result}");
-    assert_eq!(result["retry_when"], "dependencies_landed", "{result}");
+    assert_eq!(result["retry_when"], "after_wait", "{result}");
     assert_ne!(result["decision"], "merged", "{result}");
     let named = &result["detail"]["pending"][0];
     assert_eq!(named["change"], dependency, "{result}");
@@ -183,10 +183,7 @@ fn a_dependency_that_ends_without_landing_refuses_its_dependent() {
     assert_eq!(refused["decision"], "blocked", "{refused}");
     assert_eq!(refused["reason"], "DEPENDENCY_ABANDONED", "{refused}");
     assert_eq!(refused["allowed"], json!(["read", "repair"]), "{refused}");
-    assert_eq!(
-        refused["retry_when"], "dependency_dropped_or_restarted",
-        "{refused}"
-    );
+    assert_eq!(refused["retry_when"], "after_fix", "{refused}");
     let ended = &refused["detail"]["ended"][0];
     assert_eq!(ended["change"], first.as_str(), "{refused}");
     assert_eq!(ended["state"], "abandoned", "{refused}");

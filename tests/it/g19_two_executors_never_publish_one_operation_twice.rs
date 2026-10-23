@@ -36,7 +36,7 @@ fn submitted(test_box: &TestBox) -> (String, PathBuf, PathBuf, PathBuf) {
     let a = test_box.clone_of(&remote, "executor-a");
     let b = test_box.clone_of(&remote, "executor-b");
     for (clone, name) in [(&a, "exec-a"), (&b, "exec-b")] {
-        test_box.git_ok(clone, &["config", "bay.executorName", name]);
+        test_box.git_ok(clone, &["config", "bay.runnerName", name]);
         test_box.git_ok(
             clone,
             &["config", "bay.producerName", &format!("{name}-checks")],
@@ -172,7 +172,7 @@ fn run(test_box: &TestBox, round: usize) {
     let one = test_box.clone_of(&remote, &format!("executor-a{round}"));
     let two = test_box.clone_of(&remote, &format!("executor-b{round}"));
     for (clone, name) in [(&one, "exec-a"), (&two, "exec-b")] {
-        test_box.git_ok(clone, &["config", "bay.executorName", name]);
+        test_box.git_ok(clone, &["config", "bay.runnerName", name]);
         test_box.git_ok(
             clone,
             &["config", "bay.producerName", &format!("{name}-checks")],

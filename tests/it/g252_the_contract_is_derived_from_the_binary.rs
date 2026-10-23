@@ -334,8 +334,8 @@ fn every_command_clap_knows_is_listed_with_the_flags_its_help_shows() {
     assert_eq!(change["required"], true, "{change}");
     let host = commands
         .iter()
-        .find(|command| command["command"] == "host init")
-        .expect("host init is not listed");
+        .find(|command| command["command"] == "host")
+        .expect("host is not listed");
     assert!(host["about"].is_string(), "{host}");
 }
 
@@ -397,7 +397,7 @@ fn the_schema_holds_real_results_and_refuses_broken_ones() {
     assert_valid(&schema, &landed);
     let reads: [&[&str]; 3] = [
         &["status", id.as_str()],
-        &["status", "--heads"],
+        &["status", "--branches"],
         &["status", "--since"],
     ];
     for args in reads {

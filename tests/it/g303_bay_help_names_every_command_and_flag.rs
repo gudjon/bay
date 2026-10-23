@@ -126,6 +126,6 @@ fn people_come_first_then_agents_then_admin() {
         "{page}"
     );
     assert!(at("\n  bay doctor") > admin, "{page}");
-    // A subcommand sits under its command: `bay host init` after `bay host`.
-    assert!(at("\n  bay host init") > at("\n  bay host"), "{page}");
+    // A subcommand sits under its command: `bay runner run` after `bay runner`.
+    assert!(at("\n  bay runner run") > at("\n  bay runner"), "{page}");
 }

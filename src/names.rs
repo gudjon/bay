@@ -59,7 +59,7 @@ pub const FETCH_EVIDENCE: &str = "refs/bay/fetch-evidence/";
 /// `refs/bay/fetch-waiting/<Change-Id>`: `bay waiting`'s and `bay approve`'s copy of the
 /// remote's change chains (G280), local only, pruned to the remote's on each read.
 pub const FETCH_WAITING: &str = "refs/bay/fetch-waiting/";
-/// `refs/bay/census/heads/<branch>`: `bay status --heads`'s copy of the remote's branches,
+/// `refs/bay/census/heads/<branch>`: `bay status --branches`'s copy of the remote's branches,
 /// local only, removed when the census ends.
 pub const CENSUS: &str = "refs/bay/census/";
 /// `refs/bay/archive/heads/<branch>`: the tip of a branch `bay prune` deleted,

@@ -1,7 +1,7 @@
 //! G191: a bay-hosted trunk keeps a commit-graph with generation numbers and changed-path Bloom
 //! filters after pushes.
 //!
-//! `bay host init` configures the host's graph (`core.commitGraph`, `gc.writeCommitGraph`,
+//! `bay host` configures the host's graph (`core.commitGraph`, `gc.writeCommitGraph`,
 //! `commitGraph.changedPaths`, version 2 filters) and enables maintenance's commit-graph task;
 //! bay runs no maintenance itself (G172). After pushes and Git's own maintenance, the graph
 //! verifies, and a path-limited walk from the newest tip reads a filter for every commit it
@@ -39,7 +39,7 @@ fn a_hosted_trunk_walks_its_history_through_bloom_filters_after_a_push() {
     test_box.git_bare(&host, &["commit-graph", "verify"]);
     test_box.assert_walk_reads_filters(&[&git_dir], "main", "d/four");
 
-    // The settings that make it so, as `bay host init` wrote them.
+    // The settings that make it so, as `bay host` wrote them.
     for (key, value) in [
         ("core.commitGraph", "true"),
         ("gc.writeCommitGraph", "true"),

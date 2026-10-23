@@ -14,7 +14,7 @@
 //!
 //! Guards to mutate:
 //! - `src/result.rs`, the `reasons!` table: put back `["edit_locally"]` on the `QUEUED`
-//!   row (or `["resume"]` on `WORKSPACE_INCOMPLETE`): the first case fails.
+//!   row (or `["resume"]` on `VIEW_INCOMPLETE`): the first case fails.
 //! - `src/start.rs` `open`: the arm `(true, _) => (generation + 1, Some(change.clone())),`
 //!   (make it `(true, _) => (*generation, Some(change.clone())),`, or put back the 0.2.6 pair
 //!   that refuses `(true, false)` with `CHANGE_ALREADY_MERGED`): the second case's plain start

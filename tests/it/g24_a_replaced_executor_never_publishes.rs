@@ -30,7 +30,7 @@ fn a_paused_executor_resumes_after_a_takeover_and_never_publishes() {
     let a = test_box.clone_of(&remote, "executor-a");
     let b = test_box.clone_of(&remote, "executor-b");
     for (clone, name) in [(&a, "exec-a"), (&b, "exec-b")] {
-        test_box.git_ok(clone, &["config", "bay.executorName", name]);
+        test_box.git_ok(clone, &["config", "bay.runnerName", name]);
         test_box.git_ok(
             clone,
             &["config", "bay.producerName", &format!("{name}-checks")],

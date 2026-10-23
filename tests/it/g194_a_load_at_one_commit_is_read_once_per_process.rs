@@ -75,7 +75,7 @@ fn a_status_reads_the_registry_policy_and_config_at_trunk_once() {
     .into_iter()
     .chain(
         // The class files the test registry enrols; it has no `reviewer` file, so none is read.
-        ["agent", "executor", "producer", "registry"].map(|class| {
+        ["agent", "runner", "producer", "registry"].map(|class| {
             let path = format!("{registry}:{class}");
             (class, reads(&calls, &[path.as_str()]))
         }),

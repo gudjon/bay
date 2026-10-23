@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0
+
+The last renames before the first user; scripts and configs that use the old names need the new ones.
+
+- The key class `executor` is `runner`: `bay enrol runner`, `bay doctor --role runner`.
+- Git config `bay.executorKey`, `bay.executorName` and `bay.executorSandbox` are `bay.runnerKey`, `bay.runnerName` and `bay.runnerSandbox`.
+- `bay install` moves the old config keys to the new names; `bay doctor` names any left.
+- A registry signed with an `executor` file keeps working; the next `bay enrol runner` rewrites it.
+- `bay status --fleet` is `bay status --all`; `bay status --heads` is `bay status --branches`.
+- `bay host init <path>` is `bay host <path>`.
+- `bay hook` is no longer listed in `bay --help`; `bay install` writes it for the agent.
+- `WORKSPACE_INCOMPLETE` is `VIEW_INCOMPLETE`.
+- `retry_when` takes one of seven values: `by_itself`, `after_wait`, `after_fix`, `after_person`, `after_setup`, `after_new_main`, `never`.
+- `bay help --json` lists agent products in `detail.agents`, not `detail.adapters`.
+- Every change record is written as `bay.change/1`; records stored as `/2` to `/4` are still read.
+
 ## 0.3.7
 
 - `bay save` and `bay start` take what the work is, in a few words; a card id still works.

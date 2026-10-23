@@ -40,7 +40,7 @@ struct Trunk {
 fn files(keys: &TestKeys, approvers: &str) -> Vec<(&'static str, String)> {
     vec![
         ("agent", key_line(AGENT, &keys.agent)),
-        ("executor", key_line(EXECUTOR, &keys.executor)),
+        ("runner", key_line(EXECUTOR, &keys.executor)),
         ("producer", key_line(PRODUCER, &keys.producer)),
         ("approver", approvers.to_owned()),
         ("registry", key_line(REGISTRAR, &keys.registry)),
@@ -154,7 +154,7 @@ fn a_change_to_an_approval_path_lands_only_with_an_enrolled_approvers_record() {
     assert_eq!(code, 10, "{waiting}");
     assert_eq!(waiting["reason"], "APPROVAL_PENDING", "{waiting}");
     assert_eq!(waiting["allowed"], serde_json::json!(["wait"]), "{waiting}");
-    assert_eq!(waiting["retry_when"], "approved", "{waiting}");
+    assert_eq!(waiting["retry_when"], "after_person", "{waiting}");
     assert_eq!(
         waiting["detail"]["approval"]["checks"][0]["approvers"],
         serde_json::json!([APPROVER]),

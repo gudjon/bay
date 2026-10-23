@@ -44,7 +44,7 @@ fn submitted(test_box: &TestBox) -> (String, PathBuf, PathBuf, PathBuf) {
 /// An executor clone of `remote` named `name`, whose clone declares `environment`.
 fn executor(test_box: &TestBox, remote: &Path, name: &str, environment: &str) -> PathBuf {
     let clone = test_box.clone_of(remote, name);
-    test_box.git_ok(&clone, &["config", "bay.executorName", name]);
+    test_box.git_ok(&clone, &["config", "bay.runnerName", name]);
     test_box.git_ok(
         &clone,
         &["config", "bay.producerName", &format!("{name}-checks")],
@@ -119,7 +119,7 @@ fn a_box_that_declares_nothing_serves_every_environment() {
     let (id, _, remote, runs) = submitted(&test_box);
     let clone = test_box.clone_of(&remote, "executor");
 
-    let (code, result) = result_json(test_box.bay(&clone).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&clone).args(["doctor", "--role", "runner"]));
     let environments = row(&result, "environments");
     assert_eq!(environments["source"], "default", "{result}");
     assert_eq!(environments["declared"], serde_json::json!([]), "{result}");
@@ -149,7 +149,7 @@ fn doctor_names_the_environments_this_box_serves() {
     let test_box = TestBox::new();
     let (_, _, remote, _) = submitted(&test_box);
     let clone = executor(&test_box, &remote, "exec-b", "env-b");
-    let (code, result) = result_json(test_box.bay(&clone).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&clone).args(["doctor", "--role", "runner"]));
     let environments = row(&result, "environments");
     assert_eq!(environments["source"], "declared", "{result}");
     assert_eq!(
@@ -166,7 +166,7 @@ fn doctor_names_the_environments_this_box_serves() {
     assert_eq!(code, 0, "{result}");
 
     test_box.git_ok(&clone, &["config", "bay.checkEnvironment", ""]);
-    let (code, result) = result_json(test_box.bay(&clone).args(["doctor", "--role", "executor"]));
+    let (code, result) = result_json(test_box.bay(&clone).args(["doctor", "--role", "runner"]));
     let environments = row(&result, "environments");
     assert_eq!(environments["source"], "declared", "{result}");
     assert_eq!(environments["serves"], serde_json::json!([]), "{result}");

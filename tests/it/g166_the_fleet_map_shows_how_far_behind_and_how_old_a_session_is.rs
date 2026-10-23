@@ -1,4 +1,4 @@
-//! G166. `bay status --fleet` shows, per session, how far its view's trunk is behind trunk, and
+//! G166. `bay status --all` shows, per session, how far its view's trunk is behind trunk, and
 //! the session's age (`plans/wave2.md` G166; `DESIGN` § 11a, `INTERFACES` § 5a).
 //!
 //! A session's entry counts the trunk commits its change's base lacks (`behind_commits`), from
@@ -88,7 +88,7 @@ fn a_sessions_entry_counts_its_trunk_lag_and_its_age() {
     // `bay status` is the fetch; the map reads what it left.
     test_box.bay_ok(&repo, &["status"]);
 
-    let (code, result) = support::result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (code, result) = support::result_json(test_box.bay(&repo).args(["status", "--all"]));
     assert_eq!(code, 0, "{result}");
     let row = result["detail"]["sessions"]
         .as_array()
@@ -115,7 +115,7 @@ fn a_sessions_entry_counts_its_trunk_lag_and_its_age() {
         "01-SessionStart.json",
         "s-tip",
     );
-    let (_, result) = support::result_json(test_box.bay(&repo).args(["status", "--fleet"]));
+    let (_, result) = support::result_json(test_box.bay(&repo).args(["status", "--all"]));
     let row = result["detail"]["sessions"]
         .as_array()
         .unwrap()

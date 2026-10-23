@@ -6,7 +6,7 @@
 //! every command's and flag's help, each command's `writes` and `never`, every reason's
 //! `next_step` in `bay help --json`, and the skill are held to the new words. A name in backticks
 //! (`no_live_executor`, `` `executor` `` as a key class) or a dotted config key
-//! (`bay.executorKey`) is a literal name, and is not read as a word.
+//! (`bay.runnerKey`) is a literal name, and is not read as a word.
 //!
 //! Guards to mutate (each makes a case here fail):
 //! - `src/main.rs` `Command::Undo`: its help back to "checked and landed like any other".
@@ -133,11 +133,11 @@ fn the_contract_and_the_skill_say_merge_main_runner_plugin_and_machine() {
 #[test]
 fn a_literal_name_is_not_a_word() {
     assert_eq!(
-        old_words("set `bay.executorKey`, then `no_live_executor` clears"),
+        old_words("set `bay.runnerKey`, then `no_live_executor` clears"),
         Vec::<String>::new()
     );
     assert_eq!(
-        old_words("git config bay.executorSandbox none"),
+        old_words("git config bay.runnerSandbox none"),
         Vec::<String>::new()
     );
     assert_eq!(old_words("the executor runs"), ["executor"]);
