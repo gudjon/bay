@@ -667,7 +667,7 @@ fn open_refusal(change: &Value) -> Option<String> {
     let operation = &change["operation"];
     let op_id = operation["op_id"].as_str()?;
     let op_state = operation["state"].as_str().unwrap_or("unknown");
-    if matches!(state, "landed" | "abandoned" | "superseded")
+    if matches!(state, "merged" | "landed" | "abandoned" | "superseded")
         || !matches!(op_state, "blocked" | "failed")
     {
         return None;
@@ -700,8 +700,8 @@ fn compact(id: &str, status: &Value) -> String {
         "bay: change {id} (intent {}): {state}",
         change["intent"].as_str().unwrap_or("?")
     );
-    if let Some(trunk) = status["freshness"]["trunk"].as_str() {
-        let _ = write!(out, "; trunk {}", &trunk[..trunk.len().min(12)]);
+    if let Some(main) = status["freshness"]["main"].as_str() {
+        let _ = write!(out, "; main {}", &main[..main.len().min(12)]);
         match status["freshness"]["fetched_at"].as_str() {
             Some(crate::status::CACHED) => out.push_str(" (local cache; bay status fetches)"),
             Some(at) if at.starts_with("not fetched") => {
@@ -761,10 +761,10 @@ mod tests {
         let status = json!({"detail": {"changes": [{
             "change": "abcd2345", "intent": "CARD-1", "state": "open",
             "operation": {"op_id": "abcd2345.1", "state": "blocked", "outcome": "CHECK_FAILED"},
-        }]}, "freshness": {"trunk": "0123456789abcdef", "fetched_at": "2026-10-18T00:00:00Z"}});
+        }]}, "freshness": {"main": "0123456789abcdef", "fetched_at": "2026-10-18T00:00:00Z"}});
         let text = compact("abcd2345", &status);
         assert!(
-            text.contains("bay: change abcd2345 (intent CARD-1): open; trunk 0123456789ab\n"),
+            text.contains("bay: change abcd2345 (intent CARD-1): open; main 0123456789ab\n"),
             "{text}"
         );
         assert!(
@@ -776,7 +776,7 @@ mod tests {
     #[test]
     fn a_landed_change_has_no_open_refusal() {
         let status = json!({"detail": {"changes": [{
-            "change": "abcd2345", "intent": "CARD-1", "state": "landed",
+            "change": "abcd2345", "intent": "CARD-1", "state": "merged",
             "operation": {"op_id": "abcd2345.1", "state": "blocked", "outcome": "CHECK_FAILED"},
         }]}});
         assert!(!compact("abcd2345", &status).contains("refused"));

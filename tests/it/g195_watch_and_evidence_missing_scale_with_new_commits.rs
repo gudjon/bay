@@ -120,7 +120,7 @@ impl Trunk {
 fn owned(red: &Value) -> (String, String) {
     (
         red["check"].as_str().unwrap().to_owned(),
-        red["landing"].as_str().unwrap().to_owned(),
+        red["merge"].as_str().unwrap().to_owned(),
     )
 }
 
@@ -182,7 +182,7 @@ fn after_one_new_commit(history: usize) -> (BTreeMap<String, usize>, BTreeMap<St
             .bay(&trunk.repo)
             .args(["status", "--since", &since]),
     );
-    let landings = &watched["detail"]["landings"];
+    let landings = &watched["detail"]["merges"];
     assert_eq!(landings.as_array().map(Vec::len), Some(1), "{watched}");
     assert_eq!(landings[0]["commit"], new.as_str(), "{watched}");
 
@@ -227,47 +227,47 @@ fn a_watch_from_a_cursor_judges_red_as_the_full_walk_does() {
     let names: Vec<String> = (0..12).map(|n| format!("h{n}")).collect();
     let history = trunk.push(&names);
     let first = trunk.watch(None);
-    assert!(events(&first, "trunk_red").is_empty(), "{first}");
+    assert!(events(&first, "main_red").is_empty(), "{first}");
 
     // A failure answered on an older landing, then one new commit: the watch from the cursor
     // reads the note that moved, and turns red as the full walk does.
     trunk.suite(&history[3], "product_failure");
     let new = trunk.push(&["new".to_owned()]).pop().unwrap();
     let watched = trunk.watch(Some(&cursor(&first)));
-    let landings = &watched["landings"];
+    let landings = &watched["merges"];
     assert_eq!(landings.as_array().map(Vec::len), Some(1), "{watched}");
     assert_eq!(landings[0]["commit"], new.as_str(), "{watched}");
-    let turned = events(&watched, "trunk_red");
+    let turned = events(&watched, "main_red");
     assert_eq!(
         turned,
         [("suite".to_owned(), history[3].clone())],
         "{watched}"
     );
     assert_eq!(trunk.status_red(), turned);
-    assert_eq!(events(&trunk.watch(None), "trunk_red"), turned);
+    assert_eq!(events(&trunk.watch(None), "main_red"), turned);
     let seen = cursor(&watched);
     let again = trunk.watch(Some(&seen));
-    assert!(events(&again, "trunk_red").is_empty(), "{again}");
-    assert!(events(&again, "trunk_red_cleared").is_empty(), "{again}");
+    assert!(events(&again, "main_red").is_empty(), "{again}");
+    assert!(events(&again, "main_red_cleared").is_empty(), "{again}");
 
     // A pass on a newer old landing, with no new commit: it clears the red, as the full walk
     // says.
     trunk.suite(&history[8], "pass");
     let cleared = trunk.watch(Some(&seen));
     assert_eq!(
-        events(&cleared, "trunk_red_cleared"),
+        events(&cleared, "main_red_cleared"),
         [("suite".to_owned(), history[3].clone())],
         "{cleared}"
     );
-    assert!(events(&cleared, "trunk_red").is_empty(), "{cleared}");
+    assert!(events(&cleared, "main_red").is_empty(), "{cleared}");
     assert_eq!(trunk.status_red().len(), 0);
-    assert_eq!(events(&trunk.watch(None), "trunk_red").len(), 0);
+    assert_eq!(events(&trunk.watch(None), "main_red").len(), 0);
 
     // A failure on a landing older than that pass changes nothing; one on the newest turns red.
     trunk.suite(&history[5], "product_failure");
     trunk.suite(&new, "product_failure");
     let next = trunk.watch(Some(&cursor(&cleared)));
-    let turned = events(&next, "trunk_red");
+    let turned = events(&next, "main_red");
     assert_eq!(turned, [("suite".to_owned(), new.clone())], "{next}");
     assert_eq!(trunk.status_red(), turned);
 }

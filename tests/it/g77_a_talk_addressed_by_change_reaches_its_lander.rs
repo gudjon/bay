@@ -113,7 +113,7 @@ fn a_talk_to_a_change_or_its_commit_reaches_the_actor_that_landed_it() {
     assert_eq!(sent["detail"]["who"], "agent", "{sent}");
     assert_eq!(sent["detail"]["to_change"]["change"], x.as_str(), "{sent}");
     assert_eq!(
-        sent["detail"]["to_change"]["landing"],
+        sent["detail"]["to_change"]["merge"],
         landing.as_str(),
         "{sent}"
     );
@@ -145,7 +145,7 @@ fn a_typed_actor_trailer_outside_bay_never_routes_a_talk() {
     assert_eq!(code, 0, "{sent}");
     assert_eq!(sent["detail"]["who"], "agent", "{sent}");
     assert_eq!(
-        sent["detail"]["to_change"]["landing"],
+        sent["detail"]["to_change"]["merge"],
         landing.as_str(),
         "{sent}"
     );

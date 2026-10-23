@@ -124,9 +124,7 @@ fn not_linear(warnings: &Value) -> Vec<&Value> {
         .as_array()
         .map(|rows| {
             rows.iter()
-                .filter(|row| {
-                    row["code"] == "trunk_not_linear" || row["kind"] == "trunk_not_linear"
-                })
+                .filter(|row| row["code"] == "main_not_linear" || row["kind"] == "main_not_linear")
                 .collect()
         })
         .unwrap_or_default()
@@ -173,9 +171,9 @@ fn landings_an_outside_merge_pushed_off_the_first_parent_line_are_still_found() 
     let warning = warned[0];
     assert_eq!(warning["commit"], merge.as_str(), "{warning}");
     assert_eq!(warning["parents"], json!([&old, &landed_b]), "{warning}");
-    assert_eq!(warning["landings"], 2, "{warning}");
+    assert_eq!(warning["merges"], 2, "{warning}");
     assert_eq!(
-        warning["landing_commits"],
+        warning["merge_commits"],
         json!([&landed_b, &landed_a]),
         "{warning}"
     );
@@ -191,12 +189,12 @@ fn landings_an_outside_merge_pushed_off_the_first_parent_line_are_still_found() 
     let unattributed = &status["detail"]["unattributed"];
     assert_eq!(unattributed["count"], 1, "{unattributed}");
     assert_eq!(
-        unattributed["landings"][0]["commit"],
+        unattributed["merges"][0]["commit"],
         merge.as_str(),
         "{unattributed}"
     );
     assert_eq!(
-        unattributed["landings"][0]["landings_off_first_parent"], 2,
+        unattributed["merges"][0]["merges_off_first_parent"], 2,
         "{unattributed}"
     );
 
@@ -205,7 +203,7 @@ fn landings_an_outside_merge_pushed_off_the_first_parent_line_are_still_found() 
     let events = not_linear(&watched["detail"]["events"]);
     assert_eq!(events.len(), 1, "{watched}");
     assert_eq!(events[0]["commit"], merge.as_str(), "{watched}");
-    assert_eq!(events[0]["landings"], 2, "{watched}");
+    assert_eq!(events[0]["merges"], 2, "{watched}");
     let next = watched["detail"]["cursor"].as_str().unwrap().to_owned();
     let again = test_box.bay_ok(&trunk.repo, &["status", "--since", &next]);
     assert!(
@@ -247,10 +245,10 @@ fn landings_an_outside_merge_pushed_off_the_first_parent_line_are_still_found() 
     let red = &status["detail"]["red"];
     assert_eq!(red[0]["check"], "suite", "{red}");
     assert_eq!(red[0]["change"], b.as_str(), "{red}");
-    assert_eq!(red[0]["landing"], landed_b.as_str(), "{red}");
-    assert_eq!(red[0]["culprit"]["landing"], landed_b.as_str(), "{red}");
+    assert_eq!(red[0]["merge"], landed_b.as_str(), "{red}");
+    assert_eq!(red[0]["culprit"]["merge"], landed_b.as_str(), "{red}");
     assert_eq!(
-        red[0]["suspect"]["last_passed"]["landing"],
+        red[0]["suspect"]["last_passed"]["merge"],
         landed_a.as_str(),
         "{red}"
     );

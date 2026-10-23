@@ -245,14 +245,14 @@ fn the_census_classes_every_remote_branch_and_deletes_nothing() {
         .test_box
         .git_ok(&fixture.repo, &["rev-parse", "main"]);
     for (name, sha, class, proof) in [
-        ("main", trunk_tip.as_str(), "trunk", Value::Null),
+        ("main", trunk_tip.as_str(), "main", Value::Null),
         ("staging", fixture.base.as_str(), "target", Value::Null),
         ("research/idea", fixture.base.as_str(), "lane", Value::Null),
-        ("ff", fixture.ff.as_str(), "landed", "ancestor".into()),
+        ("ff", fixture.ff.as_str(), "merged", "ancestor".into()),
         (
             "squashed",
             fixture.squashed.as_str(),
-            "landed",
+            "merged",
             "patch".into(),
         ),
         ("unique", fixture.unique.as_str(), "unique", Value::Null),
@@ -260,7 +260,7 @@ fn the_census_classes_every_remote_branch_and_deletes_nothing() {
         (
             "claimed",
             fixture.claimed.as_str(),
-            "landed",
+            "merged",
             "change".into(),
         ),
     ] {
@@ -274,7 +274,7 @@ fn the_census_classes_every_remote_branch_and_deletes_nothing() {
         row(&result, "old")["newest_commit_at"],
         "2020-01-01T00:00:00Z"
     );
-    assert_eq!(result["detail"]["counts"]["landed"], 3, "{result}");
+    assert_eq!(result["detail"]["counts"]["merged"], 3, "{result}");
 
     // A stale age past 2020 makes the old branch unique: never landed either way.
     let longer = fixture.heads(&["--stale-days", "100000"]);
@@ -311,7 +311,7 @@ fn prune_deletes_only_the_landed_branches_and_the_log_restores_them() {
         .iter()
         .find(|row| row["name"] == "claimed")
         .unwrap();
-    assert_eq!(skipped["class"], "landed", "{skipped}");
+    assert_eq!(skipped["class"], "merged", "{skipped}");
     assert_eq!(skipped["proof"], "change", "{skipped}");
     assert_eq!(
         skipped["why"], "landed by Change-Id only; its commits may differ from what landed",
@@ -434,7 +434,7 @@ fn a_landed_branch_moved_after_the_census_is_not_deleted() {
         .iter()
         .find(|row| row["name"] == "ff")
         .unwrap_or_else(|| panic!("ff not skipped: {result}"));
-    assert_eq!(skipped["class"], "landed", "{skipped}");
+    assert_eq!(skipped["class"], "merged", "{skipped}");
     assert!(
         skipped["why"]
             .as_str()

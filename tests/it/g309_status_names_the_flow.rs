@@ -92,10 +92,10 @@ fn status_counts_live_by_actor_landings_cycle_time_and_the_oldest_live_change() 
         ]),
         "{flow}"
     );
-    assert_eq!(flow["landed"], 1, "{flow}");
+    assert_eq!(flow["merged"], 1, "{flow}");
 
     let cycle = &flow["cycle_time_s"];
-    assert_eq!(cycle["landed"], 1, "{flow}");
+    assert_eq!(cycle["merged"], 1, "{flow}");
     let p50 = cycle["p50"].as_u64().unwrap_or_else(|| panic!("{flow}"));
     let p90 = cycle["p90"].as_u64().unwrap_or_else(|| panic!("{flow}"));
     assert!(p50 <= p90, "{flow}");
@@ -121,6 +121,6 @@ fn with_nothing_landed_there_is_no_cycle_time() {
     let status = test_box.bay_ok(&repo, &["status"]);
     let flow = &status["detail"]["flow"];
     assert_eq!(flow["live"], 1, "{flow}");
-    assert_eq!(flow["landed"], 0, "{flow}");
+    assert_eq!(flow["merged"], 0, "{flow}");
     assert_eq!(flow["cycle_time_s"], Value::Null, "{flow}");
 }

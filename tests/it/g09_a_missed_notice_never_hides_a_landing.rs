@@ -156,7 +156,7 @@ fn a_missed_notice_never_hides_a_landing_or_an_invalidation() {
     // The notice was lost. Y's watch from its cursor still shows all three.
     let seen = watch(&test_box, &view_y, Some(&cursor));
     let detail = &seen["detail"];
-    let landings = detail["landings"].as_array().unwrap();
+    let landings = detail["merges"].as_array().unwrap();
     assert!(
         landings
             .iter()
@@ -178,11 +178,7 @@ fn a_missed_notice_never_hides_a_landing_or_an_invalidation() {
     let next = detail["cursor"].as_str().unwrap();
     assert_ne!(next, cursor, "{seen}");
     let again = watch(&test_box, &view_y, Some(next));
-    assert_eq!(
-        again["detail"]["landings"],
-        serde_json::json!([]),
-        "{again}"
-    );
+    assert_eq!(again["detail"]["merges"], serde_json::json!([]), "{again}");
     assert_eq!(again["detail"]["events"], serde_json::json!([]), "{again}");
     assert_eq!(
         again["detail"]["invalidations"],
@@ -226,7 +222,7 @@ fn a_check_that_fails_after_the_agent_left_is_an_event() {
         format!("{y}/CHECK_FAILED/tests"),
         "{seen}"
     );
-    assert_eq!(seen["detail"]["landings"], serde_json::json!([]), "{seen}");
+    assert_eq!(seen["detail"]["merges"], serde_json::json!([]), "{seen}");
 }
 
 #[test]

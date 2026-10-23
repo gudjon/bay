@@ -67,7 +67,7 @@ fn a_signed_landing_verifies_against_the_executor_file_of_its_registry() {
     );
     assert!(note.contains("\"signature\""), "{note}");
     let status = test_box.bay_ok(&repo, &["status", &id]);
-    assert_eq!(status["detail"]["changes"][0]["state"], "landed");
+    assert_eq!(status["detail"]["changes"][0]["state"], "merged");
     assert_eq!(
         status["detail"]["changes"][0]["anomalies"],
         serde_json::json!([])
@@ -126,7 +126,7 @@ fn a_publication_signed_outside_the_executor_file_is_an_anomaly_not_a_landing() 
 
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let change = &status["detail"]["changes"][0];
-    assert_ne!(change["state"], "landed", "{status}");
+    assert_ne!(change["state"], "merged", "{status}");
     let anomalies: Vec<&str> = change["anomalies"]
         .as_array()
         .unwrap()

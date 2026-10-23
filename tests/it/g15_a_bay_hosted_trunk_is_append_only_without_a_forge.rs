@@ -98,12 +98,12 @@ fn doctor_refuses_a_host_without_the_trunk_hook() {
     test_box.host_init(&host);
     let (code, result) = result_json(test_box.bay(&host).arg("doctor"));
     assert_eq!(code, 0, "{result}");
-    assert_eq!(row(&result, "trunk-hook")["state"], "green");
+    assert_eq!(row(&result, "main-hook")["state"], "green");
 
     let plain = test_box.bare("plain.git", "sha1", "reftable");
     let (code, result) = result_json(test_box.bay(&plain).arg("doctor"));
     assert_eq!(code, 10, "{result}");
-    assert_eq!(row(&result, "trunk-hook")["state"], "red");
+    assert_eq!(row(&result, "main-hook")["state"], "red");
 }
 
 #[test]

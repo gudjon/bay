@@ -40,7 +40,7 @@ fn assert_no_effect(
 ) {
     assert_eq!(result["decision"], "ok", "{result}");
     assert_eq!(result["state"], "no_effect", "{result}");
-    assert_eq!(result["detail"]["trunk_commit"], trunk, "{result}");
+    assert_eq!(result["detail"]["main_commit"], trunk, "{result}");
     assert_eq!(
         test_box
             .git_ok(repo, &["ls-remote", "origin", "refs/heads/main"])
@@ -55,7 +55,7 @@ fn assert_no_effect(
     assert_eq!(change["state"], "no_effect", "{change}");
     assert_eq!(change["operation"]["state"], "no_effect", "{change}");
     assert_eq!(change["operation"]["attempts"], 0, "no candidate: {change}");
-    assert_eq!(change["landed"], serde_json::Value::Null, "{change}");
+    assert_eq!(change["merged"], serde_json::Value::Null, "{change}");
 }
 
 #[test]

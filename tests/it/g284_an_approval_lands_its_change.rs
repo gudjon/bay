@@ -223,7 +223,7 @@ fn an_approval_lands_the_approved_candidate_with_no_second_land() {
 
     let status = trunk.test_box.bay_ok(&trunk.repo, &["status", &id]);
     let operation = &status["detail"]["changes"][0]["operation"];
-    assert_eq!(operation["published"], true, "{status}");
+    assert_eq!(operation["is_merged"], true, "{status}");
     assert_eq!(operation["attempts"], 1, "{status}");
 }
 

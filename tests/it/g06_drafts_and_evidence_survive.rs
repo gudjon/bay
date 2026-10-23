@@ -296,7 +296,7 @@ fn resume_brings_in_a_newer_trunk_and_reports_what_moved() {
     test_box.git_ok(&other, &["push", "-q", "origin", "main"]);
 
     let resumed = test_box.bay_ok(&repo, &["start", &id]);
-    assert_eq!(resumed["detail"]["trunk_moved"], true);
+    assert_eq!(resumed["detail"]["main_moved"], true);
     assert_eq!(
         resumed["detail"]["moved_paths"],
         serde_json::json!(["src/a.rs"])

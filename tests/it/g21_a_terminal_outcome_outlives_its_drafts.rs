@@ -84,10 +84,10 @@ fn the_outcome_is_explained_after_retention_and_gc() {
     let fresh = test_box.clone_of(&remote, "fresh");
     let status = test_box.bay_ok(&fresh, &["status", &id]);
     let change = &status["detail"]["changes"][0];
-    assert_eq!(change["state"], "landed", "{status}");
+    assert_eq!(change["state"], "merged", "{status}");
     assert_eq!(change["retention_cut"], true);
     assert_eq!(change["terminal"][0]["op_id"], format!("{id}.1"));
-    assert_eq!(change["terminal"][0]["outcome"], "published");
+    assert_eq!(change["terminal"][0]["outcome"], "merged");
 
     // A retry of the expired op id is refused as ambiguous.
     let opened = bay::repo::Repo::open(&executor).unwrap();
@@ -107,7 +107,7 @@ fn the_outcome_is_explained_after_retention_and_gc() {
     let after = test_box.clone_of(&remote, "after-revocation");
     let status = test_box.bay_ok(&after, &["status", &id]);
     assert_eq!(
-        status["detail"]["changes"][0]["state"], "landed",
+        status["detail"]["changes"][0]["state"], "merged",
         "{status}"
     );
     assert_eq!(

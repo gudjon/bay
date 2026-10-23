@@ -131,14 +131,14 @@ fn under_a_registry_a_stated_executor_needs_its_keys_enrolled() {
     assert_eq!(result["reason"], "RUNNER_KEY_MISSING", "{result}");
     let row_keys = row(&result, "executor-keys");
     assert_eq!(row_keys["state"], "red", "{result}");
-    assert_eq!(row_keys["executor"], "not set", "{result}");
+    assert_eq!(row_keys["runner"], "not set", "{result}");
     assert_eq!(row_keys["producer"], "not set", "{result}");
 
     test_box.use_keys(&repo, &keys);
     let (code, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "executor"]));
     assert_eq!(code, 0, "{result}");
     let row_keys = row(&result, "executor-keys");
-    assert_eq!(row_keys["executor"], "enrolled", "{result}");
+    assert_eq!(row_keys["runner"], "enrolled", "{result}");
     assert_eq!(row_keys["producer"], "enrolled", "{result}");
 
     // A name the registry does not enrol is red too.

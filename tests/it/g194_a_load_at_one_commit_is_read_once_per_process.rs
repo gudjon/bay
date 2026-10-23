@@ -55,7 +55,7 @@ fn a_status_reads_the_registry_policy_and_config_at_trunk_once() {
     let log = test_box.path().join("git-calls.log");
     test_box.log_git_calls(&log);
     let status = test_box.bay_ok(&repo, &["status"]);
-    assert_eq!(status["detail"]["trunk"], trunk.as_str(), "{status}");
+    assert_eq!(status["detail"]["main"], trunk.as_str(), "{status}");
     let listed = status["detail"]["changes"].as_array().unwrap();
     assert!(
         listed.iter().any(|change| change["change"] == id.as_str()),

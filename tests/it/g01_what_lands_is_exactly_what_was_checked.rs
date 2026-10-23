@@ -56,7 +56,7 @@ fn trunk_advances_while_a_check_runs() {
     // Two attempts; the first candidate never reached trunk; the second was checked itself.
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let change = &status["detail"]["changes"][0];
-    assert_eq!(change["state"], "landed");
+    assert_eq!(change["state"], "merged");
     assert_eq!(change["operation"]["attempts"], 2);
     assert_eq!(change["operation"]["candidate"], format!("{id}.1.2"));
     let tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);

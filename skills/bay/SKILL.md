@@ -10,9 +10,8 @@ allowed-tools:
 
 bay merges coding agents' changes into main, so several agents can work in one codebase without stale
 branches, colliding merges or a broken main. You open a change, edit in its view, and submit it once. A
-runner checks the exact candidate and merges it, even after you leave. A few field and event names still
-say `trunk` for main.
-Main is the one branch bay serves, whatever its name (`bay install --main dev`). Create no branches: a
+runner checks the exact candidate and merges it, even after you leave. Main is the one branch bay serves,
+whatever its name (`bay install --main dev`). Create no branches: a
 change is bay's own record, and its view is a folder bay makes. Branches after main, as in
 `dev → staging → production`, are `[[target]]`s; work that must never merge goes in a `[[lane]]`.
 Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its URL).
@@ -78,13 +77,13 @@ It also lists each agent product's hook moments and what each can block.
 - While a change waits in the queue, `bay status <change>` may show `operation.conflict`: main
   moved into a `MERGE_CONFLICT` on the listed paths. It keeps its place; refresh and repair now.
   The agent hook also tells your session once.
-- A `landed_on_your_paths` notice: another change merged on paths you declared. Refresh, re-read
+- A `merged_on_your_paths` notice: another change merged on paths you declared. Refresh, re-read
   the named paths, then go on.
-- `bay status` with `detail.warnings` naming `no_live_executor`: work is queued and no runner has
+- `bay status` with `detail.warnings` naming `no_live_runner`: work is queued and no runner has
   been seen recently. Tell the user a runner must run (`bay runner run`, or
   `bay runner install` to keep one running). The work stays queued. The agent hook says the
   same once, at session start or a prompt: "bay: no runner is running for this repository".
-- `bay status` with `detail.warnings` naming `trunk_not_linear`: a merge pushed outside bay put
+- `bay status` with `detail.warnings` naming `main_not_linear`: a merge pushed outside bay put
   merges off main's first-parent line. bay still finds them. Tell the user to require linear
   history on the host.
 - A `blocked` or `failed` result names a `reason`, the actions still `allowed`, and `retry_when`:
@@ -132,10 +131,10 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 
 | When | Run |
 | --- | --- |
-| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the runners with their age (`executors`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --fleet` |
-| See every head: each branch on the remote, classed `trunk`, `target`, `lane`, `landed`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --heads [--stale-days <n>]` |
-| Delete only the remote branches `landed` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[plugin.prune]` plugin runs after each delete (`detail.pruned[].on_prune`) | `bay prune [--stale-days <n>]` |
-| See merges, events (`trunk_red`, `trunk_red_cleared`, `unattributed_landing`, `trunk_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |
+| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the runners with their age (`runners`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --fleet` |
+| See every head: each branch on the remote, classed `main`, `target`, `lane`, `merged`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --heads [--stale-days <n>]` |
+| Delete only the remote branches `merged` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[plugin.prune]` plugin runs after each delete (`detail.pruned[].on_prune`) | `bay prune [--stale-days <n>]` |
+| See merges, events (`main_red`, `main_red_cleared`, `outside_merge`, `main_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
 

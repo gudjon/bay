@@ -257,6 +257,8 @@ impl Serialize for Reason {
 /// Which trunk the result was computed from, and when it was fetched.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Freshness {
+    /// Printed as `main` (0.3.5).
+    #[serde(rename = "main")]
     pub trunk: String,
     pub fetched_at: String,
 }
@@ -326,23 +328,124 @@ struct Wire<'a> {
     freshness: Option<&'a Freshness>,
 }
 
+/// 0.3.5 (owner ruling 2026-10-23): the words a result prints for keys bay names in its own
+/// code and stored records. A result is translated once, here, as it is written: the code and
+/// every record in Git keep their names, and nothing printed carries an old word. A key is
+/// renamed only when its new name is not already in the same object.
+const PRINTED_KEYS: &[(&str, &str)] = &[
+    ("trunk", "main"),
+    ("trunk_commit", "main_commit"),
+    ("trunk_tip", "main_tip"),
+    ("trunk_moved", "main_moved"),
+    ("trunk_red", "main_red"),
+    ("landing", "merge"),
+    ("landings", "merges"),
+    ("landing_commits", "merge_commits"),
+    ("landings_off_first_parent", "merges_off_first_parent"),
+    ("landed", "merged"),
+    ("landed_as", "merged_as"),
+    ("landed_revision", "merged_revision"),
+    ("landed_intent", "merged_intent"),
+    ("landing_cost", "merge_cost"),
+    ("published", "is_merged"),
+    ("publish_retries", "merge_retries"),
+    ("published_at", "merged_at"),
+    ("executor", "runner"),
+    ("executors", "runners"),
+    ("executor_name", "runner_name"),
+];
+
+/// The keys whose string values name a state, a class, a row or an event, and the words those
+/// values print as (0.3.5).
+const PRINTED_VALUE_KEYS: &[&str] = &[
+    "state",
+    "class",
+    "name",
+    "kind",
+    "event",
+    "type",
+    "outcome",
+    "waiting_for",
+    "warning",
+    "warnings",
+    "code",
+];
+
+const PRINTED_VALUES: &[(&str, &str)] = &[
+    ("landed", "merged"),
+    ("published", "merged"),
+    ("trunk", "main"),
+    ("executor", "runner"),
+    ("executor_capacity", "runner_capacity"),
+    ("trunk-hook", "main-hook"),
+    ("trunk_red", "main_red"),
+    ("trunk_red_cleared", "main_red_cleared"),
+    ("trunk_not_linear", "main_not_linear"),
+    ("unattributed_landing", "outside_merge"),
+    ("landed_on_your_paths", "merged_on_your_paths"),
+    ("no_live_executor", "no_live_runner"),
+];
+
+fn printed_value(word: &str) -> &str {
+    PRINTED_VALUES
+        .iter()
+        .find(|(old, _)| *old == word)
+        .map_or(word, |(_, new)| new)
+}
+
+/// `value` with the printed words of [`PRINTED_KEYS`] and [`PRINTED_VALUES`].
+#[must_use]
+pub fn printed(value: &Value) -> Value {
+    printed_under(value, false)
+}
+
+fn printed_under(value: &Value, named: bool) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut out = serde_json::Map::new();
+            for (key, inner) in object {
+                let new = PRINTED_KEYS
+                    .iter()
+                    .find(|(old, _)| old == key)
+                    .map(|(_, new)| *new)
+                    .filter(|new| !object.contains_key(*new))
+                    .unwrap_or(key);
+                let holds_word = PRINTED_VALUE_KEYS.contains(&key.as_str());
+                out.insert(new.to_owned(), printed_under(inner, holds_word));
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| printed_under(item, named))
+                .collect(),
+        ),
+        Value::String(word) if named => Value::String(printed_value(word).to_owned()),
+        other => other.clone(),
+    }
+}
+
 impl Serialize for BayResult {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let say = self.say();
+        let detail = self.detail.as_ref().map(printed);
+        let waiting_for = self.waiting_for.as_deref().map(printed_value);
+        let state = self.state.as_deref().map(printed_value);
         Wire {
             schema: self.schema,
             op_id: self.op_id.as_deref(),
             candidate: self.candidate.as_deref(),
             decision: self.decision,
-            state: self.state.as_deref(),
+            state,
             reason: self.reason,
             say: &say,
             change: self.change.as_deref(),
-            detail: self.detail.as_ref(),
+            detail: detail.as_ref(),
             allowed: self.allowed.as_deref(),
             retry_when: self.retry_when,
             next_step: self.reason.map(Reason::next),
-            waiting_for: self.waiting_for.as_deref(),
+            waiting_for,
             elapsed_s: self.elapsed_s,
             evidence: self.evidence.as_deref(),
             receipt: self.receipt.as_deref(),

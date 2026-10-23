@@ -19,7 +19,7 @@
 //!   `row["started_at"]`: the percentiles are Unix times, not the attempt rows' seconds);
 //! - `src/log.rs` `published_of`: `.is_some_and(|(change, _)| changes.contains(change))` (make
 //!   it `!changes.contains(change)`: no record is read, and both are null);
-//! - `src/log.rs` `published_of`: `record["outcome"] == "published"` (make it `!=`: both are
+//! - `src/log.rs` `published_of`: `record["outcome"] == "merged"` (make it `!=`: both are
 //!   null).
 
 // The check is a shell script, so this runs on Unix only.
@@ -37,7 +37,7 @@ fn terminal(test_box: &TestBox, repo: &std::path::Path, id: &str) -> Value {
         .as_array()
         .unwrap_or_else(|| panic!("no terminal records: {status}"))
         .iter()
-        .find(|record| record["outcome"] == "published")
+        .find(|record| record["outcome"] == "merged")
         .unwrap_or_else(|| panic!("no published terminal record: {status}"))
         .clone()
 }
@@ -91,7 +91,7 @@ fn status_names_the_queue_wait_and_check_time_of_landed_changes() {
     let status = test_box.bay_ok(&repo, &["status"]);
     let flow = &status["detail"]["flow"];
     let queue_wait = &flow["queue_wait_s"];
-    assert_eq!(queue_wait["landed"], 2, "{status}");
+    assert_eq!(queue_wait["merged"], 2, "{status}");
     let (wait_p50, wait_p90) = p50_p90(queue_wait);
     let check_time = &flow["check_time_s"];
     let (check_p50, check_p90) = p50_p90(check_time);
@@ -158,6 +158,6 @@ fn an_unchecked_merge_counts_no_check_run() {
     assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
     let status = test_box.bay_ok(&repo, &["status"]);
     let flow = &status["detail"]["flow"];
-    assert_eq!(flow["queue_wait_s"]["landed"], 1, "{status}");
+    assert_eq!(flow["queue_wait_s"]["merged"], 1, "{status}");
     assert!(flow["check_time_s"].is_null(), "{status}");
 }

@@ -199,12 +199,12 @@
     "freshness": {
       "type": "object",
       "required": [
-        "trunk",
+        "main",
         "fetched_at"
       ],
       "additionalProperties": false,
       "properties": {
-        "trunk": {
+        "main": {
           "type": "string"
         },
         "fetched_at": {

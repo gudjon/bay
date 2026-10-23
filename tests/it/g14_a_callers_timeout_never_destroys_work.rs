@@ -51,7 +51,7 @@ fn the_observation_timeout_detaches_the_caller_and_the_run_continues() {
         std::thread::sleep(Duration::from_millis(250));
     }
     let status = test_box.bay_ok(&repo, &["status", &id]);
-    assert_eq!(status["detail"]["changes"][0]["state"], "landed");
+    assert_eq!(status["detail"]["changes"][0]["state"], "merged");
 }
 
 #[test]

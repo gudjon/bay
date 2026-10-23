@@ -64,7 +64,7 @@ fn a_queued_landing_records_its_queue_wait_and_check_time() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|record| record["outcome"] == "published")
+        .find(|record| record["outcome"] == "merged")
         .unwrap_or_else(|| panic!("no published terminal record: {status}"))
         .clone();
     assert_eq!(terminal["schema"], "bay.terminal/1");
@@ -73,7 +73,7 @@ fn a_queued_landing_records_its_queue_wait_and_check_time() {
     let submitted_at = at(&terminal, "submitted_at");
     let queued_at = at(&terminal, "queued_at");
     let head_at = at(&terminal, "head_at");
-    let published_at = at(&terminal, "published_at");
+    let published_at = at(&terminal, "merged_at");
     assert!(submitted_at <= queued_at, "{terminal}");
     assert!(queued_at <= head_at, "{terminal}");
     assert!(head_at <= published_at, "{terminal}");
@@ -119,7 +119,7 @@ fn a_queued_landing_records_its_queue_wait_and_check_time() {
         "submitted_at",
         "queued_at",
         "head_at",
-        "published_at",
+        "merged_at",
         "attempts",
         "checks",
         "queue_wait_s",

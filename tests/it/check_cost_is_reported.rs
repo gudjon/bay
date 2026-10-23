@@ -84,8 +84,8 @@ fn a_units_seconds_reach_the_signed_record_and_the_status_sum() {
         measured,
         "{change}"
     );
-    assert_eq!(change["landing_cost"]["unit_seconds"], 4.1, "{change}");
-    assert_eq!(change["landing_cost"]["records"], 1, "{change}");
+    assert_eq!(change["merge_cost"]["unit_seconds"], 4.1, "{change}");
+    assert_eq!(change["merge_cost"]["records"], 1, "{change}");
 
     // A record in the shape written before the times existed: signed by the producer over the
     // canonical JSON without them. It still verifies, and status counts it.
@@ -111,7 +111,7 @@ fn a_units_seconds_reach_the_signed_record_and_the_status_sum() {
     assert_eq!(operation_cost["records"], 2, "{change}");
     assert_eq!(operation_cost["untimed"], 1, "{change}");
     assert_eq!(operation_cost["unit_seconds"], 4.1, "{change}");
-    assert_eq!(change["landing_cost"]["records"], 2, "{change}");
+    assert_eq!(change["merge_cost"]["records"], 2, "{change}");
 }
 
 /// Evidence readers keep fields they do not know and verify over them, so a field a later

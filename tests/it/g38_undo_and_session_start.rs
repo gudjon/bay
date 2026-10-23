@@ -115,7 +115,7 @@ fn session_start_reads_the_local_cache_and_fetches_nothing() {
     let (code, out) = session_start(&test_box, &view, "s-cached");
     assert_eq!(code, Some(0), "{out}");
     assert!(out.contains(&format!("change {id}")), "{out}");
-    assert!(out.contains(&format!("trunk {}", &tracked[..12])), "{out}");
+    assert!(out.contains(&format!("main {}", &tracked[..12])), "{out}");
     assert!(out.contains("local cache"), "{out}");
     assert_eq!(
         test_box.git_ok(&repo, &["rev-parse", "refs/remotes/origin/main"]),
@@ -169,7 +169,7 @@ fn a_landed_change_has_no_open_refusal() {
     let (code, out) = session_start(&test_box, &view, "s-after");
     assert_eq!(code, Some(0), "{out}");
     assert!(out.contains(&format!("change {id}")), "{out}");
-    assert!(out.contains("landed"), "{out}");
+    assert!(out.contains("merged"), "{out}");
     assert!(!out.contains("refused"), "{out}");
 }
 
@@ -456,7 +456,7 @@ fn an_undo_whose_effect_is_already_gone_opens_no_change() {
     assert_eq!(result["decision"], "ok", "{result}");
     assert_eq!(result["detail"]["undo"], "nothing to undo", "{result}");
     assert_eq!(result["detail"]["reverts"], id.as_str(), "{result}");
-    assert_eq!(result["detail"]["trunk"], tip.as_str(), "{result}");
+    assert_eq!(result["detail"]["main"], tip.as_str(), "{result}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), tip);
     assert_eq!(refs(&test_box, &remote, "refs/bay/changes/"), changes);
     assert_eq!(refs(&test_box, &remote, "refs/bay/intent/"), claims);

@@ -125,7 +125,7 @@ fn a_talk_closes_when_a_landing_fixes_undoes_or_supersedes_its_change() {
         closed(&status),
         vec![
             json!({"talk": about_x, "state": "answered", "fixed_by": fix,
-            "landing": fix_landing})
+            "merge": fix_landing})
         ],
         "{status}"
     );
@@ -147,7 +147,7 @@ fn a_talk_closes_when_a_landing_fixes_undoes_or_supersedes_its_change() {
         closed(&status),
         vec![
             json!({"talk": about_y, "state": "answered", "undone_by": undo,
-            "landing": undo_landing})
+            "merge": undo_landing})
         ],
         "{status}"
     );
@@ -160,7 +160,7 @@ fn a_talk_closes_when_a_landing_fixes_undoes_or_supersedes_its_change() {
         closed(&status),
         vec![
             json!({"talk": about_z, "state": "answered", "superseded_by": next,
-            "landing": next_landing})
+            "merge": next_landing})
         ],
         "{status}"
     );

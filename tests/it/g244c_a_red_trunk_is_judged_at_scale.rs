@@ -149,13 +149,13 @@ fn a_red_post_check_names_the_landings_between_its_last_pass_and_first_failure()
     assert_eq!(status["red_pending"], json!([]), "{status}");
     let red = &status["red"];
     assert_eq!(red.as_array().map(Vec::len), Some(1), "{status}");
-    assert_eq!(red[0]["landing"], landings[3].1.as_str(), "{status}");
+    assert_eq!(red[0]["merge"], landings[3].1.as_str(), "{status}");
     let suspect = &red[0]["suspect"];
-    let mark = |(change, commit): &(String, String)| json!({"landing": commit, "change": change});
+    let mark = |(change, commit): &(String, String)| json!({"merge": commit, "change": change});
     assert_eq!(suspect["last_passed"], mark(&landings[1]), "{status}");
     assert_eq!(suspect["first_failed"], mark(&landings[3]), "{status}");
     assert_eq!(
-        suspect["landings"],
+        suspect["merges"],
         json!([mark(&landings[2]), mark(&landings[3])]),
         "{status}"
     );

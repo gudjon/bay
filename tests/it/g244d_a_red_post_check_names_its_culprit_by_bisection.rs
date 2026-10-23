@@ -149,11 +149,11 @@ impl Trunk {
 }
 
 fn mark((change, commit): &(String, String)) -> Value {
-    json!({"landing": commit, "change": change})
+    json!({"merge": commit, "change": change})
 }
 
 fn tested((change, commit): &(String, String), verdict: &str) -> Value {
-    json!({"landing": commit, "change": change, "verdict": verdict})
+    json!({"merge": commit, "change": change, "verdict": verdict})
 }
 
 #[test]
@@ -161,7 +161,7 @@ fn a_bisect_names_the_landing_that_broke_the_post_check_not_the_newest_failure()
     let trunk = trunk("[runner]\nbisect_post = true\n");
     let landings = trunk.red_over_four();
     let red = trunk.red();
-    assert_eq!(red[0]["landing"], landings[4].1.as_str(), "{red}");
+    assert_eq!(red[0]["merge"], landings[4].1.as_str(), "{red}");
     assert_eq!(red[0]["culprit"], Value::Null, "{red}");
 
     // The midpoint passes, the next fails, and a rerun there fails again: three runs.
@@ -191,10 +191,10 @@ fn a_bisect_names_the_landing_that_broke_the_post_check_not_the_newest_failure()
     // The culprit owns the red, not the newest failure.
     let red = trunk.red();
     assert_eq!(red.as_array().map(Vec::len), Some(1), "{red}");
-    assert_eq!(red[0]["landing"], landings[3].1.as_str(), "{red}");
+    assert_eq!(red[0]["merge"], landings[3].1.as_str(), "{red}");
     assert_eq!(red[0]["change"], landings[3].0.as_str(), "{red}");
     let culprit = &red[0]["culprit"];
-    assert_eq!(culprit["landing"], landings[3].1.as_str(), "{red}");
+    assert_eq!(culprit["merge"], landings[3].1.as_str(), "{red}");
     assert_eq!(culprit["change"], landings[3].0.as_str(), "{red}");
     assert_eq!(
         culprit["tested"],
@@ -205,7 +205,7 @@ fn a_bisect_names_the_landing_that_broke_the_post_check_not_the_newest_failure()
         ]),
         "{red}"
     );
-    assert_eq!(red[0]["suspect"]["landings"], json!([mark(&landings[3])]));
+    assert_eq!(red[0]["suspect"]["merges"], json!([mark(&landings[3])]));
 
     // A pinned range is not bisected again.
     assert_eq!(trunk.executor_pass(), None);
@@ -233,10 +233,10 @@ fn without_bisect_post_the_executor_runs_no_post_check() {
     let landings = trunk.red_over_four();
     assert_eq!(trunk.executor_pass(), None);
     let red = trunk.red();
-    assert_eq!(red[0]["landing"], landings[4].1.as_str(), "{red}");
+    assert_eq!(red[0]["merge"], landings[4].1.as_str(), "{red}");
     assert_eq!(red[0]["culprit"], Value::Null, "{red}");
     assert_eq!(
-        red[0]["suspect"]["landings"].as_array().map(Vec::len),
+        red[0]["suspect"]["merges"].as_array().map(Vec::len),
         Some(4)
     );
 }

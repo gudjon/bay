@@ -707,7 +707,7 @@ fn a_policy_edit_landing_during_the_check_is_policy_changed_and_rechecked() {
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
     assert_eq!(op["policy_changed"], 2, "{status}");
-    assert_eq!(op["trunk_moved"], 0, "{status}");
+    assert_eq!(op["main_moved"], 0, "{status}");
     // The landed tree's evidence was produced under the policy it landed with.
     let tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);
     let note = test_box.git_bare(
@@ -774,7 +774,7 @@ fn a_rules_only_policy_edit_makes_queued_candidates_policy_changed() {
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
     assert_eq!(op["policy_changed"], 1, "{status}");
-    assert_eq!(op["trunk_moved"], 2, "{status}");
+    assert_eq!(op["main_moved"], 2, "{status}");
     let tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);
     let notes = test_box.git_bare(
         &remote,

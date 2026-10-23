@@ -213,7 +213,7 @@ fn status_heads_deletes_nothing_and_names_the_stranded_heads_too() {
         .git_ok(&fixture.repo, &["for-each-ref", "refs/heads/"]);
 
     let result = fixture.bay(&["status", "--heads"]);
-    assert_eq!(result["detail"]["counts"]["landed"], 2, "{result}");
+    assert_eq!(result["detail"]["counts"]["merged"], 2, "{result}");
     assert!(result["detail"].get("pruned").is_none(), "{result}");
 
     // The heads only this disk has, in their own field.

@@ -1117,7 +1117,7 @@ fn a_notice_changes_none_of_the_versions() {
 
     // The notice in Y's view: `bay status --since` names X's landing and Y's invalidation.
     let watched = test_box.bay_ok(&view_y, &["status", "--since"]);
-    let landings = watched["detail"]["landings"].as_array().unwrap();
+    let landings = watched["detail"]["merges"].as_array().unwrap();
     assert!(
         landings
             .iter()

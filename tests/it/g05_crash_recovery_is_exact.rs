@@ -34,8 +34,8 @@ fn kill_then_resume(point: &str, expect_state: &str, expect_op: &str) {
     assert_eq!(change["state"], expect_state, "{point}: {status}");
     assert_eq!(change["operation"]["state"], expect_op, "{point}: {status}");
     assert_eq!(
-        change["operation"]["published"],
-        expect_state == "landed",
+        change["operation"]["is_merged"],
+        expect_state == "merged",
         "{point}: {status}"
     );
 
@@ -50,7 +50,7 @@ fn kill_then_resume(point: &str, expect_state: &str, expect_op: &str) {
         "{point}"
     );
     let status = test_box.bay_ok(&repo, &["status", &id]);
-    assert_eq!(status["detail"]["changes"][0]["state"], "landed", "{point}");
+    assert_eq!(status["detail"]["changes"][0]["state"], "merged", "{point}");
 }
 
 #[test]
@@ -70,5 +70,5 @@ fn killed_after_persist() {
 
 #[test]
 fn killed_after_publish() {
-    kill_then_resume("after-publish", "landed", "published");
+    kill_then_resume("after-publish", "merged", "merged");
 }

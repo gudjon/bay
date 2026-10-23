@@ -58,7 +58,7 @@ fn edits_made_after_land_survive_the_publication_and_cleanup() {
     // Cleanup keeps the newer work: files intact, view not releasable.
     let status = test_box.bay_ok(&repo, &["status"]);
     let kept = leftover(&status, &id);
-    assert_eq!(kept["state"], "landed");
+    assert_eq!(kept["state"], "merged");
     assert_eq!(kept["newer_work"], true, "{status}");
     assert_eq!(kept["journal"], "published");
     assert_eq!(

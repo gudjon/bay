@@ -11,7 +11,7 @@ use crate::support;
 use support::{TestBox, check_files, passing_result, result_json};
 
 fn assert_fresh(result: &serde_json::Value, trunk: &str) {
-    assert_eq!(result["freshness"]["trunk"], trunk, "{result}");
+    assert_eq!(result["freshness"]["main"], trunk, "{result}");
     let at = result["freshness"]["fetched_at"]
         .as_str()
         .unwrap_or_default();

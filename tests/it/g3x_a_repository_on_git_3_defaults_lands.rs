@@ -97,11 +97,11 @@ fn the_core_flow_lands_on_git_3_defaults() {
         .iter()
         .find(|change| change["change"] == id.as_str())
         .unwrap_or_else(|| panic!("{status}"));
-    assert_eq!(change["state"], "landed", "{status}");
-    assert_eq!(change["landed"], landing.as_str(), "{status}");
+    assert_eq!(change["state"], "merged", "{status}");
+    assert_eq!(change["merged"], landing.as_str(), "{status}");
 
     let watched = test_box.bay_ok(&repo, &["status", "--since", &cursor, "--merged"]);
-    let landings = watched["detail"]["landings"].as_array().unwrap();
+    let landings = watched["detail"]["merges"].as_array().unwrap();
     assert_eq!(landings.len(), 1, "{watched}");
     assert_eq!(landings[0]["change"], id.as_str(), "{watched}");
     assert_eq!(landings[0]["commit"], landing.as_str(), "{watched}");

@@ -134,7 +134,7 @@ fn edits_additions_and_deletions_in_the_main_checkout_land_as_one_change() {
     let id = test_box.trunk_change_ids(&remote)[0].clone();
     assert_eq!(saved["change"], id.as_str(), "{saved}");
     assert_eq!(saved["detail"]["change"], id.as_str(), "{saved}");
-    assert_eq!(saved["detail"]["landed"], tip.as_str(), "{saved}");
+    assert_eq!(saved["detail"]["merged"], tip.as_str(), "{saved}");
 
     // The main checkout is clean at the new tip, by a fast-forward of its own branch.
     assert_eq!(saved["detail"]["checkout"]["moved"], true, "{saved}");

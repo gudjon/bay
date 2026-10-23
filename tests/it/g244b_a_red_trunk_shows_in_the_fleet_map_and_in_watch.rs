@@ -151,7 +151,7 @@ fn the_fleet_map_marks_who_works_on_red_paths_and_watch_sees_red_turn_and_clear(
     let (on_src, _) = trunk.start("src/held.rs", None);
     let (on_docs, _) = trunk.start("docs/held.md", None);
     let (events, green) = trunk.watch(None);
-    assert!(of_kind(&events, "trunk_red").is_empty(), "{events:?}");
+    assert!(of_kind(&events, "main_red").is_empty(), "{events:?}");
 
     trunk.suite(&landing, "product_failure");
 
@@ -161,30 +161,30 @@ fn the_fleet_map_marks_who_works_on_red_paths_and_watch_sees_red_turn_and_clear(
     assert_eq!(red.as_array().map(Vec::len), Some(1), "{fleet}");
     assert_eq!(red[0]["check"], "suite", "{fleet}");
     assert_eq!(red[0]["change"], broke.as_str(), "{fleet}");
-    assert_eq!(red[0]["landing"], landing.as_str(), "{fleet}");
+    assert_eq!(red[0]["merge"], landing.as_str(), "{fleet}");
     let suite = json!([{"check": "suite", "environment": "local"}]);
     assert_eq!(entry(&fleet, &on_src)["on_red"], suite, "{fleet}");
     assert_eq!(entry(&fleet, &on_docs)["on_red"], json!([]), "{fleet}");
 
     // Watch from before the failure sees it turn red, once.
     let (events, seen) = trunk.watch(Some(&green));
-    let turned = of_kind(&events, "trunk_red");
+    let turned = of_kind(&events, "main_red");
     assert_eq!(turned.len(), 1, "{events:?}");
     assert_eq!(turned[0]["check"], "suite", "{events:?}");
     assert_eq!(turned[0]["change"], broke.as_str(), "{events:?}");
-    assert_eq!(turned[0]["landing"], landing.as_str(), "{events:?}");
+    assert_eq!(turned[0]["merge"], landing.as_str(), "{events:?}");
     let (again, _) = trunk.watch(Some(&seen));
-    assert!(of_kind(&again, "trunk_red").is_empty(), "{again:?}");
-    assert!(of_kind(&again, "trunk_red_cleared").is_empty(), "{again:?}");
+    assert!(of_kind(&again, "main_red").is_empty(), "{again:?}");
+    assert!(of_kind(&again, "main_red_cleared").is_empty(), "{again:?}");
 
     // A fix that names the owner lands; watch sees the red clear, and the map no longer lists it.
     trunk.land("src/fix.rs", Some(&broke));
     let (events, _) = trunk.watch(Some(&seen));
-    let cleared = of_kind(&events, "trunk_red_cleared");
+    let cleared = of_kind(&events, "main_red_cleared");
     assert_eq!(cleared.len(), 1, "{events:?}");
     assert_eq!(cleared[0]["check"], "suite", "{events:?}");
-    assert_eq!(cleared[0]["landing"], landing.as_str(), "{events:?}");
-    assert!(of_kind(&events, "trunk_red").is_empty(), "{events:?}");
+    assert_eq!(cleared[0]["merge"], landing.as_str(), "{events:?}");
+    assert!(of_kind(&events, "main_red").is_empty(), "{events:?}");
     let fleet = trunk.fleet();
     assert_eq!(fleet["red"], json!([]), "{fleet}");
     assert_eq!(entry(&fleet, &on_src)["on_red"], json!([]), "{fleet}");
@@ -197,13 +197,13 @@ fn watch_sees_a_red_clear_when_a_later_run_of_the_check_passes() {
     trunk.suite(&broken, "product_failure");
     // Without a cursor, a red check is new.
     let (events, seen) = trunk.watch(None);
-    assert_eq!(of_kind(&events, "trunk_red").len(), 1, "{events:?}");
+    assert_eq!(of_kind(&events, "main_red").len(), 1, "{events:?}");
     let (_, later) = trunk.land("docs/later.md", None);
     trunk.suite(&later, "pass");
     let (events, _) = trunk.watch(Some(&seen));
-    let cleared = of_kind(&events, "trunk_red_cleared");
+    let cleared = of_kind(&events, "main_red_cleared");
     assert_eq!(cleared.len(), 1, "{events:?}");
-    assert_eq!(cleared[0]["landing"], broken.as_str(), "{events:?}");
+    assert_eq!(cleared[0]["merge"], broken.as_str(), "{events:?}");
 }
 
 /// A registry that cannot be read never reads as none in watch: evidence would then count
@@ -216,7 +216,7 @@ fn watch_judges_no_red_from_a_registry_it_cannot_read() {
     trunk.suite(&landing, "product_failure");
     trunk.test_box.bay_ok(&trunk.repo, &["status"]);
     let (events, cursor) = trunk.watch(None);
-    assert_eq!(of_kind(&events, "trunk_red").len(), 1, "{events:?}");
+    assert_eq!(of_kind(&events, "main_red").len(), 1, "{events:?}");
 
     // The registry ref names a commit whose agent file is no key list, and a pass is recorded.
     let bad = trunk.test_box.path().join("bad-registry");
@@ -265,5 +265,5 @@ fn watch_judges_no_red_from_a_registry_it_cannot_read() {
     let detail = &watched["detail"];
     assert!(detail["red_unread"].is_string(), "{watched}");
     let events = detail["events"].as_array().unwrap();
-    assert_eq!(of_kind(events, "trunk_red_cleared").len(), 0, "{watched}");
+    assert_eq!(of_kind(events, "main_red_cleared").len(), 0, "{watched}");
 }

@@ -137,7 +137,7 @@ fn a_studio_change_skips_the_world_check_and_records_why() {
         .as_array()
         .unwrap()
         .iter()
-        .find(|record| record["outcome"] == "published")
+        .find(|record| record["outcome"] == "merged")
         .unwrap_or_else(|| panic!("no published terminal record: {status}"))
         .clone();
     assert_eq!(

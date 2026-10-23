@@ -103,7 +103,7 @@ fn a_machine_that_dies_before_the_sync_shows_a_missing_record_never_success() {
     let other = test_box.clone_of(&remote, "other");
     let status = test_box.bay_ok(&other, &["status", &id]);
     let change = &status["detail"]["changes"][0];
-    assert_ne!(change["state"], "landed", "{status}");
-    assert_eq!(change["operation"]["published"], false);
+    assert_ne!(change["state"], "merged", "{status}");
+    assert_eq!(change["operation"]["is_merged"], false);
     assert_eq!(change["operation"]["receipt"], "missing", "{status}");
 }

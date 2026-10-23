@@ -103,7 +103,7 @@ fn every_relation_is_a_pair_and_a_target_off_the_first_parent_line_is_kept() {
     // Trunk by default, oldest first.
     let all = lineage(&case, None);
     assert_eq!(pairs(&all), bay_pairs, "{all}");
-    assert_eq!(all["detail"]["trunk"], next_landing.as_str(), "{all}");
+    assert_eq!(all["detail"]["main"], next_landing.as_str(), "{all}");
 
     // A change landed behind a merge's second parent, and a change on no line at all, are each
     // named by a later first-parent commit made outside bay.

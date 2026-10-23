@@ -61,9 +61,9 @@ fn the_scan_from_base_first_finds_the_earlier_landing() {
 
     // The agent resumes: its base moves past R1's landing.
     let resumed = test_box.bay_ok(&repo, &["start", &id]);
-    assert_eq!(resumed["detail"]["trunk_moved"], true, "{resumed}");
+    assert_eq!(resumed["detail"]["main_moved"], true, "{resumed}");
     assert!(
-        resumed["detail"]["landed"]["commit"].is_string(),
+        resumed["detail"]["merged"]["commit"].is_string(),
         "resume reports the landing: {resumed}"
     );
 
@@ -84,7 +84,7 @@ fn the_scan_from_base_first_finds_the_earlier_landing() {
     );
     let status = test_box.bay_ok(&repo, &["status", &id]);
     assert_eq!(
-        status["detail"]["changes"][0]["state"], "landed",
+        status["detail"]["changes"][0]["state"], "merged",
         "{status}"
     );
 }

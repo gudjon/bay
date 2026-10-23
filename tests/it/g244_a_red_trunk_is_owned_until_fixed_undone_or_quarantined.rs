@@ -114,7 +114,7 @@ fn a_failed_post_check_makes_its_paths_red_until_a_fix_lands() {
     let red = trunk.red();
     assert_eq!(red[0]["check"], "suite", "{red}");
     assert_eq!(red[0]["change"], broke.as_str(), "{red}");
-    assert_eq!(red[0]["landing"], landing.as_str(), "{red}");
+    assert_eq!(red[0]["merge"], landing.as_str(), "{red}");
 
     // A landing on the red paths is refused, naming the owner.
     let (code, refused, _) = trunk.land("src/next.rs", None);

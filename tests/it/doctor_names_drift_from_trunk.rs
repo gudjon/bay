@@ -30,7 +30,7 @@ fn the_repository_row_names_distance_from_trunk_and_modified_files() {
 
     let clean = repository(&test_box, &repo);
     assert_eq!(clean["state"], "green", "{clean}");
-    assert_eq!(clean["trunk"], "refs/remotes/origin/main", "{clean}");
+    assert_eq!(clean["main"], "refs/remotes/origin/main", "{clean}");
     assert_eq!(clean["ahead"], 0, "{clean}");
     assert_eq!(clean["behind"], 0, "{clean}");
     assert_eq!(clean["modified"], 0, "{clean}");

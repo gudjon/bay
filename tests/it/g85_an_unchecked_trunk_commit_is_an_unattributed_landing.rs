@@ -27,7 +27,7 @@ fn commit(test_box: &TestBox, dir: &Path, file: &str) -> String {
 
 /// The commits `unattributed` lists, newest first.
 fn listed(unattributed: &Value) -> Vec<&str> {
-    unattributed["landings"]
+    unattributed["merges"]
         .as_array()
         .unwrap_or_else(|| panic!("{unattributed}"))
         .iter()
@@ -84,13 +84,13 @@ fn a_merge_and_a_push_outside_bay_are_named_and_counted_and_bays_landing_is_not(
     assert_eq!(unattributed["window"], 50, "{unattributed}");
     assert_eq!(unattributed["off_first_parent"], 1, "{unattributed}");
 
-    let merged = &unattributed["landings"][0];
-    assert_eq!(merged["landed_as"], "merge", "{merged}");
+    let merged = &unattributed["merges"][0];
+    assert_eq!(merged["merged_as"], "merge", "{merged}");
     assert_eq!(merged["base"], outside.as_str(), "{merged}");
     assert_eq!(merged["merged"], json!([side]), "{merged}");
     assert_eq!(merged["merged_count"], 1, "{merged}");
-    let pushed = &unattributed["landings"][1];
-    assert_eq!(pushed["landed_as"], "outside", "{pushed}");
+    let pushed = &unattributed["merges"][1];
+    assert_eq!(pushed["merged_as"], "outside", "{pushed}");
     assert_eq!(pushed["base"], published.as_str(), "{pushed}");
     assert_eq!(pushed["merged_count"], 0, "{pushed}");
 
@@ -104,14 +104,14 @@ fn a_merge_and_a_push_outside_bay_are_named_and_counted_and_bays_landing_is_not(
         .as_array()
         .unwrap_or_else(|| panic!("{watched}"))
         .iter()
-        .filter(|event| event["kind"] == "unattributed_landing")
+        .filter(|event| event["kind"] == "outside_merge")
         .collect();
     let named: Vec<(&str, &str)> = events
         .iter()
         .map(|event| {
             (
                 event["commit"].as_str().unwrap(),
-                event["landed_as"].as_str().unwrap(),
+                event["merged_as"].as_str().unwrap(),
             )
         })
         .collect();

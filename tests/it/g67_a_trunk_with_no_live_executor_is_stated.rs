@@ -61,7 +61,7 @@ fn no_live_executor(result: &Value) -> Option<&Value> {
         .as_array()
         .into_iter()
         .flatten()
-        .find(|warning| warning["code"] == "no_live_executor")
+        .find(|warning| warning["code"] == "no_live_runner")
 }
 
 #[test]
@@ -111,12 +111,12 @@ fn the_fleet_map_lists_each_executor_with_its_version_and_environments() {
     status(&test_box, &repo, 0);
     let (code, fleet) = result_json(test_box.bay(&repo).args(["status", "--fleet"]));
     assert_eq!(code, 0, "{fleet}");
-    let executors = fleet["detail"]["executors"]
+    let executors = fleet["detail"]["runners"]
         .as_array()
         .unwrap_or_else(|| panic!("no executors: {fleet}"));
     assert_eq!(executors.len(), 1, "{fleet}");
     let seen = &executors[0];
-    assert_eq!(seen["executor"], "local", "{fleet}");
+    assert_eq!(seen["runner"], "local", "{fleet}");
     assert_eq!(seen["machine"], "box-exec", "{fleet}");
     assert_eq!(seen["bay"], bay::version::BAY, "{fleet}");
     assert!(seen["git"].is_string(), "{fleet}");
@@ -142,7 +142,7 @@ fn the_fleet_map_lists_each_executor_with_its_version_and_environments() {
     );
     let own = row(&doctor, "presence");
     assert_eq!(own["state"], "green", "{doctor}");
-    assert_eq!(own["executor"], "local", "{doctor}");
+    assert_eq!(own["runner"], "local", "{doctor}");
     assert_eq!(own["bay"], bay::version::BAY, "{doctor}");
     assert_eq!(own["last_push"]["pushed"], true, "{doctor}");
 }
@@ -166,13 +166,13 @@ fn queued_work_with_only_a_stale_presence_says_no_live_executor() {
     assert!(warning["queued"].as_u64() >= Some(1), "{later}");
     assert!(warning["seen_s"].as_u64() >= Some(3600), "{later}");
     assert!(
-        warning["executor"]
+        warning["runner"]
             .as_str()
             .is_some_and(|text| text.starts_with("none seen for ")),
         "{later}"
     );
-    assert_eq!(warning["executors"][0]["executor"], "local", "{later}");
-    assert_eq!(warning["executors"][0]["stale"], true, "{later}");
+    assert_eq!(warning["runners"][0]["runner"], "local", "{later}");
+    assert_eq!(warning["runners"][0]["stale"], true, "{later}");
     // A warning, never a refusal.
     assert_eq!(later["decision"], "ok", "{later}");
 }
@@ -185,9 +185,9 @@ fn queued_work_and_no_executor_ever_says_none_seen() {
     assert_eq!(code, 0, "{queued}");
     let result = status(&test_box, &view, 0);
     let warning = no_live_executor(&result).unwrap_or_else(|| panic!("no warning: {result}"));
-    assert_eq!(warning["executor"], "none seen", "{result}");
+    assert_eq!(warning["runner"], "none seen", "{result}");
     assert_eq!(warning["seen_s"], Value::Null, "{result}");
-    assert_eq!(warning["executors"], serde_json::json!([]), "{result}");
+    assert_eq!(warning["runners"], serde_json::json!([]), "{result}");
 
     // Nothing queued, nothing to warn of.
     let (idle_box, idle_repo, _idle_remote, _idle_executor) = seeded();

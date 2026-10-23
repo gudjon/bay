@@ -194,7 +194,7 @@ fn approvals_only_lands_without_executor_keys_and_counts_only_an_approvers_signa
     );
     let status = trunk.test_box.bay_ok(&trunk.repo, &["status", &id]);
     assert_eq!(
-        status["detail"]["changes"][0]["state"], "landed",
+        status["detail"]["changes"][0]["state"], "merged",
         "{status}"
     );
 

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.5
+
+Results print the new words everywhere; scripts that read the old field names need the new ones.
+
+- `freshness.trunk` is `freshness.main`; `detail.trunk` and `trunk_*` fields say `main`.
+- `landed`, `landing` and `landings` fields say `merged`, `merge` and `merges`; `published` is `is_merged`.
+- A change's state `landed` and an operation's `published` print as `merged`.
+- `waiting_for` says `runner` and `runner_capacity`; `executors` in the fleet view is `runners`.
+- Events `trunk_red`, `trunk_not_linear` and `unattributed_landing` are `main_red`, `main_not_linear` and `outside_merge`.
+- The notice `landed_on_your_paths` is `merged_on_your_paths`; the warning `no_live_executor` is `no_live_runner`.
+- `bay status --heads` classes main as `main` and merged branches as `merged`; doctor's `trunk-hook` row is `main-hook`.
+- Records already stored in Git keep their names and are still read.
+
 ## 0.3.4
 
 - The README is rewritten for a newcomer: one word per idea, one branch, no agent branches.

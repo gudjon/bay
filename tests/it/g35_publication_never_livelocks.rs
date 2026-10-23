@@ -519,7 +519,7 @@ fn twenty_agents_and_three_executors_all_land_with_bounded_check_time() {
     let changes = status["detail"]["changes"].as_array().unwrap();
     assert_eq!(changes.len(), AGENTS, "{status}");
     for change in changes {
-        assert_eq!(change["operation"]["state"], "published", "{change}");
+        assert_eq!(change["operation"]["state"], "merged", "{change}");
     }
     let checks = std::fs::read_to_string(&runs).unwrap().lines().count();
     eprintln!("G35 load: {checks} checks for {AGENTS} landings");
@@ -926,8 +926,8 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
     for id in &ids {
         let status = queued.test_box.bay_ok(&queued.repo, &["status", id]);
         let op = &status["detail"]["changes"][0]["operation"];
-        assert_eq!(op["state"], "published", "{status}");
-        assert_eq!(op["publish_retries"], 0, "{status}");
+        assert_eq!(op["state"], "merged", "{status}");
+        assert_eq!(op["merge_retries"], 0, "{status}");
     }
 }
 
@@ -1081,8 +1081,8 @@ fn a_policy_landing_during_the_heads_check_releases_it_and_the_queue_keeps_its_o
     let status = queued.test_box.bay_ok(&queued.repo, &["status", &first]);
     let op = &status["detail"]["changes"][0]["operation"];
     assert_eq!(op["policy_changed"], 1, "{status}");
-    assert_eq!(op["publish_retries"], 0, "{status}");
-    assert_eq!(op["state"], "published", "{status}");
+    assert_eq!(op["merge_retries"], 0, "{status}");
+    assert_eq!(op["state"], "merged", "{status}");
     // Each landed tree was checked under the policy it landed with.
     let notes = queued.test_box.git_bare(
         &queued.remote,
@@ -1156,8 +1156,8 @@ fn a_hook_timeout_retries_the_same_candidate_uncounted() {
     assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
     let status = test_box.bay_ok(&view, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
-    assert_eq!(op["publish_retries"], 2, "{status}");
-    assert_eq!(op["trunk_moved"], 0, "{status}");
+    assert_eq!(op["merge_retries"], 2, "{status}");
+    assert_eq!(op["main_moved"], 0, "{status}");
     assert_eq!(op["attempts"], 1, "the same candidate: {status}");
 }
 
@@ -1178,7 +1178,7 @@ fn five_hook_timeouts_end_in_publish_retry_exhausted() {
     assert_eq!(test_box.git_bare(&host, &["rev-parse", "main"]), trunk);
     let status = test_box.bay_ok(&view, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
-    assert_eq!(op["publish_retries"], 5, "{status}");
+    assert_eq!(op["merge_retries"], 5, "{status}");
     assert_eq!(op["outcome"], "MERGE_RETRY_EXHAUSTED", "{status}");
 }
 
@@ -1278,7 +1278,7 @@ fn a_deadline_release_mid_publish_rejoins_and_counts_as_a_publish_retry() {
     );
     let status = queued.test_box.bay_ok(&queued.repo, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
-    assert_eq!(op["publish_retries"], 1, "{status}");
+    assert_eq!(op["merge_retries"], 1, "{status}");
 }
 
 /// The progress deadline releases the head while it publishes, five times in a row. Each
@@ -1317,7 +1317,7 @@ fn the_fifth_deadline_release_mid_publish_ends_in_publish_retry_exhausted() {
     );
     let status = queued.test_box.bay_ok(&queued.repo, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
-    assert_eq!(op["publish_retries"], 5, "{status}");
+    assert_eq!(op["merge_retries"], 5, "{status}");
     assert_eq!(op["outcome"], "MERGE_RETRY_EXHAUSTED", "{status}");
 }
 
@@ -1356,5 +1356,5 @@ fn a_release_for_another_reason_mid_publish_is_no_publish_retry() {
     );
     let status = queued.test_box.bay_ok(&queued.repo, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];
-    assert_eq!(op["publish_retries"], 0, "{status}");
+    assert_eq!(op["merge_retries"], 0, "{status}");
 }

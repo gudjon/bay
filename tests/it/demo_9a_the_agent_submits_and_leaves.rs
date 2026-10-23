@@ -26,7 +26,7 @@ fn the_agent_leaves_and_the_executor_publishes() {
     assert_eq!(queued["decision"], "queued");
     assert_ne!(queued["decision"], "merged");
     assert_eq!(queued["op_id"], format!("{id}.1"));
-    assert_eq!(queued["waiting_for"], "executor");
+    assert_eq!(queued["waiting_for"], "runner");
     assert_eq!(test_box.trunk_change_ids(&remote), Vec::<String>::new());
 
     // The agent and its machine are gone.
@@ -46,7 +46,7 @@ fn the_agent_leaves_and_the_executor_publishes() {
     let back = test_box.clone_of(&remote, "back");
     let status = test_box.bay_ok(&back, &["status", &id]);
     assert_eq!(
-        status["detail"]["changes"][0]["state"], "landed",
+        status["detail"]["changes"][0]["state"], "merged",
         "{status}"
     );
 

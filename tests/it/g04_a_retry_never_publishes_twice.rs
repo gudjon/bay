@@ -98,9 +98,9 @@ fn a_publication_of_another_revision_is_not_the_first_result() {
     assert_eq!(code, 10, "{retry}");
     assert_ne!(retry["decision"], "merged", "{retry}");
     assert_eq!(retry["reason"], "CHANGE_ALREADY_MERGED", "{retry}");
-    assert_eq!(retry["detail"]["landed"], published.as_str(), "{retry}");
+    assert_eq!(retry["detail"]["merged"], published.as_str(), "{retry}");
     assert_eq!(
-        retry["detail"]["landed_revision"],
+        retry["detail"]["merged_revision"],
         landed_revision.as_str(),
         "{retry}"
     );

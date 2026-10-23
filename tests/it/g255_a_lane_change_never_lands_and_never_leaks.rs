@@ -100,7 +100,7 @@ fn a_lane_change_runs_its_checks_and_is_refused_lane_never_lands_with_its_verdic
     let detail = &refused["detail"];
     assert_eq!(detail["lane"], "research", "{refused}");
     assert_eq!(
-        detail["trunk"],
+        detail["main"],
         before.as_str(),
         "checked on the current trunk: {refused}"
     );
@@ -140,9 +140,9 @@ fn a_lane_change_runs_its_checks_and_is_refused_lane_never_lands_with_its_verdic
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let row = &status["detail"]["changes"][0];
     assert_eq!(row["lane"], "research", "{status}");
-    assert_eq!(row["landed"], Value::Null, "{status}");
+    assert_eq!(row["merged"], Value::Null, "{status}");
     assert_eq!(row["operation"]["outcome"], "lane_checked", "{status}");
-    assert_eq!(row["operation"]["published"], false, "{status}");
+    assert_eq!(row["operation"]["is_merged"], false, "{status}");
 }
 
 #[test]
@@ -215,9 +215,9 @@ fn a_forge_merge_of_a_lane_branch_is_named_as_a_lane_leak() {
     let status = test_box.bay_ok(&repo, &["status"]);
     let unattributed = &status["detail"]["unattributed"];
     assert_eq!(unattributed["lane_leaks"], 1, "{status}");
-    let landing = &unattributed["landings"][0];
+    let landing = &unattributed["merges"][0];
     assert_eq!(landing["commit"], merge.as_str(), "{status}");
-    assert_eq!(landing["landed_as"], "merge", "{status}");
+    assert_eq!(landing["merged_as"], "merge", "{status}");
     assert_eq!(landing["lane"], "research", "{status}");
     let leak = &landing["lane_leak"][0];
     assert_eq!(leak["lane"], "research", "{status}");
@@ -234,9 +234,7 @@ fn a_forge_merge_of_a_lane_branch_is_named_as_a_lane_leak() {
         .as_array()
         .unwrap_or_else(|| panic!("{watched}"))
         .iter()
-        .filter(|event| {
-            event["kind"] == "unattributed_landing" && event["commit"] == merge.as_str()
-        })
+        .filter(|event| event["kind"] == "outside_merge" && event["commit"] == merge.as_str())
         .collect();
     assert_eq!(events.len(), 1, "{watched}");
     assert_eq!(events[0]["lane"], "research", "{watched}");

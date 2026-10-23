@@ -320,7 +320,7 @@ fn a_profile_that_requires_running_reports_the_gap_until_a_producer_confirms_it(
 fn the_default_profile_keeps_published_and_checked() {
     let (test_box, repo, _, id, _, _) = landed("", "");
     let out = completion(&test_box, &repo, &id);
-    assert_eq!(out["published"], true, "{out}");
+    assert_eq!(out["is_merged"], true, "{out}");
     assert_eq!(out["checked"], true, "{out}");
     assert_eq!(out["running"], "unconfirmed", "{out}");
     assert_eq!(out["profile"]["name"], "default", "{out}");

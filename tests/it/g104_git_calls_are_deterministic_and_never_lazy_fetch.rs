@@ -70,7 +70,7 @@ fn a_boxs_log_show_signature_never_reaches_what_bay_reads() {
     let signed = test_box.git_ok(&repo, &["rev-parse", "HEAD"]);
 
     let watched = test_box.bay_ok(&repo, &["status", "--since", &cursor, "--merged"]);
-    let landings = watched["detail"]["landings"].as_array().unwrap();
+    let landings = watched["detail"]["merges"].as_array().unwrap();
     assert_eq!(landings.len(), 1, "{watched}");
     assert_eq!(landings[0]["commit"], signed.as_str(), "{watched}");
     assert_eq!(landings[0]["outside_bay"], true, "{watched}");

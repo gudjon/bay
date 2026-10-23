@@ -71,7 +71,7 @@ fn landings_after_a_cursor_name_base_time_and_landings_outside_bay() {
 
     // Outside a view, a watch with no cursor lists nothing and returns the current trunk.
     let first = landed(&test_box, &repo, None);
-    assert_eq!(first["landings"], serde_json::json!([]), "{first}");
+    assert_eq!(first["merges"], serde_json::json!([]), "{first}");
     assert_eq!(first["off_first_parent"], 0, "{first}");
     let cursor = first["cursor"].as_str().unwrap().to_owned();
 
@@ -100,7 +100,7 @@ fn landings_after_a_cursor_name_base_time_and_landings_outside_bay() {
     test_box.git_ok(&repo, &["push", "-q", "origin", "main"]);
 
     let seen = landed(&test_box, &repo, Some(&cursor));
-    let landings = seen["landings"].as_array().unwrap();
+    let landings = seen["merges"].as_array().unwrap();
     let commits: Vec<&str> = landings
         .iter()
         .map(|landing| landing["commit"].as_str().unwrap())
@@ -144,6 +144,6 @@ fn landings_after_a_cursor_name_base_time_and_landings_outside_bay() {
     // Nothing new after the cursor it returned.
     let next = seen["cursor"].as_str().unwrap();
     let again = landed(&test_box, &repo, Some(next));
-    assert_eq!(again["landings"], serde_json::json!([]), "{again}");
+    assert_eq!(again["merges"], serde_json::json!([]), "{again}");
     assert_eq!(again["off_first_parent"], 0, "{again}");
 }

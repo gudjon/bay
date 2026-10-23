@@ -87,7 +87,7 @@ fn what_lands_is_exactly_what_was_checked_with_hooks_off() {
     assert_eq!(test_box.trunk_change_ids(&remote), vec![id.clone()]);
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let change = &status["detail"]["changes"][0];
-    assert_eq!(change["state"], "landed");
+    assert_eq!(change["state"], "merged");
     assert_eq!(change["operation"]["attempts"], 2);
     let tree = test_box.git_bare(&remote, &["rev-parse", "main^{tree}"]);
     let note = test_box.git_bare(

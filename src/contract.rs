@@ -394,9 +394,9 @@ pub fn schema() -> Value {
             "receipt": string,
             "freshness": {
                 "type": "object",
-                "required": ["trunk", "fetched_at"],
+                "required": ["main", "fetched_at"],
                 "additionalProperties": false,
-                "properties": {"trunk": string, "fetched_at": string},
+                "properties": {"main": string, "fetched_at": string},
             },
         },
     })

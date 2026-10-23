@@ -141,8 +141,8 @@ fn an_unchecked_policy_lands_and_status_says_unchecked() {
 
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let change = &status["detail"]["changes"][0];
-    assert_eq!(change["state"], "landed", "{status}");
-    assert_eq!(change["completion"]["published"], true, "{status}");
+    assert_eq!(change["state"], "merged", "{status}");
+    assert_eq!(change["completion"]["is_merged"], true, "{status}");
     assert_eq!(change["completion"]["checked"], false, "{status}");
     assert_eq!(
         change["completion"]["unchecked"], "unchecked by policy",
@@ -156,7 +156,7 @@ fn an_unchecked_policy_lands_and_status_says_unchecked() {
     assert!(
         terminal
             .iter()
-            .any(|record| record["outcome"] == "published"
+            .any(|record| record["outcome"] == "merged"
                 && record["unchecked"] == "unchecked by policy"),
         "{status}"
     );
