@@ -32,7 +32,7 @@ use crate::result::{BayResult, Decision, Reason};
 use crate::talk::wake;
 
 /// The adapter kinds the kit tests: each has a stdin and stdout contract.
-pub const KINDS: [&str; 3] = ["check", "wake", "notify"];
+pub const KINDS: [&str; 4] = ["check", "wake", "notify", "assets"];
 
 /// How many times its limit the kit waits for a wake or notify adapter.
 const GRACE: u32 = 2;
@@ -81,6 +81,7 @@ pub fn test(dir: &Path, test: &Test) -> BayResult {
         "check" => test_check(&dir, &command, test),
         "wake" => test_wake(&dir, &command),
         "notify" => test_notify(&dir, &command),
+        "assets" => test_assets(&dir, &command, test.timeout_s),
         other => refused(
             other,
             &format!(
@@ -154,6 +155,90 @@ fn report(
     let mut result = BayResult::new(decision).with_detail(detail);
     result.human = Some(human);
     result
+}
+
+/// BACKLOG 49: the assets plugin's contract (`crate::assets`), run from `dir` on a sample file
+/// in a scratch directory of the kit's own: `put` names the file's bytes, a second `put` names
+/// them again, `get` writes exactly those bytes, and `get` of an identity it never stored fails.
+fn test_assets(dir: &Path, command: &str, timeout_s: Option<u64>) -> BayResult {
+    let limit = Duration::from_secs(timeout_s.unwrap_or(crate::assets::DEFAULT_TIMEOUT_S));
+    let scratch = match Scratch::new() {
+        Ok(scratch) => scratch,
+        Err(why) => return refused("assets", &why),
+    };
+    let sample = scratch.0.join("sample.bin");
+    let bytes: Vec<u8> = (0..65_536u32)
+        .map(|n| (n.wrapping_mul(2_654_435_761) >> 24) as u8)
+        .collect();
+    if let Err(error) = std::fs::write(&sample, &bytes) {
+        return refused("assets", &format!("the sample cannot be written: {error}"));
+    }
+    let plugin = crate::assets::Plugin {
+        work_root: dir,
+        command,
+        timeout: limit,
+    };
+    let id = crate::assets::identity(&sample).unwrap_or_default();
+    let sent = |args: &str| json!(format!("{command} {args}"));
+    let mut cases = Vec::new();
+    let put = plugin.put(&sample);
+    cases.push(case(
+        "put",
+        &Shown {
+            sent: sent("put <64 KiB sample>"),
+            came_back: json!(put.as_ref().map_or_else(Clone::clone, Clone::clone)),
+        },
+        match &put {
+            Ok(_) => Pass(format!("it stored the sample and named its bytes, {id}")),
+            Err(why) => Fail(why.clone()),
+        },
+    ));
+    let again = plugin.put(&sample);
+    cases.push(case(
+        "put_again",
+        &Shown {
+            sent: sent("put <the same sample>"),
+            came_back: json!(again.as_ref().map_or_else(Clone::clone, Clone::clone)),
+        },
+        match &again {
+            Ok(_) => Pass("storing bytes it holds again names them again".to_owned()),
+            Err(why) => Fail(why.clone()),
+        },
+    ));
+    let got = scratch.0.join("got.bin");
+    let get = plugin.get(&id, &got);
+    cases.push(case(
+        "get",
+        &Shown {
+            sent: sent(&format!("get {id} <file>")),
+            came_back: json!(get.as_ref().err()),
+        },
+        match &get {
+            Ok(()) => Pass("it wrote exactly the stored bytes".to_owned()),
+            Err(why) => Fail(why.clone()),
+        },
+    ));
+    let unknown = format!("sha256:{}", "0".repeat(64));
+    let missing = scratch.0.join("missing.bin");
+    let refused_get = plugin.get(&unknown, &missing);
+    cases.push(case(
+        "get_unknown",
+        &Shown {
+            sent: sent(&format!("get {unknown} <file>")),
+            came_back: json!(refused_get.as_ref().err()),
+        },
+        match &refused_get {
+            Err(_) => Pass("an identity it never stored is refused".to_owned()),
+            Ok(()) => Fail(format!("it answered {unknown}, which it never stored")),
+        },
+    ));
+    report(
+        "assets",
+        command,
+        json!(limit.as_secs()),
+        json!({"manifest_line": format!("{id} {} <path>", bytes.len())}),
+        cases,
+    )
 }
 
 /// The kit could not run its cases: `why` says what to change.

@@ -469,11 +469,11 @@ enum PluginAction {
 
 #[derive(Args)]
 struct AdapterTestArgs {
-    /// The plugin kind: `check` (a policy's `[[check]]`), `wake` (`[plugin.wake] command`) or
-    /// `notify` (`[plugin.notify] command`)
+    /// The plugin kind: `check` (a policy's `[[check]]`), `wake` (`[plugin.wake] command`),
+    /// `notify` (`[plugin.notify] command`) or `assets` (`[plugin.assets] command`)
     #[arg(value_parser = bay::adapter::KINDS)]
     kind: String,
-    /// Check: the entry's `timeout_s` (default: the policy's default)
+    /// Check or assets: the entry's `timeout_s` (default: the policy's, or the plugin's)
     #[arg(long, value_name = "SECONDS")]
     timeout_s: Option<u64>,
     /// Check: the entry's `expected_minimum`

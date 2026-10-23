@@ -18,6 +18,9 @@ The last renames before the first user; scripts and configs that use the old nam
 - A bay host no longer refuses a push when it judges two pushes at once.
 - Every result sentence says what happened first, then why, then one step.
 - Lock and offline refusals print one clean line.
+- With `[plugin.assets]` and `over_limit = "offload"`, a new file over `max_file_mib` never enters Git.
+- The plugin stores its bytes; `.bay-assets` names them by SHA-256 and size, at save, merge and checkpoint.
+- `bay plugin test assets -- <command>` checks a store plugin: put, put again, get, unknown.
 
 ## 0.3.7
 

@@ -1353,6 +1353,8 @@ fn checkpoint_view(
     let declared = inputs::paths(&record.declared_inputs);
     view::record_observed(repo, &view_path, &declared, &mut record.observed_inputs)
         .map_err(|error| error.message())?;
+    // BACKLOG 49: a checkpoint is pushed, so a large file leaves it as it leaves a merge.
+    crate::assets::offload_view(repo, &view_path)?;
     let frozen = freeze_draft(&Git::new(&view_path), &record.base, "checkpoint")
         .map_err(|error| error.message())?;
     if tree_of(repo, &frozen)? == tree_of(repo, latest)? {

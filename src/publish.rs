@@ -3164,6 +3164,8 @@ fn freeze(ctx: &Ctx) -> Result<Result<String, BayResult>, String> {
                 json!({"view": repo.view_path(id).display().to_string()}),
             )));
     }
+    // BACKLOG 49: a new file over the limit leaves the view's freeze for the assets plugin.
+    crate::assets::offload_view(repo, &repo.view_path(id))?;
     let view = Git::new(repo.view_path(id));
     let latest = ctx.chain.drafts(id).map_err(|error| error.message())?[0].clone();
     let frozen = freeze_draft(&view, &ctx.record.base, "draft").map_err(|error| error.message())?;

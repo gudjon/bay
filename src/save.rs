@@ -90,7 +90,7 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         ));
     }
     let changed = changes(&checkout)?;
-    let saved: Vec<String> = changed.iter().map(|entry| entry.path.clone()).collect();
+    let (saved, offloaded) = offload(repo, &trunk, &changed)?;
     if saved.is_empty() {
         return Ok(BayResult::ok(json!({
             "saved": saved,
@@ -149,12 +149,54 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         result.detail.take(),
         &[
             ("saved", json!(saved)),
+            ("offloaded", json!(offloaded)),
             ("change", json!(id)),
             ("landed", json!(commit)),
             ("checkout", moved),
         ],
     );
     Ok(result.with_detail(detail))
+}
+
+/// BACKLOG 49: with `[plugin.assets] over_limit = "offload"` in the config, each new file over
+/// `[limits] max_file_mib` of the policy at `trunk` goes to the assets plugin, and the manifest
+/// takes its place among the saved paths (`crate::assets`). A file Git already tracks is never
+/// offloaded: moving the checkout to a merge without it would delete it, so it is judged by the
+/// limit as before. Returns the paths to save and the offloaded ones.
+fn offload(
+    repo: &Repo,
+    trunk: &str,
+    changed: &[Entry],
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let all: Vec<String> = changed.iter().map(|entry| entry.path.clone()).collect();
+    let Some((plugin, limit)) = crate::assets::configured(repo, trunk)? else {
+        return Ok((all, Vec::new()));
+    };
+    let new: Vec<String> = changed
+        .iter()
+        .filter(|entry| !entry.tracked)
+        .map(|entry| entry.path.clone())
+        .collect();
+    let done = crate::assets::offload(
+        &plugin,
+        &repo.work_root,
+        &new,
+        limit,
+        &crate::assets::exclude_file(repo),
+    )?;
+    let offloaded: Vec<String> = done.entries.into_iter().map(|entry| entry.path).collect();
+    if offloaded.is_empty() {
+        return Ok((all, offloaded));
+    }
+    let mut saved: Vec<String> = all
+        .into_iter()
+        .filter(|path| !offloaded.contains(path))
+        .collect();
+    if !saved.iter().any(|path| path == crate::assets::MANIFEST) {
+        saved.push(crate::assets::MANIFEST.to_owned());
+        saved.sort();
+    }
+    Ok((saved, offloaded))
 }
 
 /// G279: the directory bay runs in is the main checkout itself (or a folder in it), never a

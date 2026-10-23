@@ -7,6 +7,7 @@ pub mod after;
 pub mod agent_hook;
 pub mod agent_settings;
 pub mod approve;
+pub mod assets;
 pub mod bisect;
 pub mod canonical;
 pub mod change;

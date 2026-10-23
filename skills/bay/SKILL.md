@@ -184,9 +184,13 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    For files that never merge (images, models, binaries), add `[locks] paths = ["art/"]`
    (globs): one session at a time edits each. Your first edit of one takes its lock on the
    remote; elsewhere the edit is refused `PATH_HELD`, naming the holder. Edit other paths, or
-   wait until that session stops. Offline, the edit is refused `REMOTE_UNREACHABLE`.
-3. Before you commit a `[[check]]` command or a plugin (`[plugin.wake]`, `[plugin.notify]`),
-   prove it: `bay plugin test check|wake|notify -- <command>`. It runs bay's contract cases the
+   wait until that session's turn ends. Offline, the edit is refused `REMOTE_UNREACHABLE`.
+   To keep large files out of Git, add `[plugin.assets] command = "<your store's script>"` and
+   `over_limit = "offload"` to `.bay/config.toml`: a new file over `max_file_mib` goes to that
+   store, and `.bay-assets` names its bytes (`sha256:<hex> <size> <path>`). The file stays in
+   the folder; never add it by hand.
+3. Before you commit a `[[check]]` command or a plugin (`[plugin.wake]`, `[plugin.notify]`,
+   `[plugin.assets]`), prove it: `bay plugin test check|wake|notify|assets -- <command>`. It runs bay's contract cases the
    way bay runs it, changes nothing, and exits 0 only when every case passes.
    `detail.cases` names each failing case and why.
 4. With full signing, each agent's machine sets `bay.agentKey`, and the agent runs with `BAY_ACTOR=<its enrolled

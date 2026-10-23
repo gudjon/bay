@@ -145,7 +145,9 @@ impl Freeze {
 ///   reaches outside the repository, to close the branch's open pull request on its host for
 ///   example; bay itself never does;
 /// - `runtime` (`INTERFACES` § 4, `crate::runtime`): asked by `bay status` for `running` and
-///   `effective` records about a merged commit.
+///   `effective` records about a merged commit;
+/// - `assets` (BACKLOG 49, `crate::assets`): with `over_limit = "offload"`, keeps a file over
+///   `[limits] max_file_mib` out of Git, `put` at `bay save` and named in `.bay-assets`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Plugins {
@@ -154,18 +156,24 @@ pub struct Plugins {
     pub hold: Option<Plugin>,
     pub prune: Option<Plugin>,
     pub runtime: Option<Plugin>,
+    pub assets: Option<AssetsPlugin>,
 }
 
 impl Plugins {
     /// Each plugin's command is not empty and its bound is at least 1 s; the hold and prune
     /// plugins keep their own longest bounds.
     fn validate(&self) -> Result<(), String> {
+        let assets = self.assets.as_ref().map(|assets| Plugin {
+            command: Some(assets.command.clone()),
+            timeout_s: assets.timeout_s,
+        });
         for (kind, plugin) in [
             ("notify", &self.notify),
             ("wake", &self.wake),
             ("hold", &self.hold),
             ("prune", &self.prune),
             ("runtime", &self.runtime),
+            ("assets", &assets),
         ] {
             let Some(plugin) = plugin else { continue };
             if plugin
@@ -200,6 +208,28 @@ impl Plugins {
         }
         Ok(())
     }
+}
+
+/// `[plugin.assets]` (BACKLOG 49): the plugin that stores a file's bytes outside Git, and what
+/// bay does with a file over `[limits] max_file_mib`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AssetsPlugin {
+    pub command: String,
+    pub timeout_s: Option<u64>,
+    #[serde(default)]
+    pub over_limit: OverLimit,
+}
+
+/// What bay does with a file over `[limits] max_file_mib`.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OverLimit {
+    /// Refused `CHANGE_TOO_LARGE`, as with no plugin.
+    #[default]
+    Refuse,
+    /// Stored by the plugin and named in `.bay-assets`.
+    Offload,
 }
 
 /// One `[plugin.<kind>]`.
