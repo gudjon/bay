@@ -28,7 +28,7 @@ use crate::support;
 use serde_json::Value;
 use support::TestBox;
 
-const CLAUDE_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
+const CLAUDE_ADAPTER: &str = "main = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
 
 /// Every `(product_event, bay_event, hook, group)` bay installed: its own groups, whose hook
 /// runs `bay hook <event>`.
@@ -130,7 +130,7 @@ fn the_contract_declares_each_event_install_writes_and_no_other() {
     }
 }
 
-const CODEX_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"codex\"\n";
+const CODEX_ADAPTER: &str = "main = \"main\"\n\n[agent]\nproduct = \"codex\"\n";
 
 #[test]
 fn the_codex_adapter_is_declared_as_install_writes_it_and_as_failing_open() {

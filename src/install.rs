@@ -11,7 +11,7 @@
 //! `gpg.format=ssh` and `gpg.ssh.allowedSignersFile` set to the class file of the key this box
 //! uses. Keys and the registry themselves are enrolment, never install's job. In a repository it
 //! writes `bay.machine` when it is unset: the folded host name (`live.rs`), and the bootstrap
-//! of the config (ruling: config location): `bay.trunk` and `bay.remote`, from `--trunk` and
+//! of the config (ruling: config location): `bay.main` and `bay.remote`, from `--trunk` and
 //! `--remote`, else what they already hold, else the remote's default branch
 //! (`refs/remotes/<remote>/HEAD`) and `origin`. It also sets the clone to keep a commit-graph
 //! with changed-path Bloom filters on fetch, and writes the first one (G193, `commit_graph`).
@@ -158,7 +158,7 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
     Ok(BayResult::ok(detail))
 }
 
-/// Writes `bay.trunk` and `bay.remote` (repository-local): the names given, else what they
+/// Writes `bay.main` and `bay.remote` (repository-local): the names given, else what they
 /// hold, else the remote's default branch and `origin`. With no trunk to write, writes nothing
 /// and says so: bay's commands are `CONFIG_MISSING` until one is set.
 fn write_bootstrap(git: &Git, trunk: &Trunk) -> Result<serde_json::Value, String> {

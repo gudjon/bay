@@ -103,6 +103,20 @@ fn enrol_in(dir: &Path, repo: &Repo, request: &Enrol) -> Result<BayResult, Strin
         }
         None => name.to_owned(),
     };
+    // A removed key is never enrolled again (0.3.3): refused here, before anything is signed,
+    // whatever the host checks.
+    if let Some(removal) = current
+        .as_ref()
+        .and_then(|registry| registry.removal_of(&public.0, &public.1))
+    {
+        return Err(format!(
+            "Nothing was enrolled: that key was removed from {} {} as {} at {}, and a removed key is never enrolled again. Enrol a new key.",
+            removal.class.file(),
+            removal.principal,
+            removal.reason.word(),
+            removal.at
+        ));
+    }
     let text = class_text(current.as_ref(), class, name, &public);
     Registry::check_files(|other| {
         if other == class {
@@ -121,6 +135,8 @@ fn enrol_in(dir: &Path, repo: &Repo, request: &Enrol) -> Result<BayResult, Strin
     };
     let message = format!("enrol {} {name}", class.file());
     let commit = signed_commit(&repo.git, &tree, parent.as_deref(), &signer, &message)?;
+    // Every rule a version is loaded by, here first: nothing is pushed that no bay could read.
+    Registry::load_at(&repo.git, &commit).map_err(|why| format!("Nothing was enrolled: {why}."))?;
     push(repo, &commit)?;
     Ok(BayResult::ok(json!({
         "class": class.file(),
@@ -135,7 +151,9 @@ fn remove(repo: &Repo, class: KeyClass, name: &str, reason: Removed) -> Result<B
     let (signing_key, signer_public) = registry_key(&repo.git)?;
     let parent =
         remote_registry(repo)?.ok_or("There is no registry yet, so there is no key to remove.")?;
-    let current = Registry::load_at(&repo.git, &parent)?;
+    // A version that enrolled a removed key again (0.3.2) is repaired from: every other rule
+    // holds, and the new version must pass them all.
+    let current = Registry::load_for_repair(&repo.git, &parent)?;
     let registrar = registrar(&current, &signer_public)?;
     let at = crate::clock::rfc3339_of(crate::live::unix_now());
     let mut kept = String::new();

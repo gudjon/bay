@@ -42,8 +42,8 @@ use std::process::Stdio;
 use serde_json::{Value, json};
 use support::{TestBox, result_json, row, write_executable};
 
-const CODEX_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"codex\"\n";
-const CLAUDE_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
+const CODEX_ADAPTER: &str = "main = \"main\"\n\n[agent]\nproduct = \"codex\"\n";
+const CLAUDE_ADAPTER: &str = "main = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
 
 /// Every recorded Codex event, with the `bay hook` event bay installs for it.
 const CODEX_EVENTS: [(&str, &str); 8] = [

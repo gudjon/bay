@@ -131,7 +131,7 @@ fn the_config_names_the_instruction_files() {
     );
     test_box.commit_config(
         &repo,
-        "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\ninstructions = [\"docs/RULES.md\"]\n",
+        "main = \"main\"\n\n[agent]\nproduct = \"claude\"\ninstructions = [\"docs/RULES.md\"]\n",
     );
     test_box.git_ok(&repo, &["pull", "-q", "--ff-only", "origin", "main"]);
     trunk_commit(

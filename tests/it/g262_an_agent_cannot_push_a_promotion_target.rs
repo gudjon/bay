@@ -22,7 +22,7 @@ use std::process::Stdio;
 use support::TestBox;
 
 /// The config at trunk: the `staging` target, promoted from the trunk.
-const STAGING: &str = "trunk = \"main\"\n\n[[target]]\nname = \"staging\"\n";
+const STAGING: &str = "main = \"main\"\n\n[[target]]\nname = \"staging\"\n";
 
 fn pre_tool(test_box: &TestBox, repo: &Path, command: &str) -> (Option<i32>, String) {
     let payload = serde_json::json!({

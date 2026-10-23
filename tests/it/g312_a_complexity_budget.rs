@@ -35,7 +35,9 @@ use support::TestBox;
 ///   signed Git commit; now it is one command that records why (owner ruling 2026-10-22).
 const COMMANDS: usize = 28;
 const FLAGS: usize = 76;
-const REASONS: usize = 57;
+/// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
+///   command fail with a raw error; doctor now names it and the repair.
+const REASONS: usize = 58;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.

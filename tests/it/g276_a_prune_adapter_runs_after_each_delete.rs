@@ -142,7 +142,7 @@ fn pruned<'a>(result: &'a Value, name: &str) -> &'a Value {
 #[test]
 fn the_adapter_runs_once_per_deleted_branch_and_a_failure_undoes_nothing() {
     let fixture = fixture(
-        "trunk = \"main\"\n\n[plugin.prune]\ncommand = \"scripts/on-prune\"\ntimeout_s = 20\n",
+        "main = \"main\"\n\n[plugin.prune]\ncommand = \"scripts/on-prune\"\ntimeout_s = 20\n",
         true,
     );
     let result = fixture.prune();
@@ -211,7 +211,7 @@ fn the_adapter_runs_once_per_deleted_branch_and_a_failure_undoes_nothing() {
 #[test]
 fn without_an_adapter_nothing_runs_and_a_missing_one_is_recorded() {
     // No `[plugin.prune] command`: the prune is as it was, and no row carries an outcome.
-    let plain = fixture("trunk = \"main\"\n", false);
+    let plain = fixture("main = \"main\"\n", false);
     let result = plain.prune();
     assert_eq!(plain.remote_heads(), ["main"], "{result}");
     for name in ["a-first", "b-second"] {
@@ -222,7 +222,7 @@ fn without_an_adapter_nothing_runs_and_a_missing_one_is_recorded() {
 
     // An adapter the trunk does not hold is a failure on each row, and the prune goes on.
     let missing = fixture(
-        "trunk = \"main\"\n\n[plugin.prune]\ncommand = \"scripts/not-here\"\n",
+        "main = \"main\"\n\n[plugin.prune]\ncommand = \"scripts/not-here\"\n",
         false,
     );
     let result = missing.prune();

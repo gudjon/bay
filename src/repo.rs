@@ -6,7 +6,7 @@
 //! linked worktree and every view, and never a work tree's file or a change's own commits, so
 //! neither an agent's draft nor a change selects the settings it runs and lands under (as
 //! policy is judged at the base). The trunk is found without reading any file a change can
-//! write: the bootstrap is this repository's own git config `bay.trunk` and `bay.remote`
+//! write: the bootstrap is this repository's own git config `bay.main` and `bay.remote`
 //! (written by `bay install`), else the remote's default branch, `refs/remotes/<remote>/HEAD`
 //! (remote `origin` unless `bay.remote` names another). A missing bootstrap, or no config at
 //! the trunk tip, is `CONFIG_MISSING`, never a silent default.
@@ -21,7 +21,7 @@ use crate::git::{Git, GitError};
 use crate::result::{BayResult, Reason};
 
 /// The repository-local git config key naming the trunk (`bay install --main`).
-pub const TRUNK_KEY: &str = "bay.trunk";
+pub const TRUNK_KEY: &str = "bay.main";
 /// The repository-local git config key naming the trunk's remote (`bay install --remote`).
 pub const REMOTE_KEY: &str = "bay.remote";
 /// The remote when `bay.remote` is unset.
@@ -351,16 +351,15 @@ impl Repo {
         // The config cannot move the trunk it was read from: a committed `trunk` or `remote`
         // other than the bootstrap's is refused, never followed.
         for (key, named, used) in [
-            ("trunk", config.trunk.as_deref(), &bootstrap.trunk),
+            ("main", config.trunk.as_deref(), &bootstrap.trunk),
             ("remote", config.remote.as_deref(), &bootstrap.remote),
         ] {
             if let Some(named) = named
                 && named != used
             {
                 return Err(known(format!(
-                    "{tracking}:{CONFIG_PATH} names {key} \"{named}\", but this repository's {key} is \"{used}\" (trunk from {}); run bay install --{} {named}",
-                    bootstrap.source,
-                    if key == "trunk" { "main" } else { key }
+                    "{tracking}:{CONFIG_PATH} names {key} \"{named}\", but this repository's {key} is \"{used}\" (main from {}); run bay install --{key} {named}",
+                    bootstrap.source
                 )));
             }
         }
@@ -720,7 +719,7 @@ mod tests {
 
     const TRUNK: &str =
         "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[runner]\ncommand = \"trunk-executor\"\n";
-    const DRAFT: &str = "trunk = \"decoy\"\n\n[policy]\nevidence_reuse = \"off\"\n\n[runner]\ncommand = \"draft-executor\"\n";
+    const DRAFT: &str = "main = \"decoy\"\n\n[policy]\nevidence_reuse = \"off\"\n\n[runner]\ncommand = \"draft-executor\"\n";
 
     #[test]
     fn every_setting_is_the_trunks_never_a_drafts() {
@@ -745,7 +744,7 @@ mod tests {
         git(&root, &["worktree", "add", "-q", "-b", "change", path]);
         write_config(&change, DRAFT);
         git(&change, &["commit", "-q", "-am", "draft"]);
-        write_config(&change, "trunk = \"decoy-on-disk\"\n");
+        write_config(&change, "main = \"decoy-on-disk\"\n");
 
         for dir in [&root, &change] {
             let repo = Repo::open_with(dir, Fetch::Never)
@@ -767,10 +766,10 @@ mod tests {
             &root,
             &["update-ref", "refs/remotes/origin/release", "HEAD~0"],
         );
-        git(&root, &["config", "bay.trunk", "release"]);
+        git(&root, &["config", "bay.main", "release"]);
         let repo = Repo::open_with(&change, Fetch::Never)
             .unwrap_or_else(|error| panic!("{}", error.message()));
         assert_eq!(repo.trunk_tracking_ref(), "refs/remotes/origin/release");
-        assert_eq!(repo.bootstrap.source, "git config bay.trunk");
+        assert_eq!(repo.bootstrap.source, "git config bay.main");
     }
 }

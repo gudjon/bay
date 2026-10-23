@@ -124,7 +124,7 @@ fn every_recorded_payload_gets_a_declared_answer_in_time() {
         let repo = test_box.repo_any(&format!("repo-{product}"));
         test_box.commit_config(
             &repo,
-            &format!("trunk = \"main\"\n\n[agent]\nproduct = \"{product}\"\n"),
+            &format!("main = \"main\"\n\n[agent]\nproduct = \"{product}\"\n"),
         );
         let mut files = Vec::new();
         recorded(&dir, &mut files);

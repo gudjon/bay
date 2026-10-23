@@ -30,7 +30,7 @@ use serde_json::Value;
 use support::talk::from_now;
 use support::{TestBox, result_json, unchecked_files, write_executable};
 
-const CONFIG: &str = "trunk = \"main\"\n";
+const CONFIG: &str = "main = \"main\"\n";
 
 struct Trunk {
     test_box: TestBox,

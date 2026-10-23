@@ -21,7 +21,7 @@ use crate::support;
 
 use support::{TestBox, result_json, row};
 
-const CLAUDE_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
+const CLAUDE_ADAPTER: &str = "main = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
 
 #[test]
 fn install_machine_says_it_writes_no_hooks() {

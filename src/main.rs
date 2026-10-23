@@ -280,7 +280,7 @@ struct InstallArgs {
     /// tracked settings file
     #[arg(long)]
     machine: bool,
-    /// The repository's main branch, written to git config bay.trunk (default: what it holds,
+    /// The repository's main branch, written to git config bay.main (default: what it holds,
     /// else the remote's default branch)
     #[arg(long = "main", value_name = "BRANCH", conflicts_with = "machine")]
     trunk: Option<String>,

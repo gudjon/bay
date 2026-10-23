@@ -16,7 +16,7 @@ use std::path::Path;
 use serde_json::Value;
 use support::{TestBox, result_json, row};
 
-const CLAUDE_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
+const CLAUDE_ADAPTER: &str = "main = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
 
 fn settings(repo: &Path) -> Value {
     let text = std::fs::read_to_string(repo.join(".claude/settings.json")).unwrap();

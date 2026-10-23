@@ -20,7 +20,7 @@ use crate::support;
 use serde_json::json;
 use support::{TestBox, result_json, row};
 
-const CLAUDE_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
+const CLAUDE_ADAPTER: &str = "main = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
 
 /// Each 0.3.0 hook moment and the name a 0.2 bay wrote for it.
 const RENAMED: &[(&str, &str)] = &[

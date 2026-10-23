@@ -42,7 +42,7 @@ use serde_json::Value;
 use support::{TestBox, result_json};
 
 /// A target `staging` and a lane `research`, committed on trunk.
-const CONFIG: &str = "trunk = \"main\"\n\n[[target]]\nname = \"staging\"\n\n[[lane]]\nname = \"research\"\nrefs = [\"refs/heads/research/*\"]\nwindow_s = 3600\n";
+const CONFIG: &str = "main = \"main\"\n\n[[target]]\nname = \"staging\"\n\n[[lane]]\nname = \"research\"\nrefs = [\"refs/heads/research/*\"]\nwindow_s = 3600\n";
 
 struct Fixture {
     test_box: TestBox,

@@ -132,3 +132,22 @@ fn the_contract_lists_no_removed_code_decision_or_field() {
         "{schema}"
     );
 }
+
+/// BACKLOG 55 (c), owner ruling 2026-10-22: the config names the branch bay serves `main`, and
+/// the old key `trunk` is a key bay does not know.
+///
+/// Guard to mutate: `src/config.rs` `Config`: `#[serde(rename = "main")]` to
+/// `#[serde(alias = "trunk", rename = "main")]` (the old key loads).
+#[test]
+fn the_config_key_trunk_is_unknown() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
+    test_box.commit_config(&repo, "trunk = \"main\"\n");
+    let (code, result) = support::result_json(test_box.bay(&repo).arg("status"));
+    assert_ne!(code, 0, "the old key loaded: {result}");
+    assert!(result.to_string().contains("trunk"), "{result}");
+    test_box.commit_config(&repo, "main = \"main\"\n");
+    let (code, result) = support::result_json(test_box.bay(&repo).arg("status"));
+    assert_eq!(code, 0, "{result}");
+}

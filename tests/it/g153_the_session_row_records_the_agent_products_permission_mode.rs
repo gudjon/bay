@@ -119,7 +119,7 @@ fn the_row_carries_the_mode_the_payload_names_and_the_fleet_shows_it() {
 fn doctor_says_the_deny_holds_under_bypass_permissions() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
-    test_box.commit_config(&repo, "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\n");
+    test_box.commit_config(&repo, "main = \"main\"\n\n[agent]\nproduct = \"claude\"\n");
     test_box.fake_claude(Some("2.1.302"));
     test_box.bay_ok(&repo, &["install"]);
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));

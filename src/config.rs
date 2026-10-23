@@ -23,6 +23,8 @@ const EVIDENCE_REUSE: [&str; 2] = ["off", "exact-inputs"];
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// `main = "<branch>"` (BACKLOG 55: the branch bay serves, any name; `trunk` before 0.3.3).
+    #[serde(rename = "main")]
     pub trunk: Option<String>,
     /// `[[target]]`: the promotion targets (NEW-5, `crate::target`). A promotion moves a ref
     /// such as `refs/heads/staging` to a commit already on its source; it is not a landing.
@@ -1064,7 +1066,7 @@ mod tests {
 
     /// `INTERFACES` § 7's example `.bay/config.toml`, verbatim.
     const INTERFACES_7: &str = r#"
-trunk = "main"
+main = "main"
 remote = "origin"
 [trailers]            # map Intent and Actor to an organisation's own keys (defaults shown);
                       # Change-Id, Revision-Id, Request-Id, Candidate-Id, Registry-Id and
@@ -1315,14 +1317,14 @@ product = "claude"                 # leave this table out when the box does not 
     fn a_freeze_of_the_trunk_and_the_hold_adapter_are_read_and_checked() {
         // N-8: a freeze may name the trunk itself, with no [[target]].
         let config = Config::parse(
-            "trunk = \"main\"\n[[hold]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\n\
+            "main = \"main\"\n[[hold]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\n\
              reason = \"migration\"\n[plugin.hold]\ncommand = \"scripts/bay-hold\"\ntimeout_s = 5\n",
         )
         .unwrap();
         assert_eq!(config.freezes[0].target, "main");
         // 0.3.0: a `[[hold]]` with no target holds main.
         let untargeted = Config::parse(
-            "trunk = \"trunk\"\n[[hold]]\nend = \"2026-12-24T00:00:00Z\"\nreason = \"migration\"\n",
+            "main = \"trunk\"\n[[hold]]\nend = \"2026-12-24T00:00:00Z\"\nreason = \"migration\"\n",
         )
         .unwrap();
         assert_eq!(untargeted.freezes[0].target, "trunk");

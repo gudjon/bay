@@ -27,7 +27,7 @@ const CHECK: &str = "billing-approval";
 const APPROVAL: &str = "\n[[check]]\nid = \"billing-approval\"\nenvironment = \"people\"\nkind = \"approval\"\nwhen_paths = [\"billing/\"]\n";
 /// The `staging` target, requiring the approval check.
 const STAGING: &str =
-    "trunk = \"main\"\n\n[[target]]\nname = \"staging\"\nrequires = [\"billing-approval\"]\n";
+    "main = \"main\"\n\n[[target]]\nname = \"staging\"\nrequires = [\"billing-approval\"]\n";
 
 /// Starts a change in `repo` under `intent` declaring `dir` and writes `path` in its view.
 fn start(

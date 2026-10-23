@@ -10,8 +10,9 @@ allowed-tools:
 
 bay merges coding agents' changes into main, so several agents can work in one codebase without stale
 branches, colliding merges or a broken main. You open a change, edit in its view, and submit it once. A
-runner checks the exact candidate and merges it, even after you leave. A few field and event names still
-say `trunk` for main.
+runner checks the exact candidate and merges it, even after you leave. Main is the one branch bay serves,
+whatever its name (`dev`, `main`, a fork's own line), and bay stays on it. You never create a branch: a
+change is not a branch, and its view is a folder bay makes. A few field and event names say `trunk` for main.
 Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its URL).
 
 ## Before you start
@@ -156,6 +157,9 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    `[plugin.hold] command` that answers `{"held": true|false, "reason": "..."}` to `<command> status`.
    To act on the host when `bay prune` deletes a branch (close its pull request,
    say), add `[plugin.prune] command`: it runs as `<command> pruned <branch> <sha> <archive ref>`.
+   A `dev → staging → production` repository serves `dev` (`bay install --main dev`), with
+   `[[target]] name = "staging"` (from main) and `[[target]] name = "production"` with `from = "staging"`:
+   changes merge into `dev`, and `bay status` names each target's promotable commit.
    A key a newer bay brought is a config error on an older bay, naming the key: run `bay update` there.
 2. `.bay/policy.toml` lists the required checks. Each `[[check]]` needs `expected_minimum`. A
    repository that wants no checks says `unchecked = true`. Paths that need a person's approval

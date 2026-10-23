@@ -3,7 +3,7 @@
 //! trunk tracking ref, `refs/remotes/<remote>/<trunk>`: the same from the main work tree, a
 //! linked worktree and a view, and never from a work tree's file or a change's own commits.
 //! The trunk is found first, without reading any file a change can write: the repository's
-//! own git config `bay.trunk` and `bay.remote` (written by `bay install`), else the remote's
+//! own git config `bay.main` and `bay.remote` (written by `bay install`), else the remote's
 //! default branch (`refs/remotes/<remote>/HEAD`). No bootstrap, or no config at the trunk tip,
 //! is `CONFIG_MISSING`: never a silent default. The shell deny list (G39) judges a push against
 //! that same trunk.
@@ -34,14 +34,14 @@ fn stale_main_and_a_linked_trunk(test_box: &TestBox) -> (PathBuf, PathBuf, Strin
     test_box.git_ok(&repo, &["worktree", "add", "-q", "-b", "trunk", path]);
     std::fs::create_dir_all(linked.join("src")).unwrap();
     std::fs::write(linked.join("src/a.rs"), "fn a() {}\n").unwrap();
-    TestBox::bay_config(&linked, "trunk = \"trunk\"\n");
+    TestBox::bay_config(&linked, "main = \"trunk\"\n");
     test_box.git_ok(&linked, &["add", "src", ".bay"]);
     test_box.git_ok(&linked, &["commit", "-q", "-m", "trunk"]);
     test_box.git_ok(&linked, &["push", "-q", "origin", "trunk"]);
     let tip = test_box.git_ok(&linked, &["rev-parse", "HEAD"]);
     let (code, installed) = result_json(test_box.bay(&repo).args(["install", "--main", "trunk"]));
     assert_eq!(code, 0, "{installed}");
-    assert_eq!(test_box.git_ok(&repo, &["config", "bay.trunk"]), "trunk");
+    assert_eq!(test_box.git_ok(&repo, &["config", "bay.main"]), "trunk");
     assert_eq!(test_box.git_ok(&repo, &["config", "bay.remote"]), "origin");
     (repo, linked, tip)
 }
@@ -94,7 +94,7 @@ fn a_stale_main_work_tree_and_a_trunk_with_a_config_work_from_a_linked_worktree(
     assert_eq!(
         test_box.git_ok(&view, &["rev-parse", "HEAD"]),
         tip,
-        "the view is based on the trunk bay.trunk names"
+        "the view is based on the trunk bay.main names"
     );
     assert!(view.join("src/a.rs").exists());
 
@@ -120,7 +120,7 @@ fn a_draft_config_changes_nothing_uncommitted_or_committed_in_the_change() {
         &format!("#!/bin/sh\ntouch {}\nexit 1\n", mark.display()),
     );
     let draft = format!(
-        "trunk = \"elsewhere\"\n\n[policy]\nevidence_reuse = \"exact-inputs\"\n\n[runner]\ncommand = \"{}\"\n",
+        "main = \"elsewhere\"\n\n[policy]\nevidence_reuse = \"exact-inputs\"\n\n[runner]\ncommand = \"{}\"\n",
         decoy.display()
     );
     // Uncommitted in the main work tree.
@@ -150,7 +150,7 @@ fn no_config_at_the_trunk_tip_is_config_missing() {
     // The trunk has no config; the work tree's file (uncommitted) does not count.
     std::fs::remove_dir_all(repo.join(".bay")).unwrap();
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
-    TestBox::bay_config(&repo, "trunk = \"main\"\n");
+    TestBox::bay_config(&repo, "main = \"main\"\n");
 
     for args in [
         &["start", "CARD-1", "--paths", "src/"][..],
@@ -189,7 +189,7 @@ fn no_config_at_the_trunk_tip_is_config_missing() {
     assert_config_missing(&result);
     assert_eq!(
         result["detail"]["missing"],
-        serde_json::json!(["git config bay.trunk", "refs/remotes/origin/HEAD"]),
+        serde_json::json!(["git config bay.main", "refs/remotes/origin/HEAD"]),
         "{result}"
     );
 }
@@ -243,13 +243,13 @@ fn a_trunk_config_naming_another_trunk_is_refused() {
         &repo,
         &[
             ("src/a.rs", "fn a() {}\n"),
-            (".bay/config.toml", "trunk = \"other\"\n"),
+            (".bay/config.toml", "main = \"other\"\n"),
         ],
     );
     let (code, result) = result_json(test_box.bay(&repo).args(["status"]));
     assert_ne!(code, 0, "{result}");
     assert!(
-        result.to_string().contains("names trunk \\\"other\\\""),
+        result.to_string().contains("names main \\\"other\\\""),
         "{result}"
     );
 }
@@ -260,11 +260,11 @@ fn the_trunk_push_denial_holds_with_a_decoy_trunk_in_the_draft() {
     let repo = test_box.repo_any("repo");
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     // A decoy trunk on the main work tree's disk, and committed on a linked worktree's branch.
-    TestBox::bay_config(&repo, "trunk = \"decoy\"\n");
+    TestBox::bay_config(&repo, "main = \"decoy\"\n");
     let linked = test_box.path().join("linked");
     let path = linked.to_str().unwrap();
     test_box.git_ok(&repo, &["worktree", "add", "-q", "-b", "topic", path]);
-    TestBox::bay_config(&linked, "trunk = \"decoy\"\n");
+    TestBox::bay_config(&linked, "main = \"decoy\"\n");
     test_box.git_ok(&linked, &["commit", "-q", "-am", "decoy"]);
     for cwd in [&repo, &linked] {
         for command in [

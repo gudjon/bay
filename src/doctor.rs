@@ -1141,8 +1141,15 @@ fn signing_row(git: &Git, report: &mut Report) {
         Ok(Some(registry)) => json!({"name": "signing", "required": false, "state": "green",
             "registry": registry.commit, "mode": registry.mode().name(),
             "note": "only approvals are signed, by keys of the registry's approver file; landings, requests, chains and other evidence run unsigned"}),
-        Err(why) => json!({"name": "signing", "required": false, "state": "unread",
-            "note": why}),
+        // 0.3.3: a registry no version rule allows breaks every signed judgement: red, named.
+        Err(why) => {
+            report.red(
+                Reason::RegistryUnreadable,
+                Some("the key registry cannot be read"),
+            );
+            json!({"name": "signing", "required": false, "state": "red", "note": why,
+                "recovery": "a registry key signs a version that fixes the named line; for a removed key enrolled again, bay enrol --remove <class> <name> --reason revoked"})
+        }
     };
     report.rows.push(row);
 }

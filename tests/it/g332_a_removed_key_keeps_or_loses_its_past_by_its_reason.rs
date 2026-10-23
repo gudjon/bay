@@ -205,3 +205,84 @@ fn a_bay_host_takes_a_removal_and_refuses_its_undoing() {
         "{out:?}"
     );
 }
+
+/// 0.3.3 (the Mac's 0.3.2 finding): `bay enrol` refuses a removed key, under any name, before it
+/// signs or pushes anything, so no registry no bay can read reaches a plain remote.
+///
+/// Guard to mutate: `src/enrol.rs` `enrol_in`: the `removal_of` refusal to `if false` and drop
+/// the `load_at` check before the push (the removed key is enrolled again and pushed).
+#[test]
+fn a_removed_key_is_never_enrolled_again() {
+    let (test_box, repo, keys, _tip) = covered();
+    let (code, removed) = remove(&test_box, &repo, "producer", PRODUCER, "rotated");
+    assert_eq!(code, 0, "{removed}");
+    let before = test_box.git_ok(&repo, &["rev-parse", "refs/bay/registry"]);
+    let public = keys.producer.with_extension("pub");
+    let (code, refused) = result_json(test_box.bay(&repo).args([
+        "enrol",
+        "producer",
+        "ci-2",
+        public.to_str().unwrap(),
+    ]));
+    assert_eq!(code, 20, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .is_some_and(|why| why.contains("never enrolled again")),
+        "{refused}"
+    );
+    let remote = test_box.git_ok(&repo, &["ls-remote", "origin", "refs/bay/registry"]);
+    assert!(
+        remote.starts_with(&before),
+        "the remote's registry moved: {remote}"
+    );
+}
+
+/// A registry that enrols a removed key again (0.3.2 could push one to a plain remote) makes
+/// doctor red, `REGISTRY_UNREADABLE`, naming the repair; `bay enrol --remove` repairs it.
+///
+/// Guard to mutate: `src/doctor.rs` `signing_row`: drop the `report.red(...)` (doctor stays
+/// green); `src/enrol.rs` `remove`: `load_for_repair` to `load_at` (the repair cannot read it).
+#[test]
+fn a_registry_that_enrols_a_removed_key_is_named_and_repaired() {
+    use support::{AGENT, EXECUTOR, REGISTRAR, key_line};
+    let (test_box, repo, keys, _tip) = covered();
+    let (code, removed) = remove(&test_box, &repo, "producer", PRODUCER, "rotated");
+    assert_eq!(code, 0, "{removed}");
+    // As 0.3.2 could push: the removed key enrolled again under a new name.
+    let removed_file = test_box.git_ok(&repo, &["show", "refs/bay/registry:removed"]);
+    test_box.enroll_files(
+        &repo,
+        &keys,
+        &[
+            ("agent", key_line(AGENT, &keys.agent)),
+            ("executor", key_line(EXECUTOR, &keys.executor)),
+            ("producer", key_line("ci-2", &keys.producer)),
+            ("registry", key_line(REGISTRAR, &keys.registry)),
+            ("removed", format!("{removed_file}\n")),
+        ],
+    );
+    // Doctor is red; its first red reason may be another row's in a test box (file keys).
+    let (code, doctor) = result_json(test_box.bay(&repo).arg("doctor"));
+    assert_eq!(code, 10, "{doctor}");
+    let signing = support::row(&doctor, "signing");
+    assert_eq!(signing["state"], "red", "{signing}");
+    assert!(
+        signing["recovery"]
+            .as_str()
+            .is_some_and(|text| text.contains("bay enrol --remove")),
+        "{signing}"
+    );
+
+    let (code, repaired) = remove(&test_box, &repo, "producer", "ci-2", "revoked");
+    assert_eq!(
+        code, 0,
+        "the repair could not read the registry: {repaired}"
+    );
+    let (_, doctor) = result_json(test_box.bay(&repo).arg("doctor"));
+    assert_eq!(
+        support::row(&doctor, "signing")["state"],
+        "green",
+        "{doctor}"
+    );
+}

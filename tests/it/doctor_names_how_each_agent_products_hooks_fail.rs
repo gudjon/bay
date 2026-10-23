@@ -12,7 +12,7 @@ use crate::support;
 use serde_json::Value;
 use support::{TestBox, result_json, row};
 
-const CLAUDE_ADAPTER: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
+const CLAUDE_ADAPTER: &str = "main = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
 
 fn claude_repo(test_box: &TestBox) -> std::path::PathBuf {
     let repo = test_box.repo_any("repo");

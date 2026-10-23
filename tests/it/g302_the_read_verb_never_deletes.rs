@@ -52,7 +52,7 @@ fn fixture() -> Fixture {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
-    TestBox::bay_config(&repo, "trunk = \"main\"\n");
+    TestBox::bay_config(&repo, "main = \"main\"\n");
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     test_box.git_ok(&repo, &["switch", "-q", "-c", "squashed", "main"]);
     let squashed = commit(&test_box, &repo, "squashed.txt");

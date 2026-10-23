@@ -31,7 +31,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 use support::{TestBox, result_json};
 
-const CLAUDE_ADAPTER: &str = "trunk = \"main\"\n[agent]\nproduct = \"claude\"\n";
+const CLAUDE_ADAPTER: &str = "main = \"main\"\n[agent]\nproduct = \"claude\"\n";
 
 /// The fleet map's row of `machine`.
 fn row_of<'a>(fleet: &'a Value, name: &str) -> &'a Value {

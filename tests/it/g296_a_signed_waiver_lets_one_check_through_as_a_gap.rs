@@ -51,8 +51,7 @@ use support::approval::{APPROVER, Trunk, trunk, trunk_with, trunk_with_config};
 /// The `tests` check's own key that makes it waivable.
 const WAIVABLE: &str = "waivable = true\n";
 /// The `staging` target, requiring the waivable check.
-const STAGING: &str =
-    "trunk = \"main\"\n\n[[target]]\nname = \"staging\"\nrequires = [\"tests\"]\n";
+const STAGING: &str = "main = \"main\"\n\n[[target]]\nname = \"staging\"\nrequires = [\"tests\"]\n";
 
 /// `trunk` on a box whose global config names no producer, as a person's machine has none: the
 /// author's and the approver's clones each take their own name (G297), so the approver reads

@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn a_freeze_of_the_trunk_holds_it_until_its_end() {
         let config = Config::parse(
-            "trunk = \"main\"\n[[hold]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"migration\"\n",
+            "main = \"main\"\n[[hold]]\ntarget = \"main\"\nend = \"2026-12-24T00:00:00Z\"\nreason = \"migration\"\n",
         )
         .unwrap();
         let end = crate::clock::unix_of("2026-12-24T00:00:00Z").unwrap();

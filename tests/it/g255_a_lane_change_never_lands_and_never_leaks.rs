@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use support::{TestBox, check_files, passing_result, result_json};
 
 /// A config with one lane, `research`, over `refs/heads/research/*`.
-const LANES: &str = "trunk = \"main\"\n\n[[lane]]\nname = \"research\"\nrefs = [\"refs/heads/research/*\"]\nwindow_s = 3600\n";
+const LANES: &str = "main = \"main\"\n\n[[lane]]\nname = \"research\"\nrefs = [\"refs/heads/research/*\"]\nwindow_s = 3600\n";
 
 /// A repository whose trunk declares the `research` lane and one required check that passes.
 fn seeded(test_box: &TestBox) -> PathBuf {

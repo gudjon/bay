@@ -37,7 +37,7 @@ use support::{TestBox, check_files, passing_result, result_json};
 
 const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\nwhen_paths = [\"src/**\"]\n";
 
-const CONFIG: &str = "trunk = \"main\"\n\n[[target]]\nname = \"staging\"\n";
+const CONFIG: &str = "main = \"main\"\n\n[[target]]\nname = \"staging\"\n";
 
 struct Trunk {
     test_box: TestBox,

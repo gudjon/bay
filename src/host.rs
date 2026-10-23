@@ -22,7 +22,21 @@ pub const TRUNK_HOOK: &str = "bay-trunk";
 /// The scoped hook (`hook.rs`): `pre-receive`, active once the host has a key registry.
 pub const SCOPE_HOOK: &str = "bay-scope";
 /// The host's trunk branch name, read by the hook.
-pub const TRUNK_KEY: &str = "bay.trunk";
+pub const TRUNK_KEY: &str = "bay.main";
+
+/// The branch this host serves, whatever its name (`main`, `dev`, `master`; BACKLOG 55):
+/// git config `bay.main`, else the branch the host's `HEAD` names, which `bay host init` sets
+/// to it, else `main`. A host made before `bay.main` (with `bay.trunk`) is still guarded on its
+/// own branch: `HEAD` names it.
+#[must_use]
+pub fn served_branch(git: &Git) -> String {
+    git.run(&["config", "--get", TRUNK_KEY])
+        .ok()
+        .or_else(|| git.run(&["symbolic-ref", "--short", "HEAD"]).ok())
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "main".to_owned())
+}
 
 /// `bay host init`, run in `dir`. With no `object_format` the host takes the object format of
 /// the repository that holds `dir`, so that repository can push to it; outside one, Git's own
@@ -143,9 +157,7 @@ pub fn judge_update(
     old: &str,
     new: &str,
 ) -> Result<Option<String>, GitError> {
-    let trunk = git
-        .run(&["config", "--get", TRUNK_KEY])
-        .unwrap_or_else(|_| "main".to_owned());
+    let trunk = served_branch(git);
     if refname != format!("refs/heads/{trunk}") {
         return Ok(None);
     }
@@ -223,9 +235,7 @@ fn test_slow_push(git: &Git, dir: &Path, input: &str) -> bool {
     else {
         return false;
     };
-    let trunk = git
-        .run(&["config", "--get", TRUNK_KEY])
-        .unwrap_or_else(|_| "main".to_owned());
+    let trunk = served_branch(git);
     let trunk_ref = format!("refs/heads/{trunk}");
     if !input
         .lines()

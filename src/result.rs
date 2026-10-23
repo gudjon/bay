@@ -98,6 +98,9 @@ reasons! {
     TrunkMoved => "MAIN_MOVED", [], "retried_once_then_queued", true;
     PublishRetryExhausted => "MERGE_RETRY_EXHAUSTED", ["read", "repair"], "cause_fixed", false;
     RegistryChanged => "REGISTRY_CHANGED", [], "resigned_by_valid_executor", false;
+    // 0.3.3 (the Mac's 0.3.2 finding): `refs/bay/registry` breaks a rule a version is loaded by,
+    // so nothing signed can be judged; `bay doctor` names it and the line.
+    RegistryUnreadable => "REGISTRY_UNREADABLE", ["read"], "registry_repaired", false;
     CheckFlaky => "CHECK_FLAKY", ["repair"], "check_fixed_or_quarantined", false;
     ChangeNotLanded => "CHANGE_NOT_MERGED", ["read"], "change_landed", false;
     HookTimeout => "HOOK_TIMEOUT", [], "retried_after_short_wait", true;
@@ -759,6 +762,9 @@ impl Reason {
             Self::PublishRetryExhausted => {
                 "Read the cause in `detail` and tell the user; once it is fixed, `bay merge` again."
             }
+            Self::RegistryUnreadable => {
+                "Tell the user the key registry breaks a rule (`detail`); a registry key repairs it, for a re-enrolled removed key with `bay enrol --remove`."
+            }
             Self::RegistryChanged => {
                 "Do nothing: a runner with a valid key signs it again. `bay status <change>` shows the outcome."
             }
@@ -942,6 +948,9 @@ impl Reason {
             }
             Self::PublishRetryExhausted => {
                 "Adding the change kept failing, so nothing was added; ask whoever runs bay here to look."
+            }
+            Self::RegistryUnreadable => {
+                "The project's list of trusted keys has a mistake, so nothing signed can be checked; ask whoever holds its key to fix it."
             }
             Self::RegistryChanged => {
                 "The list of trusted keys changed while saving; bay tries again once it is signed, nothing to do."
@@ -1350,7 +1359,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 57);
+        assert_eq!(Reason::ALL.len(), 58);
     }
 
     #[test]

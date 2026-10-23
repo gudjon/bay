@@ -25,8 +25,7 @@ use support::{TestBox, check_files, passing_result, result_json, unchecked_files
 const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\n";
 
 /// The `staging` target, requiring the post check.
-const STAGING: &str =
-    "trunk = \"main\"\n\n[[target]]\nname = \"staging\"\nrequires = [\"suite\"]\n";
+const STAGING: &str = "main = \"main\"\n\n[[target]]\nname = \"staging\"\nrequires = [\"suite\"]\n";
 
 struct Hosted {
     test_box: TestBox,
@@ -249,7 +248,7 @@ fn on_a_forge_a_target_moved_off_trunk_is_drift_and_watch_names_it() {
     let mut files = unchecked_files();
     files.push((
         ".bay/config.toml".to_owned(),
-        "trunk = \"main\"\n\n[[target]]\nname = \"staging\"\n\n[[target]]\nname = \"production\"\nfrom = \"staging\"\nsoak_s = 3600\n".to_owned(),
+        "main = \"main\"\n\n[[target]]\nname = \"staging\"\n\n[[target]]\nname = \"production\"\nfrom = \"staging\"\nsoak_s = 3600\n".to_owned(),
     ));
     let seeded = test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
 

@@ -22,7 +22,7 @@ fn seeded(test_box: &TestBox, name: &str, config: &str) -> PathBuf {
 #[test]
 fn a_config_naming_another_main_names_install_main() {
     let test_box = TestBox::new();
-    let repo = seeded(&test_box, "repo", "trunk = \"other\"\n");
+    let repo = seeded(&test_box, "repo", "main = \"other\"\n");
     let (_, status) = result_json(test_box.bay(&repo).arg("status"));
     // `detail` holds the command as typed; `say` turns every word into the plain one anyway.
     assert!(

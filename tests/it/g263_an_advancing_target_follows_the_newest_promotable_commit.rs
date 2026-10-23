@@ -27,7 +27,7 @@ const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage 
 
 /// The `staging` target, requiring the post check, which the executor advances.
 const ADVANCING: &str =
-    "trunk = \"main\"\n\n[[target]]\nname = \"staging\"\nrequires = [\"suite\"]\nadvance = true\n";
+    "main = \"main\"\n\n[[target]]\nname = \"staging\"\nrequires = [\"suite\"]\nadvance = true\n";
 
 struct Hosted {
     test_box: TestBox,
@@ -168,7 +168,7 @@ fn an_advancing_target_moves_to_the_newest_green_landing_and_never_to_a_red_one(
 #[test]
 fn a_target_without_advance_stays_and_a_chained_target_follows_its_source() {
     // `production` is listed before its source: the pass still moves `staging` first.
-    let config = "trunk = \"main\"\n\n\
+    let config = "main = \"main\"\n\n\
                   [[target]]\nname = \"production\"\nfrom = \"staging\"\nrequires = [\"suite\"]\nadvance = true\n\n\
                   [[target]]\nname = \"staging\"\nrequires = [\"suite\"]\nadvance = true\n\n\
                   [[target]]\nname = \"qa\"\nrequires = [\"suite\"]\n";

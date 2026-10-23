@@ -37,6 +37,10 @@ An agent opens a change, edits, and submits it once. bay combines it with the la
 checks on that exact result, and merges only what passed. A runner finishes the merge, so the agent
 can start its next task. Your repository stays an ordinary Git repository, on the host you already have.
 
+"Main" is the one branch you name for bay: `main`, `dev`, or a fork's own line. bay stays on it, and agents
+never create branches. A `dev → staging → production` repository works as it is: bay merges into `dev`, and
+promotes `dev` to `staging` and `staging` to `production` as targets.
+
 <p align="center">
   <img src=".github/demo/demo.gif" alt="Two agents in one codebase, one terminal pane each. Both add a service on port 8080. Agent A merges. bay checks agent B's change on the new main and refuses it with CHECK_FAILED. B moves to port 8081, and it merges." width="900">
 </p>

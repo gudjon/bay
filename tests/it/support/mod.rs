@@ -25,7 +25,7 @@ pub const UNSANDBOXED_CHOICE: &str = "[bay]\n\texecutorSandbox = none\n";
 pub const BOX_CONFIG: &str = "[bay]\n\texecutorSandbox = none\n\tproducerName = local\n";
 
 /// The config a new work repository starts with.
-pub const MINIMAL_CONFIG: &str = "trunk = \"main\"\n";
+pub const MINIMAL_CONFIG: &str = "main = \"main\"\n";
 
 pub struct TestBox {
     /// Serves the relay of this box's checks (G62); started by the first [`TestBox::relay`].

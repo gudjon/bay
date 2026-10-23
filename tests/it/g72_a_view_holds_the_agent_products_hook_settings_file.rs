@@ -19,7 +19,7 @@ use std::process::{Command, Stdio};
 use serde_json::{Value, json};
 use support::TestBox;
 
-const CLAUDE_CONFIG: &str = "trunk = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
+const CLAUDE_CONFIG: &str = "main = \"main\"\n\n[agent]\nproduct = \"claude\"\n";
 const SETTINGS: &str = ".claude/settings.json";
 
 /// A trunk with the Claude adapter, `src/`, another file under `.claude/`, and the settings

@@ -275,6 +275,30 @@ impl Registry {
             mode: Signing::All,
         };
         registry.validate()?;
+        registry.validate_removed()?;
+        Ok(registry)
+    }
+
+    /// [`Self::load_at`] without the rule that a removed key is never enrolled again: what
+    /// `bay enrol --remove` repairs a version that broke that rule from (0.3.2 let `bay enrol`
+    /// push one to a remote that is not a bay host). Every other rule holds.
+    ///
+    /// # Errors
+    ///
+    /// See [`Self::load_at`].
+    pub fn load_for_repair(git: &Git, commit: &str) -> Result<Self, String> {
+        let files = read_files(git, commit).0?;
+        let removed = match git.file_at(commit, REMOVED_FILE) {
+            Ok(text) => parse_removed(&text.unwrap_or_default())?,
+            Err(error) => return Err(error.message()),
+        };
+        let registry = Self {
+            commit: commit.to_owned(),
+            files,
+            removed,
+            mode: Signing::All,
+        };
+        registry.validate()?;
         Ok(registry)
     }
 
@@ -414,8 +438,36 @@ impl Registry {
                 }
             }
         }
-        // A removed key is never enrolled again: a revoked one must stay out, and a rotated
-        // one is replaced, not brought back.
+        Ok(())
+    }
+
+    /// The removal of the key `key_type` `blob`, if this version records one.
+    #[must_use]
+    pub fn removal_of(&self, key_type: &str, blob: &str) -> Option<&Removal> {
+        self.removed
+            .iter()
+            .find(|removal| removal.key_type == key_type && removal.blob == blob)
+    }
+
+    /// A removed key is never enrolled again: a revoked one must stay out, and a rotated one
+    /// is replaced, not brought back.
+    fn validate_removed(&self) -> Result<(), String> {
+        let mut seen: HashMap<(String, String), (KeyClass, String)> = HashMap::new();
+        for class in KeyClass::ALL {
+            for line in self.files[&class]
+                .lines()
+                .filter(|line| !line.trim().starts_with('#'))
+            {
+                if let [principal, key_type, blob, ..] =
+                    line.split_whitespace().collect::<Vec<_>>().as_slice()
+                {
+                    seen.insert(
+                        ((*key_type).to_owned(), (*blob).to_owned()),
+                        (class, (*principal).to_owned()),
+                    );
+                }
+            }
+        }
         for removal in &self.removed {
             let key = (removal.key_type.clone(), removal.blob.clone());
             if let Some((class, principal)) = seen.get(&key) {
@@ -670,7 +722,7 @@ impl Registry {
 
 /// The trunk tip this repository judges by (N-21): in a work repository the tracking ref of the
 /// remote trunk ([`crate::repo::Bootstrap`]), never a local branch a change can move; on a host
-/// (a bare repository) its trunk branch, `bay.trunk` or `main` as the host hook names it, as it
+/// (a bare repository) its trunk branch, `bay.main` or `main` as the host hook names it, as it
 /// stands before the push the hook judges. `None` when neither is known.
 ///
 /// # Errors
@@ -690,9 +742,7 @@ fn accepted_base(git: &Git) -> Result<Option<String>, String> {
     if bare.trim() != "true" {
         return Ok(None);
     }
-    let trunk = git
-        .run(&["config", "--get", "bay.trunk"])
-        .unwrap_or_else(|_| "main".to_owned());
+    let trunk = crate::host::served_branch(git);
     git.ref_target(&format!("refs/heads/{}", trunk.trim()))
         .map_err(|error| error.message())
 }

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.3
+
+- `bay enrol` refuses a key that was removed, under any name, before it signs or pushes anything.
+- `bay doctor` is red, `REGISTRY_UNREADABLE`, when the key registry breaks a rule, and names the repair.
+- `bay enrol --remove` repairs a registry that enrols a removed key again.
+- Fixed: on a remote that is not a bay host, 0.3.2 could push a registry no bay command could read.
+- The config names the branch bay serves `main = "<branch>"`; `trunk` is an unknown key now.
+- Git config `bay.main` replaces `bay.trunk`. A bay host without it guards the branch its `HEAD` names.
+- The skill and README say main is the one branch you name, and agents never create branches.
+- They show a `dev → staging → production` repository: bay merges into `dev` and promotes along the chain.
+
 ## 0.3.2
 
 - `bay enrol --remove <class> <name> --reason rotated|revoked` removes a key, and records why.

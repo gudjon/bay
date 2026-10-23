@@ -188,11 +188,7 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             })
         })
         .collect();
-    let trunk = format!(
-        "refs/heads/{}",
-        git.run(&["config", "--get", "bay.trunk"])
-            .unwrap_or_else(|_| "main".to_owned())
-    );
+    let trunk = format!("refs/heads/{}", crate::host::served_branch(git));
     // NEW-5: a promotion target moves only to a promotable commit, on any bay host; without a
     // registry its evidence counts unsigned, as everywhere else.
     targets(git, &updates, &trunk, registry.as_ref())?;
