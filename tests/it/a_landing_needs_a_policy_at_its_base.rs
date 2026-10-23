@@ -142,14 +142,14 @@ fn an_unchecked_policy_lands_and_status_says_unchecked() {
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let change = &status["detail"]["changes"][0];
     assert_eq!(change["state"], "merged", "{status}");
-    assert_eq!(change["completion"]["is_merged"], true, "{status}");
+    assert_eq!(change["completion"]["merged"], true, "{status}");
     assert_eq!(change["completion"]["checked"], false, "{status}");
     assert_eq!(
         change["completion"]["unchecked"], "unchecked by policy",
         "{status}"
     );
     assert_ne!(
-        change["completion"]["profile"]["summary"], "published and checked",
+        change["completion"]["profile"]["summary"], "merged and checked",
         "{status}"
     );
     let terminal = change["terminal"].as_array().unwrap();

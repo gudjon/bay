@@ -46,6 +46,11 @@ const OLD_VALUES: &[&str] = &[
 ];
 
 const VALUE_KEYS: &[&str] = &[
+    "recorded_state",
+    "receipt",
+    "requires",
+    "require",
+    "missing",
     "state",
     "class",
     "kind",
@@ -75,6 +80,15 @@ fn old_words(value: &Value, path: &str, under: Option<&str>, found: &mut Vec<Str
         Value::String(word)
             if under.is_some_and(|key| VALUE_KEYS.contains(&key))
                 && OLD_VALUES.contains(&word.as_str()) =>
+        {
+            found.push(format!("{path} = {word:?}"));
+        }
+        // An id that begins with an old event kind (`trunk_not_linear:<sha>`).
+        Value::String(word)
+            if under.is_some_and(|key| key == "id" || key == "recurrence_key")
+                && OLD_VALUES
+                    .iter()
+                    .any(|old| word.starts_with(&format!("{old}:"))) =>
         {
             found.push(format!("{path} = {word:?}"));
         }

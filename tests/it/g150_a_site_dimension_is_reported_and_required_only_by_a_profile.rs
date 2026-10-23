@@ -23,7 +23,7 @@ use support::{
 };
 
 const REVIEWER: &str = "review-1";
-const POLICY: &str = "\n[[dimension]]\nname = \"reviewed\"\nkind = \"review\"\nproducers = [\"review-1\"]\n\n[profile.release]\nrequire = [\"published\", \"checked\", \"reviewed\"]\n";
+const POLICY: &str = "\n[[dimension]]\nname = \"reviewed\"\nkind = \"review\"\nproducers = [\"review-1\"]\n\n[profile.release]\nrequire = [\"merged\", \"checked\", \"reviewed\"]\n";
 const SELECT_RELEASE: &str = "[policy]\nprofile = \"release\"\n";
 
 struct Site {

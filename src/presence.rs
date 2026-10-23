@@ -405,7 +405,7 @@ pub fn no_live_executor(repo: &Repo, queued: usize) -> Option<Value> {
         "executor": executor,
         "seen_s": seen_s,
         "executors": executors,
-        "note": "operations are queued and no executor presence is fresh: they stay queued and land once an executor runs (bay runner run)",
+        "note": "operations are queued and no runner has been seen lately: they stay queued and merge once a runner runs (bay runner run)",
     }))
 }
 

@@ -296,7 +296,7 @@ fn run(dir: &Path, request: &Request) -> Result<BayResult, String> {
             "each pruned branch's restore line is in the log; remote-tracking refs stay until git fetch --prune"
         );
     } else {
-        detail["note"] = json!("read only: nothing deleted; bay prune deletes the landed branches");
+        detail["note"] = json!("read only: nothing deleted; bay prune deletes the merged branches");
     }
     Ok(BayResult::ok(detail))
 }

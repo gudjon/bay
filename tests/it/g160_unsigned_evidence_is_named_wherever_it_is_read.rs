@@ -19,7 +19,7 @@ use bay::git::Git;
 use support::{PRODUCER, TestBox, TestKeys, check_files, passing_result, result_json};
 
 const STRICT: &str =
-    "\n[profile.strict]\nrequire = [\"published\", \"checked\"]\nrequire_signed = true\n";
+    "\n[profile.strict]\nrequire = [\"merged\", \"checked\"]\nrequire_signed = true\n";
 const SELECT_STRICT: &str = "[policy]\nprofile = \"strict\"\n";
 
 /// A box with one change landed under `policy_extra` and `config`, with a registry enrolled

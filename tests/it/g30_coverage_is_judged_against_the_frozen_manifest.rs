@@ -49,7 +49,7 @@ fn a_missing_required_check_blocks_publication() {
 
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let completion = &status["detail"]["changes"][0]["completion"];
-    assert_eq!(completion["is_merged"], false, "{status}");
+    assert_eq!(completion["merged"], false, "{status}");
     assert_eq!(completion["checked"], false);
     assert!(!status.to_string().contains("\"done\""));
 }
@@ -68,7 +68,7 @@ fn a_landed_change_reports_each_dimension_apart() {
     assert_eq!(code, 0);
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let completion = &status["detail"]["changes"][0]["completion"];
-    assert_eq!(completion["is_merged"], true, "{status}");
+    assert_eq!(completion["merged"], true, "{status}");
     assert_eq!(completion["checked"], true);
     assert_eq!(completion["running"], "unconfirmed");
     assert_eq!(completion["effective"], "unconfirmed");

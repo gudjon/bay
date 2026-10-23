@@ -773,7 +773,7 @@ fn completion_dimensions(
     } = read
     else {
         return Ok(json!({
-            "published": landed.is_some(),
+            "merged": landed.is_some(),
             "checked": checked,
             "running": "unconfirmed",
             "effective": "unconfirmed",
@@ -850,7 +850,7 @@ fn completion_dimensions(
         }
     };
     Ok(json!({
-        "published": landed.is_some(),
+        "merged": landed.is_some(),
         "checked": checked,
         "running": word(&confirmed.running),
         "effective": word(&confirmed.effective),
@@ -1192,7 +1192,7 @@ fn receipt_state(
     // Never success without proof: an unpublished operation with no outcome and no receipt
     // has a missing record.
     match (&receipt, published, &op.outcome) {
-        (_, true, _) => json!("published"),
+        (_, true, _) => json!("merged"),
         (Some(id), false, _) => json!(id),
         (None, false, Some(_)) => json!("outcome recorded in the chain"),
         (None, false, None) => json!("missing"),

@@ -2,8 +2,8 @@
 //!
 //! Change A starts on `api/`, and change B on `api/` too. B lands. A's session is told once, at
 //! its next `step.end`, through the notice path of the refusals and early conflicts: one
-//! `landed_on_your_paths` line naming B, its intent and actor, and the shared path `api/`, and
-//! saying to refresh; the session's line names B in `landed_on_your_paths`. The next hook tells
+//! `merged_on_your_paths` line naming B, its intent and actor, and the shared path `api/`, and
+//! saying to refresh; the session's line names B in `merged_on_your_paths`. The next hook tells
 //! nothing. A change on `ui/` hears of nothing. The paths are judged as `bay start` judges its
 //! overlaps (`crate::overlap::shared`).
 //!
@@ -138,20 +138,20 @@ fn a_landing_on_the_declared_paths_is_told_once_and_not_on_other_paths() {
     assert_eq!(told.lines().count(), 1, "{told}");
     assert!(
         told.starts_with(&format!(
-            "bay: change {a}: landed_on_your_paths: change {b} (intent PATHS-B, actor agent-b) \
-             landed on trunk on api/: refresh (`bay start {a}`)"
+            "bay: change {a}: merged_on_your_paths: change {b} (intent PATHS-B, actor agent-b) \
+             merged into main on api/: refresh (`bay start {a}`)"
         )),
         "{told}"
     );
     assert_eq!(
-        last_line(&repo, "s-a")["landed_on_your_paths"],
+        last_line(&repo, "s-a")["merged_on_your_paths"],
         serde_json::json!([b])
     );
     // Once: not at the next step, not at the next prompt.
     assert_eq!(post_tool(&test_box, &a_view, "s-a"), "");
     assert!(
         last_line(&repo, "s-a")
-            .get("landed_on_your_paths")
+            .get("merged_on_your_paths")
             .is_none()
     );
     let (context, prompt) = hook(
@@ -167,7 +167,7 @@ fn a_landing_on_the_declared_paths_is_told_once_and_not_on_other_paths() {
     assert_eq!(post_tool(&test_box, &ui_view, "s-c"), "");
     assert!(
         last_line(&repo, "s-c")
-            .get("landed_on_your_paths")
+            .get("merged_on_your_paths")
             .is_none()
     );
 }

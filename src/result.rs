@@ -348,6 +348,7 @@ const PRINTED_KEYS: &[(&str, &str)] = &[
     ("landed_intent", "merged_intent"),
     ("landing_cost", "merge_cost"),
     ("published", "is_merged"),
+    ("landed_on_your_paths", "merged_on_your_paths"),
     ("publish_retries", "merge_retries"),
     ("published_at", "merged_at"),
     ("executor", "runner"),
@@ -365,7 +366,8 @@ const PRINTED_VALUE_KEYS: &[&str] = &[
     "event",
     "type",
     "outcome",
-    "waiting_for",
+    "recorded_state",
+    "receipt",
     "warning",
     "warnings",
     "code",
@@ -375,8 +377,6 @@ const PRINTED_VALUES: &[(&str, &str)] = &[
     ("landed", "merged"),
     ("published", "merged"),
     ("trunk", "main"),
-    ("executor", "runner"),
-    ("executor_capacity", "runner_capacity"),
     ("trunk-hook", "main-hook"),
     ("trunk_red", "main_red"),
     ("trunk_red_cleared", "main_red_cleared"),
@@ -386,6 +386,17 @@ const PRINTED_VALUES: &[(&str, &str)] = &[
     ("no_live_executor", "no_live_runner"),
 ];
 
+/// The runner's role words, printed only under the keys that name a role, never under a key
+/// class (`bay enrol executor` stays the key class's name).
+const PRINTED_ROLE_KEYS: &[&str] = &["waiting_for", "lands_by"];
+const PRINTED_ROLES: &[(&str, &str)] = &[
+    ("executor", "runner"),
+    ("executor_capacity", "runner_capacity"),
+];
+
+/// Keys whose values are ids that begin with an event kind (`trunk_not_linear:<sha>`).
+const PRINTED_ID_KEYS: &[&str] = &["id", "recurrence_key"];
+
 fn printed_value(word: &str) -> &str {
     PRINTED_VALUES
         .iter()
@@ -393,13 +404,41 @@ fn printed_value(word: &str) -> &str {
         .map_or(word, |(_, new)| new)
 }
 
+fn printed_role(word: &str) -> &str {
+    PRINTED_ROLES
+        .iter()
+        .find(|(old, _)| *old == word)
+        .map_or(word, |(_, new)| new)
+}
+
+/// An id that begins with an old event kind, with the new one.
+fn printed_id(id: &str) -> String {
+    for (old, new) in PRINTED_VALUES {
+        if let Some(rest) = id.strip_prefix(old)
+            && (rest.starts_with(':') || rest.starts_with('/'))
+        {
+            return format!("{new}{rest}");
+        }
+    }
+    id.to_owned()
+}
+
 /// `value` with the printed words of [`PRINTED_KEYS`] and [`PRINTED_VALUES`].
 #[must_use]
 pub fn printed(value: &Value) -> Value {
-    printed_under(value, false)
+    printed_under(value, Under::Other)
 }
 
-fn printed_under(value: &Value, named: bool) -> Value {
+/// What the key a value sits under says to translate in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Under {
+    Other,
+    Word,
+    Role,
+    Id,
+}
+
+fn printed_under(value: &Value, under: Under) -> Value {
     match value {
         Value::Object(object) => {
             let mut out = serde_json::Map::new();
@@ -410,18 +449,32 @@ fn printed_under(value: &Value, named: bool) -> Value {
                     .map(|(_, new)| *new)
                     .filter(|new| !object.contains_key(*new))
                     .unwrap_or(key);
-                let holds_word = PRINTED_VALUE_KEYS.contains(&key.as_str());
-                out.insert(new.to_owned(), printed_under(inner, holds_word));
+                let key = key.as_str();
+                let under = if PRINTED_ROLE_KEYS.contains(&key) {
+                    Under::Role
+                } else if PRINTED_VALUE_KEYS.contains(&key) {
+                    Under::Word
+                } else if PRINTED_ID_KEYS.contains(&key) {
+                    Under::Id
+                } else {
+                    Under::Other
+                };
+                out.insert(new.to_owned(), printed_under(inner, under));
             }
             Value::Object(out)
         }
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|item| printed_under(item, named))
+                .map(|item| printed_under(item, under))
                 .collect(),
         ),
-        Value::String(word) if named => Value::String(printed_value(word).to_owned()),
+        Value::String(word) => Value::String(match under {
+            Under::Word => printed_value(word).to_owned(),
+            Under::Role => printed_role(printed_value(word)).to_owned(),
+            Under::Id => printed_id(word),
+            Under::Other => word.clone(),
+        }),
         other => other.clone(),
     }
 }
@@ -430,7 +483,7 @@ impl Serialize for BayResult {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let say = self.say();
         let detail = self.detail.as_ref().map(printed);
-        let waiting_for = self.waiting_for.as_deref().map(printed_value);
+        let waiting_for = self.waiting_for.as_deref().map(printed_role);
         let state = self.state.as_deref().map(printed_value);
         Wire {
             schema: self.schema,

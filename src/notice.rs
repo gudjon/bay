@@ -180,7 +180,7 @@ impl Delivery {
         }
         if !self.landed.is_empty() {
             fields.insert(
-                "landed_on_your_paths".to_owned(),
+                "merged_on_your_paths".to_owned(),
                 serde_json::json!(self.landed),
             );
         }
@@ -703,8 +703,8 @@ fn landed_line(
         .filter(|path| !path.chars().any(char::is_control))
         .collect();
     let text = format!(
-        "bay: change {change}: landed_on_your_paths: change {landed} (intent {}, actor {}) \
-         landed on trunk on {}: refresh (`bay start {change}`) and re-read them",
+        "bay: change {change}: merged_on_your_paths: change {landed} (intent {}, actor {}) \
+         merged into main on {}: refresh (`bay start {change}`) and re-read them",
         theirs.intent.reference,
         theirs.actor.name,
         paths.join(", "),

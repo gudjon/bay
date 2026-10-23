@@ -28,7 +28,7 @@ use crate::git::Git;
 pub const MAX_EXPANDED: usize = 500;
 
 /// The recovery hint of a trunk that is not linear.
-pub const HINT: &str = "a merge pushed outside bay put bay landings off trunk's first-parent line; require linear history on the host for the trunk branch, so only fast-forward pushes reach it";
+pub const HINT: &str = "a merge pushed outside bay put bay's merges off main's first-parent line; require linear history on the host for main, so only fast-forward pushes reach it";
 
 /// The warning and event code of a foreign merge.
 pub const NOT_LINEAR: &str = "trunk_not_linear";

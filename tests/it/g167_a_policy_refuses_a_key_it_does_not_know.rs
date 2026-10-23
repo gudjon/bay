@@ -111,7 +111,7 @@ fn an_unknown_key_or_table_at_any_level_makes_the_policy_invalid() {
             "[[input]]",
         ),
         (
-            format!("{base}\n[profile.strict]\nrequire = [\"published\"]\nrequire_sigend = true\n"),
+            format!("{base}\n[profile.strict]\nrequire = [\"merged\"]\nrequire_sigend = true\n"),
             "require_sigend",
             "[profile.strict]",
         ),
@@ -136,7 +136,7 @@ fn an_unknown_key_or_table_at_any_level_makes_the_policy_invalid() {
 #[test]
 fn every_documented_key_is_accepted() {
     let text = format!(
-        "revision = 3\n{}{}\n[[quarantine]]\nid = \"later\"\nenvironment = \"local\"\nreason = \"red on trunk\"\nend = \"2099-01-01\"\n\n[[input]]\nname = \"contract:api\"\nprovider = \"scripts/api-version\"\nadapter = [\"scripts/api-version\"]\npath = [\"/usr/bin\", \"/bin\"]\nphase = \"expand\"\ntimeout_s = 30\n\n[profile.strict]\nrequire = [\"published\", \"checked\"]\nrequire_signed = true\n\n[agent]\nrequire_actor = true\n",
+        "revision = 3\n{}{}\n[[quarantine]]\nid = \"later\"\nenvironment = \"local\"\nreason = \"red on trunk\"\nend = \"2099-01-01\"\n\n[[input]]\nname = \"contract:api\"\nprovider = \"scripts/api-version\"\nadapter = [\"scripts/api-version\"]\npath = [\"/usr/bin\", \"/bin\"]\nphase = \"expand\"\ntimeout_s = 30\n\n[profile.strict]\nrequire = [\"merged\", \"checked\"]\nrequire_signed = true\n\n[agent]\nrequire_actor = true\n",
         check(
             "timeout_s = 60\ninputs = [\"commit\"]\nfixtures = [\"data@sha256:0000000000000000000000000000000000000000000000000000000000000000\"]\npath = [\"/usr/bin\", \"/bin\"]\nenv = [\"DATABASE_URL\"]\npaths = [\"src/\"]\nmaterialize_timeout_s = 300\nnetwork = true\nstage = \"pre\"\nwhen_paths = [\"src/**\"]\n"
         ),

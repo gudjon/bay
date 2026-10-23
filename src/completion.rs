@@ -4,7 +4,7 @@
 //! evidence. A profile, `[profile.<name>] require = [...]` in `.bay/policy.toml`, says which of
 //! them a change needs; `[policy] profile` in `.bay/config.toml` selects one. `bay status`
 //! reports each dimension apart and a profile verdict that never collapses into "done": a
-//! required dimension that is missing is named ("published and checked; runtime confirmation
+//! required dimension that is missing is named ("merged and checked; runtime confirmation
 //! missing"), and a profile bay cannot read is `unknown`, never `complete`. A profile that sets
 //! `require_signed = true` never counts unsigned evidence (G160, owner ruling Q6): a required
 //! dimension that rests only on unsigned records is `unknown`, never satisfied.
@@ -18,7 +18,8 @@ use serde_json::{Value, json};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Dimension {
-    /// The change is on trunk.
+    /// The change is on main; its word is `merged` (0.3.5).
+    #[serde(rename = "merged")]
     Published,
     /// Named checks passed for identified inputs.
     Checked,
@@ -40,7 +41,7 @@ impl Dimension {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Published => "published",
+            Self::Published => "merged",
             Self::Checked => "checked",
             Self::Running => "running",
             Self::Effective => "effective",
@@ -50,7 +51,7 @@ impl Dimension {
     /// How a summary names this dimension when it is missing.
     const fn missing(self) -> &'static str {
         match self {
-            Self::Published => "not published",
+            Self::Published => "not merged",
             Self::Checked => "not checked",
             Self::Running => "runtime confirmation missing",
             Self::Effective => "outcome check missing",
@@ -135,7 +136,7 @@ pub fn site_dimensions(tables: Vec<SiteDimension>) -> Result<Vec<SiteDimension>,
 }
 
 /// The profile a policy without one of that name means by `default`: today's behaviour, a
-/// change is complete once published and checked; runtime is reported, not required.
+/// change is complete once merged and checked; runtime is reported, not required.
 pub const DEFAULT_PROFILE: &str = "default";
 pub const DEFAULT_REQUIRE: [Dimension; 2] = [Dimension::Published, Dimension::Checked];
 
@@ -358,7 +359,7 @@ mod tests {
         assert_eq!(out["verdict"], "incomplete");
         assert_eq!(
             out["summary"],
-            "published and checked; runtime confirmation missing; outcome check missing"
+            "merged and checked; runtime confirmation missing; outcome check missing"
         );
         assert_eq!(out["missing"], serde_json::json!(["running", "effective"]));
         assert!(!out.to_string().contains("done"));
@@ -371,7 +372,7 @@ mod tests {
         assert!(!require.require_signed);
         let out = verdict("default", Ok(require), &published_and_checked(), &[]);
         assert_eq!(out["verdict"], "complete");
-        assert_eq!(out["summary"], "published and checked");
+        assert_eq!(out["summary"], "merged and checked");
     }
 
     #[test]
@@ -390,7 +391,7 @@ mod tests {
             requirements(typo, &[]).is_err(),
             "a name neither bay nor the policy defines is refused: a typo never requires less"
         );
-        assert!(parse("require = [\"published\"]\nrequires = []\n").is_err());
+        assert!(parse("require = [\"merged\"]\nrequires = []\n").is_err());
         let mut profiles = BTreeMap::new();
         profiles.insert("p".to_owned(), parse("require = []\n").unwrap());
         assert!(validate(&profiles).is_err());
@@ -410,7 +411,7 @@ mod tests {
         let parse = |text: &str| toml::from_str::<ProfileEntry>(text).unwrap();
         let release: BTreeMap<String, ProfileEntry> = [(
             "release".to_owned(),
-            parse("require = [\"published\", \"checked\", \"reviewed\"]\n"),
+            parse("require = [\"merged\", \"checked\", \"reviewed\"]\n"),
         )]
         .into();
         let profiles = requirements(release, &[reviewed()]).unwrap();
@@ -422,7 +423,7 @@ mod tests {
             &[],
         );
         assert_eq!(out["verdict"], "incomplete");
-        assert_eq!(out["summary"], "published and checked; reviewed missing");
+        assert_eq!(out["summary"], "merged and checked; reviewed missing");
         assert_eq!(out["missing"], serde_json::json!(["reviewed"]));
         let mut met = published_and_checked();
         met.push(Need::Site("reviewed".to_owned()));

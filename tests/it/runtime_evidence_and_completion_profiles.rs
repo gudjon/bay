@@ -278,7 +278,7 @@ fn the_selected_profile_is_read_at_the_accepted_base() {
 }
 
 const DEPLOY_PROFILE: &str =
-    "\n[profile.deploy]\nrequire = [\"published\", \"checked\", \"running\"]\n";
+    "\n[profile.deploy]\nrequire = [\"merged\", \"checked\", \"running\"]\n";
 const SELECT_DEPLOY: &str = "[policy]\nprofile = \"deploy\"\n";
 
 #[test]
@@ -290,7 +290,7 @@ fn a_profile_that_requires_running_reports_the_gap_until_a_producer_confirms_it(
     assert_eq!(profile["verdict"], "incomplete", "{gap}");
     assert_eq!(profile["missing"], serde_json::json!(["running"]), "{gap}");
     assert_eq!(
-        profile["summary"], "published and checked; runtime confirmation missing",
+        profile["summary"], "merged and checked; runtime confirmation missing",
         "{gap}"
     );
 
@@ -313,19 +313,19 @@ fn a_profile_that_requires_running_reports_the_gap_until_a_producer_confirms_it(
     let met = completion(&test_box, &repo, &id);
     assert_eq!(met["profile"]["verdict"], "complete", "{met}");
     assert_eq!(met["profile"]["missing"], serde_json::json!([]), "{met}");
-    assert_eq!(met["profile"]["summary"], "published, checked and running");
+    assert_eq!(met["profile"]["summary"], "merged, checked and running");
 }
 
 #[test]
 fn the_default_profile_keeps_published_and_checked() {
     let (test_box, repo, _, id, _, _) = landed("", "");
     let out = completion(&test_box, &repo, &id);
-    assert_eq!(out["is_merged"], true, "{out}");
+    assert_eq!(out["merged"], true, "{out}");
     assert_eq!(out["checked"], true, "{out}");
     assert_eq!(out["running"], "unconfirmed", "{out}");
     assert_eq!(out["profile"]["name"], "default", "{out}");
     assert_eq!(out["profile"]["verdict"], "complete", "{out}");
-    assert_eq!(out["profile"]["summary"], "published and checked", "{out}");
+    assert_eq!(out["profile"]["summary"], "merged and checked", "{out}");
 }
 
 #[test]
@@ -342,7 +342,7 @@ fn a_profile_with_an_unknown_dimension_makes_the_policy_invalid() {
     let mut files = check_files("true", &passing_result(1), 1, 60);
     for (path, text) in &mut files {
         if path == ".bay/policy.toml" {
-            text.push_str("\n[profile.deploy]\nrequire = [\"published\", \"deployed\"]\n");
+            text.push_str("\n[profile.deploy]\nrequire = [\"merged\", \"deployed\"]\n");
         }
     }
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
