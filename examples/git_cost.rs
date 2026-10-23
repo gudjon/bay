@@ -10,8 +10,8 @@
 //! builds a scratch box as the integration tests do (a temp `HOME`, a global Git config that
 //! holds only the box's choice of no check sandbox), a bare trunk host, a work repository whose
 //! trunk holds `--files` files over `--commits` commits and one required check, and an
-//! executor clone. Then it runs a fixed scenario (`start`, `land`, `executor run --once`,
-//! `status`, `status --fleet`, `watch`, `evidence missing`), each with `BAY_TEST_GIT_TRACE`
+//! executor clone. Then it runs a fixed scenario (`start`, `merge`, `runner run --once`,
+//! `status`, `status --fleet`, `status --since`, `evidence missing`), each with `BAY_TEST_GIT_TRACE`
 //! naming a file of its own, and reports per command its git spawns, their total time and
 //! its wall time. It prints one table, or with `--json` one JSON document.
 //!
@@ -293,7 +293,7 @@ fn history(commits: usize, files: usize) -> Vec<u8> {
         &mut stream,
         "100644",
         ".bay/config.toml",
-        "trunk = \"main\"\n",
+        "main = \"main\"\n",
     );
     blob(&mut stream, "100644", ".bay/policy.toml", POLICY);
     blob(&mut stream, "100755", "scripts/bay-check", CHECK);
@@ -349,11 +349,11 @@ impl Step {
 
 fn scenario(scratch: &Scratch, bay: &Path, place: &Place) -> Result<Vec<Step>, String> {
     let repo = place.repo.as_path();
-    // The watch cursor before anything happens, outside the measure.
-    let (_, before) = bay_json(scratch, bay, repo, &["watch"], None)?;
+    // The status --since cursor before anything happens, outside the measure.
+    let (_, before) = bay_json(scratch, bay, repo, &["status", "--since"], None)?;
     let cursor = before["detail"]["cursor"]
         .as_str()
-        .ok_or_else(|| format!("bay watch returned no cursor: {before}"))?
+        .ok_or_else(|| format!("bay status --since returned no cursor: {before}"))?
         .to_owned();
     let mut steps = Vec::new();
     let (start, started) = step(
@@ -371,15 +371,19 @@ fn scenario(scratch: &Scratch, bay: &Path, place: &Place) -> Result<Vec<Step>, S
     std::fs::write(view.join("src/new.rs"), "pub fn new() {}\n")
         .map_err(|error| error.to_string())?;
     let plan: [(&'static str, &Path, Vec<&str>); 6] = [
-        ("land", view.as_path(), vec!["land"]),
+        ("merge", view.as_path(), vec!["merge"]),
         (
-            "executor run --once",
+            "runner run --once",
             place.executor.as_path(),
-            vec!["executor", "run", "--once"],
+            vec!["runner", "run", "--once"],
         ),
         ("status", repo, vec!["status"]),
         ("status --fleet", repo, vec!["status", "--fleet"]),
-        ("watch", repo, vec!["watch", "--since", cursor.as_str()]),
+        (
+            "status --since",
+            repo,
+            vec!["status", "--since", cursor.as_str()],
+        ),
         (
             "evidence missing",
             repo,

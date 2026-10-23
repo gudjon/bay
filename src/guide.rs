@@ -42,7 +42,7 @@ pub fn guide(cli: clap::Command) -> String {
         })
         .collect();
     let mut out = format!(
-        "bay {}: agents submit once, and bay lands exactly what was checked.\n",
+        "bay {}: agents submit once, and bay merges exactly what was checked.\n",
         crate::version::BAY
     );
     let groups: [(&str, Member); 3] = [

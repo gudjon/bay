@@ -26,18 +26,18 @@ Enter
 Sleep 800ms
 Ctrl+B
 Up
-Type "bay land --wait"
+Type "bay merge --wait"
 Enter
 Sleep 3.5s
 Ctrl+B
 Down
-Type "bay land --wait"
+Type "bay merge --wait"
 Enter
 Sleep 6s
 Type 'echo "port = 8081" > services/api.conf'
 Enter
 Sleep 500ms
-Type "bay land --wait"
+Type "bay merge --wait"
 Enter
 Sleep 4s
 Ctrl+B

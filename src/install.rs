@@ -141,7 +141,7 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
             if unlanded {
                 detail["hooks_to_land"] = json!(true);
                 detail["next"] = json!(format!(
-                    "commit {} and land it: every clone gets bay's hook entries from main",
+                    "commit {} and merge it: every clone gets bay's hook entries from main",
                     path.display()
                 ));
             }

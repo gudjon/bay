@@ -3824,7 +3824,7 @@ fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayR
                 ),
                 "trunk": trunk,
                 "recovery": format!(
-                    "drop the dependency: bay abandon here, then bay start {intent} --new without --after {named}; or restart {named} (bay start of its intent adopts it), land it, then bay merge again"
+                    "drop the dependency: bay abandon here, then bay start {intent} --new without --after {named}; or restart {named} (bay start of its intent adopts it), merge it, then bay merge again"
                 ),
             }));
         return Ok(Some(result));

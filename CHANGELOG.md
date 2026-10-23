@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4
+
+- The README is rewritten for a newcomer: one word per idea, one branch, no agent branches.
+- `bay help`, install and refusal texts say merge where they still said land.
+
 ## 0.3.3
 
 - `bay enrol` refuses a key that was removed, under any name, before it signs or pushes anything.

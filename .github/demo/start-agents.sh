@@ -1,5 +1,5 @@
 #!/bin/bash
-# Opens the two-agents demo: a throwaway repository (setup-two-agents.sh), an executor in the background, one
+# Opens the two-agents demo: a throwaway repository (setup-two-agents.sh), a runner in the background, one
 # view per agent, and a tmux window with one pane per agent. In a pane, `bay` shows bay's own human summary
 # (its stderr) without the bay.result/1 line it also prints on stdout. Usage: start-agents.sh (from this directory).
 set -eu
@@ -7,7 +7,7 @@ R=$(cd "$(dirname "$0")" && pwd); D=$(mktemp -d); echo "$D" > "$R/.demo-dir"
 sh "$R/setup-two-agents.sh" "$D" >/dev/null 2>&1
 export HOME="$D/home"; unset CLAUDE_CONFIG_DIR; export PATH="$HOME/.local/bin:$PATH"
 cd "$D/app"
-("$HOME/.local/bin/bay" executor run >/dev/null 2>&1 &)
+("$HOME/.local/bin/bay" runner run >/dev/null 2>&1 &)
 A=$(bay start CARD-1 --paths services --json | jq -r .detail.view)
 B=$(bay start CARD-2 --paths services --json | jq -r .detail.view)
 mkdir -p "$D/bin"

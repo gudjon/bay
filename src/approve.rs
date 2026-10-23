@@ -864,7 +864,7 @@ fn waive_in(
                 "check {check} is not waivable: the policy at the base of candidate {} does not mark it waivable = true",
                 found.commit
             ),
-            "repair the change and land it again; a waiver answers only a [[check]] with waivable = true at the base",
+            "repair the change and merge it again; a waiver answers only a [[check]] with waivable = true at the base",
             None,
         ));
     }

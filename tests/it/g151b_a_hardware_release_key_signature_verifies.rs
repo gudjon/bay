@@ -1,4 +1,4 @@
-//! G151. A release signed by any key in bay's pinned list verifies, and nothing else does. The
+//! G151b. A release signed by any key in bay's pinned list verifies, and nothing else does. The
 //! fixture is a real signature by the hardware-held release key (a secure enclave key, shown to
 //! SSH as `sk-ecdsa-sha2-nistp256@openssh.com`), made with a touch over `sk-test.txt` in the
 //! namespace `bay-test`, so it can never pass as a release signature (namespace `bay-release`).
