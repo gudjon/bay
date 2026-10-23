@@ -15,6 +15,7 @@ The last renames before the first user; scripts and configs that use the old nam
 - `retry_when` takes one of seven values: `by_itself`, `after_wait`, `after_fix`, `after_person`, `after_setup`, `after_new_main`, `never`.
 - `bay help --json` lists agent products in `detail.agents`, not `detail.adapters`.
 - Every change record is written as `bay.change/1`; records stored as `/2` to `/4` are still read.
+- A bay host no longer refuses a push when it judges two pushes at once.
 
 ## 0.3.7
 

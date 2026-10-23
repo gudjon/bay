@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::git::Git;
 use crate::policy::Signing;
@@ -512,11 +512,7 @@ impl Registry {
             .join(&self.commit);
         std::fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
         let path = dir.join(class.file());
-        if !path.exists() {
-            let tmp = dir.join(format!(".{}.tmp", class.file()));
-            std::fs::write(&tmp, &self.files[&class]).map_err(|error| error.to_string())?;
-            crate::durable::rename(&tmp, &path).map_err(|error| error.to_string())?;
-        }
+        write_once(&path, &self.files[&class])?;
         Ok(path)
     }
 
@@ -551,11 +547,7 @@ impl Registry {
             crate::agent_settings::hex(principal.as_bytes())
         );
         let path = class_path.with_file_name(&name);
-        if !path.exists() {
-            let tmp = class_path.with_file_name(format!(".{name}.tmp"));
-            std::fs::write(&tmp, lines).map_err(|error| error.to_string())?;
-            crate::durable::rename(&tmp, &path).map_err(|error| error.to_string())?;
-        }
+        write_once(&path, &lines)?;
         Ok(path)
     }
 
@@ -647,11 +639,7 @@ impl Registry {
             crate::agent_settings::hex(at.as_bytes())
         );
         let path = class_path.with_file_name(&name);
-        if !path.exists() {
-            let tmp = class_path.with_file_name(format!(".{name}.tmp"));
-            std::fs::write(&tmp, text).map_err(|error| error.to_string())?;
-            crate::durable::rename(&tmp, &path).map_err(|error| error.to_string())?;
-        }
+        write_once(&path, &text)?;
         Ok(path)
     }
 
@@ -773,4 +761,58 @@ pub fn landing_signed(git: &Git, commit: &str) -> bool {
         crate::policy::signing_stated_at(git, &format!("{commit}^1")),
         Ok(Signing::Approvals)
     )
+}
+
+/// Writes `text` at `path` unless a file is there: a file of a registry version never changes,
+/// so the first writer's is every writer's. Each writer writes its own temporary file and renames
+/// it into place, so two hook processes that judge pushes at once never take each other's
+/// temporary file away (a rename that found it gone refused a push with ENOENT).
+fn write_once(path: &Path, text: &str) -> Result<(), String> {
+    static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    if path.exists() {
+        return Ok(());
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("{} names no file", path.display()))?;
+    let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()));
+    std::fs::write(&tmp, text).map_err(|error| error.to_string())?;
+    if let Err(error) = crate::durable::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        if !path.exists() {
+            return Err(error.to_string());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_once;
+
+    /// Many writers of one registry file at once: each succeeds, and the file holds the text.
+    /// With one shared temporary name, a writer's rename finds its file taken by another's.
+    #[test]
+    fn writers_of_one_file_at_once_all_succeed() {
+        for round in 0..20 {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("runner");
+            let failed: Vec<String> = std::thread::scope(|scope| {
+                let writers: Vec<_> = (0..16)
+                    .map(|_| scope.spawn(|| write_once(&path, "r1 ssh-ed25519 AAAA\n")))
+                    .collect();
+                writers
+                    .into_iter()
+                    .filter_map(|writer| writer.join().unwrap().err())
+                    .collect()
+            });
+            assert!(failed.is_empty(), "round {round}: {failed:?}");
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                "r1 ssh-ed25519 AAAA\n"
+            );
+        }
+    }
 }
