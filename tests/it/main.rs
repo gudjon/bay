@@ -212,6 +212,7 @@ mod g345_a_large_file_merges_only_when_its_store_holds_it;
 mod g346_a_guest_products_tool_calls_are_judged;
 mod g347_a_fresh_clone_merges_with_no_setup;
 mod g348_a_pinned_runner_never_moves_to_another_version;
+mod g349_a_merge_names_what_main_changed_in_its_files;
 mod g34_a_moved_base_never_hides_an_earlier_landing;
 mod g35_publication_never_livelocks;
 mod g36_one_intent_one_revision_one_landing;

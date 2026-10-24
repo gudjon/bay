@@ -882,10 +882,12 @@ fn submit_land(
     {
         return Ok(waiting);
     }
+    // BACKLOG 67 item 9: said before any check runs, so the agent reads main's change first.
+    let moved = main_changed(&repo.git, &trunk, &revision);
     if wait && online {
-        let result = execute_op(&mut ctx, &op_id, trunk);
+        let result = execute_op(&mut ctx, &op_id, trunk.clone());
         ctx.tell_deferred();
-        return result;
+        return result.map(|result| with_main_changed(result, moved));
     }
     let op = ctx.op(&op_id);
     let mut result = BayResult::new(Decision::Queued)
@@ -895,7 +897,60 @@ fn submit_land(
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned));
     result.waiting_for = Some(if online { "executor" } else { "remote" }.to_owned());
-    Ok(with_progress(&ctx.repo.git, ctx.op(&op_id), result))
+    Ok(with_main_changed(
+        with_progress(&ctx.repo.git, ctx.op(&op_id), result),
+        moved,
+    ))
+}
+
+/// BACKLOG 67 item 9 (owner ruling 2026-10-24): the files this change edits that main changed
+/// since the change's base (where `revision` meets `trunk`), and main's newest commit that
+/// changed them, as `{"paths", "commit"}`; `None` when main changed none of them. The check
+/// still runs on the merged result: this only says it first.
+fn main_changed(git: &Git, trunk: &str, revision: &str) -> Option<serde_json::Value> {
+    let base = git.run(&["merge-base", trunk, revision]).ok()?;
+    if base == trunk {
+        return None;
+    }
+    let names = |from: &str, to: &str| -> Vec<String> {
+        git.run(&["diff", "--name-only", "--no-renames", "-z", from, to])
+            .map(|out| {
+                out.split('\0')
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mine = names(&base, revision);
+    let theirs = names(&base, trunk);
+    let paths: Vec<String> = mine
+        .into_iter()
+        .filter(|path| theirs.contains(path))
+        .collect();
+    if paths.is_empty() {
+        return None;
+    }
+    let range = format!("{base}..{trunk}");
+    let mut args = vec!["log", "-1", "--format=%H", range.as_str(), "--"];
+    args.extend(paths.iter().map(String::as_str));
+    let commit = git.run(&args).ok().filter(|commit| !commit.is_empty());
+    Some(json!({"paths": paths, "commit": commit}))
+}
+
+/// `result` with `moved` ([`main_changed`]) as its `detail.main_changed`, when there is one.
+fn with_main_changed(mut result: BayResult, moved: Option<serde_json::Value>) -> BayResult {
+    let Some(moved) = moved else {
+        return result;
+    };
+    match result.detail.as_mut() {
+        Some(serde_json::Value::Object(detail)) => {
+            detail.insert("main_changed".to_owned(), moved);
+        }
+        None => result.detail = Some(json!({"main_changed": moved})),
+        Some(_) => {}
+    }
+    result
 }
 
 /// `CHANGE_TOO_LARGE` at submit (owner ruling 2026-10-21): the change's own edits, from where

@@ -6,6 +6,7 @@
 - main is the remote's default branch; a clone follows when that default moves.
 - The skill says to save research, plans and reviews a person should read as a short file.
 - A runner with a version pin never moves to another version when its binary changes.
+- `bay merge` names the files main changed since your change began, and main's commit.
 
 ## 0.4.0
 
