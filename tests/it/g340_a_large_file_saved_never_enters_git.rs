@@ -209,7 +209,7 @@ fn the_plugin_test_holds_a_plugin_to_the_contract() {
     let command = format!("scripts/assets {}", store(&test_box).display());
     let (code, tested) = kit(&test_box, &repo, &command);
     assert_eq!(code, 0, "{tested}");
-    assert_eq!(tested["detail"]["passed"], 4, "{tested}");
+    assert_eq!(tested["detail"]["passed"], 8, "{tested}");
 
     std::fs::write(repo.join("scripts/liar"), LYING_PLUGIN).unwrap();
     std::fs::set_permissions(

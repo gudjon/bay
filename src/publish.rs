@@ -3959,6 +3959,44 @@ fn lock_not_held(
     ))
 }
 
+/// `ASSET_MISSING` at candidate build (BACKLOG 49, owner ruling 2026-10-24): the merged `tree`'s
+/// `.bay-assets` adds lines whose bytes the assets plugin does not hold (`exists`), or the
+/// plugin cannot say. A merge would name bytes no store keeps, so the operation is blocked, as
+/// on a conflict; no candidate is committed and no check runs.
+fn asset_missing(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+    tree: &str,
+) -> Result<Option<BayResult>, String> {
+    let repo = ctx.repo;
+    let detail = match crate::assets::not_held_at_merge(repo, trunk, tree) {
+        Ok(paths) if paths.is_empty() => return Ok(None),
+        Ok(paths) => json!({"paths": paths, "main": trunk}),
+        Err(why) => json!({"why": why, "main": trunk}),
+    };
+    let condition = condition(
+        &repo.git,
+        revision,
+        trunk,
+        None,
+        &ctx.record.observed_versions,
+    )?;
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Blocked;
+    op.outcome = Some(Reason::AssetMissing.code().to_owned());
+    op.blocked_on = Some(condition);
+    ctx.save(revision, None, "blocked: asset missing")?;
+    ctx.push_chain();
+    Ok(Some(
+        BayResult::blocked(Reason::AssetMissing)
+            .with_change(ctx.id.clone())
+            .with_op(op_id)
+            .with_detail(detail),
+    ))
+}
+
 /// G213: a merged `tree` equal to `trunk`'s own tree is work already on trunk, whether another
 /// change landed the same bytes or the change's edits cancel out. Nothing is published and no
 /// check runs; the operation ends `no_effect`, naming the trunk commit that holds the work.
@@ -4038,6 +4076,10 @@ fn build_and_check(
         // BACKLOG 57: a file that never merges reaches main only from the change that held
         // its lock.
         if let Some(refusal) = lock_not_held(ctx, op_id, revision, trunk, &tree)? {
+            return Ok(Err(refusal));
+        }
+        // BACKLOG 49: the bytes a change's manifest names are in the store before it merges.
+        if let Some(refusal) = asset_missing(ctx, op_id, revision, trunk, &tree)? {
             return Ok(Err(refusal));
         }
         if let Some(no_effect) = no_effect(ctx, op_id, revision, trunk, &tree)? {

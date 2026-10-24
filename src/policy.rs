@@ -62,6 +62,9 @@ struct PolicyFile {
     /// The `[locks]` table (BACKLOG 57): the paths one session at a time may edit.
     #[serde(default)]
     locks: crate::locks::Locks,
+    /// The `[assets]` table (BACKLOG 49): how long the store keeps generated files.
+    #[serde(default)]
+    assets: crate::assets::AssetsPolicy,
 }
 
 /// The `[policy]` table: `signing = "all"` (the default) or `"approvals"` (N-21). Any other value
@@ -1344,6 +1347,7 @@ fn validate_shape(file: &PolicyFile) -> Result<(), String> {
     // Owner ruling 2026-10-21: each `[limits]` key is a positive integer.
     file.limits.validate()?;
     file.locks.validate()?;
+    file.assets.validate()?;
     // Ruling 8c: a quarantine that names no check, or whose end is neither a date nor a
     // Change-Id, would set nothing aside or never show as overdue: a typo is never silent.
     for quarantine in &file.quarantine {

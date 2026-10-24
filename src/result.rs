@@ -144,6 +144,9 @@ reasons! {
     // BACKLOG 57: a change to a lockable path whose lock the change never held, refused at
     // candidate build (`crate::locks::not_held`).
     LockNotHeld => "LOCK_NOT_HELD", ["read", "repair"], "after_fix", false;
+    // BACKLOG 49: a change's `.bay-assets` names bytes the assets plugin does not hold
+    // (`crate::assets::not_held_at_merge`), refused at candidate build.
+    AssetMissing => "ASSET_MISSING", ["read", "repair"], "after_fix", false;
     RemoteNotFetched => "REMOTE_NOT_FETCHED", ["read"], "after_setup", false;
     // Ruling: config location (a repository with no `.bay/config.toml` anywhere bay looks);
     // not yet in INTERFACES § 2
@@ -1047,6 +1050,9 @@ impl Reason {
             Self::LockNotHeld => {
                 "Edit the files `detail.paths` names again in a session whose hook takes their lock, then `bay merge` again."
             }
+            Self::AssetMissing => {
+                "Save the files `detail.paths` names again, so the store holds their bytes (or fix the store `detail.why` names), then `bay merge` again."
+            }
             Self::RemoteNotFetched => {
                 "Check the network and the remote, then run the command again; `bay doctor` names what is wrong."
             }
@@ -1214,6 +1220,9 @@ impl Reason {
             Self::ShellDenied => "Stopped: that command could lose work, and it is never allowed.",
             Self::LockNotHeld => {
                 "Nothing was added: files that need a lock were edited without one. Edit them again where bay takes the lock."
+            }
+            Self::AssetMissing => {
+                "Nothing was added: the store does not hold some large files this change names. Save them again."
             }
             Self::RemoteNotFetched => {
                 "Nothing was done: bay could not get the latest main. Check the network, then try again."
@@ -1596,7 +1605,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 59);
+        assert_eq!(Reason::ALL.len(), 60);
     }
 
     #[test]

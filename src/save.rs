@@ -177,8 +177,10 @@ fn checkout_to_merge(
         return json!({"moved": false, "why": "the merge named no commit on main"});
     };
     let mut moved = bring_checkout(repo, checkout, head, tree, saved, commit);
-    if let Err(why) = crate::assets::fill_tree(repo, &repo.work_root, commit, &|_| true) {
-        moved["assets"] = json!(why);
+    match crate::assets::fill_tree(repo, &repo.work_root, commit, &|_| true) {
+        Ok(filled) if !filled.purged.is_empty() => moved["assets_purged"] = json!(filled.purged),
+        Ok(_) => {}
+        Err(why) => moved["assets"] = json!(why),
     }
     moved
 }

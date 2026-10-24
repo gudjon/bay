@@ -196,7 +196,10 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    store, and `.bay-assets` names its bytes (`sha256:<hex> <size> <path>`). The file stays in
    the folder; never add it by hand. Other clones get it at `bay install`, views and checks
    when they are made. bay ships a store for any folder or shared drive:
-   `examples/assets/folder-store`, named as `command = "scripts/folder-store <folder>"`.
+   `examples/assets/folder-store`, named as `command = "scripts/folder-store <folder>"`. A merge
+   whose large files the store does not hold is refused `ASSET_MISSING`: save them again. A file the
+   store purged keeps its line in `.bay-assets`; a clone names it and goes on. To let a store drop
+   generated files after a time, add `[assets] keep = [{ paths = "renders/", days = 30 }]` to the policy.
 3. Before you commit a `[[check]]` command or a plugin (`[plugin.wake]`, `[plugin.notify]`,
    `[plugin.assets]`), prove it: `bay plugin test check|wake|notify|assets -- <command>`. It runs bay's contract cases the
    way bay runs it, changes nothing, and exits 0 only when every case passes.

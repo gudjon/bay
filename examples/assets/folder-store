@@ -8,8 +8,12 @@
 #   command = "scripts/folder-store /Volumes/studio/bay-assets"
 #   over_limit = "offload"
 #
-# bay runs it as `<command> put <file>` and `<command> get <sha256:hex> <file>` (crate::assets),
-# and hashes every file itself. Check it with: bay plugin test assets -- scripts/folder-store <folder>
+# bay runs it as (crate::assets), and hashes every file itself:
+#   <command> put <file>                       store the bytes, print sha256:<hex>
+#   <command> get <id> <file> [<start> <end>]  write the bytes (or bytes start..end); exit 3 if purged
+#   <command> exists <id>                      exit 0 held, 1 not held, 3 purged
+#   <command> purge <id>                       drop the bytes, keep the address (a takedown)
+# Check it with: bay plugin test assets -- scripts/folder-store <folder>
 set -eu
 
 store=${1:?"name the store's folder after the command"}
@@ -33,20 +37,48 @@ put)
         cp "$file" "$store/.$hex.$$"
         mv "$store/.$hex.$$" "$store/$hex"
     fi
+    rm -f "$store/$hex.purged"
     echo "sha256:$hex"
     ;;
 get)
     id=${3:?"get needs an identity"}
     out=${4:?"get needs a file to write"}
     hex=${id#sha256:}
+    if [ -f "$store/$hex.purged" ]; then
+        echo "folder-store: $id was purged" >&2
+        exit 3
+    fi
     if [ ! -f "$store/$hex" ]; then
         echo "folder-store: $id is not in $store" >&2
         exit 1
     fi
-    cp "$store/$hex" "$out"
+    if [ $# -ge 6 ]; then
+        start=$5
+        end=$6
+        tail -c +"$((start + 1))" "$store/$hex" | head -c "$((end - start))" > "$out"
+    else
+        cp "$store/$hex" "$out"
+    fi
+    ;;
+exists)
+    hex=${3:?"exists needs an identity"}
+    hex=${hex#sha256:}
+    if [ -f "$store/$hex.purged" ]; then
+        exit 3
+    fi
+    if [ ! -f "$store/$hex" ]; then
+        exit 1
+    fi
+    ;;
+purge)
+    hex=${3:?"purge needs an identity"}
+    hex=${hex#sha256:}
+    mkdir -p "$store"
+    rm -f "$store/$hex"
+    : > "$store/$hex.purged"
     ;;
 *)
-    echo "folder-store: the actions are put and get" >&2
+    echo "folder-store: the actions are put, get, exists and purge" >&2
     exit 2
     ;;
 esac

@@ -48,6 +48,50 @@ pub const MANIFEST: &str = ".bay-assets";
 /// How long one plugin call may take when `[plugin.assets] timeout_s` is not set.
 pub const DEFAULT_TIMEOUT_S: u64 = 300;
 
+/// `[assets]` in `.bay/policy.toml` (BACKLOG 49, owner ruling 2026-10-24): per-path retention.
+/// `keep = [{ paths = "renders/", days = 30 }]` says the store may purge the bytes of a file
+/// under `paths` once `days` have passed since it was saved (the address stays, so history and
+/// its signatures stay whole). bay validates the line; the store reads it from main's policy and
+/// applies it. bay never purges.
+#[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AssetsPolicy {
+    #[serde(default)]
+    pub keep: Vec<Keep>,
+}
+
+/// One retention line.
+#[derive(Clone, Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Keep {
+    /// A glob of the paths it covers (`crate::policy::glob_matches`).
+    pub paths: String,
+    /// How long the store keeps their bytes, in days.
+    pub days: u64,
+}
+
+impl AssetsPolicy {
+    /// A validity rule of the policy (`POLICY_INVALID`): each line names paths and at least a day.
+    ///
+    /// # Errors
+    ///
+    /// Why the table is invalid.
+    pub fn validate(&self) -> Result<(), String> {
+        for keep in &self.keep {
+            if keep.paths.trim().is_empty() {
+                return Err("[assets] keep has a line with no paths".to_owned());
+            }
+            if keep.days == 0 {
+                return Err(format!(
+                    "[assets] keep for {} says 0 days: a store keeps bytes at least a day",
+                    keep.paths
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One manifest line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
@@ -190,22 +234,28 @@ pub struct Plugin<'a> {
 }
 
 impl Plugin<'_> {
-    /// Runs `<command> <args>`; its stdout, trimmed.
-    fn run(&self, args: &[&std::ffi::OsStr]) -> Result<String, String> {
+    /// Runs `<command> <args>`: its exit code, its stdout (trimmed) and its stderr's first line.
+    fn exec(&self, args: &[&std::ffi::OsStr]) -> Result<(i32, String, String), String> {
         let mut cmd = crate::run::command(self.work_root, self.command)
             .ok_or("[plugin.assets] command is empty")??;
         cmd.args(args);
         let ran = crate::run::captured(cmd, None, self.timeout)
             .map_err(|fault| format!("the assets plugin failed: {fault}"))?;
-        if !ran.status.success() {
-            let said = String::from_utf8_lossy(&ran.stderr);
-            return Err(format!(
-                "the assets plugin exited {}: {}",
-                ran.status.code().unwrap_or(-1),
-                said.lines().next().unwrap_or("").trim()
-            ));
+        let said = String::from_utf8_lossy(&ran.stderr);
+        Ok((
+            ran.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&ran.stdout).trim().to_owned(),
+            said.lines().next().unwrap_or("").trim().to_owned(),
+        ))
+    }
+
+    /// Runs `<command> <args>`; its stdout, trimmed. A non-zero exit is an error.
+    fn run(&self, args: &[&std::ffi::OsStr]) -> Result<String, String> {
+        let (code, stdout, said) = self.exec(args)?;
+        if code != 0 {
+            return Err(format!("the assets plugin exited {code}: {said}"));
         }
-        Ok(String::from_utf8_lossy(&ran.stdout).trim().to_owned())
+        Ok(stdout)
     }
 
     /// Stores `file` and returns its identity, as bay hashed it.
@@ -225,13 +275,22 @@ impl Plugin<'_> {
         Ok(id)
     }
 
-    /// Writes the bytes of `id` to `file`.
+    /// Writes the bytes of `id` to `file`; [`Got::Purged`] when the store purged them, the
+    /// address kept ([`EXIT_PURGED`]), and nothing is written.
     ///
     /// # Errors
     ///
     /// The plugin fails, or the bytes it wrote are not `id`'s.
-    pub fn get(&self, id: &str, file: &Path) -> Result<(), String> {
-        self.run(&["get".as_ref(), id.as_ref(), file.as_os_str()])?;
+    pub fn get(&self, id: &str, file: &Path) -> Result<Got, String> {
+        let (code, _, said) = self.exec(&["get".as_ref(), id.as_ref(), file.as_os_str()])?;
+        match code {
+            0 => {}
+            EXIT_PURGED => {
+                let _ = std::fs::remove_file(file);
+                return Ok(Got::Purged);
+            }
+            _ => return Err(format!("the assets plugin exited {code}: {said}")),
+        }
         let got = identity(file)?;
         if got != id {
             let _ = std::fs::remove_file(file);
@@ -239,9 +298,89 @@ impl Plugin<'_> {
                 "the assets plugin wrote bytes {got} for {id}; they were removed"
             ));
         }
-        Ok(())
+        Ok(Got::Bytes)
+    }
+
+    /// Whether the store holds the bytes of `id` (durability before a merge): exit 0 is yes,
+    /// [`EXIT_ABSENT`] no.
+    ///
+    /// # Errors
+    ///
+    /// The plugin fails, or answers another code: unknown is never a yes.
+    pub fn exists(&self, id: &str) -> Result<bool, String> {
+        let (code, _, said) = self.exec(&["exists".as_ref(), id.as_ref()])?;
+        match code {
+            0 => Ok(true),
+            EXIT_ABSENT | EXIT_PURGED => Ok(false),
+            _ => Err(format!(
+                "the assets plugin exited {code} for exists {id}: {said}"
+            )),
+        }
+    }
+
+    /// An optional action (`purge`, a range `get`): `None` when the plugin does not offer it
+    /// ([`EXIT_UNSUPPORTED`]), else whether it succeeded.
+    fn optional(&self, args: &[&std::ffi::OsStr]) -> Result<Option<String>, String> {
+        let (code, stdout, said) = self.exec(args)?;
+        match code {
+            0 => Ok(Some(stdout)),
+            EXIT_UNSUPPORTED => Ok(None),
+            _ => Err(format!("the assets plugin exited {code}: {said}")),
+        }
+    }
+
+    /// Purges the bytes of `id`, keeping its address: a later `get` answers [`EXIT_PURGED`].
+    /// bay never purges on its own; this is the store operator's action, held to the contract by
+    /// `bay plugin test assets`. `None` when the plugin does not offer it.
+    ///
+    /// # Errors
+    ///
+    /// The plugin fails.
+    pub fn purge(&self, id: &str) -> Result<Option<()>, String> {
+        Ok(self.optional(&["purge".as_ref(), id.as_ref()])?.map(|_| ()))
+    }
+
+    /// Writes bytes `start..end` of `id` to `file` (a host's preview; bay itself reads whole
+    /// files). `None` when the plugin does not offer ranges.
+    ///
+    /// # Errors
+    ///
+    /// The plugin fails.
+    pub fn get_range(
+        &self,
+        id: &str,
+        file: &Path,
+        start: u64,
+        end: u64,
+    ) -> Result<Option<()>, String> {
+        let (start, end) = (start.to_string(), end.to_string());
+        Ok(self
+            .optional(&[
+                "get".as_ref(),
+                id.as_ref(),
+                file.as_os_str(),
+                start.as_ref(),
+                end.as_ref(),
+            ])?
+            .map(|_| ()))
     }
 }
+
+/// What a `get` brought back.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Got {
+    /// The bytes, hashed.
+    Bytes,
+    /// The store purged them; their address stays in the manifest.
+    Purged,
+}
+
+/// `exists`: the store does not hold the bytes.
+pub const EXIT_ABSENT: i32 = 1;
+/// An optional action the plugin does not offer (`purge`, a range `get`).
+pub const EXIT_UNSUPPORTED: i32 = 2;
+/// `get` (and `exists`) of bytes the store purged, the address kept.
+pub const EXIT_PURGED: i32 = 3;
 
 /// The assets plugin `config` names, run from `work_root`, whatever `over_limit` says: getting
 /// bytes back needs only the plugin.
@@ -284,12 +423,12 @@ pub fn fill(
     root: &Path,
     covered: &dyn Fn(&str) -> bool,
     exclude: Option<&Path>,
-) -> Result<Vec<String>, String> {
+) -> Result<Filled, String> {
     let wanted: Vec<Entry> = manifest_at(git, commit)?
         .into_iter()
         .filter(|entry| covered(&entry.path))
         .collect();
-    let mut written = Vec::new();
+    let mut filled = Filled::default();
     for entry in &wanted {
         let file = root.join(&entry.path);
         if std::fs::metadata(&file).is_ok_and(|meta| meta.is_file() && meta.len() == entry.size) {
@@ -304,20 +443,64 @@ pub fn fill(
             .and_then(|name| name.to_str())
             .unwrap_or("asset");
         let tmp = file.with_file_name(format!(".{name}.{}.get", std::process::id()));
-        if let Err(why) = plugin.get(&entry.id, &tmp) {
-            let _ = std::fs::remove_file(&tmp);
-            return Err(format!("{} could not be fetched: {why}", entry.path));
+        match plugin.get(&entry.id, &tmp) {
+            Ok(Got::Bytes) => {}
+            // A takedown: the address stays in the manifest, and the file is named, not made.
+            Ok(Got::Purged) => {
+                filled.purged.push(entry.path.clone());
+                continue;
+            }
+            Err(why) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(format!("{} could not be fetched: {why}", entry.path));
+            }
         }
         crate::durable::rename(&tmp, &file).map_err(|error| {
             let _ = std::fs::remove_file(&tmp);
             format!("{} cannot be written: {error}", file.display())
         })?;
-        written.push(entry.path.clone());
+        filled.written.push(entry.path.clone());
     }
     if let Some(exclude) = exclude {
         exclude_paths(exclude, &wanted)?;
     }
-    Ok(written)
+    Ok(filled)
+}
+
+/// Durability before a merge (BACKLOG 49, owner ruling 2026-10-24): the manifest lines `tree`
+/// adds to `trunk`'s whose bytes the store does not hold, asked with `exists`, through the
+/// plugin of `repo`'s config. A tree that adds lines while the config names no plugin holds
+/// none of them.
+///
+/// # Errors
+///
+/// A manifest cannot be read, or the plugin cannot answer: unknown is never held.
+pub fn not_held_at_merge(repo: &Repo, trunk: &str, tree: &str) -> Result<Vec<String>, String> {
+    let before = manifest_at(&repo.git, trunk)?;
+    let added: Vec<Entry> = manifest_at(&repo.git, tree)?
+        .into_iter()
+        .filter(|entry| !before.contains(entry))
+        .collect();
+    if added.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(plugin) = plugin_of(&repo.config, &repo.work_root) else {
+        return Ok(added.into_iter().map(|entry| entry.path).collect());
+    };
+    let mut missing = Vec::new();
+    for entry in added {
+        if !plugin.exists(&entry.id)? {
+            missing.push(entry.path);
+        }
+    }
+    Ok(missing)
+}
+
+/// What [`fill`] did: the files it wrote, and those the store purged (named, never written).
+#[derive(Debug, Default)]
+pub struct Filled {
+    pub written: Vec<String>,
+    pub purged: Vec<String>,
 }
 
 /// [`fill`] for one of `repo`'s own trees (its main checkout or a view): the plugin of its
@@ -332,9 +515,9 @@ pub fn fill_tree(
     root: &Path,
     commit: &str,
     covered: &dyn Fn(&str) -> bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Filled, String> {
     let Some(plugin) = plugin_of(&repo.config, &repo.work_root) else {
-        return Ok(Vec::new());
+        return Ok(Filled::default());
     };
     fill(
         &plugin,
@@ -394,7 +577,20 @@ pub fn fill_check(
     };
     let filled = fill(&plugin, git, commit, tree_dir, &covered, None);
     let _ = std::fs::remove_dir_all(&scratch);
-    for path in filled? {
+    let filled = filled?;
+    // A check cannot run on bytes that are gone: unknown is never a pass.
+    if !filled.purged.is_empty() {
+        return Err(format!(
+            "the check reads {} kept outside Git, and the store purged {}",
+            filled.purged.join(", "),
+            if filled.purged.len() == 1 {
+                "it"
+            } else {
+                "them"
+            }
+        ));
+    }
+    for path in filled.written {
         let file = tree_dir.join(&path);
         if let Ok(meta) = std::fs::metadata(&file) {
             let mut permissions = meta.permissions();

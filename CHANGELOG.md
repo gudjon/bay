@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- A large file merges only when its store holds it; otherwise `ASSET_MISSING`.
+- A store may purge a file's bytes and keep its line; a clone names it and goes on.
+- `[assets] keep` in the policy says how long a store keeps generated files.
+- `bay plugin test assets` also checks `exists`, and optional range `get` and `purge`.
+
 ## 0.4.0
 
 The last renames before the first user; scripts and configs that use the old names need the new ones.

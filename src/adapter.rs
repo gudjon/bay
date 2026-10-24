@@ -214,7 +214,11 @@ fn test_assets(dir: &Path, command: &str, timeout_s: Option<u64>) -> BayResult {
             came_back: json!(get.as_ref().err()),
         },
         match &get {
-            Ok(()) => Pass("it wrote exactly the stored bytes".to_owned()),
+            Ok(crate::assets::Got::Bytes) => Pass("it wrote exactly the stored bytes".to_owned()),
+            Ok(crate::assets::Got::Purged) => Fail(format!(
+                "it answered purged ({}) for bytes it just stored",
+                crate::assets::EXIT_PURGED
+            )),
             Err(why) => Fail(why.clone()),
         },
     ));
@@ -229,9 +233,17 @@ fn test_assets(dir: &Path, command: &str, timeout_s: Option<u64>) -> BayResult {
         },
         match &refused_get {
             Err(_) => Pass("an identity it never stored is refused".to_owned()),
-            Ok(()) => Fail(format!("it answered {unknown}, which it never stored")),
+            Ok(_) => Fail(format!("it answered {unknown}, which it never stored")),
         },
     ));
+    assets_more(
+        &plugin,
+        &scratch.0,
+        &bytes,
+        (&id, &unknown),
+        &sent,
+        &mut cases,
+    );
     report(
         "assets",
         command,
@@ -239,6 +251,98 @@ fn test_assets(dir: &Path, command: &str, timeout_s: Option<u64>) -> BayResult {
         json!({"manifest_line": format!("{id} {} <path>", bytes.len())}),
         cases,
     )
+}
+
+/// The rest of the assets contract (BACKLOG 49, owner ruling 2026-10-24): `exists` of stored
+/// and unknown bytes (durability before a merge), and the optional actions, judged only when
+/// the plugin offers them: a range `get`, and `purge`, after which `get` answers purged.
+fn assets_more(
+    plugin: &crate::assets::Plugin<'_>,
+    scratch: &Path,
+    bytes: &[u8],
+    (id, unknown): (&str, &str),
+    sent: &dyn Fn(&str) -> Value,
+    cases: &mut Vec<Value>,
+) {
+    let shown = |args: &str, came_back: Value| Shown {
+        sent: sent(args),
+        came_back,
+    };
+    let held = plugin.exists(id);
+    cases.push(case(
+        "exists",
+        &shown(&format!("exists {id}"), json!(format!("{held:?}"))),
+        match held {
+            Ok(true) => Pass("it holds the bytes it stored".to_owned()),
+            Ok(false) => Fail("it says it lacks the bytes it just stored".to_owned()),
+            Err(why) => Fail(why),
+        },
+    ));
+    let absent = plugin.exists(unknown);
+    cases.push(case(
+        "exists_unknown",
+        &shown(&format!("exists {unknown}"), json!(format!("{absent:?}"))),
+        match absent {
+            Ok(false) => Pass(format!(
+                "an identity it never stored answers {}",
+                crate::assets::EXIT_ABSENT
+            )),
+            Ok(true) => Fail(format!("it says it holds {unknown}, which it never stored")),
+            Err(why) => Fail(why),
+        },
+    ));
+    let part = scratch.join("part.bin");
+    let ranged = plugin.get_range(id, &part, 10, 1010);
+    cases.push(case(
+        "get_range",
+        &shown(
+            &format!("get {id} <file> 10 1010"),
+            json!(format!("{ranged:?}")),
+        ),
+        match ranged {
+            Ok(None) => Pass(format!(
+                "it does not offer ranges ({}); they are optional",
+                crate::assets::EXIT_UNSUPPORTED
+            )),
+            Ok(Some(())) if std::fs::read(&part).is_ok_and(|got| got == bytes[10..1010]) => {
+                Pass("it wrote exactly bytes 10 to 1010".to_owned())
+            }
+            Ok(Some(())) => Fail("the range it wrote is not bytes 10 to 1010".to_owned()),
+            Err(why) => Fail(why),
+        },
+    ));
+    // A second sample, so the purge never takes the bytes the cases above read.
+    let other = scratch.join("purged.bin");
+    let other_bytes: Vec<u8> = bytes.iter().map(|byte| byte ^ 0x5a).collect();
+    let judged = std::fs::write(&other, &other_bytes)
+        .map_err(|error| error.to_string())
+        .and_then(|()| plugin.put(&other))
+        .and_then(|other_id| {
+            Ok(match plugin.purge(&other_id)? {
+                None => None,
+                Some(()) => Some(plugin.get(&other_id, &scratch.join("after-purge.bin"))?),
+            })
+        });
+    cases.push(case(
+        "purge",
+        &shown(
+            "purge <a second sample>, then get it",
+            json!(format!("{judged:?}")),
+        ),
+        match judged {
+            Ok(None) => Pass(format!(
+                "it does not offer purge ({}); it is optional",
+                crate::assets::EXIT_UNSUPPORTED
+            )),
+            Ok(Some(crate::assets::Got::Purged)) => {
+                Pass("after a purge, get answers purged; the address stays".to_owned())
+            }
+            Ok(Some(crate::assets::Got::Bytes)) => {
+                Fail("after a purge, get still wrote the bytes".to_owned())
+            }
+            Err(why) => Fail(why),
+        },
+    ));
 }
 
 /// The kit could not run its cases: `why` says what to change.
