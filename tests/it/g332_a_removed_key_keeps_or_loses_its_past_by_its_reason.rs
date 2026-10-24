@@ -206,6 +206,74 @@ fn a_bay_host_takes_a_removal_and_refuses_its_undoing() {
     );
 }
 
+/// The site's check of 0.4.1: a registry version the registry key signs, which keeps the
+/// removal line but enrols the removed key again under another name, is refused by a bay host
+/// too, not only by `bay enrol`: the host loads each pushed version with the rule that a removed
+/// key is never enrolled again.
+///
+/// Guard to mutate: `src/hook.rs` `Judge::registry`: load the pushed version with
+/// `Registry::load_for_repair` (the version that enrols the removed key again is taken).
+#[test]
+fn a_bay_host_refuses_a_version_that_enrols_a_removed_key_again() {
+    use support::approval::{APPROVER, trunk_enrolled_by};
+    use support::{AGENT, REGISTRAR, key_line};
+    let public = |key: &std::path::Path| key.with_extension("pub").to_str().unwrap().to_owned();
+    let mut approver = std::path::PathBuf::new();
+    let trunk = trunk_enrolled_by("", "", |test_box, repo, keys, approver_key| {
+        test_box.git_ok(
+            repo,
+            &["config", "bay.registryKey", keys.registry.to_str().unwrap()],
+        );
+        for (class, name, key) in [
+            ("registry", REGISTRAR, keys.registry.as_path()),
+            ("agent", AGENT, keys.agent.as_path()),
+            ("approver", APPROVER, approver_key),
+        ] {
+            test_box.bay_ok(repo, &["enrol", class, name, &public(key)]);
+        }
+        approver = approver_key.to_path_buf();
+    });
+    let (test_box, repo) = (&trunk.test_box, &trunk.repo);
+    let (code, removed) = remove(test_box, repo, "approver", APPROVER, "revoked");
+    assert_eq!(code, 0, "the host refused the removal: {removed}");
+
+    // Signed by the registry key, the removal line kept, the approver's key enrolled again.
+    let keys = test_box.keys();
+    test_box.git_ok(
+        repo,
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/bay/registry:refs/bay/registry",
+        ],
+    );
+    let removed_file = test_box.git_ok(repo, &["show", "refs/bay/registry:removed"]);
+    let again = test_box.registry_commit(
+        repo,
+        &keys,
+        &[
+            ("registry", key_line(REGISTRAR, &keys.registry)),
+            ("agent", key_line(AGENT, &keys.agent)),
+            ("approver", key_line("approver-2", &approver)),
+            ("removed", format!("{removed_file}\n")),
+        ],
+    );
+    let out = test_box
+        .git(repo)
+        .args(["push", "origin", &format!("{again}:refs/bay/registry")])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "the host took the removed key back: {out:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("never enrolled again"),
+        "{out:?}"
+    );
+}
+
 /// 0.3.3 (the Mac's 0.3.2 finding): `bay enrol` refuses a removed key, under any name, before it
 /// signs or pushes anything, so no registry no bay can read reaches a plain remote.
 ///
