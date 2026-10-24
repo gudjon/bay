@@ -3923,7 +3923,7 @@ fn too_large(
 
 /// `LOCK_NOT_HELD` at candidate build (BACKLOG 57): the merged `tree` changes a path the policy
 /// at `trunk` names lockable (`[locks] paths`), and no commit of that path's lock names this
-/// change (or, for a save of a main checkout, which names no change, its actor). Such an edit
+/// change (a save names its change in its lock). Such an edit
 /// went around the lock, and two copies of a file that never merges cannot be combined. The
 /// operation is blocked, as on a conflict; no candidate is committed and no check runs.
 fn lock_not_held(
@@ -3934,7 +3934,7 @@ fn lock_not_held(
     tree: &str,
 ) -> Result<Option<BayResult>, String> {
     let repo = ctx.repo;
-    let paths = crate::locks::not_held(repo, trunk, tree, &ctx.id, &ctx.record.actor.name)?;
+    let paths = crate::locks::not_held(repo, trunk, tree, &ctx.id)?;
     if paths.is_empty() {
         return Ok(None);
     }

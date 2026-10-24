@@ -1,12 +1,5 @@
 # Changelog
 
-## 0.4.1
-
-- A large file merges only when its store holds it; otherwise `ASSET_MISSING`.
-- A store may purge a file's bytes and keep its line; a clone names it and goes on.
-- `[assets] keep` in the policy says how long a store keeps generated files.
-- `bay plugin test assets` also checks `exists`, and optional range `get` and `purge`.
-
 ## 0.4.0
 
 The last renames before the first user; scripts and configs that use the old names need the new ones.
@@ -37,6 +30,12 @@ The last renames before the first user; scripts and configs that use the old nam
 - Two changes adding large files never conflict on `.bay-assets`: it merges line by line.
 - Main's commit keeps the agent's own commit message from the view, with its `Open:` lines.
 - `bay start --paths .` (or `/`) is a view of the whole tree; it takes new files anywhere.
+- A large file merges only when its store holds it; otherwise `ASSET_MISSING`.
+- A store may purge a file's bytes and keep its line; a clone names it and goes on.
+- `[assets] keep` in the policy says how long a store keeps generated files.
+- `bay plugin test assets` also checks `exists`, and optional range `get` and `purge`.
+- A merge's lock guard counts only a lock that named the change itself.
+- A command name in a sentence is said as typed (`bay merge`, never "bay combine").
 
 ## 0.3.7
 

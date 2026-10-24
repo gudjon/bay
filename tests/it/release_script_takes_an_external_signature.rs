@@ -1,8 +1,13 @@
 //! G151. `scripts/release.sh` takes a signature made by an external signer (a hardware key
 //! that signs only with a touch): `attach-sig` copies it in only when it verifies against a
 //! key in `scripts/release/allowed_signers`, and `publish` refuses a release whose
-//! `SHA256SUMS.sig` is absent or does not verify. The script runs in a throwaway repository
-//! whose allowed-signers file lists a throwaway key A; no build and no network is involved.
+//! `SHA256SUMS.sig` is absent or does not verify. `publish` tags a commit on main, or a patch of
+//! an older minor on its own line, `origin/release-<MAJOR>.<MINOR>`. The script runs in a
+//! throwaway repository whose allowed-signers file lists a throwaway key A; no build and no
+//! network is involved.
+//!
+//! Guard to mutate for the release line: `scripts/release.sh` `publish`: drop the
+//! `origin/release-$minor` alternative (a patch of an older minor is refused).
 
 #![cfg(unix)]
 
@@ -242,4 +247,51 @@ fn publish_tags_the_built_commit_after_trunk_moved() {
     let (code, stderr) = release.script(&["publish", VERSION]);
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains("COMMIT is absent"), "{stderr}");
+}
+
+/// A patch of an older minor is built on its own line (0.3.8 on release-0.3 while main holds
+/// 0.4): publish takes a built commit on `origin/release-<MAJOR>.<MINOR>` of the version's own
+/// minor, and refuses one on neither that line nor main (the Mac's report, 2026-10-24).
+#[test]
+fn publish_takes_a_commit_on_its_minors_release_line() {
+    let release = Release::new();
+    let built = release.head();
+    let origin = release.root.path().join("origin.git");
+    ok(Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg("--bare")
+        .arg(&origin));
+    release.git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+    // main is another line that never held the built commit.
+    release.git(&["checkout", "-q", "--orphan", "other"]);
+    release.git(&["commit", "-q", "-m", "main of the next minor"]);
+    release.git(&["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    release.git(&["checkout", "-q", "-f", &built]);
+    let a = release.root.path().join("keys/a");
+    let (code, stderr) = release.script(&[
+        "attach-sig",
+        VERSION,
+        release.signed_by(&a).to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{stderr}");
+
+    let (code, stderr) = release.script(&["publish", VERSION]);
+    assert_eq!(
+        code, 1,
+        "a commit on no release line was published: {stderr}"
+    );
+    assert!(
+        stderr.contains("on neither origin/main nor origin/release-9.9"),
+        "{stderr}"
+    );
+
+    release.git(&[
+        "push",
+        "-q",
+        "origin",
+        &format!("{built}:refs/heads/release-9.9"),
+    ]);
+    let (code, stderr) = release.script(&["publish", VERSION]);
+    assert_eq!(code, 0, "{stderr}");
 }

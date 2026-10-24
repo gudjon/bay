@@ -90,7 +90,7 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         ));
     }
     let changed = changes(&checkout)?;
-    if let Some(refused) = take_locks(repo, &changed) {
+    if let Some(refused) = take_locks(repo, &changed, None) {
         return Ok(refused);
     }
     let (saved, offloaded, undo) = offload(repo, &trunk, &changed)?;
@@ -123,6 +123,9 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         return Ok(untouched(started, &saved));
     }
     let id = started.change.clone().ok_or("start returned no change")?;
+    if let Some(refused) = take_locks(repo, &changed, Some(&id)) {
+        return Ok(untouched(refused, &saved));
+    }
     let detail = started.detail.clone().unwrap_or_default();
     let view = detail["view"]
         .as_str()
@@ -188,14 +191,27 @@ fn checkout_to_merge(
 /// BACKLOG 57: a person saving takes the lock of each lockable file the save changes, as an
 /// agent's edit does, so the merge guard finds it held and a second saver is stopped first.
 /// The refusal when one cannot be taken.
-fn take_locks(repo: &Repo, changed: &[Entry]) -> Option<BayResult> {
+/// Taken twice: before anything is made, so a second saver stops first, and again once the
+/// change exists, so the lock commit names it (the merge guard counts no other). The session is
+/// the caller's (`BAY_SESSION`, which the agent hook gives its session's commands), so an
+/// agent's own lock is its save's.
+fn take_locks(repo: &Repo, changed: &[Entry], change: Option<&str>) -> Option<BayResult> {
     let targets: Vec<PathBuf> = changed
         .iter()
         .map(|entry| repo.work_root.join(&entry.path))
         .collect();
-    crate::locks::take(&repo.work_root, &targets, None, crate::live::unix_now())
-        .err()
-        .map(crate::locks::refusal)
+    let session = std::env::var("BAY_SESSION")
+        .ok()
+        .filter(|session| crate::session::SessionId::parse(session).is_some());
+    crate::locks::take_for(
+        &repo.work_root,
+        &targets,
+        session.as_deref(),
+        change,
+        crate::live::unix_now(),
+    )
+    .err()
+    .map(crate::locks::refusal)
 }
 
 /// BACKLOG 49: with `[plugin.assets] over_limit = "offload"` in the config, each new file over

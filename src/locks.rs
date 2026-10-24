@@ -117,6 +117,23 @@ pub fn take(
     session: Option<&str>,
     now: u64,
 ) -> Result<(), Refused> {
+    take_for(cwd, targets, session, None, now)
+}
+
+/// [`take`], the lock commit naming `change` when it is given (a save names the change it
+/// made), else the change of the view the target is in. The merge guard counts only a lock
+/// commit that names the change it judges ([`held_by`]).
+///
+/// # Errors
+///
+/// As [`take`].
+pub fn take_for(
+    cwd: &Path,
+    targets: &[PathBuf],
+    session: Option<&str>,
+    change: Option<&str>,
+    now: u64,
+) -> Result<(), Refused> {
     for target in targets {
         let Some(target) = crate::coord::resolve(&cwd.join(target)) else {
             continue;
@@ -139,7 +156,9 @@ pub fn take(
             path,
             actor: crate::change::actor_name(),
             session: session.map(str::to_owned),
-            change: repo.view_change(&root),
+            change: change
+                .map(str::to_owned)
+                .or_else(|| repo.view_change(&root)),
             at_s: now,
             released: false,
         };
@@ -240,7 +259,8 @@ fn take_one(repo: &Repo, me: &Lock, now: u64) -> Result<(), Refused> {
         Remote::Free => String::new(),
         Remote::Taken(commit, Some(lock)) if lock.released => commit,
         Remote::Taken(commit, Some(lock)) if mine(&lock, me) => {
-            if now.saturating_sub(lock.at_s) * 2 < window_s {
+            // Kept as it is while young, unless it is to name a change it does not name yet.
+            if now.saturating_sub(lock.at_s) * 2 < window_s && lock.change == me.change {
                 return Ok(());
             }
             commit
@@ -430,11 +450,10 @@ fn lock_at(repo: &Repo, commit: &str) -> Option<Lock> {
         .filter(|lock| lock.schema == SCHEMA)
 }
 
-/// Whether change `change` (or, for a save of a main checkout, which names no change, its
-/// `actor`) held `path`'s lock at some time: some commit of the lock ref's history, as this
-/// clone fetched it, names it.
+/// Whether change `change` held `path`'s lock at some time: some commit of the lock ref's
+/// history, as this clone fetched it, names it.
 #[must_use]
-pub fn held_by(repo: &Repo, path: &str, change: &str, actor: &str) -> bool {
+pub fn held_by(repo: &Repo, path: &str, change: &str) -> bool {
     let name = lock_ref(path);
     let Ok(history) = repo.git.run(&["rev-list", &name]) else {
         return false;
@@ -443,29 +462,22 @@ pub fn held_by(repo: &Repo, path: &str, change: &str, actor: &str) -> bool {
         .lines()
         .filter_map(|commit| lock_at(repo, commit))
         .any(|lock| {
-            lock.path == path
-                && match lock.change.as_deref() {
-                    Some(held) => held == change,
-                    None => lock.actor == actor,
-                }
+            // Only a commit that names this very change: an actor is a machine's user, shared by
+            // every agent and person on it, so it never stands for the change (the Mac's
+            // review of 0.4.0, finding A).
+            lock.path == path && lock.change.as_deref() == Some(change)
         })
 }
 
 /// The merge guard (BACKLOG 57): the lockable paths, under the policy at `trunk`, that `tree`
-/// changes from `trunk` and whose lock change `change` (or its `actor`) never held. The lock
+/// changes from `trunk` and whose lock change `change` never held. The lock
 /// refs are fetched first; a fetch that fails holds nothing, so the guard refuses, never
 /// passes, when it cannot tell.
 ///
 /// # Errors
 ///
 /// The policy or the diff cannot be read.
-pub fn not_held(
-    repo: &Repo,
-    trunk: &str,
-    tree: &str,
-    change: &str,
-    actor: &str,
-) -> Result<Vec<String>, String> {
+pub fn not_held(repo: &Repo, trunk: &str, tree: &str, change: &str) -> Result<Vec<String>, String> {
     let locks = crate::policy::locks_at(&repo.git, trunk)?;
     if locks.paths.is_empty() {
         return Ok(Vec::new());
@@ -490,7 +502,7 @@ pub fn not_held(
     ]);
     Ok(lockable
         .into_iter()
-        .filter(|path| !held_by(repo, path, change, actor))
+        .filter(|path| !held_by(repo, path, change))
         .map(str::to_owned)
         .collect())
 }

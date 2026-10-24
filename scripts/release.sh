@@ -159,7 +159,13 @@ publish)
     (cd "$out" && shasum -a 256 -c -q SHA256SUMS)
     commit=$(cat "$out/COMMIT")
     git fetch -q origin
-    git merge-base --is-ancestor "$commit" origin/main || { echo "release: the built commit $commit is not on origin/main" >&2; exit 1; }
+    # A patch of an older minor is built on its own line, origin/release-<MAJOR>.<MINOR> (0.3.8 on
+    # release-0.3, while main holds 0.4); every other release is built on main.
+    minor=${version%%-*}
+    minor=${minor%.*}
+    git merge-base --is-ancestor "$commit" origin/main 2>/dev/null ||
+        git merge-base --is-ancestor "$commit" "origin/release-$minor" 2>/dev/null ||
+        { echo "release: the built commit $commit is on neither origin/main nor origin/release-$minor" >&2; exit 1; }
     pre=""
     case "$version" in *-*) pre="--prerelease" ;; esac
     notes "$version" "$commit" | sed '/./,$!d' | head -1 | grep -qx 'Pre-release.' && pre="--prerelease"

@@ -41,7 +41,7 @@ const FLAGS: usize = 76;
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,
 ///   made around its lock, reached the merge and lost someone's work there; it is refused first.
-/// - 0.4.1, one reason (`ASSET_MISSING`, BACKLOG 49): a merge could name bytes no store held,
+/// - 0.4.0, one reason (`ASSET_MISSING`, BACKLOG 49): a merge could name bytes no store held,
 ///   and every later clone and check found the file gone; it is refused first.
 const REASONS: usize = 60;
 const WORDS: usize = 7;

@@ -46,11 +46,15 @@ fn assert_says(result: &Value, what: &str) -> String {
     assert!(!say.trim().is_empty(), "{what}: an empty say: {result}");
     let count = say.split_whitespace().count();
     assert!(count <= 30, "{what}: {count} words: {say}");
+    // A command's name after `bay` is said as it is typed (`bay merge`), never put plainly: a
+    // sentence must name a command that exists (the Mac's review of 0.4.0, finding B).
+    let mut after_bay = false;
     for word in say
         .split(|c: char| !c.is_ascii_alphabetic())
         .filter(|word| !word.is_empty())
     {
-        assert!(!unplain(word), "{what}: {word:?} in {say:?}");
+        assert!(after_bay || !unplain(word), "{what}: {word:?} in {say:?}");
+        after_bay = word == "bay";
     }
     say.to_owned()
 }

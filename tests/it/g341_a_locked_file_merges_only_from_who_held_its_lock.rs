@@ -165,3 +165,29 @@ fn a_persons_save_takes_the_lock_and_a_save_of_an_older_copy_is_refused() {
         "logo 5"
     );
 }
+
+/// The Mac's review of 0.4.0 (finding A): another session holds the lock now, and the same
+/// machine user once held it too. A hookless change of the file from another clone is still
+/// refused: the guard counts only a lock commit that names the change it judges, never the
+/// actor, which every agent and person on a machine shares.
+///
+/// Guard to mutate: `src/locks.rs` `held_by`: also take a lock commit with no change whose
+/// actor is the merging actor (the hookless change merges).
+#[test]
+fn a_lock_held_by_another_session_of_the_same_user_still_refuses_a_hookless_change() {
+    let (test_box, first, second, remote) = two_clones();
+    // Session s-a, in the first clone's main checkout, holds the lock now (it names no change).
+    let (code, err) = edit(&test_box, "s-a", &first, "art/logo.bin");
+    assert_eq!(code, Some(0), "{err}");
+    // The second clone, same machine user, changes the file in a view with no hook.
+    let started = test_box.bay_ok(&second, &["start", "a sneaky logo", "--paths", "art/"]);
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    std::fs::write(view.join("art/logo.bin"), "logo 7\n").unwrap();
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "LOCK_NOT_HELD", "{refused}");
+    assert_eq!(
+        test_box.git_bare(&remote, &["show", "main:art/logo.bin"]),
+        "logo 1"
+    );
+}

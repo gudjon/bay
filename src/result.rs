@@ -743,16 +743,28 @@ pub fn unplain(word: &str) -> bool {
 fn plain(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut token = String::new();
+    // A word right after `bay` is a command's name (`bay merge`): it is said as it is typed, or
+    // the sentence names a command that does not exist.
+    let mut after_bay = false;
+    let flush = |token: &str, out: &mut String, after_bay: &mut bool| {
+        let core = token.trim_matches(|c: char| "()`'\".,;:".contains(c));
+        if *after_bay {
+            out.push_str(token);
+        } else {
+            out.push_str(&plain_token(token));
+        }
+        *after_bay = core == "bay";
+    };
     for c in text.chars() {
         if c.is_whitespace() {
-            out.push_str(&plain_token(&token));
+            flush(&token, &mut out, &mut after_bay);
             token.clear();
             out.push(c);
         } else {
             token.push(c);
         }
     }
-    out.push_str(&plain_token(&token));
+    flush(&token, &mut out, &mut after_bay);
     out
 }
 
@@ -1568,6 +1580,16 @@ mod tests {
         assert_eq!(result.decision, Decision::Failed);
         assert_eq!(result.decision.exit_code(), 20);
         assert!(result.to_human().contains("decision: failed"));
+    }
+
+    /// The Mac's review of 0.4.0 (finding B): a command's name in a fault's message is said as it
+    /// is typed, never put plainly ("bay combine" is no command).
+    #[test]
+    fn a_command_name_in_a_sentence_stays_as_typed() {
+        let say = BayResult::failed("run bay merge in a change's folder, or name the change").say();
+        assert!(say.contains("run bay merge in"), "{say}");
+        let say = BayResult::failed("the merge of one change refused").say();
+        assert!(!say.contains(" merge "), "an unplain word stayed: {say}");
     }
 
     /// BACKLOG 53 C (0.4.0): `retry_when` is one of seven, each a kind of lift; the exact
