@@ -21,7 +21,6 @@ The last renames before the first user; scripts and configs that use the old nam
 - `retry_when` takes one of seven values: `by_itself`, `after_wait`, `after_fix`, `after_person`, `after_setup`, `after_new_main`, `never`.
 - `bay help --json` lists agent products in `detail.agents`, not `detail.adapters`.
 - Every change record is written as `bay.change/1`; records stored as `/2` to `/4` are still read.
-- A bay host no longer refuses a push when it judges two pushes at once.
 - Every result sentence says what happened first, then why, then one step.
 - Lock and offline refusals print one clean line.
 - A lock is granted only on the newest copy of its file; an older copy is refused `INPUT_CHANGED`.
@@ -44,6 +43,10 @@ The last renames before the first user; scripts and configs that use the old nam
 - A command name in a sentence is said as typed (`bay merge`, never "bay combine").
 - Grok, which runs a project's Claude Code hooks, has its shell and file writes judged as Claude Code's.
 - A check runs without a file its store purged; one purge never blocks later merges.
+
+## 0.3.8
+
+- A bay host no longer refuses a push when it judges two pushes at once.
 
 ## 0.3.7
 
