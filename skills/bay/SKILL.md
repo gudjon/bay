@@ -200,7 +200,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    `bay save` takes the locks of the files it saves.
    To keep large files out of Git, add `[plugin.assets] command = "<your store's script>"` and
    `over_limit = "offload"` to `.bay/config.toml`: a new file over `max_file_mib` goes to that
-   store, and `.bay-assets` names its bytes (`sha256:<hex> <size> <path>`). The file stays in
+   store, and `.bay-assets` names its bytes (`sha256:<hex> <size> <path>`). `offload = ["**/*.pdf"]`
+   beside it sends files of a kind to the store whatever their size. The file stays in
    the folder; never add it by hand. Other clones get it at `bay install`, views and checks
    when they are made. bay ships a store for any folder or shared drive:
    `examples/assets/folder-store`, named as `command = "scripts/folder-store <folder>"`. A merge

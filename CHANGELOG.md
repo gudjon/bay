@@ -12,6 +12,7 @@
 - A change's refusal is told to the session that holds it while it is live, not every agent.
 - `bay status --all` names each session's agent product, and lists the locks held now with their holders.
 - A change that would put back what another merged change replaced is refused `UNDOES_MERGED`, naming it.
+- `[plugin.assets] offload = ["**/*.pdf"]` keeps a kind of file out of Git, whatever its size.
 
 ## 0.4.0
 

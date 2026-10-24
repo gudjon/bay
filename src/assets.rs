@@ -592,31 +592,62 @@ pub fn fill_check(
     Ok(())
 }
 
-/// The assets plugin of `repo`'s config and the policy's file limit at `trunk` in bytes, when
-/// the config offloads and the policy sets one.
+/// The assets plugin of `repo`'s config and which new files it stores ([`Rule`]): those over
+/// the policy's file limit at `trunk` (`over_limit = "offload"`), and those its `offload` globs
+/// name; `None` when it stores none.
 ///
 /// # Errors
 ///
 /// The policy cannot be read.
-pub fn configured<'a>(repo: &'a Repo, trunk: &str) -> Result<Option<(Plugin<'a>, u64)>, String> {
-    let Some(assets) = repo
-        .config
-        .plugin
-        .assets
-        .as_ref()
-        .filter(|assets| assets.over_limit == crate::config::OverLimit::Offload)
-    else {
+pub fn configured<'a>(
+    repo: &'a Repo,
+    trunk: &str,
+) -> Result<Option<(Plugin<'a>, Rule<'a>)>, String> {
+    let Some(assets) = repo.config.plugin.assets.as_ref() else {
         return Ok(None);
     };
-    let Some(max_mib) = crate::policy::limits_at(&repo.git, trunk)?.max_file_mib else {
-        return Ok(None);
+    let limit_bytes = if assets.over_limit == crate::config::OverLimit::Offload {
+        crate::policy::limits_at(&repo.git, trunk)?
+            .max_file_mib
+            .map(|mib| mib.saturating_mul(1024 * 1024))
+    } else {
+        None
     };
+    if limit_bytes.is_none() && assets.offload.is_empty() {
+        return Ok(None);
+    }
     let plugin = Plugin {
         work_root: &repo.work_root,
         command: &assets.command,
         timeout: Duration::from_secs(assets.timeout_s.unwrap_or(DEFAULT_TIMEOUT_S)),
     };
-    Ok(Some((plugin, max_mib.saturating_mul(1024 * 1024))))
+    Ok(Some((
+        plugin,
+        Rule {
+            limit_bytes,
+            globs: &assets.offload,
+        },
+    )))
+}
+
+/// Which new files the plugin stores: those over the limit (`over_limit = "offload"` with
+/// `[limits] max_file_mib`), and those an `offload` glob names, whatever their size (BACKLOG 62).
+#[derive(Clone, Copy, Debug)]
+pub struct Rule<'a> {
+    pub limit_bytes: Option<u64>,
+    pub globs: &'a [String],
+}
+
+impl Rule<'_> {
+    /// Whether the new file at `path`, of `size` bytes, is stored by the plugin.
+    #[must_use]
+    pub fn offloads(&self, path: &str, size: u64) -> bool {
+        self.limit_bytes.is_some_and(|limit| size > limit)
+            || self
+                .globs
+                .iter()
+                .any(|glob| crate::policy::glob_matches(glob, path))
+    }
 }
 
 /// The clone's `info/exclude`, shared by its main checkout and its views.
@@ -634,7 +665,7 @@ pub fn exclude_file(repo: &Repo) -> std::path::PathBuf {
 ///
 /// The view's files cannot be listed, the policy cannot be read, or a put fails.
 pub fn offload_view(repo: &Repo, view: &Path) -> Result<Vec<String>, String> {
-    let Some((plugin, limit)) = configured(repo, &repo.trunk_tracking_ref())? else {
+    let Some((plugin, rule)) = configured(repo, &repo.trunk_tracking_ref())? else {
         return Ok(Vec::new());
     };
     let listed = Git::new(view)
@@ -656,7 +687,7 @@ pub fn offload_view(repo: &Repo, view: &Path) -> Result<Vec<String>, String> {
         .filter_map(|entry| entry.strip_prefix("?? "))
         .map(str::to_owned)
         .collect();
-    let done = offload(&plugin, view, &new, limit, &exclude_file(repo))?;
+    let done = offload(&plugin, view, &new, rule, &exclude_file(repo))?;
     // The freeze that follows takes the manifest from the view's folder.
     if let Some(undo) = &done.undo {
         undo.keep();
@@ -722,7 +753,7 @@ pub fn offload(
     plugin: &Plugin<'_>,
     work_root: &Path,
     paths: &[String],
-    limit_bytes: u64,
+    rule: Rule<'_>,
     exclude: &Path,
 ) -> Result<Offloaded, String> {
     let mut offloaded = Offloaded::default();
@@ -731,7 +762,7 @@ pub fn offload(
         let Ok(meta) = std::fs::metadata(&file) else {
             continue;
         };
-        if !meta.is_file() || meta.len() <= limit_bytes {
+        if !meta.is_file() || !rule.offloads(path, meta.len()) {
             continue;
         }
         let id = plugin.put(&file)?;

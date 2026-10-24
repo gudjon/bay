@@ -223,7 +223,7 @@ fn take_locks(repo: &Repo, changed: &[Entry], change: Option<&str>) -> Option<Ba
 /// back when the save is then refused.
 fn offload(repo: &Repo, trunk: &str, changed: &[Entry]) -> Result<Offloads, String> {
     let all: Vec<String> = changed.iter().map(|entry| entry.path.clone()).collect();
-    let Some((plugin, limit)) = crate::assets::configured(repo, trunk)? else {
+    let Some((plugin, rule)) = crate::assets::configured(repo, trunk)? else {
         return Ok((all, Vec::new(), None));
     };
     let new: Vec<String> = changed
@@ -235,7 +235,7 @@ fn offload(repo: &Repo, trunk: &str, changed: &[Entry]) -> Result<Offloads, Stri
         &plugin,
         &repo.work_root,
         &new,
-        limit,
+        rule,
         &crate::assets::exclude_file(repo),
     )?;
     let offloaded: Vec<String> = done.entries.into_iter().map(|entry| entry.path).collect();

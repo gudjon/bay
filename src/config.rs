@@ -219,6 +219,10 @@ pub struct AssetsPlugin {
     pub timeout_s: Option<u64>,
     #[serde(default)]
     pub over_limit: OverLimit,
+    /// BACKLOG 62: globs of files the plugin stores whatever their size, so their bytes can be
+    /// purged later while history keeps their address (`offload = ["**/*.pdf"]`).
+    #[serde(default)]
+    pub offload: Vec<String>,
 }
 
 /// What bay does with a file over `[limits] max_file_mib`.
