@@ -4,6 +4,7 @@
 
 - A plain `git clone` saves and merges; no clone needs `bay install` of its own.
 - main is the remote's default branch; a clone follows when that default moves.
+- The skill says to save research, plans and reviews a person should read as a short file.
 
 ## 0.4.0
 

@@ -57,7 +57,8 @@ existing change.
 `<intent>` says what the work is, in a few words (or a card id). `--paths` lists every path the change reads and writes:
 the view holds only those (`--paths .` is the whole tree). Before `bay merge`, commit your work in the view
 with a message saying what you did, and an `Open: <item>` line at its end for anything left undone or
-needing a person: main's commit keeps that message. `bay start` lists in `detail.overlaps` the live changes whose
+needing a person: main's commit keeps that message. Research, a plan or a review a person should see is a
+short file (`notes/<date>-<what>.md`), saved like any other change. `bay start` lists in `detail.overlaps` the live changes whose
 declared paths overlap yours (change, intent, actor, paths). It does not refuse; talk to them, or
 narrow your paths. `bay help` shows every command and flag on one page, with what each one writes and
 never writes (read it before you hesitate to run one), and `bay <command> --help`
