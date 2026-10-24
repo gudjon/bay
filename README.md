@@ -61,7 +61,8 @@ People who are not developers use four words, usually through their agent: `bay 
 ## One branch, and no agent branches
 
 bay serves one branch, and you name it: `main`, `dev`, or any other. In bay's words that branch is
-"main", whatever its name. Name it once per clone with `bay install --main <branch>`.
+"main", whatever its name. It is the remote's default branch, as Git's own clone takes it: to serve `dev`,
+make `dev` the default on the host, and every clone follows with no step of its own.
 
 Agents create no branches. A change is bay's own record under `refs/bay/changes/`, and the agent edits it
 in a view: a folder bay makes. So there is nothing to clean up after a merge.
@@ -70,7 +71,7 @@ Branches after main are promotion targets. A repository with `dev â†’ staging â†
 `main` branch works as it is: serve `dev`, and declare the rest in `.bay/config.toml` on `dev`:
 
 ```toml
-main = "dev"                   # the branch bay serves; matches bay install --main dev
+main = "dev"                   # the branch bay serves: the remote's default branch
 
 [[target]]
 name = "staging"               # takes checked commits from dev
@@ -168,8 +169,10 @@ names any floor a machine is below. See [Install](https://getbay.io/docs/install
 1. Commit `.bay/config.toml` and `.bay/policy.toml` to main and push them. bay reads both only from
    main, so no change sets the rules it is judged by. The policy lists the required checks; a repository
    that wants none says `unchecked = true`. See [Configuration](https://getbay.io/docs/configuration).
-2. In each clone: `bay install --main <branch> --remote origin`.
-3. Start a runner: `bay runner run`, or `bay runner install` to keep one running.
+2. In one clone, `bay install`, then merge the agent settings file it writes. Every other clone needs
+   nothing: a plain `git clone` saves and merges, as Git needs only its remote.
+3. Optional: a runner, so agents can submit and leave (`bay runner run`, or `bay runner install`). Without
+   one, `bay merge --wait` and `bay save` merge right where they run.
 
 The [Quickstart](https://getbay.io/docs/quickstart) walks through each step.
 

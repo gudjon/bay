@@ -210,6 +210,7 @@ mod g343_a_view_of_the_whole_tree_takes_a_new_file;
 mod g344_main_keeps_the_agents_message;
 mod g345_a_large_file_merges_only_when_its_store_holds_it;
 mod g346_a_guest_products_tool_calls_are_judged;
+mod g347_a_fresh_clone_merges_with_no_setup;
 mod g34_a_moved_base_never_hides_an_earlier_landing;
 mod g35_publication_never_livelocks;
 mod g36_one_intent_one_revision_one_landing;

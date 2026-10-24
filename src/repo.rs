@@ -97,6 +97,21 @@ impl Bootstrap {
     }
 }
 
+/// Asks the remote for its default branch now (`git remote set-head <remote> --auto`); whether
+/// `refs/remotes/<remote>/HEAD` moved off the bootstrap's main. Offline, or unmoved, it did not.
+fn refresh_default(git: &Git, bootstrap: &Bootstrap) -> bool {
+    let head = format!("refs/remotes/{}/HEAD", bootstrap.remote);
+    let before = git.run(&["symbolic-ref", "-q", &head]).ok();
+    if git
+        .run(&["remote", "set-head", &bootstrap.remote, "--auto"])
+        .is_err()
+    {
+        return false;
+    }
+    let after = git.run(&["symbolic-ref", "-q", &head]).ok();
+    after.is_some() && after != before
+}
+
 /// A key of the repository-local git config (`$GIT_COMMON_DIR/config`); `None` when unset.
 fn local_config(git: &Git, key: &str) -> Result<Option<String>, BootstrapError> {
     match git.config_get_local(key) {
@@ -357,8 +372,17 @@ impl Repo {
             if let Some(named) = named
                 && named != used
             {
+                // A clone keeps the remote's default branch as it was when cloned. When main came
+                // from it, the remote is asked once for its default now (the host's owner sets
+                // it, never a change), so a clone needs no step of its own after the default moves.
+                if key == "main"
+                    && bootstrap.source == format!("refs/remotes/{}/HEAD", bootstrap.remote)
+                    && refresh_default(&git, &bootstrap)
+                {
+                    return Self::open_with(dir, fetch);
+                }
                 return Err(known(format!(
-                    "{tracking}:{CONFIG_PATH} names {key} \"{named}\", but this repository's {key} is \"{used}\" (main from {}); run bay install --{key} {named}",
+                    "{tracking}:{CONFIG_PATH} names {key} \"{named}\", but this repository's {key} is \"{used}\" (main from {}); make \"{named}\" the remote's default branch, or run bay install --{key} {named}",
                     bootstrap.source
                 )));
             }

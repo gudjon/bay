@@ -11,7 +11,7 @@ allowed-tools:
 bay merges coding agents' changes into main, so several agents can work in one codebase without stale
 branches, colliding merges or a broken main. You open a change, edit in its view, and submit it once. A
 runner checks the exact candidate and merges it, even after you leave. Main is the one branch bay serves,
-whatever its name (`bay install --main dev`). Create no branches: a
+whatever its name: the remote's default branch. Create no branches: a
 change is bay's own record, and its view is a folder bay makes. Branches after main, as in
 `dev → staging → production`, are `[[target]]`s; work that must never merge goes in a `[[lane]]`.
 Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its URL).
@@ -163,7 +163,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    `[plugin.hold] command` that answers `{"held": true|false, "reason": "..."}` to `<command> status`.
    To act on the host when `bay prune` deletes a branch (close its pull request,
    say), add `[plugin.prune] command`: it runs as `<command> pruned <branch> <sha> <archive ref>`.
-   A `dev → staging → production` repository serves `dev` (`bay install --main dev`), with
+   A `dev → staging → production` repository serves `dev` (the remote's default branch), with
    `[[target]] name = "staging"` (from main) and `[[target]] name = "production"` with `from = "staging"`:
    changes merge into `dev`, and `bay status` names each target's promotable commit.
    A key a newer bay brought is a config error on an older bay, naming the key: run `bay update` there.
@@ -207,7 +207,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    `detail.cases` names each failing case and why.
 4. With full signing, each agent's machine sets `bay.agentKey`, and the agent runs with `BAY_ACTOR=<its enrolled
    name>`: the host refuses a change signed by one agent for another actor (the default actor is Git's user name).
-5. In each clone: `bay install --main <name> --remote <name>`. It puts this skill in every Claude
+5. In one clone: `bay install`, then merge the agent settings file it writes; other clones need no
+   step. It puts this skill in every Claude
    config directory it finds on the machine. Name any other one with
    `git config --global --add bay.claudeConfigDirs <dir>` (each value is one config directory).
 6. Run a runner: `bay runner run`, under a supervisor. `bay runner install` writes one for

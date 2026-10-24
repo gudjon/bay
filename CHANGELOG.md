@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1
+
+- A plain `git clone` saves and merges; no clone needs `bay install` of its own.
+- main is the remote's default branch; a clone follows when that default moves.
+
 ## 0.4.0
 
 The last renames before the first user; scripts and configs that use the old names need the new ones.
