@@ -93,7 +93,15 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
     if let Some(refused) = take_locks(repo, &changed) {
         return Ok(refused);
     }
-    let (saved, offloaded) = offload(repo, &trunk, &changed)?;
+    let (saved, offloaded, undo) = offload(repo, &trunk, &changed)?;
+    // A refusal from here on leaves the folder as it found it: the manifest and the exclude
+    // list as they were (BACKLOG 49, the site's review).
+    let untouched = |result: BayResult, saved: &[String]| {
+        if let Some(undo) = &undo {
+            undo.restore();
+        }
+        untouched(result, saved)
+    };
     if saved.is_empty() {
         return Ok(BayResult::ok(json!({
             "saved": saved,
@@ -195,15 +203,12 @@ fn take_locks(repo: &Repo, changed: &[Entry]) -> Option<BayResult> {
 /// `[limits] max_file_mib` of the policy at `trunk` goes to the assets plugin, and the manifest
 /// takes its place among the saved paths (`crate::assets`). A file Git already tracks is never
 /// offloaded: moving the checkout to a merge without it would delete it, so it is judged by the
-/// limit as before. Returns the paths to save and the offloaded ones.
-fn offload(
-    repo: &Repo,
-    trunk: &str,
-    changed: &[Entry],
-) -> Result<(Vec<String>, Vec<String>), String> {
+/// limit as before. Returns the paths to save, the offloaded ones, and how to put the folder
+/// back when the save is then refused.
+fn offload(repo: &Repo, trunk: &str, changed: &[Entry]) -> Result<Offloads, String> {
     let all: Vec<String> = changed.iter().map(|entry| entry.path.clone()).collect();
     let Some((plugin, limit)) = crate::assets::configured(repo, trunk)? else {
-        return Ok((all, Vec::new()));
+        return Ok((all, Vec::new(), None));
     };
     let new: Vec<String> = changed
         .iter()
@@ -219,7 +224,7 @@ fn offload(
     )?;
     let offloaded: Vec<String> = done.entries.into_iter().map(|entry| entry.path).collect();
     if offloaded.is_empty() {
-        return Ok((all, offloaded));
+        return Ok((all, offloaded, None));
     }
     let mut saved: Vec<String> = all
         .into_iter()
@@ -229,8 +234,11 @@ fn offload(
         saved.push(crate::assets::MANIFEST.to_owned());
         saved.sort();
     }
-    Ok((saved, offloaded))
+    Ok((saved, offloaded, done.undo))
 }
+
+/// What [`offload`] returns: the paths to save, the offloaded ones, and the undo.
+type Offloads = (Vec<String>, Vec<String>, Option<crate::assets::Undo>);
 
 /// G279: the directory bay runs in is the main checkout itself (or a folder in it), never a
 /// linked worktree of the repository.

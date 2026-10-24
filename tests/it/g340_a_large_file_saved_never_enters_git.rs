@@ -24,7 +24,7 @@ use crate::support;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
-use support::{TestBox, UNCHECKED_POLICY, result_json};
+use support::{TestBox, UNCHECKED_POLICY, check_files, passing_result, result_json};
 
 /// The reference plugin bay ships (`examples/assets/folder-store`): each file's bytes in a
 /// folder named after the command, here `$HOME/asset-store`.
@@ -304,4 +304,96 @@ fn a_checkpoint_of_a_view_offloads_the_file_too() {
         manifest.ends_with(" video/clip.mov\n"),
         "{manifest} {checkpointed}"
     );
+}
+
+/// The site's repro: with two files already offloaded on main, a view over other paths (whose
+/// sparse folder holds no `.bay-assets`) merges a third, and main's manifest keeps all three.
+///
+/// Guard to mutate: `src/assets.rs` `offload`: take a missing manifest as empty instead of
+/// `manifest_at(.., "HEAD")` (the merge drops the other lines).
+#[test]
+fn a_merge_from_a_view_keeps_the_manifests_other_lines() {
+    let (test_box, repo, remote) = trunk(STORE_PLUGIN, Some("offload"));
+    std::fs::create_dir_all(repo.join("video")).unwrap();
+    for (name, seed) in [("intro.mov", 1u8), ("outro.mov", 2u8)] {
+        let bytes: Vec<u8> = video().iter().map(|byte| byte ^ seed).collect();
+        std::fs::write(repo.join("video").join(name), bytes).unwrap();
+        let (code, saved) = result_json(test_box.bay(&repo).args(["save", name]));
+        assert_eq!(code, 0, "{saved}");
+    }
+    let started = test_box.bay_ok(&repo, &["start", "add the media", "--paths", "media/"]);
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    std::fs::create_dir_all(view.join("media")).unwrap();
+    std::fs::write(view.join("media/clip.mov"), video()).unwrap();
+    let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{merged}");
+    let manifest = test_box.git_bare(&remote, &["show", "main:.bay-assets"]);
+    let paths: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.splitn(3, ' ').nth(2))
+        .collect();
+    assert_eq!(
+        paths,
+        ["media/clip.mov", "video/intro.mov", "video/outro.mov"],
+        "{manifest}"
+    );
+}
+
+/// A save refused after the plugin stored the file leaves the folder as it found it: no
+/// manifest it did not have, and the file not hidden from Git.
+///
+/// Guard to mutate: `src/save.rs` `save_in`: drop the `undo.restore()` call.
+#[test]
+fn a_refused_save_leaves_the_folder_as_it_was() {
+    let failing = passing_result(1).replace("\\\"pass\\\"", "\\\"product_failure\\\"");
+    let mut files = check_files(&format!("{failing}; exit 0"), &passing_result(1), 1, 60);
+    for (path, text) in &mut files {
+        if path == ".bay/policy.toml" {
+            text.push_str("\n[limits]\nmax_file_mib = 1\n");
+        }
+    }
+    let (test_box, repo, _remote) = trunk_with(STORE_PLUGIN, Some("offload"), &files);
+    std::fs::write(repo.join("clip.mov"), video()).unwrap();
+    let (code, refused) = result_json(test_box.bay(&repo).args(["save", "add the clip"]));
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
+    assert!(
+        !repo.join(".bay-assets").exists(),
+        "the refused save left a manifest"
+    );
+    let status = test_box.git_ok(&repo, &["status", "--porcelain"]);
+    assert!(
+        status.contains("clip.mov"),
+        "the file is hidden from Git: {status:?}"
+    );
+}
+
+/// Two changes that each add a large file whose manifest lines sit side by side both merge:
+/// the manifest is merged path by path, never a conflict of the work.
+///
+/// Guard to mutate: `src/merge.rs` `merge_tree`: return the conflict as Git reports it, without
+/// `manifest_resolved` (the second merge is refused `MERGE_CONFLICT`).
+#[test]
+fn two_changes_adding_files_side_by_side_both_merge() {
+    let (test_box, repo, remote) = trunk(STORE_PLUGIN, Some("offload"));
+    let mut views = Vec::new();
+    for (name, seed) in [("a.mov", 3u8), ("b.mov", 4u8)] {
+        let started = test_box.bay_ok(&repo, &["start", name, "--paths", "media/"]);
+        let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+        std::fs::create_dir_all(view.join("media")).unwrap();
+        let bytes: Vec<u8> = video().iter().map(|byte| byte ^ seed).collect();
+        std::fs::write(view.join("media").join(name), bytes).unwrap();
+        views.push(view);
+    }
+    for view in &views {
+        let (code, merged) = result_json(test_box.bay(view).args(["merge", "--wait"]));
+        assert_eq!(code, 0, "{merged}");
+        assert_eq!(merged["decision"], "merged", "{merged}");
+    }
+    let manifest = test_box.git_bare(&remote, &["show", "main:.bay-assets"]);
+    let paths: Vec<&str> = manifest
+        .lines()
+        .filter_map(|line| line.splitn(3, ' ').nth(2))
+        .collect();
+    assert_eq!(paths, ["media/a.mov", "media/b.mov"], "{manifest}");
 }

@@ -110,6 +110,43 @@ pub fn text(entries: &[Entry]) -> String {
     })
 }
 
+/// The three-way merge of manifest texts, path by path: a path both sides left as `base` had
+/// it stays, one side's change is taken, both sides' same change once; `None` when one path
+/// was changed differently on the two sides, or a text does not parse.
+#[must_use]
+pub fn merge3(base: &str, ours: &str, theirs: &str) -> Option<String> {
+    let read = |text: &str| -> Option<std::collections::BTreeMap<String, Entry>> {
+        Some(
+            parse(text)
+                .ok()?
+                .into_iter()
+                .map(|entry| (entry.path.clone(), entry))
+                .collect(),
+        )
+    };
+    let (base, ours, theirs) = (read(base)?, read(ours)?, read(theirs)?);
+    let mut paths: Vec<&String> = base
+        .keys()
+        .chain(ours.keys())
+        .chain(theirs.keys())
+        .collect();
+    paths.sort();
+    paths.dedup();
+    let mut merged = Vec::new();
+    for path in paths {
+        let (b, o, t) = (base.get(path), ours.get(path), theirs.get(path));
+        let kept = if o == t || t == b {
+            o
+        } else if o == b {
+            t
+        } else {
+            return None;
+        };
+        merged.extend(kept.cloned());
+    }
+    Some(text(&merged))
+}
+
 /// Whether `id` is `sha256:` and 64 lower-case hex digits.
 #[must_use]
 pub fn is_id(id: &str) -> bool {
@@ -441,6 +478,32 @@ pub fn offload_view(repo: &Repo, view: &Path) -> Result<Vec<String>, String> {
 pub struct Offloaded {
     /// The paths whose bytes went to the plugin, each with its manifest entry.
     pub entries: Vec<Entry>,
+    /// The manifest and `info/exclude` as they were before, to put back when the save is then
+    /// refused, so a refusal leaves the folder as it found it.
+    pub undo: Option<Undo>,
+}
+
+/// Each file [`offload`] wrote, with its text before (`None`: there was none).
+#[derive(Debug)]
+pub struct Undo {
+    files: Vec<(std::path::PathBuf, Option<String>)>,
+}
+
+impl Undo {
+    /// Puts each file back as it was. The bytes the plugin stored stay: a store keeps what it
+    /// is given, and a later save of the same file names them again.
+    pub fn restore(&self) {
+        for (path, before) in &self.files {
+            match before {
+                Some(text) => {
+                    let _ = std::fs::write(path, text);
+                }
+                None => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
 }
 
 /// Offloads each of `paths` (relative to `work_root`, files that exist) over `limit_bytes`:
@@ -478,11 +541,23 @@ pub fn offload(
         return Ok(offloaded);
     }
     let manifest = work_root.join(MANIFEST);
-    let current = match std::fs::read_to_string(&manifest) {
-        Ok(text) => parse(&text)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+    let before = match std::fs::read_to_string(&manifest) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(format!("{MANIFEST} cannot be read: {error}")),
     };
+    // A view's sparse set may leave the manifest out of the folder: it is still the tree's, so
+    // its lines are read from the commit the folder stands on, never taken as none.
+    let current = match &before {
+        Some(text) => parse(text)?,
+        None => manifest_at(&Git::new(work_root), "HEAD")?,
+    };
+    offloaded.undo = Some(Undo {
+        files: vec![
+            (manifest.clone(), before),
+            (exclude.to_path_buf(), std::fs::read_to_string(exclude).ok()),
+        ],
+    });
     let mut next: Vec<Entry> = current
         .into_iter()
         .filter(|entry| !offloaded.entries.iter().any(|new| new.path == entry.path))
@@ -531,7 +606,27 @@ fn glob_escape(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Entry, is_id, parse, text};
+    use super::{Entry, is_id, merge3, parse, text};
+
+    /// Two changes that each add a file merge; a path both changed differently does not.
+    #[test]
+    fn manifests_merge_path_by_path() {
+        let line = |c: char, path: &str| format!("sha256:{} 1 {path}\n", c.to_string().repeat(64));
+        let base = line('a', "m/a.mov");
+        let ours = format!("{base}{}", line('b', "m/b.mov"));
+        let theirs = format!("{base}{}", line('c', "m/c.mov"));
+        let merged = merge3(&base, &ours, &theirs).unwrap();
+        assert_eq!(
+            merged,
+            format!("{base}{}{}", line('b', "m/b.mov"), line('c', "m/c.mov"))
+        );
+        assert!(merge3(&base, &line('b', "m/a.mov"), &line('c', "m/a.mov")).is_none());
+        assert_eq!(
+            merge3(&base, &base, "").unwrap(),
+            "",
+            "a removal on one side is taken"
+        );
+    }
 
     #[test]
     fn the_manifest_reads_back_what_it_wrote_sorted_by_path() {

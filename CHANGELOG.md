@@ -26,6 +26,8 @@ The last renames before the first user; scripts and configs that use the old nam
 - `bay plugin test assets -- <command>` checks a store plugin: put, put again, get, unknown.
 - Saved large files come back by hash: in another clone at `bay install`, in views, and read-only in checks.
 - `examples/assets/folder-store` keeps large files in any folder, such as a shared drive.
+- A save refused after a large file was stored leaves the folder as it was.
+- Two changes adding large files never conflict on `.bay-assets`: it merges line by line.
 
 ## 0.3.7
 

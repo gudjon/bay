@@ -43,16 +43,74 @@ fn merge_tree(git: &Git, base: Option<&str>, ours: &str, theirs: &str) -> Result
     let is_tree = !tree.is_empty() && tree.bytes().all(|byte| byte.is_ascii_hexdigit());
     match code {
         0 if is_tree => Ok(Merge::Clean(tree)),
-        1 if is_tree => Ok(Merge::Conflict(
-            lines
+        1 if is_tree => {
+            let paths: Vec<String> = lines
                 .take_while(|line| !line.is_empty())
                 .map(str::to_owned)
-                .collect(),
-            tree,
-        )),
+                .collect();
+            manifest_resolved(git, base.as_deref(), ours, theirs, paths, tree)
+        }
         _ => Err(GitError::Failed {
             args: args.join(" "),
             stderr,
         }),
     }
+}
+
+/// BACKLOG 49: a conflict in `.bay-assets` alone is no conflict of the work. Its lines are
+/// keyed by path, so it is merged path by path (`crate::assets::merge3`): two changes that each
+/// add a file merge, and only a path both sides changed differently stays a conflict. The
+/// resolved manifest replaces the marked one in `tree`; the other paths stay as Git left them.
+fn manifest_resolved(
+    git: &Git,
+    base: Option<&str>,
+    ours: &str,
+    theirs: &str,
+    mut paths: Vec<String>,
+    tree: String,
+) -> Result<Merge, GitError> {
+    if !paths.iter().any(|path| path == crate::assets::MANIFEST) {
+        return Ok(Merge::Conflict(paths, tree));
+    }
+    let base = match base {
+        Some(base) => base.trim_start_matches("--merge-base=").to_owned(),
+        None => git.run(&["merge-base", ours, theirs])?,
+    };
+    let text = |commit: &str| {
+        git.file_at(commit, crate::assets::MANIFEST)
+            .map(Option::unwrap_or_default)
+    };
+    let Some(merged) = crate::assets::merge3(&text(&base)?, &text(ours)?, &text(theirs)?) else {
+        return Ok(Merge::Conflict(paths, tree));
+    };
+    let blob = git.run_with(
+        &["hash-object", "-w", "--stdin"],
+        &[],
+        Some(merged.as_bytes()),
+    )?;
+    let index = std::env::temp_dir().join(format!("bay-manifest-{}.index", std::process::id()));
+    let index_text = index.display().to_string();
+    let envs = [("GIT_INDEX_FILE", index_text.as_str())];
+    let resolved = git
+        .run_with(&["read-tree", &tree], &envs, None)
+        .and_then(|_| {
+            git.run_with(
+                &[
+                    "update-index",
+                    "--cacheinfo",
+                    &format!("100644,{blob},{}", crate::assets::MANIFEST),
+                ],
+                &envs,
+                None,
+            )
+        })
+        .and_then(|_| git.run_with(&["write-tree"], &envs, None));
+    let _ = std::fs::remove_file(&index);
+    let tree = resolved?;
+    paths.retain(|path| path != crate::assets::MANIFEST);
+    Ok(if paths.is_empty() {
+        Merge::Clean(tree)
+    } else {
+        Merge::Conflict(paths, tree)
+    })
 }
