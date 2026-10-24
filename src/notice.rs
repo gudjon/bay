@@ -6,7 +6,8 @@
 //! agent once, as one line, at its next `step.end` or `turn.start`, and never again.
 //! `INTERFACES` § 2 delivers such an outcome to the change's actor, so a session is told of its
 //! view's change and of every other change whose chain names its actor, wherever in the
-//! repository it runs. The hook reads the executor logs this repository already holds: no
+//! repository it runs; while the session that holds such a change is live on this machine, only
+//! that session is told (BACKLOG 64 F2). The hook reads the executor logs this repository already holds: no
 //! fetch, so an event a remote executor wrote arrives after a fetching command (`bay status`,
 //! `bay status --since`, `land`) brought the log (ruling R-hook-1). What the session was told is a
 //! delivered-notice cursor in the session's state, `notices.json`: the log tips read to, and the
@@ -282,10 +283,17 @@ pub fn deliver(repo: &Repo, scope: Scope<'_>, state_dir: &Path) -> Delivery {
     {
         cursor.logs = read.tips;
         let chain = crate::change::Chain::new(&repo.git);
+        // BACKLOG 64 F2: an actor is a machine's user, shared by every agent on it, so another
+        // change of the actor is told only to the session that holds it while that session is
+        // live on this machine; to any session of the actor once it is not.
+        let me = state_dir.file_name().and_then(|name| name.to_str());
+        let live = live_sessions(repo);
         let owns = |id: &str| {
-            chain
-                .read(id)
-                .is_ok_and(|(_, change)| change.actor.name == scope.actor)
+            chain.read(id).is_ok_and(|(_, change)| {
+                change.actor.name == scope.actor
+                    && (me == Some(change.actor.session.as_str())
+                        || !live.contains(&change.actor.session))
+            })
         };
         delivery = tell(&mut cursor, scope, &owns, &read.events, budget, now);
         moved = true;
@@ -329,6 +337,16 @@ pub fn deliver(repo: &Repo, scope: Scope<'_>, state_dir: &Path) -> Delivery {
         };
     }
     delivery
+}
+
+/// The sessions live on this machine in this repository: a line newer than the takeover
+/// window, and not ended (`crate::live::rows_of`).
+fn live_sessions(repo: &Repo) -> Vec<String> {
+    let lines = crate::live::lines(repo).unwrap_or_default();
+    crate::live::rows_of(lines, now_s(), repo.config.takeover().as_secs())
+        .iter()
+        .filter_map(|row| row["session"].as_str().map(str::to_owned))
+        .collect()
 }
 
 /// Whether `event` is about a change in `scope`: the view's change, or a change bay could have

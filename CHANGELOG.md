@@ -9,6 +9,7 @@
 - `bay merge` names the files main changed since your change began, and main's commit.
 - A file main's `.gitattributes` marks `merge=union` merges both sides' lines; a change cannot mark its own.
 - Under any agent product, an agent's own `bay save` acts as its session, so its own lock never holds it.
+- A change's refusal is told to the session that holds it while it is live, not every agent.
 
 ## 0.4.0
 
