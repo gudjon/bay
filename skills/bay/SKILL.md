@@ -190,7 +190,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    with that many changes waiting for a yes, a change that needs one more is refused `WIP_LIMIT`.
    For files that never merge (images, models, binaries), add `[locks] paths = ["art/"]`
    (globs): one session at a time edits each. Your first edit of one takes its lock on the
-   remote; elsewhere the edit is refused `PATH_HELD`, naming the holder. Edit other paths, or
+   remote; elsewhere the edit is refused `PATH_HELD`, naming the holder (`bay status --all` lists every
+   lock held now in `detail.locks`). Edit other paths, or
    wait until that session's turn ends. Offline, the edit is refused `REMOTE_UNREACHABLE`. A
    lock needs the newest copy: when main changed the file after your work began, the edit is
    refused `INPUT_CHANGED`; bring in main (`bay start <change>`), then edit. A change to such a

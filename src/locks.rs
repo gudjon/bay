@@ -92,6 +92,36 @@ pub enum Refused {
     Stale { path: String, last: String },
 }
 
+/// The locks held now, as this clone last fetched them (BACKLOG 61 b): each lock ref whose tip
+/// is not released, with its path, holder (actor and session), change and age. The ref is the
+/// state; nothing else records it.
+#[must_use]
+pub fn held(repo: &Repo, now: u64) -> Vec<serde_json::Value> {
+    let Ok(listed) = repo.git.run(&[
+        "for-each-ref",
+        "--format=%(objectname)",
+        crate::names::LOCKS,
+    ]) else {
+        return Vec::new();
+    };
+    let mut held: Vec<serde_json::Value> = listed
+        .lines()
+        .filter_map(|commit| lock_at(repo, commit))
+        .filter(|lock| !lock.released)
+        .map(|lock| {
+            serde_json::json!({
+                "path": lock.path,
+                "actor": lock.actor,
+                "session": lock.session,
+                "change": lock.change,
+                "held_s": now.saturating_sub(lock.at_s),
+            })
+        })
+        .collect();
+    held.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    held
+}
+
 /// The ref a lock of `path` lives at.
 #[must_use]
 pub fn lock_ref(path: &str) -> String {

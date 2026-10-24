@@ -177,6 +177,8 @@ pub fn fetch(repo: &Repo) {
         "+{}*:{FLEET_EXECUTOR_PREFIX}*",
         crate::presence::PRESENCE_PREFIX
     );
+    // BACKLOG 61 b: the locks held now come in the same fetch, as the remote holds them.
+    let locks = format!("+{0}*:{0}*", crate::names::LOCKS);
     let git = &repo.git;
     if git
         .run(&[
@@ -187,6 +189,7 @@ pub fn fetch(repo: &Repo) {
             repo.remote(),
             &refspec,
             &presences,
+            &locks,
         ])
         .is_err()
     {
@@ -337,6 +340,7 @@ impl Map {
         self.sessions.push(json!({
             "machine": machine,
             "session": row["session"],
+            "product": row["product"],
             "actor": row["actor"],
             "actor_source": row["actor_source"],
             "permission_mode": row["permission_mode"],
@@ -842,6 +846,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
             "actor": actor, "machines": on, "age_s": age,
         })).collect::<Vec<_>>(),
         "talks": talks,
+        "locks": crate::locks::held(repo, map.now),
         "red": red,
         "red_pending": red_pending,
         "unattributed": unattributed,

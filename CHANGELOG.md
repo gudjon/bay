@@ -10,6 +10,7 @@
 - A file main's `.gitattributes` marks `merge=union` merges both sides' lines; a change cannot mark its own.
 - Under any agent product, an agent's own `bay save` acts as its session, so its own lock never holds it.
 - A change's refusal is told to the session that holds it while it is live, not every agent.
+- `bay status --all` names each session's agent product, and lists the locks held now with their holders.
 
 ## 0.4.0
 

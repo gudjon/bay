@@ -57,8 +57,9 @@ pub const LIVE_MAX_BYTES: u64 = 32 * 1024;
 /// The most rows a summary carries: the newest ones.
 const LIVE_MAX_ROWS: usize = 64;
 /// The fields of a work record line a row keeps.
-const ROW_FIELDS: [&str; 13] = [
+const ROW_FIELDS: [&str; 14] = [
     "session",
+    "product",
     "started",
     "actor",
     "actor_source",

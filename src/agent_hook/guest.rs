@@ -13,6 +13,9 @@
 
 use serde_json::Value;
 
+/// The name a session of Grok is shown under (BACKLOG 61 a).
+pub(super) const GROK: &str = "grok";
+
 /// Grok's tool names, and Claude Code's names for the same calls.
 const GROK_TOOLS: [(&str, &str); 2] = [("run_terminal_command", "Bash"), ("write", "Write")];
 

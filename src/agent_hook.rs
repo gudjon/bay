@@ -55,6 +55,15 @@ impl Product {
         }
     }
 
+    /// The product's name, as `[agent] product` names it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Claude => crate::config::CLAUDE_PRODUCT,
+            Self::Codex => crate::config::CODEX_PRODUCT,
+        }
+    }
+
     /// The bay event of the payload's `hook_event_name`.
     fn event(self, name: &str) -> Event {
         match self {
@@ -338,12 +347,15 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
     let translated = guest::as_claude(input);
     let input = translated.as_deref().unwrap_or(input);
     let product = Product::configured(input, dir);
-    let outcome = dispatch_as(product, event, input, dir);
+    // BACKLOG 61 a: the product that called, a guest named as itself, reaches the session's row.
+    let caller = translated.as_ref().map_or(product.name(), |_| guest::GROK);
+    let outcome = dispatch_as(product, caller, event, input, dir);
     product.deliver(event, outcome)
 }
 
-/// [`dispatch`] of a payload from `product`: one event handling for every product.
-fn dispatch_as(product: Product, event: &str, input: &str, dir: &Path) -> Outcome {
+/// [`dispatch`] of a payload from `product`, which `caller` (the product, or a guest running its
+/// hooks) sent: one event handling for every product.
+fn dispatch_as(product: Product, caller: &str, event: &str, input: &str, dir: &Path) -> Outcome {
     // G323: the command line names the moment, and a tool call never slips past `tool.before` under
     // another name (a typo, or a settings file and a bay from different versions).
     if let Some(why) = misnamed_tool_call(event, input) {
@@ -372,7 +384,9 @@ fn dispatch_as(product: Product, event: &str, input: &str, dir: &Path) -> Outcom
         && !matches!(payload.event, Event::Unprobed | Event::PreToolUse)
     {
         product_event = payload.event;
-        recorded = crate::session::record(&payload);
+        let mut extra = serde_json::Map::new();
+        extra.insert("product".to_owned(), Value::from(caller));
+        recorded = crate::session::record_with(&payload, &extra);
     }
     // Ruling R7: a stop over uncheckpointed edits is refused once; exit 2 keeps the session
     // going, with the reason as its next instruction.
