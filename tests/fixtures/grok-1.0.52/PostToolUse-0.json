@@ -1,0 +1,58 @@
+{
+  "hookEventName": "post_tool_use",
+  "sessionId": "session-1",
+  "cwd": "/work/grokA",
+  "workspaceRoot": "/work/grokA",
+  "timestamp": "2026-10-24T01:33:43.326816+00:00",
+  "transcriptPath": "/home/user/.grok/sessions/%2Fwork%2FgrokA/session-1/updates.jsonl",
+  "permissionMode": "bypassPermissions",
+  "toolName": "run_terminal_command",
+  "toolUseId": "toolu-1",
+  "toolInput": {
+    "command": "echo hello > a.txt",
+    "description": "Write hello into a.txt"
+  },
+  "toolResult": {
+    "type": "Bash",
+    "output": [],
+    "output_for_prompt": "exit: 0\n",
+    "exit_code": 0,
+    "command": "echo hello > a.txt",
+    "truncated": false,
+    "signal": null,
+    "timed_out": false,
+    "description": "Write hello into a.txt",
+    "current_dir": "/work/grokA",
+    "output_file": "/home/user/.grok/sessions/%2Fwork%2FgrokA/session-1/terminal/toolu-1.log",
+    "total_bytes": 0
+  },
+  "toolInputTruncated": false,
+  "toolResultTruncated": false,
+  "durationMs": 212,
+  "isBackgrounded": false,
+  "hook_event_name": "PostToolUse",
+  "session_id": "session-1",
+  "transcript_path": "/home/user/.grok/sessions/%2Fwork%2FgrokA/session-1/updates.jsonl",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "run_terminal_command",
+  "tool_input": {
+    "command": "echo hello > a.txt",
+    "description": "Write hello into a.txt"
+  },
+  "tool_response": {
+    "type": "Bash",
+    "output": [],
+    "output_for_prompt": "exit: 0\n",
+    "exit_code": 0,
+    "command": "echo hello > a.txt",
+    "truncated": false,
+    "signal": null,
+    "timed_out": false,
+    "description": "Write hello into a.txt",
+    "current_dir": "/work/grokA",
+    "output_file": "/home/user/.grok/sessions/%2Fwork%2FgrokA/session-1/terminal/toolu-1.log",
+    "total_bytes": 0
+  },
+  "tool_use_id": "toolu-1",
+  "duration_ms": 212
+}

@@ -22,6 +22,7 @@
 
 mod claude;
 mod codex;
+mod guest;
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -333,6 +334,9 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
     if event == "talk-wait" {
         return talk_wait(dir);
     }
+    // BACKLOG 52 H4: a guest's payload in a shape bay reads (Grok's) is judged as Claude Code's.
+    let translated = guest::as_claude(input);
+    let input = translated.as_deref().unwrap_or(input);
     let product = Product::configured(input, dir);
     let outcome = dispatch_as(product, event, input, dir);
     product.deliver(event, outcome)

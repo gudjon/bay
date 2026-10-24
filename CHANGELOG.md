@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1
+
+- Grok, which runs a project's Claude Code hooks, has its shell and file writes judged as Claude Code's.
+
 ## 0.4.0
 
 The last renames before the first user; scripts and configs that use the old names need the new ones.

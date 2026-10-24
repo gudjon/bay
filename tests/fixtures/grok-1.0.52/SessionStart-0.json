@@ -1,0 +1,12 @@
+{
+  "hookEventName": "session_start",
+  "sessionId": "session-1",
+  "cwd": "/work/grokA",
+  "workspaceRoot": "/work/grokA",
+  "timestamp": "2026-10-24T01:33:39.108942+00:00",
+  "permissionMode": "bypassPermissions",
+  "source": "new",
+  "hook_event_name": "SessionStart",
+  "session_id": "session-1",
+  "permission_mode": "bypassPermissions"
+}

@@ -1,0 +1,13 @@
+{
+  "hookEventName": "user_prompt_submit",
+  "sessionId": "session-1",
+  "cwd": "/work/grokA",
+  "workspaceRoot": "/work/grokA",
+  "timestamp": "2026-10-24T01:33:39.156119+00:00",
+  "promptId": "prompt-1",
+  "permissionMode": "bypassPermissions",
+  "prompt": "Run this exact shell command and nothing else: echo hello > a.txt . Then reply DONE.",
+  "hook_event_name": "UserPromptSubmit",
+  "session_id": "session-1",
+  "permission_mode": "bypassPermissions"
+}

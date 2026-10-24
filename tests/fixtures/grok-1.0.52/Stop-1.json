@@ -1,0 +1,15 @@
+{
+  "hookEventName": "stop",
+  "sessionId": "session-1",
+  "cwd": "/work/grokA",
+  "workspaceRoot": "/work/grokA",
+  "timestamp": "2026-10-24T01:33:44.930370+00:00",
+  "transcriptPath": "/home/user/.grok/sessions/%2Fwork%2FgrokA/session-1/updates.jsonl",
+  "permissionMode": "bypassPermissions",
+  "reason": "shutdown",
+  "stopHookActive": false,
+  "hook_event_name": "Stop",
+  "session_id": "session-1",
+  "transcript_path": "/home/user/.grok/sessions/%2Fwork%2FgrokA/session-1/updates.jsonl",
+  "permission_mode": "bypassPermissions"
+}

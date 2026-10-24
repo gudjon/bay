@@ -1,0 +1,26 @@
+{
+  "hookEventName": "pre_tool_use",
+  "sessionId": "session-1",
+  "cwd": "/work/grokA",
+  "workspaceRoot": "/work/grokA",
+  "timestamp": "2026-10-24T01:33:43.086238+00:00",
+  "transcriptPath": "/home/user/.grok/sessions/%2Fwork%2FgrokA/session-1/updates.jsonl",
+  "permissionMode": "bypassPermissions",
+  "toolName": "run_terminal_command",
+  "toolUseId": "toolu-1",
+  "toolInput": {
+    "command": "echo hello > a.txt",
+    "description": "Write hello into a.txt"
+  },
+  "toolInputTruncated": false,
+  "hook_event_name": "PreToolUse",
+  "session_id": "session-1",
+  "transcript_path": "/home/user/.grok/sessions/%2Fwork%2FgrokA/session-1/updates.jsonl",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "run_terminal_command",
+  "tool_input": {
+    "command": "echo hello > a.txt",
+    "description": "Write hello into a.txt"
+  },
+  "tool_use_id": "toolu-1"
+}

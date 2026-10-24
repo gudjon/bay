@@ -1,0 +1,26 @@
+{
+  "hookEventName": "pre_tool_use",
+  "sessionId": "session-2",
+  "cwd": "/work/grokB",
+  "workspaceRoot": "/work/grokB",
+  "timestamp": "2026-10-24T01:34:38.635620+00:00",
+  "transcriptPath": "/home/user/.grok/sessions/%2Fwork%2FgrokB/session-2/updates.jsonl",
+  "permissionMode": "bypassPermissions",
+  "toolName": "write",
+  "toolUseId": "toolu-2",
+  "toolInput": {
+    "file_path": "/work/grokB/notes.md",
+    "content": "hi\n"
+  },
+  "toolInputTruncated": false,
+  "hook_event_name": "PreToolUse",
+  "session_id": "session-2",
+  "transcript_path": "/home/user/.grok/sessions/%2Fwork%2FgrokB/session-2/updates.jsonl",
+  "permission_mode": "bypassPermissions",
+  "tool_name": "write",
+  "tool_input": {
+    "file_path": "/work/grokB/notes.md",
+    "content": "hi\n"
+  },
+  "tool_use_id": "toolu-2"
+}
