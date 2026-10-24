@@ -89,17 +89,24 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         };
         // Between passes, never inside an operation: the re-exec point.
         if !once && binary.changed() {
-            if let Some(next) = binary
+            match binary
                 .version()
                 .filter(|_| moves && binary.takes_arguments())
             {
-                return BayResult::ok(json!({"ran": ran, "reexec": {
-                    "from": crate::version::BAY,
-                    "to": next,
-                    "path": binary.path,
-                }}));
+                // A pin is one version (owner ruling 2026-10-24, BACKLOG 67): a runner moves only
+                // to the binary its pin names, and never when the pin cannot be read.
+                Some(next) => match pinned_elsewhere(&next) {
+                    None => {
+                        return BayResult::ok(json!({"ran": ran, "reexec": {
+                            "from": crate::version::BAY,
+                            "to": next,
+                            "path": binary.path,
+                        }}));
+                    }
+                    Some(pin) => eprintln!("bay runner: {}", binary.pinned(&next, &pin)),
+                },
+                None => eprintln!("bay runner: {}", binary.stays()),
             }
-            eprintln!("bay runner: {}", binary.stays());
             binary.accept();
         }
         if once {
@@ -147,6 +154,19 @@ fn below_floor(line: &str) -> Option<BayResult> {
             "recovery": "upgrade git",
         }))
     })
+}
+
+/// The pin that keeps this runner off bay `next`: the box's pin (`BAY_UPDATE_VERSION`, else
+/// `bay.updateVersion`) when it names another version, or why the pin cannot be read. `None`
+/// when no pin is set, or the pin is `next`.
+fn pinned_elsewhere(next: &str) -> Option<String> {
+    match crate::update::BoxSettings::load() {
+        Ok(settings) => settings
+            .version
+            .filter(|pin| pin != next)
+            .map(|pin| format!("this box is pinned to bay {pin}")),
+        Err(why) => Some(format!("the pin cannot be read ({why})")),
+    }
 }
 
 /// Whether this platform can replace the running executor in place (`exec`).
@@ -227,6 +247,19 @@ impl Binary {
     /// Takes the file now at the path as this executor's own, so one change is told once.
     fn accept(&mut self) {
         self.stamp = self.path.as_deref().and_then(stamp);
+    }
+
+    /// Why this runner keeps running its own version though its binary is now bay `next`:
+    /// `pin` says which pin keeps it.
+    fn pinned(&self, next: &str, pin: &str) -> String {
+        let path = self
+            .path
+            .as_deref()
+            .map_or_else(String::new, |path| path.display().to_string());
+        format!(
+            "{path} is bay {next}, but {pin}; this runner keeps running bay {} until it is restarted",
+            crate::version::BAY
+        )
     }
 
     /// Why this executor keeps running its own version though its binary changed.
