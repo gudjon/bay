@@ -441,7 +441,20 @@ impl Git {
     ///
     /// The git binary is missing or the call exceeds the timeout.
     pub fn run_status(&self, args: &[&str]) -> Result<(i32, String, String), GitError> {
-        let output = self.output(args, &[], None, GIT_CALL_TIMEOUT)?;
+        self.run_status_with(args, &[])
+    }
+
+    /// [`Self::run_status`] with `envs` set for the call.
+    ///
+    /// # Errors
+    ///
+    /// The git binary is missing or the call exceeds the timeout.
+    pub fn run_status_with(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+    ) -> Result<(i32, String, String), GitError> {
+        let output = self.output(args, envs, None, GIT_CALL_TIMEOUT)?;
         Ok((
             output.status.code().unwrap_or(-1),
             String::from_utf8_lossy(&output.stdout)

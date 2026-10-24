@@ -2,6 +2,9 @@
 
 use crate::git::{Git, GitError};
 
+/// Git's variable naming the tree it reads `.gitattributes` from (`--attr-source`).
+pub const ATTR_SOURCE: &str = "GIT_ATTR_SOURCE";
+
 pub enum Merge {
     /// The merged result tree.
     Clean(String),
@@ -35,7 +38,11 @@ fn merge_tree(git: &Git, base: Option<&str>, ours: &str, theirs: &str) -> Result
     args.extend(base.as_deref());
     args.extend([ours, theirs]);
     // A content merge reads the blobs both sides changed: in a blob-less store, Git fetches them.
-    let (code, stdout, stderr) = git.fetching().run_status(&args)?;
+    // BACKLOG 67 item 1a: merge attributes (`merge=union` for an append-only list) come from
+    // `ours`, main, never from the change merged onto it, so no change picks how it is merged.
+    let (code, stdout, stderr) = git
+        .fetching()
+        .run_status_with(&args, &[(ATTR_SOURCE, ours)])?;
     let mut lines = stdout.lines();
     let tree = lines.next().unwrap_or_default().to_owned();
     // G211: Git also exits 1 for a revision it cannot read, printing no tree, so a conflict is

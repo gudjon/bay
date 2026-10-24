@@ -214,6 +214,7 @@ mod g347_a_fresh_clone_merges_with_no_setup;
 mod g348_a_pinned_runner_never_moves_to_another_version;
 mod g349_a_merge_names_what_main_changed_in_its_files;
 mod g34_a_moved_base_never_hides_an_earlier_landing;
+mod g350_an_append_only_list_merges_as_the_union_main_names;
 mod g35_publication_never_livelocks;
 mod g36_one_intent_one_revision_one_landing;
 mod g37_every_bay_ref_can_exist_at_once;

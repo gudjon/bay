@@ -60,6 +60,8 @@ with a message saying what you did, and an `Open: <item>` line at its end for an
 needing a person: main's commit keeps that message. Research, a plan or a review a person should see is a
 short file (`notes/<date>-<what>.md`), saved like any other change. When `bay merge` names
 `detail.main_changed`, main changed those files of yours since your change began: read its `commit`.
+A list every change appends to (cards, a registry) merges both sides' lines when main's
+`.gitattributes` marks it `merge=union`; your change's own `.gitattributes` never decides its merge.
 `bay start` lists in `detail.overlaps` the live changes whose
 declared paths overlap yours (change, intent, actor, paths). It does not refuse; talk to them, or
 narrow your paths. `bay help` shows every command and flag on one page, with what each one writes and

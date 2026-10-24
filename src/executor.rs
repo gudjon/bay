@@ -703,9 +703,10 @@ fn early_conflicts(repo: &Repo, queue: &Queue) -> Vec<Value> {
 /// its paths, and that merge decides.
 fn probe(repo: &Repo, trunk: &str, revision: &str) -> Result<Option<EarlyConflict>, String> {
     let quiet = ["merge-tree", "--write-tree", "--quiet", trunk, revision];
+    // As the candidate merge reads them (`crate::merge`): attributes from main only.
     let (code, _, stderr) = repo
         .git
-        .run_status(&quiet)
+        .run_status_with(&quiet, &[(crate::merge::ATTR_SOURCE, trunk)])
         .map_err(|error| error.message())?;
     match code {
         0 => return Ok(None),

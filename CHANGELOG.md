@@ -7,6 +7,7 @@
 - The skill says to save research, plans and reviews a person should read as a short file.
 - A runner with a version pin never moves to another version when its binary changes.
 - `bay merge` names the files main changed since your change began, and main's commit.
+- A file main's `.gitattributes` marks `merge=union` merges both sides' lines; a change cannot mark its own.
 
 ## 0.4.0
 
