@@ -113,3 +113,43 @@ fn a_retention_line_of_no_days_is_refused() {
     assert_ne!(code, 0, "{refused}");
     assert!(refused.to_string().contains("0 days"), "{refused}");
 }
+
+/// The site's repro: after the store purges one file, an unrelated change still merges. A
+/// whole-tree check is given every other file kept outside Git and runs without the purged one
+/// (owner ruling 2026-10-24: skip it, its line kept), so one takedown never blocks every merge.
+///
+/// Guard to mutate: `src/assets.rs` `fill_check`: refuse when `filled.purged` is not empty (the
+/// check is `infra_failure` and the save waits).
+#[test]
+fn a_purge_never_blocks_a_later_merge() {
+    let mut files = support::check_files("true", &support::passing_result(1), 1, 60);
+    for (path, text) in &mut files {
+        if path == ".bay/policy.toml" {
+            text.push_str("\n[limits]\nmax_file_mib = 1\n");
+        }
+    }
+    let (test_box, repo, remote) = trunk_with(STORE_PLUGIN, Some("offload"), &files);
+    std::fs::create_dir_all(repo.join("renders")).unwrap();
+    let render = video();
+    std::fs::write(repo.join("renders/r1.bin"), &render).unwrap();
+    let (code, saved) = result_json(test_box.bay(&repo).args(["save", "a render"]));
+    assert_eq!(code, 0, "{saved}");
+    let purged = std::process::Command::new(repo.join("scripts/assets"))
+        .args([
+            store(&test_box).to_str().unwrap(),
+            "purge",
+            &format!("sha256:{}", sha256_hex(&render)),
+        ])
+        .output()
+        .unwrap();
+    assert!(purged.status.success(), "{purged:?}");
+
+    std::fs::write(repo.join("src/a.rs"), "fn a() { 2 }\n").unwrap();
+    let (code, merged) = result_json(test_box.bay(&repo).args(["save", "an unrelated fix"]));
+    assert_eq!(code, 0, "a purge blocked an unrelated merge: {merged}");
+    assert_eq!(merged["decision"], "merged", "{merged}");
+    assert_eq!(
+        test_box.git_bare(&remote, &["show", "main:src/a.rs"]),
+        "fn a() { 2 }"
+    );
+}

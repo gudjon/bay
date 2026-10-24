@@ -577,19 +577,10 @@ pub fn fill_check(
     };
     let filled = fill(&plugin, git, commit, tree_dir, &covered, None);
     let _ = std::fs::remove_dir_all(&scratch);
+    // A purged file (a takedown) is left out of the check's tree, its line kept in `.bay-assets`
+    // (owner ruling 2026-10-24): one purge never blocks every later merge. A change's own new
+    // files are never among them: the store must hold them before it merges (`exists`).
     let filled = filled?;
-    // A check cannot run on bytes that are gone: unknown is never a pass.
-    if !filled.purged.is_empty() {
-        return Err(format!(
-            "the check reads {} kept outside Git, and the store purged {}",
-            filled.purged.join(", "),
-            if filled.purged.len() == 1 {
-                "it"
-            } else {
-                "them"
-            }
-        ));
-    }
     for path in filled.written {
         let file = tree_dir.join(&path);
         if let Ok(meta) = std::fs::metadata(&file) {

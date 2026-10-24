@@ -1,9 +1,5 @@
 # Changelog
 
-## 0.4.1
-
-- Grok, which runs a project's Claude Code hooks, has its shell and file writes judged as Claude Code's.
-
 ## 0.4.0
 
 The last renames before the first user; scripts and configs that use the old names need the new ones.
@@ -40,6 +36,8 @@ The last renames before the first user; scripts and configs that use the old nam
 - `bay plugin test assets` also checks `exists`, and optional range `get` and `purge`.
 - A merge's lock guard counts only a lock that named the change itself.
 - A command name in a sentence is said as typed (`bay merge`, never "bay combine").
+- Grok, which runs a project's Claude Code hooks, has its shell and file writes judged as Claude Code's.
+- A check runs without a file its store purged; one purge never blocks later merges.
 
 ## 0.3.7
 
