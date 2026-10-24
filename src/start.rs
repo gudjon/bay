@@ -65,6 +65,20 @@ pub struct Saved {
 /// How long a start whose claim push met a held remote ref lock waits before it re-reads.
 const CLAIM_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// The paths `--paths` names, as the change declares them: `.` or `/` (the most natural first
+/// guess for "all of it") names the whole tree, which a change declares by naming no path, so
+/// its view is a full checkout and takes a new file anywhere. As a sparse rule, `/.` or `/`
+/// matched no file, and every new file was refused.
+#[must_use]
+pub fn declared_paths(paths: Vec<String>) -> Vec<String> {
+    let whole = |path: &String| matches!(path.trim().trim_end_matches('/'), "" | ".");
+    if paths.iter().any(whole) {
+        Vec::new()
+    } else {
+        paths
+    }
+}
+
 #[must_use]
 pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
     let repo = match Repo::open_fetched(dir) {

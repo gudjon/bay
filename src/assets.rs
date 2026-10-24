@@ -470,6 +470,10 @@ pub fn offload_view(repo: &Repo, view: &Path) -> Result<Vec<String>, String> {
         .map(str::to_owned)
         .collect();
     let done = offload(&plugin, view, &new, limit, &exclude_file(repo))?;
+    // The freeze that follows takes the manifest from the view's folder.
+    if let Some(undo) = &done.undo {
+        undo.keep();
+    }
     Ok(done.entries.into_iter().map(|entry| entry.path).collect())
 }
 
@@ -483,16 +487,29 @@ pub struct Offloaded {
     pub undo: Option<Undo>,
 }
 
-/// Each file [`offload`] wrote, with its text before (`None`: there was none).
+/// Each file [`offload`] wrote, with its text before (`None`: there was none). Dropped
+/// without [`Undo::keep`], it puts each file back, so every way a save ends short of a merge
+/// (a refusal, an error) leaves the folder as it found it.
 #[derive(Debug)]
 pub struct Undo {
     files: Vec<(std::path::PathBuf, Option<String>)>,
+    kept: std::cell::Cell<bool>,
 }
 
 impl Undo {
-    /// Puts each file back as it was. The bytes the plugin stored stay: a store keeps what it
-    /// is given, and a later save of the same file names them again.
-    pub fn restore(&self) {
+    /// Keeps what was written: the save went through, or the files are used at once.
+    pub fn keep(&self) {
+        self.kept.set(true);
+    }
+}
+
+impl Drop for Undo {
+    /// Puts each file back as it was, unless kept. The bytes the plugin stored stay: a store
+    /// keeps what it is given, and a later save of the same file names them again.
+    fn drop(&mut self) {
+        if self.kept.get() {
+            return;
+        }
         for (path, before) in &self.files {
             match before {
                 Some(text) => {
@@ -557,6 +574,7 @@ pub fn offload(
             (manifest.clone(), before),
             (exclude.to_path_buf(), std::fs::read_to_string(exclude).ok()),
         ],
+        kept: std::cell::Cell::new(false),
     });
     let mut next: Vec<Entry> = current
         .into_iter()

@@ -94,14 +94,8 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         return Ok(refused);
     }
     let (saved, offloaded, undo) = offload(repo, &trunk, &changed)?;
-    // A refusal from here on leaves the folder as it found it: the manifest and the exclude
-    // list as they were (BACKLOG 49, the site's review).
-    let untouched = |result: BayResult, saved: &[String]| {
-        if let Some(undo) = &undo {
-            undo.restore();
-        }
-        untouched(result, saved)
-    };
+    // Every way this save ends short of a merge, a refusal or an error, leaves the folder as it
+    // found it (the manifest and the exclude list): `undo` puts them back when dropped unkept.
     if saved.is_empty() {
         return Ok(BayResult::ok(json!({
             "saved": saved,
@@ -145,6 +139,9 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
     let landed = publish::land(&view, Some(&id), true, None, false);
     if landed.decision != Decision::Landed {
         return Ok(untouched(landed, &saved));
+    }
+    if let Some(undo) = &undo {
+        undo.keep();
     }
     let commit = landed
         .detail

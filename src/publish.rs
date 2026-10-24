@@ -5669,7 +5669,42 @@ impl Drop for Anchored<'_> {
     }
 }
 
+/// Main's commit message for a candidate of `revision`: bay's subject and trailers, with the
+/// agent's own words between them and its own trailers after bay's (BACKLOG 58,
+/// [`crate::change::agent_message`]).
 fn candidate_message(
+    ctx: &Ctx,
+    revision: &str,
+    request_id: &str,
+    candidate_id: &str,
+    registry_id: &str,
+) -> String {
+    let message = bay_message(ctx, revision, request_id, candidate_id, registry_id);
+    let config = &ctx.repo.config;
+    let reserved = [config.intent_trailer(), config.actor_trailer()];
+    let Ok(Some((text, trailers))) =
+        crate::change::agent_message(&ctx.repo.git, revision, &reserved)
+    else {
+        return message;
+    };
+    let Some((subject, bay_trailers)) = message.split_once("\n\n") else {
+        return message;
+    };
+    let mut out = format!("{subject}\n\n");
+    if !text.is_empty() {
+        out.push_str(&text);
+        out.push_str("\n\n");
+    }
+    out.push_str(bay_trailers);
+    for trailer in trailers {
+        out.push_str(&trailer);
+        out.push('\n');
+    }
+    out
+}
+
+/// bay's own subject and trailers of a candidate of `revision`.
+fn bay_message(
     ctx: &Ctx,
     revision: &str,
     request_id: &str,

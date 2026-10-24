@@ -669,7 +669,7 @@ fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
             intent: Some(intent),
             new,
             intent_revision: "1".to_owned(),
-            paths,
+            paths: bay::start::declared_paths(paths),
             inputs,
             resume: None,
             reverts: None,

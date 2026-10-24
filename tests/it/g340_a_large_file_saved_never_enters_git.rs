@@ -342,7 +342,8 @@ fn a_merge_from_a_view_keeps_the_manifests_other_lines() {
 /// A save refused after the plugin stored the file leaves the folder as it found it: no
 /// manifest it did not have, and the file not hidden from Git.
 ///
-/// Guard to mutate: `src/save.rs` `save_in`: drop the `undo.restore()` call.
+/// Guard to mutate: `src/assets.rs` `Undo::drop`: return at once (the folder keeps what the
+/// refused save wrote).
 #[test]
 fn a_refused_save_leaves_the_folder_as_it_was() {
     let failing = passing_result(1).replace("\\\"pass\\\"", "\\\"product_failure\\\"");
@@ -396,4 +397,25 @@ fn two_changes_adding_files_side_by_side_both_merge() {
         .filter_map(|line| line.splitn(3, ' ').nth(2))
         .collect();
     assert_eq!(paths, ["media/a.mov", "media/b.mov"], "{manifest}");
+}
+
+/// The site's repro: a save that fails, rather than being refused, puts the folder back too.
+/// An open change of the same words declares only `notes.txt`, so the save cannot take the
+/// manifest into it and fails; `.bay-assets` and the exclude list stay as they were.
+#[test]
+fn a_failed_save_leaves_the_folder_as_it_was_too() {
+    let (test_box, repo, _remote) = trunk(STORE_PLUGIN, Some("offload"));
+    test_box.bay_ok(&repo, &["start", "add the clip", "--paths", "notes.txt"]);
+    std::fs::write(repo.join("clip.mov"), video()).unwrap();
+    let (code, failed) = result_json(test_box.bay(&repo).args(["save", "add the clip"]));
+    assert_ne!(code, 0, "{failed}");
+    assert!(
+        !repo.join(".bay-assets").exists(),
+        "the failed save left a manifest: {failed}"
+    );
+    let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap_or_default();
+    assert!(
+        !exclude.contains("clip.mov"),
+        "the failed save hid the file: {exclude}"
+    );
 }

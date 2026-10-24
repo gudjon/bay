@@ -907,7 +907,9 @@ impl<'a> Chain<'a> {
 
 /// Freezes a view's work into a draft commit on `base`: every edit in the view, staged
 /// through the view's own index (sparse-aware), written as one commit. The view keeps
-/// its index; nothing outside the view changes.
+/// its index; nothing outside the view changes. BACKLOG 58: when the agent committed in the
+/// view (its `HEAD` is past `base`), the draft carries the latest of those commits' message,
+/// so main's commit can say what the agent said ([`agent_message`]); else `message`.
 ///
 /// # Errors
 ///
@@ -915,11 +917,92 @@ impl<'a> Chain<'a> {
 pub fn freeze_draft(view: &Git, base: &str, message: &str) -> Result<String, GitError> {
     view.run(&["add", "--all", "--sparse"])?;
     let tree = view.run(&["write-tree"])?;
+    let head = view.run(&["rev-parse", "HEAD"])?;
+    let own = if head != base && view.is_ancestor(base, &head).unwrap_or(false) {
+        Some(view.run(&["log", "-1", "--format=%B", "HEAD"])?)
+    } else {
+        None
+    };
+    let message = own
+        .as_deref()
+        .filter(|own| !own.trim().is_empty())
+        .unwrap_or(message);
     view.run_with(
         &["commit-tree", &tree, "-p", base, "-m", message],
         RECORD_IDENTITY,
         None,
     )
+}
+
+/// The messages bay itself gives a draft: none of them is the agent's.
+const BAY_DRAFT_MESSAGES: &[&str] = &["draft", "checkpoint"];
+
+/// The trailers bay writes on main's commit: an agent's message never sets one.
+const BAY_TRAILERS: &[&str] = &[
+    "change-id",
+    "revision-id",
+    "request-id",
+    "candidate-id",
+    "registry-id",
+    "bay-epoch",
+    "bay-session",
+    "supersedes",
+    "reverts",
+    "fixes",
+    "bay-after",
+    "bay-batch",
+];
+
+/// BACKLOG 58 (owner ruling 2026-10-23): the agent's own words in draft `revision`'s message,
+/// as main's commit carries them: its text (subject and body) and its trailers (such as
+/// `Open:`), without any trailer bay writes itself (`reserved`, plus the intent and actor
+/// keys). `None` for a message bay gave the draft. bay never judges the words.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn agent_message(
+    git: &Git,
+    revision: &str,
+    reserved: &[&str],
+) -> Result<Option<(String, Vec<String>)>, GitError> {
+    let message = git.run(&["log", "-1", "--format=%B", revision])?;
+    let message = message.trim();
+    if message.is_empty()
+        || BAY_DRAFT_MESSAGES.contains(&message)
+        || message.starts_with("bay save ")
+    {
+        return Ok(None);
+    }
+    let is_trailer = |line: &str| {
+        line.split_once(": ").is_some_and(|(key, _)| {
+            !key.is_empty()
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    };
+    let (text, trailers) = match message.rsplit_once("\n\n") {
+        Some((text, last)) if last.lines().all(is_trailer) => (text.trim(), last),
+        _ if message.lines().all(is_trailer) => ("", message),
+        _ => (message, ""),
+    };
+    let kept: Vec<String> = trailers
+        .lines()
+        .filter(|line| {
+            let key = line
+                .split_once(": ")
+                .map_or("", |(key, _)| key)
+                .to_ascii_lowercase();
+            !BAY_TRAILERS.contains(&key.as_str())
+                && !reserved.iter().any(|own| own.eq_ignore_ascii_case(&key))
+        })
+        .map(str::to_owned)
+        .collect();
+    if text.is_empty() && kept.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some((text.to_owned(), kept)))
 }
 
 /// An unsigned commit of `tree` on `parent` under bay's record identity.

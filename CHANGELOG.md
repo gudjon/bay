@@ -28,6 +28,8 @@ The last renames before the first user; scripts and configs that use the old nam
 - `examples/assets/folder-store` keeps large files in any folder, such as a shared drive.
 - A save refused after a large file was stored leaves the folder as it was.
 - Two changes adding large files never conflict on `.bay-assets`: it merges line by line.
+- Main's commit keeps the agent's own commit message from the view, with its `Open:` lines.
+- `bay start --paths .` (or `/`) is a view of the whole tree; it takes new files anywhere.
 
 ## 0.3.7
 
