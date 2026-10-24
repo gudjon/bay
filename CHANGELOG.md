@@ -11,6 +11,7 @@
 - Under any agent product, an agent's own `bay save` acts as its session, so its own lock never holds it.
 - A change's refusal is told to the session that holds it while it is live, not every agent.
 - `bay status --all` names each session's agent product, and lists the locks held now with their holders.
+- A change that would put back what another merged change replaced is refused `UNDOES_MERGED`, naming it.
 
 ## 0.4.0
 

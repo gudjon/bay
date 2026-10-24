@@ -73,6 +73,7 @@
         "PATH_HELD",
         "LOCK_NOT_HELD",
         "ASSET_MISSING",
+        "UNDOES_MERGED",
         "REMOTE_NOT_FETCHED",
         "CONFIG_MISSING",
         "TOOL_BELOW_FLOOR",

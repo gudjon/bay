@@ -4055,6 +4055,161 @@ fn asset_missing(
     ))
 }
 
+/// `UNDOES_MERGED` at candidate build (BACKLOG 64 F1, owner ruling 2026-10-24): a change written
+/// from an older copy of a file, by any tool, merged cleanly and put back the file as it was
+/// before another change main merged after this change began. For each such commit on main's
+/// line since the change began (`base_first`) that touched the change's own files (its edits
+/// from its current base), its patch of each of those
+/// files is applied, only as a check, to the merged `tree`: when it still applies, `tree` holds
+/// the file as it was before that commit, so the merge would undo it. Exact reversal only: a
+/// change that reworked those lines no longer matches the commit's context. A change whose
+/// `Reverts:` names that change undoes it on purpose. Blocked as on a conflict; no candidate is
+/// committed and no check runs.
+fn undoes_merged(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+    tree: &str,
+) -> Result<Option<BayResult>, String> {
+    let repo = ctx.repo;
+    let git = &repo.git;
+    // The change's own edits, from its current base (main itself once it brought main in).
+    let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
+        return Ok(None);
+    };
+    let mine: Vec<String> = git
+        .run(&["diff", "--name-only", "--no-renames", "-z", &base, revision])
+        .map_err(|error| error.message())?
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if mine.is_empty() {
+        return Ok(None);
+    }
+    // Since the change began (`base_first`), not since its current base: a change that brought
+    // in main and then wrote a file from its older copy undoes work its base already holds.
+    let began = &ctx.record.base_first;
+    let since = if git.is_ancestor(began, trunk).unwrap_or(false) {
+        began.as_str()
+    } else {
+        base.as_str()
+    };
+    let range = format!("{since}..{trunk}");
+    let mut args = vec!["log", "--first-parent", "--format=%H", range.as_str(), "--"];
+    args.extend(mine.iter().map(String::as_str));
+    let commits = git.run(&args).map_err(|error| error.message())?;
+    if commits.is_empty() {
+        return Ok(None);
+    }
+    // The merged tree and main's own, each in an index of its own, so a patch is applied to
+    // them only as a check. A patch that applies to main too is undone on main already (a later
+    // commit there put the file back), never by this change.
+    let index = repo
+        .common_dir
+        .join("bay")
+        .join(format!("undo-{op_id}.index"));
+    let main_index = repo
+        .common_dir
+        .join("bay")
+        .join(format!("undo-{op_id}.main.index"));
+    let (index_var, main_var) = (
+        index.display().to_string(),
+        main_index.display().to_string(),
+    );
+    let envs = [("GIT_INDEX_FILE", index_var.as_str())];
+    let main_envs = [("GIT_INDEX_FILE", main_var.as_str())];
+    git.run_with(&["read-tree", tree], &envs, None)
+        .map_err(|error| error.message())?;
+    git.run_with(&["read-tree", trunk], &main_envs, None)
+        .map_err(|error| error.message())?;
+    let skip = [Some(ctx.id.as_str()), ctx.record.reverts.as_deref()];
+    let found = first_undone(git, &commits, &mine, &skip, &envs, &main_envs);
+    let _ = std::fs::remove_file(&index);
+    let _ = std::fs::remove_file(&main_index);
+    let Some((commit, change, path)) = found else {
+        return Ok(None);
+    };
+    let condition = condition(git, revision, trunk, None, &ctx.record.observed_versions)?;
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Blocked;
+    op.outcome = Some(Reason::UndoesMerged.code().to_owned());
+    op.blocked_on = Some(condition);
+    ctx.save(revision, None, "blocked: undoes merged work")?;
+    ctx.push_chain();
+    Ok(Some(
+        BayResult::blocked(Reason::UndoesMerged)
+            .with_change(ctx.id.clone())
+            .with_op(op_id)
+            .with_detail(json!({
+                "paths": [path],
+                "change": (!change.is_empty()).then_some(change),
+                "commit": commit,
+                "main": trunk,
+            })),
+    ))
+}
+
+/// The first of `commits` (newest first) whose patch of one of `mine` applies to the merged
+/// tree's index and not to main's (`envs`): `(commit, its change, the path)`. A commit of a
+/// change `skip` names (the change's own, or the one it reverts) is passed.
+fn first_undone(
+    git: &Git,
+    commits: &str,
+    mine: &[String],
+    skip: &[Option<&str>],
+    envs: &[(&str, &str)],
+    main_envs: &[(&str, &str)],
+) -> Option<(String, String, String)> {
+    for commit in commits.lines() {
+        let Ok(parent) = git.run(&["rev-parse", &format!("{commit}^1")]) else {
+            continue;
+        };
+        let theirs = git
+            .run(&[
+                "log",
+                "-1",
+                "--format=%(trailers:key=Change-Id,valueonly)",
+                commit,
+            ])
+            .unwrap_or_default();
+        let theirs = theirs.trim();
+        // Its own earlier merge, or the change it undoes on purpose, is no one else's work.
+        if !theirs.is_empty() && skip.contains(&Some(theirs)) {
+            continue;
+        }
+        for path in mine {
+            let patch = git
+                .run_bytes(
+                    &[
+                        "diff",
+                        "--binary",
+                        "--no-renames",
+                        &parent,
+                        commit,
+                        "--",
+                        path,
+                    ],
+                    &[],
+                    None,
+                )
+                .unwrap_or_default();
+            if patch.is_empty() {
+                continue;
+            }
+            let applies = |envs: &[(&str, &str)]| {
+                git.run_bytes(&["apply", "--cached", "--check", "-"], envs, Some(&patch))
+                    .is_ok()
+            };
+            if applies(envs) && !applies(main_envs) {
+                return Some((commit.to_owned(), theirs.to_owned(), path.clone()));
+            }
+        }
+    }
+    None
+}
+
 /// G213: a merged `tree` equal to `trunk`'s own tree is work already on trunk, whether another
 /// change landed the same bytes or the change's edits cancel out. Nothing is published and no
 /// check runs; the operation ends `no_effect`, naming the trunk commit that holds the work.
@@ -4138,6 +4293,10 @@ fn build_and_check(
         }
         // BACKLOG 49: the bytes a change's manifest names are in the store before it merges.
         if let Some(refusal) = asset_missing(ctx, op_id, revision, trunk, &tree)? {
+            return Ok(Err(refusal));
+        }
+        // BACKLOG 64 F1: no change silently puts back what another merged after it began.
+        if let Some(refusal) = undoes_merged(ctx, op_id, revision, trunk, &tree)? {
             return Ok(Err(refusal));
         }
         if let Some(no_effect) = no_effect(ctx, op_id, revision, trunk, &tree)? {

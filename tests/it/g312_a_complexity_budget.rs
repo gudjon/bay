@@ -43,7 +43,9 @@ const FLAGS: usize = 76;
 ///   made around its lock, reached the merge and lost someone's work there; it is refused first.
 /// - 0.4.0, one reason (`ASSET_MISSING`, BACKLOG 49): a merge could name bytes no store held,
 ///   and every later clone and check found the file gone; it is refused first.
-const REASONS: usize = 60;
+/// - 0.4.1, one reason (`UNDOES_MERGED`, BACKLOG 64 F1): a change written from an older copy of a
+///   file merged cleanly and took another agent's merged work off main; it is refused first.
+const REASONS: usize = 61;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.
