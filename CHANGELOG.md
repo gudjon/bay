@@ -34,7 +34,7 @@ The last renames before the first user; scripts and configs that use the old nam
 - A store may purge a file's bytes and keep its line; a clone names it and goes on.
 - `[assets] keep` in the policy says how long a store keeps generated files.
 - `bay plugin test assets` also checks `exists`, and optional range `get` and `purge`.
-- A merge's lock guard counts only a lock that named the change itself.
+- A merge's lock guard counts only the lock's current holder, and only if it named the change.
 - A command name in a sentence is said as typed (`bay merge`, never "bay combine").
 - Grok, which runs a project's Claude Code hooks, has its shell and file writes judged as Claude Code's.
 - A check runs without a file its store purged; one purge never blocks later merges.

@@ -1231,7 +1231,7 @@ impl Reason {
             }
             Self::ShellDenied => "Stopped: that command could lose work, and it is never allowed.",
             Self::LockNotHeld => {
-                "Nothing was added: files that need a lock were edited without one. Edit them again where bay takes the lock."
+                "Nothing was added: files that need a lock were edited without it, or another session holds it now. Edit them again to take it."
             }
             Self::AssetMissing => {
                 "Nothing was added: the store does not hold some large files this change names. Save them again."

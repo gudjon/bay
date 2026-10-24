@@ -74,8 +74,8 @@ pub struct Lock {
     pub change: Option<String>,
     /// When it was taken, last renewed or released, in Unix seconds.
     pub at_s: u64,
-    /// Whether the session released it: the ref stays, so its history names every change that
-    /// held the path (the merge guard, [`held_by`]), and a released lock is free to take.
+    /// Whether the session released it: the ref stays and keeps its holder, so the change still
+    /// holds it for the merge guard ([`held_by`]) until another takes it, and it is free to take.
     #[serde(default)]
     pub released: bool,
 }
@@ -121,8 +121,8 @@ pub fn take(
 }
 
 /// [`take`], the lock commit naming `change` when it is given (a save names the change it
-/// made), else the change of the view the target is in. The merge guard counts only a lock
-/// commit that names the change it judges ([`held_by`]).
+/// made), else the change of the view the target is in. The merge guard counts only the
+/// current holder's lock commits that name the change it judges ([`held_by`]).
 ///
 /// # Errors
 ///
@@ -450,23 +450,32 @@ fn lock_at(repo: &Repo, commit: &str) -> Option<Lock> {
         .filter(|lock| lock.schema == SCHEMA)
 }
 
-/// Whether change `change` held `path`'s lock at some time: some commit of the lock ref's
-/// history, as this clone fetched it, names it.
+/// Whether change `change` holds `path`'s lock: the current holder's commits, from the lock
+/// ref's tip (as this clone fetched it) back to the first commit of another holder, name it. A
+/// release keeps its holder, so a change that released its lock still holds it until someone
+/// else takes it; a lock it held before another session took it over counts for nothing.
 #[must_use]
 pub fn held_by(repo: &Repo, path: &str, change: &str) -> bool {
     let name = lock_ref(path);
-    let Ok(history) = repo.git.run(&["rev-list", &name]) else {
+    let Ok(history) = repo.git.run(&["rev-list", "--first-parent", &name]) else {
         return false;
     };
-    history
+    let mut locks = history
         .lines()
         .filter_map(|commit| lock_at(repo, commit))
-        .any(|lock| {
-            // Only a commit that names this very change: an actor is a machine's user, shared by
-            // every agent and person on it, so it never stands for the change (the Mac's
-            // review of 0.4.0, finding A).
-            lock.path == path && lock.change.as_deref() == Some(change)
-        })
+        .filter(|lock| lock.path == path);
+    let Some(tip) = locks.next() else {
+        return false;
+    };
+    let holder = |lock: &Lock| (lock.actor.clone(), lock.session.clone());
+    let current = holder(&tip);
+    std::iter::once(tip)
+        .chain(locks)
+        .take_while(|lock| holder(lock) == current)
+        // Only a commit that names this very change: an actor is a machine's user, shared by
+        // every agent and person on it, so it never stands for the change (the Mac's review of
+        // 0.4.0, finding A).
+        .any(|lock| lock.change.as_deref() == Some(change))
 }
 
 /// The merge guard (BACKLOG 57): the lockable paths, under the policy at `trunk`, that `tree`

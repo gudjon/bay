@@ -2914,8 +2914,11 @@ fn retry_blocked(
                 ),
         ));
     }
+    // A lock is no part of the condition: the session that takes it again changes nothing the
+    // condition names, so `LOCK_NOT_HELD` is judged again on every retry (its next step).
     if let Some(reason) = reason
         && !reason.transient()
+        && reason != Reason::LockNotHeld
         && then.as_deref() == Some(now.as_str())
     {
         return Ok(Some(

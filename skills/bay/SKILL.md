@@ -189,7 +189,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    wait until that session's turn ends. Offline, the edit is refused `REMOTE_UNREACHABLE`. A
    lock needs the newest copy: when main changed the file after your work began, the edit is
    refused `INPUT_CHANGED`; bring in main (`bay start <change>`), then edit. A change to such a
-   file merges only if it held the lock; one made without it is refused `LOCK_NOT_HELD`.
+   file merges only while it holds the lock (after its turn ends too, until another session
+   takes it); otherwise it is refused `LOCK_NOT_HELD`: edit the file again to take the lock.
    `bay save` takes the locks of the files it saves.
    To keep large files out of Git, add `[plugin.assets] command = "<your store's script>"` and
    `over_limit = "offload"` to `.bay/config.toml`: a new file over `max_file_mib` goes to that

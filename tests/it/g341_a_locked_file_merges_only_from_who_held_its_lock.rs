@@ -5,8 +5,9 @@
 //! - The successor rule: a lock is granted only when the work's base holds main's last change
 //!   to the path. An edit from an older copy would drop that change, so it is refused
 //!   `INPUT_CHANGED`, naming main's commit; with the newest main the edit goes through.
-//! - The merge guard: a change to a lockable path merges only when some commit of the path's
-//!   lock names the change (a lock ref keeps its history; a release is a commit, not a delete).
+//! - The merge guard: a change to a lockable path merges only when the lock's current holder
+//!   named the change (a release is a commit that keeps its holder; a lock another session
+//!   took since counts for nothing).
 //!   An edit made around the lock, with no hook, is refused `LOCK_NOT_HELD` at candidate build.
 //!   `bay save` takes the locks of the lockable files it saves, so a person's save passes it.
 //!
@@ -51,6 +52,31 @@ fn two_clones() -> (TestBox, PathBuf, PathBuf, PathBuf) {
     let remote = test_box.path().join("repo-remote.git");
     let second = test_box.clone_of(&remote, "second");
     (test_box, first, second, remote)
+}
+
+/// The turn end of `session` in `cwd`: its locks are released.
+fn stops(test_box: &TestBox, session: &str, cwd: &Path) {
+    let stop = json!({
+        "session_id": session,
+        "hook_event_name": "Stop",
+        "stop_hook_active": true,
+        "cwd": cwd,
+    });
+    let mut child = test_box
+        .bay_process(cwd)
+        .args(["hook", "turn.end"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stop.to_string().as_bytes())
+        .unwrap();
+    assert_eq!(child.wait_with_output().unwrap().status.code(), Some(0));
 }
 
 /// `tool.before` of `session` writing `file` (relative to `cwd`); returns (exit, stderr).
@@ -189,5 +215,107 @@ fn a_lock_held_by_another_session_of_the_same_user_still_refuses_a_hookless_chan
     assert_eq!(
         test_box.git_bare(&remote, &["show", "main:art/logo.bin"]),
         "logo 1"
+    );
+}
+
+/// The owner, on the Mac's review of 0.4.0: only the lock's current holder counts. A change
+/// whose session released the lock at its turn's end still merges while no one has taken it
+/// since; once another session takes it, the change's earlier lock counts for nothing, and its
+/// hookless edit is refused until its session takes the lock again.
+///
+/// Guards to mutate:
+/// - `src/locks.rs` `held_by`: drop the `take_while` (any past lock commit naming the change
+///   counts, and the edit merges while another session holds the lock).
+/// - `src/publish.rs` `retry_blocked`: drop the `LockNotHeld` exception (the retry after the
+///   lock is taken again returns the old refusal, unchanged).
+#[test]
+fn only_the_locks_current_holder_counts_never_a_lock_taken_over_since() {
+    let (test_box, first, second, remote) = two_clones();
+    // Released at the turn's end, taken by no one since: the change merges.
+    let started = test_box.bay_ok(&first, &["start", "a released logo", "--paths", "art/"]);
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    let (code, err) = edit(&test_box, "s-c", &view, "art/logo.bin");
+    assert_eq!(code, Some(0), "{err}");
+    std::fs::write(view.join("art/logo.bin"), "logo 8\n").unwrap();
+    stops(&test_box, "s-c", &view);
+    let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{merged}");
+    assert_eq!(merged["decision"], "merged", "{merged}");
+
+    // Released, then taken by another session: the change's earlier lock counts for nothing.
+    let started = test_box.bay_ok(&first, &["start", "a taken logo", "--paths", "art/"]);
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    let (code, err) = edit(&test_box, "s-c", &view, "art/logo.bin");
+    assert_eq!(code, Some(0), "{err}");
+    std::fs::write(view.join("art/logo.bin"), "logo 9\n").unwrap();
+    stops(&test_box, "s-c", &view);
+    test_box.git_ok(&second, &["pull", "-q", "--ff-only"]);
+    let (code, err) = edit(&test_box, "s-d", &second, "art/logo.bin");
+    assert_eq!(code, Some(0), "{err}");
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "LOCK_NOT_HELD", "{refused}");
+    assert_eq!(
+        test_box.git_bare(&remote, &["show", "main:art/logo.bin"]),
+        "logo 8"
+    );
+
+    // Once s-d's turn ends, the change's session takes the lock again, and the edit merges.
+    stops(&test_box, "s-d", &second);
+    let (code, err) = edit(&test_box, "s-c", &view, "art/logo.bin");
+    assert_eq!(code, Some(0), "{err}");
+    let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{merged}");
+    assert_eq!(
+        test_box.git_bare(&remote, &["show", "main:art/logo.bin"]),
+        "logo 9"
+    );
+}
+
+/// The Mac's two edges for the guard. In a view, a hooked agent's lock names the very change the
+/// merge judges. In the main checkout, the agent's own `bay save` re-takes the lock its hook
+/// took, as the same session (`BAY_SESSION`, which Claude Code hands the agent's shell), and is
+/// never refused `PATH_HELD` by it.
+///
+/// Guard to mutate: `src/locks.rs` `mine`: return `false` (the save is refused `PATH_HELD` by
+/// its own agent's lock).
+#[test]
+fn an_agents_own_lock_names_its_change_and_its_own_save_retakes_it() {
+    let (test_box, first, second, remote) = two_clones();
+    let started = test_box.bay_ok(&first, &["start", "a held logo", "--paths", "art/"]);
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    let change = started["change"].as_str().unwrap().to_owned();
+    let (code, err) = edit(&test_box, "s-a", &view, "art/logo.bin");
+    assert_eq!(code, Some(0), "{err}");
+    let tip = test_box.git_bare(
+        &remote,
+        &["for-each-ref", "--format=%(objectname)", "refs/bay/locks/"],
+    );
+    let lock: Value =
+        serde_json::from_str(&test_box.git_bare(&remote, &["show", &format!("{tip}:lock.json")]))
+            .unwrap();
+    assert_eq!(lock["change"], json!(change), "{lock}");
+    std::fs::write(view.join("art/logo.bin"), "logo 10\n").unwrap();
+    let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{merged}");
+    assert_eq!(merged["change"], json!(change), "{merged}");
+    stops(&test_box, "s-a", &view);
+
+    // The main checkout: session s-b's hook takes the lock, then s-b's own save re-takes it.
+    test_box.git_ok(&second, &["pull", "-q", "--ff-only"]);
+    let (code, err) = edit(&test_box, "s-b", &second, "art/logo.bin");
+    assert_eq!(code, Some(0), "{err}");
+    std::fs::write(second.join("art/logo.bin"), "logo 11\n").unwrap();
+    let (code, saved) = result_json(
+        test_box
+            .bay(&second)
+            .env("BAY_SESSION", "s-b")
+            .args(["save", "another held logo"]),
+    );
+    assert_eq!(code, 0, "{saved}");
+    assert_eq!(saved["decision"], "merged", "{saved}");
+    assert_eq!(
+        test_box.git_bare(&remote, &["show", "main:art/logo.bin"]),
+        "logo 11"
     );
 }
