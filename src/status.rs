@@ -252,7 +252,7 @@ fn not_linear(git: &crate::git::Git, trunk: &str) -> Vec<Value> {
 /// G47: the open talks this actor sent or must answer, each with who owes the reply, its ages
 /// and its standing; a lost or stale talk stays listed. Unreadable talks list nothing here.
 fn talk_rows(repo: &Repo) -> Value {
-    let Ok(me) = crate::change::current_actor() else {
+    let Ok(me) = crate::change::current_actor(&repo.common_dir) else {
         return json!([]);
     };
     crate::talk::standing::rows(&repo.git, &me.name, crate::talk::standing::reader_now())

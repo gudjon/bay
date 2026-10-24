@@ -5,6 +5,7 @@
 pub mod adapter;
 pub mod after;
 pub mod agent_hook;
+pub mod agent_pid;
 pub mod agent_settings;
 pub mod approve;
 pub mod assets;

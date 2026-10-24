@@ -111,7 +111,7 @@ fn open(dir: &Path) -> Result<(Repo, Registry, Actor), Stop> {
                 crate::names::REGISTRY
             ))
         })?;
-    let actor = crate::change::current_actor()?;
+    let actor = crate::change::current_actor(&repo.common_dir)?;
     Ok((repo, registry, actor))
 }
 

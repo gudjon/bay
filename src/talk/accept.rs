@@ -114,7 +114,7 @@ fn remote_tips(repo: &Repo, prefix: &str) -> Option<BTreeMap<String, String>> {
 }
 
 fn accept(repo: &Repo, registry: &Registry) -> Result<Outcome, String> {
-    let me = crate::change::current_actor()?;
+    let me = crate::change::current_actor(&repo.common_dir)?;
     if let Err(why) = crate::names::operator_name(&me.name) {
         return Ok(
             Outcome::new("skipped").why(format!("the actor name is not a talk recipient: {why}"))

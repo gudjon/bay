@@ -202,6 +202,7 @@ fn take_locks(repo: &Repo, changed: &[Entry], change: Option<&str>) -> Option<Ba
         .collect();
     let session = std::env::var("BAY_SESSION")
         .ok()
+        .or_else(|| crate::agent_pid::session_of_caller(&repo.common_dir))
         .filter(|session| crate::session::SessionId::parse(session).is_some());
     crate::locks::take_for(
         &repo.work_root,

@@ -804,7 +804,7 @@ fn submit_land(
         },
     };
     // An actor whose change was adopted away learns it here (§ 4, the `adopted` event).
-    let me = crate::change::current_actor()?;
+    let me = crate::change::current_actor(&repo.common_dir)?;
     if me.name != ctx.record.actor.name
         && ctx
             .record
@@ -3327,7 +3327,7 @@ fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<Ba
         Ok(trunk) => trunk,
         Err(refusal) => return Ok(refusal),
     };
-    let me = crate::change::current_actor()?;
+    let me = crate::change::current_actor(&repo.common_dir)?;
     if me.name != ctx.record.actor.name {
         return Ok(BayResult::blocked(Reason::AbandonRefused)
             .with_change(id)

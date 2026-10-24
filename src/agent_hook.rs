@@ -360,7 +360,15 @@ fn dispatch_as(product: Product, event: &str, input: &str, dir: &Path) -> Outcom
     // and the same step's end (`PostToolBatch`, Codex's `PostToolUse`) records it.
     let mut recorded = crate::session::Recorded::default();
     let mut product_event = Event::Unprobed;
-    if let Some(payload) = Payload::parse(product, event, input, dir)
+    let parsed = Payload::parse(product, event, input, dir);
+    // BACKLOG 66 C: every hook names its session against the agent's process, so the agent's
+    // own bay commands find it with no `BAY_SESSION` (`crate::agent_pid`).
+    if let Some(session) = parsed.as_ref().and_then(|payload| payload.session.as_ref())
+        && let Ok(common) = crate::git::Git::new(dir).common_dir()
+    {
+        crate::agent_pid::remember(Path::new(&common), session.as_str());
+    }
+    if let Some(payload) = parsed
         && !matches!(payload.event, Event::Unprobed | Event::PreToolUse)
     {
         product_event = payload.event;

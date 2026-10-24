@@ -368,7 +368,7 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         .clone()
         .ok_or("bay start needs an intent, or a change id")?;
     let base = repo.fetch_trunk().map_err(|error| error.message())?;
-    let me = current_actor()?;
+    let me = current_actor(&repo.common_dir)?;
     let source = actor_source();
     // G152: a policy at the base that requires a named actor refuses a name from a default,
     // before any claim is written.

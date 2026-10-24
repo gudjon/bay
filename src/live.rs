@@ -346,7 +346,7 @@ fn write_with(repo: &Repo, doctor: Option<Value>) -> Result<Option<(String, Stri
         "machine": machine,
         "at": crate::clock::now_rfc3339(),
     });
-    let actor = crate::change::current_actor()?.name;
+    let actor = crate::change::current_actor(&repo.common_dir)?.name;
     if let Some(key) = &key {
         // The host checks both against the signature and binds the ref to them (§ 10a).
         summary["key"] = json!(signing::fingerprint(key)?);

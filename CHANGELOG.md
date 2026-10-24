@@ -8,6 +8,7 @@
 - A runner with a version pin never moves to another version when its binary changes.
 - `bay merge` names the files main changed since your change began, and main's commit.
 - A file main's `.gitattributes` marks `merge=union` merges both sides' lines; a change cannot mark its own.
+- Under any agent product, an agent's own `bay save` acts as its session, so its own lock never holds it.
 
 ## 0.4.0
 

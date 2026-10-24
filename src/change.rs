@@ -123,14 +123,19 @@ impl ActorSource {
 /// # Errors
 ///
 /// The random source for a session id cannot be read.
-pub fn current_actor() -> Result<Actor, String> {
+pub fn current_actor(common: &std::path::Path) -> Result<Actor, String> {
     let name = actor_name();
+    // BACKLOG 66 C: with no `BAY_SESSION`, the session a hook named for the agent running this
+    // command (`crate::agent_pid`), else a fresh one.
     let session = match std::env::var("BAY_SESSION") {
         Ok(session) => session,
-        Err(_) => format!(
-            "s-{}",
-            crate::ids::new_change_id().map_err(|error| error.to_string())?
-        ),
+        Err(_) => match crate::agent_pid::session_of_caller(common) {
+            Some(session) => session,
+            None => format!(
+                "s-{}",
+                crate::ids::new_change_id().map_err(|error| error.to_string())?
+            ),
+        },
     };
     Ok(Actor { name, session })
 }
