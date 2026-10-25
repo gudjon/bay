@@ -690,7 +690,22 @@ fn take_in(
     base: &str,
     paths: &[String],
 ) -> Result<Result<TakenIn, BayResult>, String> {
-    let (commit, source) = resolve_from(repo, reference)?;
+    let (commit, source) = match resolve_from(repo, reference)? {
+        Resolved::Commit(commit, source) => (commit, source),
+        Resolved::Diverged {
+            full,
+            remote,
+            local,
+        } => {
+            return Ok(Err(BayResult::blocked(Reason::BranchDiverged).with_detail(json!({
+                "ref": reference,
+                "full": full,
+                "remote": remote,
+                "local": local,
+                "why": format!("--from {reference}: the remote's {full} is {remote}, and this repository's is {local}, with commits the remote's lacks"),
+            }))));
+        }
+    };
     let from = StartedFrom {
         reference: reference.to_owned(),
         commit: commit.clone(),
@@ -813,7 +828,7 @@ fn take_saved(
 /// which may be stale; `local` only when the remote has none, as a full ref, a branch or any
 /// revision this repository holds. A remote bay cannot list is an error, never a fall back to
 /// a local copy.
-fn resolve_from(repo: &Repo, reference: &str) -> Result<(String, &'static str), String> {
+fn resolve_from(repo: &Repo, reference: &str) -> Result<Resolved, String> {
     if reference.is_empty() || reference.starts_with('-') {
         return Err(format!("--from {reference:?} names no branch or ref"));
     }
@@ -851,13 +866,13 @@ fn resolve_from(repo: &Repo, reference: &str) -> Result<(String, &'static str), 
                 .run(&["merge-base", "--is-ancestor", &local, &remote_tip])
                 .is_err()
         {
-            return Err(format!(
-                "--from {reference}: the remote {remote} has {full} at {remote_tip}, and this \
-                 repository's {full} is {local}, with commits the remote's lacks: start with \
-                 --from {local} to take this repository's, or push it first"
-            ));
+            return Ok(Resolved::Diverged {
+                full,
+                remote: remote_tip,
+                local,
+            });
         }
-        return Ok((remote_tip, "remote"));
+        return Ok(Resolved::Commit(remote_tip, "remote"));
     }
     repo.git
         .run(&[
@@ -866,13 +881,26 @@ fn resolve_from(repo: &Repo, reference: &str) -> Result<(String, &'static str), 
             "-q",
             &format!("{reference}^{{commit}}"),
         ])
-        .map(|commit| (commit, "local"))
+        .map(|commit| Resolved::Commit(commit, "local"))
         .map_err(|_| {
             format!(
                 "--from {reference}: the remote {remote} has no {full}, and this repository holds \
                  no such branch, ref or commit"
             )
         })
+}
+
+/// What `--from <reference>` names ([`resolve_from`]).
+enum Resolved {
+    /// The commit, and where it was read: `remote` or `local`.
+    Commit(String, &'static str),
+    /// The remote has the branch, and this repository's copy holds commits the remote's lacks:
+    /// the `BRANCH_DIVERGED` refusal, naming both.
+    Diverged {
+        full: String,
+        remote: String,
+        local: String,
+    },
 }
 
 /// The commit the remote's `full` holds, fetched into a ref of bay's own that is deleted once

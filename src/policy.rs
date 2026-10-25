@@ -420,6 +420,12 @@ pub struct CheckEntry {
     /// Judged at the base and in the definition digest; left out of the canonical entry at 0.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub retry_on_failure: u32,
+    /// Fail fast (a fleet finding, 2026-10-25: half the night's refusals failed a seconds-long
+    /// check but paid for every slow one): a check with `first = true` runs before every other
+    /// check of the run, and a failure there ends the run, so no slow check starts. It orders
+    /// the run and changes nothing a check computes, so it is in no digest.
+    #[serde(default, skip_serializing)]
+    pub first: bool,
     /// Whether a `flaky` verdict of this check (a pass and a `product_failure` on one tree) lets
     /// the landing proceed. False, the default, refuses it `CHECK_FLAKY`. A flaky landing is
     /// named in the land result's `coverage_gaps` with every run, never as a plain pass. Judged

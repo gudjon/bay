@@ -70,6 +70,7 @@ pub mod runtime;
 pub mod save;
 pub mod service;
 pub mod session;
+pub mod setup;
 pub mod share;
 pub mod signing;
 pub mod skill;

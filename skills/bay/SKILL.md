@@ -191,6 +191,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    To keep changes small, add `[limits]` with `max_file_mib`, `max_files` or `max_added_lines`
    (positive integers; each optional). To cap the review queue, add `max_waiting_approvals`:
    with that many changes waiting for a yes, a change that needs one more is refused `WIP_LIMIT`.
+   A check that takes seconds can say `first = true`: it runs before the others, and a failure there
+   ends the run before any slow check starts.
    A slow check that reads the whole tree can run after merge instead of on every change:
    `stage = "post"` in its `[[check]]`, and `[runner] post = true` in `.bay/config.toml`. The runner then runs it
    once on main's newest tip, and with `bisect_post = true` a red result names the merge that broke it.
@@ -277,11 +279,12 @@ When the user asks to set bay up for a small team, do each step for them. Tell t
 1. On each person's machine: install bay (see "Before you start"), then `bay install` in their copy.
 2. Put `.bay/config.toml` and `.bay/policy.toml` on main and push them. The policy says
    `[policy] signing = "approvals"`, with an approval `[[check]]` for the paths that need a yes.
-3. On the machine that keeps the registry key: `git config bay.registryKey <private key path>`.
-   Then `bay enrol registry <name> <key.pub>`. The first key is always this registry key.
-4. For each person who approves: `bay enrol approver <name> <their key.pub>`. Ask only for the
-   public key, the `.pub` file. A name is a short lower-case word.
-5. On each approver's machine: `git config bay.approverName <name>` and
+3. The person who keeps the registry runs, on their own machine in the project's clone:
+   `bay install --approver <name>` (a short lower-case word). It makes their keys if they have
+   none, starts the registry, enrols them, and reads it back from the remote. Re-running it is safe.
+4. For each other person who approves: they send only their public key, the `.pub` file, and the
+   registry keeper runs `bay enrol approver <name> <their key.pub>`.
+5. On each other approver's machine: `git config bay.approverName <name>` and
    `git config bay.approverKey <their private key path>`.
 6. `bay doctor` on each machine. It names anything missing, with its fix, and publishes its verdict, so
    `bay status` then `bay status --all` on any one machine shows every machine's (`ready`).

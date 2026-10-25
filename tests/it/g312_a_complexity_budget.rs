@@ -37,8 +37,11 @@ use support::TestBox;
 ///   agent hook `bay hook`, which `bay install` writes and no one types, is hidden from `--help`.
 /// - 0.4.3, two commands (`assets`, `assets held`, BACKLOG 62): each store walked main's history
 ///   and judged the hold globs itself before a purge; now bay answers in one place.
+/// - 0.5.4, one flag (`install --approver`, owner ruling 2026-10-25): a person who approves set
+///   up two keys, three config lines and two enrolments by hand, seven steps a non-technical
+///   person got wrong; now it is one run that reads its result back from the remote.
 const COMMANDS: usize = 28;
-const FLAGS: usize = 76;
+const FLAGS: usize = 77;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,
@@ -47,7 +50,10 @@ const FLAGS: usize = 76;
 ///   and every later clone and check found the file gone; it is refused first.
 /// - 0.4.1, one reason (`UNDOES_MERGED`, BACKLOG 64 F1): a change written from an older copy of a
 ///   file merged cleanly and took another agent's merged work off main; it is refused first.
-const REASONS: usize = 61;
+/// - 0.5.4, one reason (`BRANCH_DIVERGED`, the 0.5.3 acceptance finding): a `--from` branch
+///   rebased here came back as a bare failure with no next step; now it is a refusal that names
+///   both commits and says which `--from` takes which.
+const REASONS: usize = 62;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.

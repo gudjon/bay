@@ -216,6 +216,10 @@ reasons! {
     // N-5; not yet in INTERFACES § 2: `bay start --from <branch>` names a branch that changes
     // paths `--paths` does not declare. Nothing is created; a start whose paths cover them can.
     PathsUndeclared => "PATHS_UNDECLARED", ["read", "repair"], "after_fix", false;
+    // 0.5.4 (the 0.5.3 acceptance finding): `bay start --from <branch>` names a branch whose copy
+    // here holds commits the remote's lacks (a local rebase). Nothing is created; neither is
+    // taken silently.
+    BranchDiverged => "BRANCH_DIVERGED", ["read", "repair"], "after_fix", false;
     // G273 (N-16); not yet in INTERFACES § 2: the change was started `--after` a change that has
     // not landed on trunk yet. The operation stays queued, publishes nothing, holds no queue
     // place, and is tried again once every change it names has landed.
@@ -1147,6 +1151,9 @@ impl Reason {
             Self::PathsUndeclared => {
                 "Run `bay start <intent> --from <branch>` again, with `--paths` covering every path in `detail.uncovered`."
             }
+            Self::BranchDiverged => {
+                "Run `bay start` again with `--from <commit>`: `detail.local` takes this repository's branch, `detail.remote` the remote's. Or push yours first."
+            }
             Self::DependencyPending => {
                 "Wait: the change merges after each change it names with `--after` merges; `bay status <change>` shows them."
             }
@@ -1177,6 +1184,7 @@ impl Reason {
             | Self::ApprovalPending
             | Self::TrunkHeld
             | Self::PathsUndeclared
+            | Self::BranchDiverged
             | Self::ChangeTooLarge
             | Self::WipLimit
             | Self::ToolBelowFloor
@@ -1396,6 +1404,10 @@ impl Reason {
                 "Nothing was added: the work touches files it did not list{}. Start again, listing them.",
                 paths()
             ),
+            Self::BranchDiverged => format!(
+                "Nothing was started: your copy{} here and the one online differ. Say which one you mean, or send yours first.",
+                named(text_at(detail, &["/ref"]).map(plain))
+            ),
             Self::ChangeTooLarge => format!(
                 "Nothing was saved: this change is too big{}. Keep large files elsewhere, such as a shared drive.",
                 named(too_large(detail))
@@ -1528,6 +1540,14 @@ fn ok_say(result: &BayResult) -> &'static str {
     if let Some(sentence) = answered_say(detail) {
         return sentence;
     }
+    // The owner setup (`bay install --approver`, owner ruling 2026-10-25): one plain sentence.
+    if let Some(detail) = detail.filter(|detail| detail.get("approver").is_some()) {
+        return if detail["enrolled"] == true || detail["started_registry"] == true {
+            "Done: you can now approve changes. See what waits for you with bay waiting, and approve one with bay approve <change>."
+        } else {
+            "Already set up: you can approve changes. See what waits for you with bay waiting."
+        };
+    }
     // G320: a clone install wrote hook entries that main does not hold yet.
     if detail.is_some_and(|detail| detail.get("hooks_to_land") == Some(&Value::Bool(true))) {
         return "bay is set up here; add the new settings file to main, so every copy of the project gets the safety settings.";
@@ -1642,7 +1662,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 61);
+        assert_eq!(Reason::ALL.len(), 62);
     }
 
     #[test]

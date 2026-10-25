@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4
+
+- `bay start --from` with a branch rebased here is the refusal `BRANCH_DIVERGED`, naming both commits.
+- A check with `first = true` runs before the others, and a failure there ends the run before any slow check starts.
+- `bay install --approver <name>` sets a person up to approve in one run, and reads it back from the remote.
+
 ## 0.5.3
 
 - The runner takes changes waiting for it oldest first, never in change-id order.

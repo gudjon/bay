@@ -294,6 +294,11 @@ struct InstallArgs {
     /// origin)
     #[arg(long, conflicts_with = "machine")]
     remote: Option<String>,
+    /// Set this person up to approve changes, in one run on their own machine and in the
+    /// project's clone: their keys are made if absent (never overwritten), enrolled, pushed and
+    /// read back from the remote
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["machine", "trunk", "remote"])]
+    approver: Option<String>,
 }
 
 #[derive(Args)]
@@ -574,6 +579,9 @@ fn config_refusal(cli: &Cli) -> Option<BayResult> {
 }
 
 fn install(dir: &std::path::Path, args: InstallArgs) -> BayResult {
+    if let Some(name) = &args.approver {
+        return bay::setup::approver(dir, name);
+    }
     let trunk = bay::install::Trunk {
         trunk: args.trunk,
         remote: args.remote,

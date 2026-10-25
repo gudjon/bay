@@ -355,9 +355,10 @@ fn a_local_branch_with_commits_the_remotes_lacks_is_named_never_dropped() {
         "--from",
         "outside",
     ]));
-    assert_ne!(code, 0, "{failed}");
-    let said = failed.to_string();
-    assert!(said.contains(&tip) && said.contains(&local), "{failed}");
+    assert_eq!(code, 10, "{failed}");
+    assert_eq!(failed["reason"], "BRANCH_DIVERGED", "{failed}");
+    assert_eq!(failed["detail"]["remote"], tip.as_str(), "{failed}");
+    assert_eq!(failed["detail"]["local"], local.as_str(), "{failed}");
 }
 
 #[test]

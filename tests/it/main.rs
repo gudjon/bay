@@ -249,6 +249,8 @@ mod g37_every_bay_ref_can_exist_at_once;
 mod g380_a_head_refused_by_a_moved_main_yields_its_pass;
 mod g381_a_policy_may_state_talk_before_the_switch;
 mod g382_the_runner_takes_waiting_changes_oldest_first;
+mod g383_a_person_becomes_an_approver_in_one_command;
+mod g384_a_first_check_fails_fast;
 mod g38_undo_and_session_start;
 mod g39_a_blocked_shell_command_does_not_run;
 mod g3x_a_repository_on_git_3_defaults_lands;

@@ -947,6 +947,25 @@ pub fn run_all(
         about: &told,
         shows: hooks.seen.is_some(),
     };
+    // Fail fast: every `first` check runs before the rest, one by one, and a failure or an
+    // `unavailable` answer there ends the run before any other check starts.
+    let (firsts, required): (Vec<_>, Vec<_>) =
+        required.into_iter().partition(|(_, entry)| entry.first);
+    for &(index, entry) in &firsts {
+        let unavailable = run_serial(shared, (index, entry), hooks, (&mut records, &mut on_base))?;
+        if let Some(reason) = unavailable {
+            return Ok(Ran {
+                records,
+                unavailable: Some((entry.environment.clone(), reason)),
+            });
+        }
+        if ended_by_failure(&records) {
+            return Ok(Ran {
+                records,
+                unavailable: None,
+            });
+        }
+    }
     // What the parallel phase ran, by position in `required`, and how many of them are kept.
     let mut slots: Vec<Option<Result<Slot, String>>> = required.iter().map(|_| None).collect();
     let mut kept = 0;

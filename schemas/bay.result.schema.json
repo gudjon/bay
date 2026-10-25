@@ -98,6 +98,7 @@
         "DISK_LOW",
         "MAIN_HELD",
         "PATHS_UNDECLARED",
+        "BRANCH_DIVERGED",
         "DEPENDENCY_PENDING",
         "DEPENDENCY_ABANDONED",
         "CHANGE_TOO_LARGE"
