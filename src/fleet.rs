@@ -341,6 +341,7 @@ impl Map {
             "machine": machine,
             "session": row["session"],
             "product": row["product"],
+            "waiting_for": row["waiting_for"],
             "actor": row["actor"],
             "actor_source": row["actor_source"],
             "permission_mode": row["permission_mode"],

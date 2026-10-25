@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2
+
+- `bay status --all` names why a session waits: a question, a permission prompt or its idle prompt.
+
 ## 0.4.1
 
 - A plain `git clone` saves and merges; no clone needs `bay install` of its own.

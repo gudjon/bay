@@ -1,0 +1,16 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "default",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "Stop",
+ "stop_hook_active": false,
+ "last_assistant_message": "Would you like a soft navy or a muted slate grey for the heading? Please confirm which one you want, and I'll stop there.",
+ "background_tasks": [],
+ "session_crons": []
+}

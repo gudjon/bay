@@ -21,6 +21,8 @@ pub const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", "session.start"),
     ("UserPromptSubmit", "turn.start"),
     ("PreToolUse", "tool.before"),
+    // Dossier 63 (owner ruling 2026-10-25): the question tools, recorded (claude-code-2.1.310).
+    ("PreToolUse", "tool.ask"),
     ("PostToolBatch", "step.end"),
     ("FileChanged", "file.change"),
     ("Notification", "session.wait"),
@@ -167,6 +169,13 @@ fn is_bay_group(group: &Value) -> bool {
 /// The tools bay's `PreToolUse` entry runs for (§ 11a).
 pub const PRE_TOOL_MATCHER: &str = "Edit|Write|NotebookEdit|Bash";
 
+/// The tools that ask a person (dossier 63, `tests/fixtures/claude-code-2.1.310`): bay's
+/// `tool.ask` entry runs for these and only these.
+pub const QUESTION_TOOLS: [&str; 2] = ["AskUserQuestion", "ExitPlanMode"];
+
+/// [`QUESTION_TOOLS`] as the `tool.ask` group's `matcher`.
+pub const QUESTION_MATCHER: &str = "AskUserQuestion|ExitPlanMode";
+
 /// What Claude Code does when a hook without `onFailure` fails: a non-blocking error, so the
 /// session goes on.
 pub const DEFAULT_ON_FAILURE: &str = "allow";
@@ -196,7 +205,15 @@ const RECORDS: EntryShape = EntryShape {
 
 /// The shape of bay's entry for the Claude event `event`.
 #[must_use]
-pub fn entry_shape(event: &str) -> EntryShape {
+pub fn entry_shape(event: &str, bay_event: &str) -> EntryShape {
+    if bay_event == "tool.ask" {
+        // Dossier 63: it records the question and never stops the agent; with no answer the
+        // product's own dialog opens.
+        return EntryShape {
+            matcher: Some(QUESTION_MATCHER),
+            ..RECORDS
+        };
+    }
     match event {
         // § 11a: exec form with `onFailure: "block"`, probed on the installed version (ROADMAP § 4).
         // G158: under `onFailure: "block"` a timeout denies (probe P2a); without one the
@@ -217,7 +234,7 @@ pub fn entry_shape(event: &str) -> EntryShape {
 }
 
 fn bay_group(event: &str, bay_event: &str) -> Value {
-    let shape = entry_shape(event);
+    let shape = entry_shape(event, bay_event);
     let mut hook = json!({"type": "command", "command": hook_command(bay_event)});
     if let Some(on_failure) = shape.on_failure {
         hook["onFailure"] = json!(on_failure);
@@ -241,7 +258,7 @@ fn bay_group(event: &str, bay_event: &str) -> Value {
 fn codex_group(event: &str, bay_event: &str) -> Value {
     let mut hook =
         json!({"type": "command", "command": format!("{BAY_COMMAND_PREFIX}{bay_event}")});
-    if let Some(timeout_s) = codex_entry_shape(event).timeout_s {
+    if let Some(timeout_s) = codex_entry_shape(event, bay_event).timeout_s {
         hook["timeout"] = json!(timeout_s);
     }
     json!({"hooks": [hook]})
@@ -260,7 +277,7 @@ pub const CODEX_WITHOUT_BAY: &str = "the hook fails, and the tool runs";
 /// `bay help --json` declares. A pre-tool exit 2 denies, but every entry fails open, and no
 /// entry has a matcher: Codex runs it for every tool.
 #[must_use]
-pub fn codex_entry_shape(event: &str) -> EntryShape {
+pub fn codex_entry_shape(event: &str, _bay_event: &str) -> EntryShape {
     EntryShape {
         blocks: event == "PreToolUse",
         on_failure: Some(CODEX_ON_FAILURE),
@@ -306,7 +323,7 @@ fn missing_events(
         .iter()
         .filter(|(event, bay_event)| bay_hooks(settings, event, bay_event).next().is_none())
         .map(|(event, _)| *event)
-        .collect()
+        .fold(Vec::new(), once)
 }
 
 /// The Claude events whose bay entry calls `bay hook` under another name than the one bay hooks
@@ -329,10 +346,27 @@ pub fn renamed_claude_events(settings: &Map<String, Value>) -> Vec<&'static str>
                 .flatten()
                 .filter_map(|hook| hook.get("command").and_then(Value::as_str))
                 .filter_map(bay_event_of)
-                .any(|event| event != *bay_event)
+                // One product event may carry several of bay's (`tool.before`, `tool.ask`).
+                .any(|named| {
+                    named != *bay_event
+                        && !CLAUDE_EVENTS
+                            .iter()
+                            .any(|(hooked, ours)| hooked == event && *ours == named)
+                })
         })
         .map(|(event, _)| *event)
-        .collect()
+        .collect::<Vec<_>>()
+        .into_iter()
+        .fold(Vec::new(), once)
+}
+
+/// `events` with each event once, in order: one product event may carry several of bay's
+/// entries, and a report names the product's event.
+fn once(mut events: Vec<&'static str>, event: &'static str) -> Vec<&'static str> {
+    if !events.contains(&event) {
+        events.push(event);
+    }
+    events
 }
 
 /// The Claude events whose bay entry is the bare `bay hook <event>` an earlier bay wrote,
@@ -348,7 +382,7 @@ pub fn outdated_claude_events(settings: &Map<String, Value>) -> Vec<&'static str
             entries.peek().is_some() && !entries.any(|hook| hook["command"] == current.as_str())
         })
         .map(|(event, _)| *event)
-        .collect()
+        .fold(Vec::new(), once)
 }
 
 /// The Claude events bay hooks that `settings` gives hook entries of its own, none of them
@@ -373,7 +407,7 @@ pub fn claude_events_without_bay(settings: &Map<String, Value>) -> Vec<&'static 
             })
         })
         .map(|(event, _)| *event)
-        .collect()
+        .fold(Vec::new(), once)
 }
 
 /// The `onFailure` of bay's `PreToolUse` entry: `None` when bay has no such entry, `Some(None)`
@@ -456,7 +490,9 @@ fn add_entries(
         list.retain(|group| !is_bay_group(group));
         !(list.is_empty() && before > 0)
     });
-    for (event, bay_event) in events {
+    // One event may hold several of bay's groups (`PreToolUse`: `tool.before` and `tool.ask`):
+    // bay's are taken out once per event, then each is added.
+    for (event, _) in events {
         let groups = hooks
             .entry(*event)
             .or_insert_with(|| Value::Array(Vec::new()));
@@ -465,6 +501,10 @@ fn add_entries(
         }
         if let Some(groups) = groups.as_array_mut() {
             groups.retain(|group| !is_bay_group(group));
+        }
+    }
+    for (event, bay_event) in events {
+        if let Some(groups) = hooks.get_mut(*event).and_then(Value::as_array_mut) {
             groups.push(group_for(event, bay_event));
         }
     }

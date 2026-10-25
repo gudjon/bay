@@ -175,7 +175,7 @@ fn a_reinstall_replaces_the_bare_entry_an_earlier_bay_wrote() {
     std::fs::write(&path, &text).unwrap();
     assert_eq!(
         commands(&settings(&repo), "PreToolUse"),
-        ["bay hook tool.before"]
+        ["bay hook tool.before", "bay hook tool.ask"]
     );
 
     // Doctor recognises the bare entries as bay's and names them.
@@ -194,8 +194,13 @@ fn a_reinstall_replaces_the_bare_entry_an_earlier_bay_wrote() {
     // A re-install replaces them, one entry per event, and doctor has nothing to name.
     test_box.bay_ok(&repo, &["install"]);
     let commands = commands(&settings(&repo), "PreToolUse");
-    assert_eq!(commands.len(), 1, "{commands:?}");
-    assert!(commands[0].starts_with("command -v bay "), "{commands:?}");
+    assert_eq!(commands.len(), 2, "{commands:?}");
+    assert!(
+        commands
+            .iter()
+            .all(|command| command.starts_with("command -v bay ")),
+        "{commands:?}"
+    );
     let (code, result) = result_json(test_box.bay(&repo).arg("doctor"));
     assert_eq!(code, 0, "{result}");
     let hooks = row(&result, "hooks");

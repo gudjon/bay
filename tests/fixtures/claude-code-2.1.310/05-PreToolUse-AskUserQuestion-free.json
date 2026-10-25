@@ -1,0 +1,33 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "auto",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PreToolUse",
+ "tool_name": "AskUserQuestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Which colour should the heading be?",
+    "header": "Heading colour",
+    "options": [
+     {
+      "label": "Black",
+      "description": "Set the heading to black"
+     },
+     {
+      "label": "Grey",
+      "description": "Set the heading to grey"
+     }
+    ],
+    "multiSelect": false
+   }
+  ]
+ },
+ "tool_use_id": "toolu_01UcgTytD7FuhkTWggonot4g"
+}

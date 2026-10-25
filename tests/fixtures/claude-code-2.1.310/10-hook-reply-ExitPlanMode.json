@@ -1,0 +1,10 @@
+{
+ "hookSpecificOutput": {
+  "hookEventName": "PreToolUse",
+  "permissionDecision": "allow",
+  "updatedInput": {
+   "plan": "Create `notes.txt` in the repo root (<redacted>) containing the single word `hello`.\nVerify by reading the file back and confirming its contents are `hello`.\n",
+   "planFilePath": "<redacted>/plans/plan-a-one-step-change-structured-walrus.md"
+  }
+ }
+}

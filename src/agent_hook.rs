@@ -373,6 +373,9 @@ fn dispatch_as(product: Product, caller: &str, event: &str, input: &str, dir: &P
     let mut recorded = crate::session::Recorded::default();
     let mut product_event = Event::Unprobed;
     let parsed = Payload::parse(product, event, input, dir);
+    if event == "tool.ask" {
+        return ask(parsed.as_ref(), caller, input);
+    }
     // BACKLOG 66 C: every hook names its session against the agent's process, so the agent's
     // own bay commands find it with no `BAY_SESSION` (`crate::agent_pid`).
     if let Some(session) = parsed.as_ref().and_then(|payload| payload.session.as_ref())
@@ -386,6 +389,26 @@ fn dispatch_as(product: Product, caller: &str, event: &str, input: &str, dir: &P
         product_event = payload.event;
         let mut extra = serde_json::Map::new();
         extra.insert("product".to_owned(), Value::from(caller));
+        // Dossier 63 item 1: why the session waits, as Claude Code 2.1.310 records it. The
+        // kind reaches the live row; the message stays in the session's own record.
+        if payload.event == Event::Notification
+            && let Ok(value) = serde_json::from_str::<Value>(input)
+        {
+            if let Some(kind) = value["notification_type"].as_str() {
+                extra.insert("waiting_for".to_owned(), serde_json::json!({"kind": kind}));
+            }
+            if let Some(message) = value["message"].as_str() {
+                let mut message = message.to_owned();
+                if message.len() > MAX_QUESTION_BYTES {
+                    let mut end = MAX_QUESTION_BYTES;
+                    while !message.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    message.truncate(end);
+                }
+                extra.insert("message".to_owned(), Value::from(message));
+            }
+        }
         recorded = crate::session::record_with(&payload, &extra);
     }
     // Ruling R7: a stop over uncheckpointed edits is refused once; exit 2 keeps the session
@@ -414,6 +437,38 @@ fn dispatch_as(product: Product, caller: &str, event: &str, input: &str, dir: &P
         return shell_deny(product, event, input, dir);
     }
     pre_tool(product, input, dir)
+}
+
+/// The most of a question tool's input, or a notification's message, the session's record keeps.
+const MAX_QUESTION_BYTES: usize = 8192;
+
+/// `tool.ask` (dossier 63, owner ruling 2026-10-25): the session asks a person with a question
+/// tool (`AskUserQuestion`, `ExitPlanMode`). It is recorded, waiting for a question, with the
+/// tool's input kept in the session's own record and never in the live row, and the hook says
+/// nothing, so the product's dialog opens as it would without bay.
+fn ask(payload: Option<&Payload>, caller: &str, input: &str) -> Outcome {
+    let Some(payload) = payload else {
+        return Outcome::default();
+    };
+    let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
+    let mut extra = serde_json::Map::new();
+    extra.insert("product".to_owned(), Value::from(caller));
+    extra.insert("event".to_owned(), Value::from("question"));
+    extra.insert("state".to_owned(), Value::from("waiting"));
+    extra.insert(
+        "waiting_for".to_owned(),
+        serde_json::json!({"kind": "question", "tool": value["tool_name"]}),
+    );
+    // A plan can be long: the session's record keeps at most [`MAX_QUESTION_BYTES`] of it.
+    let question = &value["tool_input"];
+    let kept = if question.to_string().len() <= MAX_QUESTION_BYTES {
+        question.clone()
+    } else {
+        serde_json::json!({"cut": true})
+    };
+    extra.insert("question".to_owned(), kept);
+    let _ = crate::session::record_with(payload, &extra);
+    Outcome::default()
 }
 
 /// `tool.before`: a payload bay cannot read is denied (G59); else the claims of other sessions
@@ -577,7 +632,20 @@ fn misnamed_tool_call(event: &str, input: &str) -> Option<String> {
         return None;
     }
     let payload: Value = serde_json::from_str(input).ok()?;
-    payload.get("tool_name")?;
+    let tool = payload.get("tool_name")?;
+    // Dossier 63: `tool.ask` takes the question tools and nothing else, so no other call is
+    // ever let through unjudged under it.
+    if event == "tool.ask" {
+        return (!crate::agent_settings::QUESTION_TOOLS
+            .iter()
+            .any(|question| tool == *question))
+        .then(|| {
+            format!(
+                "arrived as `bay hook tool.ask`, which takes only {}; its entry must call `bay hook tool.before`",
+                crate::agent_settings::QUESTION_MATCHER
+            )
+        });
+    }
     let known = crate::agent_settings::CLAUDE_EVENTS
         .iter()
         .chain(crate::agent_settings::CODEX_EVENTS)

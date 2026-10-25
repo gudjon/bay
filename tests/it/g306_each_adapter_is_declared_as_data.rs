@@ -123,9 +123,13 @@ fn the_contract_declares_each_event_install_writes_and_no_other() {
         );
     }
 
-    // Only pre-tool denies and stop refuses once (R7): those two block, the rest record.
+    // Only pre-tool denies and stop refuses once (R7): those two block, the rest record (the
+    // question tools' `tool.ask` on `PreToolUse` too, dossier 63).
     for event in events {
-        let blocks = matches!(event["product_event"].as_str(), Some("PreToolUse" | "Stop"));
+        let blocks = matches!(
+            event["bay_event"].as_str(),
+            Some("tool.before" | "turn.end")
+        );
         assert_eq!(event["blocks"], blocks, "{event}");
     }
 }

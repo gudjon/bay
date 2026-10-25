@@ -95,12 +95,12 @@ fn agents() -> Vec<Value> {
 /// entry `shape` gives it, the shape the writer uses.
 fn adapter_events(
     table: &[(&str, &str)],
-    shape: fn(&str) -> crate::agent_settings::EntryShape,
+    shape: fn(&str, &str) -> crate::agent_settings::EntryShape,
 ) -> Vec<Value> {
     table
         .iter()
         .map(|(product_event, bay_event)| {
-            let shape = shape(product_event);
+            let shape = shape(product_event, bay_event);
             json!({
                 "product_event": product_event,
                 "bay_event": bay_event,

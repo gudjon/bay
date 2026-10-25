@@ -1,0 +1,28 @@
+{
+ "hookSpecificOutput": {
+  "hookEventName": "PreToolUse",
+  "permissionDecision": "allow",
+  "updatedInput": {
+   "questions": [
+    {
+     "question": "Which colour should the heading be?",
+     "header": "Heading colour",
+     "options": [
+      {
+       "label": "Black",
+       "description": "Set the heading to black"
+      },
+      {
+       "label": "Grey",
+       "description": "Set the heading to grey"
+      }
+     ],
+     "multiSelect": false
+    }
+   ],
+   "answers": {
+    "Which colour should the heading be?": "Green, a little darker than the logo"
+   }
+  }
+ }
+}

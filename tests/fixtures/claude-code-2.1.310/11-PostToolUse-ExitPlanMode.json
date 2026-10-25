@@ -1,0 +1,21 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "acceptEdits",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "ExitPlanMode",
+ "tool_input": {},
+ "tool_response": {
+  "plan": "Create `notes.txt` in the repo root (<redacted>) containing the single word `hello`.\nVerify by reading the file back and confirming its contents are `hello`.\n",
+  "isAgent": false,
+  "filePath": "<redacted>/plans/plan-a-one-step-change-structured-walrus.md"
+ },
+ "tool_use_id": "toolu_01Sj4ZF6BodMGuR2E3pjXZQn",
+ "duration_ms": 15
+}

@@ -1,0 +1,10 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "hook_event_name": "Notification",
+ "message": "Claude is waiting for your input",
+ "notification_type": "idle_prompt"
+}

@@ -1,0 +1,33 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "auto",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PreToolUse",
+ "tool_name": "AskUserQuestion",
+ "tool_input": {
+  "questions": [
+   {
+    "question": "Which colour should the button be?",
+    "header": "Button colour",
+    "options": [
+     {
+      "label": "Red",
+      "description": "Set the button to red"
+     },
+     {
+      "label": "Blue",
+      "description": "Set the button to blue"
+     }
+    ],
+    "multiSelect": false
+   }
+  ]
+ },
+ "tool_use_id": "toolu_01Ddsk5rBoLEk16eUu3P15N7"
+}
