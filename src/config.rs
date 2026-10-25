@@ -375,6 +375,10 @@ pub struct Executor {
     /// Culprit finding (`crate::bisect`): when a post check is red over more than one landing,
     /// an executor that serves its environment runs it on the range's midpoints. Default off.
     pub bisect_post: Option<bool>,
+    /// The runner's own post checks (`crate::bisect::tips`): after its queue's work, each post
+    /// check runs once on main's newest tip that has no record of it, on a box that serves its
+    /// environment, so many landings cost one run and a red one is bisected. Default off.
+    pub post: Option<bool>,
     /// Never a repository's setting (ruling R14): whether checks run with no sandbox is the
     /// box's choice, global Git config `bay.runnerSandbox = none`. Read only to refuse it.
     pub sandbox: Option<toml::Value>,
@@ -992,6 +996,15 @@ impl Config {
                 .and_then(|executor| executor.submission_timeout_s)
                 .unwrap_or(30),
         )
+    }
+
+    /// Whether the runner runs post checks on main's newest tip itself (`[runner] post`).
+    #[must_use]
+    pub fn post_tips(&self) -> bool {
+        self.executor
+            .as_ref()
+            .and_then(|executor| executor.post)
+            .unwrap_or(false)
     }
 
     /// Whether the executor finds the culprit of a red post check (`[runner] bisect_post`).

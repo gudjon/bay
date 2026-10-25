@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1
+
+- With `[runner] post = true`, the runner runs post checks itself, once on main's newest tip.
+- A runner's presence beats during a long pass, so a busy runner never reads as gone.
+
 ## 0.5.0
 
 - Locks come from `.gitattributes` on main: mark a path `lockable`, as Git LFS does. `[locks]` is gone.

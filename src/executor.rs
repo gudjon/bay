@@ -529,6 +529,10 @@ fn pass(
                 ran.extend(recovered.take());
                 return Ok(ran);
             }
+            // A pass carries the whole queue, so it can run long: its presence beats before each
+            // operation (at most once a heartbeat), naming it, never only at the pass's start, so
+            // a busy runner never reads as gone.
+            beat.publish(repo, Some(&op_id), depth);
             let step = Cell::new("read");
             let result =
                 publish::execute(repo, id, &op_id, &step).unwrap_or_else(BayResult::failed);
@@ -554,6 +558,11 @@ fn pass(
     );
     ran.extend(compaction(repo, &chain));
     ran.extend(recovered.take());
+    // After the queue's work, never ahead of it: the runner's own post checks on main's tip,
+    // then the culprit of a red one (G244d).
+    if let Some(post) = crate::bisect::tips(repo) {
+        ran.push(json!({"post": post}));
+    }
     // G244d: after the queue's work, never ahead of it, the culprit of a red post check.
     if let Some(bisect) = crate::bisect::run(repo) {
         ran.push(json!({"bisect": bisect}));

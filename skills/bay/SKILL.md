@@ -191,6 +191,9 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    To keep changes small, add `[limits]` with `max_file_mib`, `max_files` or `max_added_lines`
    (positive integers; each optional). To cap the review queue, add `max_waiting_approvals`:
    with that many changes waiting for a yes, a change that needs one more is refused `WIP_LIMIT`.
+   A slow check that reads the whole tree can run after merge instead of on every change:
+   `stage = "post"` in its `[[check]]`, and `[runner] post = true` in `.bay/config.toml`. The runner then runs it
+   once on main's newest tip, and with `bisect_post = true` a red result names the merge that broke it.
    For files that never merge (images, models, binaries), mark them `lockable` in `.gitattributes`
    on main (`art/** lockable`, Git LFS's attribute): one session at a time edits each. Your first edit of one takes its lock on the
    remote; elsewhere the edit is refused `PATH_HELD`, naming the holder (`bay status --all` lists every

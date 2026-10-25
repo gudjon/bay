@@ -52,6 +52,62 @@ pub fn run(repo: &Repo) -> Option<Value> {
     }
 }
 
+/// The runner's own post checks (`[runner] post`): after its queue's work, each post check of the
+/// policy at main's newest tip's first parent runs once on that tip when this box serves its
+/// environment and holds no record of it there yet. One run answers every landing since the last
+/// run's tip: a pass, or a red the red judgement (`crate::red`) ranges and `[runner] bisect_post`
+/// narrows. `None` when off or nothing ran.
+#[must_use]
+pub fn tips(repo: &Repo) -> Option<Value> {
+    if !repo.config.post_tips() {
+        return None;
+    }
+    match tip_runs(repo) {
+        Ok(reports) if reports.is_empty() => None,
+        Ok(reports) => Some(Value::Array(reports)),
+        Err(why) => Some(json!({"error": why})),
+    }
+}
+
+fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
+    let git = &repo.git;
+    let keys = Keys::load(git);
+    repo.fetch_registry();
+    repo.fetch_evidence(&keys);
+    let registry = Registry::current(git)?;
+    let tip = repo.fetch_trunk().map_err(|error| error.message())?;
+    let Ok(base) = rev(git, &format!("{tip}^1")) else {
+        return Ok(Vec::new());
+    };
+    let Some(policy) = crate::policy::load_at(git, &base).map_err(String::from)? else {
+        return Ok(Vec::new());
+    };
+    let served = check::Served::read(git);
+    let tree = tree_of(git, &tip)?;
+    let writer = Writer::of(git, &keys, registry.as_ref())?;
+    let mut reports = Vec::new();
+    for entry in policy.checks.iter().filter(|entry| {
+        entry.stage == crate::policy::Stage::Post && served.serves(&entry.environment)
+    }) {
+        let id = CheckId::new(&entry.id, &entry.environment);
+        if writer.records(git, &tree, &id)? > 0 {
+            continue;
+        }
+        let verdict = match run_at(
+            repo,
+            &keys,
+            &writer,
+            (&id, ("post", json!({"tip": tip}))),
+            &tip,
+        )? {
+            Ok(verdict) => json!(verdict),
+            Err(why) => json!({"not_run": why}),
+        };
+        reports.push(json!({"check": entry.id, "environment": entry.environment, "tip": tip, "verdict": verdict}));
+    }
+    Ok(reports)
+}
+
 /// The largest number of check runs one bisect of `landings` landings makes: ⌈log2(n)⌉ probes
 /// and one rerun at the suspect.
 #[must_use]
@@ -152,6 +208,10 @@ fn bisect(
     red: &Red,
     suspect: &Suspect,
 ) -> Result<Value, String> {
+    let window = json!({
+        "last_passed": suspect.passed.as_ref().map(|mark| mark.landing.clone()),
+        "first_failed": suspect.failed.landing,
+    });
     let git = &repo.git;
     let id = CheckId::new(&red.check, &red.environment);
     let mut range: Vec<Mark> = suspect.landings.clone();
@@ -168,7 +228,13 @@ fn bisect(
             stopped = Some("undecided");
             break;
         }
-        let verdict = match run_at(repo, keys, writer, red, suspect, &mark.landing)? {
+        let verdict = match run_at(
+            repo,
+            keys,
+            writer,
+            (&id, ("bisect", window.clone())),
+            &mark.landing,
+        )? {
             Ok(verdict) => verdict,
             Err(why) => return Ok(not_run(red, &why, &tested)),
         };
@@ -188,7 +254,13 @@ fn bisect(
         None => {
             // One rerun at the suspect rules out a flake before it is named.
             let mark = range[0].clone();
-            let verdict = match run_at(repo, keys, writer, red, suspect, &mark.landing)? {
+            let verdict = match run_at(
+                repo,
+                keys,
+                writer,
+                (&id, ("bisect", window.clone())),
+                &mark.landing,
+            )? {
                 Ok(verdict) => verdict,
                 Err(why) => return Ok(not_run(red, &why, &tested)),
             };
@@ -218,36 +290,31 @@ fn run_at(
     repo: &Repo,
     keys: &Keys,
     writer: &Writer,
-    red: &Red,
-    suspect: &Suspect,
+    (id, why): (&CheckId, (&str, Value)),
     commit: &str,
 ) -> Result<Result<Verdict, String>, String> {
     let git = &repo.git;
-    let id = CheckId::new(&red.check, &red.environment);
+    let (field, body) = why;
     let base = rev(git, &format!("{commit}^1"))?;
     let tree = tree_of(git, commit)?;
     let base_tree = tree_of(git, &base)?;
-    let only = match alone(git, writer, &id, &base)? {
+    let only = match alone(git, writer, id, &base)? {
         Ok(only) => only,
         Err(why) => return Ok(Err(why)),
     };
     let changed = check::changed_paths(git, &base, commit)?;
-    let run = writer.records(git, &tree, &id)? + 1;
+    let run = writer.records(git, &tree, id)? + 1;
     let short = commit.get(..12).unwrap_or(commit);
-    let candidate_id = format!("bisect-{short}-{run}");
+    let candidate_id = format!("{field}-{short}-{run}");
     let scratch = repo
         .common_dir
         .join("bay")
         .join("check")
         .join(&candidate_id);
-    let range = json!({
-        "last_passed": suspect.passed.as_ref().map(|mark| mark.landing.clone()),
-        "first_failed": suspect.failed.landing,
-    });
     let mut keep = |record: &mut EvidenceRecord| -> Result<(), String> {
         // Post evidence, as a post producer writes it: no pre-publication provenance.
         record.policy_provenance = None;
-        record.unknown.insert("bisect".to_owned(), range.clone());
+        record.unknown.insert(field.to_owned(), body.clone());
         // The producer signs outside the check's sandbox, after reading its output (§ 7).
         if let Some(signer) = &writer.signer {
             record.sign(&signer.key)?;
@@ -299,7 +366,7 @@ fn run_at(
     git.run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
         .map_err(|error| {
             format!(
-                "the bisect's record is written here but not pushed: {}",
+                "the post check's record is written here but not pushed: {}",
                 error.message()
             )
         })?;

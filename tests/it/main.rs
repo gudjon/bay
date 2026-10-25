@@ -238,6 +238,8 @@ mod g369_a_large_file_is_kept_in_the_remotes_own_store;
 mod g36_one_intent_one_revision_one_landing;
 mod g370_an_https_remote_keeps_the_bytes_in_parts;
 mod g371_how_a_path_collides_is_said_once_on_main;
+mod g372_a_busy_runner_never_reads_as_gone;
+mod g373_the_runner_runs_post_checks_on_mains_tip;
 mod g37_every_bay_ref_can_exist_at_once;
 mod g38_undo_and_session_start;
 mod g39_a_blocked_shell_command_does_not_run;
