@@ -44,6 +44,15 @@ pub const FLEET_EXECUTOR_PREFIX: &str = crate::names::FLEET_EXECUTOR;
 /// The most live summaries the map reads; the host refuses more (`crate::hook`).
 const FLEET_MAX_MACHINES: usize = 256;
 
+/// The talk uplift (owner ruling 2026-10-25): whether talk is on, as the policy at `trunk` says.
+fn talk_policy(git: &Git, trunk: &str) -> Value {
+    match crate::policy::load_at(git, trunk) {
+        Ok(Some(policy)) => policy.talk.to_json(),
+        Ok(None) => crate::policy::TalkPolicy::default().to_json(),
+        Err(why) => json!({"unread": String::from(why)}),
+    }
+}
+
 /// `bay status --all`: the fleet map from the local cache. A cache with no recorded fetch of
 /// the configured remote's live refs is not the fleet: the result is `blocked` with
 /// `REMOTE_NOT_FETCHED`, and its detail lists no machines, actors, talks or sessions.
@@ -830,6 +839,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         crate::unattributed::scan(git, trunk).unwrap_or_else(|why| json!({"unread": why}))
     });
     let targets = map.trunk.as_deref().map(|trunk| target_rows(repo, trunk));
+    let talk = map.trunk.as_deref().map(|trunk| talk_policy(git, trunk));
     let machines: Vec<Value> = map.machines.into_values().collect();
     let mut result = BayResult::ok(json!({
         "remote": repo.remote(),
@@ -847,6 +857,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
             "actor": actor, "machines": on, "age_s": age,
         })).collect::<Vec<_>>(),
         "talks": talks,
+        "talk": talk,
         "locks": crate::locks::held(repo, map.now),
         "red": red,
         "red_pending": red_pending,

@@ -36,7 +36,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Pick a change up again: bring in newer main and see what moved | `bay start <change>` |
 | Fix a change that already merged | `bay start <intent> --fixes <change>` (the merge names it in a `Fixes:` trailer) |
 | Try work that must never merge, in a sandbox lane the config declares | `bay start <intent> --paths <paths> --lane <lane>` (`bay merge` runs its checks; it never merges) |
-| Take in a branch made outside bay (a bot's or a person's) as one change | `bay start <intent> --paths <paths> --from <branch>` (the remote's tip when the remote has the branch; `--paths` must cover every file it changes; then `bay merge`) |
+| Take in a branch made outside bay (a bot's or a person's) as one change | `bay start <intent> --from <branch>` (the remote's tip when the remote has the branch; it declares the files the branch changes, or give `--paths` covering them; then `bay merge`). After a rebase: `bay start <change> --from <branch or sha>` replaces its draft, no new branch name. Main's commit keeps the branch's author and messages |
 | Merge a change only after another change merged | `bay start <intent> --paths <paths> --after <change>` (repeatable; submit it now, it merges once each one merged) |
 | Save edits made in the main checkout (non-developers) | `bay save <intent>` |
 | See the changes waiting for this machine's approver: candidate, paths, diff summary | `bay waiting` (`detail.waiting`) |
@@ -46,7 +46,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Remove a key, when the user asks: `rotated` keeps its past records valid, `revoked` (compromised) voids them all | `bay enrol --remove <class> <name> --reason rotated\|revoked` (signed by `bay.registryKey`; the last registry key is never removed) |
 | Give the change up, so another agent may adopt it | `bay abandon [<change>]` (default: the view's change) |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
-| Read state, and main commits that did not merge through bay (`unattributed`; `by_writer` counts them per committer) | `bay status` |
+| Read state, and main commits that did not merge through bay (`unattributed`; `by_writer` counts them per committer) | `bay status` (lists live changes only; `bay status <change>` reads any one, merged too) |
 | See the flow: live changes by actor and their limit, merges this week, cycle time, queue wait and check time (p50, p90), the oldest live change, what waits for a yes | `bay status` (`detail.flow`) |
 | See each promotion target (`staging`): its tip, `drift`, `lag`, checks, freeze and the `promotable` commit | `bay status` (`detail.targets`) |
 | See whether main is held, by whom (`source`: `window` or `plugin`), why and until when | `bay status` (`detail.hold`) |

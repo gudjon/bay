@@ -1,0 +1,97 @@
+//! G379 (owner, 2026-10-25: "the case with 'bay status' responding to many MB of JSON is not
+//! agentic friendly"; the patch part, ruled "patch first, then 0.6.0"). A status listing names
+//! the live changes, in one fetch.
+//!
+//! A plain `bay status` outside a change's view lists the changes that are still live; a merged
+//! one is left out, and `bay status <change>` still reads it whole. The listing refreshes the
+//! live changes' chains in one fetch, never one fetch or two per change.
+//!
+//! Guards to mutate: `src/status.rs` `run`: drop the `!ended(record.state)` filter (the merged
+//! changes are listed); call `refresh_chains` for a listing too (a fetch per change).
+
+// Each case runs shell scripts (adapters), so these run on Unix only.
+#![cfg(unix)]
+
+use crate::support;
+
+use std::path::PathBuf;
+
+use support::{TestBox, result_json, unchecked_files};
+
+#[test]
+fn a_listing_names_only_live_changes_and_fetches_once() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &unchecked_files());
+    let mut merged = Vec::new();
+    for n in 0..4 {
+        let started = test_box.bay_ok(&repo, &["start", &format!("CARD-{n}"), "--paths", "src/"]);
+        let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+        std::fs::write(view.join(format!("src/f{n}.rs")), "fn f() {}\n").unwrap();
+        let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+        assert_eq!(code, 0, "{landed}");
+        merged.push(started["change"].as_str().unwrap().to_owned());
+    }
+    let mut live = Vec::new();
+    for n in 0..3 {
+        let started = test_box.bay_ok(
+            &repo,
+            &[
+                "start",
+                &format!("LIVE-{n}"),
+                "--paths",
+                &format!("live{n}/"),
+            ],
+        );
+        live.push(started["change"].as_str().unwrap().to_owned());
+    }
+
+    let fetches = |trace: &str| {
+        let trace = test_box.path().join(trace);
+        let (code, listed) = result_json(
+            test_box
+                .bay(&repo)
+                .arg("status")
+                .env("BAY_TEST_GIT_TRACE", &trace),
+        );
+        assert_eq!(code, 0, "{listed}");
+        let count = std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains("\"sub\":\"fetch\""))
+            .count();
+        (listed, count)
+    };
+    let (listed, before) = fetches("first.trace");
+    let mut ids: Vec<String> = listed["detail"]["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["change"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    ids.sort();
+    live.sort();
+    assert_eq!(ids, live, "only the live changes: {listed}");
+
+    // Three more live changes cost the listing no more fetches.
+    for n in 3..6 {
+        test_box.bay_ok(
+            &repo,
+            &[
+                "start",
+                &format!("LIVE-{n}"),
+                "--paths",
+                &format!("live{n}/"),
+            ],
+        );
+    }
+    let (_, after) = fetches("second.trace");
+    assert_eq!(
+        after, before,
+        "a fetch per change: {before} fetches, then {after}"
+    );
+
+    // A merged change is still read whole when it is named.
+    let named = test_box.bay_ok(&repo, &["status", &merged[0]]);
+    assert_eq!(named["detail"]["changes"][0]["state"], "merged", "{named}");
+}

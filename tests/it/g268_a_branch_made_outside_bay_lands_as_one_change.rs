@@ -19,6 +19,16 @@
 //! `if !uncovered.is_empty()` refusal (the third case); and in `resolve_from`, the
 //! `if on_remote {` branch that fetches the remote's tip (make it `if false {` and the fourth
 //! case fails: the stale local branch is taken in, with `source` `local`).
+//!
+//! 0.5.3 (fleet findings, 2026-10-25): a local branch of the name that holds commits the
+//! remote's lacks (a local rebase) is never dropped silently: the start fails, naming both
+//! (guard: the `merge-base --is-ancestor` test in `resolve_from`). `bay start <CHANGE> --from
+//! <ref>` replaces that change's draft with the branch's net change on the newest trunk, so a
+//! rebase never needs a new branch name (guard: the `if let Some(reference) = from` block of
+//! `resume`). With no `--paths`, the change declares exactly the paths the branch changes
+//! (guard: the `derived` request in `open`). Main's commit keeps the branch's author and its
+//! messages, and an amend in the view that changes only the message is a new draft (guards:
+//! `src/publish.rs` `commit_candidate`'s author; `src/change.rs` `same_draft`'s message).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -324,4 +334,139 @@ fn the_remotes_tip_is_taken_over_a_stale_local_branch_of_the_same_name() {
     let from = &started["detail"]["from"];
     assert_eq!(from["commit"], stale.as_str(), "{started}");
     assert_eq!(from["source"], "local", "{started}");
+}
+
+#[test]
+fn a_local_branch_with_commits_the_remotes_lacks_is_named_never_dropped() {
+    let (test_box, repo, _remote) = trunk();
+    let tip = outside_branch(&test_box, &repo, &[&[("src/x.rs", "ONE\ntwo\n")]]);
+    // Rebased here: the same edit, made again on trunk, so neither tip holds the other.
+    test_box.git_ok(&repo, &["switch", "-q", "-c", "outside"]);
+    std::fs::write(repo.join("src/x.rs"), "ONE\ntwo\nthree\n").unwrap();
+    test_box.git_ok(&repo, &["commit", "-q", "-am", "rebased"]);
+    let local = test_box.git_ok(&repo, &["rev-parse", "HEAD"]);
+    test_box.git_ok(&repo, &["switch", "-q", "main"]);
+
+    let (code, failed) = result_json(test_box.bay(&repo).args([
+        "start",
+        "CARD-rebased",
+        "--paths",
+        "src/",
+        "--from",
+        "outside",
+    ]));
+    assert_ne!(code, 0, "{failed}");
+    let said = failed.to_string();
+    assert!(said.contains(&tip) && said.contains(&local), "{failed}");
+}
+
+#[test]
+fn a_rebased_branch_replaces_its_changes_draft_under_the_same_change() {
+    let (test_box, repo, remote) = trunk();
+    outside_branch(&test_box, &repo, &[&[("src/x.rs", "ONE\ntwo\n")]]);
+    let started = test_box.bay_ok(
+        &repo,
+        &[
+            "start",
+            "CARD-outside",
+            "--paths",
+            "src/",
+            "--from",
+            "outside",
+        ],
+    );
+    let change = started["change"].as_str().unwrap().to_owned();
+    // Trunk moves; the branch is rebased onto it here and never pushed under a new name.
+    land_through_bay(&test_box, &repo, "CARD-other", "src/a.rs", "fn a2() {}\n");
+    test_box.git_ok(&repo, &["fetch", "-q", "origin", "main"]);
+    test_box.git_ok(&repo, &["switch", "-q", "-c", "rebased", "origin/main"]);
+    std::fs::write(repo.join("src/x.rs"), "ONE\nTWO\n").unwrap();
+    test_box.git_ok(&repo, &["commit", "-q", "-am", "rebased onto main"]);
+    let rebased = test_box.git_ok(&repo, &["rev-parse", "HEAD"]);
+    test_box.git_ok(&repo, &["switch", "-q", "main"]);
+
+    let resumed = test_box.bay_ok(&repo, &["start", &change, "--from", &rebased]);
+    assert_eq!(resumed["change"], change.as_str(), "{resumed}");
+    let view = PathBuf::from(resumed["detail"]["view"].as_str().unwrap());
+    assert_eq!(
+        std::fs::read_to_string(view.join("src/x.rs")).unwrap(),
+        "ONE\nTWO\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(view.join("src/a.rs")).unwrap(),
+        "fn a2() {}\n"
+    );
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{landed}");
+    assert_eq!(
+        test_box.git_bare(&remote, &["show", "main:src/x.rs"]),
+        "ONE\nTWO",
+        "{landed}"
+    );
+    let heads = refs(&test_box, &remote, "refs/heads/");
+    assert_eq!(heads.len(), 2, "no new branch name: {heads:?}");
+}
+
+#[test]
+fn with_no_paths_an_outside_branch_declares_what_it_changes() {
+    let (test_box, repo, _remote) = trunk();
+    outside_branch(&test_box, &repo, &[&[("src/x.rs", "ONE\ntwo\n")]]);
+    let started = test_box.bay_ok(&repo, &["start", "CARD-outside", "--from", "outside"]);
+    let change = started["change"].as_str().unwrap();
+    let record: serde_json::Value = serde_json::from_str(&test_box.git_ok(
+        &repo,
+        &["show", &format!("refs/bay/changes/{change}:change.json")],
+    ))
+    .unwrap();
+    assert_eq!(
+        record["declared_inputs"],
+        serde_json::json!(["src/x.rs"]),
+        "{record}"
+    );
+}
+
+#[test]
+fn main_keeps_the_branchs_author_and_words_and_an_amend_is_read() {
+    let (test_box, repo, remote) = trunk();
+    test_box.git_ok(&repo, &["switch", "-q", "-c", "outside"]);
+    std::fs::write(repo.join("src/x.rs"), "ONE\ntwo\n").unwrap();
+    test_box.git_ok(&repo, &["add", "--all"]);
+    test_box.git_ok(
+        &repo,
+        &[
+            "commit",
+            "-q",
+            "--author=Ada Writer <ada@example.org>",
+            "-m",
+            "Say one loudly\n\nBecause it matters.\n\nReviewed-by: Lin",
+        ],
+    );
+    test_box.git_ok(&repo, &["push", "-q", "origin", "outside"]);
+    test_box.git_ok(&repo, &["switch", "-q", "main"]);
+    let started = test_box.bay_ok(&repo, &["start", "CARD-outside", "--from", "outside"]);
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{landed}");
+    let author = test_box.git_bare(&remote, &["log", "-1", "--format=%an <%ae>", "main"]);
+    assert_eq!(author, "Ada Writer <ada@example.org>");
+    let message = test_box.git_bare(&remote, &["log", "-1", "--format=%B", "main"]);
+    assert!(
+        message.contains("Say one loudly") && message.contains("Because it matters."),
+        "{message}"
+    );
+    assert!(message.contains("Reviewed-by: Lin"), "{message}");
+    assert!(!message.contains("start --from"), "{message}");
+
+    // A change whose agent amends only the message: main says the amended words.
+    let started = test_box.bay_ok(&repo, &["start", "CARD-amend", "--paths", "src/"]);
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    std::fs::write(view.join("src/a.rs"), "fn a2() {}\n").unwrap();
+    test_box.git_ok(&view, &["commit", "-q", "-am", "first words"]);
+    let id = started["change"].as_str().unwrap();
+    test_box.bay_ok(&repo, &["start", id]);
+    test_box.git_ok(&view, &["commit", "-q", "--amend", "-m", "better words"]);
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{landed}");
+    let message = test_box.git_bare(&remote, &["log", "-1", "--format=%B", "main"]);
+    assert!(message.contains("better words"), "{message}");
 }

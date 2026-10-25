@@ -109,7 +109,7 @@ enum Command {
     },
     /// Current state, derived on read from main and refs
     Status {
-        /// One change (default: the view's change, else every local change)
+        /// One change, merged or live (default: the view's change, else every live local change)
         change: Option<String>,
         /// Every machine and runner of the repository, from the local cache `bay status` fetches;
         /// fails closed without that fetch

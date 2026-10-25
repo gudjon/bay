@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.3
+
+- The runner takes changes waiting for it oldest first, never in change-id order.
+- A policy may state `[talk]` (`enabled`, `kinds` and more) ahead of 0.6.0; `bay status --all` names it.
+- A queue head refused because main moved gives the runner's turn back, so every change gets a place and a batch can land.
+- A batch refused because main moved is retried on the moved main, never a fault.
+- bay's own record pushes skip the repository's pre-push hook; a push of main still runs it.
+- `bay start --from` refuses a local branch with commits the remote's lacks, naming both.
+- `bay start <change> --from <ref>` replaces that change's draft, so a rebase needs no new branch name.
+- `bay start --from` with no `--paths` declares exactly the files the branch changes.
+- Main's commit keeps a `--from` branch's author and messages; an amend of only the message is read.
+- `bay status` names a check environment no live runner serves while work is queued.
+- A runner's presence beats during one long check, not only between operations.
+- A plain `bay status` lists live changes only, refreshed in one fetch; name a change to read any.
+
 ## 0.5.2
 
 - `footprint = "observed"`: bay records what a check read, and reuses its result where those bytes are unchanged.

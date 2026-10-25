@@ -68,6 +68,48 @@ struct PolicyFile {
     /// The `[assets]` table (BACKLOG 49): how long the store keeps generated files.
     #[serde(default)]
     assets: crate::assets::AssetsPolicy,
+    /// The `[talk]` table (owner ruling 2026-10-25, the talk uplift).
+    #[serde(default)]
+    talk: TalkPolicy,
+}
+
+/// The `[talk]` table (owner ruling 2026-10-25: talk is off unless the policy on main turns it
+/// on, from 0.6.0). This release reads every key 0.6.0 will, and changes no behaviour: talk
+/// works as before, so a repository can merge `enabled = true` ahead of the switch. `kinds`
+/// names talk kinds; any other value is `POLICY_INVALID`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TalkPolicy {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub kinds: Vec<String>,
+    #[serde(default)]
+    pub senders: Vec<String>,
+    #[serde(default)]
+    pub recipients: Vec<String>,
+    #[serde(default)]
+    pub max_round: Option<u32>,
+    #[serde(default)]
+    pub wake: Option<bool>,
+}
+
+impl TalkPolicy {
+    /// How `bay status --all` names it: whether talk is on, the kinds it allows (every kind when
+    /// the policy names none), and whether the policy states `enabled` at all.
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let kinds: Vec<&str> = if self.kinds.is_empty() {
+            crate::talk::KIND_NAMES.to_vec()
+        } else {
+            self.kinds.iter().map(String::as_str).collect()
+        };
+        serde_json::json!({
+            "enabled": self.enabled.unwrap_or(true),
+            "stated": self.enabled.is_some(),
+            "kinds": kinds,
+        })
+    }
 }
 
 /// The `[policy]` table: `signing = "all"` (the default) or `"approvals"` (N-21). Any other value
@@ -1067,6 +1109,8 @@ pub struct Policy {
     pub reuse_unsigned: bool,
     /// `[limits]` (owner ruling 2026-10-21): how big one change may be.
     pub limits: crate::limits::Limits,
+    /// `[talk]` (owner ruling 2026-10-25): read and named, with no effect before 0.6.0.
+    pub talk: TalkPolicy,
 }
 
 /// Why a policy could not be loaded.
@@ -1192,6 +1236,17 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
         }
     }
     *ran_git = true;
+    if let Some(kind) = file
+        .talk
+        .kinds
+        .iter()
+        .find(|kind| !crate::talk::KIND_NAMES.contains(&kind.as_str()))
+    {
+        return Err(invalid(format!(
+            "[talk] kinds names {kind:?}; a talk kind is one of {}",
+            crate::talk::KIND_NAMES.join(", ")
+        )));
+    }
     validate_inputs(git, commit, &file.input).map_err(invalid)?;
     let dimensions = crate::completion::site_dimensions(file.dimension).map_err(invalid)?;
     let profiles = crate::completion::requirements(file.profile, &dimensions).map_err(invalid)?;
@@ -1214,6 +1269,7 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
         signing: file.policy.signing,
         reuse_unsigned: file.policy.reuse_unsigned,
         limits: file.limits,
+        talk: file.talk,
     }))
 }
 

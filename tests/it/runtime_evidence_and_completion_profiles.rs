@@ -238,15 +238,14 @@ fn the_runtime_adapter_is_asked_only_for_a_named_change_whose_profile_needs_it()
     let config = format!("{SELECT_DEPLOY}{plain}");
     let (test_box, repo, _, id, _, _) = landed(DEPLOY_PROFILE, &config);
     let marker = marker_script(&test_box, &repo);
+    // A listing names live changes only (the 0.5.3 status patch), and runs no adapter.
     let all = test_box.bay_ok(&repo, &["status"]);
-    let listed = &all["detail"]["changes"][0]["completion"];
-    assert_eq!(all["detail"]["changes"][0]["change"], id.as_str(), "{all}");
-    assert_eq!(listed["runtime"]["adapter"], "not asked", "{all}");
-    assert_eq!(listed["profile"]["verdict"], "incomplete", "{all}");
+    let listed = all["detail"]["changes"].as_array().unwrap();
     assert!(
-        !marker.exists(),
-        "a listing of every change ran the adapter"
+        listed.iter().all(|row| row["change"] != id.as_str()),
+        "a merged change was listed: {all}"
     );
+    assert!(!marker.exists(), "a listing ran the adapter");
     let named = completion(&test_box, &repo, &id);
     assert_eq!(named["runtime"]["adapter"], "ran", "{named}");
     assert!(marker.exists());

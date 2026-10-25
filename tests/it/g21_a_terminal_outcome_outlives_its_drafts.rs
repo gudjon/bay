@@ -267,8 +267,9 @@ impl Drop for Killed {
     }
 }
 
-/// `status` refreshes every local chain; a fetch that fails for one change never rewrites that
-/// change from another change's fetched chain (a stale `FETCH_HEAD`).
+/// `status` refreshes every live local chain, and a named change is read fresh whatever its
+/// state (the 0.5.3 status patch); a fetch that fails for one change never rewrites that change
+/// from another change's fetched chain (a stale `FETCH_HEAD`).
 #[test]
 fn a_failed_chain_fetch_never_rewrites_another_change() {
     let test_box = TestBox::new();
@@ -323,6 +324,8 @@ fn a_failed_chain_fetch_never_rewrites_another_change() {
         before,
         "{other}'s chain was rewritten after its fetch failed"
     );
+    // A merged change is named to be read: its cut chain is brought in.
+    test_box.bay_ok(&repo, &["status", &cut]);
     assert_eq!(
         test_box.git_ok(&repo, &["rev-parse", &format!("refs/bay/changes/{cut}")]),
         remote_cut,

@@ -939,6 +939,76 @@ pub fn freeze_draft(view: &Git, base: &str, message: &str) -> Result<String, Git
     )
 }
 
+/// Whether drafts `a` and `b` say the same: the same tree and the same message, so an amend
+/// that changes only the message is a new draft (BACKLOG 58: main's commit says it).
+///
+/// # Errors
+///
+/// A git fault.
+pub fn same_draft(git: &Git, a: &str, b: &str) -> Result<bool, GitError> {
+    let read = |commit: &str| git.run(&["log", "-1", "--format=%T%x00%B", commit]);
+    Ok(read(a)? == read(b)?)
+}
+
+/// `commit_on` with the author of `author` (a commit of a branch made outside bay), so a
+/// draft taken in keeps who wrote it; bay stays the committer.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn commit_on_by(
+    git: &Git,
+    tree: &str,
+    parent: &str,
+    message: &str,
+    author: &str,
+) -> Result<String, GitError> {
+    let who = git.run(&[
+        "log",
+        "-1",
+        "--format=%an%x00%ae%x00%ad",
+        "--date=raw",
+        author,
+    ])?;
+    let mut parts = who.splitn(3, '\0');
+    let (name, email, date) = (
+        parts.next().unwrap_or_default(),
+        parts.next().unwrap_or_default(),
+        parts.next().unwrap_or_default(),
+    );
+    let mut envs: Vec<(&str, &str)> = RECORD_IDENTITY
+        .iter()
+        .filter(|(key, _)| key.starts_with("GIT_COMMITTER"))
+        .copied()
+        .collect();
+    envs.extend([
+        ("GIT_AUTHOR_NAME", name),
+        ("GIT_AUTHOR_EMAIL", email),
+        ("GIT_AUTHOR_DATE", date),
+    ]);
+    git.run_with(
+        &[
+            "commit-tree",
+            tree,
+            "-p",
+            parent,
+            "--no-gpg-sign",
+            "-m",
+            message,
+        ],
+        &envs,
+        None,
+    )
+}
+
+/// Whether `email` is bay's own record identity: a draft authored by it names no person.
+#[must_use]
+pub fn is_record_author(email: &str) -> bool {
+    RECORD_IDENTITY
+        .iter()
+        .any(|(key, value)| *key == "GIT_AUTHOR_EMAIL" && *value == email)
+}
+
 /// The messages bay itself gives a draft: none of them is the agent's.
 const BAY_DRAFT_MESSAGES: &[&str] = &["draft", "checkpoint"];
 

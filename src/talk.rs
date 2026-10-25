@@ -82,6 +82,9 @@ pub const TALKS_READ_CHUNK: usize = 512;
 pub const BAY_TALK_CLOCK_SKEW_S: u64 = 300;
 
 /// Each kind and the target fields it may name.
+/// The talk kinds by name, as `[talk] kinds` names them.
+pub const KIND_NAMES: [&str; 3] = ["delivery", "discovery", "reliability"];
+
 const KINDS: [(&str, &[&str]); 3] = [
     ("delivery", &["change", "artifact"]),
     ("discovery", &["decision"]),

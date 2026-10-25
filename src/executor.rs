@@ -478,13 +478,15 @@ fn pass(
     let chain = Chain::new(&repo.git);
     let mut chains = chain.read_all().map_err(|error| error.message())?;
     // Queued changes go first, in queue order, so one pass carries the queue as far as it can:
-    // when the head lands, the next entry is head by the time it is reached.
+    // when the head lands, the next entry is head by the time it is reached. The rest go oldest
+    // first by their chain's last write (a fleet finding, 2026-10-25: in change-id order, a change
+    // whose id sorted last waited two hours while newer ones went ahead).
     let queue = match seen.after {
         Some(queue) => queue,
         None => Queue::read(repo)?,
     };
     let place = |id: &str| queue.of_change(id).map_or(u64::MAX, |entry| entry.seq);
-    chains.sort_by_key(|held| place(&held.id));
+    chains.sort_by_key(|held| (place(&held.id), held.committed));
     let records: Vec<ChangeRecord> = chains.iter().map(|held| held.record.clone()).collect();
     let holding = records
         .iter()
@@ -530,12 +532,15 @@ fn pass(
                 return Ok(ran);
             }
             // A pass carries the whole queue, so it can run long: its presence beats before each
-            // operation (at most once a heartbeat), naming it, never only at the pass's start, so
-            // a busy runner never reads as gone.
-            beat.publish(repo, Some(&op_id), depth);
+            // operation and once a heartbeat during it, naming it, never only at the pass's
+            // start, so a busy runner never reads as gone.
             let step = Cell::new("read");
-            let result =
-                publish::execute(repo, id, &op_id, &step).unwrap_or_else(BayResult::failed);
+            let (result, last_step) = beat.during(repo, &op_id, depth, || {
+                let result =
+                    publish::execute(repo, id, &op_id, &step).unwrap_or_else(BayResult::failed);
+                (result, step.get())
+            });
+            step.set(last_step);
             let result = receipted(repo, id, step.get(), result).with_op(op_id.clone());
             // Trunk moved: what waits behind the new head hears of a conflict now (G177).
             if result.decision == Decision::Landed

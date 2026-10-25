@@ -87,6 +87,37 @@ impl Beat {
         }
     }
 
+    /// Beats every heartbeat on a thread of its own while `work` runs, so a runner in one long
+    /// check never reads as gone (the 0.5.1 acceptance finding): `self` beats first, as before
+    /// an operation, and the thread's copy beats once a heartbeat after that until `work` ends.
+    pub fn during<T>(
+        &mut self,
+        repo: &Repo,
+        holding: &str,
+        queue_depth: usize,
+        work: impl FnOnce() -> T,
+    ) -> T {
+        self.publish(repo, Some(holding), queue_depth);
+        let mut ticker = Self {
+            git: self.git.clone(),
+            interval_s: self.interval_s,
+            last: Some(Instant::now()),
+            outcome: None,
+        };
+        let done = std::sync::atomic::AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(250));
+                    ticker.publish(repo, Some(holding), queue_depth);
+                }
+            });
+            let out = work();
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            out
+        })
+    }
+
     /// Writes this executor's presence and pushes it, unless the last write is less than one
     /// heartbeat old. Best effort: the outcome goes to [`Self::outcome`] and the outcome file.
     pub fn publish(&mut self, repo: &Repo, holding: Option<&str>, queue_depth: usize) {
@@ -406,6 +437,64 @@ pub fn no_live_executor(repo: &Repo, queued: usize) -> Option<Value> {
         "seen_s": seen_s,
         "executors": executors,
         "note": "operations are queued and no runner has been seen lately: they stay queued and merge once a runner runs (bay runner run)",
+    }))
+}
+
+/// A fleet finding (2026-10-25): an `unserved_environment` warning when operations are queued
+/// and live runners answer, but no live runner serves an environment a check of the policy at
+/// `trunk` runs in. Those checks answer `unavailable` until a box declares it
+/// (`bay.checkEnvironment`). A live runner that declares nothing serves every environment.
+#[must_use]
+pub fn unserved_environments(repo: &Repo, queued: usize, trunk: &str) -> Option<Value> {
+    if queued == 0 {
+        return None;
+    }
+    let rows = crate::fleet::executors(repo).ok()??;
+    let live: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["readable"] == true && row["stale"] == false)
+        .collect();
+    if live.is_empty()
+        || live
+            .iter()
+            .any(|row| row["environments"]["source"] == "default")
+    {
+        return None;
+    }
+    let served: Vec<&str> = live
+        .iter()
+        .filter_map(|row| row["environments"]["declared"].as_array())
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    let policy = crate::policy::load_at(&repo.git, trunk).ok()??;
+    let mut missing: Vec<(&str, &str)> = policy
+        .checks
+        .iter()
+        // G245: an approval runs on no runner; a person's record answers it.
+        .filter(|entry| !entry.is_approval())
+        .filter(|entry| !served.contains(&entry.environment.as_str()))
+        .map(|entry| (entry.environment.as_str(), entry.id.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    missing.sort_unstable();
+    let mut environments: Vec<&str> = missing
+        .iter()
+        .map(|(environment, _)| *environment)
+        .collect();
+    environments.dedup();
+    let checks: Vec<Value> = missing
+        .iter()
+        .map(|(environment, check)| json!({"check": check, "environment": environment}))
+        .collect();
+    Some(json!({
+        "code": "unserved_environment",
+        "environments": environments,
+        "checks": checks,
+        "served": served,
+        "note": "no live runner serves these environments, so their checks answer unavailable: add each with git config --add bay.checkEnvironment <environment> in the runner's clone, then restart the runner",
     }))
 }
 

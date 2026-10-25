@@ -7,6 +7,11 @@
 //!
 //! Guard to mutate: `src/executor.rs` `pass`: drop the `beat.publish` before `publish::execute`
 //! (the presence still names the first operation while the second one runs).
+//!
+//! 0.5.3 (the 0.5.1 acceptance finding): it beats once a heartbeat during one long check too,
+//! so a check longer than `stale_after_s` never reads as gone. Guard to mutate:
+//! `src/presence.rs` `Beat::during`: drop the ticker's `publish` (the presence's time stays put
+//! while the check runs).
 
 // The check is a shell script, so this runs on Unix only.
 #![cfg(unix)]
@@ -62,4 +67,36 @@ fn the_presence_names_each_operation_as_the_pass_reaches_it() {
         first, last,
         "the presence still named the pass's first operation while the next one ran: {holding:?}"
     );
+}
+
+#[test]
+fn the_presence_beats_while_one_long_check_runs() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let remote = test_box.path().join("repo-remote.git");
+    let log = test_box.path().join("at.log");
+    // The check notes the presence's time, waits past several heartbeats, and notes it again.
+    let at = format!(
+        "git --git-dir='{remote}' show refs/bay/executor/local:presence.json | sed -n 's/.*\"at\": *\"\\([^\"]*\\)\".*/\\1/p' >> '{log}'",
+        remote = remote.display(),
+        log = log.display()
+    );
+    let seen = test_box.relay(&format!("{at}; sleep 4; {at}"));
+    let mut files = check_files(&seen, &passing_result(1), 1, 60);
+    files.push((
+        ".bay/config.toml".to_owned(),
+        "[runner]\nheartbeat_s = 1\nlease_s = 30\n".to_owned(),
+    ));
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    let (_, view) = test_box.start_and_edit(&repo);
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    assert_eq!(code, 0, "{queued}");
+    let runner = test_box.clone_of(&remote, "runner");
+    let (code, ran) = result_json(test_box.bay(&runner).args(["runner", "run", "--once"]));
+    assert_eq!(code, 0, "{ran}");
+
+    let seen = std::fs::read_to_string(&log).unwrap_or_default();
+    let times: Vec<&str> = seen.lines().collect();
+    assert_eq!(times.len(), 2, "{seen:?}");
+    assert_ne!(times[0], times[1], "no beat during the check: {seen:?}");
 }

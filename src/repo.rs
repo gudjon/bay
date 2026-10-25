@@ -585,6 +585,50 @@ impl Repo {
         ])?;
         let remote = git.run(&["rev-parse", "--verify", &fetched])?;
         let _ = git.run(&["update-ref", "-d", &fetched, &remote]);
+        self.settle_chain(change, &remote)?;
+        Ok(remote)
+    }
+
+    /// [`Repo::remote_chain`] for each of `changes`, in one fetch per 200 of them rather than
+    /// one or two each: what `bay status` refreshes when it lists changes (the 0.5.3 status
+    /// patch). A batch the remote refuses whole (a change it lacks) is read one by one.
+    pub fn remote_chains(&self, changes: &[String]) {
+        let git = &self.git;
+        for batch in changes.chunks(200) {
+            let specs: Vec<String> = batch
+                .iter()
+                .map(|change| {
+                    format!(
+                        "+{}:{}{change}",
+                        crate::change::change_ref(change),
+                        crate::names::FETCH
+                    )
+                })
+                .collect();
+            let mut args = vec!["fetch", "-q", "--no-tags", self.remote()];
+            args.extend(specs.iter().map(String::as_str));
+            if git.run(&args).is_err() {
+                for change in batch {
+                    let _ = self.remote_chain(change);
+                }
+                continue;
+            }
+            for change in batch {
+                let fetched = format!("{}{change}", crate::names::FETCH);
+                if let Ok(remote) = git.run(&["rev-parse", "--verify", &fetched]) {
+                    let _ = git.run(&["update-ref", "-d", &fetched, &remote]);
+                    let _ = self.settle_chain(change, &remote);
+                }
+            }
+        }
+    }
+
+    /// Moves this store's chain ref of `change` to the remote's head `remote` as
+    /// [`Repo::remote_chain`] does: forward only, a retention cut taken, local work kept.
+    fn settle_chain(&self, change: &str, remote: &str) -> Result<(), GitError> {
+        let git = &self.git;
+        let name = crate::change::change_ref(change);
+        let remote = remote.to_owned();
         match git.ref_target(&name)? {
             None => {
                 let _ = git.run(&["update-ref", &name, &remote, ""]);
@@ -608,7 +652,7 @@ impl Repo {
                 }
             }
         }
-        Ok(remote)
+        Ok(())
     }
 
     /// [`Repo::remote_chain`] and the record at the remote's head: the remote's view of the

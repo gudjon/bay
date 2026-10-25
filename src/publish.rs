@@ -451,6 +451,10 @@ struct Ctx<'a> {
     /// again, never rebuilt, while trunk stands where it was merged onto
     /// ([`approved_candidate`]).
     approved: Option<String>,
+    /// F11: this run is a runner's pass over its queue (`execute`), so a head refused by a
+    /// moved trunk gives the pass back instead of rebuilding in place ([`yield_head`]). A
+    /// `merge --wait` runs its own operation to its outcome and never yields.
+    yields: bool,
 }
 
 impl<'a> Ctx<'a> {
@@ -478,6 +482,7 @@ impl<'a> Ctx<'a> {
             retries_here: 0,
             ahead_of_turn: false,
             approved: None,
+            yields: false,
         })
     }
 
@@ -1137,6 +1142,7 @@ pub fn execute(
     step: &Cell<&'static str>,
 ) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
+    ctx.yields = true;
     if !ctx.record.operations.iter().any(|op| op.op_id == op_id) {
         if ctx.record.retention_cut {
             // § 9a: a retry of an op id whose record expired is ambiguous, never new work.
@@ -1455,9 +1461,14 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     // the publishing push) passes the head on. Not an operation given up on `REGISTRY_CHANGED`:
     // its key can sign no release, and the place stays with the operation, which the executor
     // that takes it over publishes as the head (§ 10a).
-    let given_up = outcome
-        .as_ref()
-        .is_ok_and(|result| result.reason == Some(Reason::RegistryChanged));
+    // F11: nor a head that gave its pass back: it keeps its place for the next pass.
+    let given_up = outcome.as_ref().is_ok_and(|result| {
+        result.reason == Some(Reason::RegistryChanged)
+            || result
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail["yielded"] == true)
+    });
     if let Some(at) = seq
         && !given_up
         && !crate::queue::Queue::read(ctx.repo)?.released.contains(&at)
@@ -1681,6 +1692,20 @@ fn batch(
                 );
             }
             Ok(Some(result))
+        }
+        Err(why) => {
+            give_back(&mut others, landing);
+            // F11: a batch refused because trunk moved is no fault. The runner's head yields
+            // with its place kept, and the next pass forms the batch again on the moved trunk.
+            if ctx.yields
+                && ctx
+                    .repo
+                    .fetch_trunk()
+                    .is_ok_and(|now| now.as_str() != trunk)
+            {
+                return yield_head(ctx, op_id, revision, at).map(Some);
+            }
+            Err(why)
         }
         other => {
             give_back(&mut others, landing);
@@ -2039,7 +2064,7 @@ fn build_batch<'a>(
             size: members.len(),
         };
         message.push_str(&tag.trailer());
-        let commit = commit_candidate(owner, &member.tree, &parent, &message)?;
+        let commit = commit_candidate(owner, &member.tree, &parent, &message, &member.revision)?;
         // The head's anchor is its operation's; each other member's goes with this run.
         if index > 0 {
             anchors.push(Anchored::new(git, &member.op_id)?);
@@ -2456,13 +2481,40 @@ fn after_trunk_moved(
     if policy_identity(&ctx.repo.git, moved.base)? != policy_identity(&ctx.repo.git, moved.trunk)? {
         return recheck_under_new_policy(ctx, op_id, revision, seq);
     }
-    let op = ctx.op_mut(op_id);
-    op.trunk_moved += 1;
+    ctx.op_mut(op_id).trunk_moved += 1;
+    if let Some(at) = *seq
+        && ctx.yields
+    {
+        return yield_head(ctx, op_id, revision, at).map(Some);
+    }
     // § 6: bay retries once more, then the operation joins the publication queue.
-    if op.trunk_moved >= TRUNK_MOVED_LIMIT && seq.is_none() {
+    if ctx.op(op_id).trunk_moved >= TRUNK_MOVED_LIMIT && seq.is_none() {
         return enqueue(ctx, op_id, revision, Reason::Queued).map(Some);
     }
     Ok(None)
+}
+
+/// F11 (a fleet finding, 2026-10-25: one head rebuilt twelve times in one pass while main moved
+/// outside bay, and no other change was given a place for an hour): the head gives its claim
+/// back and keeps its place, so the runner's pass goes on to every other change. The next pass
+/// runs it again, as the head, with a batch of the places behind it when `batch` is set.
+fn yield_head(ctx: &mut Ctx, op_id: &str, revision: &str, at: u64) -> Result<BayResult, String> {
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Admitted;
+    op.owner = None;
+    op.outcome = Some(Reason::Queued.code().to_owned());
+    ctx.save(
+        revision,
+        None,
+        &format!("yielded {op_id} at {at}: main moved"),
+    )?;
+    ctx.push_chain();
+    let mut result = BayResult::new(Decision::Queued)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(json!({"yielded": true, "seq": at}));
+    result.waiting_for = Some("executor".to_owned());
+    Ok(result)
 }
 
 /// § 7: a candidate checked under an older policy is `POLICY_CHANGED` and rechecked under the new
@@ -3253,7 +3305,8 @@ fn freeze(ctx: &Ctx) -> Result<Result<String, BayResult>, String> {
     let view = Git::new(repo.view_path(id));
     let latest = ctx.chain.drafts(id).map_err(|error| error.message())?[0].clone();
     let frozen = freeze_draft(&view, &ctx.record.base, "draft").map_err(|error| error.message())?;
-    let revision = if tree_of(&repo.git, &frozen)? == tree_of(&repo.git, &latest)?
+    let revision = if crate::change::same_draft(&repo.git, &frozen, &latest)
+        .map_err(|error| error.message())?
         && parent_of(&repo.git, &latest)?.as_deref() == Some(ctx.record.base.as_str())
     {
         latest
@@ -4346,7 +4399,7 @@ fn build_and_check(
             .signing()
             .map_or_else(|| "none".to_owned(), |registry| registry.commit.clone());
         let message = candidate_message(ctx, revision, &request_id, &candidate_id, &registry_id);
-        let commit = commit_candidate(ctx, &tree, trunk, &message)?;
+        let commit = commit_candidate(ctx, &tree, trunk, &message, revision)?;
         anchor(&ctx.repo.git, op_id, &commit)?;
         kill_point("after-commit");
         (candidate_id, commit, tree)
@@ -5926,7 +5979,13 @@ fn answered(
 }
 
 /// Step 3: the candidate commit, signed by the publishing executor when signing is on.
-fn commit_candidate(ctx: &Ctx, tree: &str, trunk: &str, message: &str) -> Result<String, String> {
+fn commit_candidate(
+    ctx: &Ctx,
+    tree: &str,
+    trunk: &str,
+    message: &str,
+    revision: &str,
+) -> Result<String, String> {
     let git = &ctx.repo.git;
     let signer = ctx.executor_signer()?;
     let mut args: Vec<String> = Vec::new();
@@ -5953,10 +6012,35 @@ fn commit_candidate(ctx: &Ctx, tree: &str, trunk: &str, message: &str) -> Result
         },
         Signer::identity,
     );
-    let envs: Vec<(&str, &str)> = identity
+    // A draft a person wrote (a branch made outside bay) keeps its author on main's commit;
+    // bay, or the runner's key, stays the committer.
+    let author = git
+        .run(&[
+            "log",
+            "-1",
+            "--format=%an%x00%ae%x00%ad",
+            "--date=raw",
+            revision,
+        ])
+        .map_err(|error| error.message())?;
+    let mut parts = author.splitn(3, '\0');
+    let (name, email, date) = (
+        parts.next().unwrap_or_default().to_owned(),
+        parts.next().unwrap_or_default().to_owned(),
+        parts.next().unwrap_or_default().to_owned(),
+    );
+    let mut envs: Vec<(&str, &str)> = identity
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
+    if !email.is_empty() && !crate::change::is_record_author(&email) {
+        envs.retain(|(key, _)| !key.starts_with("GIT_AUTHOR"));
+        envs.extend([
+            ("GIT_AUTHOR_NAME", name.as_str()),
+            ("GIT_AUTHOR_EMAIL", email.as_str()),
+            ("GIT_AUTHOR_DATE", date.as_str()),
+        ]);
+    }
     git.run_with(&args, &envs, None)
         .map_err(|error| error.message())
 }

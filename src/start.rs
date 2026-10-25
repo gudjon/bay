@@ -23,6 +23,7 @@ use crate::result::{BayResult, Decision, Reason};
 use crate::signing::{Keys, Signer};
 use crate::view;
 
+#[derive(Clone)]
 pub struct StartRequest {
     pub intent: Option<String>,
     /// Claim the intent's next generation after its change ended without landing, instead of
@@ -54,6 +55,7 @@ pub struct StartRequest {
 }
 
 /// The edits made in the main checkout that `bay save` takes in (G279).
+#[derive(Clone)]
 pub struct Saved {
     /// A commit of the edits on the main checkout's `HEAD`, which is on trunk's history, so its
     /// merge onto the base has that `HEAD` as its merge base.
@@ -101,7 +103,7 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         .clone()
         .or_else(|| names_change(&repo, request));
     let result = match &resumed {
-        Some(id) => resume(&repo, id),
+        Some(id) => resume(&repo, id, request.from.as_deref()),
         None => open(&repo, request),
     };
     let mut result = result.unwrap_or_else(BayResult::failed);
@@ -131,14 +133,14 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
 /// G300: the change a plain `bay start <CHANGE>` picks up, as `--resume <CHANGE>` does. The
 /// positional names a change when it is a change id and that change's ref is here or on the
 /// remote; otherwise it is an intent, as before. A start that asks for what only a new change
-/// takes (`--new`, `--fixes`, `--lane`, `--from`, `--after`, a save) always opens one.
+/// takes (`--new`, `--fixes`, `--lane`, `--after`, a save) always opens one. `--from` with a
+/// change named replaces its draft (`resume`).
 fn names_change(repo: &Repo, request: &StartRequest) -> Option<String> {
     let id = request.intent.as_deref().filter(|id| is_change_id(id))?;
     if request.new
         || request.reverts.is_some()
         || request.fixes.is_some()
         || request.lane.is_some()
-        || request.from.is_some()
         || !request.after.is_empty()
         || request.saved.is_some()
     {
@@ -400,6 +402,19 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
             Err(refusal) => return Ok(refusal),
         },
     };
+    // G268: an outside branch with no `--paths` declares the paths it changes, never the whole
+    // tree, so its claim holds only what it touches.
+    let derived;
+    let request = match &taken_in {
+        Some(taken) if request.paths.is_empty() && request.from.is_some() => {
+            derived = StartRequest {
+                paths: taken.changed.clone(),
+                ..request.clone()
+            };
+            &derived
+        }
+        _ => request,
+    };
     let hash = intent_hash(&intent, &request.intent_revision);
     // § 4: one intent, one change, by claim. A lost race re-reads the claims.
     for _ in 0..5 {
@@ -657,6 +672,9 @@ fn compacted_claims(
 struct TakenIn {
     from: Option<StartedFrom>,
     draft: String,
+    /// The paths the outside branch changes since its merge base with trunk: what a start
+    /// with `--from` and no `--paths` declares (G268).
+    changed: Vec<String>,
 }
 
 /// Takes in the branch made outside bay that `reference` names (G268): the commit the remote's
@@ -693,10 +711,15 @@ fn take_in(
             &commit,
         ])
         .map_err(|error| error.message())?;
-    // A change that declares no paths holds the whole tree.
-    let uncovered: Vec<&str> = changed
+    let changed: Vec<String> = changed
         .split('\0')
         .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect();
+    // A change that declares no paths holds the whole tree.
+    let uncovered: Vec<&str> = changed
+        .iter()
+        .map(String::as_str)
         .filter(|path| {
             !paths.is_empty() && !paths.iter().any(|declared| inputs::within(declared, path))
         })
@@ -722,11 +745,32 @@ fn take_in(
                 "next": "bring main into the branch outside bay, then start again",
             })))),
         Merge::Clean(tree) => {
-            let draft = commit_on(&repo.git, &tree, base, &format!("start --from {reference}"))
+            // The branch's own words, oldest first as a squash says them, and its author.
+            let messages = repo
+                .git
+                .run(&[
+                    "log",
+                    "--reverse",
+                    "--format=%B%x00",
+                    &format!("{merge_base}..{commit}"),
+                ])
+                .map_err(|error| error.message())?;
+            let message: Vec<&str> = messages
+                .split('\0')
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .collect();
+            let message = if message.is_empty() {
+                format!("start --from {reference}")
+            } else {
+                message.join("\n\n")
+            };
+            let draft = crate::change::commit_on_by(&repo.git, &tree, base, &message, &commit)
                 .map_err(|error| error.message())?;
             Ok(Ok(TakenIn {
                 from: Some(from),
                 draft,
+                changed,
             }))
         }
     }
@@ -754,7 +798,11 @@ fn take_saved(
         Merge::Clean(tree) => {
             let draft = commit_on(&repo.git, &tree, base, &saved.message)
                 .map_err(|error| error.message())?;
-            Ok(Ok(TakenIn { from: None, draft }))
+            Ok(Ok(TakenIn {
+                from: None,
+                draft,
+                changed: Vec::new(),
+            }))
         }
     }
 }
@@ -790,32 +838,26 @@ fn resolve_from(repo: &Repo, reference: &str) -> Result<(String, &'static str), 
             .is_some_and(|(_, name)| name.trim() == full)
     });
     if on_remote {
-        let fetched = format!("{}from-{}", crate::names::FETCH, std::process::id());
-        let commit = repo
-            .git
-            .run(&[
-                "fetch",
-                "-q",
-                "--no-tags",
-                remote,
-                &format!("+{full}:{fetched}"),
-            ])
-            .and_then(|_| {
-                repo.git.run(&[
-                    "rev-parse",
-                    "--verify",
-                    "-q",
-                    &format!("{fetched}^{{commit}}"),
-                ])
-            });
-        let _ = repo.git.run(&["update-ref", "-d", &fetched]);
-        return commit.map(|commit| (commit, "remote")).map_err(|error| {
-            format!(
-                "--from {reference}: the remote {remote} has {full}, and it cannot be \
-                     fetched: {}",
-                error.message()
-            )
-        });
+        let remote_tip = fetch_from(repo, remote, reference, &full)?;
+        // N-5: a local branch of the name that is only behind the remote's is stale, and the
+        // remote's is taken. One that holds commits the remote's lacks (a local rebase, an
+        // unpushed commit) is never dropped silently: the start names both.
+        if let Ok(local) =
+            repo.git
+                .run(&["rev-parse", "--verify", "-q", &format!("{full}^{{commit}}")])
+            && local != remote_tip
+            && repo
+                .git
+                .run(&["merge-base", "--is-ancestor", &local, &remote_tip])
+                .is_err()
+        {
+            return Err(format!(
+                "--from {reference}: the remote {remote} has {full} at {remote_tip}, and this \
+                 repository's {full} is {local}, with commits the remote's lacks: start with \
+                 --from {local} to take this repository's, or push it first"
+            ));
+        }
+        return Ok((remote_tip, "remote"));
     }
     repo.git
         .run(&[
@@ -831,6 +873,37 @@ fn resolve_from(repo: &Repo, reference: &str) -> Result<(String, &'static str), 
                  no such branch, ref or commit"
             )
         })
+}
+
+/// The commit the remote's `full` holds, fetched into a ref of bay's own that is deleted once
+/// read.
+fn fetch_from(repo: &Repo, remote: &str, reference: &str, full: &str) -> Result<String, String> {
+    let fetched = format!("{}from-{}", crate::names::FETCH, std::process::id());
+    let commit = repo
+        .git
+        .run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            remote,
+            &format!("+{full}:{fetched}"),
+        ])
+        .and_then(|_| {
+            repo.git.run(&[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("{fetched}^{{commit}}"),
+            ])
+        });
+    let _ = repo.git.run(&["update-ref", "-d", &fetched]);
+    commit.map_err(|error| {
+        format!(
+            "--from {reference}: the remote {remote} has {full}, and it cannot be \
+                     fetched: {}",
+            error.message()
+        )
+    })
 }
 
 /// Creates the change and its claim in one atomic push (§ 4), so a crash never leaves a claim
@@ -1255,7 +1328,41 @@ fn holder_works(
     Ok(None)
 }
 
-fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
+/// `start <CHANGE> --from <ref>`: the branch's net change on `trunk` becomes the change's
+/// draft, appended to its chain at `head`, and its view is made again at that draft. Returns
+/// the draft, or the refusal [`take_in`] gives.
+fn replace_draft(
+    repo: &Repo,
+    chain: &Chain,
+    (head, record): (&mut String, &mut ChangeRecord),
+    trunk: &str,
+    reference: &str,
+) -> Result<Result<String, BayResult>, String> {
+    let id = record.id.clone();
+    let declared = inputs::paths(&record.declared_inputs);
+    let taken = match take_in(repo, reference, trunk, &declared)? {
+        Ok(taken) => taken,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    record.from = taken.from;
+    trunk.clone_into(&mut record.base);
+    *head = chain
+        .append(
+            head,
+            record,
+            &taken.draft,
+            &format!("start --from {reference}"),
+        )
+        .map_err(|error| error.message())?;
+    view::discard(repo, &id).map_err(|error| error.message())?;
+    view::create(repo, &id, &taken.draft, &declared).map_err(|error| error.message())?;
+    Ok(Ok(taken.draft))
+}
+
+/// Picks up change `id`; with `from`, a branch made outside bay (`start <CHANGE> --from`), its
+/// net change on the newest trunk replaces the change's draft, after the view's own edits are
+/// checkpointed, so a rebased branch lands under its change and never needs a new name.
+fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String> {
     if !is_change_id(id) {
         return Err(format!("{id} is not a change id"));
     }
@@ -1305,7 +1412,13 @@ fn resume(repo: &Repo, id: &str) -> Result<BayResult, String> {
     }
 
     let old_base = record.base.clone();
-    let moved_paths = if trunk == old_base {
+    if let Some(reference) = from {
+        match replace_draft(repo, &chain, (&mut head, &mut record), &trunk, reference)? {
+            Ok(taken) => draft = taken,
+            Err(refusal) => return Ok(refusal.with_change(id)),
+        }
+    }
+    let moved_paths = if trunk == record.base {
         Vec::new()
     } else {
         match bring_in_trunk(repo, &chain, &head, &mut record, &draft, &trunk)? {
@@ -1370,7 +1483,7 @@ fn checkpoint_view(
     crate::assets::offload_view(repo, &view_path)?;
     let frozen = freeze_draft(&Git::new(&view_path), &record.base, "checkpoint")
         .map_err(|error| error.message())?;
-    if tree_of(repo, &frozen)? == tree_of(repo, latest)? {
+    if crate::change::same_draft(&repo.git, &frozen, latest).map_err(|error| error.message())? {
         return Ok(None);
     }
     let head = chain
@@ -1500,12 +1613,6 @@ fn agent_signer(repo: &Repo, actor: &str) -> Result<Option<Signer>, String> {
         key,
         name: actor.to_owned(),
     }))
-}
-
-fn tree_of(repo: &Repo, commit: &str) -> Result<String, String> {
-    repo.git
-        .run(&["rev-parse", &format!("{commit}^{{tree}}")])
-        .map_err(|error| error.message())
 }
 
 /// Pushes the change chain. A chain only appends, so this is a fast-forward; a refusal or an

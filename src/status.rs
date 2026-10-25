@@ -133,6 +133,46 @@ fn refresh_chains(repo: &Repo, chain: &Chain, ids: &[String]) -> Result<(), Stri
     Ok(())
 }
 
+/// The changes a status read names, their chains refreshed from the remote: the one named, or
+/// every live one this repository holds (the 0.5.3 status patch, owner 2026-10-25). An ended
+/// change (merged, abandoned, superseded, no effect) never comes back, so its record here is
+/// final, and `bay status <change>` still reads it whole. A listing refreshes in one fetch.
+fn listed(repo: &Repo, chain: &Chain, named: Option<String>) -> Result<Vec<String>, String> {
+    crate::log::fetch(repo);
+    if let Some(id) = named {
+        let ids = vec![id];
+        refresh_chains(repo, chain, &ids)?;
+        return Ok(ids);
+    }
+    let ids: Vec<String> = repo
+        .git
+        .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
+        .map_err(|error| error.message())?
+        .lines()
+        .map(|name| name.trim_start_matches(CHANGES_PREFIX).to_owned())
+        .filter(|id| {
+            chain
+                .read(id)
+                .ok()
+                .is_none_or(|(_, record)| !ended(record.state))
+        })
+        .collect();
+    repo.remote_chains(&ids);
+    Ok(ids)
+}
+
+/// Whether a change in `state` has ended for good.
+const fn ended(state: crate::change::ChangeState) -> bool {
+    use crate::change::ChangeState;
+    matches!(
+        state,
+        ChangeState::Landed
+            | ChangeState::Abandoned
+            | ChangeState::Superseded
+            | ChangeState::NoEffect
+    )
+}
+
 fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     let repo = match Repo::open_fetched(dir) {
         Ok(repo) => repo,
@@ -150,19 +190,12 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         .is_some()
         .then(|| crate::talk::receive(&repo))
         .flatten();
-    let ids: Vec<String> = match change.map(str::to_owned).or_else(|| repo.view_change(dir)) {
-        Some(id) => vec![id],
-        None => repo
-            .git
-            .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
-            .map_err(|error| error.message())?
-            .lines()
-            .map(|name| name.trim_start_matches(CHANGES_PREFIX).to_owned())
-            .collect(),
-    };
     let chain = Chain::new(&repo.git);
-    crate::log::fetch(&repo);
-    refresh_chains(&repo, &chain, &ids)?;
+    let ids = listed(
+        &repo,
+        &chain,
+        change.map(str::to_owned).or_else(|| repo.view_change(dir)),
+    )?;
     // The runtime adapter is asked only for a change this read names: a listing of every
     // change stays bounded however many have landed.
     let read = Read::Full {
@@ -180,6 +213,11 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
             .filter(|receipt| receipt.change == *id)
             .collect();
         changes.push(describe(&repo, &record, &trunk, &unsynced, &read)?);
+    }
+    // Red, flakes and post checks judge the evidence notes: fetched once here, never left to a
+    // landed change's row (the listing names live changes only, the 0.5.3 status patch).
+    if fetched_at.is_some() {
+        repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
     }
     let leftovers = leftovers(&repo, &trunk)?;
     let quarantines = quarantines(&repo, &trunk);
@@ -214,6 +252,9 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     }
     let mut warnings: Vec<Value> = crate::presence::no_live_executor(&repo, queued)
         .into_iter()
+        .chain(crate::presence::unserved_environments(
+            &repo, queued, &trunk,
+        ))
         .collect();
     // N-20: each outside merge in the red window that pushed bay landings off the line.
     warnings.extend(not_linear(&repo.git, &trunk));

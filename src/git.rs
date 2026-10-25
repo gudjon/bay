@@ -1052,13 +1052,36 @@ fn batch_missing(out: &[u8], contents: bool) -> Vec<String> {
 
 /// `args`, with `--no-show-signature` after a `log` or `show`: G104, a box's
 /// `log.showSignature` would print each signature's verification among the lines bay parses.
+/// And `--no-verify` after a `push` of bay's records alone (G376): a repository's `pre-push`
+/// hook guards its branches, and run on bay's own refs it only delays or breaks bay's records,
+/// so a push of main still runs it.
 fn as_formatted<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> {
     let first = args.first().copied();
-    let quiet = matches!(first, Some("log" | "show")).then_some("--no-show-signature");
+    let quiet = match first {
+        Some("log" | "show") => Some("--no-show-signature"),
+        Some("push") if records_only(&args[1..]) => Some("--no-verify"),
+        _ => None,
+    };
     first
         .into_iter()
         .chain(quiet)
         .chain(args.iter().skip(1).copied())
+}
+
+/// Whether the words of a `push` after its remote update only bay's records: every
+/// destination is under `refs/bay/` or `refs/notes/bay/`, and there is at least one.
+fn records_only(words: &[&str]) -> bool {
+    let mut names = words.iter().filter(|word| !word.starts_with('-')).skip(1);
+    let ours = |name: &&str| {
+        let target = name.trim_start_matches('+');
+        let target = target.rsplit_once(':').map_or(target, |(_, to)| to);
+        target.starts_with(crate::names::BAY) || target.starts_with(crate::names::NOTES)
+    };
+    let mut any = false;
+    names.all(|name| {
+        any = true;
+        ours(name)
+    }) && any
 }
 
 /// The bound of a call to `git <args>` given `timeout`: a call that talks to a remote under the
@@ -1476,5 +1499,20 @@ mod tests {
             .map(ToOwned::to_owned)
             .collect();
         assert!(args.ends_with(&super::TREE_WRITES.map(std::ffi::OsString::from)));
+    }
+
+    /// G376: only a push whose every destination is one of bay's refs skips the hook.
+    #[test]
+    fn only_a_push_of_bays_records_skips_the_hook() {
+        use super::records_only;
+        use crate::names::{BAY, NOTES};
+        let change = format!("{BAY}changes/a:{BAY}changes/a");
+        let notes = format!("+{NOTES}evidence/x:{NOTES}evidence/x");
+        let ours = format!("{BAY}x:{BAY}x");
+        assert!(records_only(&["-q", "--atomic", "origin", &change]));
+        assert!(records_only(&["origin", &notes]));
+        assert!(!records_only(&["origin", "abc:refs/heads/main", &ours]));
+        assert!(!records_only(&["origin", "main"]));
+        assert!(!records_only(&["origin"]));
     }
 }
