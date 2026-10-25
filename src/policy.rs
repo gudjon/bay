@@ -169,7 +169,9 @@ fn signing_in(text: &str) -> Signing {
 /// refuse `ACTOR_UNPROVEN` while the agent key cannot prove which actor signs: several actors
 /// run sessions under this OS account, which can read a file-based agent key (G243b).
 /// `max_live_changes = N` makes `bay start` refuse `WIP_LIMIT` while the actor already holds N
-/// live changes, a lane change among them (G264). None refuses anything by default.
+/// live changes, a lane change among them (G264). `question_wait_s = N` (dossier 63) has a
+/// question tool's hook wait up to N seconds, at most [`MAX_QUESTION_WAIT_S`], for a person's
+/// signed answer on the question's talk. None refuses or waits by default.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentPolicy {
@@ -179,7 +181,13 @@ pub struct AgentPolicy {
     pub require_actor_proof: bool,
     #[serde(default)]
     pub max_live_changes: Option<u64>,
+    #[serde(default)]
+    pub question_wait_s: Option<u64>,
 }
+
+/// The longest a question tool's hook waits for an answer (owner ruling 2026-10-25, ~90 s):
+/// while it waits, the person at the terminal sees only that a hook runs.
+pub const MAX_QUESTION_WAIT_S: u64 = 90;
 
 /// One check set aside for a stated time (`DESIGN` § 7, ruling 8c): while the entry is in the
 /// policy at the base, the check is not in the frozen manifest and is reported as a coverage
@@ -1246,6 +1254,24 @@ pub fn max_live_changes_at(git: &Git, commit: &str) -> Result<Option<u64>, Strin
     }
 }
 
+/// How long a question tool's hook waits for an answer under the policy at `commit`
+/// (`[agent] question_wait_s`, dossier 63): 0, record only, with no policy, no key, or a
+/// policy bay cannot read, so a broken policy never holds an agent.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn question_wait_at(git: &Git, commit: &str) -> Result<u64, String> {
+    match load_at(git, commit) {
+        Ok(policy) => Ok(policy
+            .and_then(|policy| policy.agent.question_wait_s)
+            .unwrap_or(0)
+            .min(MAX_QUESTION_WAIT_S)),
+        Err(LoadError::Git(why)) => Err(why),
+        Err(LoadError::Invalid(_)) => Ok(0),
+    }
+}
+
 /// The size limits of the policy at `commit` (`[limits]`, owner ruling 2026-10-21), judged at
 /// the base like every other policy key. No policy, or no key, sets no limit. An invalid policy
 /// sets none here: it lands nothing, and its refusal is `POLICY_INVALID`.
@@ -1348,6 +1374,14 @@ fn validate_shape(file: &PolicyFile) -> Result<(), String> {
     file.limits.validate()?;
     file.locks.validate()?;
     file.assets.validate()?;
+    // Dossier 63: a wait past the cap would hide the question from the person at the terminal.
+    if let Some(wait) = file.agent.question_wait_s
+        && wait > MAX_QUESTION_WAIT_S
+    {
+        return Err(format!(
+            "[agent] question_wait_s = {wait}: a question tool waits at most {MAX_QUESTION_WAIT_S} seconds for an answer"
+        ));
+    }
     // Ruling 8c: a quarantine that names no check, or whose end is neither a date nor a
     // Change-Id, would set nothing aside or never show as overdue: a typo is never silent.
     for quarantine in &file.quarantine {

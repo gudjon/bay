@@ -478,7 +478,104 @@ fn ask(payload: Option<&Payload>, caller: &str, input: &str) -> Outcome {
     };
     extra.insert("question".to_owned(), kept);
     let _ = crate::session::record_with(payload, &extra);
-    Outcome::default()
+    // Dossier 63 item 4: with a wait set, a person's signed answer on every question of the
+    // call answers the tool; none, or only some, by the deadline, and the dialog opens.
+    if talks.is_empty() {
+        return Outcome::default();
+    }
+    match answered(payload, &value, &talks) {
+        Some(output) => Outcome {
+            stdout: output.to_string(),
+            ..Outcome::default()
+        },
+        None => Outcome::default(),
+    }
+}
+
+/// How often a waiting question tool looks for its answers.
+const ANSWER_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The hook's answer to the question tool call `value` once each of its `talks` has a verified
+/// answer ([`crate::talk::verified_answer`]) within the policy's `[agent] question_wait_s`:
+/// `AskUserQuestion` allowed with `updatedInput.answers` keyed by question text, a plan allowed
+/// on "yes" and denied otherwise, the person's words its reason (tests/fixtures/
+/// claude-code-2.1.310, 01-11 and 18-23). `None` with no wait set, or when the deadline passes
+/// with any question unanswered.
+fn answered(payload: &Payload, value: &Value, talks: &[String]) -> Option<Value> {
+    let repo = crate::repo::Repo::open(&payload.cwd).ok()?;
+    let wait = crate::policy::question_wait_at(&repo.git, &repo.trunk_tracking_ref()).ok()?;
+    if wait == 0 {
+        return None;
+    }
+    // One talk per question, in order, or the answers would land on the wrong questions.
+    let asked = match value["tool_name"].as_str() {
+        Some("ExitPlanMode") => 1,
+        _ => value["tool_input"]["questions"]
+            .as_array()
+            .map_or(0, Vec::len),
+    };
+    if talks.len() != asked {
+        return None;
+    }
+    let actor = crate::change::current_actor(&repo.common_dir).ok()?;
+    let prefix = format!("{}{}/", crate::talk::TALK_PREFIX, actor.name);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
+    loop {
+        let _ = repo.git.run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            repo.remote(),
+            &format!("+{prefix}*:{prefix}*"),
+        ]);
+        let registry = crate::registry::Registry::current(&repo.git).ok()??;
+        let values: Option<Vec<String>> = talks
+            .iter()
+            .map(|id| {
+                let name = crate::talk::talk_ref(&actor.name, id);
+                let tip = repo.git.ref_target(&name).ok()??;
+                let talk = crate::talk::Talk::read(&repo.git, &name, &tip).ok()?;
+                crate::talk::verified_answer(&repo.git, &registry, &talk)
+            })
+            .collect();
+        if let Some(values) = values {
+            return Some(reply(value, &values));
+        }
+        if std::time::Instant::now() + ANSWER_POLL > deadline {
+            return None;
+        }
+        std::thread::sleep(ANSWER_POLL);
+    }
+}
+
+/// The `PreToolUse` reply that gives the question tool call `value` the answers `values`, one per
+/// question in the tool's order.
+fn reply(value: &Value, values: &[String]) -> Value {
+    let input = &value["tool_input"];
+    if value["tool_name"] == "ExitPlanMode" {
+        let words = values.first().map(String::as_str).unwrap_or_default();
+        if words.trim().eq_ignore_ascii_case("yes") {
+            return serde_json::json!({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                "permissionDecision": "allow", "updatedInput": input}});
+        }
+        return serde_json::json!({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+            "permissionDecision": "deny", "permissionDecisionReason": words}});
+    }
+    let mut answers = serde_json::Map::new();
+    for (question, answer) in input["questions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .zip(values)
+    {
+        if let Some(text) = question["question"].as_str() {
+            answers.insert(text.to_owned(), Value::from(answer.as_str()));
+        }
+    }
+    let mut updated = input.clone();
+    updated["answers"] = Value::Object(answers);
+    serde_json::json!({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+        "permissionDecision": "allow", "updatedInput": updated}})
 }
 
 /// How long a question talk is owed a reply: past it, the question is old news.
@@ -557,7 +654,7 @@ fn question_talks(payload: &Payload, value: &Value) -> Vec<String> {
             }
             asks.push(crate::talk::Ask {
                 what: Some("Approve this plan?".to_owned()),
-                decision: vec![format!("{}{tool_use}:0", crate::talk::QUESTION)],
+                decision: vec![format!("{}{tool_use}:0", crate::talk::PLAN)],
                 context: Some(kept),
                 context_truncated: cut,
                 options: Some(serde_json::json!([

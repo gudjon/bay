@@ -141,6 +141,23 @@ pub(crate) fn agent_key(git: &Git, registry: &Registry, name: &str) -> Result<Pa
     }
 }
 
+/// This machine's approver key and name (`bay.approverKey`, `bay.approverName`), when the
+/// registry enrols that key for that name as an approver: a person's key (dossier 63).
+fn approver_key(git: &Git, registry: &Registry) -> Option<(PathBuf, String)> {
+    let get = |key: &str| {
+        git.config_get(key)
+            .ok()
+            .flatten()
+            .filter(|value| !value.is_empty())
+    };
+    let name = get("bay.approverName")?;
+    let key = PathBuf::from(get("bay.approverKey")?);
+    let (key_type, blob) = signing::public_key(&key).ok()?;
+    registry
+        .holds(KeyClass::Approver, &name, &key_type, &blob)
+        .then_some((key, name))
+}
+
 /// This machine's reviewer key (`bay.reviewerKey`), when the registry enrols it for `name`
 /// (G149): the key a reviewer's delivery talk is signed with.
 fn reviewer_key(git: &Git, registry: &Registry, name: &str) -> Result<PathBuf, Refusal> {
@@ -603,10 +620,25 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
     if value.trim().is_empty() {
         return Err(Refusal::invalid("the answer's `--value` is empty").into());
     }
-    let key = agent_key(&repo.git, &registry, &me.name)?;
     let id = request.talk.as_str();
     let talk = find(&repo, id)?
         .ok_or_else(|| Refusal::invalid(format!("no talk {id} is here or on the remote")))?;
+    // Dossier 63: a person answers a talk that asks one with their approver key (as they
+    // approve), under the name the registry enrols it for; anyone else answers as an agent.
+    let person = super::asks_a_person(&talk.body)
+        .then(|| approver_key(&repo.git, &registry))
+        .flatten();
+    let by_person = person.is_some();
+    let (key, me) = match person {
+        Some((key, name)) => (
+            key,
+            Actor {
+                name,
+                session: me.session,
+            },
+        ),
+        None => (agent_key(&repo.git, &registry, &me.name)?, me),
+    };
     if talk.body["kind"] != "discovery" {
         return Err(Refusal::invalid(format!(
             "only a discovery talk takes an answer; {id} is a {} talk",
@@ -614,7 +646,8 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
         ))
         .into());
     }
-    if me.name != talk.who && talk.body["decides"].as_str() != Some(me.name.as_str()) {
+    if !by_person && me.name != talk.who && talk.body["decides"].as_str() != Some(me.name.as_str())
+    {
         return Err(Refusal::invalid(format!(
             "only `who` ({}) or `decides` answers talk {id}",
             talk.who

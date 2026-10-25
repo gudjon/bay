@@ -300,7 +300,7 @@ struct Chain {
     /// The entries this push added so far, by blob: their commit and JSON.
     known: Known,
     /// Each actor's own lines of the agent class file, by actor.
-    principal_files: std::collections::HashMap<String, std::path::PathBuf>,
+    principal_files: std::collections::HashMap<(KeyClass, String), std::path::PathBuf>,
 }
 
 impl Chain {
@@ -361,31 +361,37 @@ impl Chain {
     /// Whether commit `index` of this push is signed by the agent key enrolled for `actor`:
     /// one `ssh-keygen -Y verify`, in Git's namespace, of the signature Git would check, over
     /// the payload Git would check, against `actor`'s own lines of the agent class file.
-    fn signed_by(&mut self, push: &Push, index: usize, actor: &str) -> Result<bool, String> {
-        let raw = &self.raws[index];
-        let Some(signature) = raw
+    /// The first of `classes` whose key enrolled for `actor` signed commit `index`; `None` when
+    /// none did.
+    fn signed_as(
+        &mut self,
+        push: &Push,
+        index: usize,
+        actor: &str,
+        classes: &[KeyClass],
+    ) -> Result<Option<KeyClass>, String> {
+        let Some(signature) = self.raws[index]
             .signature
             .as_ref()
             .and_then(|sig| std::str::from_utf8(sig).ok())
+            .map(str::to_owned)
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        let file = if let Some(file) = self.principal_files.get(actor) {
-            file.clone()
-        } else {
-            let file = push
-                .registry
-                .principal_file(push.git, KeyClass::Agent, actor)?;
-            self.principal_files.insert(actor.to_owned(), file.clone());
-            file
-        };
-        Ok(signing::verify_data(
-            &file,
-            actor,
-            "git",
-            &raw.payload,
-            signature,
-        ))
+        for class in classes {
+            let cached = (*class, actor.to_owned());
+            let file = if let Some(file) = self.principal_files.get(&cached) {
+                file.clone()
+            } else {
+                let file = push.registry.principal_file(push.git, *class, actor)?;
+                self.principal_files.insert(cached, file.clone());
+                file
+            };
+            if signing::verify_data(&file, actor, "git", &self.raws[index].payload, &signature) {
+                return Ok(Some(*class));
+            }
+        }
+        Ok(None)
     }
 
     /// The JSON of the file commit `index` adds: canonical text of at most
@@ -444,16 +450,25 @@ impl Chain {
         }
         not_ahead("at", at.unwrap_or_default())?;
         let actor = entry["actor"]["name"].as_str().unwrap_or_default();
-        if !self.signed_by(push, index, actor)? {
+        // Dossier 63 (ruling T1 as the owner changed it, 2026-10-25): an answer on a talk that
+        // asks a person may be signed by a person, an approver or registry key enrolled for the
+        // name it gives, as an approval is.
+        let classes: &[KeyClass] = if kind == "answer" && super::asks_a_person(&self.talk.body) {
+            &[KeyClass::Agent, KeyClass::Approver, KeyClass::Registry]
+        } else {
+            &[KeyClass::Agent]
+        };
+        let Some(class) = self.signed_as(push, index, actor, classes)? else {
             return Err(format!(
                 "{new} is not signed by the agent key of {actor}, the actor its {kind} entry names"
             ));
-        }
+        };
+        let by_person = class != KeyClass::Agent;
         let talk = &self.talk;
         match kind.as_str() {
             "ack" => ack(talk, actor, &entry),
             "backbrief" => backbrief(push, talk, actor, &entry, &self.known),
-            "answer" => answer(git, talk, actor, &entry, &self.known),
+            "answer" => answer(git, talk, actor, &entry, &self.known, by_person),
             "close" => close(push, talk, actor, &entry, &self.known),
             other => Err(format!("`{other}` is not a talk entry")),
         }?;
@@ -815,14 +830,22 @@ fn backbrief(
     Ok(())
 }
 
-fn answer(git: &Git, talk: &Talk, actor: &str, entry: &Value, known: &Known) -> Result<(), String> {
+fn answer(
+    git: &Git,
+    talk: &Talk,
+    actor: &str,
+    entry: &Value,
+    known: &Known,
+    by_person: bool,
+) -> Result<(), String> {
     if talk.body["kind"] != "discovery" {
         return Err(format!(
             "only a discovery talk takes an answer; {} is not one",
             talk.id
         ));
     }
-    if actor != talk.who && talk.body["decides"].as_str() != Some(actor) {
+    // A person who signed (`by_person`, only on a talk that asks one) answers as themself.
+    if !by_person && actor != talk.who && talk.body["decides"].as_str() != Some(actor) {
         return Err(format!(
             "only {} or `decides` answers talk {}",
             talk.who, talk.id
@@ -871,10 +894,7 @@ fn close(
     // Dossier 63: a question talk ends where it was asked, when the question tool ended there
     // (answered at the terminal, or the session went on).
     if entry["state"] == "ended" {
-        let question = talk.body["decision"]
-            .as_str()
-            .is_some_and(|decision| decision.starts_with(super::QUESTION));
-        if !question || entry.get("by").is_some() {
+        if !super::asks_a_person(&talk.body) || entry.get("by").is_some() {
             return Err(
                 "only a question talk ends, and an ended close names no talk `by`".to_owned(),
             );

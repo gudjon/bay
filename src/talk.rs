@@ -127,6 +127,42 @@ const FIELDS: [&str; 28] = [
 /// The prefix of a question talk's `decision` (dossier 63): `question:<tool_use_id>:<n>`, the
 /// n-th question of one question tool call. Structure bay judges, never the prose.
 pub const QUESTION: &str = "question:";
+/// The prefix of a plan talk's `decision`: `plan:<tool_use_id>:0`, a plan to approve.
+pub const PLAN: &str = "plan:";
+
+/// Dossier 63 item 4: the value of `talk`'s standing answer when its commit is signed by a key
+/// enrolled for the name the answer gives, as `registry` holds it: an approver or registry key
+/// (a person), or the agent key of `who` or `decides`. A recipient judges it itself: on a remote
+/// with no bay host, no hook judged the push. `None` with no answer, or one not so signed.
+#[must_use]
+pub fn verified_answer(git: &Git, registry: &Registry, talk: &Talk) -> Option<String> {
+    let (commit, entry) = talk.standing_answer(git).ok()??;
+    let name = entry["actor"]["name"].as_str()?;
+    let value = entry["value"].as_str()?;
+    let party = name == talk.who || talk.body["decides"].as_str() == Some(name);
+    let classes: &[KeyClass] = if party {
+        &[KeyClass::Agent, KeyClass::Approver, KeyClass::Registry]
+    } else {
+        &[KeyClass::Approver, KeyClass::Registry]
+    };
+    classes.iter().find_map(|class| {
+        let allowed = registry.principal_file(git, *class, name).ok()?;
+        (crate::signing::verify_commit(git, &commit, &allowed).ok()?? == name)
+            .then(|| value.to_owned())
+    })
+}
+
+/// Whether `body` asks a person (dossier 63): a discovery talk whose `decision` is a question
+/// or a plan. Only such a talk takes the question fields, an `ended` close, and an answer
+/// signed by a person (an approver or registry key) as well as by `who` or `decides`.
+#[must_use]
+pub fn asks_a_person(body: &Value) -> bool {
+    body.get("kind").and_then(Value::as_str) == Some("discovery")
+        && body
+            .get("decision")
+            .and_then(Value::as_str)
+            .is_some_and(|decision| decision.starts_with(QUESTION) || decision.starts_with(PLAN))
+}
 /// The most options a question carries, as the question tool takes them.
 const MAX_OPTIONS: usize = 4;
 /// The fields the id is the digest of (ruling T7): not `sent`, so a retry is the same id.
@@ -509,16 +545,11 @@ pub fn check_body(body: &Value) -> Result<(), Refusal> {
 /// `{label, description}` objects with a label each; `multi_select` is true or false;
 /// `context_truncated` is true or absent.
 fn check_question(map: &Map<String, Value>) -> Result<(), Refusal> {
-    let question = map.get("kind").and_then(Value::as_str) == Some("discovery")
-        && map
-            .get("decision")
-            .and_then(Value::as_str)
-            .is_some_and(|decision| decision.starts_with(QUESTION));
     let own = ["options", "multi_select", "context_truncated"];
-    if !question {
+    if !asks_a_person(&Value::Object(map.clone())) {
         if let Some(field) = own.iter().find(|field| map.contains_key(**field)) {
             return Err(Refusal::invalid(format!(
-                "`{field}` belongs to a question talk: a discovery talk whose decision is {QUESTION}…"
+                "`{field}` belongs to a question talk: a discovery talk whose decision is {QUESTION}… or {PLAN}…"
             )));
         }
         return Ok(());

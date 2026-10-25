@@ -5,6 +5,8 @@
 - A push or fetch to a remote with many refs gets three minutes, not the local call's thirty seconds.
 - `bay status --all` names why a session waits: a question, a permission prompt or its idle prompt.
 - With a key registry, each question an agent asks becomes a talk; it closes when the session goes on.
+- A person with an approver key answers an agent's question: `bay talk --answer <id> --value <answer>`.
+- With `[agent] question_wait_s` set, a signed answer reaches the question tool as the person's answer.
 
 ## 0.4.1
 

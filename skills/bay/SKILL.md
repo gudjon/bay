@@ -61,7 +61,8 @@ needing a person: main's commit keeps that message. Research, a plan or a review
 short file (`notes/<date>-<what>.md`), saved like any other change. When `bay merge` names
 `detail.main_changed`, main changed those files of yours since your change began: read its `commit`.
 When you need a person's decision, ask with your product's question tool (Claude Code's
-`AskUserQuestion`), not in words: bay records that you wait for one, and why.
+`AskUserQuestion`), not in words: bay records that you wait for one, and why. With
+`[agent] question_wait_s` in the policy, a person may answer it from elsewhere; it reaches you as theirs.
 A list every change appends to (cards, a registry) merges both sides' lines when main's
 `.gitattributes` marks it `merge=union`; your change's own `.gitattributes` never decides its merge.
 `bay start` lists in `detail.overlaps` the live changes whose
