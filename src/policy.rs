@@ -354,8 +354,13 @@ pub struct CheckEntry {
     /// carried onto a tree it never judged. Judged at the base; `true` enters the definition
     /// digest, and the default is left out of the canonical entry (the G26 vector). It needs
     /// `paths` or `when_paths`.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub footprint: bool,
+    ///
+    /// `footprint = "observed"` (items 1 and 2, owner ruling 2026-10-25): bay records what the
+    /// check read and listed in its tree ([`crate::check::observe`]), and that observed read
+    /// set is the record's footprint. No `paths` is needed, and a read set that goes stale is
+    /// impossible.
+    #[serde(default, skip_serializing_if = "FootprintMode::is_off")]
+    pub footprint: FootprintMode,
     /// G292: whether an approval check's record also answers a later candidate of the same
     /// change whose `when_paths` content, in its tree and in its base's, is byte for byte the
     /// approved candidate's ([`CheckEntry::carries`], `crate::throughput::carried_approvals`).
@@ -581,7 +586,7 @@ impl CheckEntry {
                 None
             };
         }
-        if !self.footprint {
+        if self.footprint != FootprintMode::Declared {
             return None;
         }
         self.paths.as_deref().or(self.when_paths.as_deref())
@@ -1595,10 +1600,60 @@ fn validate_materialization(entry: &CheckEntry) -> Result<(), String> {
     Ok(())
 }
 
+/// A `[[check]]`'s `footprint` (NEW-10; items 1 and 2): none, declared by its `paths` or
+/// `when_paths` (`true`), or observed by bay as the check runs (`"observed"`). `true`
+/// serializes as `true`, so a declared footprint keeps its definition digest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FootprintMode {
+    #[default]
+    Off,
+    Declared,
+    Observed,
+}
+
+impl FootprintMode {
+    #[must_use]
+    pub fn is_off(&self) -> bool {
+        *self == Self::Off
+    }
+}
+
+impl Serialize for FootprintMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Off => serializer.serialize_bool(false),
+            Self::Declared => serializer.serialize_bool(true),
+            Self::Observed => serializer.serialize_str("observed"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for FootprintMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Flag(bool),
+            Word(String),
+        }
+        match Raw::deserialize(deserializer)? {
+            Raw::Flag(false) => Ok(Self::Off),
+            Raw::Flag(true) => Ok(Self::Declared),
+            Raw::Word(word) if word == "observed" => Ok(Self::Observed),
+            Raw::Word(other) => Err(serde::de::Error::custom(format!(
+                "footprint is true or \"observed\", not {other:?}"
+            ))),
+        }
+    }
+}
+
 /// NEW-10: a check with `footprint = true` names what it reads, in `paths` or `when_paths`; a
 /// footprint of the whole tree would carry nothing, and an empty one everything.
 fn validate_footprint(entry: &CheckEntry) -> Result<(), String> {
-    if entry.footprint && entry.paths.is_none() && entry.when_paths.is_none() {
+    if entry.footprint == FootprintMode::Declared
+        && entry.paths.is_none()
+        && entry.when_paths.is_none()
+    {
         return Err(format!(
             "check {} declares footprint = true with neither paths nor when_paths; a footprint names what the check reads",
             entry.id
@@ -1606,9 +1661,16 @@ fn validate_footprint(entry: &CheckEntry) -> Result<(), String> {
     }
     // N-18: a footprint carries a record onto a candidate with another changed set, and a
     // changed-only check sees exactly its own changed set.
-    if entry.footprint && entry.changed_only() {
+    if !entry.footprint.is_off() && entry.changed_only() {
         return Err(format!(
-            "check {} declares footprint = true and materialize = \"changed\"; a footprint carries a record onto another changed set, and this check sees only its own",
+            "check {} declares a footprint and materialize = \"changed\"; a footprint carries a record onto another changed set, and this check sees only its own",
+            entry.id
+        ));
+    }
+    // An observed footprint holds only for a verdict that reads nothing but its tree.
+    if entry.footprint == FootprintMode::Observed && entry.network {
+        return Err(format!(
+            "check {} declares footprint = \"observed\" and network = true; what it reads over the network is never observed, so its record could be carried onto a tree it never judged",
             entry.id
         ));
     }

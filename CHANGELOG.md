@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+- `footprint = "observed"`: bay records what a check read, and reuses its result where those bytes are unchanged.
+
 ## 0.5.1
 
 - With `[runner] post = true`, the runner runs post checks itself, once on main's newest tip.

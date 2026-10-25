@@ -5792,7 +5792,12 @@ fn finished_checks(
         }
         // NEW-10: a check keyed by its read set carries the record of an earlier candidate of
         // this operation whose read set is the same, byte for byte (`crate::throughput`).
-        if subject.is_none() && ctx.repo.config.footprint_lanes() {
+        // Items 1 and 2: an observed footprint is exact by itself, so it carries under
+        // exact-inputs reuse with no lanes key.
+        if subject.is_none()
+            && (ctx.repo.config.footprint_lanes()
+                || check.footprint == policy::FootprintMode::Observed)
+        {
             let carried = carry_over(ctx, op_id, policy, judged, check)?;
             if answered(&carried, &id, digest, None) {
                 reused.extend(carried);
@@ -5829,9 +5834,12 @@ fn carry_over(
     if trees.is_empty() {
         return Ok(Vec::new());
     }
-    let Some(stamp) = throughput::stamp(git, entry, judged.tree, judged.base_tree) else {
+    let observed = entry.footprint == policy::FootprintMode::Observed;
+    let declared = throughput::stamp(git, entry, judged.tree, judged.base_tree);
+    if declared.is_none() && !observed {
         return Ok(Vec::new());
-    };
+    }
+    let trees_now = (judged.tree, judged.base_tree);
     let id = evidence::CheckId::new(&entry.id, &entry.environment);
     let index = policy
         .checks
@@ -5845,7 +5853,11 @@ fn carry_over(
             && record.policy_revision == policy.revision
             && record.policy_provenance.as_deref() == Some(judged.provenance.as_str())
             && record.fixtures().as_deref() == Some(entry.fixtures.as_slice())
-            && throughput::same_stamp(record, &stamp)
+            && match &declared {
+                Some(stamp) => throughput::same_stamp(record, stamp),
+                // A record whose read set cannot be read is no match.
+                None => throughput::same_observed(git, record, trees_now).unwrap_or(false),
+            }
     };
     let onto = throughput::Onto {
         tree: judged.tree,
@@ -5866,6 +5878,11 @@ fn carry_over(
                 judged.candidate,
                 carried.len() + 1
             );
+            // The carried record names the footprint as it is in this candidate's trees.
+            let stamp = match &declared {
+                Some(stamp) => stamp.clone(),
+                None => throughput::restamp(git, record, trees_now)?,
+            };
             let mut next = throughput::carry(record, &producer, name, &onto, &stamp);
             // G163: a producer the check's list leaves out never answers it, carried or not.
             if !policy.listed(&next) {

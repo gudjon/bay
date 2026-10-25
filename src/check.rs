@@ -809,6 +809,9 @@ struct Judged {
     /// unit pre-existing: what a check with `baseline = "base"` records when the base failed
     /// each of them too.
     excused: Option<Excused>,
+    /// Items 1 and 2: a check with `footprint = "observed"`, its observed footprint
+    /// ([`crate::throughput::observed_stamp`]), when bay could observe the run.
+    observed: Option<serde_json::Value>,
 }
 
 /// N-3: the judgement of a failed result past its failing units: its other units, its plan
@@ -828,6 +831,7 @@ impl Judged {
             selection: None,
             unavailable: None,
             excused: None,
+            observed: None,
         }
     }
 }
@@ -1373,9 +1377,13 @@ fn run_once(
         about,
         history: history.as_ref(),
     };
+    // Items 1 and 2: a check whose footprint is observed has its tree armed before it runs.
+    let armed = (not_run.is_none() && entry.footprint == crate::policy::FootprintMode::Observed)
+        .then(|| observe::arm(&tree_dir, &dir))
+        .flatten();
     let remaining = budget.map(|budget| budget.saturating_sub(started.elapsed()));
     let ran = Instant::now();
-    let judged = match not_run {
+    let mut judged = match not_run {
         Some(judged) => judged,
         None => within_budget(
             hooks,
@@ -1387,6 +1395,19 @@ fn run_once(
             remaining,
         ),
     };
+    // What it read and listed, stamped, unless the run gave no verdict to reuse.
+    if let Some(armed) = armed
+        && judged.unavailable.is_none()
+        && let Some((read, listed)) = observe::collect(&tree_dir, armed)
+    {
+        judged.observed = crate::throughput::observed_stamp(
+            git,
+            (candidate.tree, candidate.base_tree),
+            &read,
+            &listed,
+        )
+        .ok();
+    }
     make_writable(&dir);
     let _ = std::fs::remove_dir_all(&dir);
     Ok((judged, ran))
@@ -1417,6 +1438,10 @@ fn evidence(
                     .collect::<Vec<_>>()
             ),
         );
+    }
+    // Items 1 and 2: what the run read and listed, the record's observed footprint.
+    if let Some(stamp) = judged.observed {
+        unknown.insert(crate::throughput::FOOTPRINT.to_owned(), stamp);
     }
     EvidenceRecord {
         schema: EVIDENCE_SCHEMA.to_owned(),
@@ -2092,6 +2117,7 @@ fn judge_units(result: &CheckResult, entry: &CheckEntry, units: Vec<Unit>) -> Ju
         selection: None,
         unavailable: None,
         excused: None,
+        observed: None,
     };
     // § 7: `declared_empty` is valid only with `selected` = 0 and `expected_minimum` = 0; any
     // other combination is `unknown`.
@@ -2165,6 +2191,7 @@ fn judge_units(result: &CheckResult, entry: &CheckEntry, units: Vec<Unit>) -> Ju
         selection: empty.then(|| DECLARED_EMPTY.to_owned()),
         unavailable: None,
         excused: None,
+        observed: None,
     }
 }
 
@@ -2665,4 +2692,5 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
 #[cfg(all(test, unix))]
 mod materializing;
 
+pub mod observe;
 pub mod sandbox;

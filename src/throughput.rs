@@ -448,6 +448,149 @@ pub fn read_digest(git: &Git, tree: &str, read: &[String]) -> Result<String, Str
     crate::canonical::digest(&json!(entries))
 }
 
+/// Items 1 and 2: the observed footprint of a check that read the files `read` and listed the
+/// directories `listed` (paths relative to the tree, `""` for its root, [`crate::check::observe`]):
+/// each read file with its blob id, each listed directory with the hash of its sorted entry
+/// names, and the digest of both in `tree` and in `base_tree`. A record stamped with it holds
+/// for a later candidate whose tree, and base, have the same bytes and entries there
+/// ([`same_observed`]).
+///
+/// # Errors
+///
+/// A git fault.
+pub fn observed_stamp(
+    git: &Git,
+    (tree, base_tree): (&str, &str),
+    read: &[String],
+    listed: &[String],
+) -> Result<Value, String> {
+    let ours = observed_digest(git, tree, read, listed)?;
+    let base = observed_digest(git, base_tree, read, listed)?;
+    Ok(json!({
+        "observed": true,
+        "read": ours.read,
+        "listed": ours.listed,
+        "tree": ours.digest,
+        "base_tree": base.digest,
+    }))
+}
+
+/// What a tree holds at an observed footprint's paths.
+struct Seen {
+    read: Vec<(String, String)>,
+    listed: Vec<(String, String)>,
+    digest: String,
+}
+
+fn observed_digest(
+    git: &Git,
+    tree: &str,
+    read: &[String],
+    listed: &[String],
+) -> Result<Seen, String> {
+    let all = git
+        .run(&["ls-tree", "-r", "-t", "-z", "--full-tree", tree])
+        .map_err(|error| error.message())?;
+    // path -> object id, for every blob and tree; and dir -> its entry names.
+    let mut objects = std::collections::BTreeMap::new();
+    let mut entries: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for line in all.split('\0').filter(|line| !line.is_empty()) {
+        let Some((meta, path)) = line.split_once('\t') else {
+            continue;
+        };
+        let id = meta
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or_default()
+            .to_owned();
+        let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
+        entries
+            .entry(dir.to_owned())
+            .or_default()
+            .push(name.to_owned());
+        objects.insert(path.to_owned(), id);
+    }
+    let read: Vec<(String, String)> = read
+        .iter()
+        .map(|path| (path.clone(), objects.get(path).cloned().unwrap_or_default()))
+        .collect();
+    let listed: Vec<(String, String)> = listed
+        .iter()
+        .map(|dir| {
+            let mut names = entries.get(dir).cloned().unwrap_or_default();
+            names.sort();
+            let hash = crate::canonical::digest(&json!(names)).unwrap_or_default();
+            (dir.clone(), hash)
+        })
+        .collect();
+    let digest = crate::canonical::digest(&json!({"read": read, "listed": listed}))?;
+    Ok(Seen {
+        read,
+        listed,
+        digest,
+    })
+}
+
+/// Whether `record`, stamped with an observed footprint, holds for `tree` and `base_tree`: its
+/// read files and listed directories are the same there as in the tree it ran on.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn same_observed(
+    git: &Git,
+    record: &EvidenceRecord,
+    (tree, base_tree): (&str, &str),
+) -> Result<bool, String> {
+    let Some(held) = record
+        .unknown
+        .get(FOOTPRINT)
+        .filter(|held| held["observed"] == true)
+    else {
+        return Ok(false);
+    };
+    let paths = |field: &str| -> Vec<String> {
+        held[field]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get(0).and_then(Value::as_str).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (read, listed) = (paths("read"), paths("listed"));
+    let ours = observed_digest(git, tree, &read, &listed)?;
+    let base = observed_digest(git, base_tree, &read, &listed)?;
+    Ok(held["tree"] == json!(ours.digest) && held["base_tree"] == json!(base.digest))
+}
+
+/// `record`'s observed footprint as it is in `tree` and `base_tree`: the same paths, read
+/// there.
+///
+/// # Errors
+///
+/// A git fault, or a record with no observed footprint.
+pub fn restamp(git: &Git, record: &EvidenceRecord, trees: (&str, &str)) -> Result<Value, String> {
+    let held = record
+        .unknown
+        .get(FOOTPRINT)
+        .filter(|held| held["observed"] == true)
+        .ok_or("the record has no observed footprint")?;
+    let paths = |field: &str| -> Vec<String> {
+        held[field]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get(0).and_then(Value::as_str).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    observed_stamp(git, trees, &paths("read"), &paths("listed"))
+}
+
 /// Whether `record` holds exactly `stamp`: the same read set, and the same digests of it in
 /// its tree and its base's.
 #[must_use]
