@@ -1,0 +1,8 @@
+{
+ "tool_result": {
+  "type": "tool_result",
+  "content": "PreToolUse:ExitPlanMode hook error: No: keep notes.txt as it is, and put the word hello in docs/hello.txt instead.",
+  "is_error": true,
+  "tool_use_id": "toolu_01B8rzcBEUFthjWZ2DTdXdQF"
+ }
+}

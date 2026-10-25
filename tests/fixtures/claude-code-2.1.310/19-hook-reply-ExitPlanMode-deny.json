@@ -1,0 +1,7 @@
+{
+ "hookSpecificOutput": {
+  "hookEventName": "PreToolUse",
+  "permissionDecision": "deny",
+  "permissionDecisionReason": "No: keep notes.txt as it is, and put the word hello in docs/hello.txt instead."
+ }
+}

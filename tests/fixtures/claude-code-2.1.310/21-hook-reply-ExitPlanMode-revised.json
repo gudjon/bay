@@ -1,0 +1,10 @@
+{
+ "hookSpecificOutput": {
+  "hookEventName": "PreToolUse",
+  "permissionDecision": "allow",
+  "updatedInput": {
+   "plan": "## Context\nPut the word \"hello\" in a file. Per feedback, `notes.txt` stays untouched; the word goes in `docs/hello.txt` instead.\n\n## Plan\n1. Create `docs/hello.txt` (and the `docs/` directory if missing) containing `hello`; leave `notes.txt` unchanged.\n",
+   "planFilePath": "<redacted>/plans/plan-a-one-step-change-jiggly-floyd.md"
+  }
+ }
+}

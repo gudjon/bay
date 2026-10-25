@@ -50,6 +50,12 @@ pub struct Ask {
     pub dry_run: bool,
     /// A change id or a trunk commit whose lander is the recipient (G77), in place of `who`.
     pub to_change: Option<String>,
+    /// A question talk's options, `[{label, description}]` (dossier 63).
+    pub options: Option<Value>,
+    /// Whether a question takes several of its options.
+    pub multi_select: Option<bool>,
+    /// The question's `context` was cut to fit the talk.
+    pub context_truncated: bool,
 }
 
 /// An answer to a discovery talk: its id, the decision value, and the standing answer's commit
@@ -216,6 +222,15 @@ fn build(ask: &Ask, from: &Actor, sent: u64) -> Result<Value, Refusal> {
     }
     if ask.urgent {
         body["urgent"] = json!(true);
+    }
+    if let Some(options) = &ask.options {
+        body["options"] = options.clone();
+    }
+    if let Some(multi) = ask.multi_select {
+        body["multi_select"] = json!(multi);
+    }
+    if ask.context_truncated {
+        body["context_truncated"] = json!(true);
     }
     body["id"] = json!(talk_id(&body).map_err(Refusal::invalid)?);
     Ok(body)

@@ -1,0 +1,18 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "plan",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PreToolUse",
+ "tool_name": "ExitPlanMode",
+ "tool_input": {
+  "plan": "## Context\nOverwrite `notes.txt` (repo root) so its entire contents are the word \"hello\".\n\n## Plan\n1. Write `hello` to `notes.txt`, replacing its current contents (verify with a read afterward).\n",
+  "planFilePath": "<redacted>/plans/plan-a-one-step-change-jiggly-floyd.md"
+ },
+ "tool_use_id": "toolu_01B8rzcBEUFthjWZ2DTdXdQF"
+}

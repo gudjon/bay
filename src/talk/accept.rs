@@ -176,6 +176,45 @@ fn append(
         .map_err(|error| error.message())
 }
 
+/// Dossier 63: closes the question talks `ids` to this actor as `ended`, once the question tool
+/// that asked them ended here (answered at the terminal, or the session went on), and pushes
+/// them. A talk already closed, or one this clone does not hold, is passed. Best effort: a close
+/// that cannot be written now is written by no later run, and the talk stays open on the remote
+/// until its `follow_up`.
+pub fn end_questions(repo: &Repo, ids: &[String]) {
+    let Ok(Some(registry)) = Registry::current(&repo.git) else {
+        return;
+    };
+    let Ok(me) = crate::change::current_actor(&repo.common_dir) else {
+        return;
+    };
+    let Ok(key) = agent_key(&repo.git, &registry, &me.name) else {
+        return;
+    };
+    let prefix = format!("{TALK_PREFIX}{}/", me.name);
+    let Some(remote) = remote_tips(repo, &prefix) else {
+        return;
+    };
+    fetch_matching(repo, &format!("{prefix}*"));
+    for id in ids {
+        let name = crate::talk::talk_ref(&me.name, id);
+        let Ok(Some(tip)) = repo.git.ref_target(&name) else {
+            continue;
+        };
+        let Ok(talk) = Talk::read(&repo.git, &name, &tip) else {
+            continue;
+        };
+        if talk.closed() {
+            continue;
+        }
+        let close = json!({"schema": TALK_SCHEMA, "entry": "close", "talk": talk.id,
+            "actor": {"name": me.name, "session": me.session}, "state": "ended",
+            "at": now_rfc3339()});
+        let _ = append(repo, &talk, &close, &key, &me.name);
+    }
+    let _ = push_moved(repo, &prefix, &remote);
+}
+
 /// Accept's check of a talk to `me`: the body's rules, the registry actors, and the root commit:
 /// `talk.json` alone, the same body, signed by the sender's agent key, committed at `sent`. A
 /// reviewer's talk also stands beside no other open talk of that reviewer about its change, among

@@ -17,6 +17,7 @@ hook's own stdout, not Claude Code's. Input for recording why a session waits an
 | 15 | The input of a `Stop` hook set with `asyncRewake: true`: the ordinary `Stop` payload. |
 | 16 | That hook exited 2 after 20 s with one line on stderr and one on stdout. The session woke. `woken_with` is the transcript's entry; `model_received` is what the model was sent: the stderr line (not stdout) as "Stop hook blocking error from command "Stop": …", inside a notice that says "NOT USER INPUT … Do NOT interpret this as user acknowledgement, confirmation, or response to any pending question". `assistant_after`: the agent did not take the line as the person's answer. |
 | 17 | The same wake, telling the agent to ask its question again with `AskUserQuestion`. The agent declined: it kept to the person's "stop and wait", and said it would not treat the hook's message as their reply. |
+| 18–23 | `ExitPlanMode` refused with words (recorded 2026-10-25, plan mode): the hook replied `permissionDecision: "deny"` with `permissionDecisionReason: "No: keep notes.txt as it is, and put the word hello in docs/hello.txt instead."` (19). The agent received it as a tool result with `is_error: true`: "PreToolUse:ExitPlanMode hook error: No: …" (23). It rewrote the plan on that feedback ("Per feedback, `notes.txt` stays untouched…", 20) and presented it again; the second plan was allowed (21–22). So a refusal with a person's words revises the plan. |
 
 Also observed, not in a file:
 

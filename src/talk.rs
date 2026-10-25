@@ -40,7 +40,7 @@ mod send;
 pub mod standing;
 pub mod wake;
 
-pub use accept::receive;
+pub use accept::{end_questions, receive};
 pub use judge::{Push, judge};
 pub use open::{name_open_talks, open_on};
 pub use send::{Answer, Ask, answer, talk};
@@ -94,7 +94,7 @@ const RESULT_WORDS: [&str; 3] = ["target", "forecast", "commitment"];
 const PROMISE_FIELDS: [&str; 4] = ["owns", "promises", "needs", "promise_evidence"];
 /// The only status words (`DESIGN` § 11c).
 pub const STATUS_WORDS: [&str; 4] = ["ready", "blocked", "validated", "done"];
-const FIELDS: [&str; 25] = [
+const FIELDS: [&str; 28] = [
     "schema",
     "id",
     "from",
@@ -120,7 +120,15 @@ const FIELDS: [&str; 25] = [
     "promises",
     "needs",
     "promise_evidence",
+    "options",
+    "multi_select",
+    "context_truncated",
 ];
+/// The prefix of a question talk's `decision` (dossier 63): `question:<tool_use_id>:<n>`, the
+/// n-th question of one question tool call. Structure bay judges, never the prose.
+pub const QUESTION: &str = "question:";
+/// The most options a question carries, as the question tool takes them.
+const MAX_OPTIONS: usize = 4;
 /// The fields the id is the digest of (ruling T7): not `sent`, so a retry is the same id.
 const ID_FIELDS: [&str; 10] = [
     "from",
@@ -476,6 +484,7 @@ pub fn check_body(body: &Value) -> Result<(), Refusal> {
     {
         return Err(Refusal::invalid("`urgent` is true or absent"));
     }
+    check_question(map)?;
     let id = required(map, "id")?;
     let computed = talk_id(body).map_err(Refusal::invalid)?;
     if id != computed {
@@ -491,6 +500,69 @@ pub fn check_body(body: &Value) -> Result<(), Refusal> {
         .with("limit", json!("BAY_TALK_MAX_BYTES"))
         .with("max_bytes", json!(BAY_TALK_MAX_BYTES))
         .with("bytes", json!(size)));
+    }
+    Ok(())
+}
+
+/// Dossier 63: `options`, `multi_select` and `context_truncated` belong to a question talk only
+/// (a discovery talk whose `decision` is `question:…`). `options` is at most four
+/// `{label, description}` objects with a label each; `multi_select` is true or false;
+/// `context_truncated` is true or absent.
+fn check_question(map: &Map<String, Value>) -> Result<(), Refusal> {
+    let question = map.get("kind").and_then(Value::as_str) == Some("discovery")
+        && map
+            .get("decision")
+            .and_then(Value::as_str)
+            .is_some_and(|decision| decision.starts_with(QUESTION));
+    let own = ["options", "multi_select", "context_truncated"];
+    if !question {
+        if let Some(field) = own.iter().find(|field| map.contains_key(**field)) {
+            return Err(Refusal::invalid(format!(
+                "`{field}` belongs to a question talk: a discovery talk whose decision is {QUESTION}…"
+            )));
+        }
+        return Ok(());
+    }
+    if let Some(options) = map.get("options") {
+        let Some(list) = options.as_array().filter(|list| list.len() <= MAX_OPTIONS) else {
+            return Err(Refusal::invalid(format!(
+                "`options` is a list of at most {MAX_OPTIONS} options"
+            )));
+        };
+        for option in list {
+            let fine = option.as_object().is_some_and(|option| {
+                option
+                    .keys()
+                    .all(|key| key == "label" || key == "description")
+                    && option
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .is_some_and(|label| !label.trim().is_empty())
+                    && option.get("description").is_none_or(Value::is_string)
+            });
+            if !fine {
+                return Err(Refusal::invalid(
+                    "each of `options` is {label, description}, with a label",
+                ));
+            }
+            for text in option.as_object().into_iter().flat_map(|o| o.values()) {
+                if let Some(text) = text.as_str() {
+                    plain("options", text)?;
+                }
+            }
+        }
+    }
+    if map
+        .get("multi_select")
+        .is_some_and(|value| !value.is_boolean())
+    {
+        return Err(Refusal::invalid("`multi_select` is true or false"));
+    }
+    if map
+        .get("context_truncated")
+        .is_some_and(|value| *value != Value::Bool(true))
+    {
+        return Err(Refusal::invalid("`context_truncated` is true or absent"));
     }
     Ok(())
 }

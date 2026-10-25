@@ -1,0 +1,21 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "acceptEdits",
+ "effort": {
+  "level": "medium"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "ExitPlanMode",
+ "tool_input": {},
+ "tool_response": {
+  "plan": "## Context\nPut the word \"hello\" in a file. Per feedback, `notes.txt` stays untouched; the word goes in `docs/hello.txt` instead.\n\n## Plan\n1. Create `docs/hello.txt` (and the `docs/` directory if missing) containing `hello`; leave `notes.txt` unchanged.\n",
+  "isAgent": false,
+  "filePath": "<redacted>/plans/plan-a-one-step-change-jiggly-floyd.md"
+ },
+ "tool_use_id": "toolu_01AY92WcZR7NVPv2N7vvn9QX",
+ "duration_ms": 14
+}

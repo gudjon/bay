@@ -3,6 +3,7 @@
 ## 0.4.2
 
 - `bay status --all` names why a session waits: a question, a permission prompt or its idle prompt.
+- With a key registry, each question an agent asks becomes a talk; it closes when the session goes on.
 
 ## 0.4.1
 

@@ -942,6 +942,7 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
             urgent: args.urgent,
             dry_run: args.dry_run,
             to_change: args.to_change,
+            ..bay::talk::Ask::default()
         },
     )
 }

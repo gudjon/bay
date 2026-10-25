@@ -868,6 +868,19 @@ fn close(
     if entry["state"] == "expired" {
         return expired(push, talk, entry, known);
     }
+    // Dossier 63: a question talk ends where it was asked, when the question tool ended there
+    // (answered at the terminal, or the session went on).
+    if entry["state"] == "ended" {
+        let question = talk.body["decision"]
+            .as_str()
+            .is_some_and(|decision| decision.starts_with(super::QUESTION));
+        if !question || entry.get("by").is_some() {
+            return Err(
+                "only a question talk ends, and an ended close names no talk `by`".to_owned(),
+            );
+        }
+        return Ok(());
+    }
     let by = entry["by"].as_str().filter(|by| is_talk_id(by));
     let (Some("superseded"), Some(by)) = (entry["state"].as_str(), by) else {
         return Err(

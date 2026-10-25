@@ -373,15 +373,20 @@ fn dispatch_as(product: Product, caller: &str, event: &str, input: &str, dir: &P
     let mut recorded = crate::session::Recorded::default();
     let mut product_event = Event::Unprobed;
     let parsed = Payload::parse(product, event, input, dir);
-    if event == "tool.ask" {
-        return ask(parsed.as_ref(), caller, input);
-    }
     // BACKLOG 66 C: every hook names its session against the agent's process, so the agent's
     // own bay commands find it with no `BAY_SESSION` (`crate::agent_pid`).
     if let Some(session) = parsed.as_ref().and_then(|payload| payload.session.as_ref())
         && let Ok(common) = crate::git::Git::new(dir).common_dir()
     {
         crate::agent_pid::remember(Path::new(&common), session.as_str());
+    }
+    if event == "tool.ask" {
+        return ask(parsed.as_ref(), caller, input);
+    }
+    if let Some(payload) = parsed.as_ref()
+        && payload.agent.is_none()
+    {
+        end_questions(payload);
     }
     if let Some(payload) = parsed
         && !matches!(payload.event, Event::Unprobed | Event::PreToolUse)
@@ -455,10 +460,15 @@ fn ask(payload: Option<&Payload>, caller: &str, input: &str) -> Outcome {
     extra.insert("product".to_owned(), Value::from(caller));
     extra.insert("event".to_owned(), Value::from("question"));
     extra.insert("state".to_owned(), Value::from("waiting"));
-    extra.insert(
-        "waiting_for".to_owned(),
-        serde_json::json!({"kind": "question", "tool": value["tool_name"]}),
-    );
+    let mut waiting = serde_json::json!({"kind": "question", "tool": value["tool_name"]});
+    // Dossier 63 item 2: with a registry, each question is a talk this session opens; the
+    // live row names the talks, never their text.
+    let talks = question_talks(payload, &value);
+    if !talks.is_empty() {
+        waiting["talks"] = serde_json::json!(talks);
+        remember_questions(payload, &talks);
+    }
+    extra.insert("waiting_for".to_owned(), waiting);
     // A plan can be long: the session's record keeps at most [`MAX_QUESTION_BYTES`] of it.
     let question = &value["tool_input"];
     let kept = if question.to_string().len() <= MAX_QUESTION_BYTES {
@@ -469,6 +479,148 @@ fn ask(payload: Option<&Payload>, caller: &str, input: &str) -> Outcome {
     extra.insert("question".to_owned(), kept);
     let _ = crate::session::record_with(payload, &extra);
     Outcome::default()
+}
+
+/// How long a question talk is owed a reply: past it, the question is old news.
+const QUESTION_FOLLOW_UP_S: u64 = 3600;
+/// The most of a plan a question talk carries, leaving the rest of the talk its room.
+const MAX_PLAN_BYTES: usize = 6144;
+
+/// The question talks a question tool call opens (dossier 63 item 2): one discovery talk per
+/// question (`decision: question:<tool_use_id>:<n>`, in the tool's order), from the session's
+/// actor to itself, its options and `multi_select` as data; for a plan, one yes-or-no talk
+/// with the plan as its context. Returns the ids sent. Without a registry that signs all, or
+/// with no agent key here, `bay talk` refuses, and none is sent: the question is only recorded.
+fn question_talks(payload: &Payload, value: &Value) -> Vec<String> {
+    let Some(tool_use) = value["tool_use_id"].as_str() else {
+        return Vec::new();
+    };
+    let Ok(repo) = crate::repo::Repo::open(&payload.cwd) else {
+        return Vec::new();
+    };
+    let Ok(actor) = crate::change::current_actor(&repo.common_dir) else {
+        return Vec::new();
+    };
+    let follow_up = crate::clock::rfc3339_of(crate::live::unix_now() + QUESTION_FOLLOW_UP_S);
+    let base = crate::talk::Ask {
+        who: Some(actor.name.clone()),
+        kind: Some("discovery".to_owned()),
+        follow_up: Some(follow_up),
+        ..crate::talk::Ask::default()
+    };
+    let mut asks = Vec::new();
+    match value["tool_name"].as_str() {
+        Some("AskUserQuestion") => {
+            for (n, question) in value["tool_input"]["questions"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                let Some(text) = question["question"].as_str() else {
+                    continue;
+                };
+                let options: Vec<Value> = question["options"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|option| {
+                        let label = option["label"].as_str()?;
+                        let mut kept = serde_json::json!({"label": label});
+                        if let Some(description) = option["description"].as_str() {
+                            kept["description"] = Value::from(description);
+                        }
+                        Some(kept)
+                    })
+                    .collect();
+                asks.push(crate::talk::Ask {
+                    what: Some(text.to_owned()),
+                    decision: vec![format!("{}{tool_use}:{n}", crate::talk::QUESTION)],
+                    follow_up: base.follow_up.clone(),
+                    context: question["header"].as_str().map(str::to_owned),
+                    options: (!options.is_empty()).then(|| Value::from(options)),
+                    multi_select: question["multiSelect"].as_bool(),
+                    ..base.clone()
+                });
+            }
+        }
+        Some("ExitPlanMode") => {
+            let plan = value["tool_input"]["plan"].as_str().unwrap_or_default();
+            let mut kept = plan.to_owned();
+            let cut = kept.len() > MAX_PLAN_BYTES;
+            if cut {
+                let mut end = MAX_PLAN_BYTES;
+                while !kept.is_char_boundary(end) {
+                    end -= 1;
+                }
+                kept.truncate(end);
+            }
+            asks.push(crate::talk::Ask {
+                what: Some("Approve this plan?".to_owned()),
+                decision: vec![format!("{}{tool_use}:0", crate::talk::QUESTION)],
+                context: Some(kept),
+                context_truncated: cut,
+                options: Some(serde_json::json!([
+                    {"label": "yes", "description": "approve the plan"},
+                    {"label": "no", "description": "revise it: no, then why"},
+                ])),
+                multi_select: Some(false),
+                ..base.clone()
+            });
+        }
+        _ => {}
+    }
+    asks.iter()
+        .map(|ask| crate::talk::talk(&payload.cwd, ask))
+        .filter(|sent| sent.reason.is_none())
+        .filter_map(|sent| {
+            sent.detail
+                .as_ref()
+                .and_then(|detail| detail["talk"].as_str())
+                .map(str::to_owned)
+        })
+        .collect()
+}
+
+/// The file in a session's state that names its open question talks.
+const QUESTIONS_FILE: &str = "questions.json";
+
+/// Adds `talks` to the session's open question talks.
+fn remember_questions(payload: &Payload, talks: &[String]) {
+    let (Some(session), Ok(repo)) = (&payload.session, crate::repo::Repo::open(&payload.cwd))
+    else {
+        return;
+    };
+    let dir = crate::session::state_dir(&repo, session);
+    let mut open = open_questions(&dir);
+    open.extend(talks.iter().cloned());
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(dir.join(QUESTIONS_FILE), Value::from(open).to_string());
+    }
+}
+
+/// The question talks the session state at `dir` names open.
+fn open_questions(dir: &Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join(QUESTIONS_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Vec<String>>(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Dossier 63: any later event of the session means its question tool ended (answered at the
+/// terminal, or the session went on), so its open question talks close as `ended`.
+fn end_questions(payload: &Payload) {
+    let (Some(session), Ok(repo)) = (&payload.session, crate::repo::Repo::open(&payload.cwd))
+    else {
+        return;
+    };
+    let dir = crate::session::state_dir(&repo, session);
+    let open = open_questions(&dir);
+    if open.is_empty() {
+        return;
+    }
+    crate::talk::end_questions(&repo, &open);
+    let _ = std::fs::remove_file(dir.join(QUESTIONS_FILE));
 }
 
 /// `tool.before`: a payload bay cannot read is denied (G59); else the claims of other sessions
