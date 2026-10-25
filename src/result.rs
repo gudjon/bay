@@ -14,6 +14,12 @@ pub const SCHEMA: &str = "bay.result/1";
 /// How long one `git` invocation may run.
 pub const GIT_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long one `git` call that talks to a remote may run (`push`, `fetch`, `ls-remote`,
+/// `clone`, `pull`): a remote that advertises tens of thousands of refs takes longer than any
+/// local call to answer a push, and a bound meant for local work refused it (a fleet's
+/// `bay start` on a forge, 2026-10-25).
+pub const GIT_NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Decision {

@@ -38,7 +38,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Instant;
 
-use crate::result::GIT_CALL_TIMEOUT;
+use crate::result::{GIT_CALL_TIMEOUT, GIT_NETWORK_TIMEOUT};
 
 /// The options before a call that writes a work tree ([`Git::writing_tree`]): no CRLF
 /// conversion of the box's `core.autocrlf`, and long paths on Git for Windows (a key other Gits
@@ -475,6 +475,7 @@ impl Git {
         input: Option<&[u8]>,
         timeout: std::time::Duration,
     ) -> Result<Output, GitError> {
+        let timeout = bound_for(args, timeout);
         let args_display = args.join(" ");
         let run = || {
             let mut cmd = self.command();
@@ -1060,6 +1061,30 @@ fn as_formatted<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> {
         .chain(args.iter().skip(1).copied())
 }
 
+/// The bound of a call to `git <args>` given `timeout`: a call that talks to a remote under the
+/// default local bound gets [`GIT_NETWORK_TIMEOUT`]; a bound a caller chose stays as it is.
+fn bound_for(args: &[&str], timeout: std::time::Duration) -> std::time::Duration {
+    if timeout != GIT_CALL_TIMEOUT {
+        return timeout;
+    }
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        if *word == "-c" || *word == "-C" {
+            words.next();
+            continue;
+        }
+        if word.starts_with('-') {
+            continue;
+        }
+        return if matches!(*word, "push" | "fetch" | "ls-remote" | "clone" | "pull") {
+            GIT_NETWORK_TIMEOUT
+        } else {
+            timeout
+        };
+    }
+    timeout
+}
+
 /// A bare repository holds `HEAD` and `objects/` at its top and has no `.git`.
 fn is_bare_dir(dir: &Path) -> bool {
     dir.join("HEAD").is_file() && dir.join("objects").is_dir() && !dir.join(".git").exists()
@@ -1202,9 +1227,43 @@ fn wait_until(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{Git, GitError, batch_missing, run_bounded_for};
+    use super::{Git, GitError, batch_missing, bound_for, run_bounded_for};
+    use crate::result::{GIT_CALL_TIMEOUT, GIT_NETWORK_TIMEOUT};
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    /// A push to a forge with tens of thousands of refs outlasts the local bound (a fleet's
+    /// `bay start`, 2026-10-25): every call that talks to a remote gets the network bound, and
+    /// a local call, or a bound a caller chose, stays as it is.
+    #[test]
+    fn a_call_that_talks_to_a_remote_gets_the_network_bound() {
+        for args in [
+            &["push", "-q", "--atomic", "origin", "a:a"][..],
+            &["fetch", "-q", "origin"],
+            &["ls-remote", "origin"],
+            &["-c", "protocol.version=2", "fetch", "origin"],
+            &["clone", "-q", "x", "y"],
+        ] {
+            assert_eq!(
+                bound_for(args, GIT_CALL_TIMEOUT),
+                GIT_NETWORK_TIMEOUT,
+                "{args:?}"
+            );
+        }
+        for args in [
+            &["status"][..],
+            &["rev-parse", "HEAD"],
+            &["-c", "push.x=1", "log"],
+        ] {
+            assert_eq!(
+                bound_for(args, GIT_CALL_TIMEOUT),
+                GIT_CALL_TIMEOUT,
+                "{args:?}"
+            );
+        }
+        let chosen = Duration::from_secs(5);
+        assert_eq!(bound_for(&["push", "origin"], chosen), chosen);
+    }
 
     /// What `git config [--local] --get <key>` answers in `git`'s repository, spawned.
     fn asked(git: &Git, key: &str, local: bool) -> Option<String> {

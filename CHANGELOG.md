@@ -2,6 +2,7 @@
 
 ## 0.4.2
 
+- A push or fetch to a remote with many refs gets three minutes, not the local call's thirty seconds.
 - `bay status --all` names why a session waits: a question, a permission prompt or its idle prompt.
 - With a key registry, each question an agent asks becomes a talk; it closes when the session goes on.
 
