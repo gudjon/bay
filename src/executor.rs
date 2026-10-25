@@ -563,6 +563,9 @@ fn pass(
     if let Some(post) = crate::bisect::tips(repo) {
         ran.push(json!({"post": post}));
     }
+    if let Some(warm) = crate::bisect::warm(repo) {
+        ran.push(json!({"warm": warm}));
+    }
     // G244d: after the queue's work, never ahead of it, the culprit of a red post check.
     if let Some(bisect) = crate::bisect::run(repo) {
         ran.push(json!({"bisect": bisect}));

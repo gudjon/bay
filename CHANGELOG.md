@@ -3,6 +3,7 @@
 ## 0.5.2
 
 - `footprint = "observed"`: bay records what a check read, and reuses its result where those bytes are unchanged.
+- `[runner] warm = true`: the runner runs observed checks on main's tip, so a change runs only what it reaches.
 
 ## 0.5.1
 

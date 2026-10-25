@@ -196,6 +196,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    once on main's newest tip, and with `bisect_post = true` a red result names the merge that broke it.
    With `[policy] evidence_reuse = "exact-inputs"`, `footprint = "observed"` on a `[[check]]` lets bay record what each run
    read and listed; a later candidate whose bytes there are the same reuses the result, with no read set declared.
+   With `[runner] warm = true`, the runner also runs such checks once on main's newest tip, so a change runs only the
+   checks whose reads it touches.
    For files that never merge (images, models, binaries), mark them `lockable` in `.gitattributes`
    on main (`art/** lockable`, Git LFS's attribute): one session at a time edits each. Your first edit of one takes its lock on the
    remote; elsewhere the edit is refused `PATH_HELD`, naming the holder (`bay status --all` lists every

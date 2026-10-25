@@ -108,6 +108,63 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
     Ok(reports)
 }
 
+/// Items 1 and 2: the runner warms results on main's tip (`[runner] warm`). After its queue's
+/// work, each pre check with `footprint = "observed"` in the policy at main's newest tip runs
+/// once on that tip as a candidate of no change (the tip, on the tip, under its own policy),
+/// on a box that serves its environment, when this box holds no record of it there yet. A
+/// later candidate on that tip carries the record for every check whose observed reads its
+/// change does not touch, so a change runs only the checks it reaches. `None` when off or
+/// nothing ran.
+#[must_use]
+pub fn warm(repo: &Repo) -> Option<Value> {
+    if !repo.config.warm() {
+        return None;
+    }
+    match warm_runs(repo) {
+        Ok(reports) if reports.is_empty() => None,
+        Ok(reports) => Some(Value::Array(reports)),
+        Err(why) => Some(json!({"error": why})),
+    }
+}
+
+fn warm_runs(repo: &Repo) -> Result<Vec<Value>, String> {
+    let git = &repo.git;
+    let keys = Keys::load(git);
+    repo.fetch_registry();
+    repo.fetch_evidence(&keys);
+    let registry = Registry::current(git)?;
+    let tip = repo.fetch_trunk().map_err(|error| error.message())?;
+    let Some(policy) = crate::policy::load_at(git, &tip).map_err(String::from)? else {
+        return Ok(Vec::new());
+    };
+    let served = check::Served::read(git);
+    let tree = tree_of(git, &tip)?;
+    let writer = Writer::of(git, &keys, registry.as_ref())?;
+    let mut reports = Vec::new();
+    for entry in policy.checks.iter().filter(|entry| {
+        entry.stage == crate::policy::Stage::Pre
+            && entry.footprint == crate::policy::FootprintMode::Observed
+            && served.serves(&entry.environment)
+    }) {
+        let id = CheckId::new(&entry.id, &entry.environment);
+        if writer.records(git, &tree, &id)? > 0 {
+            continue;
+        }
+        let verdict = match run_at(
+            repo,
+            &keys,
+            &writer,
+            (&id, ("warm", json!({"tip": tip}))),
+            &tip,
+        )? {
+            Ok(verdict) => json!(verdict),
+            Err(why) => json!({"not_run": why}),
+        };
+        reports.push(json!({"check": entry.id, "environment": entry.environment, "tip": tip, "verdict": verdict}));
+    }
+    Ok(reports)
+}
+
 /// The largest number of check runs one bisect of `landings` landings makes: ⌈log2(n)⌉ probes
 /// and one rerun at the suspect.
 #[must_use]
@@ -295,10 +352,22 @@ fn run_at(
 ) -> Result<Result<Verdict, String>, String> {
     let git = &repo.git;
     let (field, body) = why;
-    let base = rev(git, &format!("{commit}^1"))?;
+    // A warm run is a candidate of no change on the tip, judged as one on that tip: its base
+    // is the tip itself. A post run and a bisect judge a landing under its first parent.
+    let warm = field == "warm";
+    let base = if warm {
+        commit.to_owned()
+    } else {
+        rev(git, &format!("{commit}^1"))?
+    };
     let tree = tree_of(git, commit)?;
     let base_tree = tree_of(git, &base)?;
-    let only = match alone(git, writer, id, &base)? {
+    let stage = if warm {
+        crate::policy::Stage::Pre
+    } else {
+        crate::policy::Stage::Post
+    };
+    let only = match alone(git, writer, id, &base, stage)? {
         Ok(only) => only,
         Err(why) => return Ok(Err(why)),
     };
@@ -312,8 +381,11 @@ fn run_at(
         .join("check")
         .join(&candidate_id);
     let mut keep = |record: &mut EvidenceRecord| -> Result<(), String> {
-        // Post evidence, as a post producer writes it: no pre-publication provenance.
-        record.policy_provenance = None;
+        // Post evidence, as a post producer writes it: no pre-publication provenance. A warm
+        // record is pre-publication evidence of the tip, and keeps it, so a candidate carries it.
+        if !warm {
+            record.policy_provenance = None;
+        }
         record.unknown.insert(field.to_owned(), body.clone());
         // The producer signs outside the check's sandbox, after reading its output (§ 7).
         if let Some(signer) = &writer.signer {
@@ -381,17 +453,15 @@ fn alone(
     writer: &Writer,
     id: &CheckId,
     base: &str,
+    stage: crate::policy::Stage,
 ) -> Result<Result<crate::policy::Policy, String>, String> {
     // G91: a landing's post check is judged in the policy at its first parent.
     let Some(policy) = crate::policy::load_at(git, base).map_err(String::from)? else {
         return Ok(Err(format!("{base} has no policy to run the check under")));
     };
-    let Some(entry) = policy
-        .check(id)
-        .filter(|entry| entry.stage == crate::policy::Stage::Post)
-    else {
+    let Some(entry) = policy.check(id).filter(|entry| entry.stage == stage) else {
         return Ok(Err(format!(
-            "the policy at {base} has no post check {} in {}",
+            "the policy at {base} has no {stage:?} check {} in {}",
             id.id, id.environment
         )));
     };
@@ -406,16 +476,17 @@ fn alone(
             writer.name
         )));
     }
-    let Some(manifest) = policy
-        .post
+    let listed = if stage == crate::policy::Stage::Post {
+        &policy.post
+    } else {
+        &policy.manifest
+    };
+    let Some(manifest) = listed
         .iter()
         .find(|post| post.id == id.id && post.environment == id.environment)
         .cloned()
     else {
-        return Ok(Err(format!(
-            "the post check {} is quarantined at {base}",
-            id.id
-        )));
+        return Ok(Err(format!("the check {} is quarantined at {base}", id.id)));
     };
     let mut entry = entry.clone();
     entry.when_paths = None;

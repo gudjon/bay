@@ -379,6 +379,10 @@ pub struct Executor {
     /// check runs once on main's newest tip that has no record of it, on a box that serves its
     /// environment, so many landings cost one run and a red one is bisected. Default off.
     pub post: Option<bool>,
+    /// Items 1 and 2 (`crate::bisect::warm`): after its queue's work, the runner runs each pre
+    /// check with `footprint = "observed"` once on main's newest tip, so later candidates reuse
+    /// it for what their change does not touch. Default off.
+    pub warm: Option<bool>,
     /// Never a repository's setting (ruling R14): whether checks run with no sandbox is the
     /// box's choice, global Git config `bay.runnerSandbox = none`. Read only to refuse it.
     pub sandbox: Option<toml::Value>,
@@ -627,6 +631,8 @@ impl Config {
             (self.ahead() > 0, "ahead"),
             (self.footprint_lanes(), "footprint_lanes"),
             (self.batch().is_some(), "batch"),
+            // A warm record answers a change only through reuse.
+            (self.warm(), "warm"),
         ]
         .into_iter()
         .filter_map(|(on, key)| on.then_some(key))
@@ -996,6 +1002,15 @@ impl Config {
                 .and_then(|executor| executor.submission_timeout_s)
                 .unwrap_or(30),
         )
+    }
+
+    /// Whether the runner warms observed checks on main's newest tip (`[runner] warm`).
+    #[must_use]
+    pub fn warm(&self) -> bool {
+        self.executor
+            .as_ref()
+            .and_then(|executor| executor.warm)
+            .unwrap_or(false)
     }
 
     /// Whether the runner runs post checks on main's newest tip itself (`[runner] post`).

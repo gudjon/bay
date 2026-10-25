@@ -241,6 +241,7 @@ mod g371_how_a_path_collides_is_said_once_on_main;
 mod g372_a_busy_runner_never_reads_as_gone;
 mod g373_the_runner_runs_post_checks_on_mains_tip;
 mod g374_a_check_is_reused_on_what_it_was_seen_to_read;
+mod g375_a_result_warmed_on_mains_tip_answers_every_change_that_misses_it;
 mod g37_every_bay_ref_can_exist_at_once;
 mod g38_undo_and_session_start;
 mod g39_a_blocked_shell_command_does_not_run;

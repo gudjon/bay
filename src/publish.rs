@@ -5829,6 +5829,9 @@ fn carry_over(
         .iter()
         .map(|attempt| attempt.tree.as_str())
         .chain(op.prechecks.iter().map(|precheck| precheck.tree.as_str()))
+        // Items 1 and 2: main's own tip, the candidate's base, where the last landing's records
+        // and the runner's warm records sit, for an observed footprint.
+        .chain((entry.footprint == policy::FootprintMode::Observed).then_some(judged.base_tree))
         .filter(|tree| *tree != judged.tree)
         .collect();
     if trees.is_empty() {
