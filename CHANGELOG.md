@@ -5,6 +5,7 @@
 - `footprint = "observed"`: bay records what a check read, and reuses its result where those bytes are unchanged.
 - `[runner] warm = true`: the runner runs observed checks on main's tip, so a change runs only what it reaches.
 - A `[[hold]]` may have a `start`, so a window booked ahead, such as a match day, holds only then.
+- A target no longer waits on a required check the commit's `when_paths` do not wake.
 
 ## 0.5.1
 

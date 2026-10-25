@@ -228,8 +228,9 @@ fn count(git: &Git, args: &[&str]) -> Result<u64, String> {
 }
 
 /// The state of each check `requires` names for `commit`, as `{check, environment, state}`:
-/// `pass`, `product_failure`, `flaky`, `unknown` (only records that answer nothing) or
-/// `pending` (no record), judged under the policy at the commit's first parent; `unknown_check`
+/// `pass`, `product_failure`, `flaky`, `unknown` (only records that answer nothing),
+/// `pending` (no record) or `not_required` (a machine check whose `when_paths` miss every path
+/// the commit changes), judged under the policy at the commit's first parent; `unknown_check`
 /// for an id that policy does not declare, and `no_policy` when there is no valid one.
 ///
 /// # Errors
@@ -266,6 +267,7 @@ pub fn checks(
     let tree = git
         .run(&["rev-parse", &format!("{commit}^{{tree}}")])
         .map_err(|error| error.message())?;
+    let changed = crate::check::changed_paths(git, &base, commit)?;
     // G163: only records from the producers a check lists answer it.
     let mut records = policy.answering(evidence::counted(
         git,
@@ -300,6 +302,12 @@ pub fn checks(
             out.push(json!({"check": id, "environment": null, "state": "unknown_check"}));
         }
         for entry in entries {
+            // As post-merge judgement reads it: a check the commit does not wake is not
+            // required of it. A person's approval is never implied by the paths (G288).
+            if !entry.is_approval() && policy.unwoken(entry, &changed).is_some() {
+                out.push(json!({"check": entry.id, "environment": entry.environment, "state": "not_required"}));
+                continue;
+            }
             let check = CheckId::new(&entry.id, &entry.environment);
             let subject = policy.commit_keyed(&check).then_some(commit);
             let state = match evidence::combine(&records, &check, &policy.manifest_digest, subject)
@@ -375,7 +383,7 @@ fn time_and_checks(
 /// A `check` failure for each row of [`checks`] that is not a pass.
 fn check_failures(rule: &Rule, commit: &str, rows: &[Value]) -> Vec<Value> {
     rows.iter()
-        .filter(|row| row["state"] != "pass")
+        .filter(|row| row["state"] != "pass" && row["state"] != "not_required")
         .map(|row| {
             let check = row["check"].as_str().unwrap_or_default();
             let state = row["state"].as_str().unwrap_or_default();

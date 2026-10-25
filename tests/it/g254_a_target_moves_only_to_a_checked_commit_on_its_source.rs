@@ -37,6 +37,11 @@ struct Hosted {
 /// post check `suite`, and `config` committed on trunk. The repository's clone holds the agent,
 /// executor and producer keys.
 fn hosted(config: &str) -> Hosted {
+    hosted_with(config, POST)
+}
+
+/// [`hosted`], with `post` in place of the post check `suite`.
+fn hosted_with(config: &str, post: &str) -> Hosted {
     let test_box = TestBox::new();
     let host = test_box.path().join("host.git");
     test_box.host_init(&host);
@@ -45,7 +50,7 @@ fn hosted(config: &str) -> Hosted {
     let mut files = check_files("true", &passing_result(1), 1, 60);
     for (path, text) in &mut files {
         if path == ".bay/policy.toml" {
-            text.push_str(POST);
+            text.push_str(post);
         }
     }
     files.push((".bay/config.toml".to_owned(), config.to_owned()));
@@ -261,6 +266,31 @@ fn a_hold_booked_ahead_holds_only_in_its_window() {
         plain.as_str(),
         "a hold not yet started blocked: {row}"
     );
+}
+
+/// A required check the commit does not wake (its `when_paths` miss every changed path) is not
+/// required of it: the target is promoted with no record of it, as post-merge judgement reads it.
+/// Guard to mutate: `src/target.rs` `checks`: drop the `unwoken` arm (the commit reads
+/// `pending` and is never promotable).
+#[test]
+fn a_required_check_the_commit_does_not_wake_does_not_block_it() {
+    let docs_only = POST.replace(
+        "stage = \"post\"\n",
+        "stage = \"post\"\nwhen_paths = [\"docs/\"]\n",
+    );
+    let hosted = hosted_with(STAGING, &docs_only);
+    let (_, plain) = hosted.land("src/plain.rs", None);
+    let row = hosted.staging();
+    assert_eq!(row["promotable"]["commit"], plain.as_str(), "{row}");
+    let (accepted, said) = push(
+        &hosted.test_box,
+        &hosted.repo,
+        &format!("{plain}:refs/heads/staging"),
+    );
+    assert!(accepted, "{said}");
+    let row = hosted.staging();
+    assert_eq!(row["checks"][0]["state"], "not_required", "{row}");
+    assert_eq!(row["tip_failures"], serde_json::json!([]), "{row}");
 }
 
 #[test]
