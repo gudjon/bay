@@ -471,6 +471,18 @@ enum EvidenceAction {
 
 #[derive(Subcommand)]
 enum AssetsAction {
+    /// The remote's own store (66 E), as bay runs it when `[plugin.assets]` names no command:
+    /// the assets plugin protocol, so no one types it
+    #[command(hide = true)]
+    Store {
+        /// The remote's URL or path
+        remote: String,
+        /// `put`, `get`, `exists`, `purge` or `get-range`
+        verb: String,
+        /// The verb's arguments, as the plugin protocol gives them
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<String>,
+    },
     /// Whether a store may purge an object: held when main's `[assets] hold` covers any path
     /// main's history ever saved it under. A store asks before every purge
     Held {
@@ -551,6 +563,9 @@ fn config_refusal(cli: &Cli) -> Option<BayResult> {
             | Command::Update { .. }
             | Command::Hook { .. }
             | Command::Plugin { .. }
+            | Command::Assets {
+                action: AssetsAction::Store { .. }
+            }
             | Command::Help { .. }
     );
     needs_config
@@ -757,6 +772,13 @@ fn main() -> ExitCode {
         Command::Assets {
             action: AssetsAction::Held { id },
         } => bay::assets::held_answer(&cli.dir, &id),
+        Command::Assets {
+            action: AssetsAction::Store { remote, verb, args },
+        } => {
+            // The plugin protocol, not a bay result: its exit code and its stdout.
+            let code = bay::assets::store::run(&remote, &verb, &args);
+            return ExitCode::from(u8::try_from(code).unwrap_or(1));
+        }
         Command::Plugin { action } => plugin(&cli.dir, action),
         Command::Help { command } => return help(&command, cli.json),
         Command::Hook { event } => {

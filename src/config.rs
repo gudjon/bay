@@ -163,8 +163,9 @@ impl Plugins {
     /// Each plugin's command is not empty and its bound is at least 1 s; the hold and prune
     /// plugins keep their own longest bounds.
     fn validate(&self) -> Result<(), String> {
+        // An empty assets command names the remote's own store (66 E), so it is no empty command.
         let assets = self.assets.as_ref().map(|assets| Plugin {
-            command: Some(assets.command.clone()),
+            command: None,
             timeout_s: assets.timeout_s,
         });
         for (kind, plugin) in [
@@ -215,6 +216,8 @@ impl Plugins {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AssetsPlugin {
+    /// The store's program; empty (or left out): the remote's own store (BACKLOG 66 E).
+    #[serde(default)]
     pub command: String,
     pub timeout_s: Option<u64>,
     #[serde(default)]

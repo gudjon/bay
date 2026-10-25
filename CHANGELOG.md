@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.5
+
+- Large files go to the remote's own store: `[plugin.assets]` needs no command.
+- An https remote keeps them in parts, through Git's own login for that remote.
+- `bay host` keeps them beside the repository; an ssh remote reaches them over Git's ssh.
+
 ## 0.4.4
 
 - A push the remote refuses is named with the remote's reason, never as a moved change.

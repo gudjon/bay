@@ -177,6 +177,7 @@ fn test_assets(dir: &Path, command: &str, timeout_s: Option<u64>) -> BayResult {
         work_root: dir,
         command,
         timeout: limit,
+        store: None,
     };
     let id = crate::assets::identity(&sample).unwrap_or_default();
     let sent = |args: &str| json!(format!("{command} {args}"));

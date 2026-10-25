@@ -42,6 +42,8 @@ use crate::repo::Repo;
 
 use sha2::{Digest, Sha256};
 
+pub mod store;
+
 /// The manifest, at the repository's root.
 pub const MANIFEST: &str = ".bay-assets";
 
@@ -348,13 +350,30 @@ pub struct Plugin<'a> {
     pub work_root: &'a Path,
     pub command: &'a str,
     pub timeout: Duration,
+    /// With no `command`, the remote's own store (66 E): its URL, which `bay store` serves.
+    pub store: Option<String>,
 }
 
 impl Plugin<'_> {
     /// Runs `<command> <args>`: its exit code, its stdout (trimmed) and its stderr's first line.
     fn exec(&self, args: &[&std::ffi::OsStr]) -> Result<(i32, String, String), String> {
-        let mut cmd = crate::run::command(self.work_root, self.command)
-            .ok_or("[plugin.assets] command is empty")??;
+        let mut cmd = if self.command.trim().is_empty() {
+            // The remote's own store: bay itself, with its environment (its ssh agent and Git's
+            // settings reach the remote as a push does).
+            let url = self.store.as_deref().ok_or(
+                "[plugin.assets] names no command, and the remote has no URL to keep a store at",
+            )?;
+            let exe = std::env::current_exe()
+                .map_err(|error| format!("cannot find the running bay: {error}"))?;
+            let mut cmd = std::process::Command::new(exe);
+            cmd.args(["assets", "store"])
+                .arg(url)
+                .current_dir(self.work_root);
+            cmd
+        } else {
+            crate::run::command(self.work_root, self.command)
+                .ok_or("[plugin.assets] command is empty")??
+        };
         cmd.args(args);
         let ran = crate::run::captured(cmd, None, self.timeout)
             .map_err(|fault| format!("the assets plugin failed: {fault}"))?;
@@ -507,7 +526,16 @@ pub fn plugin_of<'a>(config: &'a crate::config::Config, work_root: &'a Path) -> 
         work_root,
         command: &assets.command,
         timeout: Duration::from_secs(assets.timeout_s.unwrap_or(DEFAULT_TIMEOUT_S)),
+        store: own_store(&Git::new(work_root), config, &assets.command),
     })
+}
+
+/// With no `command`, the URL of the config's remote, where its own store is (66 E).
+fn own_store(git: &Git, config: &crate::config::Config, command: &str) -> Option<String> {
+    if !command.trim().is_empty() {
+        return None;
+    }
+    store::remote_url(git, config.remote())
 }
 
 /// The manifest of `commit`, empty when it has none.
@@ -677,20 +705,28 @@ pub fn fill_check(
             "the candidate's {MANIFEST} names files, and the config at its base names no [plugin.assets] to fetch them"
         ));
     };
-    let program = assets
-        .command
-        .split_whitespace()
-        .next()
-        .ok_or("[plugin.assets] command is empty")?
-        .to_owned();
     let scratch = tree_dir.with_extension("assets-plugin");
     let _ = std::fs::remove_dir_all(&scratch);
-    crate::materialize::materialize(git, base, Some(&[program]), &scratch, deadline, &mut || {})
+    // A named program is the base's own copy; the remote's own store is bay itself (66 E).
+    if let Some(program) = assets.command.split_whitespace().next() {
+        crate::materialize::materialize(
+            git,
+            base,
+            Some(&[program.to_owned()]),
+            &scratch,
+            deadline,
+            &mut || {},
+        )
         .map_err(|unmade| format!("the assets plugin could not be materialized: {unmade:?}"))?;
+    } else {
+        std::fs::create_dir_all(&scratch)
+            .map_err(|error| format!("cannot make {}: {error}", scratch.display()))?;
+    }
     let plugin = Plugin {
         work_root: &scratch,
         command: &assets.command,
         timeout: Duration::from_secs(assets.timeout_s.unwrap_or(DEFAULT_TIMEOUT_S)),
+        store: own_store(git, &config, &assets.command),
     };
     let filled = fill(&plugin, git, commit, tree_dir, &covered, None);
     let _ = std::fs::remove_dir_all(&scratch);
@@ -737,6 +773,7 @@ pub fn configured<'a>(
         work_root: &repo.work_root,
         command: &assets.command,
         timeout: Duration::from_secs(assets.timeout_s.unwrap_or(DEFAULT_TIMEOUT_S)),
+        store: own_store(&repo.git, &repo.config, &assets.command),
     };
     Ok(Some((
         plugin,

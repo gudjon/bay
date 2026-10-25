@@ -201,9 +201,11 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    file merges only while it holds the lock (after its turn ends too, until another session
    takes it); otherwise it is refused `LOCK_NOT_HELD`: edit the file again to take the lock.
    `bay save` takes the locks of the files it saves.
-   To keep large files out of Git, add `[plugin.assets] command = "<your store's script>"` and
-   `over_limit = "offload"` to `.bay/config.toml`: a new file over `max_file_mib` goes to that
-   store, and `.bay-assets` names its bytes (`sha256:<hex> <size> <path>`). `offload = ["**/*.pdf"]`
+   To keep large files out of Git, add `[plugin.assets]` with `over_limit = "offload"` to
+   `.bay/config.toml`: a new file over `max_file_mib` goes to the remote's own store (a `bay host`, a
+   hosted product, or a path remote, through the remote's own login), and `.bay-assets` names its bytes
+   (`sha256:<hex> <size> <path>`). A plain Git host keeps no store: there, name one with
+   `command = "<your store's script>"`. `offload = ["**/*.pdf"]`
    beside it sends files of a kind to the store whatever their size. The file stays in
    the folder; never add it by hand. Other clones get it at `bay install`, views and checks
    when they are made. bay ships a store for any folder or shared drive:
