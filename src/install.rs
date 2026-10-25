@@ -74,6 +74,9 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
     }
     // `bay.exe` on Windows (plan W2).
     let target = bin_dir.join(format!("bay{}", std::env::consts::EXE_SUFFIX));
+    if let Some(refusal) = pinned_elsewhere(&target)? {
+        return Ok(refusal);
+    }
     place_binary(&bin_dir, &target)?;
 
     // § 15.3 item 4: the skill this binary carries, at the caller's path and (G319) in every
@@ -179,7 +182,7 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
 /// Moves each renamed Git config key (`crate::signing::RENAMED_KEYS`) set in `scope`
 /// (`--global` or `--local`) to its new name there, unless the new name is already set, and
 /// unsets the old one. Returns each move as `{from, to}`.
-fn carry_over(git: &Git, scope: &str) -> Result<Vec<serde_json::Value>, String> {
+pub(crate) fn carry_over(git: &Git, scope: &str) -> Result<Vec<serde_json::Value>, String> {
     if scope == "--local" && git.repo_info().is_err() {
         return Ok(Vec::new());
     }
@@ -273,6 +276,38 @@ fn signing_identity(git: &Git) -> Result<Option<String>, String> {
 fn on_path(dir: &Path) -> bool {
     std::env::var_os("PATH")
         .is_some_and(|path| std::env::split_paths(&path).any(|entry| entry == dir))
+}
+
+/// A box pin names one version (owner ruling 2026-10-25, a fleet rollout's finding: a test loop's
+/// install replaced a shared runner's binary 38 times in 30 minutes). An install by a bay of
+/// another version never replaces the box's binary: it is refused `UPDATE_PINNED` before it
+/// writes anything, naming the pin, and only the pin moves the box. The binary already being
+/// this one is no replacement. A process's own `BAY_UPDATE_VERSION` is its pin.
+fn pinned_elsewhere(target: &Path) -> Result<Option<BayResult>, String> {
+    let settings = crate::update::BoxSettings::load()?;
+    let Some(pin) = settings.version.clone() else {
+        return Ok(None);
+    };
+    let running = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.canonicalize().ok());
+    if pin == crate::version::BAY || running.is_some() && running == target.canonicalize().ok() {
+        return Ok(None);
+    }
+    let why = format!(
+        "this box is pinned to bay {pin} ({}); this is bay {}, so install leaves {} as it is: only the pin moves the box",
+        settings.pin_name(),
+        crate::version::BAY,
+        target.display()
+    );
+    Ok(Some(
+        BayResult::blocked(crate::result::Reason::UpdatePinned).with_detail(json!({
+            "binary": target.display().to_string(),
+            "pinned": pin,
+            "running": crate::version::BAY,
+            "why": why,
+        })),
+    ))
 }
 
 fn place_binary(bin_dir: &Path, target: &Path) -> Result<(), String> {

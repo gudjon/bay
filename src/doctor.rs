@@ -689,7 +689,23 @@ fn hooks_row(
     if !missing.is_empty() {
         row["missing"] = json!(missing);
         row["recovery"] = json!(hooks_recovery(git, agent_settings::CLAUDE_SETTINGS_FILE));
-        report.red(Reason::HooksMissing, Some("hooks missing"));
+        let (behind, some_there) = agent_settings::claude_events_behind(&settings);
+        if some_there {
+            // The project's settings carry bay, written by an older one: this bay hooks more.
+            row["behind"] = json!(behind);
+            row["note"] = json!(format!(
+                "this bay ({}) also hooks {}, which {} does not carry yet: the project's settings were written by an older bay",
+                crate::version::BAY,
+                behind.join(", "),
+                agent_settings::CLAUDE_SETTINGS_FILE
+            ));
+            report.red(
+                Reason::HooksMissing,
+                Some("hooks missing: the project's settings are older than this bay"),
+            );
+        } else {
+            report.red(Reason::HooksMissing, Some("hooks missing"));
+        }
     }
     // G158: the entry's timeout bounds a hung hook; without it the product's default holds the
     // agent first. Not red: the hook still fails closed when the default fires.

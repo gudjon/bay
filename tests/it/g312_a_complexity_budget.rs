@@ -35,7 +35,9 @@ use support::TestBox;
 ///   signed Git commit; now it is one command that records why (owner ruling 2026-10-22).
 /// - 0.4.0, two commands fewer: `host init` is `host` (one word for the one step), and the
 ///   agent hook `bay hook`, which `bay install` writes and no one types, is hidden from `--help`.
-const COMMANDS: usize = 26;
+/// - 0.4.3, two commands (`assets`, `assets held`, BACKLOG 62): each store walked main's history
+///   and judged the hold globs itself before a purge; now bay answers in one place.
+const COMMANDS: usize = 28;
 const FLAGS: usize = 76;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.

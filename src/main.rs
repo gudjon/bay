@@ -203,6 +203,11 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Admin: ask about a large file's stored bytes; changes nothing
+    Assets {
+        #[command(subcommand)]
+        action: AssetsAction,
+    },
     /// Admin: prove a plugin keeps its contract, run as bay runs it; changes nothing
     Plugin {
         #[command(subcommand)]
@@ -461,6 +466,16 @@ enum EvidenceAction {
         /// Why, in the writer's words: kept in the signed record; a `waiver` needs one
         #[arg(long, value_name = "TEXT")]
         why: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AssetsAction {
+    /// Whether a store may purge an object: held when main's `[assets] hold` covers any path
+    /// main's history ever saved it under. A store asks before every purge
+    Held {
+        /// The object's identity, `sha256:<64 hex>`
+        id: String,
     },
 }
 
@@ -739,6 +754,9 @@ fn main() -> ExitCode {
         Command::Update { version, check } => {
             bay::update::update(&bay::update::Request { version, check })
         }
+        Command::Assets {
+            action: AssetsAction::Held { id },
+        } => bay::assets::held_answer(&cli.dir, &id),
         Command::Plugin { action } => plugin(&cli.dir, action),
         Command::Help { command } => return help(&command, cli.json),
         Command::Hook { event } => {

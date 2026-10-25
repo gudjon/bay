@@ -3,6 +3,12 @@
 ## 0.4.3
 
 - With a key registry, a lock is signed by the agent's key; an unsigned lock holds nothing.
+- A failed check ends the run: later checks are named `not_run`, so a cheap lint spares slow tests.
+- `[assets] hold` keeps a file's stored bytes from any purge; a store asks `bay assets held <id>`.
+- On a pinned machine, `bay install` from another bay version is refused `UPDATE_PINNED` and changes nothing.
+- A runner moves its own renamed config keys at start, so it no longer runs as `local`.
+- Doctor names each hook a newer bay adds that the project's settings lack, under `behind`.
+- The question hook gets a 120 s timeout, so a hung bay never holds an agent for ten minutes.
 
 ## 0.4.2
 

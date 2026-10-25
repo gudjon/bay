@@ -257,7 +257,7 @@ impl BoxSettings {
     }
 
     /// How the pin is named in a refusal: the variable or the config key it came from.
-    fn pin_name(&self) -> &'static str {
+    pub(crate) fn pin_name(&self) -> &'static str {
         if self.version_from == Some(FROM_ENV) {
             VERSION_VAR
         } else {

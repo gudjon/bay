@@ -1662,7 +1662,7 @@ mod tests {
     const COMMANDS: &[&str] = &[
         "start", "merge", "abandon", "save", "waiting", "approve", "reject", "enrol", "undo",
         "status", "prune", "talk", "doctor", "install", "host", "runner", "live", "share",
-        "evidence", "update", "plugin", "hook", "help",
+        "evidence", "update", "assets", "plugin", "hook", "help",
     ];
 
     #[test]

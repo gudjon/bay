@@ -90,6 +90,10 @@ fn hook_runs(hook: &Value, bay_event: &str) -> bool {
 /// second, so a hook still running at 30 s is hung, and the product denies the call.
 pub const PRE_TOOL_TIMEOUT_S: u64 = 30;
 
+/// The `timeout` (seconds) on bay's question entry (`tool.ask`): the longest wait for an answer
+/// (`[agent] question_wait_s`, at most [`crate::policy::MAX_QUESTION_WAIT_S`]) and 30 s more.
+pub const QUESTION_TIMEOUT_S: u64 = crate::policy::MAX_QUESTION_WAIT_S + 30;
+
 /// Claude Code's project settings file, relative to the work tree's top level.
 pub const CLAUDE_SETTINGS_FILE: &str = ".claude/settings.json";
 
@@ -209,8 +213,12 @@ pub fn entry_shape(event: &str, bay_event: &str) -> EntryShape {
     if bay_event == "tool.ask" {
         // Dossier 63: it records the question and never stops the agent; with no answer the
         // product's own dialog opens.
+        // The owner's 0.4.2 check: a timeout of its own above the longest wait the policy
+        // allows, so a hung bay never holds the agent for the product's default (600 s) and an
+        // allowed wait is never cut; a timeout here only lets the product's dialog open.
         return EntryShape {
             matcher: Some(QUESTION_MATCHER),
+            timeout_s: Some(QUESTION_TIMEOUT_S),
             ..RECORDS
         };
     }
@@ -313,6 +321,20 @@ pub fn missing_claude_events(settings: &Map<String, Value>) -> Vec<&'static str>
 #[must_use]
 pub fn missing_codex_events(settings: &Map<String, Value>) -> Vec<&'static str> {
     missing_events(settings, CODEX_EVENTS)
+}
+
+/// The bay events (`tool.ask`, …) of [`CLAUDE_EVENTS`] that have no bay entry, and whether
+/// any of bay's entries is there at all: some there and some missing means an older bay wrote
+/// the settings (a fleet rollout's finding, 2026-10-25).
+#[must_use]
+pub fn claude_events_behind(settings: &Map<String, Value>) -> (Vec<&'static str>, bool) {
+    let missing: Vec<&'static str> = CLAUDE_EVENTS
+        .iter()
+        .filter(|(event, bay_event)| bay_hooks(settings, event, bay_event).next().is_none())
+        .map(|(_, bay_event)| *bay_event)
+        .collect();
+    let some_there = missing.len() < CLAUDE_EVENTS.len();
+    (missing, some_there)
 }
 
 fn missing_events(

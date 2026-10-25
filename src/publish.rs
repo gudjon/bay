@@ -5461,6 +5461,18 @@ fn verdict(
                     "verdict": record.verdict, "why": why})
             }),
     );
+    // Owner ruling 2026-10-25: a failed check ends the run (`crate::check::run_all`), so each
+    // required check with no record at all never started; it is named `not_run`, never passed.
+    if code == Reason::CheckFailed {
+        why.extend(
+            gaps.iter()
+                .filter(|(id, _)| !all.iter().any(|record| record.check.id == id.id))
+                .map(|(id, _)| {
+                    json!({"check": id.id, "verdict": "not_run",
+                        "why": "a check before it failed, so the run ended before it started"})
+                }),
+        );
+    }
     Some((code, word, why))
 }
 

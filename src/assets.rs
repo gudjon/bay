@@ -53,11 +53,19 @@ pub const DEFAULT_TIMEOUT_S: u64 = 300;
 /// under `paths` once `days` have passed since it was saved (the address stays, so history and
 /// its signatures stay whole). bay validates the line; the store reads it from main's policy and
 /// applies it. bay never purges.
+///
+/// `hold = ["matters/acme/"]` (BACKLOG 62, owner ruling 2026-10-24) is a retention rule that
+/// refuses a purge: a file ever saved under a held path is never purged while the hold stands,
+/// whatever `keep` says. Bytes are stored by content, so one identity may sit under several
+/// paths, and a file deleted or renamed since stays held: any manifest line in main's history
+/// counts ([`held`]). The store asks `bay assets held <id>` before it purges.
 #[derive(Clone, Debug, Default, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AssetsPolicy {
     #[serde(default)]
     pub keep: Vec<Keep>,
+    #[serde(default)]
+    pub hold: Vec<String>,
 }
 
 /// One retention line.
@@ -77,6 +85,9 @@ impl AssetsPolicy {
     ///
     /// Why the table is invalid.
     pub fn validate(&self) -> Result<(), String> {
+        if self.hold.iter().any(|glob| glob.trim().is_empty()) {
+            return Err("[assets] hold has an empty glob".to_owned());
+        }
         for keep in &self.keep {
             if keep.paths.trim().is_empty() {
                 return Err("[assets] keep has a line with no paths".to_owned());
@@ -104,6 +115,112 @@ pub struct Entry {
 impl Entry {
     fn line(&self) -> String {
         format!("{} {} {}", self.id, self.size, self.path)
+    }
+}
+
+/// Why an object is held: the hold glob of main's policy, and the newest commit of main's
+/// history whose manifest line names the object under a path it covers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Held {
+    pub hold: String,
+    pub path: String,
+    pub commit: String,
+}
+
+/// Whether the object `id` is held at `main` (BACKLOG 62): the policy at `main` holds a path
+/// that any manifest line of `main`'s history ever named `id` under. An invalid policy still
+/// holds what its text names (`crate::policy::assets_at`): a typo never lifts a hold.
+///
+/// # Errors
+///
+/// A git fault: unknown is never "not held".
+pub fn held(git: &Git, main: &str, id: &str) -> Result<Option<Held>, String> {
+    let policy = crate::policy::assets_at(git, main)?;
+    if policy.hold.is_empty() {
+        return Ok(None);
+    }
+    let log = git
+        .run(&[
+            "log",
+            "--format=commit %H",
+            "-p",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-renames",
+            "--unified=0",
+            main,
+            "--",
+            MANIFEST,
+        ])
+        .map_err(|error| error.message())?;
+    let mut commit = "";
+    for line in log.lines() {
+        if let Some(at) = line.strip_prefix("commit ") {
+            commit = at;
+            continue;
+        }
+        let Some(added) = line.strip_prefix('+').filter(|_| !line.starts_with("+++")) else {
+            continue;
+        };
+        let Ok(entries) = parse(added) else {
+            continue;
+        };
+        for entry in entries.into_iter().filter(|entry| entry.id == id) {
+            if let Some(hold) = policy
+                .hold
+                .iter()
+                .find(|glob| crate::policy::glob_matches(glob, &entry.path))
+            {
+                return Ok(Some(Held {
+                    hold: hold.clone(),
+                    path: entry.path,
+                    commit: commit.to_owned(),
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// `bay assets held <id>`: whether a store may purge the object `id`, judged at main. In a bare
+/// repository (a `bay host`, or a gateway's cache) main is its own served branch; in a clone,
+/// main is fetched first, and a fetch that fails answers nothing, never "not held".
+#[must_use]
+pub fn held_answer(dir: &Path, id: &str) -> crate::result::BayResult {
+    use crate::result::BayResult;
+    if !is_id(id) {
+        return BayResult::failed(format!("{id} is not an object identity (sha256:<64 hex>)"));
+    }
+    let probe = Git::new(dir);
+    let bare = probe
+        .run(&["rev-parse", "--is-bare-repository"])
+        .is_ok_and(|out| out.trim() == "true");
+    let answer = if bare {
+        let main = format!("refs/heads/{}", crate::host::served_branch(&probe));
+        held(&probe, &main, id)
+    } else {
+        let repo = match Repo::open(dir) {
+            Ok(repo) => repo,
+            Err(why) => return BayResult::failed(why),
+        };
+        if let Err(error) = repo.fetch_trunk() {
+            return BayResult::failed(format!(
+                "main could not be fetched, so whether {id} is held is unknown: {}",
+                error.message()
+            ));
+        }
+        held(&repo.git, &repo.trunk_tracking_ref(), id)
+    };
+    match answer {
+        Ok(Some(held)) => BayResult::ok(serde_json::json!({
+            "id": id,
+            "held": true,
+            "hold": held.hold,
+            "path": held.path,
+            "commit": held.commit,
+        })),
+        Ok(None) => BayResult::ok(serde_json::json!({"id": id, "held": false})),
+        Err(why) => BayResult::failed(format!("whether {id} is held is unknown: {why}")),
     }
 }
 

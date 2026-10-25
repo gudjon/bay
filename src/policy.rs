@@ -1307,6 +1307,45 @@ pub fn locks_at(git: &Git, commit: &str) -> Result<crate::locks::Locks, String> 
     }
 }
 
+/// The `[assets]` table of the policy at `commit` (BACKLOG 49, 62). No policy, or no table,
+/// keeps and holds nothing. An invalid policy still holds what its text names: a typo elsewhere
+/// never lifts a hold.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn assets_at(git: &Git, commit: &str) -> Result<crate::assets::AssetsPolicy, String> {
+    // Read from the text, valid or not: the table is validated with the policy (G104b) and kept
+    // nowhere else.
+    let Some(table) = git
+        .file_at(commit, POLICY_PATH)
+        .map_err(|error| error.message())?
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .and_then(|table| table.get("assets").cloned())
+    else {
+        return Ok(crate::assets::AssetsPolicy::default());
+    };
+    if let Ok(assets) = table.clone().try_into() {
+        return Ok(assets);
+    }
+    // A bad line beside it never lifts a hold: its globs are read on their own.
+    let hold = table
+        .get("hold")
+        .and_then(toml::Value::as_array)
+        .map(|globs| {
+            globs
+                .iter()
+                .filter_map(toml::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(crate::assets::AssetsPolicy {
+        hold,
+        ..crate::assets::AssetsPolicy::default()
+    })
+}
+
 /// The `[agent]` flag `key` of the policy at `commit`, read by `flag`. No policy sets none. An
 /// invalid policy still sets it when its text says so: a typo elsewhere never lifts it.
 fn agent_flag_at(

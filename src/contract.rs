@@ -239,6 +239,11 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
         &["anything in a project"],
     ),
     (
+        "assets",
+        &["nothing: held reads main's policy and history"],
+        &["your files", "main", "the store"],
+    ),
+    (
         "plugin",
         &["nothing: it runs a plugin with test inputs"],
         &["your files", "main"],

@@ -875,6 +875,13 @@ const PARALLEL_POLL: Duration = Duration::from_millis(50);
 /// in a later one, § 7), and returns the records of this run. A check the adapter answers
 /// `unavailable` for gets no record, and the run stops there: no worker answers for it.
 ///
+/// A check whose last run failed (`product_failure`, after its reruns and its judgement against
+/// the base) ends the run (owner ruling 2026-10-25, cheap checks first): no check after it in
+/// the policy's order starts, so a failing lint never pays for the tests behind it. In a
+/// parallel run, a later check already running finishes, but its record is never kept, so a
+/// parallel refusal names what a serial one names (N-17). The decision is already a refusal;
+/// a check with no record is named `not_run` in it.
+///
 /// N-17: with `limits.parallel` above 1, up to that many checks run at once, each on its own
 /// thread in its own `check-{index}` directory ([`run_parallel`]). What is observed stays what
 /// a serial run observes: records reach `keep` on this thread, one at a time, in the policy's
@@ -957,6 +964,9 @@ pub fn run_all(
     // The checks left, in order: what the parallel phase ran and is not yet kept, and each check
     // it did not run (every check of a serial run, a check judged against the base), run here.
     for (position, &(index, entry)) in required.iter().enumerate().skip(kept) {
+        if ended_by_failure(&records) {
+            break;
+        }
         let unavailable = match slots.get_mut(position).and_then(Option::take) {
             Some(slot) => keep_slot(shared, (index, entry), slot?, hooks, &mut records)?,
             None => run_serial(shared, (index, entry), hooks, (&mut records, &mut on_base))?,
@@ -1117,7 +1127,10 @@ fn run_parallel(
                 active -= 1;
                 stop |= !slot
                     .as_ref()
-                    .is_ok_and(|slot: &Slot| slot.unavailable.is_none());
+                    .is_ok_and(|slot: &Slot| slot.unavailable.is_none())
+                    || slot
+                        .as_ref()
+                        .is_ok_and(|slot: &Slot| ended_by_failure(&slot.runs));
                 if let Some(place) = slots.get_mut(position) {
                     *place = Some(slot);
                 }
@@ -1139,9 +1152,25 @@ fn run_parallel(
                 if let Some(reason) = keep_slot(shared, (index, entry), slot?, hooks, records)? {
                     return Ok(Some((entry.environment.clone(), reason)));
                 }
+                // A failed check ends the run here as it would a serial one (N-17): a later check
+                // that ran beside it is never kept, so it is `not_run` in both.
+                if ended_by_failure(records) {
+                    return Ok(None);
+                }
             }
         }
         Ok(None)
+    })
+}
+
+/// Whether a check of `records` ended in a failure: its last record (its last run) is a
+/// `product_failure`. A failure a later rerun passed is flaky, not a failure here.
+fn ended_by_failure(records: &[EvidenceRecord]) -> bool {
+    records.iter().enumerate().any(|(at, record)| {
+        record.verdict == Verdict::ProductFailure
+            && !records[at + 1..]
+                .iter()
+                .any(|later| later.check == record.check)
     })
 }
 

@@ -112,6 +112,9 @@ fn install_writes_a_record_only_group_for_the_question_tools() {
         .unwrap_or_else(|| panic!("no question group: {settings}"));
     assert_eq!(ask["matcher"], "AskUserQuestion|ExitPlanMode", "{ask}");
     assert!(ask["hooks"][0].get("onFailure").is_none(), "{ask}");
+    // Above the longest wait the policy allows (90 s), so a hung bay never holds the agent for the
+    // product's default.
+    assert_eq!(ask["hooks"][0]["timeout"], 120, "{ask}");
     let before = groups
         .iter()
         .find(|group| runs(group, "tool.before"))

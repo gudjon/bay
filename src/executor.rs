@@ -55,6 +55,20 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         git.map(|line| crate::version::Version::parse(&line).to_string()),
         interval,
     );
+    // A clone set up before 0.4.0 names its runner under the old keys, which bay never reads,
+    // so the runner ran as `local`: it moves them in its own clone, as `bay install` does.
+    match crate::install::carry_over(&crate::git::Git::new(dir), "--local") {
+        Ok(moved) => {
+            for row in moved {
+                eprintln!(
+                    "bay runner: moved {} to {} in this clone (renamed in 0.4.0)",
+                    row["from"].as_str().unwrap_or_default(),
+                    row["to"].as_str().unwrap_or_default()
+                );
+            }
+        }
+        Err(why) => eprintln!("bay runner: could not move the renamed keys in this clone: {why}"),
+    }
     // Named before it pins its binary, so an update between the two keeps this version's file.
     let _presence = Presence::hold();
     crate::update::pin_own_binary();

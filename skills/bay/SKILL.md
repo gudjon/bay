@@ -119,7 +119,7 @@ A few reasons need more than their next step:
 
 | Reason | Also |
 | --- | --- |
-| `CHECK_FAILED` | A check with `baseline = "base"` names only new failures; pre-existing ones appear as `baseline_failures` in `coverage_gaps`: report them, never as passed. A check with `waivable = true` may instead get an approver's waiver (`bay waiting` lists it); then `bay merge --wait`. The waiver appears in `coverage_gaps` with the real verdict: report it, never as passed. |
+| `CHECK_FAILED` | A failed check ends the run: each check after it is `not_run` in `detail.checks`, never report it passed. A check with `baseline = "base"` names only new failures; pre-existing ones appear as `baseline_failures` in `coverage_gaps`: report them, never as passed. A check with `waivable = true` may instead get an approver's waiver (`bay waiting` lists it); then `bay merge --wait`. The waiver appears in `coverage_gaps` with the real verdict: report it, never as passed. |
 | `CHECK_FLAKY` | A merge may name one flaky in `coverage_gaps`: report it, never as passed. |
 | `WIP_LIMIT` | From `bay start`: you hold the most live changes (`detail.live_changes`). From `bay merge`: the review queue is full (`detail.review`: `waiting`, `max`, `oldest`); do `detail.next`. |
 | `POLICY_INVALID` | Every merge is judged by the policy on main, so a broken one blocks them all, its own repair too. The repair merges when signed by the registry key: tell the user; on the machine that holds it, `git config bay.agentKey <registry key>` for that one `bay merge`, then set it back. Never do this unasked. On a main from `bay host` this path is not yet proven: tell the user so. |
@@ -211,6 +211,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    whose large files the store does not hold is refused `ASSET_MISSING`: save them again. A file the
    store purged keeps its line in `.bay-assets`; a clone names it and goes on. To let a store drop
    generated files after a time, add `[assets] keep = [{ paths = "renders/", days = 30 }]` to the policy.
+   To stop any purge of files that must be kept (a legal hold), add `hold = ["matters/acme/"]`: a file
+   ever saved under a held path stays, even if deleted since. A store asks `bay assets held <id>` before it purges.
 3. Before you commit a `[[check]]` command or a plugin (`[plugin.wake]`, `[plugin.notify]`,
    `[plugin.assets]`), prove it: `bay plugin test check|wake|notify|assets -- <command>`. It runs bay's contract cases the
    way bay runs it, changes nothing, and exits 0 only when every case passes.
@@ -244,9 +246,13 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 The order, learned in a fleet rollout:
 1. On every machine: `bay update`, then `bay install --machine`. It writes only the bay program and its guide, in
    every Claude config directory it finds (`bay.claudeConfigDirs` names others). It never writes hook entries, a
-   repository's settings or its Git config, so it is safe to run on a busy machine.
+   repository's settings or its Git config, so it is safe to run on a busy machine. On a machine pinned to one
+   version (`bay.updateVersion`), an install by another bay is refused `UPDATE_PINNED` and changes nothing: tests and
+   other agents never move a shared runner. Move the machine with its pin. A runner moves its own renamed config keys
+   when it starts.
 2. Put `[agent] product = "claude"` in `.bay/config.toml` on main. Each machine's `bay doctor` now reads hooks red
-   until step 3 merges: that is expected, not a fault.
+   until step 3 merges: that is expected, not a fault. After a bay update, doctor's hooks row names under `behind` any
+   hook this bay adds that the project's settings lack: repeat step 3.
 3. In one clone, run `bay install`, and merge the change that commits `.claude/settings.json` with bay's entries.
    Every machine gets the hooks as it takes that change. A machine without bay is unaffected: each entry first
    checks that bay is present.
