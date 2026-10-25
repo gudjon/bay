@@ -18,12 +18,18 @@
 //! refused one, ruling R7) and its end release them, as they release its claims
 //! (`crate::claims`). Offline, a lockable edit is refused `REMOTE_UNREACHABLE`: unknown is
 //! never free. A shell command's writes are not judged here (`CANNOT_SEE`).
+//!
+//! Under a key registry that signs every record, a lock commit is signed by this machine's agent
+//! key (BACKLOG 57: "a signed, create-only hold ref"), and only a lock commit signed by the agent
+//! key enrolled for the actor it names counts: an unsigned one is a lock bay cannot read, so it
+//! holds nothing at merge and is taken over at an edit. A bay host refuses one outright.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::registry::{KeyClass, Registry};
 use crate::repo::Repo;
 
 pub const SCHEMA: &str = "bay.lock/1";
@@ -104,9 +110,10 @@ pub fn held(repo: &Repo, now: u64) -> Vec<serde_json::Value> {
     ]) else {
         return Vec::new();
     };
+    let registry = signing_registry(repo);
     let mut held: Vec<serde_json::Value> = listed
         .lines()
-        .filter_map(|commit| lock_at(repo, commit))
+        .filter_map(|commit| lock_at(repo, registry.as_ref(), commit))
         .filter(|lock| !lock.released)
         .map(|lock| {
             serde_json::json!({
@@ -271,13 +278,7 @@ fn read_remote(repo: &Repo, name: &str, path: &str) -> Result<Remote, Refused> {
     repo.git
         .run(&["fetch", "-q", repo.remote(), &format!("+{name}:{name}")])
         .map_err(|error| unreachable(error.message()))?;
-    let lock = repo
-        .git
-        .file_at(&commit, FILE)
-        .ok()
-        .flatten()
-        .and_then(|text| serde_json::from_str::<Lock>(&text).ok())
-        .filter(|lock| lock.schema == SCHEMA);
+    let lock = lock_at(repo, signing_registry(repo).as_ref(), &commit);
     Ok(Remote::Taken(commit, lock))
 }
 
@@ -307,9 +308,10 @@ fn take_one(repo: &Repo, me: &Lock, now: u64) -> Result<(), Refused> {
         // Past the window, unreadable, or with no session to end it: taken over.
         Remote::Taken(commit, _) => commit,
     };
-    if push(repo, &name, &lease, me).is_ok() {
-        return Ok(());
-    }
+    let why = match push(repo, &name, &lease, me) {
+        Ok(()) => return Ok(()),
+        Err(why) => why,
+    };
     // Another machine took it between the read and the push, or the remote stopped answering.
     match read_remote(repo, &name, &me.path)? {
         Remote::Taken(_, Some(lock)) if !mine(&lock, me) => {
@@ -321,7 +323,7 @@ fn take_one(repo: &Repo, me: &Lock, now: u64) -> Result<(), Refused> {
         }
         _ => Err(Refused::Unreachable {
             path: me.path.clone(),
-            why: format!("the push of {name} was refused"),
+            why: format!("the push of {name} was refused: {why}"),
         }),
     }
 }
@@ -355,14 +357,41 @@ fn lock_commit(repo: &Repo, lock: &Lock, parent: &str) -> Result<String, String>
         if lock.released { "release" } else { "lock" },
         lock.path
     );
-    let mut args = vec!["commit-tree", tree.as_str()];
-    if !parent.is_empty() {
-        args.extend(["-p", parent]);
+    let key = match signing_registry(repo) {
+        Some(_) => Some(crate::signing::Keys::load(&repo.git).agent.ok_or(
+            "the repository has a key registry and this machine has no agent key (git config bay.agentKey) to sign the lock with",
+        )?),
+        None => None,
+    };
+    let mut args: Vec<String> = Vec::new();
+    if let Some(key) = &key {
+        args.extend([
+            "-c".to_owned(),
+            "gpg.format=ssh".to_owned(),
+            "-c".to_owned(),
+            format!("user.signingkey={}", key.display()),
+        ]);
     }
-    args.extend(["--no-gpg-sign", "-m", message.as_str()]);
+    args.extend(["commit-tree".to_owned(), tree]);
+    if !parent.is_empty() {
+        args.extend(["-p".to_owned(), parent.to_owned()]);
+    }
+    args.push(if key.is_some() { "-S" } else { "--no-gpg-sign" }.to_owned());
+    args.extend(["-m".to_owned(), message]);
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     repo.git
         .run_with(&args, crate::change::RECORD_IDENTITY, None)
         .map_err(fault)
+}
+
+/// The repository's key registry, when it signs every record (`[policy] signing = "all"`): then
+/// a lock commit is signed, and only a signed one counts. `None` without one, or when it cannot
+/// be read.
+fn signing_registry(repo: &Repo) -> Option<Registry> {
+    Registry::current(&repo.git)
+        .ok()
+        .flatten()
+        .filter(Registry::signs_all)
 }
 
 /// Pushes `lock` to `name` with a lease on `lease` (empty: no ref), its commit on `lease`, and
@@ -458,7 +487,8 @@ pub fn renew(repo: &Repo, state_dir: &Path, now: u64) {
 /// left alone and the ref keeps who held it.
 pub fn release(repo: &Repo, state_dir: &Path, now: u64) {
     for (name, commit) in remembered(state_dir) {
-        let Some(lock) = lock_at(repo, &commit) else {
+        // The commit this session pushed itself: read, not judged.
+        let Some(lock) = lock_at(repo, None, &commit) else {
             continue;
         };
         let released = Lock {
@@ -471,13 +501,32 @@ pub fn release(repo: &Repo, state_dir: &Path, now: u64) {
     write_remembered(state_dir, &[]);
 }
 
-fn lock_at(repo: &Repo, commit: &str) -> Option<Lock> {
-    repo.git
+fn lock_at(repo: &Repo, registry: Option<&Registry>, commit: &str) -> Option<Lock> {
+    signed_lock(&repo.git, registry, commit)
+}
+
+/// The lock commit `commit` holds; under `registry`, only when the agent key enrolled for the
+/// actor it names signed it (the host's judgement of a lock ref, and the merge guard's).
+#[must_use]
+pub fn signed_lock(
+    git: &crate::git::Git,
+    registry: Option<&Registry>,
+    commit: &str,
+) -> Option<Lock> {
+    let lock = git
         .file_at(commit, FILE)
         .ok()
         .flatten()
         .and_then(|text| serde_json::from_str::<Lock>(&text).ok())
-        .filter(|lock| lock.schema == SCHEMA)
+        .filter(|lock| lock.schema == SCHEMA)?;
+    let Some(registry) = registry else {
+        return Some(lock);
+    };
+    let file = registry
+        .principal_file(git, KeyClass::Agent, &lock.actor)
+        .ok()?;
+    let signer = crate::signing::verify_commit(git, commit, &file).ok()??;
+    (signer == lock.actor).then_some(lock)
 }
 
 /// Whether change `change` holds `path`'s lock: the current holder's commits, from the lock
@@ -490,9 +539,12 @@ pub fn held_by(repo: &Repo, path: &str, change: &str) -> bool {
     let Ok(history) = repo.git.run(&["rev-list", "--first-parent", &name]) else {
         return false;
     };
+    let registry = signing_registry(repo);
+    // Under a registry, a commit no enrolled key of its actor signed is no holder's: the walk
+    // stops at it, so a forged commit never names a change, nor hides the holder before it.
     let mut locks = history
         .lines()
-        .filter_map(|commit| lock_at(repo, commit))
+        .map_while(|commit| lock_at(repo, registry.as_ref(), commit))
         .filter(|lock| lock.path == path);
     let Some(tip) = locks.next() else {
         return false;

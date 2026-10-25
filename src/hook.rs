@@ -261,6 +261,8 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             judge.presence(update, executor)
         } else if let Some(talk) = name.strip_prefix(crate::talk::TALK_PREFIX) {
             judge.talk(update, talk)
+        } else if name.starts_with(crate::names::LOCKS) {
+            judge.lock(update)
         } else if name.starts_with(crate::names::ARCHIVE_HEADS) {
             archive(update)
         } else {
@@ -1298,6 +1300,31 @@ impl Judge<'_> {
                 Some((commit.to_owned(), at))
             })
             .collect())
+    }
+
+    /// A lock ref (BACKLOG 57, `crate::locks`): its tip is a `bay.lock/1` commit of the path the
+    /// ref is named for, signed by the agent key enrolled for the actor it names, so no one
+    /// writes a lock as another agent. A deletion is not judged: it frees the path, and a
+    /// change whose lock is gone holds nothing at merge.
+    fn lock(&self, update: &Update) -> Result<(), String> {
+        if is_zero(&update.new) {
+            return Ok(());
+        }
+        let lock = crate::locks::signed_lock(self.git, Some(self.registry), &update.new)
+            .ok_or_else(|| {
+                format!(
+                    "{} is not a {} commit signed by the agent key of the actor it names",
+                    update.new,
+                    crate::locks::SCHEMA
+                )
+            })?;
+        if crate::locks::lock_ref(&lock.path) != update.name {
+            return Err(format!(
+                "{} is the lock of another path ({})",
+                update.new, lock.path
+            ));
+        }
+        Ok(())
     }
 
     /// A live summary ref (§ 10a, ruling R1): never deleted; one parentless, agent-signed

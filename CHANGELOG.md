@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.3
+
+- With a key registry, a lock is signed by the agent's key; an unsigned lock holds nothing.
+
 ## 0.4.2
 
 - A push or fetch to a remote with many refs gets three minutes, not the local call's thirty seconds.

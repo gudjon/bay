@@ -226,6 +226,7 @@ mod g358_a_question_is_a_talk_the_session_opens_and_ends;
 mod g359_a_person_answers_an_agents_question;
 mod g35_publication_never_livelocks;
 mod g360_a_persons_answer_reaches_the_agent_as_theirs;
+mod g361_a_lock_counts_only_when_its_holder_signed_it;
 mod g36_one_intent_one_revision_one_landing;
 mod g37_every_bay_ref_can_exist_at_once;
 mod g38_undo_and_session_start;

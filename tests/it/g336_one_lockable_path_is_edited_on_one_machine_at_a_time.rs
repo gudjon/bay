@@ -206,6 +206,8 @@ fn a_bay_host_takes_the_lock_refs() {
     // A host with a registry judges every bay ref it is pushed (§ 10a).
     let keys = test_box.keys();
     test_box.enroll(&first, &keys);
+    // The lock is signed by the agent key enrolled for its actor (G361).
+    test_box.use_keys(&first, &keys);
     let second = test_box.clone_of(&host, "second");
 
     let (code, err) = edit(&test_box, "s-first", &first, "art/logo.bin");
