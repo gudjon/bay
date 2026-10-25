@@ -378,10 +378,13 @@ fn build(
             unknown.insert(crate::throughput::FOOTPRINT.to_owned(), stamp);
         }
         let mut named = json!({"inputs": common.inputs, "version": common.version});
-        // Two approvals (or waivers) of one candidate under two policies are two records,
-        // never one id.
+        // Two approvals (or waivers) of one candidate under two policies, or of two checks of
+        // one candidate (a policy that asks two people's yes, G368), are two records, never one
+        // id.
         if evidence::approver_kind(&request.kind) {
             named["manifest_digest"] = json!(manifest_digest);
+            named["check"] = json!(check);
+            named["environment"] = json!(environment);
         }
         let digest = crate::canonical::digest(&named)?;
         let short = digest

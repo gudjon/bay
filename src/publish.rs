@@ -676,7 +676,7 @@ impl<'a> Ctx<'a> {
     /// Pushes the chain and moves `refs/bay/requests/<id>` to `request` in one atomic push
     /// (§ 10a). The requests ref always names the latest land request. Like
     /// [`Ctx::push_chain`] it pushes this process's own objects, never the local refs.
-    fn push_chain_and_request(&mut self, request: &str) -> bool {
+    fn push_chain_and_request(&mut self, request: &str) -> Result<(), Option<String>> {
         let name = change_ref(&self.id);
         let requests = format!("{}{}", crate::names::REQUESTS, self.id);
         let _ = self.repo.git.run(&["update-ref", &requests, request]);
@@ -691,13 +691,39 @@ impl<'a> Ctx<'a> {
         let chain = format!("{}:{name}", self.head);
         let request_spec = format!("+{request}:{requests}");
         args.extend([self.repo.remote(), chain.as_str(), request_spec.as_str()]);
-        let pushed = self.repo.git.run(&args).is_ok();
-        if pushed {
-            self.pushed_head = Some(self.head.clone());
-            self.unpushed_from = None;
-            self.catch_up_local();
+        match self.repo.git.run(&args) {
+            Ok(_) => {
+                self.pushed_head = Some(self.head.clone());
+                self.unpushed_from = None;
+                self.catch_up_local();
+                Ok(())
+            }
+            Err(error) => Err(self.refused(&name, &error.message())),
         }
-        pushed
+    }
+
+    /// Why the push of the chain `name` failed, when the remote's chain did not move (its tip,
+    /// if any, is under the head pushed, so the push was a fast-forward): then the remote
+    /// refused the push (its hook, a size limit, its rights), and `why` is its first line.
+    /// `None` when it moved, or when bay cannot tell: the caller reads it again.
+    fn refused(&self, name: &str, why: &str) -> Option<String> {
+        let listed = self
+            .repo
+            .git
+            .run(&["ls-remote", self.repo.remote(), name])
+            .ok()?;
+        // Moved: the remote's tip is not under the head pushed, so that push was no fast-forward.
+        if let Some(tip) = listed.split_whitespace().next()
+            && !self.repo.git.is_ancestor(tip, &self.head).unwrap_or(false)
+        {
+            return None;
+        }
+        let first = why
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("no reason given");
+        Some(first.to_owned())
     }
 
     /// After this process pushed its head: a local chain ref that another process moved back
@@ -3305,10 +3331,19 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
     ctx.op_mut(&op_id).request_id = Some(request_id.clone());
     ctx.save_or_moved(revision, Some(&request_id), &format!("request {op_id}"))?;
     kill_point("before-request-push");
-    if !ctx.push_chain_and_request(&request_id) && ctx.online {
+    match ctx.push_chain_and_request(&request_id) {
+        Ok(()) => {}
+        Err(_) if !ctx.online => {}
+        // The remote chain did not move, so the remote refused the push itself: saying the
+        // chain moved would be false, and a retry would be refused the same way.
+        Err(Some(why)) => {
+            return Err(format!(
+                "the remote refused the push of the change, and its chain did not move: {why}"
+            ));
+        }
         // The remote chain moved while this request was written (an executor appended): the
         // caller re-reads the chain and writes the request again.
-        return Err(CHAIN_MOVED.to_owned());
+        Err(None) => return Err(CHAIN_MOVED.to_owned()),
     }
     admit(ctx, &op_id, revision)?;
     Ok(op_id)

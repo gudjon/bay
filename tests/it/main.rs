@@ -232,6 +232,8 @@ mod g363_a_held_file_is_never_purged;
 mod g364_a_runner_never_runs_under_a_name_it_was_not_given;
 mod g365_doctor_names_a_project_whose_hooks_an_older_bay_wrote;
 mod g366_an_install_never_moves_a_pinned_box;
+mod g367_a_refused_push_is_named_never_a_moved_chain;
+mod g368_only_a_person_lifts_a_hold;
 mod g36_one_intent_one_revision_one_landing;
 mod g37_every_bay_ref_can_exist_at_once;
 mod g38_undo_and_session_start;

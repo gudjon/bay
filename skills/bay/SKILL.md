@@ -213,6 +213,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    generated files after a time, add `[assets] keep = [{ paths = "renders/", days = 30 }]` to the policy.
    To stop any purge of files that must be kept (a legal hold), add `hold = ["matters/acme/"]`: a file
    ever saved under a held path stays, even if deleted since. A store asks `bay assets held <id>` before it purges.
+   A hold needs an approval `[[check]]` with `when_paths = [".bay/"]`, so only a person's signed yes lifts it.
 3. Before you commit a `[[check]]` command or a plugin (`[plugin.wake]`, `[plugin.notify]`,
    `[plugin.assets]`), prove it: `bay plugin test check|wake|notify|assets -- <command>`. It runs bay's contract cases the
    way bay runs it, changes nothing, and exits 0 only when every case passes.

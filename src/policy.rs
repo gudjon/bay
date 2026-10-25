@@ -1413,6 +1413,22 @@ fn validate_shape(file: &PolicyFile) -> Result<(), String> {
     file.limits.validate()?;
     file.locks.validate()?;
     file.assets.validate()?;
+    // Owner ruling 2026-10-25 (BACKLOG 62): only a person lifts a hold. A change to the policy
+    // is judged by the policy at its base, so with an approval check over the policy file, a
+    // change that removes or narrows a hold merges only with an approver's signed yes.
+    if !file.assets.hold.is_empty()
+        && !file.check.iter().any(|entry| {
+            entry.is_approval()
+                && entry
+                    .when_paths
+                    .as_ref()
+                    .is_some_and(|globs| globs.iter().any(|glob| glob_matches(glob, POLICY_PATH)))
+        })
+    {
+        return Err(format!(
+            "[assets] hold needs an approval [[check]] whose when_paths covers {POLICY_PATH}: only a person's signed yes lifts a hold"
+        ));
+    }
     // Dossier 63: a wait past the cap would hide the question from the person at the terminal.
     if let Some(wait) = file.agent.question_wait_s
         && wait > MAX_QUESTION_WAIT_S

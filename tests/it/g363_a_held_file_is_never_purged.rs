@@ -23,6 +23,9 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use support::{TestBox, UNCHECKED_POLICY, result_json};
 
+/// A person's yes on every policy change: a policy that holds needs one (G368).
+const POLICY_APPROVAL: &str = "\n[[check]]\nid = \"policy-approval\"\nenvironment = \"people\"\nkind = \"approval\"\nwhen_paths = [\".bay/\"]\n";
+
 const BRIEF: &str = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 const RENDER: &str = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
 
@@ -37,7 +40,9 @@ fn trunk(extra: &str) -> (TestBox, PathBuf, PathBuf) {
         &[("src/a.rs", "fn a() {}\n"), (".bay-assets", &manifest)],
         &[(
             ".bay/policy.toml".to_owned(),
-            format!("{UNCHECKED_POLICY}\n[assets]\nhold = [\"matters/acme/\"]\n{extra}"),
+            format!(
+                "{UNCHECKED_POLICY}{POLICY_APPROVAL}\n[assets]\nhold = [\"matters/acme/\"]\n{extra}"
+            ),
         )],
     );
     let remote = test_box.path().join("repo-remote.git");

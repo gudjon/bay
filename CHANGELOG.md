@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4
+
+- A push the remote refuses is named with the remote's reason, never as a moved change.
+- A policy with `[assets] hold` needs an approval check over `.bay/`: only a person lifts a hold.
+- One `bay approve` answers every approval check a change waits on; two no longer collide.
+
 ## 0.4.3
 
 - With a key registry, a lock is signed by the agent's key; an unsigned lock holds nothing.
