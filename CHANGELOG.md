@@ -7,6 +7,7 @@
 - With a key registry, each question an agent asks becomes a talk; it closes when the session goes on.
 - A person with an approver key answers an agent's question: `bay talk --answer <id> --value <answer>`.
 - With `[agent] question_wait_s` set, a signed answer reaches the question tool as the person's answer.
+- Update the host and runner to 0.4.2 before setting `question_wait_s`: an older bay refuses the key.
 
 ## 0.4.1
 
