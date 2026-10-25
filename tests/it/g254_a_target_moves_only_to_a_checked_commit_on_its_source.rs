@@ -6,7 +6,8 @@
 //! it the trunk does not reach (`drift`), its required checks and the newest promotable commit.
 //! On a bay host the hook refuses, with `PROMOTION_REFUSED`, a push that moves it to a commit off
 //! the trunk's first-parent line, or one whose required post check has not passed; a recorded
-//! pass makes the same push succeed. While a `[[hold]]` is in force only a landing that
+//! pass makes the same push succeed. While a `[[hold]]` is in force (from its `start`, when it has
+//! one, to its `end`) only a landing that
 //! carries `Fixes:` is promoted. On a forge, which enforces nothing, the same reading detects a
 //! target moved off the trunk as drift, and `bay status --since` names the move.
 
@@ -239,6 +240,27 @@ fn a_freeze_refuses_a_plain_promotion_and_takes_a_fix() {
     let (accepted, said) = push(test_box, repo, &format!("{fix}:refs/heads/staging"));
     assert!(accepted, "{said}");
     assert_eq!(hosted.staging()["tip"], fix.as_str());
+}
+
+/// A hold booked ahead (`start`, a match day) holds only in its window: before its start a
+/// commit is promoted as usual. Guard to mutate: `src/config.rs` `Freeze::active`: ignore
+/// `start` (the booked hold blocks promotion now).
+#[test]
+fn a_hold_booked_ahead_holds_only_in_its_window() {
+    let config = format!(
+        "{STAGING}\n[[hold]]\ntarget = \"staging\"\nstart = \"{}\"\nend = \"{}\"\nreason = \"match day\"\n",
+        from_now(3600),
+        from_now(7200)
+    );
+    let hosted = hosted(&config);
+    let (_, plain) = hosted.land("src/plain.rs", None);
+    hosted.suite(&plain, "pass");
+    let row = hosted.staging();
+    assert_eq!(
+        row["promotable"]["commit"],
+        plain.as_str(),
+        "a hold not yet started blocked: {row}"
+    );
 }
 
 #[test]

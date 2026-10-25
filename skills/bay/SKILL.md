@@ -167,7 +167,7 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    `[agent] product`: `claude` or `codex`; `bay install` writes bay's hooks where that product
    reads them. Codex's hooks only sense (Codex runs a tool when a hook fails), so main is the
    guard there. To hold main (an incident, a
-   migration), add a `[[hold]]` with `end` and `reason` (a `target` holds a promotion target instead), or a
+   migration), add a `[[hold]]` with `end` and `reason` (and `start`, to book a window ahead) (a `target` holds a promotion target instead), or a
    `[plugin.hold] command` that answers `{"held": true|false, "reason": "..."}` to `<command> status`.
    To act on the host when `bay prune` deletes a branch (close its pull request,
    say), add `[plugin.prune] command`: it runs as `<command> pruned <branch> <sha> <archive ref>`.

@@ -120,6 +120,10 @@ impl Target {
 pub struct Freeze {
     #[serde(default)]
     pub target: String,
+    /// When it starts, in RFC 3339 UTC to the second; none: in force from the moment it is on
+    /// main. A window booked ahead, such as a match day, is written once and holds only then.
+    #[serde(default)]
+    pub start: Option<String>,
     /// The end, in RFC 3339 UTC to the second (`2026-12-24T00:00:00Z`).
     pub end: String,
     pub reason: String,
@@ -130,7 +134,11 @@ impl Freeze {
     /// ([`Config::parse`]), so here it reads as in force.
     #[must_use]
     pub fn active(&self, now: u64) -> bool {
-        crate::clock::unix_of(&self.end).is_none_or(|end| now < end)
+        let started = self
+            .start
+            .as_deref()
+            .is_none_or(|start| crate::clock::unix_of(start).is_none_or(|start| now >= start));
+        started && crate::clock::unix_of(&self.end).is_none_or(|end| now < end)
     }
 }
 
@@ -731,6 +739,17 @@ impl Config {
                      (2026-12-24T00:00:00Z)",
                     freeze.target, freeze.end
                 ));
+            }
+            if let Some(start) = &freeze.start {
+                let ends_after = crate::clock::unix_of(start)
+                    .zip(crate::clock::unix_of(&freeze.end))
+                    .is_some_and(|(start, end)| start < end);
+                if !ends_after {
+                    return Err(format!(
+                        "[[hold]] of {:?}: start = {start:?} must be an RFC 3339 UTC time to the second before its end",
+                        freeze.target
+                    ));
+                }
             }
             if freeze.reason.trim().is_empty() {
                 return Err(format!("[[hold]] of {:?} has no reason", freeze.target));
