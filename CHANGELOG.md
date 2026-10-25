@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+- Locks come from `.gitattributes` on main: mark a path `lockable`, as Git LFS does. `[locks]` is gone.
+- A kind of file leaves Git by `bay-offload` in `.gitattributes`. `[plugin.assets] offload` is gone.
+- An edit of `.gitattributes` made outside bay is named, as a policy edit is.
+
 ## 0.4.5
 
 - Large files go to the remote's own store: `[plugin.assets]` needs no command.

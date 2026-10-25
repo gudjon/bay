@@ -37,10 +37,8 @@ fn case() -> TalkCase {
     hosted_talk_seeded(|test_box, a| {
         let mut files = unchecked_files();
         files.retain(|(path, _)| path != ".bay/policy.toml");
-        files.push((
-            ".bay/policy.toml".to_owned(),
-            format!("{UNCHECKED_POLICY}\n[locks]\npaths = [\"art/\"]\n"),
-        ));
+        files.push((".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned()));
+        files.push((".gitattributes".to_owned(), "art/** lockable\n".to_owned()));
         test_box.seed_with_check(
             a,
             &[("art/logo.bin", "logo 1\n"), ("src/a.rs", "fn a() {}\n")],

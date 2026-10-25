@@ -16,6 +16,9 @@ use crate::git::Git;
 use crate::inputs::InputEntry;
 
 pub const POLICY_PATH: &str = ".bay/policy.toml";
+
+/// The file at the root that says how each path collides (BACKLOG 65): `lockable`, `bay-offload`.
+pub const GITATTRIBUTES: &str = ".gitattributes";
 const DEFAULT_TIMEOUT_S: u64 = 1800;
 
 /// The `inputs` value of a check that reads commit metadata: its evidence is keyed by subject
@@ -59,9 +62,9 @@ struct PolicyFile {
     /// The `[limits]` table (owner ruling 2026-10-21): how big one change may be.
     #[serde(default)]
     limits: crate::limits::Limits,
-    /// The `[locks]` table (BACKLOG 57): the paths one session at a time may edit.
+    /// The `[locks]` table 0.5.0 removed (BACKLOG 65): read only to name its new home.
     #[serde(default)]
-    locks: crate::locks::Locks,
+    locks: Option<toml::Value>,
     /// The `[assets]` table (BACKLOG 49): how long the store keeps generated files.
     #[serde(default)]
     assets: crate::assets::AssetsPolicy,
@@ -817,11 +820,13 @@ impl Policy {
 }
 
 impl Policy {
-    /// Every path this policy is made of: the policy file and each adapter path of its checks
+    /// Every path this policy is made of: the policy file, `.gitattributes` (BACKLOG 65: how each
+    /// path collides, lockable or offloaded, is said there), and each adapter path of its checks
     /// and its input providers, sorted.
     #[must_use]
     pub fn paths(&self) -> Vec<String> {
-        let mut paths: Vec<String> = std::iter::once(POLICY_PATH.to_owned())
+        let mut paths: Vec<String> = [POLICY_PATH.to_owned(), GITATTRIBUTES.to_owned()]
+            .into_iter()
             .chain(self.adapter_paths())
             .collect();
         paths.sort();
@@ -1057,8 +1062,6 @@ pub struct Policy {
     pub reuse_unsigned: bool,
     /// `[limits]` (owner ruling 2026-10-21): how big one change may be.
     pub limits: crate::limits::Limits,
-    /// `[locks]` (BACKLOG 57): the paths one session at a time may edit (`crate::locks`).
-    pub locks: crate::locks::Locks,
 }
 
 /// Why a policy could not be loaded.
@@ -1206,7 +1209,6 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
         signing: file.policy.signing,
         reuse_unsigned: file.policy.reuse_unsigned,
         limits: file.limits,
-        locks: file.locks,
     }))
 }
 
@@ -1284,26 +1286,6 @@ pub fn limits_at(git: &Git, commit: &str) -> Result<crate::limits::Limits, Strin
         Ok(Some(policy)) => Ok(policy.limits),
         Ok(None) | Err(LoadError::Invalid(_)) => Ok(crate::limits::Limits::default()),
         Err(LoadError::Git(why)) => Err(why),
-    }
-}
-
-/// The lockable paths of the policy at `commit` (`[locks]`, BACKLOG 57), judged at the base like
-/// every other policy key. No policy, or no table, locks none. An invalid policy still locks
-/// what its text names: a typo elsewhere never lifts a lock.
-///
-/// # Errors
-///
-/// A git fault.
-pub fn locks_at(git: &Git, commit: &str) -> Result<crate::locks::Locks, String> {
-    match load_at(git, commit) {
-        Ok(policy) => Ok(policy.map(|policy| policy.locks).unwrap_or_default()),
-        Err(LoadError::Git(why)) => Err(why),
-        Err(LoadError::Invalid(_)) => Ok(git
-            .file_at(commit, POLICY_PATH)
-            .map_err(|error| error.message())?
-            .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
-            .and_then(|table| table.get("locks")?.clone().try_into().ok())
-            .unwrap_or_default()),
     }
 }
 
@@ -1411,7 +1393,14 @@ fn parse_error(text: &str, error: &toml::de::Error) -> String {
 fn validate_shape(file: &PolicyFile) -> Result<(), String> {
     // Owner ruling 2026-10-21: each `[limits]` key is a positive integer.
     file.limits.validate()?;
-    file.locks.validate()?;
+    // BACKLOG 65 (owner ruling 2026-10-25): the class of a path has one home, `.gitattributes`
+    // on main. No alias, so a policy that still says `[locks]` names where it went.
+    if file.locks.is_some() {
+        return Err(
+            "[locks] was removed in 0.5.0: mark the paths `lockable` in .gitattributes on main (`art/** lockable`, Git LFS's attribute)"
+                .to_owned(),
+        );
+    }
     file.assets.validate()?;
     // Owner ruling 2026-10-25 (BACKLOG 62): only a person lifts a hold. A change to the policy
     // is judged by the policy at its base, so with an approval check over the policy file, a

@@ -4015,7 +4015,7 @@ fn too_large(
 }
 
 /// `LOCK_NOT_HELD` at candidate build (BACKLOG 57): the merged `tree` changes a path the policy
-/// at `trunk` names lockable (`[locks] paths`), and no commit of that path's lock names this
+/// at `trunk` marks `lockable` (in `.gitattributes`), and no commit of that path's lock names this
 /// change (a save names its change in its lock). Such an edit
 /// went around the lock, and two copies of a file that never merges cannot be combined. The
 /// operation is blocked, as on a conflict; no candidate is committed and no check runs.

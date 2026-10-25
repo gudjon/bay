@@ -115,10 +115,10 @@ fn the_map_lists_each_lock_held_now_and_its_holder() {
     test_box.seed_with_check(
         &repo,
         &[("art/logo.bin", "logo\n")],
-        &[(
-            ".bay/policy.toml".to_owned(),
-            format!("{UNCHECKED_POLICY}\n[locks]\npaths = [\"art/\"]\n"),
-        )],
+        &[
+            (".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned()),
+            (".gitattributes".to_owned(), "art/** lockable\n".to_owned()),
+        ],
     );
     let other = test_box.clone_of(&test_box.path().join("repo-remote.git"), "other");
     let edit = json!({

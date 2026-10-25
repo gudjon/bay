@@ -235,7 +235,7 @@ fn offload(repo: &Repo, trunk: &str, changed: &[Entry]) -> Result<Offloads, Stri
         &plugin,
         &repo.work_root,
         &new,
-        rule,
+        &rule,
         &crate::assets::exclude_file(repo),
     )?;
     let offloaded: Vec<String> = done.entries.into_iter().map(|entry| entry.path).collect();

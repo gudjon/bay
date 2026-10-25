@@ -3,11 +3,12 @@
 //!
 //! Some documents must be erasable on request, and a blob in Git cannot be erased without
 //! rewriting history that bay's signed evidence binds to. Size alone does not say which files
-//! those are, so `[plugin.assets] offload = ["**/*.pdf"]` in `.bay/config.toml` sends every new
-//! file a glob names to the store, however small, and `.bay-assets` names its bytes; the store
+//! those are, so `*.pdf bay-offload` in main's `.gitattributes` (BACKLOG 65, the one home of a
+//! path's class) sends every new file of that kind to the store, however small, and `.bay-assets` names its bytes; the store
 //! can purge them later and history keeps their address. Other files stay in Git.
 //!
-//! Guard to mutate: `src/assets.rs` `Rule::offloads`: drop the glob arm (the document enters Git).
+//! Guard to mutate: `src/assets.rs` `Rule::offloads`: drop the `by_kind` arm (the document enters
+//! Git).
 
 // The store is a shell script, so this runs on Unix only.
 #![cfg(unix)]
@@ -32,11 +33,15 @@ fn a_small_document_a_glob_names_goes_to_the_store_and_a_note_stays_in_git() {
             (
                 ".bay/config.toml".to_owned(),
                 format!(
-                    "[plugin.assets]\ncommand = \"scripts/assets {}\"\noffload = [\"**/*.pdf\"]\n",
+                    "[plugin.assets]\ncommand = \"scripts/assets {}\"\n",
                     store(&test_box).display()
                 ),
             ),
             ("scripts/assets".to_owned(), STORE_PLUGIN.to_owned()),
+            (
+                ".gitattributes".to_owned(),
+                "*.pdf bay-offload\n".to_owned(),
+            ),
         ],
     );
     std::fs::set_permissions(

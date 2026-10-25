@@ -1,9 +1,9 @@
-//! Locks across machines (BACKLOG 57, owner ruling 2026-10-23): `[locks]` in `.bay/policy.toml`.
+//! Locks across machines (BACKLOG 57, owner ruling 2026-10-23; BACKLOG 65, 2026-10-25): the
+//! `lockable` attribute in `.gitattributes`.
 //!
 //! Some files never merge: an image, a model, a binary. Two machines that edit one lose one
-//! machine's work at merge. `[locks] paths` names them by glob (the `when_paths` globs,
-//! `crate::policy::glob_matches`), judged by the policy at main's tip as this clone last
-//! fetched it, so a change never lifts a lock for itself.
+//! machine's work at merge. Git LFS's `lockable` attribute names them ([`lockable`]), read at
+//! main's tip as this clone last fetched it, so a change never lifts a lock for itself.
 //!
 //! At `tool.before`, the first edit of a lockable path takes its lock on the remote: a ref
 //! `refs/bay/locks/<hash>` (the path's sha256, 32 hex characters) pointing at a commit whose
@@ -39,35 +39,55 @@ const FILE: &str = "lock.json";
 /// per line.
 const STATE_FILE: &str = "locks";
 
-/// The `[locks]` table.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct Locks {
-    /// The lockable paths, as globs.
-    #[serde(default)]
-    pub paths: Vec<String>,
+/// The paths of `paths` that are lockable at `commit` (BACKLOG 65, owner ruling 2026-10-25):
+/// Git LFS's `lockable` attribute in `.gitattributes`, read with `git check-attr --source`, so the
+/// class of a path has one home on main and a change's own attributes never judge it. A path is
+/// lockable when the attribute is set (`lockable`, or `lockable=true`).
+///
+/// # Errors
+///
+/// A git fault: unknown is never "not lockable".
+pub fn lockable(
+    git: &crate::git::Git,
+    commit: &str,
+    paths: &[&str],
+) -> Result<Vec<String>, String> {
+    attribute_set(git, commit, "lockable", paths)
 }
 
-impl Locks {
-    /// A validity rule of the policy (`POLICY_INVALID`): each glob names something.
-    ///
-    /// # Errors
-    ///
-    /// Why the table is invalid.
-    pub fn validate(&self) -> Result<(), String> {
-        if self.paths.iter().any(|glob| glob.trim().is_empty()) {
-            return Err("[locks] paths holds an empty glob".to_owned());
-        }
-        Ok(())
+/// The paths of `paths` whose attribute `name` is set (or `true`) at `commit`, by the
+/// `.gitattributes` files of `commit`'s tree.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn attribute_set(
+    git: &crate::git::Git,
+    commit: &str,
+    name: &str,
+    paths: &[&str],
+) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
     }
-
-    /// Whether `path` is lockable.
-    #[must_use]
-    pub fn covers(&self, path: &str) -> bool {
-        self.paths
-            .iter()
-            .any(|glob| crate::policy::glob_matches(glob, path))
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
     }
+    let out = git
+        .run_with(
+            &["check-attr", "--source", commit, "-z", "--stdin", name],
+            &[],
+            Some(&input),
+        )
+        .map_err(|error| error.message())?;
+    let words: Vec<&str> = out.split('\0').collect();
+    Ok(words
+        .chunks(3)
+        .filter(|row| row.len() == 3 && matches!(row[2], "set" | "true"))
+        .map(|row| row[0].to_owned())
+        .collect())
 }
 
 /// One lock, as its commit's `lock.json` holds it.
@@ -181,10 +201,10 @@ pub fn take_for(
         let Ok(repo) = Repo::open_known(&root) else {
             continue;
         };
-        let Ok(locks) = crate::policy::locks_at(&repo.git, &repo.trunk_tracking_ref()) else {
+        let Ok(lockable) = lockable(&repo.git, &repo.trunk_tracking_ref(), &[path.as_str()]) else {
             continue;
         };
-        if !locks.covers(&path) {
+        if lockable.is_empty() {
             continue;
         }
         successor(&repo, &root, &path)?;
@@ -569,18 +589,15 @@ pub fn held_by(repo: &Repo, path: &str, change: &str) -> bool {
 ///
 /// The policy or the diff cannot be read.
 pub fn not_held(repo: &Repo, trunk: &str, tree: &str, change: &str) -> Result<Vec<String>, String> {
-    let locks = crate::policy::locks_at(&repo.git, trunk)?;
-    if locks.paths.is_empty() {
-        return Ok(Vec::new());
-    }
     let changed = repo
         .git
         .run(&["diff", "--name-only", "--no-renames", "-z", trunk, tree])
         .map_err(|error| error.message())?;
-    let lockable: Vec<&str> = changed
+    let changed: Vec<&str> = changed
         .split('\0')
-        .filter(|path| !path.is_empty() && locks.covers(path))
+        .filter(|path| !path.is_empty())
         .collect();
+    let lockable = lockable(&repo.git, trunk, &changed)?;
     if lockable.is_empty() {
         return Ok(Vec::new());
     }
@@ -594,13 +611,12 @@ pub fn not_held(repo: &Repo, trunk: &str, tree: &str, change: &str) -> Result<Ve
     Ok(lockable
         .into_iter()
         .filter(|path| !held_by(repo, path, change))
-        .map(str::to_owned)
         .collect())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Locks, lock_ref};
+    use super::{lock_ref, lockable};
 
     #[test]
     fn a_lock_ref_is_a_bay_ref_named_by_the_path() {
@@ -610,20 +626,38 @@ mod tests {
     }
 
     #[test]
-    fn the_globs_name_the_lockable_paths() {
-        let locks = Locks {
-            paths: vec!["*.psd".to_owned(), "models/".to_owned()],
+    fn the_attribute_at_the_commit_names_the_lockable_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=t", "-c", "user.email=t@bay.invalid"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
         };
-        assert!(locks.covers("logo.psd"));
-        assert!(locks.covers("models/big.bin"));
-        assert!(!locks.covers("src/a.rs"));
-        assert!(Locks::default().validate().is_ok());
-        assert!(
-            Locks {
-                paths: vec![String::new()]
-            }
-            .validate()
-            .is_err()
+        run(&["init", "-q"]);
+        std::fs::write(
+            dir.path().join(".gitattributes"),
+            "*.psd lockable\nmodels/** lockable\nmodels/readme.txt -lockable\n",
+        )
+        .unwrap();
+        run(&["add", ".gitattributes"]);
+        run(&["commit", "-q", "-m", "attributes"]);
+        let git = crate::git::Git::new(dir.path());
+        let paths = [
+            "logo.psd",
+            "models/big.bin",
+            "models/readme.txt",
+            "src/a.rs",
+        ];
+        assert_eq!(
+            lockable(&git, "HEAD", &paths).unwrap(),
+            ["logo.psd", "models/big.bin"]
         );
+        assert_eq!(lockable(&git, "HEAD", &[]).unwrap(), Vec::<String>::new());
     }
 }

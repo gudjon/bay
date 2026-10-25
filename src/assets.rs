@@ -746,8 +746,8 @@ pub fn fill_check(
 }
 
 /// The assets plugin of `repo`'s config and which new files it stores ([`Rule`]): those over
-/// the policy's file limit at `trunk` (`over_limit = "offload"`), and those its `offload` globs
-/// name; `None` when it stores none.
+/// the policy's file limit at `trunk` (`over_limit = "offload"`), and those main marks
+/// `bay-offload` in `.gitattributes`; `None` with no `[plugin.assets]`.
 ///
 /// # Errors
 ///
@@ -766,9 +766,6 @@ pub fn configured<'a>(
     } else {
         None
     };
-    if limit_bytes.is_none() && assets.offload.is_empty() {
-        return Ok(None);
-    }
     let plugin = Plugin {
         work_root: &repo.work_root,
         command: &assets.command,
@@ -779,28 +776,39 @@ pub fn configured<'a>(
         plugin,
         Rule {
             limit_bytes,
-            globs: &assets.offload,
+            git: &repo.git,
+            main: trunk.to_owned(),
         },
     )))
 }
 
 /// Which new files the plugin stores: those over the limit (`over_limit = "offload"` with
-/// `[limits] max_file_mib`), and those an `offload` glob names, whatever their size (BACKLOG 62).
-#[derive(Clone, Copy, Debug)]
+/// `[limits] max_file_mib`), and those of a kind main's `.gitattributes` marks `bay-offload`,
+/// whatever their size (BACKLOG 62, 65): the class of a path has one home, judged at main.
+#[derive(Clone)]
 pub struct Rule<'a> {
     pub limit_bytes: Option<u64>,
-    pub globs: &'a [String],
+    pub git: &'a Git,
+    /// The commit whose `.gitattributes` judge: main's, never the change's own.
+    pub main: String,
 }
 
 impl Rule<'_> {
-    /// Whether the new file at `path`, of `size` bytes, is stored by the plugin.
+    /// The paths of `paths` main marks `bay-offload`.
+    ///
+    /// # Errors
+    ///
+    /// A git fault: unknown is never "kept in Git".
+    pub fn by_kind(&self, paths: &[&str]) -> Result<Vec<String>, String> {
+        crate::locks::attribute_set(self.git, &self.main, "bay-offload", paths)
+    }
+
+    /// Whether the new file at `path`, of `size` bytes, is stored by the plugin, given the paths
+    /// [`Rule::by_kind`] named.
     #[must_use]
-    pub fn offloads(&self, path: &str, size: u64) -> bool {
+    pub fn offloads(&self, path: &str, size: u64, by_kind: &[String]) -> bool {
         self.limit_bytes.is_some_and(|limit| size > limit)
-            || self
-                .globs
-                .iter()
-                .any(|glob| crate::policy::glob_matches(glob, path))
+            || by_kind.iter().any(|kind| kind == path)
     }
 }
 
@@ -841,7 +849,7 @@ pub fn offload_view(repo: &Repo, view: &Path) -> Result<Vec<String>, String> {
         .filter_map(|entry| entry.strip_prefix("?? "))
         .map(str::to_owned)
         .collect();
-    let done = offload(&plugin, view, &new, rule, &exclude_file(repo))?;
+    let done = offload(&plugin, view, &new, &rule, &exclude_file(repo))?;
     // The freeze that follows takes the manifest from the view's folder.
     if let Some(undo) = &done.undo {
         undo.keep();
@@ -907,16 +915,18 @@ pub fn offload(
     plugin: &Plugin<'_>,
     work_root: &Path,
     paths: &[String],
-    rule: Rule<'_>,
+    rule: &Rule<'_>,
     exclude: &Path,
 ) -> Result<Offloaded, String> {
     let mut offloaded = Offloaded::default();
+    let listed: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let by_kind = rule.by_kind(&listed)?;
     for path in paths {
         let file = work_root.join(path);
         let Ok(meta) = std::fs::metadata(&file) else {
             continue;
         };
-        if !meta.is_file() || !rule.offloads(path, meta.len()) {
+        if !meta.is_file() || !rule.offloads(path, meta.len(), &by_kind) {
             continue;
         }
         let id = plugin.put(&file)?;

@@ -191,8 +191,8 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    To keep changes small, add `[limits]` with `max_file_mib`, `max_files` or `max_added_lines`
    (positive integers; each optional). To cap the review queue, add `max_waiting_approvals`:
    with that many changes waiting for a yes, a change that needs one more is refused `WIP_LIMIT`.
-   For files that never merge (images, models, binaries), add `[locks] paths = ["art/"]`
-   (globs): one session at a time edits each. Your first edit of one takes its lock on the
+   For files that never merge (images, models, binaries), mark them `lockable` in `.gitattributes`
+   on main (`art/** lockable`, Git LFS's attribute): one session at a time edits each. Your first edit of one takes its lock on the
    remote; elsewhere the edit is refused `PATH_HELD`, naming the holder (`bay status --all` lists every
    lock held now in `detail.locks`). Edit other paths, or
    wait until that session's turn ends. Offline, the edit is refused `REMOTE_UNREACHABLE`. A
@@ -205,8 +205,9 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    `.bay/config.toml`: a new file over `max_file_mib` goes to the remote's own store (a `bay host`, a
    hosted product, or a path remote, through the remote's own login), and `.bay-assets` names its bytes
    (`sha256:<hex> <size> <path>`). A plain Git host keeps no store: there, name one with
-   `command = "<your store's script>"`. `offload = ["**/*.pdf"]`
-   beside it sends files of a kind to the store whatever their size. The file stays in
+   `command = "<your store's script>"`. `*.pdf bay-offload` in `.gitattributes` on main
+   sends files of a kind to the store whatever their size. A change's own `.gitattributes` never
+   locks, unlocks or offloads its own files: main's says. The file stays in
    the folder; never add it by hand. Other clones get it at `bay install`, views and checks
    when they are made. bay ships a store for any folder or shared drive:
    `examples/assets/folder-store`, named as `command = "scripts/folder-store <folder>"`. A merge

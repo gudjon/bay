@@ -39,10 +39,8 @@ fn two_clones() -> (TestBox, PathBuf, PathBuf, PathBuf) {
         &first,
         &[("art/logo.bin", "logo 1\n"), ("src/a.rs", "fn a() {}\n")],
         &[
-            (
-                ".bay/policy.toml".to_owned(),
-                format!("{UNCHECKED_POLICY}\n[locks]\npaths = [\"art/\"]\n"),
-            ),
+            (".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned()),
+            (".gitattributes".to_owned(), "art/** lockable\n".to_owned()),
             (
                 ".bay/config.toml".to_owned(),
                 "[runner]\nlease_s = 30\nheartbeat_s = 1\n".to_owned(),

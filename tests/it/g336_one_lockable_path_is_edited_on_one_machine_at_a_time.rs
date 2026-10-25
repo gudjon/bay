@@ -32,10 +32,8 @@ use support::{TestBox, UNCHECKED_POLICY};
 /// The lockable art, with a takeover window of `2 * lease_s`.
 fn policy_files(lease_s: u32) -> Vec<(String, String)> {
     vec![
-        (
-            ".bay/policy.toml".to_owned(),
-            format!("{UNCHECKED_POLICY}\n[locks]\npaths = [\"art/\"]\n"),
-        ),
+        (".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned()),
+        (".gitattributes".to_owned(), "art/** lockable\n".to_owned()),
         (
             ".bay/config.toml".to_owned(),
             format!("[runner]\nlease_s = {lease_s}\nheartbeat_s = 1\n"),

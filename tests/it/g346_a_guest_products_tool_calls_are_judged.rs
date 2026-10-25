@@ -95,10 +95,10 @@ fn a_grok_write_takes_a_lock_as_claude_codes_does() {
     test_box.seed_with_check(
         &repo,
         &[("art/logo.bin", "logo\n")],
-        &[(
-            ".bay/policy.toml".to_owned(),
-            format!("{UNCHECKED_POLICY}\n[locks]\npaths = [\"art/\"]\n"),
-        )],
+        &[
+            (".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned()),
+            (".gitattributes".to_owned(), "art/** lockable\n".to_owned()),
+        ],
     );
     let target = repo.join("art/logo.bin");
     let write = fixture("PreToolUse-write-tool.json", &repo, |payload| {

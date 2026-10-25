@@ -86,10 +86,10 @@ fn an_agents_own_save_takes_its_hooks_lock_and_a_terminals_does_not() {
     test_box.seed_with_check(
         &repo,
         &[("art/logo.bin", "logo 1\n")],
-        &[(
-            ".bay/policy.toml".to_owned(),
-            format!("{UNCHECKED_POLICY}\n[locks]\npaths = [\"art/\"]\n"),
-        )],
+        &[
+            (".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned()),
+            (".gitattributes".to_owned(), "art/** lockable\n".to_owned()),
+        ],
     );
     let remote = test_box.path().join("repo-remote.git");
     let saved = an_agent_edits_and_saves(&test_box, &repo);

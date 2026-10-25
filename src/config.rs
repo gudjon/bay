@@ -163,6 +163,17 @@ impl Plugins {
     /// Each plugin's command is not empty and its bound is at least 1 s; the hold and prune
     /// plugins keep their own longest bounds.
     fn validate(&self) -> Result<(), String> {
+        // BACKLOG 65: a kind of file is offloaded by `.gitattributes` on main, its one home.
+        if self
+            .assets
+            .as_ref()
+            .is_some_and(|assets| assets.offload.is_some())
+        {
+            return Err(
+                "[plugin.assets] offload was removed in 0.5.0: mark the paths `bay-offload` in .gitattributes on main (`*.pdf bay-offload`)"
+                    .to_owned(),
+            );
+        }
         // An empty assets command names the remote's own store (66 E), so it is no empty command.
         let assets = self.assets.as_ref().map(|assets| Plugin {
             command: None,
@@ -222,10 +233,10 @@ pub struct AssetsPlugin {
     pub timeout_s: Option<u64>,
     #[serde(default)]
     pub over_limit: OverLimit,
-    /// BACKLOG 62: globs of files the plugin stores whatever their size, so their bytes can be
-    /// purged later while history keeps their address (`offload = ["**/*.pdf"]`).
+    /// The `offload` globs 0.5.0 moved to the `bay-offload` attribute (BACKLOG 65): read only to
+    /// name where they went.
     #[serde(default)]
-    pub offload: Vec<String>,
+    pub offload: Option<toml::Value>,
 }
 
 /// What bay does with a file over `[limits] max_file_mib`.
