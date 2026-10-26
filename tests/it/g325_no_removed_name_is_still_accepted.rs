@@ -154,9 +154,15 @@ fn the_config_key_trunk_is_unknown() {
     let repo = test_box.repo_any("repo");
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     test_box.commit_config(&repo, "trunk = \"main\"\n");
-    let (code, result) = support::result_json(test_box.bay(&repo).arg("status"));
-    assert_ne!(code, 0, "the old key loaded: {result}");
-    assert!(result.to_string().contains("trunk"), "{result}");
+    // It never loads: bay judges by the last valid config instead (B2 for the config), and
+    // names why main's does not load.
+    let (_, result) = support::result_json(test_box.bay(&repo).arg("status"));
+    assert!(
+        result["detail"]["config_used"]["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("trunk")),
+        "the old key loaded: {result}"
+    );
     test_box.commit_config(&repo, "main = \"main\"\n");
     let (code, result) = support::result_json(test_box.bay(&repo).arg("status"));
     assert_eq!(code, 0, "{result}");
