@@ -361,8 +361,13 @@ impl Repo {
                 missing_config(&bootstrap, &tracking, true, None),
             ));
         };
-        let mut config = Config::parse(&text)
-            .map_err(|message| known(format!("{tracking}:{CONFIG_PATH}: {message}")))?;
+        let mut config = match Config::parse(&text) {
+            Ok(config) => config,
+            // B2 for the config: a main whose config does not load is judged by the last one
+            // that does (`Config::at`).
+            Err(message) => Config::at(&git, &tip)
+                .map_err(|_| known(format!("{tracking}:{CONFIG_PATH}: {message}")))?,
+        };
         // The config cannot move the trunk it was read from: a committed `trunk` or `remote`
         // other than the bootstrap's is refused, never followed.
         for (key, named, used) in [

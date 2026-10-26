@@ -277,7 +277,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     // A read of one change scans its own view only, never every view on the machine (a fleet
     // finding, 2026-10-26: 43 views cost a named status about 26 s).
     let named = change.map(str::to_owned).or_else(|| repo.view_change(dir));
-    let leftovers = leftovers(&repo, &trunk, named.as_deref())?;
+    let leftovers = leftovers(&repo, &trunk, named.as_deref(), me.as_deref())?;
     let quarantines = quarantines(&repo, &trunk);
     let flakes = flake_rows(&repo, &trunk, &read);
     let (red_rows_now, red_pending) = red_rows(&repo, &trunk);
@@ -568,7 +568,12 @@ pub(crate) fn open_quarantines(git: &crate::git::Git, at: &str) -> Result<Vec<Va
 
 /// Every view this machine still holds, with its change state, its age and whether it has
 /// uncheckpointed edits (G41). No pull-request state, no chat activity.
-fn leftovers(repo: &Repo, trunk: &str, only: Option<&str>) -> Result<Vec<Value>, String> {
+fn leftovers(
+    repo: &Repo,
+    trunk: &str,
+    only: Option<&str>,
+    me: Option<&str>,
+) -> Result<Vec<Value>, String> {
     // W5: every chain in one batch (G200b), never one read per view.
     let chain = Chain::new(&repo.git);
     let mut records: std::collections::BTreeMap<String, ChangeRecord> = chain
@@ -585,10 +590,11 @@ fn leftovers(repo: &Repo, trunk: &str, only: Option<&str>) -> Result<Vec<Value>,
         let Some(record) = records.remove(&id) else {
             continue;
         };
-        // A listing reports the views of ended changes only, at most LISTED of them: a live
-        // change's view is in its own row, and checking every view on a shared box cost a
-        // status minutes (a fleet finding, 2026-10-26: 256 views).
-        if only.is_none() && (!ended(record.state) || out.len() >= LISTED) {
+        // A listing reports the views of ended changes and of the reader's own live ones, at
+        // most LISTED of them: checking every view on a shared box cost a status minutes (a
+        // fleet finding, 2026-10-26: 256 views).
+        let listed = ended(record.state) || me.is_none_or(|me| me == record.actor.name);
+        if only.is_none() && (!listed || out.len() >= LISTED) {
             continue;
         }
         let landed = !scan(&repo.git, &record.base_first, trunk, &id)?

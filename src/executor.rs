@@ -781,17 +781,14 @@ fn sweep_ended(repo: &Repo, queue: &Queue, records: &[ChangeRecord]) {
 /// Orders a pass: queued changes first, in queue order, so one pass carries the queue as far as
 /// it can; the rest oldest first by their chain's last write (a fleet finding, 2026-10-25: in
 /// change-id order a change whose id sorted last waited two hours). An operation released from
-/// the queue while it waited for a worker goes first of all (a fleet finding, 2026-10-26: it came
-/// last, after every pre-check, and rejoined an hour or more later); rejoining takes no check.
+/// the queue (while it waited for a worker, main's hold or a dependency, or after a refused
+/// publishing push), or never yet placed, goes first of all (fleet findings, 2026-10-26: such a
+/// change came last, after every pre-check, and rejoined an hour or more later); joining the
+/// line takes no check.
 fn in_pass_order(chains: &mut [crate::change::HeldChain], queue: &Queue) {
     let place = |id: &str| queue.of_change(id).map_or(u64::MAX, |entry| entry.seq);
     let rejoins = |held: &crate::change::HeldChain| {
-        queue.of_change(&held.id).is_none()
-            && held
-                .record
-                .operations
-                .iter()
-                .any(|op| op.unavailable.is_some() && runs(op))
+        queue.of_change(&held.id).is_none() && held.record.operations.iter().any(runs)
     };
     chains.sort_by_key(|held| {
         let at = if rejoins(held) { 0 } else { place(&held.id) };
@@ -1024,8 +1021,57 @@ fn probe(repo: &Repo, trunk: &str, revision: &str) -> Result<Option<EarlyConflic
 
 #[cfg(test)]
 mod tests {
-    use super::op_line;
+    use super::{in_pass_order, op_line};
+    use crate::change::{ChangeRecord, HeldChain};
+    use crate::queue::{Entry, Queue};
     use crate::result::BayResult;
+
+    fn held(id: &str, state: &str, committed: u64) -> HeldChain {
+        let record: ChangeRecord = serde_json::from_value(serde_json::json!({
+            "schema": "bay.change/1", "id": id,
+            "intent": {"reference": id, "revision": "1"},
+            "actor": {"name": "agent", "session": "s"},
+            "base_first": "b", "base": "b", "observed_remote": "b",
+            "declared_inputs": [], "state": "ready",
+            "operations": [{
+                "op_id": format!("{id}.1"), "revision": "r", "request_digest": "d",
+                "state": state, "epoch": 0,
+            }],
+        }))
+        .unwrap();
+        HeldChain {
+            id: id.to_owned(),
+            head: String::new(),
+            committed,
+            record,
+        }
+    }
+
+    /// A fleet finding (2026-10-26): changes whose places were given back while main was held
+    /// waited an hour after the hold ended, sorted behind every queued change's check. A change
+    /// that waits with no place goes first, since joining the line takes no check.
+    #[test]
+    fn a_change_waiting_without_a_place_goes_first() {
+        let mut queue = Queue::default();
+        queue.entries.insert(
+            7,
+            Entry {
+                seq: 7,
+                commit: String::new(),
+                op_id: "queued01.1".to_owned(),
+                change: "queued01".to_owned(),
+            },
+        );
+        let mut chains = vec![
+            held("queued01", "admitted", 1),
+            held("ended001", "published", 2),
+            held("unplaced", "admitted", 3),
+            held("checked1", "checked", 4),
+        ];
+        in_pass_order(&mut chains, &queue);
+        let order: Vec<&str> = chains.iter().map(|held| held.id.as_str()).collect();
+        assert_eq!(order[..3], ["unplaced", "checked1", "queued01"]);
+    }
 
     /// A failure's journal line names its cause, on one line.
     #[test]

@@ -1030,7 +1030,7 @@ impl Reason {
                 "Run `bay start <change>`, then `bay merge` again: the change is checked under the current policy."
             }
             Self::PolicyInvalid => {
-                "Tell the user `.bay/policy.toml` on main is invalid, as `detail` says; its repair merges when signed by the registry key."
+                "Tell the user a rules file in `.bay/` is invalid, as `detail` says; repair it in a new revision."
             }
             Self::PolicyMissing => {
                 "Tell the user main has no `.bay/policy.toml`, so nothing can merge; set it up only if they ask."
@@ -1218,9 +1218,7 @@ impl Reason {
             Self::PolicyChanged => {
                 "Not added yet: the rules changed while this was checked. bay checks it again under the new rules."
             }
-            Self::PolicyInvalid => {
-                "Nothing can be added: the project's rules file (.bay/policy.toml) has a mistake. Fix it first."
-            }
+            Self::PolicyInvalid => "Not added: a rules file in .bay/ has a mistake. Fix it first.",
             Self::PolicyMissing => {
                 "Nothing can be added: this project has no rules file (.bay/policy.toml) yet. Ask whoever set it up."
             }

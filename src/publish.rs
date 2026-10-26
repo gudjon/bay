@@ -1516,6 +1516,11 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     if let Some(waiting) = waits_for_worker(ctx, op_id) {
         return Ok(waiting);
     }
+    // B3: a change whose own config does not load never waits in line for a merge that would
+    // stop every bay command (a fleet finding, 2026-10-26).
+    if let Some(refused) = config_gate(ctx, op_id, &revision, &trunk)? {
+        return Ok(refused);
+    }
     // G273: a change publishes only after every change it names has landed (`crate::after`).
     // Until then it holds no queue place, so whatever is behind it reaches the head.
     if ctx.record.lane.is_none()
@@ -4155,6 +4160,62 @@ fn dependency_unrun(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayRes
     }
     Ok(dependency_waiting(ctx, op_id, trunk)?
         .map(|waiting| with_progress(&ctx.repo.git, op, waiting)))
+}
+
+/// B3 (a fleet finding, 2026-10-26: `ahead = 32` merged to main stopped every bay command on
+/// every box): a change that edits `.bay/config.toml` into one this bay cannot load is blocked
+/// `POLICY_INVALID`, naming why, before it waits in line, so its owner repairs it in a new
+/// revision. `None` when the change leaves the config as its base has it, or it loads.
+fn config_gate(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Option<BayResult>, String> {
+    let op = ctx.op(op_id);
+    if op.state.is_terminal() || op.state == OpState::Blocked {
+        return Ok(None);
+    }
+    let git = &ctx.repo.git;
+    let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
+        return Ok(None);
+    };
+    let blob = |at: &str| {
+        git.run(&[
+            "rev-parse",
+            "-q",
+            "--verify",
+            &format!("{at}:{}", crate::config::CONFIG_PATH),
+        ])
+        .ok()
+    };
+    if blob(revision) == blob(&base) {
+        return Ok(None);
+    }
+    let Err(why) = crate::config::Config::exactly_at(git, revision) else {
+        return Ok(None);
+    };
+    let result = BayResult::blocked(Reason::PolicyInvalid)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(json!({"config_at": revision, "why": why}));
+    if !held_elsewhere(ctx, op_id) {
+        give_back_place(ctx, op_id, "policy_invalid")?;
+        let op = ctx.op_mut(op_id);
+        op.state = OpState::Blocked;
+        op.outcome = Some(Reason::PolicyInvalid.code().to_owned());
+        op.owner = None;
+        ctx.save(
+            revision,
+            None,
+            &format!(
+                "blocked {op_id}: its {} does not load",
+                crate::config::CONFIG_PATH
+            ),
+        )?;
+        ctx.push_chain();
+    }
+    Ok(Some(result))
 }
 
 /// G273: the result of `op_id` while a change it lands after is not on trunk at `trunk`, read

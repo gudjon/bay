@@ -1178,6 +1178,41 @@ pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
     .0
 }
 
+/// The blob or tree id of every adapter path of `entry` at `commit`, in one `cat-file
+/// --batch-check`, never one process per path (a fleet finding, 2026-10-26: 25 paths across 50
+/// landings were 1,250 git calls in one status). An absent path makes the policy invalid.
+fn adapter_ids(
+    git: &Git,
+    commit: &str,
+    entry: &CheckEntry,
+    invalid: &dyn Fn(String) -> LoadError,
+) -> Result<BTreeMap<String, Value>, LoadError> {
+    let mut input = String::new();
+    for path in &entry.adapter {
+        input.push_str(commit);
+        input.push(':');
+        input.push_str(path.trim_end_matches('/'));
+        input.push('\n');
+    }
+    let out = git
+        .run_with(
+            &["cat-file", "--batch-check=%(objectname)"],
+            &[],
+            Some(input.as_bytes()),
+        )
+        .map_err(|error| LoadError::Git(error.message()))?;
+    let mut answers = out.lines();
+    let mut ids = BTreeMap::new();
+    for path in &entry.adapter {
+        let oid = answers
+            .next()
+            .filter(|line| !line.ends_with(" missing") && !line.is_empty())
+            .ok_or_else(|| invalid(format!("adapter path {path} is absent")))?;
+        ids.insert(path.clone(), Value::String(oid.to_owned()));
+    }
+    Ok(ids)
+}
+
 /// [`load_at`], read from Git every time. `ran_git` is set once the judgement runs any git
 /// call past the policy text itself.
 fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>, LoadError> {
@@ -1221,15 +1256,8 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
                 entry.id
             )));
         }
-        let mut adapter_ids = BTreeMap::new();
         *ran_git = true;
-        for path in &entry.adapter {
-            let spec = format!("{commit}:{}", path.trim_end_matches('/'));
-            let oid = git
-                .run(&["rev-parse", "--verify", "-q", &spec])
-                .map_err(|_| invalid(format!("adapter path {path} is absent")))?;
-            adapter_ids.insert(path.clone(), Value::String(oid));
-        }
+        let adapter_ids = adapter_ids(git, commit, entry, &invalid)?;
         // Ruling 8c: an open quarantine takes its check out of the frozen manifest. G91: a
         // post-publication check is never in it, so it never blocks a landing.
         if !quarantined(entry) {

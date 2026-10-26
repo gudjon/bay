@@ -809,11 +809,14 @@ fn the_hook_judges_the_target_where_it_lands_and_a_config_it_cannot_read_is_not_
     let through = outside.join("link/../src/feature.rs");
     let (code, stdout, stderr) = pre_tool(&test_box, &outside, "Write", &through, "s-6");
     assert_eq!(code, Some(2), "{through:?}: {stdout} {stderr}");
-    // A config bay cannot read cannot say how old a cache may be: a notice, never silent.
+    // A config bay cannot read is never silent: the hook judges by the last valid one (B2 for
+    // the config), and says so.
     test_box.commit_config(&repo, "[hooks]\ncache_max_age_s = \"soon\"\n");
-    let found = pre_tool(&test_box, &view, "Write", &target, "s-6");
-    let context = assert_notice(&found, "an unreadable config");
-    assert!(context.contains(&id), "{context}");
+    let (code, stdout, stderr) = pre_tool(&test_box, &view, "Write", &target, "s-6");
+    assert_eq!(code, Some(2), "{stdout} {stderr}");
+    assert!(stderr.contains("INPUT_UNOBSERVED"), "{stderr}");
+    assert!(stderr.contains("last valid"), "{stderr}");
+    assert!(stderr.contains(&id), "{stderr}");
     // A write in no view of that repository stays silent.
     let (code, stdout, _) = pre_tool(&test_box, &repo, "Write", &repo.join("src/x.rs"), "s-6");
     assert_eq!((code, stdout.as_str()), (Some(0), ""));

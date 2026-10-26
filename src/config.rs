@@ -448,6 +448,22 @@ pub struct Agent {
 /// opens share it.
 pub(crate) const COMMITTED: &str = "config";
 
+/// How many first-parent commits that changed the config [`Config::at`] looks back through for
+/// one that loads, as `crate::publish` does for the policy.
+const LAST_VALID_WITHIN: usize = 50;
+
+static FALLBACK: std::sync::Mutex<Option<serde_json::Value>> = std::sync::Mutex::new(None);
+
+/// When this process judged by an older config because main's does not load: the commit whose
+/// config does not load, the one used, and why (`config_used` in a result's detail).
+#[must_use]
+pub fn fallback() -> Option<serde_json::Value> {
+    FALLBACK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 /// The instruction files of `[agent] instructions` when the config names none (G155).
 pub const DEFAULT_INSTRUCTIONS: [&str; 2] = ["AGENTS.md", "CLAUDE.md"];
 
@@ -486,12 +502,54 @@ impl Config {
         }
     }
 
-    /// The config committed at `commit`; the default when that commit has none.
+    /// The config bay judges by at `commit`: the one committed there, the default when that
+    /// commit has none, or, while that one does not load, the newest one that does among the
+    /// last [`LAST_VALID_WITHIN`] first-parent commits that changed it (B2 for the config, a
+    /// fleet finding, 2026-10-26: `ahead = 32` on main refused every bay command on every box,
+    /// and released the queue's places, until a person merged the fix around bay). The fallback
+    /// is said once on stderr and in every result ([`fallback`]).
     ///
     /// # Errors
     ///
-    /// The committed config does not parse, or git cannot say whether it exists.
+    /// No config among those commits loads, or git cannot say whether one exists.
     pub fn at(git: &crate::git::Git, commit: &str) -> Result<Self, String> {
+        let why = match Self::exactly_at(git, commit) {
+            Ok(config) => return Ok(config),
+            Err(why) => why,
+        };
+        let listed = git
+            .run(&[
+                "rev-list",
+                "--first-parent",
+                "-n",
+                &LAST_VALID_WITHIN.to_string(),
+                commit,
+                "--",
+                CONFIG_PATH,
+            ])
+            .map_err(|_| why.clone())?;
+        let (used, config) = listed
+            .lines()
+            .find_map(|at| {
+                Self::exactly_at(git, at)
+                    .ok()
+                    .map(|config| (at.to_owned(), config))
+            })
+            .ok_or_else(|| why.clone())?;
+        let mut said = FALLBACK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if said.is_none() {
+            eprintln!(
+                "bay: {why}; judging by the last valid {CONFIG_PATH}, at {used}, until a fix merges"
+            );
+            *said = Some(serde_json::json!({"broken_at": commit, "used": used, "why": why}));
+        }
+        Ok(config)
+    }
+
+    /// The config committed at `commit`, exactly; the default when that commit has none.
+    pub(crate) fn exactly_at(git: &crate::git::Git, commit: &str) -> Result<Self, String> {
         let path = format!("{commit}:{CONFIG_PATH}");
         // The config text at a commit never changes: read once per process (plan B2).
         let text = crate::memo::at(

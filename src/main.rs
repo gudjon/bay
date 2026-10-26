@@ -1047,6 +1047,25 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
     )
 }
 
+/// B2 for the config: a result judged by an older config than main's says so, as
+/// `detail.config_used` (`bay::config::fallback`).
+fn with_config_used(text: String) -> String {
+    let Some(used) = bay::config::fallback() else {
+        return text;
+    };
+    let Ok(mut document) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return text;
+    };
+    if document["detail"].is_null() {
+        document["detail"] = serde_json::json!({});
+    }
+    let Some(detail) = document["detail"].as_object_mut() else {
+        return text;
+    };
+    detail.insert("config_used".to_owned(), used);
+    serde_json::to_string(&document).map_or(text, |line| line + "\n")
+}
+
 fn render(result: &BayResult, json: bool) -> ExitCode {
     // G313 (ruling 2026-10-22, ch. 35 R5): a person at a terminal reads the plain sentence
     // first, with no document; a program reads stdout through a pipe, or passes `--json`, and
@@ -1056,7 +1075,7 @@ fn render(result: &BayResult, json: bool) -> ExitCode {
         return ExitCode::from(u8::try_from(result.decision.exit_code()).unwrap_or(20));
     }
     match result.to_json() {
-        Ok(text) => print!("{text}"),
+        Ok(text) => print!("{}", with_config_used(text)),
         Err(error) => {
             eprintln!("result serialization failed: {error}");
             return ExitCode::from(20);

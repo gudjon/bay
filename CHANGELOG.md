@@ -6,7 +6,12 @@
 - A change that no pre-merge check covers merges in the next push, ahead of the line.
 - A change on a red main's paths waits and is checked again once main is green.
 - A new revision keeps its change's place in line, the head's place too.
-- `bay status` describes only your own changes, reads every change in one batch, and lists ended views only.
+- `bay status` describes only your own changes, reads every change in one batch, and lists fewer views.
+- A change waiting without a place in line joins it at the start of a runner pass, not its end.
+- While main's `.bay/config.toml` does not load, bay uses the last valid one, and each result says so.
+- A change whose own `.bay/config.toml` does not load is refused before it waits in line.
+- The skill says how to keep the queue moving, and how to read a batch merge and a red main.
+
 ## 0.5.13
 
 - A runner releases every queue place whose operation has ended, anywhere in the line, each pass.
