@@ -259,9 +259,9 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 The order, learned in a fleet rollout:
 1. On every machine: `bay update`, then `bay install --machine`. It writes only the bay program and its guide, in
    every Claude config directory it finds (`bay.claudeConfigDirs` names others). It never writes hook entries, a
-   repository's settings or its Git config, so it is safe to run on a busy machine. On a machine pinned to one
-   version (`bay.updateVersion`), an install by another bay is refused `UPDATE_PINNED` and changes nothing: tests and
-   other agents never move a shared runner. Move the machine with its pin. A runner moves its own renamed config keys
+   repository's settings or its Git config, so it is safe to run on a busy machine. A pin (`bay.updateVersion`) is the
+   oldest version a machine runs: it follows every newer release, and an install by a bay below the pin or never
+   released is refused `UPDATE_PINNED`, so tests and other agents never move a shared runner. A runner moves its own renamed config keys
    when it starts.
 2. Put `[agent] product = "claude"` in `.bay/config.toml` on main. Each machine's `bay doctor` now reads hooks red
    until step 3 merges: that is expected, not a fault. After a bay update, doctor's hooks row names under `behind` any

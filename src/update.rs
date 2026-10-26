@@ -5,9 +5,14 @@
 //! run. A process's `BAY_UPDATE_VERSION` overrides the pin for that process, so one agent on a
 //! shared login can choose its own. A cloned repository never moves the box.
 //!
+//! A pin is the oldest version the box runs, never a ceiling (a fleet finding, 2026-10-26: a pin
+//! left behind held a box on an old release for days, and runners stayed on a release with a
+//! known fault after its fix was out). The box follows every newer release; a build that was
+//! never released never moves it ([`pin_allows`]).
+//!
 //! bay is 0.x, so every release is a pre-release, offered best effort, and every release is a
-//! candidate: there are no update channels. Resolves a target (an exact pin wins, then
-//! `--version`, then the newest release that has a build for this platform, skipping back past
+//! candidate: there are no update channels. Resolves a target (`--version`, else the
+//! newest release or the pin when the pin is newer, else the newest release that has a build for this platform, skipping back past
 //! a newer one that has none), downloads the release beside the installed binary
 //! (`$HOME/.local/bin/bay`, bay's one install path, whichever copy runs), verifies it all or
 //! nothing, unpacks only `bay` from the bytes it hashed, keeps it as that version's own file
@@ -343,12 +348,14 @@ fn run(request: &Request) -> Result<BayResult, Refusal> {
     let plan = resolve(&source, pin, request.version.clone())?;
 
     if let (Some(pin), Some(version)) = (&plan.pin, &request.version)
-        && pin != version
+        && compare(version, pin) == Ordering::Less
     {
         return Err(plan.refuse(
             Decision::Blocked,
             Reason::UpdatePinned,
-            format!("this box is pinned to {pin}; only its pin ({pin_name}) moves it"),
+            format!(
+                "this box runs bay {pin} or newer ({pin_name}); {version} is older, and only a lower pin moves it back"
+            ),
         ));
     }
     match compare(&plan.target, BAY) {
@@ -422,8 +429,9 @@ fn unsigned_for_us(refusal: &Refusal) -> bool {
             .is_some_and(|detail| detail["why"] == NOT_OUR_KEY)
 }
 
-/// A pin wins, then `--version`, then the newest release that has a build for this platform.
-/// Every release is a candidate: whether GitHub marks it a pre-release plays no part.
+/// `--version` wins, then the newest release that has a build for this platform, or the pin
+/// when no release is as new as it. A release list that cannot be read leaves a pinned box on
+/// its pin. Every release is a candidate: whether GitHub marks it a pre-release plays no part.
 fn resolve(source: &Source, pin: Option<String>, version: Option<String>) -> Result<Plan, Refusal> {
     let unavailable = |why: String| {
         Box::new(
@@ -431,7 +439,15 @@ fn resolve(source: &Source, pin: Option<String>, version: Option<String>) -> Res
                 .with_detail(json!({"installed": BAY, "why": why})),
         )
     };
-    if let Some(target) = pin.clone().or(version) {
+    let on_pin = |pin: &Option<String>| {
+        pin.clone().map(|target| Plan {
+            target,
+            pin: pin.clone(),
+            newest: None,
+            steps: Vec::new(),
+        })
+    };
+    if let Some(target) = version {
         return Ok(Plan {
             target,
             pin,
@@ -439,8 +455,28 @@ fn resolve(source: &Source, pin: Option<String>, version: Option<String>) -> Res
             steps: Vec::new(),
         });
     }
-    let platform =
-        platform().ok_or_else(|| unavailable("no release build for this platform".to_owned()))?;
+    let listed = list_newest(source);
+    let (newest, steps) = match listed {
+        Ok(listed) => listed,
+        Err(why) => return on_pin(&pin).ok_or_else(|| unavailable(why)),
+    };
+    if let Some(floor) = &pin
+        && compare(floor, &newest) == Ordering::Greater
+    {
+        return Ok(on_pin(&pin).expect("a pin"));
+    }
+    Ok(Plan {
+        target: newest,
+        pin,
+        newest: None,
+        steps,
+    })
+}
+
+/// The newest release that has a build for this platform, and the older ones, newest first,
+/// that are still newer than this bay (G242's steps).
+fn list_newest(source: &Source) -> Result<(String, Vec<String>), String> {
+    let platform = platform().ok_or_else(|| "no release build for this platform".to_owned())?;
     let archive = archive_name(&platform);
     let built = |release: &Release| release.assets.contains(&archive);
     // Read until a built release no newer than this one, so every release an update may step
@@ -449,8 +485,7 @@ fn resolve(source: &Source, pin: Option<String>, version: Option<String>) -> Res
         releases
             .iter()
             .any(|release| built(release) && compare(&release.version, BAY) != Ordering::Greater)
-    })
-    .map_err(unavailable)?;
+    })?;
     let mut versions: Vec<String> = releases
         .into_iter()
         .filter(built)
@@ -461,16 +496,21 @@ fn resolve(source: &Source, pin: Option<String>, version: Option<String>) -> Res
     let mut versions = versions.into_iter();
     let newest = versions
         .next()
-        .ok_or_else(|| unavailable(format!("no release has a build for {platform}")))?;
+        .ok_or_else(|| format!("no release has a build for {platform}"))?;
     let steps = versions
         .filter(|version| compare(version, BAY) == Ordering::Greater)
         .collect();
-    Ok(Plan {
-        target: newest,
-        pin,
-        newest: None,
-        steps,
-    })
+    Ok((newest, steps))
+}
+
+/// Whether a box whose pin is `pin` runs bay `version`: the pin itself, or a newer version that
+/// is the newest release the last check recorded. A build that was never released is never the
+/// newest release, so it never moves a pinned box.
+#[must_use]
+pub fn pin_allows(pin: &str, version: &str) -> bool {
+    version == pin
+        || compare(version, pin) == Ordering::Greater
+            && State::read().and_then(|state| state.newest).as_deref() == Some(version)
 }
 
 /// A published release: its version and the names of its assets.
@@ -678,7 +718,9 @@ pub struct State {
     pub install_error: Option<String>,
 }
 
-const DAY_S: u64 = 24 * 3600;
+/// How often a box asks for a new release: hourly, so a fix reaches the fleet the hour it is
+/// out (a fleet finding, 2026-10-26: a daily check left boxes a day behind).
+const CHECK_EVERY_S: u64 = 3600;
 
 impl State {
     fn path() -> Option<PathBuf> {
@@ -925,14 +967,14 @@ pub fn auto() {
     let mut state = State::read().unwrap_or_default();
     let now = now_s();
     // A check recorded in the future (a clock set back) does not hold off the next one.
-    if state.checked_at <= now && now - state.checked_at < DAY_S {
+    if state.checked_at <= now && now - state.checked_at < CHECK_EVERY_S {
         return;
     }
     // An invalid environment value starts no check; the next `bay update` names it.
     let Ok(settings) = BoxSettings::load() else {
         return;
     };
-    if !settings.auto || settings.version.is_some() {
+    if !settings.auto {
         return;
     }
     // Claimed and recorded before the check starts, so concurrent commands start at most one.
@@ -958,9 +1000,9 @@ pub fn auto() {
 }
 
 /// Doctor's `bay` row: the installed version, the box's pin, and the newest release from the
-/// last recorded check. Doctor makes no network call. A pinned box has no update available:
-/// only its pin moves it. An old channel setting that is still set is named, and the row stays
-/// green.
+/// last recorded check. Doctor makes no network call. A pin is a floor, so a pinned box has an
+/// update available whenever a newer release is out. An old channel setting that is still set
+/// is named, and the row stays green.
 #[must_use]
 pub fn doctor_row() -> Value {
     let settings = match BoxSettings::load() {
@@ -981,8 +1023,7 @@ pub fn doctor_row() -> Value {
         ));
     }
     if let Some(newest) = state.and_then(|state| state.newest) {
-        row["update_available"] =
-            json!(pin.is_none() && compare(&newest, BAY) == Ordering::Greater);
+        row["update_available"] = json!(compare(&newest, BAY) == Ordering::Greater);
         row["newest"] = json!(newest);
     }
     if let Some(error) = State::read().and_then(|state| state.install_error) {

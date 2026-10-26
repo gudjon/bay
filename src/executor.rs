@@ -84,6 +84,11 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             Ok(repo) => repo,
             Err(error) => return error.into_result(),
         };
+        // A fleet finding (2026-10-26): a runner is the one bay that runs for days, so it asks
+        // for a new release itself, at most hourly and in the background, like any command.
+        if !once {
+            crate::update::auto();
+        }
         // A release that could not be pushed never stops the supervisor, which every queued
         // operation depends on: it is reported and tried again on the next pass (§ 6, § 9a).
         let mut seen = Seen::default();
@@ -102,26 +107,27 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             Err(message) => return BayResult::failed(message),
         };
         // Between passes, never inside an operation: the re-exec point.
-        if !once && binary.changed() {
-            match binary
+        if !once && (binary.changed() || binary.holding()) {
+            // A pin is a floor: a runner moves to its pin or a newer release, never to a build
+            // that was never released, and never when the pin cannot be read.
+            if let Some(next) = binary
                 .version()
                 .filter(|_| moves && binary.takes_arguments())
             {
-                // A pin is one version (owner ruling 2026-10-24, BACKLOG 67): a runner moves only
-                // to the binary its pin names, and never when the pin cannot be read.
-                Some(next) => match pinned_elsewhere(&next) {
-                    None => {
-                        return BayResult::ok(json!({"ran": ran, "reexec": {
-                            "from": crate::version::BAY,
-                            "to": next,
-                            "path": binary.path,
-                        }}));
-                    }
-                    Some(pin) => eprintln!("bay runner: {}", binary.pinned(&next, &pin)),
-                },
-                None => eprintln!("bay runner: {}", binary.stays()),
+                let Some(pin) = pinned_elsewhere(&next) else {
+                    return BayResult::ok(json!({"ran": ran, "reexec": {
+                        "from": crate::version::BAY,
+                        "to": next,
+                        "path": binary.path,
+                    }}));
+                };
+                if binary.hold() {
+                    eprintln!("bay runner: {}", binary.pinned(&next, &pin));
+                }
+            } else {
+                eprintln!("bay runner: {}", binary.stays());
+                binary.accept();
             }
-            binary.accept();
         }
         if once {
             let mut detail = json!({"ran": ran});
@@ -171,13 +177,14 @@ fn below_floor(line: &str) -> Option<BayResult> {
 }
 
 /// The pin that keeps this runner off bay `next`: the box's pin (`BAY_UPDATE_VERSION`, else
-/// `bay.updateVersion`) when it names another version, or why the pin cannot be read. `None`
-/// when no pin is set, or the pin is `next`.
+/// `bay.updateVersion`) when it does not allow `next` ([`crate::update::pin_allows`]: the pin
+/// itself, or the newest release above it), or why the pin cannot be read. `None` when no pin
+/// is set, or the pin allows `next`.
 fn pinned_elsewhere(next: &str) -> Option<String> {
     match crate::update::BoxSettings::load() {
         Ok(settings) => settings
             .version
-            .filter(|pin| pin != next)
+            .filter(|pin| !crate::update::pin_allows(pin, next))
             .map(|pin| format!("this box is pinned to bay {pin}")),
         Err(why) => Some(format!("the pin cannot be read ({why})")),
     }
@@ -213,20 +220,44 @@ pub fn reexec(result: &BayResult) {
 struct Binary {
     path: Option<PathBuf>,
     stamp: Option<(u64, Option<std::time::SystemTime>, u64)>,
+    /// The file a pin kept this runner off, asked about again each pass: a pin that changes
+    /// later moves the runner then (a fleet finding, 2026-10-26: runners told once stayed on an
+    /// old release after their pin moved past it).
+    held: Option<(u64, Option<std::time::SystemTime>, u64)>,
 }
 
 impl Binary {
     fn now() -> Self {
         let path = std::env::current_exe().ok();
         let stamp = path.as_deref().and_then(stamp);
-        Self { path, stamp }
+        Self {
+            path,
+            stamp,
+            held: None,
+        }
     }
 
-    /// The file at the path is another one now (inode, or modification time and size).
+    /// The file at the path is another one now (inode, or modification time and size), and not
+    /// the one a pin keeps this runner off.
     fn changed(&self) -> bool {
-        self.path
-            .as_deref()
-            .is_some_and(|path| stamp(path) != self.stamp)
+        self.path.as_deref().is_some_and(|path| {
+            let now = stamp(path);
+            now != self.stamp && (self.held.is_none() || now != self.held)
+        })
+    }
+
+    /// The file at the path is the one a pin kept this runner off.
+    fn holding(&self) -> bool {
+        self.held.is_some() && self.path.as_deref().and_then(stamp) == self.held
+    }
+
+    /// Records the file now at the path as the one its pin keeps this runner off; whether it
+    /// is a new one, to be told.
+    fn hold(&mut self) -> bool {
+        let now = self.path.as_deref().and_then(stamp);
+        let new = self.held != now;
+        self.held = now;
+        new
     }
 
     /// The version the file at the path answers now (`bay --version`); `None` when it does not
@@ -271,7 +302,7 @@ impl Binary {
             .as_deref()
             .map_or_else(String::new, |path| path.display().to_string());
         format!(
-            "{path} is bay {next}, but {pin}; this runner keeps running bay {} until it is restarted",
+            "{path} is bay {next}, but {pin}; this runner keeps running bay {} until its pin allows bay {next}",
             crate::version::BAY
         )
     }

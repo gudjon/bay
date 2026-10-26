@@ -46,13 +46,13 @@ fn the_bay_row_names_version_newest_and_pin() {
     assert_eq!(bay["newest"], "9.1.0", "{bay}");
     assert_eq!(bay["update_available"], true, "{bay}");
 
-    // A pinned box has no update available: only the pin moves it.
+    // A pin is a floor: a pinned box has an update available once a newer release is out.
     test_box.git_ok(&repo, &["config", "--global", "bay.updateVersion", "9.0.0"]);
     let (_, result) = result_json(test_box.bay(&repo).arg("doctor"));
     let bay = row(&result, "bay");
     assert_eq!(bay["pin"], "9.0.0", "{bay}");
     assert_eq!(bay["pin_source"], "git config", "{bay}");
-    assert_eq!(bay["update_available"], false, "{bay}");
+    assert_eq!(bay["update_available"], true, "{bay}");
 
     // A process's environment wins over the box's config, and the row says so.
     let (_, result) = result_json(

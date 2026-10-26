@@ -1,9 +1,14 @@
 # Changelog
 
-## 0.5.10
+## 0.5.11
 
 - `bay status` describes at most 20 changes, yours first, and names the rest, so an agent can read it whole.
 - The next `bay start` releases a clean view of an ended change at once, not after the retention window.
+- A pin (`bay.updateVersion`) is now the oldest version a machine runs; it follows every newer release.
+- A machine checks for a new release hourly, and a runner checks too.
+- A runner whose pin moves past a new binary moves to it at its next pass.
+- While main's own policy is invalid, a change waits instead of being refused, and merges once it is fixed.
+- A slow heartbeat never stalls copying a check's files.
 
 ## 0.5.9
 

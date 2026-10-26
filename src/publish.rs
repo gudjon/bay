@@ -1526,6 +1526,13 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     {
         return Ok(waiting);
     }
+    // While main's own policy is invalid, a change that cannot fix it waits without a place,
+    // so a fix behind it reaches the head.
+    if ctx.record.lane.is_none()
+        && let Some(waiting) = main_policy_invalid(ctx, op_id, &revision, &trunk)?
+    {
+        return Ok(waiting);
+    }
     // § 6: while a queue is live only its head runs; anyone else holds a place and publishes
     // nothing. With a throughput lever on, it is checked ahead of its turn (`crate::throughput`).
     // NEW-4: a lane change only checks, so it never reserves a place, and never waits for one.
@@ -5604,6 +5611,54 @@ fn wait_for_worker(
     )?;
     ctx.push_chain();
     Ok(waiting)
+}
+
+/// A fleet finding (2026-10-26: an invalid policy merged to main by hand refused every head
+/// for half an hour, and each refused change waited for its author to merge it again): while
+/// the policy on main itself breaks a validity rule, a change that does not touch the policy
+/// is not refused. Nothing can judge it, so it waits with `POLICY_INVALID`, holds no queue
+/// place, released as `policy_invalid` ([`wait_unplaced`]), and is checked once main's policy
+/// is fixed. A change under `.bay/` goes on, since it may be the fix, and is judged as before.
+fn main_policy_invalid(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Option<BayResult>, String> {
+    let op = ctx.op(op_id);
+    if op.state.is_terminal() || op.state == OpState::Blocked {
+        return Ok(None);
+    }
+    let git = &ctx.repo.git;
+    let Err(policy::LoadError::Invalid(why)) = policy::load_at(git, trunk) else {
+        return Ok(None);
+    };
+    let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
+        return Ok(None);
+    };
+    let changed = check::changed_paths(git, &base, revision)?;
+    if ctx.repair.is_some() || changed.iter().any(|path| path.starts_with(".bay/")) {
+        return Ok(None);
+    }
+    let mut result = BayResult::refused(Decision::Queued, Reason::PolicyInvalid)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(json!({
+            "policy_at": trunk,
+            "policy": "main",
+            "why": why,
+            "waits": "main's own rules have a mistake; this change is checked once they are fixed, with no step from you",
+        }));
+    result.waiting_for = Some("policy".to_owned());
+    wait_unplaced(
+        ctx,
+        op_id,
+        revision,
+        Reason::PolicyInvalid,
+        "policy_invalid",
+        &format!("waits {op_id}: main's policy has a mistake"),
+    )?;
+    Ok(Some(result))
 }
 
 /// A fleet finding (2026-10-26): a runner whose box does not serve an environment a check of

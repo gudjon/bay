@@ -151,11 +151,9 @@ fn a_plain_start_after_a_landing_opens_the_next_generation() {
     );
     assert_eq!(trailer.trim(), first_id);
 
-    // Each generation lands once: the first change's view lands nothing again.
-    std::fs::write(first_view.join("src/late.rs"), "fn late() {}\n").unwrap();
-    let (code, again) = result_json(test_box.bay(&first_view).args(["merge", "--wait"]));
-    assert_eq!(code, 10, "{again}");
-    assert_eq!(again["reason"], "CHANGE_ALREADY_MERGED", "{again}");
+    // Each generation lands once: the first change's view, merged and clean, was released when
+    // the second started, so nothing can land from it again.
+    assert!(!first_view.exists(), "{}", first_view.display());
     assert_eq!(test_box.trunk_change_ids(&remote).len(), 2);
 
     // --new is still accepted after a landing, and does what a plain start does.

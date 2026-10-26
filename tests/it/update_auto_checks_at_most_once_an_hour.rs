@@ -1,8 +1,8 @@
-//! Auto-update: at most one check a day, from `status` and `doctor` only, in the background.
+//! Auto-update: at most one check an hour, from `status` and `doctor` only, in the background.
 //!
 //! `DESIGN` (the binary's lifecycle, auto-update). The check never changes the command's
-//! result or exit code; `BAY_DISABLE_AUTOUPDATE=1`, the box's `bay.updateAuto = false` and a
-//! box pin (global config or the process's `BAY_UPDATE_VERSION`) each keep it from running, and a repository's `[update]` keys never do; the hook
+//! result or exit code; `BAY_DISABLE_AUTOUPDATE=1` and the box's `bay.updateAuto = false` each
+//! keep it from running, and a pin, a floor, never does, nor a repository's `[update]` keys; the hook
 //! never runs it. The fixture release is the one of G50.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -18,6 +18,7 @@ use release_fixture::{Build, Fixture};
 
 const NEWER: &str = "9.0.0";
 const DAY_S: u64 = 24 * 3600;
+const HOUR_S: u64 = 3600;
 
 /// `bay doctor` in `repo`: its exit code and stdout.
 fn doctor(fixture: &Fixture, repo: &std::path::Path, disabled: bool) -> (i32, String) {
@@ -74,24 +75,27 @@ fn doctor_updates_in_the_background_without_changing_its_result() {
 }
 
 #[test]
-fn status_checks_once_a_day() {
+fn status_checks_once_an_hour() {
     let fixture = Fixture::new();
     // The newest release is the installed version, so a check changes nothing on disk.
     fixture.list(&[(bay::version::BAY, false)]);
     let repo = fixture.repo("");
 
-    let an_hour_ago = fixture.checked_ago(3600);
+    let ten_minutes_ago = fixture.checked_ago(600);
     let _ = fixture.bay(&repo).arg("status").output_busy();
     assert_eq!(
         checked_at(&fixture),
-        Some(an_hour_ago),
-        "not due within a day"
+        Some(ten_minutes_ago),
+        "not due within an hour"
     );
 
-    let two_days_ago = fixture.checked_ago(2 * DAY_S);
+    let two_hours_ago = fixture.checked_ago(2 * HOUR_S);
     let _ = fixture.bay(&repo).arg("status").output_busy();
     let checked = checked_at(&fixture).unwrap();
-    assert!(checked > two_days_ago + DAY_S, "due after a day: {checked}");
+    assert!(
+        checked > two_hours_ago + HOUR_S,
+        "due after an hour: {checked}"
+    );
     eventually("the background check records the newest release", || {
         fixture
             .state()
@@ -101,7 +105,7 @@ fn status_checks_once_a_day() {
 }
 
 #[test]
-fn the_switches_and_a_pin_keep_the_check_from_running() {
+fn the_switches_keep_the_check_from_running_and_a_pin_does_not() {
     let fixture = Fixture::new();
     fixture.release(NEWER, NEWER, None);
     fixture.list(&[(NEWER, false)]);
@@ -119,8 +123,9 @@ fn the_switches_and_a_pin_keep_the_check_from_running() {
         .output_busy();
     assert_eq!(checked_at(&fixture), Some(due));
 
-    // The box's switch and the box's pin keep it from running.
-    for (key, value) in [("bay.updateAuto", "false"), ("bay.updateVersion", NEWER)] {
+    // The box's switch keeps it from running.
+    {
+        let (key, value) = ("bay.updateAuto", "false");
         let fixture = Fixture::new();
         fixture.release(NEWER, NEWER, None);
         fixture.list(&[(NEWER, false)]);
@@ -133,9 +138,9 @@ fn the_switches_and_a_pin_keep_the_check_from_running() {
         fixture.assert_untouched();
     }
 
-    // A pin in the process's environment holds the box still too, and an invalid one starts
-    // no check.
-    for value in [NEWER, "not-a-version"] {
+    // An invalid pin in the process's environment starts no check.
+    {
+        let value = "not-a-version";
         let fixture = Fixture::new();
         fixture.release(NEWER, NEWER, None);
         fixture.list(&[(NEWER, false)]);

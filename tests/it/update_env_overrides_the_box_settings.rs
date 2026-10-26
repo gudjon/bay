@@ -1,5 +1,5 @@
 //! A process's `BAY_UPDATE_VERSION` overrides the box's global Git config `bay.updateVersion`
-//! for that process; with no pin, `--version` picks the target. On a shared login every agent
+//! for that process; `--version` picks the target, and a pin is the oldest it may be. On a shared login every agent
 //! shares one global config, so its supervisor chooses for it in its environment. A set
 //! variable that is not a version is refused by name, never ignored. The fixture release is the
 //! one of G50.
@@ -41,12 +41,13 @@ fn the_env_pin_wins_over_the_box_pin() {
     fixture.box_config("bay.updateVersion", NEWER);
     let env = [("BAY_UPDATE_VERSION", NEWEST)];
 
+    // A pin is a floor: the box goes to the newest release above it.
     let (code, result) = update(&fixture, &env, &["--check"]);
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["detail"]["target"], NEWEST, "{result}");
+    assert_eq!(result["detail"]["target"], RC, "{result}");
     assert_eq!(result["detail"]["pinned"], NEWEST, "{result}");
 
-    // A target off the env pin, even the box's own pin, is refused naming the env pin.
+    // A target below the env pin, even the box's own pin, is refused naming the env pin.
     let (code, result) = update(&fixture, &env, &["--version", NEWER]);
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "UPDATE_PINNED", "{result}");
@@ -59,9 +60,10 @@ fn the_env_pin_wins_over_the_box_pin() {
     fixture.assert_untouched();
 
     // Without the variable, the box's pin holds and is named as config.
-    let (code, result) = update(&fixture, &[], &["--version", NEWEST]);
+    fixture.box_config("bay.updateVersion", NEWEST);
+    let (code, result) = update(&fixture, &[], &["--version", NEWER]);
     assert_eq!(code, 10, "{result}");
-    assert_eq!(result["detail"]["pinned"], NEWER, "{result}");
+    assert_eq!(result["detail"]["pinned"], NEWEST, "{result}");
     let why = result["detail"]["why"].as_str().unwrap();
     assert!(why.contains("bay.updateVersion"), "{why}");
     assert!(!why.contains("BAY_UPDATE_VERSION"), "{why}");

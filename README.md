@@ -128,7 +128,7 @@ not store it.</sub>
 
 - **Free.** MIT licence, no paid tier, no account. Use it in a company of any size.
 - **Your code stays with you.** bay has no server and sends no telemetry. It talks to your own Git
-  remote. Besides that, it only downloads its own releases from GitHub, at most once a day;
+  remote. Besides that, it only downloads its own releases from GitHub, at most once an hour;
   `git config --global bay.updateAuto false` turns that off.
 - **Small enough to read.** One Rust program, five direct dependencies (`clap`, `serde`, `serde_json`,
   `sha2`, `toml`), and `unsafe_code = "forbid"`. Ask your coding agent to audit it:

@@ -519,14 +519,28 @@ fn stream(
             }
         })
     };
-    let written = write_all(
-        &mut BufReader::with_capacity(1 << 16, stdout),
-        blobs,
-        dir,
-        deadline,
-        links,
-        tick,
-    );
+    // A fleet finding (2026-10-26): the heartbeat may wait on the network for minutes. Run on
+    // the thread that reads cat-file, it let cat-file's pipe fill, and a runner holding the
+    // head froze. So the files are written on a thread of their own, and `tick` runs here.
+    let written = std::thread::scope(|scope| {
+        let reader = scope.spawn(move || {
+            write_all(
+                &mut BufReader::with_capacity(1 << 16, stdout),
+                blobs,
+                dir,
+                deadline,
+                links,
+                &mut || {},
+            )
+        });
+        while !reader.is_finished() {
+            tick();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        reader
+            .join()
+            .unwrap_or_else(|_| Err(Unmade::Failed("the file writer stopped".to_owned())))
+    });
     done.store(true, Ordering::SeqCst);
     let _ = watchdog.join();
     if let Ok(mut child) = child.lock() {
@@ -792,6 +806,28 @@ mod tests {
         let meta = std::fs::symlink_metadata(plain.join("link")).unwrap();
         assert!(!meta.is_symlink());
         assert_eq!(std::fs::read(plain.join("link")).unwrap(), b"lf.txt");
+    }
+
+    /// A heartbeat that waits, as one on a slow network does, never holds up the reading of
+    /// cat-file: the tree is written before the deadline however long each beat takes.
+    #[test]
+    fn a_slow_heartbeat_never_stops_the_files_being_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = repository(&dir.path().join("repo"));
+        for n in 0..40 {
+            add(
+                &git,
+                &format!("f{n}.txt"),
+                format!("{n}\n").as_bytes(),
+                "100644",
+            );
+        }
+        let commit = commit_all(&git);
+        let out = dir.path().join("out");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut slow = || std::thread::sleep(Duration::from_millis(400));
+        materialize(&git, &commit, None, &out, deadline, &mut slow).unwrap();
+        assert_eq!(std::fs::read(out.join("f39.txt")).unwrap(), b"39\n");
     }
 
     /// A path list keeps what it covers: a directory entry what lies under it, never a sibling

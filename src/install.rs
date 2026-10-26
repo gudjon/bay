@@ -291,11 +291,13 @@ fn pinned_elsewhere(target: &Path) -> Result<Option<BayResult>, String> {
     let running = std::env::current_exe()
         .ok()
         .and_then(|path| path.canonicalize().ok());
-    if pin == crate::version::BAY || running.is_some() && running == target.canonicalize().ok() {
+    if crate::update::pin_allows(&pin, crate::version::BAY)
+        || running.is_some() && running == target.canonicalize().ok()
+    {
         return Ok(None);
     }
     let why = format!(
-        "this box is pinned to bay {pin} ({}); this is bay {}, so install leaves {} as it is: only the pin moves the box",
+        "this box is pinned to bay {pin} ({}); this is bay {}, so install leaves {} as it is: the box runs its pin or a newer release",
         settings.pin_name(),
         crate::version::BAY,
         target.display()
