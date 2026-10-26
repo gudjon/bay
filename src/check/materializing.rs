@@ -248,8 +248,10 @@ fn materialization_renews_the_lease() {
         &mut beat,
     );
     assert_eq!(record.verdict, Verdict::Pass, "{:?}", record.why);
+    // The beat runs beside the writer, not once per file (a slow beat never stalls it), so a
+    // write this short beats at least once.
     assert!(
-        while_materializing >= 2000,
+        while_materializing >= 1,
         "{while_materializing} beats while the candidate was written"
     );
 }

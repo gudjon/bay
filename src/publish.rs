@@ -1573,6 +1573,7 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     });
     if let Some(at) = seq
         && !given_up
+        && holds_place(ctx, op_id)
         && !crate::queue::Queue::read(ctx.repo)?.released.contains(&at)
     {
         let reason = match &outcome {
@@ -1602,6 +1603,23 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
         let _ = crate::queue::release(ctx.repo, signer.as_ref(), at, op_id, &reason);
     }
     outcome
+}
+
+/// Whether this process may give the head's place back after its run of `op_id`: the remote's
+/// operation has ended, or this process's claim still stands (its epoch and its name). A fleet
+/// finding (2026-10-26): a runner whose head another runner had taken over released the place
+/// as `failed` when its own run ended, and a head whose check had passed was never published.
+/// The runner that holds the claim releases it.
+fn holds_place(ctx: &mut Ctx, op_id: &str) -> bool {
+    if ctx.refetch().is_err() {
+        return true;
+    }
+    let name = ctx.executor_name();
+    ctx.find_op(op_id).is_none_or(|op| {
+        op.state.is_terminal()
+            || op.state == OpState::Blocked
+            || (op.epoch == ctx.my_epoch && op.owner.as_deref() == Some(name.as_str()))
+    })
 }
 
 /// A fault ended this executor's run of `op_id` after its claim (§ 9a): the claim is given
