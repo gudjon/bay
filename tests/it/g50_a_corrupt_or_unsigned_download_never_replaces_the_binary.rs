@@ -136,18 +136,20 @@ fn a_target_off_the_pin_is_refused_pinned() {
     fixture.release("9.1.0", "9.1.0", None);
     fixture.list(&[("9.1.0", false), (NEWER, false)]);
     let repo = fixture.repo("");
-    fixture.box_config("bay.updateVersion", NEWER);
 
-    let (code, result) = fixture.update(&repo, &["--version", "9.1.0"]);
+    // A pin is a floor: a version below it is refused.
+    fixture.box_config("bay.updateVersion", "9.1.0");
+    let (code, result) = fixture.update(&repo, &["--version", NEWER]);
     assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "UPDATE_PINNED");
-    assert_eq!(result["detail"]["pinned"], NEWER);
+    assert_eq!(result["detail"]["pinned"], "9.1.0");
     fixture.assert_untouched();
 
-    // The pin wins over the newest release.
+    // The newest release above the pin wins over the pin.
+    fixture.box_config("bay.updateVersion", NEWER);
     let (code, result) = fixture.update(&repo, &["--check"]);
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["detail"]["target"], NEWER);
+    assert_eq!(result["detail"]["target"], "9.1.0");
     fixture.assert_untouched();
 }
 
@@ -176,11 +178,12 @@ fn a_repository_never_moves_the_box() {
     assert_eq!(result["detail"]["target"], NEWER);
     assert_eq!(result["detail"]["pinned"], serde_json::Value::Null);
 
-    // The box's own pin does move it.
+    // The box's own pin is read, as its floor: below the newest release, it moves nothing.
     fixture.box_config("bay.updateVersion", "0.0.1");
     let (code, result) = fixture.update(&repo, &["--check"]);
     assert_eq!(code, 0, "{result}");
-    assert_eq!(result["detail"]["target"], "0.0.1");
+    assert_eq!(result["detail"]["target"], NEWER);
+    assert_eq!(result["detail"]["pinned"], "0.0.1");
     fixture.assert_untouched();
 }
 

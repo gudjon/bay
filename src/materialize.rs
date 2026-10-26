@@ -93,9 +93,245 @@ pub fn materialize(
     if blobs.is_empty() {
         return Ok(());
     }
+    let store = Store::open(git);
+    let blobs = match &store {
+        Some(store) => store.link_all(git, blobs, dir, deadline, tick)?,
+        None => blobs,
+    };
+    if blobs.is_empty() {
+        return Ok(());
+    }
     prefetch(git, commit, &blobs, deadline)?;
     tick();
-    stream(git, &blobs, dir, deadline, links, tick)
+    stream(git, &blobs, dir, deadline, links, tick)?;
+    if let Some(store) = &store {
+        store.keep_all(&blobs, dir);
+    }
+    Ok(())
+}
+
+/// A fleet finding (2026-10-26): a check whose tree is the whole repository wrote ~4 GB for
+/// every candidate and its base, about six minutes each on a runner, and the whole queue waited
+/// on it. So each file's bytes are kept once, in the repository's own store
+/// (`<common dir>/bay/blobs`), and a tree is made of hard links to them: a file is written once
+/// per box, never once per tree.
+///
+/// A kept file is read-only and carries a fixed modification time, and it is used only while
+/// its size and time are still those: a check that writes to a file of its tree fails to (it
+/// may replace the file, never change the kept one), and one that changes a kept file anyway
+/// leaves an entry no later tree uses. A link that cannot be made (another filesystem, an
+/// inode's link limit) leaves that file to be written as before.
+#[cfg(unix)]
+struct Store {
+    dir: PathBuf,
+}
+
+/// The modification time every kept file carries: 2000-01-01, which no write leaves.
+#[cfg(unix)]
+const KEPT_AT: Duration = Duration::from_hours(262_968);
+
+/// How often unused kept files (no tree links them) are removed.
+#[cfg(unix)]
+const PRUNE_EVERY: Duration = Duration::from_secs(3600);
+
+#[cfg(unix)]
+impl Store {
+    /// The repository's store, made if it is absent; `None` when it cannot be.
+    fn open(git: &Git) -> Option<Self> {
+        let common = git.common_dir().ok()?;
+        let dir = Path::new(&common).join("bay").join("blobs");
+        std::fs::create_dir_all(&dir).ok()?;
+        let store = Self { dir };
+        store.prune();
+        Some(store)
+    }
+
+    /// Where `blob`'s bytes are kept: by id, and apart for an executable one.
+    fn entry(&self, blob: &Entry) -> PathBuf {
+        let suffix = if blob.mode == Mode::Executable {
+            ".x"
+        } else {
+            ""
+        };
+        self.dir
+            .join(&blob.oid[..2.min(blob.oid.len())])
+            .join(format!("{}{suffix}", blob.oid))
+    }
+
+    /// Links into place under `dir` every blob of `blobs` the store holds intact; returns the
+    /// rest, which are written as before. Symbolic links are never kept.
+    fn link_all(
+        &self,
+        git: &Git,
+        blobs: Vec<Entry>,
+        dir: &Path,
+        deadline: Instant,
+        tick: &mut dyn FnMut(),
+    ) -> Result<Vec<Entry>, Unmade> {
+        let sizes = sizes(git, &blobs, deadline)?;
+        let mut rest = Vec::new();
+        let mut made_parent: Option<PathBuf> = None;
+        for blob in blobs {
+            remaining(deadline)?;
+            let keepable = blob.mode != Mode::Symlink;
+            let entry = self.entry(&blob);
+            let intact = keepable
+                && sizes
+                    .get(blob.oid.as_str())
+                    .is_some_and(|size| kept_intact(&entry, *size, &blob));
+            if !intact {
+                rest.push(blob);
+                continue;
+            }
+            let place = blob.place(dir)?;
+            if let Some(parent) = place.parent()
+                && made_parent.as_deref() != Some(parent)
+            {
+                std::fs::create_dir_all(parent).map_err(|error| failed(parent, &error))?;
+                made_parent = Some(parent.to_path_buf());
+            }
+            if std::fs::hard_link(&entry, &place).is_err() {
+                rest.push(blob);
+            }
+            tick();
+        }
+        Ok(rest)
+    }
+
+    /// Keeps every file of `blobs` just written under `dir`: read-only, at [`KEPT_AT`], and
+    /// linked into the store. A file that cannot be kept stays as written.
+    fn keep_all(&self, blobs: &[Entry], dir: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        for blob in blobs.iter().filter(|blob| blob.mode != Mode::Symlink) {
+            let Ok(place) = blob.place(dir) else {
+                continue;
+            };
+            let kept = std::fs::File::open(&place).and_then(|file| {
+                file.set_modified(std::time::UNIX_EPOCH + KEPT_AT)?;
+                let mode = if blob.mode == Mode::Executable {
+                    0o555
+                } else {
+                    0o444
+                };
+                file.set_permissions(std::fs::Permissions::from_mode(mode))
+            });
+            if kept.is_err() {
+                continue;
+            }
+            let entry = self.entry(blob);
+            if let Some(parent) = entry.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if !kept_intact_any(&entry) {
+                let _ = std::fs::remove_file(&entry);
+            }
+            let _ = std::fs::hard_link(&place, &entry);
+        }
+    }
+
+    /// At most once per [`PRUNE_EVERY`], removes every kept file no tree links any more.
+    fn prune(&self) {
+        use std::os::unix::fs::MetadataExt as _;
+        let marker = self.dir.join(".pruned");
+        let due = std::fs::metadata(&marker)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_none_or(|age| age >= PRUNE_EVERY);
+        if !due || std::fs::write(&marker, b"").is_err() {
+            return;
+        }
+        let Ok(shards) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        for shard in shards.flatten() {
+            let Ok(files) = std::fs::read_dir(shard.path()) else {
+                continue;
+            };
+            for file in files.flatten() {
+                if file
+                    .metadata()
+                    .is_ok_and(|meta| meta.is_file() && meta.nlink() == 1)
+                {
+                    let _ = std::fs::remove_file(file.path());
+                }
+            }
+        }
+    }
+}
+
+/// Whether the kept file at `entry` still holds `blob` as it was kept: a read-only file of
+/// `size` bytes at [`KEPT_AT`], executable exactly when `blob` is.
+#[cfg(unix)]
+fn kept_intact(entry: &Path, size: u64, blob: &Entry) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::symlink_metadata(entry).is_ok_and(|meta| {
+        let mode = meta.permissions().mode();
+        meta.is_file()
+            && meta.len() == size
+            && meta.modified().ok() == Some(std::time::UNIX_EPOCH + KEPT_AT)
+            && mode & 0o222 == 0
+            && (mode & 0o111 != 0) == (blob.mode == Mode::Executable)
+    })
+}
+
+/// Whether a file is kept at `entry` that no write has touched since.
+#[cfg(unix)]
+fn kept_intact_any(entry: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt as _;
+    std::fs::symlink_metadata(entry).is_ok_and(|meta| {
+        meta.is_file()
+            && meta.modified().ok() == Some(std::time::UNIX_EPOCH + KEPT_AT)
+            && meta.permissions().mode() & 0o222 == 0
+    })
+}
+
+/// The size of each blob of `blobs` the store holds, by id, read without fetching any.
+#[cfg(unix)]
+fn sizes(
+    git: &Git,
+    blobs: &[Entry],
+    deadline: Instant,
+) -> Result<std::collections::BTreeMap<String, u64>, Unmade> {
+    let out = git
+        .run_bytes_for(
+            &["cat-file", "--batch-check=%(objectname) %(objectsize)"],
+            &[NO_REPLACE, ("GIT_NO_LAZY_FETCH", "1")],
+            Some(&lines(blobs.iter().map(|blob| blob.oid.as_str()))),
+            remaining(deadline)?,
+        )
+        .map_err(|error| from_git(&error))?;
+    Ok(String::from_utf8_lossy(&out)
+        .lines()
+        .filter_map(|line| {
+            let (oid, size) = line.split_once(' ')?;
+            Some((oid.to_owned(), size.parse().ok()?))
+        })
+        .collect())
+}
+
+/// Where hard links and read-only files are not the platform's, every tree is written whole.
+#[cfg(not(unix))]
+struct Store;
+
+#[cfg(not(unix))]
+impl Store {
+    fn open(_: &Git) -> Option<Self> {
+        None
+    }
+
+    fn link_all(
+        &self,
+        _: &Git,
+        blobs: Vec<Entry>,
+        _: &Path,
+        _: Instant,
+        _: &mut dyn FnMut(),
+    ) -> Result<Vec<Entry>, Unmade> {
+        Ok(blobs)
+    }
+
+    fn keep_all(&self, _: &[Entry], _: &Path) {}
 }
 
 /// In a partial clone, fetches every blob of `blobs` the store lacks in one batched fetch per
@@ -806,6 +1042,58 @@ mod tests {
         let meta = std::fs::symlink_metadata(plain.join("link")).unwrap();
         assert!(!meta.is_symlink());
         assert_eq!(std::fs::read(plain.join("link")).unwrap(), b"lf.txt");
+    }
+
+    /// A second tree of the same files is made of links to the first one's kept bytes, never
+    /// written again: the same inode, read-only, with the tree's bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_written_once_and_linked_into_every_later_tree() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let git = repository(&dir.path().join("repo"));
+        add(&git, "a.txt", b"one\n", "100644");
+        add(&git, "tools/run.sh", b"#!/bin/sh\n", "100755");
+        let commit = commit_all(&git);
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        materialize(&git, &commit, None, &first, far(), &mut || {}).unwrap();
+        materialize(&git, &commit, None, &second, far(), &mut || {}).unwrap();
+        for path in ["a.txt", "tools/run.sh"] {
+            let (one, two) = (
+                std::fs::metadata(first.join(path)).unwrap(),
+                std::fs::metadata(second.join(path)).unwrap(),
+            );
+            assert_eq!(one.ino(), two.ino(), "{path} is linked, not written again");
+            assert!(two.permissions().readonly(), "{path}");
+        }
+        assert_eq!(std::fs::read(second.join("a.txt")).unwrap(), b"one\n");
+        assert!(
+            std::fs::metadata(second.join("tools/run.sh"))
+                .unwrap()
+                .mode()
+                & 0o111
+                != 0
+        );
+    }
+
+    /// A kept file that a check changed anyway is never linked into a later tree: that tree
+    /// gets the tree's own bytes.
+    #[cfg(unix)]
+    #[test]
+    fn a_kept_file_changed_by_a_check_is_never_reused() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let git = repository(&dir.path().join("repo"));
+        add(&git, "a.txt", b"one\n", "100644");
+        let commit = commit_all(&git);
+        let first = dir.path().join("first");
+        materialize(&git, &commit, None, &first, far(), &mut || {}).unwrap();
+        let file = first.join("a.txt");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&file, b"two\n").unwrap();
+        let second = dir.path().join("second");
+        materialize(&git, &commit, None, &second, far(), &mut || {}).unwrap();
+        assert_eq!(std::fs::read(second.join("a.txt")).unwrap(), b"one\n");
     }
 
     /// A heartbeat that waits, as one on a slow network does, never holds up the reading of

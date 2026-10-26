@@ -7,8 +7,11 @@
 - A pin (`bay.updateVersion`) is now the oldest version a machine runs; it follows every newer release.
 - A machine checks for a new release hourly, and a runner checks too.
 - A runner whose pin moves past a new binary moves to it at its next pass.
-- While main's own policy is invalid, a change waits instead of being refused, and merges once it is fixed.
 - A slow heartbeat never stalls copying a check's files.
+- A check's tree links each file from one store per repository, so it is written once per machine.
+- A runner releases a head whose operation already ended between its own operations, not at its next pass.
+- A runner's pass skips changes that only wait far back in the line, so it reaches real work in minutes.
+- A queue place a runner cannot release is named in its journal.
 
 ## 0.5.9
 

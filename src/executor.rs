@@ -93,6 +93,11 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         // operation depends on: it is reported and tried again on the next pass (§ 6, § 9a).
         let mut seen = Seen::default();
         let unreleased = deadlines(&repo, &mut heads, &mut seen).err();
+        // A fleet finding (2026-10-26): a release the remote refused was reported only by
+        // `--once`, so a looping runner held a dead head for hours without a word.
+        if let Some(why) = unreleased.as_ref().filter(|_| !once) {
+            eprintln!("bay runner: a queue place could not be released: {why}");
+        }
         let mut notes = Vec::new();
         let mut advanced = Vec::new();
         let ran = match pass(
@@ -536,12 +541,13 @@ fn pass(
     crate::log::push(repo, &Keys::load(&repo.git).executor_name);
     notes.extend(early_conflicts(repo, &queue));
     let due = publish::retention_due(repo, &chains);
+    let reach = within_reach(repo, &queue);
     for record in &records {
         let id = record.id.as_str();
         let queued: Vec<String> = record
             .operations
             .iter()
-            .filter(|op| runs(op))
+            .filter(|op| runs(op) && reach(op, freed(&ran)))
             .map(|op| op.op_id.clone())
             .collect();
         if queued.is_empty() {
@@ -650,9 +656,25 @@ fn run_op(
 /// leases, so this runner takes it between two other operations; `None` when there is no head,
 /// it is `just` the operation this runner ran, or its chain moved within that time (a live holder
 /// heartbeats it while a check runs).
+///
+/// A head whose operation already ended is released here and now, never run (a fleet finding,
+/// 2026-10-26: a superseded operation of an abandoned change held the head for five hours, and
+/// each runner "took" it after every operation, ran nothing, and moved on).
 fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
     let head = Queue::read(repo).ok()?.head()?.clone();
     if head.op_id == just {
+        return None;
+    }
+    if let Some(reason) = finished_head(repo, &head) {
+        let signer = Keys::load(&repo.git).executor;
+        if let Err(why) =
+            crate::queue::release(repo, signer.as_ref(), head.seq, &head.op_id, &reason)
+        {
+            eprintln!(
+                "bay runner: queue place {} could not be released: {why}",
+                head.seq
+            );
+        }
         return None;
     }
     let tip = repo.remote_chain(&head.change).ok()?;
@@ -690,6 +712,44 @@ fn in_pass_order(chains: &mut [crate::change::HeldChain], queue: &Queue) {
 /// Whether a pass runs `op`: it is neither terminal nor blocked, or, G284, it waits for a
 /// person's approval ([`publish::awaits_approval`]), which the pass asks again, so the approval
 /// lands it and nobody lands it a second time.
+/// Whether a pass has anything to do for operation `op` of change `id` (a fleet finding,
+/// 2026-10-26: a pass visited every one of 130 waiting changes, at several network round trips
+/// each, only to find each still waiting; a pass took twenty minutes, and a change with real
+/// work waited for it). An operation that holds a queue place beyond the head, the entries
+/// checked ahead of their turn and one batch, and only waits there, is left for a later pass:
+/// nothing can move it before the line reaches it.
+///
+/// `freed` is how many places this pass has ended so far: each moves the line up by one.
+fn within_reach(repo: &Repo, queue: &Queue) -> impl Fn(&crate::change::Operation, usize) -> bool {
+    let reach = 1 + repo.config.ahead() + repo.config.batch().map_or(0, |batch| batch.max);
+    let places: HashMap<String, usize> = queue
+        .entries
+        .values()
+        .filter(|entry| !queue.released.contains(&entry.seq))
+        .map(|entry| (entry.op_id.clone(), queue.position(entry.seq)))
+        .collect();
+    move |op, freed| {
+        let waits = matches!(op.state, OpState::Submitted | OpState::Admitted)
+            && op.unavailable.is_none()
+            && op.owner.is_none();
+        !waits
+            || places
+                .get(&op.op_id)
+                .is_none_or(|position| *position <= reach + freed)
+    }
+}
+
+/// How many operations of `ran` reached an outcome that gives up a queue place.
+fn freed(ran: &[Value]) -> usize {
+    ran.iter()
+        .filter(|row| {
+            row["decision"]
+                .as_str()
+                .is_some_and(|decision| !matches!(decision, "queued" | "ok"))
+        })
+        .count()
+}
+
 fn runs(op: &crate::change::Operation) -> bool {
     !op.state.is_terminal() && (op.state != OpState::Blocked || publish::awaits_approval(op))
 }

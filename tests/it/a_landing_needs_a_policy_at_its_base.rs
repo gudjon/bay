@@ -117,12 +117,9 @@ fn unchecked_beside_a_check_is_policy_invalid() {
     }
     let (test_box, repo, remote, trunk) = seeded(&files);
     let (_, view) = test_box.start_and_edit(&repo);
-    // G392: main's own mistake refuses nothing; the change waits for main's policy to be fixed.
     let (code, result) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
-    assert_eq!(code, 0, "{result}");
-    assert_eq!(result["decision"], "queued", "{result}");
+    assert_eq!(code, 10, "{result}");
     assert_eq!(result["reason"], "POLICY_INVALID", "{result}");
-    assert_eq!(result["waiting_for"], "policy", "{result}");
     assert!(result.to_string().contains("unchecked"), "{result}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
 }
