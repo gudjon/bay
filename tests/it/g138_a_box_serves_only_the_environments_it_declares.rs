@@ -239,3 +239,56 @@ fn a_head_its_box_cannot_serve_is_taken_by_one_that_can_with_a_queue_live() {
     both.sort();
     assert_eq!(landed, both, "the box that serves env-b merged both");
 }
+
+/// A fleet finding (2026-10-26): while a live runner whose box serves a head's environments is
+/// there, a box that does not serve them never claims the head. Before, it claimed it, found no
+/// worker and released the place, which sent the change to the back of the queue.
+#[test]
+fn a_box_that_cannot_serve_the_head_leaves_it_to_a_live_one_that_can() {
+    let test_box = TestBox::new();
+    let (first, repo, remote, _runs) = submitted(&test_box);
+    let (second, view) = test_box.start_and_edit(&repo);
+    std::fs::remove_file(view.join("src/new.rs")).unwrap();
+    std::fs::write(view.join("src/second.rs"), "fn second() {}\n").unwrap();
+    let e1 = executor(&test_box, &remote, "exec-a", "env-a");
+    let e2 = executor(&test_box, &remote, "exec-b", "env-b");
+    // E2's presence is fresh: it made a pass before the second change queued behind the first.
+    let _ = test_box
+        .bay_process(&e2)
+        .args(["--json", "runner", "run", "--once"])
+        .env("BAY_TEST_PAUSE_AT", "before-claim")
+        .env("BAY_TEST_PAUSE_FILE", test_box.path().join("never"))
+        .env("BAY_TEST_PAUSE_TIMEOUT_S", "2")
+        .output();
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    assert_eq!(code, 0, "{queued}");
+    let waited = test_box.bay_ok(&e1, &["runner", "run", "--once"]);
+    let log = test_box.git_bare(
+        &remote,
+        &["log", "--format=%s", &format!("refs/bay/changes/{first}")],
+    );
+    assert!(
+        !log.contains("by exec-a"),
+        "the box that cannot serve env-b claimed the head: {log}\n{waited}"
+    );
+    let released = test_box.git_bare(
+        &remote,
+        &[
+            "for-each-ref",
+            "--format=%(contents:subject)",
+            "refs/bay/queue-done/",
+        ],
+    );
+    assert!(!released.contains("unavailable"), "{released}");
+    for _ in 0..3 {
+        test_box.bay_ok(&e2, &["runner", "run", "--once"]);
+        if test_box.trunk_change_ids(&remote).len() == 2 {
+            break;
+        }
+    }
+    let mut landed = test_box.trunk_change_ids(&remote);
+    landed.sort();
+    let mut both = vec![first, second];
+    both.sort();
+    assert_eq!(landed, both, "the box that serves env-b merged both");
+}

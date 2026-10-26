@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.7
+
+- A runner never claims a queue head its box cannot serve while a live runner can; the head keeps its place.
+
 ## 0.5.6
 
 - `bay status` reads the runner logs and every chain once, in batches, so a long queue answers in seconds.

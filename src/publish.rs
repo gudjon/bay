@@ -1464,6 +1464,9 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
         Gate::Head(seq) => Some(seq),
         Gate::Free => None,
     };
+    if let Some(waiting) = served_elsewhere(ctx, op_id, &revision, &trunk)? {
+        return Ok(waiting);
+    }
     if let Some(report) = claim(ctx, op_id, &revision, &trunk)? {
         return Ok(report);
     }
@@ -5510,6 +5513,87 @@ fn wait_for_worker(
     )?;
     ctx.push_chain();
     Ok(waiting)
+}
+
+/// A fleet finding (2026-10-26): a runner whose box does not serve an environment a check of
+/// `op_id` runs in leaves the operation, unclaimed and in its place, to a live runner whose box
+/// serves them all, and writes nothing. Before, it claimed the queue head, found no worker and
+/// released the place, which sent the change to the back of the queue (33 changes in one night).
+/// `None` when this box serves them, or when no other live runner does: the operation then
+/// waits for a worker as before (§ 7), so a queue never stalls on an environment no one serves.
+fn served_elsewhere(
+    ctx: &Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &str,
+) -> Result<Option<BayResult>, String> {
+    let git = &ctx.repo.git;
+    let Ok(Some(policy)) = policy::load_at(git, trunk) else {
+        return Ok(None);
+    };
+    let served = check::Served::read(git);
+    let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
+        return Ok(None);
+    };
+    let changed = check::changed_paths(git, &base, revision)?;
+    let mut missing: Vec<String> = policy
+        .checks
+        .iter()
+        .filter(|entry| !entry.is_approval() && policy.requires(entry, &changed))
+        .filter(|entry| !served.serves(&entry.environment))
+        .map(|entry| entry.environment.clone())
+        .collect();
+    missing.sort();
+    missing.dedup();
+    if missing.is_empty() {
+        return Ok(None);
+    }
+    let elsewhere = live_runner_serving(ctx, &missing);
+    Ok(elsewhere.then(|| unavailable(ctx, op_id, &missing, None)))
+}
+
+/// Whether another runner's presence on the remote is live and declares every one of
+/// `environments` (one that declares none serves every one). Live is strict here: beaten within
+/// three of its cadences and half a minute, so a runner that stopped never holds a head for
+/// the hour its presence takes to read stale (a fleet finding, 2026-10-26).
+fn live_runner_serving(ctx: &Ctx, environments: &[String]) -> bool {
+    let git = &ctx.repo.git;
+    let prefix = crate::presence::PRESENCE_PREFIX;
+    if git
+        .run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            ctx.repo.remote(),
+            &format!("+{prefix}*:{prefix}*"),
+        ])
+        .is_err()
+    {
+        return false;
+    }
+    let me = crate::presence::presence_ref(&ctx.executor_name());
+    let Ok(listed) = git.run(&["for-each-ref", "--format=%(refname) %(objectname)", prefix]) else {
+        return false;
+    };
+    let now = crate::presence::reader_now();
+    listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, _)| *name != me)
+        .filter_map(|(_, commit)| crate::presence::record_at(git, commit).ok().flatten())
+        .any(|record| {
+            let cadence = record["cadence_s"].as_u64().unwrap_or(10);
+            let fresh = record["at"]
+                .as_str()
+                .and_then(crate::clock::unix_of)
+                .is_some_and(|at| now.saturating_sub(at) <= cadence * 3 + 30);
+            let declared = record["environments"]["declared"].as_array();
+            fresh
+                && (record["environments"]["source"] == "default"
+                    || environments.iter().all(|environment| {
+                        declared.is_some_and(|all| all.iter().any(|it| it == environment.as_str()))
+                    }))
+        })
 }
 
 /// An operation waiting for a worker (§ 6, § 7) is passed over with nothing written while this
