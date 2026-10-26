@@ -1,8 +1,9 @@
-//! G97: a view of an ended change is released after the retention window, and a view that holds
-//! newer or uncheckpointed work never is (`DESIGN` § 10; findings from a pilot that removed a landed view).
+//! G97: a view of an ended change is released, and a view that holds newer or uncheckpointed work
+//! never is (`DESIGN` § 10; findings from a pilot that removed a landed view).
 //!
 //! The next `bay start` on the machine removes each view whose change landed, was abandoned or
-//! ended `no_effect`, once its end is `[retention] window_s` or more ago, checking right before
+//! ended `no_effect`, at once (owner ruling 2026-10-26: `[retention] window_s` keeps the chain's
+//! records, never a view; a fleet's shared checkout held 574 views), checking right before
 //! that the view holds nothing newer than the revision the change ended with. The view's worktree
 //! and its journal both go, so `bay status` no longer lists it. A view with an edit, an untracked
 //! file or a commit of its own, a locked worktree, a directory that is no worktree, the view the
@@ -176,18 +177,19 @@ fn a_landed_view_is_released_and_every_view_with_work_or_in_use_is_kept() {
 }
 
 #[test]
-fn a_landed_view_inside_the_window_is_kept() {
+fn a_landed_view_is_released_without_waiting_for_the_retention_window() {
     let test_box = TestBox::new();
     let repo = seeded(&test_box, 86_400);
     let (clean, clean_view) = start_with(&test_box, &repo, "clean");
     land(&test_box, &clean_view);
 
     let started = test_box.bay_ok(&repo, &["start", "CARD-NEXT", "--paths", "src/"]);
-    assert!(started["detail"]["released_views"].is_null(), "{started}");
-    assert!(
-        clean_view.join("src/clean.rs").exists(),
-        "the landed view is kept"
+    assert_eq!(
+        started["detail"]["released_views"],
+        serde_json::json!([clean]),
+        "{started}"
     );
-    assert!(journal(&test_box, &repo, &clean).exists());
-    assert!(listed(&test_box, &repo, &clean));
+    assert!(!clean_view.exists(), "the landed view is released");
+    assert!(!journal(&test_box, &repo, &clean).exists());
+    assert!(!listed(&test_box, &repo, &clean));
 }

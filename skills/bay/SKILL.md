@@ -46,7 +46,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Remove a key, when the user asks: `rotated` keeps its past records valid, `revoked` (compromised) voids them all | `bay enrol --remove <class> <name> --reason rotated\|revoked` (signed by `bay.registryKey`; the last registry key is never removed) |
 | Give the change up, so another agent may adopt it | `bay abandon [<change>] [--why "<reason>"]` (default: the view's change; say why, e.g. where the work merged) |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
-| Read state, and main commits that did not merge through bay (`unattributed`; `by_writer` counts them per committer) | `bay status` (lists live changes only; `bay status <change>` reads any one, merged too) |
+| Read state, and main commits that did not merge through bay (`unattributed`; `by_writer` counts them per committer) | `bay status` (lists live changes only, at most 20 described, yours first; the rest are in `detail.more_changes`, and `bay status <change>` reads any one, merged too) |
 | See the flow: live changes by actor and their limit, merges this week, cycle time, queue wait and check time (p50, p90), the oldest live change, what waits for a yes | `bay status` (`detail.flow`) |
 | See each promotion target (`staging`): its tip, `drift`, `lag`, checks, freeze and the `promotable` commit | `bay status` (`detail.targets`) |
 | See whether main is held, by whom (`source`: `window` or `plugin`), why and until when | `bay status` (`detail.hold`) |

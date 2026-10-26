@@ -274,7 +274,11 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
             window: lane_window,
         })
     };
-    view::release_ended(repo, repo.config.retention_window(), &ended)
+    // Owner ruling 2026-10-26: a view of an ended change that holds nothing newer is released at
+    // once. Its work is on main or recorded on the chain; the retention window keeps the chain's
+    // records, never a view (a fleet's shared checkout held 574 views). A lane change keeps its
+    // own window.
+    view::release_ended(repo, std::time::Duration::ZERO, &ended)
 }
 
 /// The refusal of a start whose `--lane` the config at trunk does not declare, whose `--fixes`

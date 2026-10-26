@@ -95,3 +95,28 @@ fn a_listing_names_only_live_changes_and_fetches_once() {
     let named = test_box.bay_ok(&repo, &["status", &merged[0]]);
     assert_eq!(named["detail"]["changes"][0]["state"], "merged", "{named}");
 }
+
+/// A fleet finding (2026-10-26: a listing of 146 live changes ran to megabytes, and an agent reads
+/// it whole): a listing describes at most 20 changes, the reader's own first, and names the rest
+/// with how to read one.
+#[test]
+fn a_listing_describes_at_most_twenty_changes_and_names_the_rest() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &unchecked_files());
+    for n in 0..23 {
+        test_box.bay_ok(
+            &repo,
+            &["start", &format!("CARD-{n}"), "--paths", &format!("p{n}/")],
+        );
+    }
+    let (code, listed) = result_json(test_box.bay(&repo).arg("status"));
+    assert_eq!(code, 0, "{listed}");
+    let described = listed["detail"]["changes"].as_array().unwrap().len();
+    assert_eq!(described, 20, "{listed}");
+    assert_eq!(listed["detail"]["more_changes"]["count"], 3, "{listed}");
+    assert_eq!(
+        listed["detail"]["more_changes"]["read"], "bay status <change>",
+        "{listed}"
+    );
+}

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.10
+
+- `bay status` describes at most 20 changes, yours first, and names the rest, so an agent can read it whole.
+- The next `bay start` releases a clean view of an ended change at once, not after the retention window.
+
 ## 0.5.9
 
 - `bay status` reads each change's newest draft alone, never its whole chain, so long-lived changes stay fast.

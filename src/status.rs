@@ -158,6 +158,22 @@ fn listed(repo: &Repo, chain: &Chain, named: Option<String>) -> Result<Vec<Strin
     Ok(ids)
 }
 
+/// How many changes a listing describes; the rest are named in `more_changes`.
+const LISTED: usize = 20;
+
+/// The live changes a listing names but does not describe: how many, the first hundred ids, and
+/// how to read one. `null` when none is left out.
+fn more_changes(more: &[String]) -> Value {
+    if more.is_empty() {
+        return Value::Null;
+    }
+    json!({
+        "count": more.len(),
+        "ids": more.iter().take(100).collect::<Vec<_>>(),
+        "read": "bay status <change>",
+    })
+}
+
 /// Whether a change in `state` has ended for good.
 const fn ended(state: crate::change::ChangeState) -> bool {
     use crate::change::ChangeState;
@@ -201,15 +217,31 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     };
     let mut changes = Vec::new();
     let mut queued = 0;
+    // An agent reads this answer whole, so it has a budget (a fleet finding, 2026-10-26: a
+    // listing of 146 live changes ran to megabytes and minutes). At most LISTED changes are
+    // described, the reader's own first; the rest are named, and `bay status <change>` reads one.
+    let me = crate::change::current_actor(&repo.common_dir)
+        .ok()
+        .map(|actor| actor.name);
+    let mut records = Vec::new();
     for id in &ids {
         let (_, record) = chain.read(id).map_err(|error| error.message())?;
         queued += crate::presence::waiting(&record);
+        records.push(record);
+    }
+    records.sort_by_key(|record| me.as_deref() != Some(record.actor.name.as_str()));
+    let mut more = Vec::new();
+    for record in &records {
+        if changes.len() >= LISTED {
+            more.push(record.id.clone());
+            continue;
+        }
         let unsynced: Vec<&Receipt> = pending
             .iter()
             .map(|(_, receipt)| receipt)
-            .filter(|receipt| receipt.change == *id)
+            .filter(|receipt| receipt.change == record.id)
             .collect();
-        changes.push(describe(&repo, &record, &trunk, &unsynced, &read)?);
+        changes.push(describe(&repo, record, &trunk, &unsynced, &read)?);
     }
     // Red, flakes and post checks judge the evidence notes: fetched once here, never left to a
     // landed change's row (the listing names live changes only, the 0.5.3 status patch).
@@ -228,6 +260,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     let flow = crate::flow::flow(&repo, &trunk).unwrap_or_else(|why| json!({"unread": why}));
     let mut result = BayResult::ok(json!({
         "changes": changes,
+        "more_changes": more_changes(&more),
         "flakes": flakes,
         "flow": flow,
         "leftovers": leftovers,
