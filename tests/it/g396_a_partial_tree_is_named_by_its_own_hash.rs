@@ -32,7 +32,9 @@ fn trunk(test_box: &TestBox, extra: &str) -> (PathBuf, PathBuf) {
     let relay = test_box.relay(&format!("printf '%s\\n' \"$req\" >> '{}'", log.display()));
     let before = String::new()
         + "scratch=$(mktemp -d)\n"
-        + "hash=$(GIT_DIR=\"$scratch\" GIT_INDEX_FILE=\"$scratch/index\" sh -c 'git init -q --bare \"$GIT_DIR\" && git --work-tree=. add -A . && git write-tree')\n"
+        // The repository's object format, read from the length of the candidate's tree id.
+        + "format=sha1; case \"$req\" in *'\"tree\":\"'????????????????????????????????????????????????????????????????'\"'*) format=sha256 ;; esac\n"
+        + "hash=$(GIT_DIR=\"$scratch\" GIT_INDEX_FILE=\"$scratch/index\" FORMAT=\"$format\" sh -c 'git init -q --bare --object-format=\"$FORMAT\" \"$GIT_DIR\" && git --work-tree=. add -A . && git write-tree')\n"
         + "rm -rf \"$scratch\"\n"
         + "req=\"$hash|$(printf '%s' \"$req\" | tr -d '\\n')\"\n"
         + &relay;
