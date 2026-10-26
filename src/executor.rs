@@ -610,6 +610,20 @@ fn op_line(op_id: &str, result: &BayResult) -> String {
         line.push_str(" waiting for ");
         line.push_str(waiting);
     }
+    // A fleet finding (2026-10-26): a head that failed said only "failed", and nobody could
+    // tell why. A failure names its cause, on the same one line.
+    if result.decision == Decision::Failed
+        && let Some(why) = result.detail.as_ref().and_then(|detail| {
+            detail
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| detail["why"].as_str().map(str::to_owned))
+        })
+    {
+        let why: String = why.split_whitespace().collect::<Vec<_>>().join(" ");
+        line.push_str(": ");
+        line.extend(why.chars().take(400));
+    }
     line
 }
 
@@ -717,11 +731,17 @@ fn in_pass_order(chains: &mut [crate::change::HeldChain], queue: &Queue) {
 /// each, only to find each still waiting; a pass took twenty minutes, and a change with real
 /// work waited for it). An operation that holds a queue place beyond the head, the entries
 /// checked ahead of their turn and one batch, and only waits there, is left for a later pass:
-/// nothing can move it before the line reaches it.
+/// nothing can move it before the line reaches it. With footprint lanes on, every entry is.
 ///
 /// `freed` is how many places this pass has ended so far: each moves the line up by one.
 fn within_reach(repo: &Repo, queue: &Queue) -> impl Fn(&crate::change::Operation, usize) -> bool {
-    let reach = 1 + repo.config.ahead() + repo.config.batch().map_or(0, |batch| batch.max);
+    // Footprint lanes (NEW-10) may check any entry whose footprint is apart from those ahead
+    // of it, wherever it waits, so with them on every entry is within reach.
+    let reach = if repo.config.footprint_lanes() {
+        usize::MAX / 2
+    } else {
+        1 + repo.config.ahead() + repo.config.batch().map_or(0, |batch| batch.max)
+    };
     let places: HashMap<String, usize> = queue
         .entries
         .values()
@@ -918,5 +938,21 @@ fn probe(repo: &Repo, trunk: &str, revision: &str) -> Result<Option<EarlyConflic
             trunk: trunk.to_owned(),
             paths,
         })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::op_line;
+    use crate::result::BayResult;
+
+    /// A failure's journal line names its cause, on one line.
+    #[test]
+    fn a_failed_operation_names_its_cause_on_its_line() {
+        let failed = BayResult::failed("git push: the remote refused\nthe ref");
+        assert_eq!(
+            op_line("abcd1234.1", &failed),
+            "abcd1234.1 failed: git push: the remote refused the ref"
+        );
     }
 }
