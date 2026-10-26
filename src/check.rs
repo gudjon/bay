@@ -2305,7 +2305,13 @@ fn prepare(
     // N-18: a changed-only check gets the candidate's changed paths and its `paths`, never the
     // rest of the tree; its adapter paths still come from the base, as for any check.
     let kept = entry.materialized(candidate.changed_paths);
-    let made = materialize(
+    // A check that observes its reads gets files of its own (`crate::materialize::materialize_owned`).
+    let candidate_tree = if entry.footprint == crate::policy::FootprintMode::Observed {
+        crate::materialize::materialize_owned
+    } else {
+        materialize
+    };
+    let made = candidate_tree(
         git,
         candidate.commit,
         kept.as_deref(),

@@ -71,6 +71,37 @@ pub fn materialize(
     deadline: Instant,
     tick: &mut dyn FnMut(),
 ) -> Result<(), Unmade> {
+    made(git, commit, paths, dir, deadline, tick, true)
+}
+
+/// [`materialize`], with files of the tree's own: none is linked from the store. A check that
+/// observes its reads (`footprint = "observed"`) marks each file's times, and a linked file
+/// shares its inode, and so its times, with the store and every other tree that links it; one
+/// check's mark would hide another's reads, and break the store's own mark.
+///
+/// # Errors
+///
+/// As [`materialize`].
+pub fn materialize_owned(
+    git: &Git,
+    commit: &str,
+    paths: Option<&[String]>,
+    dir: &Path,
+    deadline: Instant,
+    tick: &mut dyn FnMut(),
+) -> Result<(), Unmade> {
+    made(git, commit, paths, dir, deadline, tick, false)
+}
+
+fn made(
+    git: &Git,
+    commit: &str,
+    paths: Option<&[String]>,
+    dir: &Path,
+    deadline: Instant,
+    tick: &mut dyn FnMut(),
+    shared: bool,
+) -> Result<(), Unmade> {
     std::fs::create_dir_all(dir).map_err(|error| failed(dir, &error))?;
     // G265: below the box's disk floor no file of the tree is written.
     if let Some(low) = crate::disk::below_floor(git, dir).map_err(Unmade::Failed)? {
@@ -93,7 +124,7 @@ pub fn materialize(
     if blobs.is_empty() {
         return Ok(());
     }
-    let store = Store::open(git);
+    let store = if shared { Store::open(git) } else { None };
     let blobs = match &store {
         Some(store) => store.link_all(git, blobs, dir, deadline, tick)?,
         None => blobs,
@@ -1074,6 +1105,27 @@ mod tests {
                 & 0o111
                 != 0
         );
+    }
+
+    /// A tree made with files of its own shares no inode with the store, so a check that marks
+    /// its files' times marks only its own.
+    #[cfg(unix)]
+    #[test]
+    fn an_owned_tree_shares_no_file_with_the_store() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let git = repository(&dir.path().join("repo"));
+        add(&git, "a.txt", b"one\n", "100644");
+        let commit = commit_all(&git);
+        let (linked, owned) = (dir.path().join("linked"), dir.path().join("owned"));
+        materialize(&git, &commit, None, &linked, far(), &mut || {}).unwrap();
+        super::materialize_owned(&git, &commit, None, &owned, far(), &mut || {}).unwrap();
+        let (one, two) = (
+            std::fs::metadata(linked.join("a.txt")).unwrap(),
+            std::fs::metadata(owned.join("a.txt")).unwrap(),
+        );
+        assert_ne!(one.ino(), two.ino());
+        assert_eq!(std::fs::read(owned.join("a.txt")).unwrap(), b"one\n");
     }
 
     /// A kept file that a check changed anyway is never linked into a later tree: that tree
