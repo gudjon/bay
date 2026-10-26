@@ -713,29 +713,45 @@ impl<'a> Chain<'a> {
     ///
     /// [`ChainError::NotFound`] or a git fault.
     pub fn drafts(&self, id: &str) -> Result<Vec<String>, ChainError> {
-        let mut state = self.head(id)?.ok_or(ChainError::NotFound)?;
+        let head = self.head(id)?.ok_or(ChainError::NotFound)?;
+        // W5: the whole chain in two spawns, its states with their parents and their records in
+        // one batch, never one `rev-list` and one `cat-file` per state (a long chain is read by
+        // every `bay status`).
+        let listed = self
+            .git
+            .run(&["rev-list", "--first-parent", "--parents", &head])?;
+        let states: Vec<Vec<&str>> = listed
+            .lines()
+            .map(|line| line.split_whitespace().collect())
+            .collect();
+        let names: Vec<String> = states
+            .iter()
+            .filter_map(|state| state.first())
+            .map(|state| format!("{state}:{RECORD_FILE}"))
+            .collect();
+        let records = self.git.objects(&names)?;
         let mut drafts = Vec::new();
-        loop {
-            let parents = self.parents(&state)?;
-            if self
-                .record_at(&state)
-                .is_ok_and(|record| record.retention_cut)
-            {
+        for (line, record) in states.iter().zip(records) {
+            let [state, parents @ ..] = line.as_slice() else {
+                break;
+            };
+            let cut = record
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .and_then(|text| parse_record(&text).ok())
+                .is_some_and(|record| record.retention_cut);
+            if cut {
                 // A cut head is a root: its first parent is the landed revision.
                 if let Some(revision) = parents.first() {
-                    drafts.push(revision.clone());
+                    drafts.push((*revision).to_owned());
                 }
                 return Ok(drafts);
             }
-            match parents.as_slice() {
+            match parents {
                 [draft] => {
-                    drafts.push(draft.clone());
+                    drafts.push((*draft).to_owned());
                     return Ok(drafts);
                 }
-                [previous, draft] | [previous, draft, _] => {
-                    drafts.push(draft.clone());
-                    state.clone_from(previous);
-                }
+                [_previous, draft] | [_previous, draft, _] => drafts.push((*draft).to_owned()),
                 _ => {
                     return Err(ChainError::BadRecord(format!(
                         "state commit {state} has {} parents",
@@ -744,6 +760,7 @@ impl<'a> Chain<'a> {
                 }
             }
         }
+        Ok(drafts)
     }
 
     /// The land request: an agent-signed commit whose tree holds `request.json` and whose one
@@ -847,13 +864,6 @@ impl<'a> Chain<'a> {
             .map(|(key, value)| (key.as_str(), value.as_str()))
             .collect();
         Ok(self.git.run_with(&args, &envs, None)?)
-    }
-
-    fn parents(&self, commit: &str) -> Result<Vec<String>, ChainError> {
-        let line = self
-            .git
-            .run(&["rev-list", "--parents", "-n", "1", commit])?;
-        Ok(line.split_whitespace().skip(1).map(str::to_owned).collect())
     }
 
     fn state_commit(

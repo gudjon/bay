@@ -132,7 +132,8 @@ fn the_check_request_names_exactly_the_paths_the_candidate_changes() {
             "plan",
             "requires",
             "schema",
-            "timeout_s"
+            "timeout_s",
+            "turn"
         ],
         "{request}"
     );

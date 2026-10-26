@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.6
+
+- `bay status` reads the runner logs and every chain once, in batches, so a long queue answers in seconds.
+- A command never pushes a stale copy of a change the remote has moved past.
+- A push of bay's records that the host refuses for a moment is tried twice more before it is refused.
+- The runner writes one line per change it handled to its journal.
+- A check request says whether it is the queue head's run or a pre-check, in `turn`.
+
 ## 0.5.5
 
 - `bay doctor` counts a check's variables only for the environments this box serves.

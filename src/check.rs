@@ -45,6 +45,11 @@ pub struct Candidate<'a> {
     /// The version of each named input the candidate is checked under, `<kind>:<name>@<version>`
     /// (`INTERFACES` § 3): the request's `inputs`.
     pub inputs: &'a [String],
+    /// A runner's run of a queued change: `"head"` for the queue head's own run, `"ahead"` for
+    /// a pre-check of an entry behind it (`crate::throughput`), so an adapter can give the head
+    /// a worker first (a batch is the head's run). `None` for every other run (a bisection, a
+    /// post check of main, a test of the adapter): the request then has no `turn`.
+    pub turn: Option<&'static str>,
 }
 
 /// The change behind a candidate, as its check request names it (`INTERFACES` § 3).
@@ -136,6 +141,9 @@ fn about(
     candidate: &Candidate,
 ) -> Result<serde_json::Map<String, serde_json::Value>, String> {
     let mut about = serde_json::Map::new();
+    if let Some(turn) = candidate.turn {
+        about.insert("turn".to_owned(), json!(turn));
+    }
     about.insert(
         "base".to_owned(),
         json!({"commit": candidate.onto, "tree": candidate.base_tree}),
@@ -1590,6 +1598,7 @@ fn base_answer(
         id: &id,
         policy_provenance: candidate.policy_provenance,
         inputs: candidate.inputs,
+        turn: None,
     };
     let (mut judged, ran) = run_once(
         git,
@@ -2675,6 +2684,7 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
                 id: "op.1",
                 policy_provenance: crate::policy::Provenance::Bay,
                 inputs: &[],
+                turn: None,
             };
             let limits = Limits {
                 budget: None,

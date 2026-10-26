@@ -408,6 +408,7 @@ fn run_at(
             id: &candidate_id,
             policy_provenance: crate::policy::Provenance::Bay,
             inputs: &[],
+            turn: None,
         },
         &writer.name,
         &check::Limits {

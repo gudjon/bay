@@ -421,7 +421,18 @@ impl Git {
         timeout: std::time::Duration,
     ) -> Result<Vec<u8>, GitError> {
         let args_display = args.join(" ");
-        let output = self.output(args, envs, input, timeout)?;
+        let mut output = self.output(args, envs, input, timeout)?;
+        // W10: a host may refuse a push of bay's records for a moment of its own (a hosting
+        // check it could not finish), and accept the same push a second later. Such a push is
+        // tried again before it is called refused; a ref another writer moved is the caller's
+        // to read, so it is answered at once.
+        for wait in HOST_RETRY_WAITS {
+            if output.status.success() || !host_refused(args, &output.stderr) {
+                break;
+            }
+            std::thread::sleep(wait);
+            output = self.output(args, envs, input, timeout)?;
+        }
         let stderr = String::from_utf8(output.stderr).map_err(|_| GitError::NotUtf8 {
             args: args_display.clone(),
         })?;
@@ -1066,6 +1077,32 @@ fn as_formatted<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> {
         .into_iter()
         .chain(quiet)
         .chain(args.iter().skip(1).copied())
+}
+
+/// W10: the waits before a push of bay's records the host refused is tried again.
+const HOST_RETRY_WAITS: [std::time::Duration; 2] = [
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(3),
+];
+
+/// W10: whether a failed `git <args>` is a push of bay's records alone that the host refused
+/// itself (`[remote rejected]`), not one refused because a ref moved (a lease, a lock held by
+/// another writer, a fetch first), which its caller reads again.
+fn host_refused(args: &[&str], stderr: &[u8]) -> bool {
+    if args.first() != Some(&"push") || !records_only(&args[1..]) {
+        return false;
+    }
+    let text = String::from_utf8_lossy(stderr);
+    text.contains("[remote rejected]")
+        && ![
+            "cannot lock ref",
+            "stale info",
+            "fetch first",
+            "non-fast-forward",
+            "already exists",
+        ]
+        .iter()
+        .any(|moved| text.contains(moved))
 }
 
 /// Whether the words of a `push` after its remote update only bay's records: every

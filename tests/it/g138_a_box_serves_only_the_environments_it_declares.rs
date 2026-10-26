@@ -207,3 +207,35 @@ fn the_repository_config_cannot_declare_an_environment() {
     assert_ne!(code, 0, "{result}");
     assert!(result.to_string().contains("check_environment"), "{result}");
 }
+
+/// A queue head released because its box serves none of its environments (a live queue: a
+/// second change waits behind it) is taken by a box that serves them, never held by the box
+/// that recorded the wait (a fleet finding, 2026-10-26: a change sat three hours `running`
+/// under a box with no route to the environment it needed).
+#[test]
+fn a_head_its_box_cannot_serve_is_taken_by_one_that_can_with_a_queue_live() {
+    let test_box = TestBox::new();
+    let (first, repo, remote, _runs) = submitted(&test_box);
+    let (second, view) = test_box.start_and_edit(&repo);
+    // Its own edit, so it is never work the first change already put on main.
+    std::fs::remove_file(view.join("src/new.rs")).unwrap();
+    std::fs::write(view.join("src/second.rs"), "fn second() {}\n").unwrap();
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    assert_eq!(code, 0, "{queued}");
+    let e1 = executor(&test_box, &remote, "exec-a", "env-a");
+    let e2 = executor(&test_box, &remote, "exec-b", "env-b");
+    let waited = test_box.bay_ok(&e1, &["runner", "run", "--once"]);
+    assert!(waited.to_string().contains("CHECK_UNAVAILABLE"), "{waited}");
+    for _ in 0..3 {
+        let ran = test_box.bay_ok(&e2, &["runner", "run", "--once"]);
+        if test_box.trunk_change_ids(&remote).len() == 2 {
+            break;
+        }
+        eprintln!("{ran}");
+    }
+    let mut landed = test_box.trunk_change_ids(&remote);
+    landed.sort();
+    let mut both = vec![first, second];
+    both.sort();
+    assert_eq!(landed, both, "the box that serves env-b merged both");
+}

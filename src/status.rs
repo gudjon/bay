@@ -63,19 +63,13 @@ pub fn cached(
         .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
         .map_err(|error| error.message())?;
     let pending = receipts::pending(repo);
-    let chain = Chain::new(&repo.git);
-    let ids = repo
-        .git
-        .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
+    // W5: every chain in one batch (G200b), never one read per change.
+    let chains = Chain::new(&repo.git)
+        .read_all()
         .map_err(|error| error.message())?;
     let mut changes = Vec::new();
-    for id in ids
-        .lines()
-        .map(|name| name.trim_start_matches(CHANGES_PREFIX))
-    {
-        let Ok((_, record)) = chain.read(id) else {
-            continue;
-        };
+    for held in chains {
+        let (id, record) = (held.id.as_str(), held.record);
         if !select(id, &record) {
             continue;
         }
@@ -144,18 +138,21 @@ fn listed(repo: &Repo, chain: &Chain, named: Option<String>) -> Result<Vec<Strin
         refresh_chains(repo, chain, &ids)?;
         return Ok(ids);
     }
+    // W5: every chain's record in one batch (G200b); a chain it cannot read stays listed.
+    let ended_here: std::collections::BTreeSet<String> = chain
+        .read_all()
+        .map_err(|error| error.message())?
+        .into_iter()
+        .filter(|held| ended(held.record.state))
+        .map(|held| held.id)
+        .collect();
     let ids: Vec<String> = repo
         .git
         .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
         .map_err(|error| error.message())?
         .lines()
         .map(|name| name.trim_start_matches(CHANGES_PREFIX).to_owned())
-        .filter(|id| {
-            chain
-                .read(id)
-                .ok()
-                .is_none_or(|(_, record)| !ended(record.state))
-        })
+        .filter(|id| !ended_here.contains(id))
         .collect();
     repo.remote_chains(&ids);
     Ok(ids)
@@ -510,10 +507,17 @@ pub(crate) fn open_quarantines(git: &crate::git::Git, at: &str) -> Result<Vec<Va
 /// Every view this machine still holds, with its change state, its age and whether it has
 /// uncheckpointed edits (G41). No pull-request state, no chat activity.
 fn leftovers(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
+    // W5: every chain in one batch (G200b), never one read per view.
     let chain = Chain::new(&repo.git);
+    let mut records: std::collections::BTreeMap<String, ChangeRecord> = chain
+        .read_all()
+        .map_err(|error| error.message())?
+        .into_iter()
+        .map(|held| (held.id, held.record))
+        .collect();
     let mut out = Vec::new();
     for id in view::all(repo) {
-        let Ok((_, record)) = chain.read(&id) else {
+        let Some(record) = records.remove(&id) else {
             continue;
         };
         let landed = !scan(&repo.git, &record.base_first, trunk, &id)?

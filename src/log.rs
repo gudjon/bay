@@ -379,30 +379,54 @@ pub fn records_for(git: &Git, id: &str) -> Result<Vec<Value>, String> {
 }
 
 fn every_record(git: &Git, keep: &dyn Fn(&Value) -> bool) -> Result<Vec<Value>, String> {
-    let logs = git
-        .run(&["for-each-ref", "--format=%(refname)", LOG_PREFIX])
+    Ok(all_records(git)?
+        .iter()
+        .filter(|record| keep(record))
+        .cloned()
+        .collect())
+}
+
+/// Every record of every executor log, read once per state of the logs: one `cat-file --batch`
+/// over all their commits, kept while the logs' tips stay where they were. `bay status` asks
+/// for each change's records in turn, and before it read every log once per change, one
+/// process per commit (W5: 22,533 reads on a queue of 87 changes).
+fn all_records(git: &Git) -> Result<std::sync::Arc<Vec<Value>>, String> {
+    use std::sync::{Arc, Mutex};
+    static READ: Mutex<Option<(String, Arc<Vec<Value>>)>> = Mutex::new(None);
+    let tips = git
+        .run(&[
+            "for-each-ref",
+            "--format=%(objectname) %(refname)",
+            LOG_PREFIX,
+        ])
         .map_err(|error| error.message())?;
+    let key = format!("{}\n{tips}", git.dir().display());
+    if let Some((read, records)) = READ.lock().ok().as_deref().and_then(Option::as_ref)
+        && *read == key
+    {
+        return Ok(Arc::clone(records));
+    }
     let mut out = Vec::new();
-    for name in logs.lines() {
+    for name in tips
+        .lines()
+        .filter_map(|line| line.split_once(' ').map(|(_, name)| name))
+    {
         let commits = git
             .run(&["rev-list", name])
             .map_err(|error| error.message())?;
-        for commit in commits.lines() {
-            // G104b: a record the commit holds and bay cannot read is an error, never skipped.
-            let Some(text) = git
-                .file_at(commit, "record.json")
-                .map_err(|error| error.message())?
-            else {
-                continue;
-            };
-            if let Ok(record) = serde_json::from_str::<Value>(&text)
-                && keep(&record)
-            {
+        let commits: Vec<&str> = commits.lines().collect();
+        // G104b: a record the commit holds and bay cannot read is an error, never skipped.
+        for text in records(git, &commits)?.into_iter().flatten() {
+            if let Ok(record) = serde_json::from_str::<Value>(&text) {
                 out.push(record);
             }
         }
     }
-    Ok(out)
+    let records = Arc::new(out);
+    if let Ok(mut read) = READ.lock() {
+        *read = Some((key, Arc::clone(&records)));
+    }
+    Ok(records)
 }
 
 #[cfg(test)]

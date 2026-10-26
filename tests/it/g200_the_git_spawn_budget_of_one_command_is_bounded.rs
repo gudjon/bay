@@ -84,3 +84,79 @@ fn a_start_stays_within_its_git_spawn_budget() {
     assert!(result["detail"]["view"].is_string(), "{result}");
     assert_budget("start", &counts, START_SPAWNS);
 }
+
+/// W5 (a 139 s `bay status` on a queue of 87 changes): status reads the executor logs once,
+/// in one batch, however many live changes it lists, never every log once per change, and every
+/// chain in one batch, never one read per change or per state. With two changes open here and
+/// the merges made in another clone, its `cat-file` spawns are the same after four as after two.
+#[test]
+fn a_status_reads_the_executor_logs_once_however_many_changes_it_lists() {
+    let test_box = TestBox::new();
+    let repo = seeded(&test_box);
+    for n in 1..=2 {
+        test_box.bay_ok(
+            &repo,
+            &[
+                "start",
+                &format!("OPEN-{n}"),
+                "--paths",
+                &format!("open{n}/"),
+            ],
+        );
+    }
+    // The merges come from another clone, so this one's views stay the same while the logs grow.
+    let other = test_box.clone_of(&test_box.path().join("repo-remote.git"), "other");
+    let merge = |n: usize| {
+        let started = test_box.bay_ok(&other, &["start", &format!("CARD-{n}"), "--paths", "src/"]);
+        let view = std::path::PathBuf::from(started["detail"]["view"].as_str().unwrap());
+        std::fs::write(view.join(format!("src/n{n}.rs")), "fn n() {}\n").unwrap();
+        let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+        assert_eq!(code, 0, "{merged}");
+    };
+    let cat_files = |name: &str| {
+        let (counts, listed) = spawns(&test_box, name, test_box.bay(&repo).arg("status"));
+        assert!(listed.to_string().contains("OPEN-2"), "{listed}");
+        counts.get("cat-file").copied().unwrap_or(0)
+    };
+    merge(1);
+    merge(2);
+    let two = cat_files("two");
+    merge(3);
+    merge(4);
+    let four = cat_files("four");
+    assert!(
+        four <= two,
+        "bay status read more objects one by one as the logs grew: {two} cat-file spawns after two merges, {four} after four"
+    );
+}
+
+/// W5: a command pushes only the local chains the remote lacks or is behind on, never a stale
+/// copy of a chain the remote has moved on: that push could only be refused (14 such pushes in
+/// one 139 s `bay status`).
+#[test]
+fn a_status_never_pushes_a_chain_the_remote_moved_past() {
+    let test_box = TestBox::new();
+    let repo = seeded(&test_box);
+    let started = test_box.bay_ok(&repo, &["start", "CARD-1", "--paths", "src/"]);
+    let view = std::path::PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    std::fs::write(view.join("src/n.rs"), "fn n() {}\n").unwrap();
+    let remote = test_box.path().join("repo-remote.git");
+    let other = test_box.clone_of(&remote, "other");
+    test_box.git_ok(
+        &other,
+        &[
+            "fetch",
+            "-q",
+            "origin",
+            "+refs/bay/changes/*:refs/bay/changes/*",
+        ],
+    );
+    let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{merged}");
+    let (counts, _) = spawns(&test_box, "stale", test_box.bay(&other).arg("status"));
+    assert_eq!(
+        counts.get("push").copied().unwrap_or(0),
+        0,
+        "bay status pushed a stale chain: {counts:?}"
+    );
+}

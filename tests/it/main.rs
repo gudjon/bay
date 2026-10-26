@@ -254,6 +254,7 @@ mod g384_a_first_check_fails_fast;
 mod g387_an_approved_policy_fix_is_judged_by_its_own_adapter;
 mod g388_a_chain_already_on_the_remote_is_not_a_refusal;
 mod g38_undo_and_session_start;
+mod g390_a_push_the_host_refused_for_a_moment_is_tried_again;
 mod g39_a_blocked_shell_command_does_not_run;
 mod g3x_a_repository_on_git_3_defaults_lands;
 mod g40_the_holder_can_abandon_and_another_actor_can_adopt;

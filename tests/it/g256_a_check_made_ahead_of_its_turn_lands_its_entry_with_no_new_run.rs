@@ -9,7 +9,8 @@
 //! history is the queue's order. When the head fails instead, the prediction missed: the second
 //! entry's pre-check is about another tree, so it is checked again, as is the third. An entry
 //! that changes the policy predicts nothing for the entries behind it: they are checked at their
-//! turn, under the policy that then holds.
+//! turn, under the policy that then holds. Each request says which run it is: `turn` is
+//! `"head"` for the head's run and `"ahead"` for a pre-check.
 //!
 //! The guards to mutate: `ahead_of_turn` in `src/publish.rs` (return `result` at once),
 //! `throughput::predict` (return `trunk` without folding the entries ahead), and
@@ -55,7 +56,10 @@ fn while_the_head_is_checked(fail_head: bool) -> (Held, [String; 3], Value) {
         3,
         "the head's run and two pre-checks: {ahead}"
     );
+    // The request says which run it is, so an adapter can give the head a worker first.
+    assert_eq!(requests[0]["turn"], "head", "{:?}", requests[0]);
     for (at, id) in ids.iter().enumerate().skip(1) {
+        assert_eq!(requests[at]["turn"], "ahead", "{:?}", requests[at]);
         let result = ran_for(&ahead, id);
         assert_eq!(result["decision"], "queued", "{result}");
         let precheck = &result["detail"]["precheck"];

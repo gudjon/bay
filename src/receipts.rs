@@ -213,7 +213,15 @@ pub fn sync_chains(repo: &Repo) -> usize {
         let Some(id) = name.strip_prefix(changes) else {
             continue;
         };
-        if listed(&remote, '\t', name) == Some(oid) {
+        let on_remote = listed(&remote, '\t', name);
+        if on_remote == Some(oid) {
+            continue;
+        }
+        // W5: only work the remote lacks. A copy the remote moved past (its tip not under
+        // the local one, or not even here) could only be refused.
+        if let Some(tip) = on_remote
+            && !repo.git.is_ancestor(tip, oid).unwrap_or(false)
+        {
             continue;
         }
         let request_ref = format!("{requests}{id}");

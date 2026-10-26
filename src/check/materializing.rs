@@ -130,6 +130,7 @@ fn run_with(
         id: "op.1",
         policy_provenance: crate::policy::Provenance::Bay,
         inputs: &[],
+        turn: None,
     };
     let limits = Limits {
         budget,

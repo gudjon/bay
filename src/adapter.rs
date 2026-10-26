@@ -1069,6 +1069,7 @@ fn run_check(
             id: CANDIDATE_ID,
             policy_provenance: crate::policy::Provenance::Bay,
             inputs: &[],
+            turn: None,
         },
         PRODUCER,
         &limits,

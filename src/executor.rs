@@ -548,6 +548,9 @@ fn pass(
             {
                 notes.extend(early_conflicts(repo, &queue));
             }
+            // One line per operation on stderr (a service's journal), so a stalled queue can be
+            // read without the refs: what each pass did with each change, and why.
+            eprintln!("bay runner: {}", op_line(&op_id, &result));
             ran.push(json!({
                 "change": id,
                 "op_id": op_id,
@@ -577,6 +580,25 @@ fn pass(
     }
     advanced.extend(advance(repo));
     Ok(ran)
+}
+
+/// The one journal line of a pass's outcome for `op_id`: the decision, the reason code when
+/// there is one, and what it waits for.
+fn op_line(op_id: &str, result: &BayResult) -> String {
+    let decision = serde_json::to_value(result.decision)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let mut line = format!("{op_id} {decision}");
+    if let Some(reason) = result.reason {
+        line.push(' ');
+        line.push_str(reason.code());
+    }
+    if let Some(waiting) = &result.waiting_for {
+        line.push_str(" waiting for ");
+        line.push_str(waiting);
+    }
+    line
 }
 
 /// Whether a pass runs `op`: it is neither terminal nor blocked, or, G284, it waits for a

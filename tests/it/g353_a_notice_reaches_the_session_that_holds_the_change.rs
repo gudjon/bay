@@ -115,6 +115,13 @@ fn told(test_box: &TestBox, repo: &Path, session: &str) -> String {
 #[test]
 fn while_the_holder_is_live_only_the_holder_is_told() {
     let (test_box, repo, id) = refused(true);
+    // The holder is live now: on a loaded box the setup can outlast the takeover window.
+    hook(
+        &test_box,
+        &repo,
+        "session.start",
+        &fixture("01-SessionStart.json", "s-holder", &repo),
+    );
     let other = told(&test_box, &repo, "s-other");
     assert!(
         !other.contains(&format!("change {id}")),
