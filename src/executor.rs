@@ -29,7 +29,7 @@
 //! from every other box; `--once` names the write in `detail.presence`.
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -581,6 +581,9 @@ fn pass(
     notes.extend(early_conflicts(repo, &queue));
     let due = publish::retention_due(repo, &chains);
     let reach = within_reach(repo, &queue);
+    // The heads this pass took between its operations: the loop, which reads the chains as the
+    // pass began, never runs one of them again.
+    let mut taken: HashSet<String> = HashSet::new();
     for record in &records {
         let id = record.id.as_str();
         let queued: Vec<String> = record
@@ -589,6 +592,7 @@ fn pass(
             // A change that names one it fixes, reverts or supersedes is always reached: it may
             // be the repair of a red main, which runs ahead of the line (`queue_gate`).
             .filter(|op| runs(op) && (names_a_repair(record) || reach(op, freed(&ran))))
+            .filter(|op| !taken.contains(&op.op_id))
             .map(|op| op.op_id.clone())
             .collect();
         if queued.is_empty() {
@@ -610,6 +614,7 @@ fn pass(
             // next pass's start an hour later.
             if let Some((head_id, head_op)) = abandoned_head(repo, &op_id) {
                 ran.push(run_op(repo, &head_id, &head_op, depth, beat, notes));
+                taken.insert(head_op);
             }
         }
     }
