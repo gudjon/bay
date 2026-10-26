@@ -498,6 +498,42 @@ pub fn unserved_environments(repo: &Repo, queued: usize, trunk: &str) -> Option<
     }))
 }
 
+/// Whether executor `owner` still beats its presence on `repo`'s remote: written within three
+/// of its cadences and half a minute. A fleet finding (2026-10-26): a runner holding a head
+/// through a long copy wrote nothing to the head's chain for minutes, and another runner took
+/// the head over and began the same work again. A quiet chain is no proof its holder stopped;
+/// a quiet presence is. `false` when the presence cannot be read.
+#[must_use]
+pub fn beats(repo: &Repo, owner: &str) -> bool {
+    let name = presence_ref(owner);
+    if repo
+        .git
+        .run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            repo.remote(),
+            &format!("+{name}:{name}"),
+        ])
+        .is_err()
+    {
+        return false;
+    }
+    let Some(record) = repo
+        .git
+        .run(&["rev-parse", "-q", "--verify", &name])
+        .ok()
+        .and_then(|commit| record_at(&repo.git, &commit).ok().flatten())
+    else {
+        return false;
+    };
+    let cadence = record["cadence_s"].as_u64().unwrap_or(10);
+    record["at"]
+        .as_str()
+        .and_then(crate::clock::unix_of)
+        .is_some_and(|at| reader_now().saturating_sub(at) <= cadence * 3 + 30)
+}
+
 #[cfg(test)]
 mod tests {
     use super::age;

@@ -2974,7 +2974,15 @@ fn claim(
     // Another process holds the operation: take it over only once its lease expired, on this
     // process's own clock. A restarted supervisor watches a full lease again. A holder whose
     // executor key the registry revoked holds no lease (§ 10a).
-    if held && !holder_revoked(ctx, op_id)? && !lease_expired(ctx) {
+    // A holder whose presence still beats keeps its claim however quiet its chain (a fleet
+    // finding, 2026-10-26: a runner in a long copy lost its head to a runner that waited out
+    // one lease of chain silence, and the head's work began twice).
+    let beats = held
+        && op
+            .owner
+            .clone()
+            .is_some_and(|owner| crate::presence::beats(ctx.repo, &owner));
+    if held && !holder_revoked(ctx, op_id)? && (beats || !lease_expired(ctx)) {
         let mut result = BayResult::new(Decision::Ok).with_change(&id).with_op(op_id);
         result.state = Some("running".to_owned());
         let (owner, epoch) = ctx

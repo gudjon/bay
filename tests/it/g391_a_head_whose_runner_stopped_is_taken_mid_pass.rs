@@ -4,7 +4,8 @@
 //!
 //! Runner A holds the head in a long check and is then killed. Runner B, which found the head
 //! held by a live runner at its pass's start and went on to pre-check the entries behind it,
-//! takes the head over once A's chain has been silent for two leases, in the same pass.
+//! takes the head over once A's chain has been silent for two leases and A's presence is quiet
+//! too (G397), in the same pass.
 //!
 //! Guard to mutate, in `src/executor.rs`: `abandoned_head` returning `None` (B's pass ends with
 //! the head still A's).
@@ -27,8 +28,9 @@ fn a_runner_takes_a_stopped_runners_head_between_its_own_operations() {
         policy: None,
         seed: &[("src/a.rs", "fn a() {}\n")],
         hold_first: true,
-        // Every run but the held first takes a while, so B is mid-pass when A stops.
-        fails: "sleep 6; false",
+        // Every run but the held first takes a while, so B is still mid-pass once A's presence
+        // has gone quiet too (three cadences and half a minute after A stops).
+        fails: "sleep 25; false",
     });
     let one = held.queue("one", "src");
     let _two = held.queue("two", "src");

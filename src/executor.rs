@@ -705,53 +705,20 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
     (idle > repo.config.lease().as_secs() * 2).then_some((head.change, head.op_id))
 }
 
-/// Whether the runner that holds `head`'s operation still beats its presence, within three of
-/// its cadences and half a minute (a fleet finding, 2026-10-26: a head held through a long
-/// copy wrote nothing to its chain for minutes, and another runner took it over and began the
-/// same work again). A chain that stays quiet is no proof its holder stopped; a quiet presence
-/// is.
+/// Whether the runner that holds `head`'s operation still beats its presence
+/// ([`crate::presence::beats`]).
 fn holder_alive(repo: &Repo, head: &crate::queue::Entry) -> bool {
-    let Some(owner) = repo.remote_record(&head.change).ok().and_then(|remote| {
-        remote
-            .record
-            .operations
-            .into_iter()
-            .find(|op| op.op_id == head.op_id)
-            .and_then(|op| op.owner)
-    }) else {
-        return false;
-    };
-    let name = crate::presence::presence_ref(&owner);
-    if repo
-        .git
-        .run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            repo.remote(),
-            &format!("+{name}:{name}"),
-        ])
-        .is_err()
-    {
-        return false;
-    }
-    let Some(record) = repo
-        .git
-        .run(&["rev-parse", "-q", "--verify", &name])
+    repo.remote_record(&head.change)
         .ok()
-        .and_then(|commit| {
-            crate::presence::record_at(&repo.git, &commit)
-                .ok()
-                .flatten()
+        .and_then(|remote| {
+            remote
+                .record
+                .operations
+                .into_iter()
+                .find(|op| op.op_id == head.op_id)
+                .and_then(|op| op.owner)
         })
-    else {
-        return false;
-    };
-    let cadence = record["cadence_s"].as_u64().unwrap_or(10);
-    record["at"]
-        .as_str()
-        .and_then(crate::clock::unix_of)
-        .is_some_and(|at| crate::presence::reader_now().saturating_sub(at) <= cadence * 3 + 30)
+        .is_some_and(|owner| crate::presence::beats(repo, &owner))
 }
 
 /// Orders a pass: queued changes first, in queue order, so one pass carries the queue as far as
