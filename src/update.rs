@@ -54,6 +54,9 @@ use crate::version::BAY;
 pub const RELEASE_KEYS: &[&str] = &[
     // The release key 0.1.1-0.1.4 are signed with; dropped by a later release.
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPnvMnsFVUR3lBcKXj2PkjHH3mIDFHKl2/Ov/lgVHMM7",
+    // The 0.x pre-release key, kept on the build box and signing each 0.x release there
+    // (owner ruling 2026-10-26); dropped before 1.0.
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICks1fBuvAPoSH96LnFu0M5ZSbaO6FQpAn2xITWLpuYL",
     // The hardware-held release key (SHA256:esVZKU2sltI199RAoWUorTk/Bw6t02pPUfHnNy3OFj0).
     "sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNhLXNoYTItbmlzdHAyNTZAb3BlbnNzaC5jb20AAAAIbmlzdHAyNTYAAABBBKhWxaQcv6q6F/FeEpLS8mDAnee+kArl4ZD9eoNC96RnbV+BxgA+VPEaaTgnguJTxEc5gta4F4h4v3h/sfrT00UAAAAEc3NoOg==",
 ];

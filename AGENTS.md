@@ -70,8 +70,9 @@ into bay. Defaults are plain Git ones: `main`, any host.
   flag changes, change the skill in the same commit.
 - **`CHANGELOG.md`**: one `## <version>` section per release, newest first, user-visible changes only, no
   test ids. getbay.io copies it at each release tag, so keep each sentence to 20 words or fewer.
-- **Versions**: `MAJOR.MINOR.PATCH`. While bay is at 0.x, a minor release may still change a command or a format. `scripts/release.sh` refuses a
-  new MINOR or MAJOR without the maintainer's approval (`BAY_RELEASE_APPROVED=<version>`); a PATCH needs none.
+- **Versions**: `MAJOR.MINOR.PATCH`. While bay is at 0.x, a minor release may still change a command or a format. From 1.0, `scripts/release.sh`
+  refuses a new MINOR or MAJOR without the maintainer's approval (`BAY_RELEASE_APPROVED=<version>`); a PATCH, and any 0.x
+  release, needs none.
 
 ## Security
 

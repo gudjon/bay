@@ -12,6 +12,7 @@
 - A runner releases a head whose operation already ended between its own operations, not at its next pass.
 - A runner's pass skips changes that only wait far back in the line, so it reaches real work in minutes.
 - A queue place a runner cannot release is named in its journal.
+- bay trusts a second release key, so 0.x releases are signed as they are built.
 
 ## 0.5.9
 
