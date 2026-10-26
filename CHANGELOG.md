@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.9
+
+- `bay status` reads each change's newest draft alone, never its whole chain, so long-lived changes stay fast.
+- `bay status <change>` scans that change's own view only, never every view on the machine.
+- Whether live changes merged is read from main's history once, never once per change.
+- Reading a change's drafts stops at its first state again; 0.5.6 read main's whole history per change.
+
 ## 0.5.8
 
 - `bay merge --from <branch>` takes a branch made outside bay in and merges it, in one step.
@@ -12,7 +19,7 @@
 
 ## 0.5.7
 
-- A runner never claims a queue head its box cannot serve while a live runner can; the head keeps its place.
+- A runner leaves a queue head it cannot serve to a live runner that can; the head keeps its place.
 
 ## 0.5.6
 

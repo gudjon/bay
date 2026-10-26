@@ -160,3 +160,40 @@ fn a_status_never_pushes_a_chain_the_remote_moved_past() {
         "bay status pushed a stale chain: {counts:?}"
     );
 }
+
+/// A fleet finding (2026-10-26: 43 views, a named status took 5 minutes): `bay status <change>`
+/// reads that change's own view and newest draft, never every view's chain state by state, so
+/// its git spawns are the same with two other views open as with six.
+#[test]
+fn a_named_status_costs_the_same_however_many_other_views_are_open() {
+    let test_box = TestBox::new();
+    let repo = seeded(&test_box);
+    let open = |n: usize| {
+        test_box.bay_ok(
+            &repo,
+            &["start", &format!("VIEW-{n}"), "--paths", &format!("v{n}/")],
+        )["change"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let named = open(0);
+    let (one, two) = (open(1), open(2));
+    let total = |name: &str| {
+        let (counts, _) = spawns(
+            &test_box,
+            name,
+            test_box.bay(&repo).args(["status", &named]),
+        );
+        counts.values().sum::<usize>()
+    };
+    let with_two = total("two");
+    for n in 3..=6 {
+        open(n);
+    }
+    let with_six = total("six");
+    assert!(
+        with_six <= with_two,
+        "bay status {named} spawned more git processes as other views opened ({one}, {two}, …): {with_two} with two, {with_six} with six"
+    );
+}

@@ -1072,7 +1072,7 @@ fn add_dependencies(
     if !added.is_empty() {
         record.after.extend(added.iter().cloned());
         chain.sign_with(agent_signer(repo, &me.name)?);
-        let draft = chain.drafts(change).map_err(|error| error.message())?[0].clone();
+        let draft = newest_draft(chain, change)?;
         let before = head.to_owned();
         let head = chain
             .append(
@@ -1166,7 +1166,7 @@ fn adopt_or_refuse(
         // landing can be cut in turn.
         record.retention_cut = false;
         chain.sign_with(agent_signer(repo, &me.name)?);
-        let draft = chain.drafts(change).map_err(|error| error.message())?[0].clone();
+        let draft = newest_draft(&chain, change)?;
         let first_head = head.clone();
         head = chain
             .append(
@@ -1195,7 +1195,7 @@ fn adopt_or_refuse(
     add_dependencies(repo, request, me, change, (&mut chain, &head), &mut record)?;
     let path = repo.view_path(change);
     if !view::exists(&path) {
-        let draft = chain.drafts(change).map_err(|error| error.message())?[0].clone();
+        let draft = newest_draft(&chain, change)?;
         view::create(
             repo,
             change,
@@ -1467,7 +1467,7 @@ fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String
             .head(id)
             .map_err(|error| error.message())?
             .ok_or("the change chain vanished")?;
-        let draft = chain.drafts(id).map_err(|error| error.message())?[0].clone();
+        let draft = newest_draft(&chain, id)?;
         chain
             .append(&head, &record, &draft, "observe inputs")
             .map_err(|error| error.message())?;
@@ -1618,6 +1618,11 @@ fn bring_in_trunk(
             Ok(Ok(changed))
         }
     }
+}
+
+/// The newest draft of change `id` ([`Chain::latest_draft`]).
+fn newest_draft(chain: &Chain, id: &str) -> Result<String, String> {
+    chain.latest_draft(id).map_err(|error| error.message())
 }
 
 /// `after` in the order given, each change once.

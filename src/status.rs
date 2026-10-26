@@ -216,7 +216,10 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     if fetched_at.is_some() {
         repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
     }
-    let leftovers = leftovers(&repo, &trunk)?;
+    // A read of one change scans its own view only, never every view on the machine (a fleet
+    // finding, 2026-10-26: 43 views cost a named status about 26 s).
+    let named = change.map(str::to_owned).or_else(|| repo.view_change(dir));
+    let leftovers = leftovers(&repo, &trunk, named.as_deref())?;
     let quarantines = quarantines(&repo, &trunk);
     let flakes = flake_rows(&repo, &trunk, &read);
     let (red_rows_now, red_pending) = red_rows(&repo, &trunk);
@@ -506,7 +509,7 @@ pub(crate) fn open_quarantines(git: &crate::git::Git, at: &str) -> Result<Vec<Va
 
 /// Every view this machine still holds, with its change state, its age and whether it has
 /// uncheckpointed edits (G41). No pull-request state, no chat activity.
-fn leftovers(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
+fn leftovers(repo: &Repo, trunk: &str, only: Option<&str>) -> Result<Vec<Value>, String> {
     // W5: every chain in one batch (G200b), never one read per view.
     let chain = Chain::new(&repo.git);
     let mut records: std::collections::BTreeMap<String, ChangeRecord> = chain
@@ -516,7 +519,10 @@ fn leftovers(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
         .map(|held| (held.id, held.record))
         .collect();
     let mut out = Vec::new();
-    for id in view::all(repo) {
+    for id in view::all(repo)
+        .into_iter()
+        .filter(|id| only.is_none_or(|only| only == id))
+    {
         let Some(record) = records.remove(&id) else {
             continue;
         };
@@ -529,7 +535,7 @@ fn leftovers(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
             json!(record.state)
         };
         let path = repo.view_path(&id);
-        let latest = chain.drafts(&id).map_err(|error| error.message())?[0].clone();
+        let latest = chain.latest_draft(&id).map_err(|error| error.message())?;
         let uncheckpointed = if view::exists(&path) {
             json!(view::uncheckpointed(&path, &latest).map_err(|error| error.message())?)
         } else {

@@ -119,15 +119,22 @@ pub fn write(repo: &Repo, at: SystemTime) -> Result<(), String> {
     let chains = Chain::new(&repo.git)
         .read_all()
         .map_err(|error| error.message())?;
+    // One trunk log answers whether each live change landed, never one log per change.
+    let live_bases: Vec<(&str, &str)> = chains
+        .iter()
+        .filter(|held| live(held.record.state))
+        .map(|held| (held.record.base_first.as_str(), held.id.as_str()))
+        .collect();
+    let scans = crate::publish::scan_many(&repo.git, &trunk, &live_bases)?;
     let mut changes = Vec::new();
     for held in &chains {
         let (id, record) = (held.id.as_str(), &held.record);
         // A change that is not live, or has landed, is listed with no input: its writes are
         // known to be uncovered, never a gap.
         if !live(record.state)
-            || !crate::publish::scan(&repo.git, &record.base_first, &trunk, id)?
-                .publications
-                .is_empty()
+            || scans
+                .get(id)
+                .is_some_and(|scan| !scan.publications.is_empty())
         {
             changes.push(CoordChange {
                 change: id.to_owned(),

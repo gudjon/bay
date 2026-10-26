@@ -343,17 +343,72 @@ pub struct Scan {
 /// A git fault.
 pub fn scan(git: &Git, base_first: &str, trunk: &str, id: &str) -> Result<Scan, String> {
     let range = format!("{base_first}..{trunk}");
-    let log = git
-        .run(&[
-            "log",
-            "--format=%H%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Revision-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%cn%x1e",
-            &range,
-        ])
-        .map_err(|error| error.message())?;
+    let log = trunk_log(git, &[range.as_str()])?;
     let signatures = git
         .ref_target(REGISTRY_REF)
         .map_err(|error| error.message())?
         .is_some();
+    Ok(scan_of(git, &log, signatures, id))
+}
+
+/// [`scan`] of many changes, `(base_first, id)` each, from one `git log` of trunk since the
+/// oldest of their bases: a change's publication names it in its trailer, so one pass over the
+/// union of their ranges answers every one (a fleet finding, 2026-10-26: `bay status` ran one
+/// log per live change, about 140 on a fleet's queue).
+///
+/// # Errors
+///
+/// A git fault.
+pub fn scan_many(
+    git: &Git,
+    trunk: &str,
+    changes: &[(&str, &str)],
+) -> Result<std::collections::HashMap<String, Scan>, String> {
+    let mut out = std::collections::HashMap::new();
+    if changes.is_empty() {
+        return Ok(out);
+    }
+    let mut bases: Vec<&str> = changes.iter().map(|(base, _)| *base).collect();
+    bases.sort_unstable();
+    bases.dedup();
+    let mut args = vec!["merge-base", "--octopus"];
+    args.extend(bases.iter().copied());
+    // One base needs no join. A base this store cannot join (not here, or on no common line)
+    // falls back to one scan per change, as before.
+    let joined = match bases.as_slice() {
+        [only] => Ok((*only).to_owned()),
+        _ => git.run(&args),
+    };
+    let Ok(oldest) = joined else {
+        for (base, id) in changes {
+            out.insert((*id).to_owned(), scan(git, base, trunk, id)?);
+        }
+        return Ok(out);
+    };
+    let range = format!("{oldest}..{trunk}");
+    let log = trunk_log(git, &[range.as_str()])?;
+    let signatures = git
+        .ref_target(REGISTRY_REF)
+        .map_err(|error| error.message())?
+        .is_some();
+    for (_, id) in changes {
+        out.insert((*id).to_owned(), scan_of(git, &log, signatures, id));
+    }
+    Ok(out)
+}
+
+/// Trunk's commits in `range`, each as `scan` reads it.
+fn trunk_log(git: &Git, range: &[&str]) -> Result<String, String> {
+    let mut args = vec![
+        "log",
+        "--format=%H%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Revision-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%cn%x1e",
+    ];
+    args.extend(range.iter().copied());
+    git.run(&args).map_err(|error| error.message())
+}
+
+/// The publications of change `id` in `log` ([`trunk_log`]).
+fn scan_of(git: &Git, log: &str, signatures: bool, id: &str) -> Scan {
     let mut scan = Scan::default();
     for entry in log.split('\u{1e}') {
         let fields: Vec<&str> = entry.trim().split('\u{1f}').map(str::trim).collect();
@@ -373,7 +428,7 @@ pub fn scan(git: &Git, base_first: &str, trunk: &str, id: &str) -> Result<Scan, 
             scan.anomalies.push(found);
         }
     }
-    Ok(scan)
+    scan
 }
 
 /// Whether `commit` verifies against the executor file of the registry version `registry_id`
@@ -3350,7 +3405,10 @@ fn freeze(ctx: &Ctx) -> Result<Result<String, BayResult>, String> {
     // BACKLOG 49: a new file over the limit leaves the view's freeze for the assets plugin.
     crate::assets::offload_view(repo, &repo.view_path(id))?;
     let view = Git::new(repo.view_path(id));
-    let latest = ctx.chain.drafts(id).map_err(|error| error.message())?[0].clone();
+    let latest = ctx
+        .chain
+        .latest_draft(id)
+        .map_err(|error| error.message())?;
     let frozen = freeze_draft(&view, &ctx.record.base, "draft").map_err(|error| error.message())?;
     let revision = if crate::change::same_draft(&repo.git, &frozen, &latest)
         .map_err(|error| error.message())?
@@ -3483,7 +3541,10 @@ fn abandon_change(
     }
     let agent = ctx.agent_signer()?;
     ctx.chain.sign_with(agent);
-    let draft = ctx.chain.drafts(id).map_err(|error| error.message())?[0].clone();
+    let draft = ctx
+        .chain
+        .latest_draft(id)
+        .map_err(|error| error.message())?;
     let mut request = json!({
         "schema": REQUEST_SCHEMA,
         "kind": "abandon",
