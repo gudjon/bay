@@ -519,6 +519,7 @@ fn pass(
     };
     in_pass_order(&mut chains, &queue);
     let records: Vec<ChangeRecord> = chains.iter().map(|held| held.record.clone()).collect();
+    sweep_ended(repo, &queue, &records);
     let holding = records
         .iter()
         .flat_map(|record| &record.operations)
@@ -700,6 +701,43 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
         .ok()?;
     let idle = crate::live::unix_now().saturating_sub(written);
     (idle > repo.config.lease().as_secs() * 2).then_some((head.change, head.op_id))
+}
+
+/// Releases every queue place, anywhere in the line, whose operation has ended (a fleet
+/// finding, 2026-10-26: five places outlived their operations, superseded, abandoned, or
+/// reserved again after publishing, and each held the whole line once it reached the head).
+/// It reads the chains the pass already holds, so it costs no read of its own; a release is
+/// the one any runner writes. A place whose change is not among them is left to the head's
+/// own release.
+fn sweep_ended(repo: &Repo, queue: &Queue, records: &[ChangeRecord]) {
+    let ended: Vec<(u64, String, String)> = queue
+        .entries
+        .values()
+        .filter(|entry| !queue.released.contains(&entry.seq))
+        .filter_map(|entry| {
+            let record = records.iter().find(|record| record.id == entry.change)?;
+            let op = record
+                .operations
+                .iter()
+                .find(|op| op.op_id == entry.op_id)?;
+            (op.state.is_terminal() || op.state == OpState::Blocked).then(|| {
+                let reason = op.outcome.as_ref().map_or_else(
+                    || word(op.state).unwrap_or_default(),
+                    |outcome| outcome.to_lowercase(),
+                );
+                (entry.seq, entry.op_id.clone(), reason)
+            })
+        })
+        .collect();
+    if ended.is_empty() {
+        return;
+    }
+    let signer = Keys::load(&repo.git).executor;
+    for (seq, op_id, reason) in ended {
+        if let Err(why) = crate::queue::release(repo, signer.as_ref(), seq, &op_id, &reason) {
+            eprintln!("bay runner: queue place {seq} could not be released: {why}");
+        }
+    }
 }
 
 /// Orders a pass: queued changes first, in queue order, so one pass carries the queue as far as

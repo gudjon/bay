@@ -478,7 +478,7 @@ pub fn check_files(
     timeout_s: u32,
 ) -> Vec<(String, String)> {
     let script = format!(
-        "#!/bin/sh\nreq=$(cat)\ncommit=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"}}.*/\\1/p')\ntree=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"}}.*/\\2/p')\n{before}\n{result}\n"
+        "#!/bin/sh\nreq=$(cat)\ncommit=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"[,}}].*/\\1/p')\ntree=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"[,}}].*/\\2/p')\n{before}\n{result}\n"
     );
     let policy = format!(
         "revision = 1\n\n[[check]]\nid = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = {expected_minimum}\ntimeout_s = {timeout_s}\n"

@@ -261,7 +261,9 @@ The order, learned in a fleet rollout:
    every Claude config directory it finds (`bay.claudeConfigDirs` names others). It never writes hook entries, a
    repository's settings or its Git config, so it is safe to run on a busy machine. A pin (`bay.updateVersion`) is the
    oldest version a machine runs: it follows every newer release, and an install by a bay below the pin or never
-   released is refused `UPDATE_PINNED`, so tests and other agents never move a shared runner. A runner moves its own renamed config keys
+   released is refused `UPDATE_PINNED`, so tests and other agents never move a shared runner. An image that must
+   keep one bay (a server or runner container) turns updates off with `BAY_DISABLE_AUTOUPDATE=1`: a pin is
+   only a floor, and `bay status` and `bay doctor` update hourly. A runner moves its own renamed config keys
    when it starts.
 2. Put `[agent] product = "claude"` in `.bay/config.toml` on main. Each machine's `bay doctor` now reads hooks red
    until step 3 merges: that is expected, not a fault. After a bay update, doctor's hooks row names under `behind` any

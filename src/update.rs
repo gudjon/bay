@@ -951,8 +951,8 @@ fn now_s() -> u64 {
         .map_or(0, |elapsed| elapsed.as_secs())
 }
 
-/// Auto-update, from `status` and `doctor` only (never `land`, `executor run` or the hook,
-/// which hold or may hold an operation): at most one check a day, run as a detached
+/// Auto-update, from `status`, `doctor` and a looping runner between its passes (never `land`
+/// or the hook, which hold or may hold an operation): at most one check an hour, run as a detached
 /// `bay update` so the command's result and exit code never change. `BAY_DISABLE_AUTOUPDATE=1`
 /// and the box's `bay.updateAuto = false` turn it off, and a pinned box never moves on its own;
 /// a repository's settings play no part. A build

@@ -491,6 +491,9 @@ struct Ctx<'a> {
     online: bool,
     /// The chain head the last heartbeat pushed, while a check runs (§ 9a).
     beat_pushed: std::cell::RefCell<Option<String>>,
+    /// B2: the last valid policy this operation was judged by, because main's own is invalid;
+    /// every result of the operation names it.
+    policy_used: std::cell::RefCell<Option<serde_json::Value>>,
     /// Events this run wrote mid-operation, told to the notify adapter only once the operation
     /// reached its outcome, so a slow adapter never holds an operation past its lease.
     deferred: std::cell::RefCell<Vec<serde_json::Value>>,
@@ -533,6 +536,7 @@ impl<'a> Ctx<'a> {
             repair: None,
             online: true,
             beat_pushed: std::cell::RefCell::new(None),
+            policy_used: std::cell::RefCell::new(None),
             deferred: std::cell::RefCell::new(Vec::new()),
             retries_here: 0,
             ahead_of_turn: false,
@@ -1555,7 +1559,14 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
             return Err(why);
         }
     };
-    let outcome = run_attempts(ctx, op_id, &revision, trunk, &mut seq);
+    let mut outcome = run_attempts(ctx, op_id, &revision, trunk, &mut seq);
+    // B2: every result of an operation judged by the last valid policy names it.
+    if let (Ok(result), Some(used)) = (outcome.as_mut(), ctx.policy_used.borrow().clone()) {
+        let detail = result.detail.get_or_insert_with(|| json!({}));
+        if detail.is_object() {
+            detail["policy_used"] = used;
+        }
+    }
     if outcome.is_err() {
         release_after_fault(ctx, op_id, &revision);
     }
@@ -4860,13 +4871,13 @@ fn unraised(
     base_policy: Option<&policy::Policy>,
     own_policy: &policy::Policy,
 ) -> Option<String> {
-    let base_revision = match base_policy {
-        Some(policy) => policy.revision,
-        None => match policy::revision_at(git, trunk) {
-            Ok(revision) => revision.unwrap_or(0),
-            Err(why) => return Some(why),
-        },
+    // The revision main's policy states, valid or not: under B2 the judging policy may be an
+    // older one, and a fix must still raise main's revision, never move it back.
+    let stated = match policy::revision_at(git, trunk) {
+        Ok(revision) => revision.unwrap_or(0),
+        Err(why) => return Some(why),
     };
+    let base_revision = base_policy.map_or(stated, |policy| policy.revision.max(stated));
     (own_policy.revision <= base_revision).then(|| {
         format!(
             "this change edits the policy or an adapter path, so it must raise revision above {base_revision}; it has {}",
@@ -4879,6 +4890,9 @@ fn unraised(
 /// tree. Returns whether a judging policy ran checks (so there is evidence to push), the
 /// attempt's verdict word ([`UNCHECKED`] when the policy that judges it is unchecked), and the
 /// refusal when any required check is not `pass` or the base has no policy.
+// One judgement, read top to bottom: the base's policy (or the last valid one), then the
+// candidate's own when it changes the policy.
+#[allow(clippy::too_many_lines)]
 fn check_candidate(
     ctx: &Ctx,
     op_id: &str,
@@ -4900,18 +4914,32 @@ fn check_candidate(
             ),
         ))
     };
+    let mut adapters_from: Option<String> = None;
     let base_policy = match policy::load_at(git, trunk) {
         Ok(policy) => policy,
         // § 7: a registry-signed repair is judged by its own new policy alone, so an invalid
         // base policy stays repairable.
         Err(policy::LoadError::Invalid(_)) if ctx.repair.is_some() => None,
-        // § 7: the policy at the accepted base breaks a validity rule, so no candidate can be
-        // judged by it; a bad policy never passes its own candidate.
-        Err(policy::LoadError::Invalid(why)) => {
-            return Ok(policy_invalid(ctx, op_id, trunk, "base", &why));
-        }
+        // B2 (owner ruling 2026-10-26): the policy at the accepted base breaks a validity rule,
+        // so the candidate is judged by the last valid policy on main's first-parent line, with
+        // that commit's adapters, and every result says so. Only when main never had a valid
+        // one is the candidate refused: a bad policy never passes its own candidate.
+        Err(policy::LoadError::Invalid(why)) => match last_valid_policy(git, trunk) {
+            Some((at, policy)) => {
+                *ctx.policy_used.borrow_mut() = Some(json!({
+                    "commit": at,
+                    "revision": policy.revision,
+                    "invalid_at": trunk,
+                    "why": why,
+                }));
+                adapters_from = Some(at);
+                Some(policy)
+            }
+            None => return Ok(policy_invalid(ctx, op_id, trunk, "base", &why)),
+        },
         Err(policy::LoadError::Git(why)) => return refuse(why),
     };
+    let base_from = adapters_from.as_deref().unwrap_or(trunk);
     // The missing-policy ruling: no policy at the base is unknown criteria, and unknown is
     // never pass. Only a registry-signed repair, judged by its own new policy alone (§ 7), may
     // stand on such a base; a candidate's own policy never judges it otherwise.
@@ -4943,7 +4971,7 @@ fn check_candidate(
         let Some(policy) = &base_policy else {
             return Ok(policy_missing(ctx, op_id, trunk));
         };
-        let (verdict, refusal) = run(candidate_id, policy, trunk)?;
+        let (verdict, refusal) = run(candidate_id, policy, base_from)?;
         return Ok((!policy.unchecked, verdict, refusal));
     }
 
@@ -4983,7 +5011,7 @@ fn check_candidate(
     if let Some(approvals) = approval_repair(ctx, base_policy.as_ref(), trunk, commit, &own_policy)?
     {
         let own = run(&format!("{candidate_id}-own"), &own_policy, commit)?;
-        return approved_repair(own, || run(candidate_id, &approvals, trunk));
+        return approved_repair(own, || run(candidate_id, &approvals, base_from));
     }
     let Some(policy) = &base_policy else {
         return Ok(policy_missing(ctx, op_id, trunk));
@@ -4994,7 +5022,7 @@ fn check_candidate(
     if policy.unchecked {
         return Ok((false, UNCHECKED, None));
     }
-    let (verdict, refusal) = run(candidate_id, policy, trunk)?;
+    let (verdict, refusal) = run(candidate_id, policy, base_from)?;
     if refusal.is_some() {
         return Ok((true, verdict, refusal));
     }
@@ -5099,6 +5127,28 @@ fn policy_missing(ctx: &Ctx, op_id: &str, base: &str) -> (bool, &'static str, Op
 
 /// `POLICY_INVALID` (§ 2, § 7): the policy at `at`, the base's or the candidate's own (`which`),
 /// breaks a validity rule, so it judges nothing.
+/// B2: the newest commit on `trunk`'s first-parent line that changes `.bay/` and whose policy
+/// loads, and that policy; `None` when none of the last 50 such commits has a valid one.
+fn last_valid_policy(git: &Git, trunk: &str) -> Option<(String, policy::Policy)> {
+    let listed = git
+        .run(&[
+            "rev-list",
+            "--first-parent",
+            "-n",
+            "50",
+            trunk,
+            "--",
+            ".bay/",
+        ])
+        .ok()?;
+    listed
+        .lines()
+        .find_map(|commit| match policy::load_at(git, commit) {
+            Ok(Some(policy)) => Some((commit.to_owned(), policy)),
+            _ => None,
+        })
+}
+
 fn policy_invalid(
     ctx: &Ctx,
     op_id: &str,

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.13
+
+- A runner releases every queue place whose operation has ended, anywhere in the line, each pass.
+- While main's policy is invalid, changes are judged by the last valid one, and each result says so.
+- A fix to an invalid policy merges through bay, judged by the last valid policy; its revision must still rise.
+- A check whose tree is part of the candidate's is told that part's tree as `candidate.paths_tree`.
+
 ## 0.5.12
 
 - A runner that lost a head to another leaves its place; a head that passed is never failed by it.

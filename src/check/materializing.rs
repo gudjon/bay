@@ -15,8 +15,8 @@ use crate::git::Git;
 /// only when both hold. What it saw goes to stderr.
 const ADAPTER: &str = r#"#!/bin/sh
 req=$(cat)
-commit=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"}.*/\1/p')
-tree=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"}.*/\2/p')
+commit=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"[,}].*/\1/p')
+tree=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"[,}].*/\2/p')
 seen=$(find . -type f | LC_ALL=C sort | tr '\n' ' ')
 verdict=product_failure
 if [ "$seen" = 'SEEN' ] && printf '%s' "$req" | grep -qF '"changed_paths":CHANGED'; then verdict=pass; fi
@@ -27,8 +27,8 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
 /// Counts the candidate's files: a pass when there are exactly `$1`.
 const COUNTER: &str = r#"#!/bin/sh
 req=$(cat)
-commit=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"}.*/\1/p')
-tree=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"}.*/\2/p')
+commit=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"[,}].*/\1/p')
+tree=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"[,}].*/\2/p')
 count=$(find . -type f | wc -l | tr -d ' ')
 verdict=product_failure
 if [ "$count" = "$1" ]; then verdict=pass; fi

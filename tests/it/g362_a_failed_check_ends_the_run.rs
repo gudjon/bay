@@ -34,7 +34,7 @@ fn trunk(test_box: &TestBox, checks: &[&str], runner: &str) -> (PathBuf, PathBuf
     let fail = passing_result(1).replace("\\\"pass\\\"", "\\\"product_failure\\\"");
     let pass = passing_result(1);
     let script = format!(
-        "#!/bin/sh\nreq=$(cat)\ncommit=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"}}.*/\\1/p')\ntree=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"}}.*/\\2/p')\ncase \"$1\" in\n  lint) {lint_log}\n    if [ -f src/lint.bad ]; then {fail}; else {pass}; fi ;;\n  slow) {slow_log}\n    sleep 2; {pass} ;;\n  *) {other_log}\n    {pass} ;;\nesac\nexit 0\n",
+        "#!/bin/sh\nreq=$(cat)\ncommit=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"[,}}].*/\\1/p')\ntree=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"[,}}].*/\\2/p')\ncase \"$1\" in\n  lint) {lint_log}\n    if [ -f src/lint.bad ]; then {fail}; else {pass}; fi ;;\n  slow) {slow_log}\n    sleep 2; {pass} ;;\n  *) {other_log}\n    {pass} ;;\nesac\nexit 0\n",
         lint_log = logged("lint"),
         slow_log = logged("slow"),
         other_log = logged("$1"),

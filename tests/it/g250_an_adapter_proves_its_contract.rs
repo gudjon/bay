@@ -31,8 +31,8 @@ fn wake_script(before: &str, answer: &str, code: u8) -> String {
 fn check_script(before: &str, schema: &str) -> String {
     format!(
         "#!/bin/sh\nreq=$(cat)\n\
-         commit=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"}}.*/\\1/p')\n\
-         tree=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"}}.*/\\2/p')\n\
+         commit=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"[,}}].*/\\1/p')\n\
+         tree=$(printf '%s' \"$req\" | sed -n 's/.*\"candidate\":{{\"commit\":\"\\([0-9a-f]*\\)\",\"tree\":\"\\([0-9a-f]*\\)\"[,}}].*/\\2/p')\n\
          {before}\n\
          printf '{{\"schema\":\"{schema}\",\"exercised\":{{\"commit\":\"%s\",\"tree\":\"%s\"}},\"plan\":{{\"selected\":1,\"completed\":1}},\"checks\":[{{\"id\":\"t1\",\"verdict\":\"pass\"}}]}}' \"$commit\" \"$tree\"\n"
     )

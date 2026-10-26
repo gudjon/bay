@@ -349,9 +349,14 @@ fn a_policy_that_turns_its_provider_off_is_invalid() {
     // A timeout of zero would make every provider time out: coverage off with no notice.
     let off = format!("{}timeout_s = 0\n", policy(2, None));
     move_trunk(&test_box, &repo, &[(".bay/policy.toml", &off)]);
-    let (code, refused) = land(&test_box, &view);
-    assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
+    // B2: an invalid policy on trunk refuses nothing; the change is judged by the last valid
+    // one, and its result names why trunk's is invalid.
+    let (code, landed) = land(&test_box, &view);
+    assert_eq!(code, 0, "{landed}");
+    assert!(
+        landed["detail"]["policy_used"]["why"].is_string(),
+        "{landed}"
+    );
 }
 
 #[test]
@@ -370,9 +375,14 @@ fn a_provider_path_that_climbs_out_of_its_adapter_makes_the_policy_invalid() {
             &format!("provider = \"scripts/{}bin/cat\"", "../".repeat(40)),
         );
     move_trunk(&test_box, &repo, &[(".bay/policy.toml", &climbing)]);
-    let (code, refused) = land(&test_box, &view);
-    assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
+    // B2: an invalid policy on trunk refuses nothing; the change is judged by the last valid
+    // one, and its result names why trunk's is invalid.
+    let (code, landed) = land(&test_box, &view);
+    assert_eq!(code, 0, "{landed}");
+    assert!(
+        landed["detail"]["policy_used"]["why"].is_string(),
+        "{landed}"
+    );
 }
 
 #[test]
@@ -652,9 +662,14 @@ fn a_provider_outside_its_adapter_list_makes_the_policy_invalid() {
         "adapter = [\"api/version\"]",
     );
     move_trunk(&test_box, &repo, &[(".bay/policy.toml", &invalid)]);
-    let (code, refused) = land(&test_box, &view);
-    assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
+    // B2: an invalid policy on trunk refuses nothing; the change is judged by the last valid
+    // one, and its result names why trunk's is invalid.
+    let (code, landed) = land(&test_box, &view);
+    assert_eq!(code, 0, "{landed}");
+    assert!(
+        landed["detail"]["policy_used"]["why"].is_string(),
+        "{landed}"
+    );
 }
 
 /// `bay hook tool.before` with probed payload 03 (a `Write`), its tool, target and session

@@ -181,7 +181,7 @@ fn an_adapter_edit_that_passes_both_adapters_lands_and_its_manifest_is_the_bases
 }
 
 #[test]
-fn a_policy_with_two_entries_for_one_check_is_refused() {
+fn a_policy_with_two_entries_for_one_check_is_named_and_the_last_valid_one_judges() {
     let (test_box, repo, _remote, _id, view) = change(true);
     // Trunk gets an invalid policy (pushed directly, as a broken forge would allow).
     let doubled = format!(
@@ -192,11 +192,13 @@ fn a_policy_with_two_entries_for_one_check_is_refused() {
     test_box.git_ok(&repo, &["commit", "-q", "-am", "invalid policy"]);
     test_box.git_ok(&repo, &["push", "-q", "origin", "main"]);
     let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
-    // The policy at the accepted base breaks a validity rule (INTERFACES § 2, § 7).
-    assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
+    // The policy at the accepted base breaks a validity rule (INTERFACES § 2, § 7). B2: the
+    // change is judged by the last valid policy, and its result names why trunk's is invalid.
+    assert_eq!(code, 0, "{refused}");
     assert!(
-        refused.to_string().contains("two [[check]] entries"),
+        refused["detail"]["policy_used"]["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("two [[check]] entries")),
         "{refused}"
     );
 }
@@ -259,7 +261,9 @@ fn a_registry_signed_repair_restores_a_broken_adapter_and_an_agent_signed_one_is
 }
 
 #[test]
-fn an_invalid_policy_on_trunk_is_policy_invalid_until_a_registry_signed_repair() {
+/// B2 (owner ruling 2026-10-26): a policy fix to an invalid policy on trunk merges through bay,
+/// judged by the last valid policy, and must still raise trunk's stated revision.
+fn an_invalid_policy_on_trunk_is_fixed_through_bay_judged_by_the_last_valid_one() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let files = vec![
@@ -290,25 +294,22 @@ fn an_invalid_policy_on_trunk_is_policy_invalid_until_a_registry_signed_repair()
         ]))
     };
 
-    // An ordinary change is judged by the invalid base policy: refused, never passed.
-    let (code, refused) = repair_at(&keys.agent, "REPAIR-1", 8);
-    assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "POLICY_INVALID", "{refused}");
-    assert_eq!(refused["retry_when"], "after_new_main");
-
-    // An invalid policy still states its revision: a repair below it would move revision
-    // back, so it is refused.
-    let (code, lowered) = repair_at(&keys.registry, "REPAIR-LOW", 3);
+    // A fix below the invalid policy's stated revision would move revision back: refused.
+    let (code, lowered) = repair_at(&keys.agent, "REPAIR-LOW", 3);
     assert_ne!(code, 0, "{lowered}");
     assert!(
         lowered.to_string().contains("raise revision above 7"),
         "{lowered}"
     );
 
-    // A registry-signed repair is judged by its own new policy alone.
-    let (code, repaired) = repair_at(&keys.registry, "REPAIR-2", 8);
+    // An ordinary fix above it is judged by the last valid policy, revision 1, and says so.
+    let (code, repaired) = repair_at(&keys.agent, "REPAIR-1", 8);
     assert_eq!(code, 0, "{repaired}");
-    assert_eq!(repaired["decision"], "merged");
+    assert_eq!(repaired["decision"], "merged", "{repaired}");
+    assert_eq!(
+        repaired["detail"]["policy_used"]["revision"], 1,
+        "{repaired}"
+    );
 }
 
 /// The `policy_provenance` of every evidence record on the remote trunk's tree.

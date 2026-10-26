@@ -1394,6 +1394,7 @@ fn run_once(
     } else {
         None
     };
+    let kept = paths_tree(git, entry, candidate, &dir);
     let place = Place {
         tree: &tree_dir,
         adapter: &adapter_dir,
@@ -1403,6 +1404,7 @@ fn run_once(
         read: &limits.sandbox.read,
         about,
         history: history.as_ref(),
+        paths_tree: kept.as_deref(),
     };
     // Items 1 and 2: a check whose footprint is observed has its tree armed before it runs.
     let armed = (not_run.is_none() && entry.footprint == crate::policy::FootprintMode::Observed)
@@ -1801,12 +1803,18 @@ struct Place<'a> {
     about: &'a serde_json::Map<String, serde_json::Value>,
     /// The read-only history of a check with `inputs = ["history"]`.
     history: Option<&'a History>,
+    /// The tree of the candidate kept to what the check's tree holds, for a check whose tree
+    /// is not the whole candidate's ([`paths_tree`]).
+    paths_tree: Option<&'a str>,
 }
 
 /// The `bay.check.request/1` bay sends for `entry` on `candidate` (`INTERFACES` § 3). Fields
 /// are only ever added to a request of one schema, and an adapter ignores a field it does not
 /// know, so `base`, `change`, `messages`, `messages_truncated`, `git` and `materialized` keep
 /// it at `/1`:
+/// - `candidate.paths_tree`: only for a check whose tree is part of the candidate's (its
+///   `paths`, or `materialize = "changed"`): the Git tree of exactly that part, which the files
+///   it got hash to.
 /// - `materialized`: `"changed"`, only for a check with `materialize = "changed"` (N-18): its
 ///   tree holds only the request's `changed_paths` that the candidate still has, and the
 ///   entry's `paths`.
@@ -1848,6 +1856,9 @@ fn request(
     if entry.changed_only() {
         request["materialized"] = json!("changed");
     }
+    if let Some(tree) = place.paths_tree {
+        request["candidate"]["paths_tree"] = json!(tree);
+    }
     if let Some(fields) = request.as_object_mut() {
         fields.extend(place.about.clone());
         if let Some(history) = place.history {
@@ -1855,6 +1866,27 @@ fn request(
         }
     }
     request
+}
+
+/// A fleet finding (2026-10-26): an adapter that checks its tree against the candidate's
+/// `tree` can never match when the check's `paths` keep only part of it. So a check whose tree
+/// is part of the candidate's is told the Git tree of exactly that part: the candidate's
+/// entries its tree holds, as `git write-tree` names them. `None` for a check whose tree is the
+/// whole candidate's, or when the tree cannot be made.
+fn paths_tree(git: &Git, entry: &CheckEntry, candidate: &Candidate, dir: &Path) -> Option<String> {
+    let kept = entry.materialized(candidate.changed_paths)?;
+    let index = dir.join("paths-tree.index");
+    let index = index.to_str()?;
+    let env = [("GIT_INDEX_FILE", index)];
+    let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", candidate.commit, "--"];
+    args.extend(kept.iter().map(String::as_str));
+    let listed = git.run_bytes(&args, &[], None).ok()?;
+    git.run_with(&["read-tree", "--empty"], &env, None).ok()?;
+    git.run_bytes(&["update-index", "-z", "--index-info"], &env, Some(&listed))
+        .ok()?;
+    let tree = git.run_with(&["write-tree"], &env, None).ok();
+    let _ = std::fs::remove_file(index);
+    tree
 }
 
 fn run_one(
@@ -2639,8 +2671,8 @@ mod tests {
 
         const ADAPTER: &str = r#"#!/bin/sh
 req=$(cat)
-commit=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"}.*/\1/p')
-tree=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"}.*/\2/p')
+commit=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"[,}].*/\1/p')
+tree=$(printf '%s' "$req" | sed -n 's/.*"candidate":{"commit":"\([0-9a-f]*\)","tree":"\([0-9a-f]*\)"[,}].*/\2/p')
 printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"plan":{"selected":1,"completed":1},"checks":[{"id":"t1","verdict":"pass"}]}' "$commit" "$tree"
 "#;
 
