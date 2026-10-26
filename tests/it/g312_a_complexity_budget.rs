@@ -40,8 +40,13 @@ use support::TestBox;
 /// - 0.5.4, one flag (`install --approver`, owner ruling 2026-10-25): a person who approves set
 ///   up two keys, three config lines and two enrolments by hand, seven steps a non-technical
 ///   person got wrong; now it is one run that reads its result back from the remote.
+/// - 0.5.8, one flag (`merge --from`, a fleet finding 2026-10-26): a branch made outside bay
+///   (ten dependency-bot PRs) took `start --from`, then copying its change id into `merge`; now
+///   it is one command, so no PR has to be merged around bay.
+/// - 0.5.8, one flag (`abandon --why`, a fleet finding 2026-10-26): an audit of abandoned work
+///   asked each seat why it gave a change up; now the reason is in the signed request.
 const COMMANDS: usize = 28;
-const FLAGS: usize = 77;
+const FLAGS: usize = 79;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,

@@ -471,3 +471,80 @@ fn main_keeps_the_branchs_author_and_words_and_an_amend_is_read() {
     let message = test_box.git_bare(&remote, &["log", "-1", "--format=%B", "main"]);
     assert!(message.contains("better words"), "{message}");
 }
+
+/// `bay merge --from <branch>` (0.5.8): a branch made outside bay (a dependency bot's) is taken in
+/// and merged in one step, under the branch's name as its intent and its own paths, with no
+/// change id to carry from `bay start` to `bay merge`.
+#[test]
+fn merge_from_takes_a_branch_in_and_merges_it_in_one_step() {
+    let (test_box, repo, remote) = trunk();
+    outside_branch(&test_box, &repo, &[&[("src/x.rs", "ONE\ntwo\n")]]);
+    let (code, merged) = result_json(
+        test_box
+            .bay(&repo)
+            .args(["merge", "--from", "outside", "--wait"]),
+    );
+    assert_eq!(code, 0, "{merged}");
+    assert_eq!(merged["decision"], "merged", "{merged}");
+    assert_eq!(
+        test_box.git_bare(&remote, &["show", "main:src/x.rs"]),
+        "ONE\ntwo"
+    );
+    // Its intent is the branch, so the same branch merged again adopts that change.
+    let id = merged["change"].as_str().unwrap();
+    let record = test_box.git_bare(
+        &remote,
+        &["show", &format!("refs/bay/changes/{id}:change.json")],
+    );
+    assert!(record.contains("\"outside\""), "{record}");
+}
+
+/// A fleet finding (2026-10-26): a refresh onto a moved main (`bay start <change>`) keeps the
+/// draft's own message and author; it used to write "resume onto trunk" over them.
+#[test]
+fn a_refresh_onto_a_moved_main_keeps_the_drafts_message_and_author() {
+    let (test_box, repo, _remote) = trunk();
+    test_box.git_ok(&repo, &["switch", "-q", "-c", "outside"]);
+    std::fs::write(repo.join("src/x.rs"), "ONE\ntwo\n").unwrap();
+    test_box.git_ok(&repo, &["add", "--all"]);
+    test_box.git_ok(
+        &repo,
+        &[
+            "commit",
+            "-q",
+            "--author",
+            "Ada Outside <ada@example.org>",
+            "-m",
+            "the outside work",
+        ],
+    );
+    test_box.git_ok(&repo, &["push", "-q", "origin", "outside"]);
+    test_box.git_ok(&repo, &["switch", "-q", "main"]);
+    let started = test_box.bay_ok(
+        &repo,
+        &[
+            "start",
+            "CARD-outside",
+            "--paths",
+            "src/",
+            "--from",
+            "outside",
+        ],
+    );
+    let id = started["change"].as_str().unwrap().to_owned();
+    land_through_bay(
+        &test_box,
+        &repo,
+        "CARD-before",
+        "src/new.rs",
+        "fn new() {}\n",
+    );
+    let (code, resumed) = result_json(test_box.bay(&repo).args(["start", &id]));
+    assert_eq!(code, 0, "{resumed}");
+    let view = PathBuf::from(resumed["detail"]["view"].as_str().unwrap());
+    let head = test_box.git_ok(&view, &["log", "-1", "--format=%s|%an"]);
+    assert_eq!(
+        head, "the outside work|Ada Outside",
+        "the refresh kept the draft's own message"
+    );
+}

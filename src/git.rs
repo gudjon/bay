@@ -1210,16 +1210,16 @@ pub fn run_bounded_for(
         }
         _ => None,
     };
-    let mut stdout = child
+    let stdout = child
         .stdout
         .take()
         .ok_or(GitError::UnexpectedOutput("stdout pipe is missing"))?;
-    let mut stderr = child
+    let stderr = child
         .stderr
         .take()
         .ok_or(GitError::UnexpectedOutput("stderr pipe is missing"))?;
-    let stdout_handle = thread::spawn(move || read_to_end(&mut stdout));
-    let stderr_handle = thread::spawn(move || read_to_end(&mut stderr));
+    let stdout_handle = reader(stdout);
+    let stderr_handle = reader(stderr);
 
     let status = wait_until(&mut child, display, timeout);
     // Counted however the call ended: a write that timed out may have landed.
@@ -1241,22 +1241,56 @@ pub fn run_bounded_for(
     }
     Ok(Output {
         status,
-        stdout: join_bytes(stdout_handle)?,
-        stderr: join_bytes(stderr_handle)?,
+        stdout: join_bytes(&stdout_handle)?,
+        stderr: join_bytes(&stderr_handle)?,
     })
 }
 
-fn read_to_end(reader: &mut impl Read) -> std::io::Result<Vec<u8>> {
-    let mut buffer = Vec::new();
-    reader.read_to_end(&mut buffer)?;
-    Ok(buffer)
+/// How long a pipe of a git call that exited may stay open: a process git started (an ssh
+/// connection, a credential helper) can inherit it and hold it open after git itself is gone. A
+/// fleet's runner hung 19 minutes on one, its git child exited and its pass stopped (2026-10-26).
+const PIPE_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A pipe's reader on its own thread, each chunk it reads kept in a buffer the caller shares,
+/// so a caller that stops waiting ([`join_bytes`]) still has every byte read by then.
+struct Reader {
+    read: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    done: std::sync::mpsc::Receiver<std::io::Result<()>>,
 }
 
-fn join_bytes(handle: thread::JoinHandle<std::io::Result<Vec<u8>>>) -> Result<Vec<u8>, GitError> {
-    handle
-        .join()
-        .map_err(|_| GitError::Join)?
-        .map_err(GitError::Spawn)
+fn reader(mut pipe: impl Read + Send + 'static) -> Reader {
+    let read = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (send, done) = std::sync::mpsc::channel();
+    let into = std::sync::Arc::clone(&read);
+    thread::spawn(move || {
+        let mut chunk = vec![0_u8; 64 * 1024];
+        let ended = loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break Ok(()),
+                Ok(n) => {
+                    if let Ok(mut all) = into.lock() {
+                        all.extend_from_slice(&chunk[..n]);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => break Err(error),
+            }
+        };
+        let _ = send.send(ended);
+    });
+    Reader { read, done }
+}
+
+fn join_bytes(handle: &Reader) -> Result<Vec<u8>, GitError> {
+    match handle.done.recv_timeout(PIPE_GRACE) {
+        Ok(Err(error)) => return Err(GitError::Spawn(error)),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Err(GitError::Join),
+        // A pipe that closed, or one something git started still holds after git exited: what
+        // was read is all that comes, and that reader is left to end with that process.
+        Ok(Ok(())) | Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+    }
+    let read = handle.read.lock().map_err(|_| GitError::Join)?;
+    Ok(read.clone())
 }
 
 fn wait_until(

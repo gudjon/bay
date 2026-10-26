@@ -56,6 +56,10 @@ enum Command {
     Merge {
         /// The change (default: the change of the view bay runs in)
         change: Option<String>,
+        /// Take in a branch made outside bay and merge it in one step: `start --from <branch>`
+        /// with the branch's name as the intent, then `merge`
+        #[arg(long, conflicts_with = "change")]
+        from: Option<String>,
         #[command(flatten)]
         wait: WaitArgs,
     },
@@ -63,6 +67,9 @@ enum Command {
     Abandon {
         /// The change (default: the change of the view bay runs in)
         change: Option<String>,
+        /// Why it is given up, kept in its signed abandon request (who gave it up is already)
+        #[arg(long)]
+        why: Option<String>,
     },
     /// Merge the edits made in the main checkout as one change: start, merge --wait, then move
     /// the checkout to the new tip of main. Never in a view (use merge there)
@@ -661,8 +668,8 @@ fn approve_change(dir: &std::path::Path, command: Command) -> BayResult {
 
 /// `bay abandon [CHANGE]` (G301): the abandon request; with no change, the change of the view
 /// bay runs in.
-fn abandon(dir: &std::path::Path, change: Option<&str>) -> BayResult {
-    bay::publish::land(dir, change, false, None, true)
+fn abandon(dir: &std::path::Path, change: Option<&str>, why: Option<&str>) -> BayResult {
+    bay::publish::land(dir, change, false, None, Some(why))
 }
 
 /// `bay save`: the request its arguments make.
@@ -684,6 +691,48 @@ fn enrol(dir: &std::path::Path, args: EnrolArgs) -> BayResult {
                 .and_then(bay::registry::Removed::named),
         },
     )
+}
+
+/// `bay merge --from <branch>`: a branch made outside bay (a dependency bot's, a scheduled
+/// job's) taken in and merged in one step. It is `bay start <branch> --from <branch>`, whose
+/// paths are the branch's own (G268), then `bay merge` of that change: a start that does not
+/// end in a view is its own answer.
+fn merge_from(
+    dir: &std::path::Path,
+    branch: &str,
+    wait: bool,
+    observe: Option<std::time::Duration>,
+) -> BayResult {
+    let intent = branch
+        .trim_start_matches("refs/heads/")
+        .trim_start_matches("refs/remotes/")
+        .to_owned();
+    let started = bay::start::start(
+        dir,
+        &bay::start::StartRequest {
+            intent: Some(intent),
+            new: false,
+            intent_revision: "1".to_owned(),
+            paths: Vec::new(),
+            inputs: Vec::new(),
+            resume: None,
+            reverts: None,
+            fixes: None,
+            lane: None,
+            from: Some(branch.to_owned()),
+            after: Vec::new(),
+            saved: None,
+        },
+    );
+    let Some(view) = started
+        .detail
+        .as_ref()
+        .and_then(|detail| detail["view"].as_str())
+        .map(std::path::PathBuf::from)
+    else {
+        return started;
+    };
+    bay::publish::land(&view, None, wait, observe, None)
 }
 
 /// `bay start`: the request its arguments make.
@@ -741,11 +790,14 @@ fn main() -> ExitCode {
             bundle,
             remote,
         } => bay::share::share(&cli.dir, &change, bundle.as_deref(), remote.as_deref()),
-        Command::Merge { change, wait } => {
+        Command::Merge { change, from, wait } => {
             let (wait, observe) = wait.wait();
-            bay::publish::land(&cli.dir, change.as_deref(), wait, observe, false)
+            match from {
+                Some(branch) => merge_from(&cli.dir, &branch, wait, observe),
+                None => bay::publish::land(&cli.dir, change.as_deref(), wait, observe, None),
+            }
         }
-        Command::Abandon { change } => abandon(&cli.dir, change.as_deref()),
+        Command::Abandon { change, why } => abandon(&cli.dir, change.as_deref(), why.as_deref()),
         Command::Host(HostArgs {
             action: Some(HostAction::Hook { event, args }),
             ..

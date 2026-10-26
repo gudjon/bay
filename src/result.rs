@@ -1471,7 +1471,18 @@ impl BayResult {
             Decision::Queued if self.waiting_for.as_deref() == Some("remote") => {
                 "Saved here; it is sent and checked once main can be reached.".to_owned()
             }
-            Decision::Queued => "Saved. bay checks it and adds it to main next.".to_owned(),
+            Decision::Queued => match (
+                detail.and_then(|detail| detail["place"].as_u64()),
+                detail.and_then(|detail| detail["in_line"].as_u64()),
+            ) {
+                (Some(1), _) => {
+                    "Saved. It is first in line; bay checks it and adds it to main next.".to_owned()
+                }
+                (Some(place), Some(in_line)) => format!(
+                    "Saved. It is place {place} of {in_line} in line; bay checks it when its turn comes."
+                ),
+                _ => "Saved. bay checks it and adds it to main next.".to_owned(),
+            },
             Decision::Ok => ok_say(self).to_owned(),
             Decision::Blocked => {
                 "Not done yet; read the detail for what is needed, then try again.".to_owned()

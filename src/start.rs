@@ -1594,7 +1594,15 @@ fn bring_in_trunk(
             .with_change(record.id.clone())
             .with_detail(json!({"conflicts": paths, "trunk": trunk, "base": old_base})))),
         Merge::Clean(tree) => {
-            let rebased = commit_on(&repo.git, &tree, trunk, "resume onto trunk")
+            // A fleet finding (2026-10-26): a refresh keeps the draft's own message and author;
+            // it used to replace them with "resume onto trunk".
+            let message = repo
+                .git
+                .run(&["log", "-1", "--format=%B", draft])
+                .ok()
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| "resume onto trunk".to_owned());
+            let rebased = crate::change::commit_on_by(&repo.git, &tree, trunk, &message, draft)
                 .map_err(|error| error.message())?;
             // G212: the sparse checkout fetches only the declared files it writes.
             Git::new(repo.view_path(&record.id))

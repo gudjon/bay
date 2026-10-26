@@ -7,13 +7,13 @@
 //!
 //! Guards to mutate (each makes a case here fail):
 //!
-//! - `src/main.rs` `fn abandon`: pass `false` as the last argument of
-//!   `bay::publish::land(dir, change, false, None, true)`:
+//! - `src/main.rs` `fn abandon`: pass `None` as the last argument of
+//!   `bay::publish::land(dir, change, false, None, Some(why))`:
 //!   `bay_abandon_in_a_view_abandons_its_change` and
 //!   `bay_abandon_names_a_change_from_the_repository` fail (a landing is submitted instead).
 //! - `src/main.rs` `fn abandon`: pass `None` for `change`:
 //!   `bay_abandon_names_a_change_from_the_repository` fails (no view, so no change).
-//! - `src/publish.rs` `land`: drop the `if abandon { ... }` branch:
+//! - `src/publish.rs` `land`: drop the `if let Some(why) = abandon { ... }` branch:
 //!   `bay_land_abandon_still_works` fails, with every case above.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
@@ -80,4 +80,24 @@ fn bay_land_abandon_still_works() {
     let (code, abandoned) = result_json(test_box.bay(&view).args(["abandon"]));
     assert_eq!(code, 0, "{abandoned}");
     assert_abandoned(&test_box, &repo, &id, &abandoned);
+}
+
+/// A fleet finding (2026-10-26): an audit could say who gave a change up, never why.
+/// `bay abandon --why <text>` keeps the reason in the signed abandon request.
+#[test]
+fn bay_abandon_keeps_its_reason_in_the_request() {
+    let (test_box, repo) = setup();
+    let (id, view) = started(&test_box, &repo, "CARD-why");
+    let (code, abandoned) =
+        result_json(
+            test_box
+                .bay(&view)
+                .args(["abandon", "--why", "landed another way as abc123"]),
+        );
+    assert_eq!(code, 0, "{abandoned}");
+    assert_abandoned(&test_box, &repo, &id, &abandoned);
+    let request = abandoned["detail"]["request"].as_str().unwrap();
+    let remote = test_box.path().join("repo-remote.git");
+    let text = test_box.git_bare(&remote, &["show", &format!("{request}:request.json")]);
+    assert!(text.contains("landed another way as abc123"), "{text}");
 }

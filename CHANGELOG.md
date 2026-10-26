@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.8
+
+- `bay merge --from <branch>` takes a branch made outside bay in and merges it, in one step.
+- A change waiting in line is told its place, never "next" from far back.
+- A refresh onto a moved main keeps the draft's own message and author.
+- `bay abandon --why <text>` keeps the reason in the signed abandon request.
+- A runner takes a change waiting to rejoin the queue first in its pass, not last.
+- A runner takes over a queue head whose runner stopped, between its own operations.
+- A git call whose helper keeps its output open no longer hangs bay.
+
 ## 0.5.7
 
 - A runner never claims a queue head its box cannot serve while a live runner can; the head keeps its place.
@@ -29,7 +39,7 @@
 
 - The runner takes changes waiting for it oldest first, never in change-id order.
 - A policy may state `[talk]` (`enabled`, `kinds` and more) ahead of 0.6.0; `bay status --all` names it.
-- A queue head refused because main moved gives the runner's turn back, so every change gets a place and a batch can land.
+- A queue head that main moved past gives its turn back, so a batch can merge.
 - A batch refused because main moved is retried on the moved main, never a fault.
 - bay's own record pushes skip the repository's pre-push hook; a push of main still runs it.
 - `bay start --from` refuses a local branch with commits the remote's lacks, naming both.

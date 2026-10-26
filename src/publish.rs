@@ -117,7 +117,7 @@ pub fn land(
     change: Option<&str>,
     wait: bool,
     observe: Option<Duration>,
-    abandon: bool,
+    abandon: Option<Option<&str>>,
 ) -> BayResult {
     let repo = match Repo::open_fetched(dir) {
         Ok(repo) => repo,
@@ -134,8 +134,8 @@ pub fn land(
     let mut result = Err(CHAIN_MOVED.to_owned());
     for _ in 0..3 {
         adopt_remote_chain(&repo, &id);
-        if abandon {
-            result = abandon_change(&repo, &id, &step);
+        if let Some(why) = abandon {
+            result = abandon_change(&repo, &id, &step, why);
             break;
         }
         result = match observe.filter(|_| wait) {
@@ -952,10 +952,30 @@ fn submit_land(
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned));
     result.waiting_for = Some(if online { "executor" } else { "remote" }.to_owned());
+    // A fleet finding (2026-10-26): a change 34th in line read "adds it to main next", and its
+    // seat took the wait for a refusal. Its place is said, read from the queue it holds.
+    if let Some(place) = place_in_line(ctx.repo, &op_id) {
+        result.detail = Some(place);
+    }
     Ok(with_main_changed(
         with_progress(&ctx.repo.git, ctx.op(&op_id), result),
         moved,
     ))
+}
+
+/// `{"place", "in_line"}`: where operation `op_id` stands among the queue's live places, 1 for
+/// the head; `None` when it holds no place (no queue is live, or it was not admitted yet).
+fn place_in_line(repo: &Repo, op_id: &str) -> Option<serde_json::Value> {
+    let queue = crate::queue::Queue::read(repo).ok()?;
+    let mine = queue.of(op_id)?.seq;
+    let live: Vec<u64> = queue
+        .entries
+        .keys()
+        .copied()
+        .filter(|seq| !queue.released.contains(seq))
+        .collect();
+    let place = live.iter().filter(|seq| **seq <= mine).count();
+    Some(json!({"place": place, "in_line": live.len()}))
 }
 
 /// BACKLOG 67 item 9 (owner ruling 2026-10-24): the files this change edits that main changed
@@ -3436,7 +3456,12 @@ const CHAIN_MOVED: &str = "the change chain moved on the remote while the reques
 /// chain, by the actor the chain records as current. The change becomes `abandoned` and any
 /// actor may then adopt its intent. Its pending operations are cancelled; trunk, the requests
 /// ref and the view stay as they are.
-fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<BayResult, String> {
+fn abandon_change(
+    repo: &Repo,
+    id: &str,
+    step: &Cell<&'static str>,
+    why: Option<&str>,
+) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
     let trunk = match ctx.fetch_trunk()? {
         Ok(trunk) => trunk,
@@ -3459,13 +3484,18 @@ fn abandon_change(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<Ba
     let agent = ctx.agent_signer()?;
     ctx.chain.sign_with(agent);
     let draft = ctx.chain.drafts(id).map_err(|error| error.message())?[0].clone();
-    let request = json!({
+    let mut request = json!({
         "schema": REQUEST_SCHEMA,
         "kind": "abandon",
         "change": id,
         "actor": ctx.record.actor,
         "registry": ctx.signing().map(|registry| registry.commit.clone()),
     });
+    // A fleet finding (2026-10-26): an audit of abandoned work could say who gave a change up,
+    // never why. The reason, when given, is part of the signed request.
+    if let Some(why) = why.filter(|why| !why.trim().is_empty()) {
+        request["why"] = json!(why);
+    }
     let request_id = ctx
         .chain
         .request_commit(&request, &draft, "abandon")

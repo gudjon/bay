@@ -477,16 +477,11 @@ fn pass(
     repo.fetch_chains().map_err(|error| error.message())?;
     let chain = Chain::new(&repo.git);
     let mut chains = chain.read_all().map_err(|error| error.message())?;
-    // Queued changes go first, in queue order, so one pass carries the queue as far as it can:
-    // when the head lands, the next entry is head by the time it is reached. The rest go oldest
-    // first by their chain's last write (a fleet finding, 2026-10-25: in change-id order, a change
-    // whose id sorted last waited two hours while newer ones went ahead).
     let queue = match seen.after {
         Some(queue) => queue,
         None => Queue::read(repo)?,
     };
-    let place = |id: &str| queue.of_change(id).map_or(u64::MAX, |entry| entry.seq);
-    chains.sort_by_key(|held| (place(&held.id), held.committed));
+    in_pass_order(&mut chains, &queue);
     let records: Vec<ChangeRecord> = chains.iter().map(|held| held.record.clone()).collect();
     let holding = records
         .iter()
@@ -531,33 +526,13 @@ fn pass(
                 ran.extend(recovered.take());
                 return Ok(ran);
             }
-            // A pass carries the whole queue, so it can run long: its presence beats before each
-            // operation and once a heartbeat during it, naming it, never only at the pass's
-            // start, so a busy runner never reads as gone.
-            let step = Cell::new("read");
-            let (result, last_step) = beat.during(repo, &op_id, depth, || {
-                let result =
-                    publish::execute(repo, id, &op_id, &step).unwrap_or_else(BayResult::failed);
-                (result, step.get())
-            });
-            step.set(last_step);
-            let result = receipted(repo, id, step.get(), result).with_op(op_id.clone());
-            // Trunk moved: what waits behind the new head hears of a conflict now (G177).
-            if result.decision == Decision::Landed
-                && let Ok(queue) = Queue::read(repo)
-            {
-                notes.extend(early_conflicts(repo, &queue));
+            ran.push(run_op(repo, id, &op_id, depth, beat, notes));
+            // F13 (2026-10-25, again 2026-10-26: a runner hung holding the head 19 minutes):
+            // between operations, a head whose holder stopped writing is taken now, not at the
+            // next pass's start an hour later.
+            if let Some((head_id, head_op)) = abandoned_head(repo, &op_id) {
+                ran.push(run_op(repo, &head_id, &head_op, depth, beat, notes));
             }
-            // One line per operation on stderr (a service's journal), so a stalled queue can be
-            // read without the refs: what each pass did with each change, and why.
-            eprintln!("bay runner: {}", op_line(&op_id, &result));
-            ran.push(json!({
-                "change": id,
-                "op_id": op_id,
-                "decision": result.decision,
-                "reason": result.reason,
-                "detail": result.detail,
-            }));
         }
     }
     ran.extend(
@@ -599,6 +574,86 @@ fn op_line(op_id: &str, result: &BayResult) -> String {
         line.push_str(waiting);
     }
     line
+}
+
+/// Runs operation `op_id` of change `id` under this runner's beat, and returns its row of the
+/// pass. Its outcome is one journal line (stderr) and, when it merged, the early conflicts it
+/// makes for the changes behind it (G177).
+fn run_op(
+    repo: &Repo,
+    id: &str,
+    op_id: &str,
+    depth: usize,
+    beat: &mut crate::presence::Beat,
+    notes: &mut Vec<Value>,
+) -> Value {
+    // A pass carries the whole queue, so it can run long: its presence beats before each
+    // operation and once a heartbeat during it, naming it, never only at the pass's start, so a
+    // busy runner never reads as gone.
+    let step = Cell::new("read");
+    let (result, last_step) = beat.during(repo, op_id, depth, || {
+        let result = publish::execute(repo, id, op_id, &step).unwrap_or_else(BayResult::failed);
+        (result, step.get())
+    });
+    step.set(last_step);
+    let result = receipted(repo, id, step.get(), result).with_op(op_id.to_owned());
+    // Trunk moved: what waits behind the new head hears of a conflict now (G177).
+    if result.decision == Decision::Landed
+        && let Ok(queue) = Queue::read(repo)
+    {
+        notes.extend(early_conflicts(repo, &queue));
+    }
+    // One line per operation on stderr (a service's journal), so a stalled queue can be read
+    // without the refs: what each pass did with each change, and why.
+    eprintln!("bay runner: {}", op_line(op_id, &result));
+    json!({
+        "change": id,
+        "op_id": op_id,
+        "decision": result.decision,
+        "reason": result.reason,
+        "detail": result.detail,
+    })
+}
+
+/// The queue head's (change, operation) when its holder stopped writing its chain for two
+/// leases, so this runner takes it between two other operations; `None` when there is no head,
+/// it is `just` the operation this runner ran, or its chain moved within that time (a live holder
+/// heartbeats it while a check runs).
+fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
+    let head = Queue::read(repo).ok()?.head()?.clone();
+    if head.op_id == just {
+        return None;
+    }
+    let tip = repo.remote_chain(&head.change).ok()?;
+    let written = repo
+        .git
+        .run(&["log", "-1", "--format=%ct", &tip])
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    let idle = crate::live::unix_now().saturating_sub(written);
+    (idle > repo.config.lease().as_secs() * 2).then_some((head.change, head.op_id))
+}
+
+/// Orders a pass: queued changes first, in queue order, so one pass carries the queue as far as
+/// it can; the rest oldest first by their chain's last write (a fleet finding, 2026-10-25: in
+/// change-id order a change whose id sorted last waited two hours). An operation released from
+/// the queue while it waited for a worker goes first of all (a fleet finding, 2026-10-26: it came
+/// last, after every pre-check, and rejoined an hour or more later); rejoining takes no check.
+fn in_pass_order(chains: &mut [crate::change::HeldChain], queue: &Queue) {
+    let place = |id: &str| queue.of_change(id).map_or(u64::MAX, |entry| entry.seq);
+    let rejoins = |held: &crate::change::HeldChain| {
+        queue.of_change(&held.id).is_none()
+            && held
+                .record
+                .operations
+                .iter()
+                .any(|op| op.unavailable.is_some() && runs(op))
+    };
+    chains.sort_by_key(|held| {
+        let at = if rejoins(held) { 0 } else { place(&held.id) };
+        (at, held.committed)
+    });
 }
 
 /// Whether a pass runs `op`: it is neither terminal nor blocked, or, G284, it waits for a

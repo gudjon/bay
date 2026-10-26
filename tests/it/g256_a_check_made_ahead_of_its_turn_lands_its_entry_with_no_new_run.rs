@@ -197,3 +197,27 @@ fn no_entry_behind_a_head_that_changes_the_policy_is_checked_ahead() {
         );
     }
 }
+
+/// A fleet finding (2026-10-26): a re-merge of a change that waits in line says where it
+/// stands, never "adds it to main next" from 34th place, which its seat took for a refusal.
+#[test]
+fn a_queued_change_is_told_its_place_in_line() {
+    let held = host(&Check {
+        config: CONFIG,
+        policy: None,
+        seed: &[("src/a.rs", "fn a() {}\n")],
+        hold_first: true,
+        fails: "false",
+    });
+    let _one = held.queue("one", "src");
+    let two = held.queue("two", "src");
+    let _three = held.queue("three", "src");
+    let (code, again) = support::result_json(held.test_box.bay(&held.repo).args(["merge", &two]));
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["detail"]["place"], 2, "{again}");
+    assert_eq!(again["detail"]["in_line"], 3, "{again}");
+    assert_eq!(
+        again["say"], "Saved. It is place 2 of 3 in line; bay checks it when its turn comes.",
+        "{again}"
+    );
+}

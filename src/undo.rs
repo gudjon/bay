@@ -149,7 +149,7 @@ fn undo_in(
             }));
         return Ok(publish::with_receipt(repo, &id, "undo", refused));
     }
-    Ok(publish::land(view, Some(&id), wait, observe, false))
+    Ok(publish::land(view, Some(&id), wait, observe, None))
 }
 
 fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
