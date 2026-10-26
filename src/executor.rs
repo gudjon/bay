@@ -691,9 +691,6 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
         }
         return None;
     }
-    if holder_alive(repo, &head) {
-        return None;
-    }
     let tip = repo.remote_chain(&head.change).ok()?;
     let written = repo
         .git
@@ -703,22 +700,6 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
         .ok()?;
     let idle = crate::live::unix_now().saturating_sub(written);
     (idle > repo.config.lease().as_secs() * 2).then_some((head.change, head.op_id))
-}
-
-/// Whether the runner that holds `head`'s operation still beats its presence
-/// ([`crate::presence::beats`]).
-fn holder_alive(repo: &Repo, head: &crate::queue::Entry) -> bool {
-    repo.remote_record(&head.change)
-        .ok()
-        .and_then(|remote| {
-            remote
-                .record
-                .operations
-                .into_iter()
-                .find(|op| op.op_id == head.op_id)
-                .and_then(|op| op.owner)
-        })
-        .is_some_and(|owner| crate::presence::beats(repo, &owner))
 }
 
 /// Orders a pass: queued changes first, in queue order, so one pass carries the queue as far as

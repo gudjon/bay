@@ -2,7 +2,6 @@
 
 ## 0.5.12
 
-- A runner takes over a head only once its holder's presence is quiet, never because its chain is.
 - A runner that lost a head to another leaves its place; a head that passed is never failed by it.
 - `bay status` describes at most 20 changes, yours first, and names the rest, so an agent can read it whole.
 - The next `bay start` releases a clean view of an ended change at once, not after the retention window.
