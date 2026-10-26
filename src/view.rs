@@ -265,22 +265,54 @@ fn holds_nothing_newer(path: &Path, ended: &Ended) -> Result<bool, GitError> {
     Ok(!uncheckpointed(path, &ended.revision)?)
 }
 
-/// Removes a half-made view so it can be created again.
+/// Removes the view of change `id` so it can be made again, never deleting work that no draft
+/// holds: a view whose files differ from `saved` (the newest draft), has untracked files, or
+/// cannot be compared at all is moved aside to `<views>/<id>.unsaved-<unix seconds>`, whole,
+/// and that path is returned (a fleet finding, 2026-10-26: a view whose journal a full disk
+/// left unfinished was removed by `bay start`, the repair its refusal names, and the next
+/// submit was the draft before the agent's edits). Only a view that provably holds nothing
+/// newer than `saved` is deleted.
 ///
 /// # Errors
 ///
-/// A git fault.
-pub fn discard(repo: &Repo, id: &str) -> Result<(), GitError> {
+/// A git fault, or the view cannot be moved aside.
+pub fn discard(repo: &Repo, id: &str, saved: &str) -> Result<Option<PathBuf>, GitError> {
     let path = repo.view_path(id);
     let path_text = path.display().to_string();
-    let _ = repo
-        .git
-        .writing_tree()
-        .run(&["worktree", "remove", "--force", &path_text]);
-    if path.exists() {
-        std::fs::remove_dir_all(&path).map_err(GitError::Spawn)?;
+    let mut kept = None;
+    if path.exists() && holds_unsaved(&path, saved) {
+        let aside = repo
+            .views_dir()
+            .join(format!("{id}.unsaved-{}", unix_now()));
+        std::fs::rename(&path, &aside).map_err(GitError::Spawn)?;
+        kept = Some(aside);
+    } else {
+        let _ = repo
+            .git
+            .writing_tree()
+            .run(&["worktree", "remove", "--force", &path_text]);
+        if path.exists() {
+            std::fs::remove_dir_all(&path).map_err(GitError::Spawn)?;
+        }
     }
-    repo.git.run(&["worktree", "prune"]).map(|_| ())
+    repo.git.run(&["worktree", "prune"])?;
+    Ok(kept)
+}
+
+/// Whether the view at `path` holds a file that `saved` does not: one changed or added against
+/// its tree, or untracked. A file the view lacks is no work (a view made only in part lacks
+/// many), and a view that cannot be read is taken to hold work.
+fn holds_unsaved(path: &Path, saved: &str) -> bool {
+    let git = Git::new(path);
+    let tree = format!("{saved}^{{tree}}");
+    let changed = match git.run_status(&["diff", "--quiet", "--diff-filter=d", &tree]) {
+        Ok((0, _, _)) => false,
+        Ok(_) | Err(_) => true,
+    };
+    changed
+        || git
+            .run(&["ls-files", "--others", "--exclude-standard"])
+            .map_or(true, |untracked| !untracked.is_empty())
 }
 
 /// A declared path as a non-cone sparse-checkout pattern rooted at the top: `src/` stays a

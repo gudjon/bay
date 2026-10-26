@@ -33,7 +33,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Submit the change | `bay merge` (returns at once; a runner checks and merges it) |
 | Wait for the outcome here | `bay merge --wait` (`--wait=<seconds>`: watch that long, then return; the run goes on) |
 | Submit a change from outside its view | `bay merge <change>` |
-| Pick a change up again: bring in newer main and see what moved | `bay start <change>` |
+| Pick a change up again: bring in newer main and see what moved | `bay start <change>`. When it remade an unfinished view, `detail.unsaved_kept` names where its unsaved files were kept: copy them back, then `bay merge` |
 | Fix a change that already merged | `bay start <intent> --fixes <change>` (the merge names it in a `Fixes:` trailer) |
 | Try work that must never merge, in a sandbox lane the config declares | `bay start <intent> --paths <paths> --lane <lane>` (`bay merge` runs its checks; it never merges) |
 | Take in a branch made outside bay (a bot's or a person's) and merge it in one step | `bay merge --from <branch>` (its intent is the branch's name). To take it in first: `bay start <intent> --from <branch>` (the remote's tip when the remote has the branch; it declares the files the branch changes, or give `--paths` covering them; then `bay merge`). After a rebase: `bay start <change> --from <branch or sha>` replaces its draft, no new branch name. Main's commit keeps the branch's author and messages |

@@ -1369,6 +1369,7 @@ fn replace_draft(
     (head, record): (&mut String, &mut ChangeRecord),
     trunk: &str,
     reference: &str,
+    saved: &str,
 ) -> Result<Result<String, BayResult>, String> {
     let id = record.id.clone();
     let declared = inputs::paths(&record.declared_inputs);
@@ -1386,7 +1387,8 @@ fn replace_draft(
             &format!("start --from {reference}"),
         )
         .map_err(|error| error.message())?;
-    view::discard(repo, &id).map_err(|error| error.message())?;
+    // The view's edits were checkpointed into `saved` before this; whatever is newer is kept.
+    view::discard(repo, &id, saved).map_err(|error| error.message())?;
     view::create(repo, &id, &taken.draft, &declared).map_err(|error| error.message())?;
     Ok(Ok(taken.draft))
 }
@@ -1426,9 +1428,11 @@ fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String
     let mut draft = latest.clone();
     let mut checkpointed = false;
     let complete = view::journal(repo, id).is_some_and(view::Journal::is_complete);
+    let mut unsaved_kept = None;
     if view::exists(&view_path) && !complete {
-        // A half-made view (start was killed mid-creation) is released and made again.
-        view::discard(repo, id).map_err(|error| error.message())?;
+        // A half-made view (start was killed mid-creation, or its journal was lost) is made
+        // again; any file in it that no draft holds is kept aside, never deleted.
+        unsaved_kept = view::discard(repo, id, &latest).map_err(|error| error.message())?;
     }
     if view::exists(&view_path) {
         if let Some((new_head, frozen)) =
@@ -1445,7 +1449,15 @@ fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String
 
     let old_base = record.base.clone();
     if let Some(reference) = from {
-        match replace_draft(repo, &chain, (&mut head, &mut record), &trunk, reference)? {
+        let saved = draft.clone();
+        match replace_draft(
+            repo,
+            &chain,
+            (&mut head, &mut record),
+            &trunk,
+            reference,
+            &saved,
+        )? {
             Ok(taken) => draft = taken,
             Err(refusal) => return Ok(refusal.with_change(id)),
         }
@@ -1492,6 +1504,7 @@ fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String
         "observed_versions": record.observed_versions,
         "pushed": pushed,
         "landed": landed,
+        "unsaved_kept": unsaved_kept.map(|path| path.display().to_string()),
     }))
     .with_change(id))
 }

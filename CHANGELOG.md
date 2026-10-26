@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.17
+
+- `bay start` never deletes a view's unsaved files; it keeps them aside and names the place.
+
 ## 0.5.16
 
 - A runner takes a queue head nobody holds between its own operations, not at its next pass.
