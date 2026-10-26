@@ -89,6 +89,11 @@ It also lists each agent product's hook moments and what each can block.
   The agent hook also tells your session once.
 - A `merged_on_your_paths` notice: another change merged on paths you declared. Refresh, re-read
   the named paths, then go on.
+- `MAIN_RED` with `waiting_for: main`: main is broken on your paths. Your change keeps waiting and
+  is checked again once main is green; do not merge it again. A change that fixes it
+  (`bay start <intent> --fixes <owner>`) goes ahead of the line.
+- A change that no check covers, such as a document no check reads, merges in the next push.
+- `bay status` describes your own changes and counts the others; `bay status <change>` reads one.
 - `bay status` with `detail.warnings` naming `no_live_runner`: work is queued and no runner has
   been seen recently. Tell the user a runner must run (`bay runner run`, or
   `bay runner install` to keep one running). The work stays queued. The agent hook says the

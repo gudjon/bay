@@ -120,3 +120,34 @@ fn a_listing_describes_at_most_twenty_changes_and_names_the_rest() {
         "{listed}"
     );
 }
+
+/// A fleet finding (2026-10-26: one status on a shared box took five minutes and 80 KB, for an
+/// agent that wanted a few hundred tokens): a listing describes the reader's own changes, and
+/// counts and names everyone else's.
+#[test]
+fn a_listing_describes_only_the_readers_own_changes() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &unchecked_files());
+    for n in 0..3 {
+        let (code, started) =
+            result_json(test_box.bay(&repo).env("BAY_ACTOR", "someone-else").args([
+                "start",
+                &format!("THEIRS-{n}"),
+                "--paths",
+                &format!("t{n}/"),
+            ]));
+        assert_eq!(code, 0, "{started}");
+    }
+    for n in 0..2 {
+        test_box.bay_ok(
+            &repo,
+            &["start", &format!("MINE-{n}"), "--paths", &format!("m{n}/")],
+        );
+    }
+    let (code, listed) = result_json(test_box.bay(&repo).arg("status"));
+    assert_eq!(code, 0, "{listed}");
+    let described = listed["detail"]["changes"].as_array().unwrap();
+    assert_eq!(described.len(), 2, "only the reader's own: {listed}");
+    assert_eq!(listed["detail"]["more_changes"]["count"], 3, "{listed}");
+}

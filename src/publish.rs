@@ -1536,7 +1536,7 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     let gate = if ctx.record.lane.is_some() {
         Gate::Free
     } else {
-        queue_gate(ctx, op_id)?
+        queue_gate(ctx, op_id, &trunk)?
     };
     let mut seq = match gate {
         Gate::Wait(result) => return Ok(ahead_of_turn(ctx, op_id, &trunk, *result)),
@@ -2683,7 +2683,7 @@ enum Gate {
 
 /// The queue gate (§ 6). A newer revision replaces its change's entry in place, or releases it
 /// when it is the head; an operation that is not the head reserves a place and runs no check.
-fn queue_gate(ctx: &mut Ctx, op_id: &str) -> Result<Gate, String> {
+fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     let signer = ctx.executor_signer().ok().flatten();
     let mut queue = crate::queue::Queue::read(ctx.repo)?;
     if queue.deadline_releases(op_id, &ctx.op(op_id).mid_publish_releases) >= 3 {
@@ -2706,19 +2706,10 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str) -> Result<Gate, String> {
     if queue.of(op_id).is_none()
         && let Some(older) = queue.of_change(&ctx.id).cloned()
     {
-        if queue.head().is_some_and(|head| head.seq == older.seq) {
-            // A newer revision of the head releases it and joins at the back.
-            crate::queue::release(
-                ctx.repo,
-                signer.as_ref(),
-                older.seq,
-                &older.op_id,
-                "superseded",
-            )?;
-        } else {
-            // A newer revision of a queued entry takes its place.
-            crate::queue::replace(ctx.repo, signer.as_ref(), &older, op_id)?;
-        }
+        // A newer revision takes its entry's place, the head's too (the trust-agents ruling,
+        // 2026-10-26: a head revised to repair it was sent behind 120 changes). A head revised
+        // again and again is still bounded by its deadline releases.
+        crate::queue::replace(ctx.repo, signer.as_ref(), &older, op_id)?;
         queue = crate::queue::Queue::read(ctx.repo)?;
     }
     // § 6: a head released because no worker answered rejoins at the back once it is served
@@ -2736,8 +2727,74 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str) -> Result<Gate, String> {
     if head.op_id == op_id {
         return Ok(Gate::Head(head.seq));
     }
+    // Repair first: while main is red, a change that names the red's owning change (`Fixes:`,
+    // `Reverts:`, `Supersedes:`) runs as a head from its own place, ahead of the line it
+    // unblocks. Main's state chooses it, never a priority; once main is green, the line is in
+    // arrival order again.
+    if let Some(entry) = queue.of(op_id).cloned()
+        && (repairs_red(ctx, trunk)?
+            || needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?)
+    {
+        return Ok(Gate::Head(entry.seq));
+    }
     let revision = ctx.op(op_id).revision.clone();
     enqueue(ctx, op_id, &revision, Reason::Queued).map(|result| Gate::Wait(Box::new(result)))
+}
+
+/// Nothing to check, nothing to wait (owner, 2026-10-26: a document must reach main at once):
+/// whether no pre-merge check of `trunk`'s policy is required for `revision`'s changes, so it
+/// can change no other change's result. A change to `.bay/`, an unreadable policy, or a policy
+/// that checks nothing at all is never this case.
+///
+/// # Errors
+///
+/// A git fault while listing the change's paths.
+pub fn needs_no_check(git: &Git, trunk: &str, revision: &str) -> Result<bool, String> {
+    let Ok(Some(policy)) = policy::load_at(git, trunk) else {
+        return Ok(false);
+    };
+    if policy.unchecked || policy.checks.is_empty() {
+        return Ok(false);
+    }
+    let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
+        return Ok(false);
+    };
+    let changed = check::changed_paths(git, &base, revision)?;
+    if changed.is_empty() || changed.iter().any(|path| path.starts_with(".bay/")) {
+        return Ok(false);
+    }
+    let (required, _) = policy.required(&changed);
+    Ok(required.iter().all(|entry| {
+        let id = crate::evidence::CheckId::new(&entry.id, &entry.environment);
+        policy
+            .check(&id)
+            .is_some_and(|check| check.stage == policy::Stage::Post)
+    }))
+}
+
+/// Whether this change names, by `Fixes:`, `Reverts:` or `Supersedes:`, the change that owns a
+/// red post check on `trunk` (G244).
+fn repairs_red(ctx: &Ctx, trunk: &str) -> Result<bool, String> {
+    let names: Vec<&String> = [
+        &ctx.record.fixes,
+        &ctx.record.reverts,
+        &ctx.record.supersedes,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if names.is_empty() {
+        return Ok(false);
+    }
+    // The post records on the remote decide the red: fetched now, only for a change that names
+    // a repair, so a runner never judges a repair on a stale reading.
+    ctx.repo.fetch_evidence(&ctx.keys);
+    let reds = crate::red::red(&ctx.repo.git, trunk, ctx.registry.as_ref())?;
+    Ok(reds.iter().any(|red| {
+        red.change
+            .as_ref()
+            .is_some_and(|owner| names.contains(&owner))
+    }))
 }
 
 /// Holds a place in the queue: reserves one if the operation has none, gives up ownership so
@@ -3889,18 +3946,27 @@ fn red_gate(
     if blocking.is_empty() {
         return Ok(None);
     }
-    let op = ctx.op_mut(op_id);
-    op.state = OpState::Blocked;
-    op.outcome = Some(Reason::TrunkRed.code().to_owned());
-    ctx.save(revision, None, &format!("blocked {op_id}: trunk is red"))?;
-    ctx.push_chain();
-    let owners: Vec<Option<&String>> = blocking.iter().map(|red| red.change.as_ref()).collect();
+    let owners: Vec<Option<String>> = blocking.iter().map(|red| red.change.clone()).collect();
+    let red: Vec<serde_json::Value> = blocking.iter().map(|red| red.to_json()).collect();
+    // The trust-agents ruling (2026-10-26): a change on a red main's paths waits, holds no
+    // queue place so the line and a fix behind it move, and is checked again by itself once
+    // main is green; it is never blocked into a re-merge by hand.
+    wait_unplaced(
+        ctx,
+        op_id,
+        revision,
+        Reason::TrunkRed,
+        "main_red",
+        &format!("waits {op_id}: main is red on its paths"),
+    )?;
+    let mut waiting = BayResult::refused(Decision::Queued, Reason::TrunkRed);
+    waiting.waiting_for = Some("main".to_owned());
     Ok(Some(
-        BayResult::blocked(Reason::TrunkRed)
+        waiting
             .with_change(ctx.id.clone())
             .with_op(op_id)
             .with_detail(json!({
-                "red": blocking.iter().map(|red| red.to_json()).collect::<Vec<_>>(),
+                "red": red,
                 "ways_out": [
                     "merge a change that names the owner: bay start --fixes <owner>, or bay undo <owner>",
                     "a later run of the post check passes on main",

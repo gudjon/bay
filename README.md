@@ -137,8 +137,8 @@ not store it.</sub>
   rest, such as `ssh-keygen`, `tar` and the check sandbox, run locally.
 - **Checks in a sandbox.** `bwrap` on Linux and `sandbox-exec` on macOS. A check gets no network unless
   its entry in the policy on main says `network = true`.
-- **Signed releases.** A hardware-held key signs every release from 0.1.5, and `install.sh` and
-  `bay update` refuse one that does not verify.
+- **Signed releases.** A bay release key signs every release: a hardware-held key, or while bay is 0.x,
+  a build key. `install.sh` and `bay update` refuse a release that does not verify.
 
 See [Security and privacy](https://getbay.io/docs/security) for everything bay sends, and where.
 
@@ -151,7 +151,7 @@ curl -fsSL https://getbay.io/install.sh | sh
 ```
 
 The script downloads the newest release from this repository's GitHub Releases. It checks `SHA256SUMS`
-against the bay release key, a hardware-held key, and the archive against `SHA256SUMS`. It installs one
+against the bay release keys, and the archive against `SHA256SUMS`. It installs one
 binary to `~/.local/bin/bay`. When that folder is on your `PATH`, it then runs `bay install`, and
 `bay doctor` inside a repository; otherwise it tells you the two lines to run. You can also
 [verify a release by hand](SECURITY.md#verify-a-release-yourself).

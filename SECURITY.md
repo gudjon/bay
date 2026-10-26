@@ -31,7 +31,8 @@ Fixes go into the newest release only. Run `bay update` to get it.
 
 Every release carries `SHA256SUMS` and `SHA256SUMS.sig`, an SSH signature in the namespace
 `bay-release`. The trusted keys are in [`scripts/release/allowed_signers`](scripts/release/allowed_signers): the
-key that signed releases up to 0.1.4, and the hardware-held key that signs them from 0.1.5.
+key that signed releases up to 0.1.4, the 0.x build key that signs them from 0.5.13 until 1.0, and the
+hardware-held key that signed them from 0.1.5 to 0.5.12.
 
 ```sh
 ssh-keygen -Y verify -f scripts/release/allowed_signers -I bay-release -n bay-release \

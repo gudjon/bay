@@ -432,6 +432,69 @@ struct Judge<'a> {
 }
 
 impl Judge<'_> {
+    /// A publication that is not the head's (§ 6, the trust-agents ruling 2026-10-26) stands
+    /// only when it releases its change's own place in this push, and nothing ahead can be
+    /// affected: its change needs no pre-merge check (`crate::publish::needs_no_check`), or it
+    /// names, by `Fixes:`, `Reverts:` or `Supersedes:`, the change that owns a red post check on
+    /// the trunk it moves (`crate::red`).
+    fn repairs_red(
+        &self,
+        queue: &crate::queue::Queue,
+        trunk: &str,
+        change: &str,
+    ) -> Result<bool, String> {
+        let Some(own) = queue.of_change(change) else {
+            return Ok(false);
+        };
+        let release = format!("{}{}", crate::queue::DONE_PREFIX, own.seq);
+        let releases_own = self
+            .updates
+            .iter()
+            .any(|other| other.name == release && is_zero(&other.old));
+        if !releases_own || is_zero(trunk) {
+            return Ok(false);
+        }
+        // Nothing to check, nothing to wait: a change that no pre-merge check covers.
+        if let Some(record) = self.change_record(change)?
+            && let Some(op) = record
+                .operations
+                .iter()
+                .rev()
+                .find(|op| !op.state.is_terminal())
+            && crate::publish::needs_no_check(self.git, trunk, &op.revision)?
+        {
+            return Ok(true);
+        }
+        let Some(record) = self.change_record(change)? else {
+            return Ok(false);
+        };
+        let names: Vec<&String> = [&record.fixes, &record.reverts, &record.supersedes]
+            .into_iter()
+            .flatten()
+            .collect();
+        if names.is_empty() {
+            return Ok(false);
+        }
+        let reds = crate::red::red(self.git, trunk, Some(self.registry))?;
+        Ok(reds.iter().any(|red| {
+            red.change
+                .as_ref()
+                .is_some_and(|owner| names.contains(&owner))
+        }))
+    }
+
+    /// The record of `change` as this push leaves its chain, if the host holds one.
+    fn change_record(&self, change: &str) -> Result<Option<crate::change::ChangeRecord>, String> {
+        let name = format!("{}{change}", crate::change::CHANGES_PREFIX);
+        let Some(head) = self.after(&name)? else {
+            return Ok(None);
+        };
+        crate::change::Chain::new(self.git)
+            .record_at(&head)
+            .map(Some)
+            .map_err(|error| error.message())
+    }
+
     /// A ref's value after this push: its new value if the push moves it, else its current one.
     fn after(&self, name: &str) -> Result<Option<String>, String> {
         if let Some(update) = self.by_name.get(name) {
@@ -712,7 +775,8 @@ impl Judge<'_> {
                 Some(commit) => self.trailer(commit, "Change-Id")?,
                 None => String::new(),
             };
-            if !releases_head || head.change != change {
+            let heads_it = releases_head && head.change == change;
+            if !heads_it && !self.repairs_red(&queue, &update.old, &change)? {
                 return Err(format!(
                     "QUEUED: {QUEUE_HELD_BY} {} (place {})",
                     head.op_id, head.seq
@@ -1772,8 +1836,10 @@ impl Judge<'_> {
             return Ok(());
         }
         let old = queue.entries.get(&seq).ok_or("replaces no reservation")?;
-        if queue.head().is_some_and(|head| head.seq == seq) || queue.released.contains(&seq) {
-            return Err("only a queued entry that is not the head is replaced in place".to_owned());
+        // A newer revision keeps its entry's place, the head's too (the trust-agents ruling,
+        // 2026-10-26); a released place is never taken again.
+        if queue.released.contains(&seq) {
+            return Err("a released place is never replaced".to_owned());
         }
         let text = self
             .git

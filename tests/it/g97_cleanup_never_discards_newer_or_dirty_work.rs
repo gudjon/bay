@@ -173,7 +173,8 @@ fn a_landed_view_is_released_and_every_view_with_work_or_in_use_is_kept() {
             "{why}: the journal is kept"
         );
     }
-    assert!(listed(&test_box, &repo, &untracked) && listed(&test_box, &repo, &refused));
+    // A listing reports the views of ended changes; a live change's view is in its own row.
+    assert!(listed(&test_box, &repo, &untracked));
 }
 
 #[test]

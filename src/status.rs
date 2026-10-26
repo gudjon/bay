@@ -169,7 +169,7 @@ fn more_changes(more: &[String]) -> Value {
     }
     json!({
         "count": more.len(),
-        "ids": more.iter().take(100).collect::<Vec<_>>(),
+        "ids": more.iter().take(LISTED).collect::<Vec<_>>(),
         "read": "bay status <change>",
     })
 }
@@ -184,6 +184,32 @@ const fn ended(state: crate::change::ChangeState) -> bool {
             | ChangeState::Superseded
             | ChangeState::NoEffect
     )
+}
+
+/// The records of `ids`, read in one batch of every chain (G200b), never one walk per change (a
+/// fleet finding, 2026-10-26: 2,408 state reads, a third of a five-minute status). One named
+/// change is read alone.
+fn held_records(chain: &Chain, ids: &[String]) -> Result<Vec<ChangeRecord>, String> {
+    let mut held: std::collections::BTreeMap<String, ChangeRecord> = if ids.len() == 1 {
+        let (_, record) = chain.read(&ids[0]).map_err(|error| error.message())?;
+        std::iter::once((ids[0].clone(), record)).collect()
+    } else {
+        chain
+            .read_all()
+            .map_err(|error| error.message())?
+            .into_iter()
+            .map(|held| (held.id, held.record))
+            .collect()
+    };
+    ids.iter()
+        .map(|id| match held.remove(id) {
+            Some(record) => Ok(record),
+            None => chain
+                .read(id)
+                .map(|(_, record)| record)
+                .map_err(|error| error.message()),
+        })
+        .collect()
 }
 
 fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
@@ -216,23 +242,23 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         ask_runtime: ids.len() == 1 && (change.is_some() || repo.view_change(dir).is_some()),
     };
     let mut changes = Vec::new();
-    let mut queued = 0;
     // An agent reads this answer whole, so it has a budget (a fleet finding, 2026-10-26: a
     // listing of 146 live changes ran to megabytes and minutes). At most LISTED changes are
     // described, the reader's own first; the rest are named, and `bay status <change>` reads one.
     let me = crate::change::current_actor(&repo.common_dir)
         .ok()
         .map(|actor| actor.name);
-    let mut records = Vec::new();
-    for id in &ids {
-        let (_, record) = chain.read(id).map_err(|error| error.message())?;
-        queued += crate::presence::waiting(&record);
-        records.push(record);
-    }
+    let records = held_records(&chain, &ids)?;
+    let queued: usize = records.iter().map(crate::presence::waiting).sum();
+    let mut records = records;
     records.sort_by_key(|record| me.as_deref() != Some(record.actor.name.as_str()));
+    // A listing describes the reader's own changes; everyone else's are counted and named, so
+    // an agent's answer stays a few hundred tokens however busy the repository is.
+    let mine_only = ids.len() > 1 && me.is_some();
     let mut more = Vec::new();
     for record in &records {
-        if changes.len() >= LISTED {
+        let others = mine_only && me.as_deref() != Some(record.actor.name.as_str());
+        if changes.len() >= LISTED || others {
             more.push(record.id.clone());
             continue;
         }
@@ -559,6 +585,12 @@ fn leftovers(repo: &Repo, trunk: &str, only: Option<&str>) -> Result<Vec<Value>,
         let Some(record) = records.remove(&id) else {
             continue;
         };
+        // A listing reports the views of ended changes only, at most LISTED of them: a live
+        // change's view is in its own row, and checking every view on a shared box cost a
+        // status minutes (a fleet finding, 2026-10-26: 256 views).
+        if only.is_none() && (!ended(record.state) || out.len() >= LISTED) {
+            continue;
+        }
         let landed = !scan(&repo.git, &record.base_first, trunk, &id)?
             .publications
             .is_empty();

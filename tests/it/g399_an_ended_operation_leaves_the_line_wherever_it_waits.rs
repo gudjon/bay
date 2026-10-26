@@ -9,13 +9,11 @@
 
 use crate::support;
 
-use std::path::PathBuf;
-
 use support::PRODUCER;
 use support::queued::{Check, OTHER_PRODUCER, finished, host};
 
 #[test]
-fn a_superseded_operations_place_is_released_while_the_head_is_held() {
+fn an_abandoned_operations_place_is_released_while_the_head_is_held() {
     let held = host(&Check {
         config: "[runner]\nlease_s = 30\nheartbeat_s = 1\n",
         policy: None,
@@ -29,12 +27,14 @@ fn a_superseded_operations_place_is_released_while_the_head_is_held() {
     let b = held.executor("exec-b", OTHER_PRODUCER);
     let runner_a = held.spawn(&a);
     held.wait_held();
-    // A new revision of two supersedes two.1, whose place stays in the line behind the head.
-    let started = held.test_box.bay_ok(&held.repo, &["start", "two"]);
-    assert_eq!(started["change"], two.as_str(), "{started}");
-    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
-    std::fs::write(view.join("src/two.rs"), "fn two() { 2; }\n").unwrap();
-    held.test_box.bay_ok(&view, &["merge"]);
+    // two is abandoned while it waits behind the held head: its operation ends, its place stays.
+    let (code, abandoned) = support::result_json(held.test_box.bay(&held.repo).args([
+        "abandon",
+        two.as_str(),
+        "--why",
+        "done elsewhere",
+    ]));
+    assert_eq!(code, 0, "{abandoned}");
     let pass = held.pass(&b);
     let released = held
         .test_box

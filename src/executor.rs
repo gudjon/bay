@@ -428,12 +428,19 @@ fn deadlines(
     let mut queue = Queue::read(repo)?;
     seen.before = Some(queue.clone());
     // Heads whose operation already reached an outcome release at once, one after another.
-    while let Some(head) = queue.head()
-        && let Some(reason) = finished_head(repo, head)
+    while let Some(head) = queue.head().cloned()
+        && let Some(reason) = finished_head(repo, &head)
     {
-        let signer = Keys::load(&repo.git).executor;
-        crate::queue::release(repo, signer.as_ref(), head.seq, &head.op_id, &reason)?;
+        let record = repo
+            .remote_record(&head.change)
+            .ok()
+            .map(|remote| remote.record);
+        pass_on_or_release(repo, record.as_ref(), &head, &reason)?;
         queue = Queue::read(repo)?;
+        // A place passed on to a live operation is a live head now.
+        if queue.head().is_some_and(|now| now.seq == head.seq) {
+            break;
+        }
     }
     heads.retain(|seq, _| queue.head().is_some_and(|head| head.seq == *seq));
     let Some(head) = queue.head().cloned() else {
@@ -475,6 +482,37 @@ fn finished_head(repo: &Repo, head: &crate::queue::Entry) -> Option<String> {
         || word(op.state).unwrap_or_default(),
         |outcome| outcome.to_lowercase(),
     ))
+}
+
+/// The newer live operation of `record` that `op_id` was superseded by, when there is one: its
+/// place passes to it, never released (the trust-agents ruling, 2026-10-26: a revision made at
+/// the head kept no place and joined behind 120 changes).
+fn successor(record: &ChangeRecord, op_id: &str) -> Option<String> {
+    let op = record.operations.iter().find(|op| op.op_id == op_id)?;
+    if op.state != OpState::Superseded {
+        return None;
+    }
+    record
+        .operations
+        .iter()
+        .rev()
+        .find(|op| !op.state.is_terminal() && op.state != OpState::Blocked)
+        .map(|op| op.op_id.clone())
+}
+
+/// Gives the place of `entry`, whose operation ended, to the operation that superseded it, or
+/// else releases it as `reason`.
+fn pass_on_or_release(
+    repo: &Repo,
+    record: Option<&ChangeRecord>,
+    entry: &crate::queue::Entry,
+    reason: &str,
+) -> Result<(), String> {
+    let signer = Keys::load(&repo.git).executor;
+    match record.and_then(|record| successor(record, &entry.op_id)) {
+        Some(next) => crate::queue::replace(repo, signer.as_ref(), entry, &next),
+        None => crate::queue::release(repo, signer.as_ref(), entry.seq, &entry.op_id, reason),
+    }
 }
 
 /// A state's snake-case word, as the change chain spells it.
@@ -548,7 +586,9 @@ fn pass(
         let queued: Vec<String> = record
             .operations
             .iter()
-            .filter(|op| runs(op) && reach(op, freed(&ran)))
+            // A change that names one it fixes, reverts or supersedes is always reached: it may
+            // be the repair of a red main, which runs ahead of the line (`queue_gate`).
+            .filter(|op| runs(op) && (names_a_repair(record) || reach(op, freed(&ran))))
             .map(|op| op.op_id.clone())
             .collect();
         if queued.is_empty() {
@@ -681,10 +721,11 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
         return None;
     }
     if let Some(reason) = finished_head(repo, &head) {
-        let signer = Keys::load(&repo.git).executor;
-        if let Err(why) =
-            crate::queue::release(repo, signer.as_ref(), head.seq, &head.op_id, &reason)
-        {
+        let record = repo
+            .remote_record(&head.change)
+            .ok()
+            .map(|remote| remote.record);
+        if let Err(why) = pass_on_or_release(repo, record.as_ref(), &head, &reason) {
             eprintln!(
                 "bay runner: queue place {} could not be released: {why}",
                 head.seq
@@ -710,32 +751,29 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
 /// the one any runner writes. A place whose change is not among them is left to the head's
 /// own release.
 fn sweep_ended(repo: &Repo, queue: &Queue, records: &[ChangeRecord]) {
-    let ended: Vec<(u64, String, String)> = queue
+    for entry in queue
         .entries
         .values()
         .filter(|entry| !queue.released.contains(&entry.seq))
-        .filter_map(|entry| {
-            let record = records.iter().find(|record| record.id == entry.change)?;
-            let op = record
-                .operations
-                .iter()
-                .find(|op| op.op_id == entry.op_id)?;
-            (op.state.is_terminal() || op.state == OpState::Blocked).then(|| {
-                let reason = op.outcome.as_ref().map_or_else(
-                    || word(op.state).unwrap_or_default(),
-                    |outcome| outcome.to_lowercase(),
-                );
-                (entry.seq, entry.op_id.clone(), reason)
-            })
-        })
-        .collect();
-    if ended.is_empty() {
-        return;
-    }
-    let signer = Keys::load(&repo.git).executor;
-    for (seq, op_id, reason) in ended {
-        if let Err(why) = crate::queue::release(repo, signer.as_ref(), seq, &op_id, &reason) {
-            eprintln!("bay runner: queue place {seq} could not be released: {why}");
+    {
+        let Some(record) = records.iter().find(|record| record.id == entry.change) else {
+            continue;
+        };
+        let Some(op) = record.operations.iter().find(|op| op.op_id == entry.op_id) else {
+            continue;
+        };
+        if !(op.state.is_terminal() || op.state == OpState::Blocked) {
+            continue;
+        }
+        let reason = op.outcome.as_ref().map_or_else(
+            || word(op.state).unwrap_or_default(),
+            |outcome| outcome.to_lowercase(),
+        );
+        if let Err(why) = pass_on_or_release(repo, Some(record), entry, &reason) {
+            eprintln!(
+                "bay runner: queue place {} could not be released: {why}",
+                entry.seq
+            );
         }
     }
 }
@@ -795,6 +833,11 @@ fn within_reach(repo: &Repo, queue: &Queue) -> impl Fn(&crate::change::Operation
                 .get(&op.op_id)
                 .is_none_or(|position| *position <= reach + freed)
     }
+}
+
+/// Whether `record` names a change it fixes, reverts or supersedes.
+fn names_a_repair(record: &ChangeRecord) -> bool {
+    record.fixes.is_some() || record.reverts.is_some() || record.supersedes.is_some()
 }
 
 /// How many operations of `ran` reached an outcome that gives up a queue place.

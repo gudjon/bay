@@ -213,7 +213,7 @@ fn a_bisect_names_the_landing_that_broke_the_post_check_not_the_newest_failure()
     // MAIN_RED names the culprit's change as the owner.
     let (_, view) = trunk.test_box.start_and_edit(&trunk.repo);
     let (code, refused) = result_json(trunk.test_box.bay(&view).args(["merge", "--wait"]));
-    assert_eq!(code, 10, "{refused}");
+    assert_eq!(code, 0, "it waits for main: {refused}");
     assert_eq!(refused["reason"], "MAIN_RED", "{refused}");
     assert_eq!(
         refused["detail"]["red"][0]["change"],

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.14
+
+- A change that fixes a red main runs ahead of the line, and the host takes it.
+- A change that no pre-merge check covers merges in the next push, ahead of the line.
+- A change on a red main's paths waits and is checked again once main is green.
+- A new revision keeps its change's place in line, the head's place too.
+- `bay status` describes only your own changes, reads every change in one batch, and lists ended views only.
 ## 0.5.13
 
 - A runner releases every queue place whose operation has ended, anywhere in the line, each pass.
