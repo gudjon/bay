@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.16
+
+- A runner takes a queue head nobody holds between its own operations, not at its next pass.
+
 ## 0.5.15
 
 - A batch and a prediction pass over a queued change whose pre-check already failed on that base.

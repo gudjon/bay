@@ -773,8 +773,7 @@ fn places_within(span: std::time::Duration) -> usize {
     places
 }
 
-/// A trunk whose check moves trunk from another clone on its first two runs, as `setup(2, 0)`
-/// does, and whose adapter answers `unavailable` while `marker` exists (`INTERFACES` § 3),
+/// A trunk whose check moves trunk from another clone on its first four runs, and whose adapter answers `unavailable` while `marker` exists (`INTERFACES` § 3),
 /// under the scaled lease ([`outage_config`]). Returns it and the marker.
 fn setup_outage() -> (Queued, PathBuf) {
     let test_box = TestBox::new();
@@ -791,7 +790,7 @@ fn setup_outage() -> (Queued, PathBuf) {
             &test_box,
             &format!(
                 "echo \"$tree\" >> '{runs}'; n=$(wc -l < '{runs}' | tr -d ' '); \
-                 if [ \"$n\" -le 2 ]; then ( cd '{other}' && git pull -q --rebase && echo \"$n\" > docs/move-$n.md && git add docs && git -c user.name=t -c user.email=t@t commit -q -m \"move $n\" && git push -q origin main ); fi",
+                 if [ \"$n\" -le 4 ]; then ( cd '{other}' && git pull -q --rebase && echo \"$n\" > docs/move-$n.md && git add docs && git -c user.name=t -c user.email=t@t commit -q -m \"move $n\" && git push -q origin main ); fi",
                 runs = runs.display(),
                 other = other.display(),
             ),
@@ -856,7 +855,9 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
         "refs/bay/queue/1\nrefs/bay/queue/2\nrefs/bay/queue/3",
         "all three hold a place before the outage"
     );
-    assert_eq!(runs(&queued), 2);
+    // The head is taken again between the runner's operations, so main moves under it on
+    // each of its runs in the pass (`executor::abandoned_head`).
+    assert_eq!(runs(&queued), 4);
 
     // The outage: the executor keeps making passes, its agents gone, under the scaled deadline.
     queued
@@ -898,7 +899,7 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
         reservations <= 3 * places_within(outage),
         "{reservations} reservations in {outage:?}: {refs}"
     );
-    assert_eq!(runs(&queued), 2, "no check ran to an answer in the outage");
+    assert_eq!(runs(&queued), 4, "no check ran to an answer in the outage");
 
     // The workers return: further passes land all three, each once. A pass that began before
     // the unscaled config landed may meet trunk moved under its head's check: that head checks

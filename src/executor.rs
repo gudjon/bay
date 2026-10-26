@@ -707,8 +707,8 @@ fn run_op(
     })
 }
 
-/// The queue head's (change, operation) when its holder stopped writing its chain for two
-/// leases, so this runner takes it between two other operations; `None` when there is no head,
+/// The queue head's (change, operation) when nobody holds it, or its holder stopped writing its
+/// chain for two leases, so this runner takes it between two other operations; `None` when there is no head,
 /// it is `just` the operation this runner ran, or its chain moved within that time (a live holder
 /// heartbeats it while a check runs).
 ///
@@ -732,6 +732,23 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
             );
         }
         return None;
+    }
+    // A head nobody holds (one that yielded because main moved, or gave its claim back) is
+    // taken now, never left to a later pass (a fleet finding, 2026-10-26: a yielded head waited
+    // twenty minutes while all three runners pre-checked changes behind it).
+    if let Ok(remote) = repo.remote_record(&head.change)
+        && remote
+            .record
+            .operations
+            .iter()
+            .find(|op| op.op_id == head.op_id)
+            .is_some_and(|op| {
+                runs(op)
+                    && op.owner.is_none()
+                    && matches!(op.state, OpState::Submitted | OpState::Admitted)
+            })
+    {
+        return Some((head.change, head.op_id));
     }
     let tip = repo.remote_chain(&head.change).ok()?;
     let written = repo

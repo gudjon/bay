@@ -117,3 +117,33 @@ fn without_a_batch_the_head_still_gives_the_pass_back() {
     let landed = test_box.trunk_change_ids(&remote);
     assert!(ids.iter().all(|id| landed.contains(id)), "{landed:?}");
 }
+
+/// A fleet finding (2026-10-26): a yielded head waited twenty minutes, nobody holding it, while
+/// every runner pre-checked changes behind it until its pass ended. A head nobody holds is run
+/// again between a runner's operations, in the same pass.
+///
+/// Guard to mutate, in `src/executor.rs`: the unheld-head arm of `abandoned_head` (remove it).
+#[test]
+fn a_yielded_head_runs_again_within_the_same_pass() {
+    let (_test_box, _remote, _ids, passes) = moving_main(false);
+    let again = passes
+        .iter()
+        .filter_map(serde_json::Value::as_array)
+        .any(|ran| {
+            ran.iter().enumerate().any(|(at, run)| {
+                run["detail"]["yielded"] == true
+                    && ran[at + 1..]
+                        .iter()
+                        .any(|later| later["op_id"] == run["op_id"])
+            }) || ran.iter().enumerate().any(|(at, run)| {
+                run["op_id"].is_string()
+                    && ran[at + 1..].iter().any(|later| {
+                        later["op_id"] == run["op_id"] && later["detail"]["yielded"] == true
+                    })
+            })
+        });
+    assert!(
+        again,
+        "a head nobody held waited for the next pass: {passes:?}"
+    );
+}
