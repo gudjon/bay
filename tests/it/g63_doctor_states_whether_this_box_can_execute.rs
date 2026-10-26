@@ -116,6 +116,15 @@ fn a_required_checks_env_name_unset_here_is_red_and_set_is_green() {
     assert_eq!(code, 0, "a ready executor box: {result}");
     assert_eq!(row(&result, "check-env")["state"], "green", "{result}");
     assert_eq!(row(&result, "git")["role"], "runner", "{result}");
+
+    // A box that serves only another environment never runs the check: its variable is not
+    // this box's concern. Guard: `src/doctor.rs` `check_env_row`'s `served` filter.
+    test_box.git_ok(
+        &repo,
+        &["config", "--add", "bay.checkEnvironment", "elsewhere"],
+    );
+    let (_, result) = result_json(test_box.bay(&repo).args(["doctor", "--role", "runner"]));
+    assert_eq!(row(&result, "check-env")["state"], "green", "{result}");
 }
 
 #[test]

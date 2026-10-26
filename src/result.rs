@@ -1476,6 +1476,16 @@ impl BayResult {
             Decision::Blocked => {
                 "Not done yet; read the detail for what is needed, then try again.".to_owned()
             }
+            // G389: a setup that stopped after writing keys or settings never says nothing
+            // changed.
+            Decision::Failed if detail.and_then(|detail| detail.get("changed")).is_some() => {
+                match short(detail) {
+                    Some(short) => {
+                        format!("Not finished: {short}. Run it again; it keeps what it set up.")
+                    }
+                    None => "Not finished; run it again, it keeps what it set up.".to_owned(),
+                }
+            }
             Decision::Failed => match short(detail) {
                 Some(short) => format!("Nothing was changed: {short}."),
                 None => "Nothing was changed: bay could not finish.".to_owned(),
@@ -1867,6 +1877,23 @@ mod tests {
         );
         assert!(unplain("Commits") && unplain("rebasing") && unplain("refs"));
         assert!(!unplain("refused") && !unplain("refresh") && !unplain("committee"));
+    }
+
+    /// G389: a setup that wrote keys before it stopped never says nothing changed.
+    #[test]
+    fn a_failure_after_writes_never_says_nothing_changed() {
+        let partial = BayResult::new(Decision::Failed).with_detail(
+            json!({"why": "The registry did not arrive. Run this again.", "changed": ["bay.approverKey"]}),
+        );
+        assert_eq!(
+            partial.say(),
+            "Not finished: The registry did not arrive. Run it again; it keeps what it set up."
+        );
+        assert!(
+            BayResult::failed("x")
+                .say()
+                .starts_with("Nothing was changed")
+        );
     }
 
     #[test]

@@ -703,8 +703,32 @@ impl<'a> Ctx<'a> {
                 self.catch_up_local();
                 Ok(())
             }
+            // G388: the remote took this very head from another push of this box's records
+            // after it advertised the older tip, so the chain is pushed: the request goes alone.
+            Err(_) if self.remote_tip(&name).as_deref() == Some(self.head.as_str()) => {
+                let alone = ["push", "-q", self.repo.remote(), request_spec.as_str()];
+                match self.repo.git.run(&alone) {
+                    Ok(_) => {
+                        self.pushed_head = Some(self.head.clone());
+                        self.unpushed_from = None;
+                        self.catch_up_local();
+                        Ok(())
+                    }
+                    Err(error) => Err(self.refused(&name, &error.message())),
+                }
+            }
             Err(error) => Err(self.refused(&name, &error.message())),
         }
+    }
+
+    /// The remote's tip of the chain `name`, when bay can read it.
+    fn remote_tip(&self, name: &str) -> Option<String> {
+        let listed = self
+            .repo
+            .git
+            .run(&["ls-remote", self.repo.remote(), name])
+            .ok()?;
+        listed.split_whitespace().next().map(str::to_owned)
     }
 
     /// Why the push of the chain `name` failed, when the remote's chain did not move (its tip,
@@ -4842,6 +4866,13 @@ fn check_candidate(
         let (verdict, refusal) = run(&own_id, &own_policy, commit)?;
         return Ok((!own_policy.unchecked, verdict, refusal));
     }
+    // "Approval = repair" (G387): under `signing = "approvals"` a person's yes to a policy fix
+    // stands in for a repair's signature; see [`approval_repair`].
+    if let Some(approvals) = approval_repair(ctx, base_policy.as_ref(), trunk, commit, &own_policy)?
+    {
+        let own = run(&format!("{candidate_id}-own"), &own_policy, commit)?;
+        return approved_repair(own, || run(candidate_id, &approvals, trunk));
+    }
     let Some(policy) = &base_policy else {
         return Ok(policy_missing(ctx, op_id, trunk));
     };
@@ -4865,6 +4896,64 @@ fn check_candidate(
         own_verdict
     };
     Ok((true, verdict, refusal))
+}
+
+/// G387: an approved repair's verdict: its own policy's run, `own`, then, when that passed, the
+/// base's approval checks (`approvals`).
+type PolicyRun = (&'static str, Option<BayResult>);
+fn approved_repair(
+    own: PolicyRun,
+    approvals: impl FnOnce() -> Result<PolicyRun, String>,
+) -> Result<(bool, &'static str, Option<BayResult>), String> {
+    let (verdict, refusal) = own;
+    if refusal.is_some() {
+        return Ok((true, verdict, refusal));
+    }
+    let (approved, refusal) = approvals()?;
+    let verdict = if refusal.is_some() || verdict == UNCHECKED {
+        approved
+    } else {
+        verdict
+    };
+    Ok((true, verdict, refusal))
+}
+
+/// G387: the base's policy cut to the approval checks the candidate wakes, when the candidate
+/// is an approved repair's kind under `signing = "approvals"`: it changes only the policy and
+/// adapter paths, and the base requires an approval of it. `None` otherwise, and under
+/// `signing = "all"` or for a registry-signed repair, where a repair is the registry's
+/// signature.
+fn approval_repair(
+    ctx: &Ctx,
+    base: Option<&policy::Policy>,
+    trunk: &str,
+    commit: &str,
+    own: &policy::Policy,
+) -> Result<Option<policy::Policy>, String> {
+    let git = &ctx.repo.git;
+    let (Some(registry), Some(base)) = (ctx.registry.as_ref(), base) else {
+        return Ok(None);
+    };
+    if registry.signs_all() || base.unchecked || ctx.repair.is_some() {
+        return Ok(None);
+    }
+    if !only_policy_paths(git, trunk, commit, Some(base), own)? {
+        return Ok(None);
+    }
+    let changed = check::changed_paths(git, trunk, commit)?;
+    let mut approvals = base.clone();
+    approvals
+        .checks
+        .retain(|entry| entry.is_approval() && base.requires(entry, &changed));
+    // Only those checks are owed of this run; the digest stays the base's, which an approval
+    // names.
+    approvals.manifest.retain(|owed| {
+        approvals
+            .checks
+            .iter()
+            .any(|entry| entry.id == owed.id && entry.environment == owed.environment)
+    });
+    Ok((!approvals.checks.is_empty()).then_some(approvals))
 }
 
 /// The verdict word of an attempt whose judging policies declare `unchecked = true`: it ran

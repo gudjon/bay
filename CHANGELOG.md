@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.5
+
+- `bay doctor` counts a check's variables only for the environments this box serves.
+- A merge whose change reached the remote from another push meanwhile is queued, never refused.
+- `bay install --approver` under `signing = "all"` refuses before it makes any key.
+- Under `signing = "approvals"`, an approved fix to the policy or its check scripts runs its own scripts.
+
 ## 0.5.4
 
 - `bay start --from` with a branch rebased here is the refusal `BRANCH_DIVERGED`, naming both commits.

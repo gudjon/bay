@@ -6,10 +6,12 @@
 //! in `~/.ssh` when there are none (mode 0600, no prompt), sets them in the clone, starts the
 //! registry under `[policy] signing = "approvals"`, enrols the approver, and reads both back from
 //! the remote, saying one plain sentence. A second run changes nothing. Under `signing = "all"`
-//! it starts no registry, which would make every landing need a runner key, and says why.
+//! it starts no registry, which would make every landing need a runner key, and says why
+//! before it writes any key or setting, so its "Nothing was changed" is true.
 //!
 //! Guards to mutate, in `src/setup.rs`: the signing test (start a registry under "all": the
-//! second case fails); the `holds` test before the approver's enrolment (enrol it again on a
+//! second case fails); the signing test after the keys are made (the second case finds a
+//! key); the `holds` test before the approver's enrolment (enrol it again on a
 //! second run, which `bay enrol` refuses: the first case fails). Each enrolment's own push and
 //! read-back is `bay enrol`'s, held by G299.
 
@@ -87,5 +89,26 @@ fn under_signing_all_no_registry_is_started() {
     assert!(
         listed.is_empty(),
         "a registry was started under signing = all: {listed}"
+    );
+    // The refusal comes before anything is written, so its "Nothing was changed" is true.
+    assert!(
+        refused["say"]
+            .as_str()
+            .is_some_and(|say| say.starts_with("Nothing was changed")),
+        "{refused}"
+    );
+    assert!(
+        !test_box.home.join(".ssh/bay-approver-ada").exists()
+            && !test_box.home.join(".ssh/bay-registry").exists(),
+        "a key was made before the refusal"
+    );
+    let set = test_box
+        .git(&repo)
+        .args(["config", "--get", "bay.approverKey"])
+        .output()
+        .unwrap();
+    assert!(
+        !set.status.success(),
+        "a setting was saved before the refusal"
     );
 }

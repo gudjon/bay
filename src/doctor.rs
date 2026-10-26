@@ -1135,10 +1135,14 @@ fn check_env_row(git: &Git, config: &Config, report: &mut Report) {
             return;
         }
     };
+    // A check of an environment this box does not serve never runs here, so its variables are
+    // not this box's concern (a fleet finding, 2026-10-25: a runner serving two of three
+    // environments read red for the third's).
+    let served = crate::check::Served::read(git);
     let unset: Vec<Value> = policy
         .checks
         .iter()
-        .filter(|entry| !policy.is_quarantined(entry))
+        .filter(|entry| !policy.is_quarantined(entry) && served.serves(&entry.environment))
         .flat_map(|entry| {
             entry
                 .env

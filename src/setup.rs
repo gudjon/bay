@@ -29,13 +29,19 @@ const APPROVER_NAME: &str = "bay.approverName";
 /// `bay install --approver <name>`.
 #[must_use]
 pub fn approver(dir: &Path, name: &str) -> BayResult {
-    match run(dir, name) {
+    let mut changed = Vec::new();
+    match run(dir, name, &mut changed) {
         Ok(result) => result,
-        Err(why) => BayResult::failed(why),
+        Err(why) if changed.is_empty() => BayResult::failed(why),
+        // G389: a run that wrote keys or settings before it stopped says so, never "Nothing
+        // was changed"; a second run keeps them and goes on.
+        Err(why) => {
+            BayResult::new(Decision::Failed).with_detail(json!({"why": why, "changed": changed}))
+        }
     }
 }
 
-fn run(dir: &Path, name: &str) -> Result<BayResult, String> {
+fn run(dir: &Path, name: &str, changed: &mut Vec<String>) -> Result<BayResult, String> {
     if name.is_empty()
         || !name.starts_with(|c: char| c.is_ascii_lowercase())
         || !name
@@ -58,24 +64,10 @@ fn run(dir: &Path, name: &str) -> Result<BayResult, String> {
         APPROVER_KEY,
         &ssh.join(format!("bay-approver-{name}")),
     );
-    let made_registry = ensure_key(&registry_key, "bay registry")?;
-    let made_approver = ensure_key(&approver_key, &format!("bay approver {name}"))?;
-    for (key, value) in [
-        (REGISTRY_KEY, registry_key.display().to_string()),
-        (APPROVER_KEY, approver_key.display().to_string()),
-        (APPROVER_NAME, name.to_owned()),
-    ] {
-        repo.git.run(&["config", key, &value]).map_err(|error| {
-            format!(
-                "bay could not save {key} in this project: {}",
-                error.message()
-            )
-        })?;
-    }
-
+    // G389: a project that cannot take this setup is told so before anything is written.
     repo.fetch_registry();
-    let mut started = false;
-    if Registry::current(&repo.git)?.is_none() {
+    let start_registry = Registry::current(&repo.git)?.is_none();
+    if start_registry {
         let trunk = repo
             .git
             .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
@@ -87,6 +79,34 @@ fn run(dir: &Path, name: &str) -> Result<BayResult, String> {
                     .to_owned(),
             );
         }
+    }
+    let made_registry = ensure_key(&registry_key, "bay registry")?;
+    if made_registry {
+        changed.push(registry_key.display().to_string());
+    }
+    let made_approver = ensure_key(&approver_key, &format!("bay approver {name}"))?;
+    if made_approver {
+        changed.push(approver_key.display().to_string());
+    }
+    for (key, value) in [
+        (REGISTRY_KEY, registry_key.display().to_string()),
+        (APPROVER_KEY, approver_key.display().to_string()),
+        (APPROVER_NAME, name.to_owned()),
+    ] {
+        if repo.git.run(&["config", "--get", key]).ok().as_deref() == Some(value.as_str()) {
+            continue;
+        }
+        repo.git.run(&["config", key, &value]).map_err(|error| {
+            format!(
+                "bay could not save {key} in this project: {}",
+                error.message()
+            )
+        })?;
+        changed.push(key.to_owned());
+    }
+
+    let mut started = false;
+    if start_registry {
         enrolled(dir, "registry", name, &registry_key)?;
         started = true;
     }
