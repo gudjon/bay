@@ -73,6 +73,23 @@ says more about one. `bay help --json` is the same list for programs, with every
 the JSON Schema of `bay.result/1`.
 It also lists each agent product's hook moments and what each can block.
 
+## Keep the queue moving
+
+Changes merge one push at a time, in queue order, so what you submit sets the pace for every agent:
+
+- **Small.** One intent per change. A red batch is split to find the change that broke it, and a small
+  change is quick to judge and to fix.
+- **Narrow.** Change only the paths your intent needs. Checks wake by path (`when_paths`), so a narrow
+  diff wakes fewer checks. With `footprint_lanes`, a change whose checks share no path with the changes
+  ahead of it is checked beside them.
+- **Plain.** Keep `.bay/` and check scripts in a change of their own: runners do not check ahead past
+  one, and it never joins a batch. Name `--input` only when the work relies on that version: a change
+  with named inputs never joins a batch either.
+- **Green.** Run the repository's fast checks in your view before `bay merge`. A failure costs a check
+  run, and while recent runs fail often, no batch forms for anyone.
+- **Gone.** `bay merge`, then go on with other work. A runner finishes the merge; `bay status --since`
+  or the wake plugin tells you the outcome.
+
 ## Read the result
 
 - Always pass `--json`. stdout is then one `bay.result/1` JSON document, and text on stderr is
@@ -84,6 +101,10 @@ It also lists each agent product's hook moments and what each can block.
   error exits 2.
 - `queued` means the merge has not happened yet; only `merged` means it has. `waiting_for` says
   what it waits for. Do not report it as merged.
+- A `merged` result with `detail.batch` merged on one check of several changes' combined tree, not of
+  yours alone. Report it merged, and name the batch.
+- `bay status` lists in `detail.red` each check that turned main red after a merge, with its `culprit`
+  once the evidence names one merge. If that is yours, fix it first: `bay start <intent> --fixes <change>`.
 - While a change waits in the queue, `bay status <change>` may show `operation.conflict`: main
   moved into a `MERGE_CONFLICT` on the listed paths. It keeps its place; refresh and repair now.
   The agent hook also tells your session once.
@@ -198,6 +219,18 @@ Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
    with that many changes waiting for a yes, a change that needs one more is refused `WIP_LIMIT`.
    A check that takes seconds can say `first = true`: it runs before the others, and a failure there
    ends the run before any slow check starts.
+   To merge more changes a day (https://getbay.io/docs/throughput), in `[runner]` of `.bay/config.toml`:
+   `ahead = N` lets runners that do not hold the head check the next N changes early, on the main the
+   changes ahead of them predict; `batch = { min = 2, max = 8, max_failure_rate = 0.3 }` checks several
+   queued changes as one tree, merges them in one push, and splits a red batch to find the culprit;
+   `footprint_lanes = true`, with `footprint = true` on a check whose verdict reads only its `paths`
+   (else its `when_paths`), carries its records across unrelated merges and checks a change beside the
+   head. These three turn on evidence reuse, and need a registry that signs everything or
+   `[policy] reuse_unsigned = true`. `parallel_checks = N` (1 to 16) runs one change's checks at
+   once, with no reuse. A required check with no `when_paths` makes every change's footprint the
+   whole tree, so no change is checked beside another. Each runner is its own check slot: more runners give more early checks. When
+   `bay status` `detail.flow` shows queue wait well above check time, add a runner or one of these.
+   A check reads `turn` in its request (`head` or `ahead`), so a busy worker can serve the head first.
    A slow check that reads the whole tree can run after merge instead of on every change:
    `stage = "post"` in its `[[check]]`, and `[runner] post = true` in `.bay/config.toml`. The runner then runs it
    once on main's newest tip, and with `bisect_post = true` a red result names the merge that broke it.
