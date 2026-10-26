@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.15
+
+- A batch and a prediction pass over a queued change whose pre-check already failed on that base.
+
 ## 0.5.14
 
 - A change that fixes a red main runs ahead of the line, and the host takes it.

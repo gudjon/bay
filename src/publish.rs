@@ -1890,6 +1890,7 @@ fn batch_plan(
         live: true,
         batchable: true,
         checked: None,
+        fails_on: Vec::new(),
     };
     let behind: Vec<throughput::Queued> = queue
         .behind(at)

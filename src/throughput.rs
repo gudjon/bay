@@ -166,6 +166,19 @@ pub struct Queued {
     pub batchable: bool,
     /// The trunk commit and candidate of a checked attempt the operation would publish.
     pub checked: Option<(String, String)>,
+    /// The base trees its pre-checks found a product failure on: on such a base it will not
+    /// land, so a prediction and a batch pass over it (a fleet finding, 2026-10-26: a member
+    /// whose pre-check had failed went into a batch, turned it red and cost a bisection, and
+    /// every pre-check behind it ran on a base that counted it as landed).
+    pub fails_on: Vec<String>,
+}
+
+impl Queued {
+    /// Whether its pre-check found a product failure on `base_tree`.
+    #[must_use]
+    pub fn fails_on(&self, base_tree: &str) -> bool {
+        self.fails_on.iter().any(|tree| tree == base_tree)
+    }
 }
 
 impl Queued {
@@ -193,9 +206,18 @@ impl Queued {
                 && crate::inputs::names(&record.declared_inputs).is_empty()
                 && op.batch_culprit.is_none(),
             checked,
+            fails_on: op
+                .prechecks
+                .iter()
+                .filter(|precheck| precheck.verdict == PRODUCT_FAILURE)
+                .map(|precheck| precheck.base_tree.clone())
+                .collect(),
         })
     }
 }
+
+/// A pre-check verdict that names a failure of the change itself, never of a check's machinery.
+const PRODUCT_FAILURE: &str = "product_failure";
 
 /// What one queue entry does to a predicted base.
 pub enum Fold {
@@ -261,6 +283,9 @@ pub fn predict(
                 return Ok(None);
             }
             base.clone_from(commit);
+            continue;
+        }
+        if queued.fails_on(&tree_of(git, &base)?) {
             continue;
         }
         match fold(git, policy, &base, &queued.revision)? {
@@ -937,6 +962,11 @@ pub fn plan_batch(
         let base = members
             .last()
             .map_or_else(|| trunk.to_owned(), |member| member.commit.clone());
+        // A member known to fail on this base is passed over, never batched: it runs alone as
+        // the head in its turn.
+        if !members.is_empty() && queued.fails_on(&tree_of(git, &base)?) {
+            continue;
+        }
         let Fold::Applied {
             commit,
             tree,
@@ -1172,7 +1202,82 @@ pub fn roles(tags: &[Option<&str>]) -> Result<Vec<Role>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BatchTag, Bisect, Footprint, Role, failure_rate, roles};
+    use super::{
+        BatchTag, Bisect, Fold, Footprint, Queued, Role, failure_rate, fold, plan_batch, predict,
+        roles, tree_of,
+    };
+    use crate::git::Git;
+
+    /// A repository with a base on `main` and three revisions on it, each adding one file.
+    fn three_on_a_base() -> (tempfile::TempDir, Git, String, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path());
+        let run = |args: &[&str]| git.run(args).unwrap();
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@t.invalid"]);
+        std::fs::create_dir_all(dir.path().join(".bay")).unwrap();
+        std::fs::write(
+            dir.path().join(".bay/policy.toml"),
+            "revision = 1\nunchecked = true\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "base"]);
+        let base = run(&["rev-parse", "HEAD"]);
+        let mut revisions = Vec::new();
+        for name in ["b", "c", "d"] {
+            run(&["checkout", "-q", "--detach", &base]);
+            std::fs::write(dir.path().join(format!("{name}.txt")), "x\n").unwrap();
+            run(&["add", "."]);
+            run(&["commit", "-q", "-m", name]);
+            revisions.push(run(&["rev-parse", "HEAD"]));
+        }
+        (dir, git, base, revisions)
+    }
+
+    fn queued(seq: u64, revision: &str, fails_on: Vec<String>) -> Queued {
+        Queued {
+            seq,
+            change: format!("change{seq}"),
+            op_id: format!("change{seq}.1"),
+            revision: revision.to_owned(),
+            live: true,
+            batchable: true,
+            checked: None,
+            fails_on,
+        }
+    }
+
+    /// A fleet finding (2026-10-26): an entry whose pre-check failed on its predicted base went
+    /// into the batch, turned it red and cost a bisection, and the pre-checks behind it ran on a
+    /// base that counted it as landed. On that base it is passed over: the batch and the
+    /// prediction go on without it.
+    #[test]
+    fn an_entry_known_to_fail_on_its_base_is_passed_over() {
+        let (_dir, git, trunk, revisions) = three_on_a_base();
+        let policy = crate::policy::load_at(&git, &trunk).unwrap().unwrap();
+        let Fold::Applied { commit, .. } = fold(&git, &policy, &trunk, &revisions[0]).unwrap()
+        else {
+            panic!("the head folds");
+        };
+        let red_on = tree_of(&git, &commit).unwrap();
+        let head = queued(1, &revisions[0], Vec::new());
+        let behind = [
+            queued(2, &revisions[1], vec![red_on]),
+            queued(3, &revisions[2], Vec::new()),
+        ];
+        let members = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
+        assert_eq!(seqs, [1, 3]);
+        let base = predict(&git, &policy, &trunk, &[head, behind[0].clone()])
+            .unwrap()
+            .unwrap();
+        let files = git.run(&["ls-tree", "--name-only", &base]).unwrap();
+        assert!(files.contains("b.txt"), "{files}");
+        assert!(!files.contains("c.txt"), "{files}");
+    }
 
     fn globs(globs: &[&str]) -> Footprint {
         Footprint::Globs(globs.iter().map(|glob| (*glob).to_owned()).collect())
