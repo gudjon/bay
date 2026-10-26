@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.12
+
+- A runner takes over a head only once its holder's presence is quiet, never because its chain is.
+
 ## 0.5.11
 
 - `bay status` describes at most 20 changes, yours first, and names the rest, so an agent can read it whole.
