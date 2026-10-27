@@ -73,22 +73,39 @@ says more about one. `bay help --json` is the same list for programs, with every
 the JSON Schema of `bay.result/1`.
 It also lists each agent product's hook moments and what each can block.
 
-## Keep the queue moving
+## Keep merges fast
 
-Changes merge one push at a time, in queue order, so what you submit sets the pace for every agent:
+bay exists to make merging faster than doing it by hand: you submit once, and the runners merge for you. How they do it:
 
-- **Small.** One intent per change. A red batch is split to find the change that broke it, and a small
-  change is quick to judge and to fix.
-- **Narrow.** Change only the paths your intent needs. Checks wake by path (`when_paths`), so a narrow
-  diff wakes fewer checks. With `footprint_lanes`, a change whose checks share no path with the changes
-  ahead of it is checked beside them.
-- **Plain.** Keep `.bay/` and check scripts in a change of their own: runners do not check ahead past
-  one, and it never joins a batch. Name `--input` only when the work relies on that version: a change
-  with named inputs never joins a batch either.
-- **Green.** Run the repository's fast checks in your view before `bay merge`. A failure costs a check
-  run, and while recent runs fail often, no batch forms for anyone.
-- **Gone.** `bay merge`, then go on with other work. A runner finishes the merge; `bay status --since`
-  or the wake plugin tells you the outcome.
+- **One line, checked in batches.** Runners take the change at the head of the line, together with the changes behind
+  it that merge cleanly with it, and check them as one batch. A batch's size follows how often recent checks failed.
+- **Checked ahead.** While one batch is checked, other runners check the next batches on the main the batch ahead
+  will make. When a batch's turn comes and main is as predicted, it merges at once on that check.
+- **Skips, not stops.** A change that conflicts, may not join a batch, or already failed is passed over and keeps
+  its place for its own turn.
+
+What you do decides the speed for every agent:
+
+- **Submit once, then go on with other work.** `bay merge` once. Running it again does not move the change up.
+  Read the outcome with `bay status <change>` or `bay status --since`, not in a tight loop.
+- **Fix in place.** When a change is refused, fails a check, or `bay status` shows `operation.conflict`:
+  `bay start <change>` (it brings in newer main), fix it in the view, then `bay merge <change>`. The new revision
+  keeps the change's place in line, even at the head. Never abandon it and start a new change for the same work:
+  a new change joins at the back.
+- **Green before you submit.** Run the repository's fast checks in your view first. A red change costs the whole
+  batch it is in a split to find it.
+- **Small and narrow.** One intent per change, only the paths that intent needs.
+- **Never push main, and never merge on the host.** Every commit that reaches main outside bay throws away the batch
+  being checked and the batches checked ahead of it.
+- **Changes to `.bay/` go through bay** like any other change, in a change of their own; never by a pull request or
+  a direct push.
+- **A fix for a red main goes first.** `bay start <intent> --fixes <change>` (or `bay undo <change>`) runs ahead of
+  the line.
+- **Give up dead work.** `bay abandon <change> --why <reason>`: a runner frees its place at its next pass.
+- **Name `--input` only when the work relies on that version**; such a change is checked on its own.
+
+Signals to read: `detail.batch.stopped` says why a batch ended; `detail.warnings` names `wake_failing` when no
+session is being told of its refusals; `waiting_for` says what a queued change waits for.
 
 ## Read the result
 
@@ -103,7 +120,6 @@ Changes merge one push at a time, in queue order, so what you submit sets the pa
   what it waits for. Do not report it as merged.
 - A `merged` result with `detail.batch` merged on one check of several changes' combined tree, not of
   yours alone. Report it merged, and name the batch.
-- `bay status` `detail.warnings` with `wake_failing` means no session is being told of refusals; its `why` names the cause. Tell the user.
 - `bay status` lists in `detail.red` each check that turned main red after a merge, with its `culprit`
   once the evidence names one merge. If that is yours, fix it first: `bay start <intent> --fixes <change>`.
 - While a change waits in the queue, `bay status <change>` may show `operation.conflict`: main

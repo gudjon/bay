@@ -3654,7 +3654,15 @@ fn verify_request_digest(ctx: &Ctx, op_id: &str) -> Result<Option<BayResult>, St
     let text = match ctx.repo.git.file_at(request_id, "request.json") {
         Ok(Some(text)) => text,
         Ok(None) => return refuse("its request is not a request commit"),
-        Err(error) => return refuse(&error.message()),
+        // A fleet finding (2026-10-27): with the remote's credential gone, a lazy fetch of the
+        // request object failed, and healthy changes were refused for it. A read that fails is
+        // this executor's fault, said and retried, never a refusal of the request.
+        Err(error) => {
+            return Err(format!(
+                "the request of {op_id} cannot be read: {}",
+                error.message()
+            ));
+        }
     };
     let request: serde_json::Value =
         serde_json::from_str(&text).map_err(|error| error.to_string())?;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.24
+
+- A runner fetches bay's records with their contents, so reading the queue costs no round trip per place.
+- A runner that cannot read a change's request retries it later, and the change keeps its place.
+- The skill and `bay help` say how to keep merges fast: submit once, fix in place, keep changes small.
+
 ## 0.5.23
 
 - An agent hook reads git config once per directory, not once per call site.

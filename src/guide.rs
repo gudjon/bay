@@ -89,6 +89,10 @@ pub fn guide(cli: clap::Command) -> String {
                 .collect()
         })
         .unwrap_or_default();
+    // The owner, 2026-10-27: bay is about speed, and an agent must know what keeps merges fast.
+    out.push_str(
+        "\nFast merges\n  Submit once with bay merge, then go on; running it again does not move a change up.\n  Refused, failed or conflicting: bay start <change>, fix, bay merge <change>. The change keeps its place.\n  Never push main or merge on the host: it throws away the batches being checked.\n  Changes to .bay/ go through bay like any other change.\n",
+    );
     let _ = write!(
         out,
         "\nEvery command also takes\n{}\n  {:<28} Say more about one command: bay <command> --help\n  {:<28} Name this bay's version\n\n`bay help --json` is the same list for programs, with every result code.\n",

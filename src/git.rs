@@ -1074,6 +1074,18 @@ fn as_formatted<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> {
     let quiet = match first {
         Some("log" | "show") => Some("--no-show-signature"),
         Some("push") if records_only(&args[1..]) => Some("--no-verify"),
+        // A fleet finding (2026-10-27): a runner's blob-less clone read each queue entry and
+        // change record by a fetch of its own, one round trip each, 2 s apiece on a hosted
+        // remote: a pass over 30 places spent two minutes on them. A fetch of bay's records alone
+        // brings their blobs, which are small, so every later read of them is local.
+        Some("fetch")
+            if records_only(&args[1..])
+                && !args.iter().any(|word| {
+                    word.starts_with("--filter") || word.starts_with("--no-filter")
+                }) =>
+        {
+            Some("--no-filter")
+        }
         _ => None,
     };
     first
@@ -1108,12 +1120,13 @@ fn host_refused(args: &[&str], stderr: &[u8]) -> bool {
         .any(|moved| text.contains(moved))
 }
 
-/// Whether the words of a `push` after its remote update only bay's records: every
-/// destination is under `refs/bay/` or `refs/notes/bay/`, and there is at least one.
+/// Whether the words of a `push` or `fetch` after its remote name only bay's records: every
+/// destination (or excluded name, `^<name>`) is under `refs/bay/` or `refs/notes/bay/`, and
+/// there is at least one.
 fn records_only(words: &[&str]) -> bool {
     let mut names = words.iter().filter(|word| !word.starts_with('-')).skip(1);
     let ours = |name: &&str| {
-        let target = name.trim_start_matches('+');
+        let target = name.trim_start_matches(['+', '^']);
         let target = target.rsplit_once(':').map_or(target, |(_, to)| to);
         target.starts_with(crate::names::BAY) || target.starts_with(crate::names::NOTES)
     };
@@ -1587,6 +1600,8 @@ mod tests {
         assert!(records_only(&["origin", &notes]));
         assert!(!records_only(&["origin", "abc:refs/heads/main", &ours]));
         assert!(!records_only(&["origin", "main"]));
+        assert!(records_only(&["origin", &change, &format!("^{change}")]));
+        assert!(!records_only(&["origin"]));
         assert!(!records_only(&["origin"]));
     }
 }

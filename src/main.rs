@@ -25,6 +25,7 @@ struct Cli {
 enum Command {
     /// Open a change: a fresh main, a sparse view of the declared paths, the change record;
     /// or, named by its id, pick up an existing change: checkpoint its draft, bring in newer main
+    /// (the way to fix a refused or conflicting change; then `bay merge` keeps its place)
     Start {
         /// What this work is, in a few words (or a card id), or an existing change's id to pick
         /// it up
@@ -52,7 +53,8 @@ enum Command {
         #[arg(long, value_name = "CHANGE")]
         after: Vec<String>,
     },
-    /// Freeze the draft, build the candidate, check it, merge it into main
+    /// Freeze the draft, build the candidate, check it, merge it into main. Submit once: a
+    /// runner merges it in its turn, and a new revision of a queued change keeps its place
     Merge {
         /// The change (default: the change of the view bay runs in)
         change: Option<String>,
