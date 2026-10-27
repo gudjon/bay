@@ -1834,12 +1834,22 @@ fn batch(
             give_back(&mut others, landing);
             // F11: a batch refused because trunk moved is no fault. The runner's head yields
             // with its place kept, and the next pass forms the batch again on the moved trunk.
+            // B4: so is a batch the host refused while trunk stood still (a transient refusal
+            // such as GitHub's GH009); it counts one uncounted publish retry, then yields.
             if ctx.yields
-                && ctx
-                    .repo
-                    .fetch_trunk()
-                    .is_ok_and(|now| now.as_str() != trunk)
+                && let Ok(now) = ctx.repo.fetch_trunk()
             {
+                if now.as_str() == trunk
+                    && !judged_by_bay(&why)
+                    && let Some(blocked) = uncounted_retry(
+                        ctx,
+                        op_id,
+                        revision,
+                        &format!("the host refused the batch's push ({})", first_line(&why)),
+                    )?
+                {
+                    return Ok(Some(blocked));
+                }
                 return yield_head(ctx, op_id, revision, at).map(Some);
             }
             Err(why)
@@ -1849,6 +1859,23 @@ fn batch(
             other
         }
     }
+}
+
+/// Whether a refused push was refused by bay's own host hook, which judged it (its lines read
+/// `remote: bay: ...`): a judgement, never a fault to retry.
+fn judged_by_bay(error: &str) -> bool {
+    error.contains("remote: bay:")
+}
+
+/// The first non-empty line of `text`, at most 160 characters, for a one-line record.
+fn first_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .chars()
+        .take(160)
+        .collect()
 }
 
 /// A planned batch: the policy it is judged by, its members, and why it ended (R7).
@@ -2394,6 +2421,26 @@ fn after_refused_push(
     // candidate is pushed again after a short wait, uncounted; bay never unlinks the lock.
     if now == *trunk && held_lock(error) {
         return lock_held(ctx, op_id, revision);
+    }
+    // B4 (a fleet finding, 2026-10-26/27: GitHub refused a passed head's push with a bare
+    // "(failed)" and with GH009, both cleared on a retry, and bay released the place as
+    // `failed`): trunk did not move, so the host's refusal is a fault of the push, never of the
+    // change. The same candidate is pushed again after a short wait, uncounted toward
+    // `MAIN_MOVED`, and the head keeps its place; five end it as `MERGE_RETRY_EXHAUSTED`.
+    if now == *trunk && !judged_by_bay(error) {
+        if let Some(blocked) = uncounted_retry(
+            ctx,
+            op_id,
+            revision,
+            &format!(
+                "the host refused the publishing push ({})",
+                first_line(error)
+            ),
+        )? {
+            return Ok(Some(blocked));
+        }
+        std::thread::sleep(HOOK_RETRY_WAIT);
+        return Ok(None);
     }
     if now == *trunk {
         return Ok(Some(

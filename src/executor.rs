@@ -593,6 +593,9 @@ fn pass(
             .iter()
             // A change that names one it fixes, reverts or supersedes is always reached: it may
             // be the repair of a red main, which runs ahead of the line (`queue_gate`).
+            // A fleet finding (2026-10-27): an abandoned change's older operation was still
+            // queued and run hours later. No operation of an ended change runs.
+            .filter(|_| !change_ended(record))
             .filter(|op| runs(op) && (names_a_repair(record) || reach(op, freed(&ran))))
             .filter(|op| !taken.contains(&op.op_id))
             .map(|op| op.op_id.clone())
@@ -815,13 +818,18 @@ fn sweep_ended(repo: &Repo, queue: &Queue, records: &[ChangeRecord]) {
         let Some(op) = record.operations.iter().find(|op| op.op_id == entry.op_id) else {
             continue;
         };
-        if !(op.state.is_terminal() || op.state == OpState::Blocked) {
+        let op_ended = op.state.is_terminal() || op.state == OpState::Blocked;
+        if !(op_ended || change_ended(record)) {
             continue;
         }
-        let reason = op.outcome.as_ref().map_or_else(
-            || word(op.state).unwrap_or_default(),
-            |outcome| outcome.to_lowercase(),
-        );
+        let reason = if op_ended {
+            op.outcome.as_ref().map_or_else(
+                || word(op.state).unwrap_or_default(),
+                |outcome| outcome.to_lowercase(),
+            )
+        } else {
+            word_of_change(record)
+        };
         if let Err(why) = pass_on_or_release(repo, Some(record), entry, &reason) {
             eprintln!(
                 "bay runner: queue place {} could not be released: {why}",
@@ -829,6 +837,26 @@ fn sweep_ended(repo: &Repo, queue: &Queue, records: &[ChangeRecord]) {
             );
         }
     }
+}
+
+/// Whether `record`'s change has ended (abandoned, superseded, merged, or its work already on
+/// trunk): none of its operations runs again, whatever state an older one was left in.
+fn change_ended(record: &ChangeRecord) -> bool {
+    matches!(
+        record.state,
+        crate::change::ChangeState::Abandoned
+            | crate::change::ChangeState::Superseded
+            | crate::change::ChangeState::Landed
+            | crate::change::ChangeState::NoEffect
+    )
+}
+
+/// The release reason for a place of an ended change: its state's word.
+fn word_of_change(record: &ChangeRecord) -> String {
+    serde_json::to_value(record.state)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_else(|| "ended".to_owned())
 }
 
 /// Orders a pass: queued changes first, in queue order, so one pass carries the queue as far as
@@ -1098,6 +1126,28 @@ mod tests {
             committed,
             record,
         }
+    }
+
+    /// A fleet finding (2026-10-27): an abandoned change's older operation was queued after the
+    /// abandon and run hours later. An ended change's operations never run, and its places go.
+    #[test]
+    fn an_ended_change_never_runs_whatever_its_operations_say() {
+        let mut open = held("open0001", "admitted", 1).record;
+        assert!(!super::change_ended(&open));
+        for state in [
+            crate::change::ChangeState::Abandoned,
+            crate::change::ChangeState::Superseded,
+            crate::change::ChangeState::Landed,
+            crate::change::ChangeState::NoEffect,
+        ] {
+            open.state = state;
+            assert!(super::change_ended(&open), "{state:?}");
+        }
+        assert_eq!(
+            super::word_of_change(&open),
+            "no_effect",
+            "a place is released with the change's state"
+        );
     }
 
     /// A fleet finding (2026-10-26): changes whose places were given back while main was held

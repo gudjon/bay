@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.19
+
+- A merging push the host refuses while main stands still is retried, and the change keeps its place.
+- No operation of an abandoned or merged change runs, and its queue place is released.
+
 ## 0.5.18
 
 - While the head checks its batch, other runners check the next batches; a batch whose turn comes lands on that check.
