@@ -289,6 +289,43 @@ fn named_or_refused(
     request: &StartRequest,
     base: &str,
 ) -> Result<Option<BayResult>, String> {
+    // Fleet findings (2026-10-27): `bay start <change> --after <id>` (or `--fixes`) opened a new,
+    // empty change whose intent was that change's id, while its author meant to refresh it. A
+    // change named with what only a new change takes is refused, never a second change by it.
+    if let Some(id) = request.intent.as_deref().filter(|id| is_change_id(id))
+        && !request.new
+        && (request.fixes.is_some()
+            || request.lane.is_some()
+            || request.reverts.is_some()
+            || !request.after.is_empty())
+        && (Chain::new(&repo.git).head(id).ok().flatten().is_some()
+            || repo.fetch_refs(&[change_ref(id)]).is_ok())
+    {
+        return Err(format!(
+            "{id} is a change: `bay start {id}` alone refreshes it in place and keeps its place; \
+             --after, --fixes, --lane and --reverts open a new change, so give that one its own \
+             intent, or pass --new"
+        ));
+    }
+    // Fleet findings (2026-10-27): `--paths a,b,c` was read as one path named `a,b,c`.
+    if let Some(joined) = request.paths.iter().find(|path| {
+        path.contains(',')
+            && repo
+                .git
+                .run(&[
+                    "ls-tree",
+                    "--name-only",
+                    base,
+                    "--",
+                    path.trim_end_matches('/'),
+                ])
+                .is_ok_and(|listed| listed.is_empty())
+    }) {
+        return Err(format!(
+            "--paths {joined}: paths are separated by spaces, not commas; main holds no path by \
+             that name"
+        ));
+    }
     // NEW-4: a lane is one the config at trunk declares, or nothing is created.
     if let Some(lane) = &request.lane
         && repo.config.lane(lane).is_none()

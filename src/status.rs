@@ -272,7 +272,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     // Red, flakes and post checks judge the evidence notes: fetched once here, never left to a
     // landed change's row (the listing names live changes only, the 0.5.3 status patch).
     if fetched_at.is_some() {
-        repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
+        repo.fetch_evidence_once(&crate::signing::Keys::load(&repo.git));
     }
     // A read of one change scans its own view only, never every view on the machine (a fleet
     // finding, 2026-10-26: 43 views cost a named status about 26 s).
@@ -383,7 +383,7 @@ fn target_rows(repo: &Repo, trunk: &str, fetched: bool, read: &Read) -> Value {
             .iter()
             .any(|target| !target.requires.is_empty())
     {
-        repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
+        repo.fetch_evidence_once(&crate::signing::Keys::load(&repo.git));
     }
     // An unreadable registry never reads as none: evidence would then count unsigned.
     let current;
@@ -1201,7 +1201,7 @@ fn post_checks(repo: &Repo, landed: Option<&crate::publish::Found>, read: &Read)
     let pending = |rows: &[Value]| rows.iter().any(|row| row["state"] == "pending");
     let rows = match judge() {
         Ok(rows) if pending(&rows) => {
-            repo.fetch_evidence(&crate::signing::Keys::load(&repo.git));
+            repo.fetch_evidence_once(&crate::signing::Keys::load(&repo.git));
             judge()
         }
         other => other,

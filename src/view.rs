@@ -258,8 +258,19 @@ fn worktree_admin(repo: &Repo, path: &Path) -> Option<PathBuf> {
 
 /// Whether the view at `path` holds nothing newer than the revision its change ended with.
 fn holds_nothing_newer(path: &Path, ended: &Ended) -> Result<bool, GitError> {
-    let head = Git::new(path).run(&["rev-parse", "--verify", "HEAD"])?;
-    if head != ended.revision && !ended.placed.contains(&head) {
+    let git = Git::new(path);
+    let head = git.run(&["rev-parse", "--verify", "HEAD"])?;
+    // A fleet finding (2026-10-27): agents commit in their views, and the draft bay lands is its
+    // own commit of that tree with that message, so a landed view kept a HEAD no draft names, and
+    // one shared store kept 152 clean views of landed changes (15 GB, 450 worktrees). A HEAD with
+    // the last revision's tree and message is what that revision copied; a commit with a message
+    // of its own is still kept.
+    let copied =
+        |rev: &str| -> Result<String, GitError> { git.run(&["log", "-1", "--format=%T%n%B", rev]) };
+    if head != ended.revision
+        && !ended.placed.contains(&head)
+        && copied(&head)? != copied(&ended.revision)?
+    {
         return Ok(false);
     }
     Ok(!uncheckpointed(path, &ended.revision)?)

@@ -161,6 +161,8 @@ pub struct Repo {
     prefetched: Mutex<Option<Result<String, GitError>>>,
     /// When this command last fetched trunk, for the result's `freshness` (G80).
     fetched_at: Mutex<Option<String>>,
+    /// Whether [`Repo::fetch_evidence_once`] has run.
+    evidence_fetched: std::sync::atomic::AtomicBool,
 }
 
 /// Why [`Repo::open_with`] could not open a repository.
@@ -408,6 +410,7 @@ impl Repo {
                     .then(crate::clock::now_rfc3339),
             ),
             prefetched: Mutex::new(prefetched),
+            evidence_fetched: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -497,27 +500,31 @@ impl Repo {
     /// remote copy this machine did not write is a collision its push reports. Best effort:
     /// offline, the local records are what this machine can see.
     pub fn fetch_evidence(&self, keys: &crate::signing::Keys) {
+        // A fleet finding (2026-10-27): listing the remote's notes refs first cost a second round
+        // trip on every fetch, and a status read fetched them twice. One fetch of the pattern,
+        // this machine's own refs excluded, reads the same refs.
         let own: Vec<String> = keys
             .own_names()
             .into_iter()
-            .map(crate::evidence::notes_ref)
+            .map(|name| format!("^{}", crate::evidence::notes_ref(name)))
             .collect();
-        let pattern = format!("{}*", crate::evidence::EVIDENCE_PREFIX);
-        let Ok(listed) = self.git.run(&["ls-remote", self.remote(), &pattern]) else {
-            return;
-        };
-        let refspecs: Vec<String> = listed
-            .lines()
-            .filter_map(|line| line.split_whitespace().nth(1))
-            .filter(|name| !own.iter().any(|own| own == name))
-            .map(|name| format!("+{name}:{name}"))
-            .collect();
-        if refspecs.is_empty() {
-            return;
-        }
-        let mut args = vec!["fetch", "-q", "--no-tags", self.remote()];
-        args.extend(refspecs.iter().map(String::as_str));
+        let prefix = crate::evidence::EVIDENCE_PREFIX;
+        let every = format!("+{prefix}*:{prefix}*");
+        let mut args = vec!["fetch", "-q", "--no-tags", self.remote(), every.as_str()];
+        args.extend(own.iter().map(String::as_str));
         let _ = self.git.run(&args);
+    }
+
+    /// [`Repo::fetch_evidence`], at most once in this process for this repository: a command that
+    /// judges evidence in several places reads the remote's notes once. Never for a runner,
+    /// whose passes each need the remote's newest.
+    pub fn fetch_evidence_once(&self, keys: &crate::signing::Keys) {
+        if !self
+            .evidence_fetched
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.fetch_evidence(keys);
+        }
     }
 
     /// Fetches `refs` (full ref names) from the remote into the same names. A ref the

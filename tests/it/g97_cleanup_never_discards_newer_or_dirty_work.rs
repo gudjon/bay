@@ -194,3 +194,25 @@ fn a_landed_view_is_released_without_waiting_for_the_retention_window() {
     assert!(!journal(&test_box, &repo, &clean).exists());
     assert!(!listed(&test_box, &repo, &clean));
 }
+
+/// A fleet finding (2026-10-27): agents commit in their views before they submit, and the draft
+/// bay lands is its own commit of that tree, so a landed view's HEAD is a commit no draft names.
+/// One shared store kept 152 such clean views of landed changes. A view whose HEAD holds the
+/// landed tree is released all the same.
+#[test]
+fn a_landed_view_its_author_committed_in_is_released() {
+    let test_box = TestBox::new();
+    let repo = seeded(&test_box, 0);
+    let (committed, view) = start_with(&test_box, &repo, "committed");
+    test_box.git_ok(&view, &["add", "--all", "--sparse"]);
+    test_box.git_ok(&view, &["commit", "-q", "-m", "the author's own commit"]);
+    land(&test_box, &view);
+
+    let started = test_box.bay_ok(&repo, &["start", "CARD-NEXT", "--paths", "src/"]);
+    assert_eq!(
+        started["detail"]["released_views"],
+        serde_json::json!([committed]),
+        "{started}"
+    );
+    assert!(!view.exists(), "the landed view is released");
+}
