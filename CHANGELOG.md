@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.20
+
+- A batch passes over a member that conflicts and leaves it for its own turn, instead of ending there.
+
 ## 0.5.19
 
 - A merging push the host refuses while main stands still is retried, and the change keeps its place.
@@ -7,7 +11,7 @@
 
 ## 0.5.18
 
-- While the head checks its batch, other runners check the next batches; a batch whose turn comes lands on that check.
+- Other runners check the next batches while the head checks its own; each lands on that check in its turn.
 - A runner pass ends after five minutes, so a newly submitted change gets its place within minutes.
 - A plugin's script runs as committed on main, never from a runner's older checkout.
 - `bay status` warns `wake_failing` when every recent wake failed, and names why.

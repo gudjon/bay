@@ -983,6 +983,10 @@ pub fn plan_batch(
                 tree,
                 changed,
             } => (commit, tree, changed),
+            // A member that conflicts, or whose work is already there, is passed over and left
+            // for its own turn, never the end of the batch (measured on 0.5.18, 2026-10-27:
+            // both batches of the first hour ended at a conflict, at 19 and at 7 members).
+            Fold::Skipped(_) if !members.is_empty() => continue,
             Fold::Skipped(why) => {
                 stopped = why;
                 break;
@@ -1269,6 +1273,30 @@ mod tests {
             checked: None,
             fails_on,
         }
+    }
+
+    /// Measured on 0.5.18 (2026-10-27): both batches of the first hour ended at a conflicting
+    /// member. A member that conflicts is passed over and left for its own turn.
+    #[test]
+    fn a_member_that_conflicts_is_passed_over() {
+        let (dir, git, trunk, revisions) = three_on_a_base();
+        let run = |args: &[&str]| git.run(args).unwrap();
+        let mut edits = Vec::new();
+        for text in ["head\n", "other\n"] {
+            run(&["checkout", "-q", "--detach", &trunk]);
+            std::fs::write(dir.path().join("a.txt"), text).unwrap();
+            run(&["commit", "-q", "-am", text.trim()]);
+            edits.push(run(&["rev-parse", "HEAD"]));
+        }
+        let policy = crate::policy::load_at(&git, &trunk).unwrap().unwrap();
+        let head = queued(1, &edits[0], Vec::new());
+        let behind = [
+            queued(2, &edits[1], Vec::new()),
+            queued(3, &revisions[0], Vec::new()),
+        ];
+        let (members, _) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
+        assert_eq!(seqs, [1, 3]);
     }
 
     /// A fleet finding (2026-10-26): an entry whose pre-check failed on its predicted base went
