@@ -795,6 +795,11 @@ fn plain_token(token: &str) -> String {
         let start = token.find(core).unwrap_or(0);
         return format!("{}{file}{}", &token[..start], &token[start + core.len()..]);
     }
+    // A path on disk is what a person opens or names in a fix: kept whole, never put plainly (a
+    // fleet finding, 2026-10-27: "cannot change to 'bay's records'" stood for a view's folder).
+    if core.starts_with('/') || core.starts_with("~/") {
+        return token.to_owned();
+    }
     if core.contains('/') && core.split(|c: char| !c.is_ascii_alphabetic()).any(unplain) {
         let start = token.find(core).unwrap_or(0);
         return format!(
@@ -964,12 +969,26 @@ fn short(detail: Option<&Value>) -> Option<String> {
     let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
     // The first sentence, whole: up to the first ". " (or the line's end).
     let sentence = line.split_once(". ").map_or(line, |(first, _)| first);
-    if sentence.split_whitespace().count() > SHORT_WORDS {
+    let words: Vec<&str> = sentence.split_whitespace().collect();
+    // Git's own words (a command it ran, or what git printed) are never put plainly: rewritten,
+    // ref names inside them read as nonsense (fleet findings, 0.5.6 and 2026-10-27). Only bay's
+    // words before them make the sentence; git's stay whole in `detail`.
+    let git = words.iter().position(|word| {
+        *word == "git"
+            || ["fatal:", "error:", "remote:", "hint:"]
+                .iter()
+                .any(|prefix| word.starts_with(prefix))
+    });
+    let mine = &words[..git.unwrap_or(words.len())];
+    if mine.len() > SHORT_WORDS {
         return None;
     }
-    let short = sentence.split_whitespace().collect::<Vec<_>>().join(" ");
-    let short = plain(short.trim_end_matches(['.', ':', ';', ',']));
-    (!short.is_empty()).then_some(short)
+    let short = plain(mine.join(" ").trim_end_matches(['.', ':', ';', ',']));
+    match git {
+        _ if short.is_empty() => None,
+        Some(_) => Some(format!("{short}; git's own words are in the detail")),
+        None => Some(short),
+    }
 }
 
 impl Reason {
@@ -1650,6 +1669,37 @@ mod tests {
     use super::{BayResult, Decision, Freshness, Reason, SCHEMA, plain, unplain};
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn git_words_in_a_fault_are_never_put_plainly() {
+        let say = BayResult::failed(
+            "the merging push was refused: git push -q --force-with-lease=refs/bay/queue/760:abc origin d6d:refs/bay/queue/760 failed",
+        )
+        .say();
+        assert_eq!(
+            say,
+            "Nothing was changed: the combining push was refused; git's own words are in the detail."
+        );
+        let fatal =
+            BayResult::failed("fatal: cannot change to '/home/u/repo/.git/bay/views/x'").say();
+        assert!(!fatal.contains("bay's records"), "{fatal}");
+    }
+
+    #[test]
+    fn a_path_on_disk_in_a_fault_is_kept_whole() {
+        let said = super::plain(
+            "fatal: cannot change to '/home/u/repo/.git/bay/views/abcd1234': No such file or directory",
+        );
+        assert!(
+            said.contains("'/home/u/repo/.git/bay/views/abcd1234'"),
+            "{said}"
+        );
+        let refs = super::plain("no key registry (refs/bay/registry), so the trunk waits");
+        assert!(
+            !refs.contains("refs/bay"),
+            "a ref is still put plainly: {refs}"
+        );
+    }
 
     #[test]
     fn an_update_github_limits_says_when_to_try_again() {

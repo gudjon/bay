@@ -85,10 +85,32 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
     let served = check::Served::read(git);
     let tree = tree_of(git, &tip)?;
     let writer = Writer::of(git, &keys, registry.as_ref())?;
+    // A fleet finding (2026-10-27, 0.5.29): with one post check a pass and main moving every few
+    // minutes, each new tip began again at the policy's first post check, and the later ones never
+    // ran. The checks no landing in the red window answers (`crate::red`'s pending) go first.
+    let pending: Vec<(String, String)> = crate::red::state(git, &tip, registry.as_ref())
+        .map(|judged| {
+            judged
+                .pending
+                .into_iter()
+                .map(|pending| (pending.check, pending.environment))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut entries: Vec<&crate::policy::CheckEntry> = policy
+        .checks
+        .iter()
+        .filter(|entry| {
+            entry.stage == crate::policy::Stage::Post && served.serves(&entry.environment)
+        })
+        .collect();
+    entries.sort_by_key(|entry| {
+        !pending
+            .iter()
+            .any(|(check, environment)| *check == entry.id && *environment == entry.environment)
+    });
     let mut reports = Vec::new();
-    for entry in policy.checks.iter().filter(|entry| {
-        entry.stage == crate::policy::Stage::Post && served.serves(&entry.environment)
-    }) {
+    for entry in entries {
         let id = CheckId::new(&entry.id, &entry.environment);
         if writer.records(git, &tree, &id)? > 0 {
             continue;

@@ -1045,8 +1045,8 @@ fn now_s() -> u64 {
 /// Auto-update, from `status`, `doctor` and a looping runner between its passes (never `land`
 /// or the hook, which hold or may hold an operation): at most one check an hour, run as a detached
 /// `bay update` so the command's result and exit code never change. `BAY_DISABLE_AUTOUPDATE=1`
-/// and the box's `bay.updateAuto = false` turn it off, and a pinned box never moves on its own;
-/// a repository's settings play no part. A build
+/// and the box's `bay.updateAuto = false` turn it off; a pin is a floor, so a pinned box still
+/// moves to every newer release; a repository's settings play no part. A build
 /// `scripts/release.sh` did not make checks only against a test release
 /// (`BAY_TEST_RELEASE_URL`), so a development binary never replaces itself.
 pub fn auto() {

@@ -926,10 +926,24 @@ fn change_ended(record: &ChangeRecord) -> bool {
             | crate::change::ChangeState::Landed
             | crate::change::ChangeState::NoEffect
     )
+    // A fleet finding (2026-10-27): a change an older bay reopened after it merged read `ready`
+    // with a later revision `submitted`; every runner took that revision each pass and refused it
+    // as already merged, a receipt each time. A change with a published operation is on main.
+    || record
+        .operations
+        .iter()
+        .any(|op| op.state == OpState::Published)
 }
 
 /// The release reason for a place of an ended change: its state's word.
 fn word_of_change(record: &ChangeRecord) -> String {
+    if record
+        .operations
+        .iter()
+        .any(|op| op.state == OpState::Published)
+    {
+        return "published".to_owned();
+    }
     serde_json::to_value(record.state)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -1203,6 +1217,23 @@ mod tests {
             committed,
             record,
         }
+    }
+
+    /// A fleet finding (2026-10-27): a change reopened after it merged kept a revision
+    /// `submitted` that every runner retook each pass. A change with a published operation has
+    /// ended, whatever its state says, so none of its operations runs and its place goes.
+    #[test]
+    fn a_change_with_a_published_operation_has_ended() {
+        let mut reopened = held("hxzd0001", "submitted", 1).record;
+        assert!(!super::change_ended(&reopened));
+        let mut first = reopened.operations[0].clone();
+        first.op_id = "hxzd0001.0".to_owned();
+        first.state = crate::change::OpState::Published;
+        reopened.operations.insert(0, first);
+        assert!(
+            super::change_ended(&reopened),
+            "a published operation ends the change"
+        );
     }
 
     /// A fleet finding (2026-10-27): a runner that held a checked head ran five post checks

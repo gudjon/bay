@@ -213,6 +213,12 @@ pub fn sync_chains(repo: &Repo) -> usize {
         let Some(id) = name.strip_prefix(changes) else {
             continue;
         };
+        // G419 (a fleet finding, 2026-10-27): a copy of a chain under a name that is no change
+        // id (`refs/bay/changes/hvvrfutj-r`, made outside bay) was pushed back to the remote by
+        // every store that still held it, after its deletion. bay pushes only its own records.
+        if !crate::ids::is_change_id(id) {
+            continue;
+        }
         let on_remote = listed(&remote, '\t', name);
         if on_remote == Some(oid) {
             continue;

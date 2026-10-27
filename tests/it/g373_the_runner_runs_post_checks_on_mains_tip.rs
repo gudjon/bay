@@ -179,3 +179,43 @@ fn a_pass_past_its_bound_still_runs_one_post_check() {
         .unwrap_or_else(|| panic!("no post check past the bound: {result}"));
     assert_eq!(post[0]["verdict"], "pass", "{post}");
 }
+
+/// A fleet finding (2026-10-27, 0.5.29): with one post check a pass and main moving every few
+/// minutes, each new tip began again at the policy's first post check, so the later ones never
+/// ran. A post check no landing answers goes before one answered a landing ago.
+#[test]
+fn a_post_check_nothing_answered_goes_before_one_answered_on_an_older_tip() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let mut files = check_files("true", &passing_result(1), 1, 60);
+    for (path, text) in &mut files {
+        if path == ".bay/policy.toml" {
+            text.push_str(POST);
+            text.push_str(
+                &POST
+                    .replace("\"suite\"", "\"lint\"")
+                    .replace("bay-check suite", "bay-check lint"),
+            );
+        }
+    }
+    files.push((
+        ".bay/config.toml".to_owned(),
+        "[runner]\npost = true\n".to_owned(),
+    ));
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    land(&test_box, &repo, "src/l0.rs");
+    let first = pass(&test_box, &repo);
+    let ran_first = first
+        .iter()
+        .find_map(|row| row.get("post"))
+        .and_then(|post| post[0]["check"].as_str().map(str::to_owned));
+    assert_eq!(ran_first.as_deref(), Some("suite"), "{first:?}");
+    // Main moves on: on the new tip, suite answered a landing ago and lint never did.
+    land(&test_box, &repo, "src/l1.rs");
+    let second = pass(&test_box, &repo);
+    let ran_second = second
+        .iter()
+        .find_map(|row| row.get("post"))
+        .and_then(|post| post[0]["check"].as_str().map(str::to_owned));
+    assert_eq!(ran_second.as_deref(), Some("lint"), "{second:?}");
+}

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.30
+
+- A runner runs the post check that has gone longest unanswered first, so none starves while main moves.
+- A failure's sentence keeps paths and git's own words whole, never rewriting them into bay's words.
+- A change with a merged revision counts as ended, so runners stop retaking its other revisions.
+- bay's sync pushes only change records with a valid change id, never a foreign copy.
+
 ## 0.5.29
 
 - A runner runs its one post-merge check every pass again; in 0.5.28 a busy queue skipped them all.
