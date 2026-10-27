@@ -1563,6 +1563,11 @@ fn checkpoint_view(
         .map_err(|error| error.message())?;
     // BACKLOG 49: a checkpoint is pushed, so a large file leaves it as it leaves a merge.
     crate::assets::offload_view(repo, &view_path)?;
+    if let Ok(Some(trunk)) = repo.git.ref_target(&repo.trunk_tracking_ref())
+        && let Some(base) = crate::change::newer_base(&Git::new(&view_path), &record.base, &trunk)
+    {
+        record.base = base;
+    }
     let frozen = freeze_draft(&Git::new(&view_path), &record.base, "checkpoint")
         .map_err(|error| error.message())?;
     if crate::change::same_draft(&repo.git, &frozen, latest).map_err(|error| error.message())? {

@@ -1,12 +1,11 @@
 # Changelog
 
-## 0.5.27
+## 0.5.28
 
-- A runner does at most one post-merge check a pass, so post checks never hold up the line.
+- `bay update` reads with a GitHub token when one is set, else the release page, and says when to retry.
+- A refresh or merge judges a change from the main its folder stands on, not an older recorded one.
+- A runner does at most one post-merge check a pass, and none while it holds the queue's head.
 - A check's scratch folder is removed however its run ends, and a runner clears folders untouched for six hours.
-
-## 0.5.26
-
 - Every post check on main's tip runs; before, only the first one in the policy did.
 - A runner makes retention cuts after the queue's work, so they never hold up admission.
 - `bay status <change>` says that change's own state, never "Done" for a change still in line.

@@ -961,6 +961,19 @@ impl<'a> Chain<'a> {
     }
 }
 
+/// The base a view really stands on, when it is newer than the one its change records: the
+/// newest commit the view's `HEAD` shares with `trunk`, if `recorded` is behind it (fleet
+/// findings, 2026-10-27: a refresh's new base was recorded only in a chain that was then set
+/// aside, and a hand merge of trunk into a view moved it too; either way the change's draft
+/// against the recorded base counted other changes' work as its own, and every refresh
+/// conflicted on files it never touched). `None` when the view stands on the recorded base.
+#[must_use]
+pub fn newer_base(view: &Git, recorded: &str, trunk: &str) -> Option<String> {
+    let head = view.run(&["rev-parse", "--verify", "HEAD"]).ok()?;
+    let shared = view.run(&["merge-base", &head, trunk]).ok()?;
+    (shared != recorded && view.is_ancestor(recorded, &shared).unwrap_or(false)).then_some(shared)
+}
+
 /// Freezes a view's work into a draft commit on `base`: every edit in the view, staged
 /// through the view's own index (sparse-aware), written as one commit. The view keeps
 /// its index; nothing outside the view changes. BACKLOG 58: when the agent committed in the

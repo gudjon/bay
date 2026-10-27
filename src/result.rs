@@ -1318,6 +1318,17 @@ impl Reason {
     #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn say(self, detail: Option<&Value>) -> String {
+        // A fleet finding: GitHub's limit on unauthenticated reads refused updates; the
+        // sentence says when it resets, and how to read past it.
+        if self == Self::UpdateUnavailable
+            && let Some(at) = text_at(detail, &["/why"])
+                .and_then(|why| why.split("retry after ").nth(1))
+                .map(|rest| rest.split([';', ' ']).next().unwrap_or(rest))
+        {
+            return format!(
+                "Not updated: GitHub limits reads until {at}. Try again then, or set GH_TOKEN."
+            );
+        }
         // G305: doctor's evidence that the trunk changes around bay.
         if self == Self::HooksMissing
             && let (Some(count), Some(window)) = (
@@ -1639,6 +1650,18 @@ mod tests {
     use super::{BayResult, Decision, Freshness, Reason, SCHEMA, plain, unplain};
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn an_update_github_limits_says_when_to_try_again() {
+        let say = Reason::UpdateUnavailable.say(Some(&json!({"why":
+            "cannot download https://api.github.com/x: 403; GitHub asks to retry after 2026-10-27T13:00:00Z"})));
+        assert_eq!(
+            say,
+            "Not updated: GitHub limits reads until 2026-10-27T13:00:00Z. Try again then, or set GH_TOKEN."
+        );
+        let plain = Reason::UpdateUnavailable.say(Some(&json!({"why": "offline"})));
+        assert!(plain.contains("Try again later"), "{plain}");
+    }
 
     #[test]
     fn a_status_of_one_change_says_that_changes_state() {

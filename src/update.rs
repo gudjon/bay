@@ -63,6 +63,11 @@ pub const RELEASE_KEYS: &[&str] = &[
 const PRINCIPAL: &str = "bay-release";
 const RELEASES: &str = "https://github.com/gudjon/bay/releases";
 const RELEASE_LIST: &str = "https://api.github.com/repos/gudjon/bay/releases?per_page=100&page=";
+/// The plain release page, which redirects to the newest release's tag. It is read when the API
+/// cannot be, such as when a shared address has spent GitHub's unauthenticated rate limit.
+const LATEST_PAGE: &str = "https://github.com/gudjon/bay/releases/latest";
+/// The environment variables a GitHub token is read from, in order.
+const TOKEN_VARS: [&str; 2] = ["GH_TOKEN", "GITHUB_TOKEN"];
 /// A bound on the pages read, so a list that never ends cannot hold the command.
 const MAX_PAGES: usize = 100;
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_mins(5);
@@ -113,22 +118,49 @@ impl Source {
     }
 
     fn fetch(&self, url: &str, out: &Path) -> Result<(), String> {
+        self.curl(url, out, &[]).map(|_| ())
+    }
+
+    /// Runs curl for `url` into `out` and returns what `extra` asks it to write (`-w`). A request
+    /// to GitHub's API carries a token from [`TOKEN_VARS`] when one is set, passed on stdin so it
+    /// never shows in a process list. A refusal names when to retry, when GitHub says.
+    fn curl(&self, url: &str, out: &Path, extra: &[&str]) -> Result<String, String> {
+        let headers = out.with_extension("headers");
         let mut cmd = Command::new("curl");
         cmd.args(["-fsSL", "--max-time", "300"]);
         if self.https_only {
             cmd.args(["--proto", "=https", "--tlsv1.2"]);
         }
-        cmd.arg("-o").arg(out).arg(url);
-        let output = git::run_bounded_for(cmd, "curl", None, DOWNLOAD_TIMEOUT)
-            .map_err(|error| error.message())?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(format!(
-                "cannot download {url}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
+        let token = api_token().filter(|_| url.starts_with("https://api.github.com/"));
+        let config = token.map(|token| format!("header = \"Authorization: Bearer {token}\"\n"));
+        if config.is_some() {
+            cmd.args(["--config", "-"]);
         }
+        cmd.args(extra);
+        cmd.arg("-D").arg(&headers).arg("-o").arg(out).arg(url);
+        let output = git::run_bounded_for(
+            cmd,
+            "curl",
+            config.as_deref().map(str::as_bytes),
+            DOWNLOAD_TIMEOUT,
+        )
+        .map_err(|error| error.message())?;
+        let seen = std::fs::read_to_string(&headers).unwrap_or_default();
+        let _ = std::fs::remove_file(&headers);
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+        }
+        let mut why = format!(
+            "cannot download {url}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs());
+        if let Some(at) = retry_at(&seen, now) {
+            let _ = write!(why, "; GitHub asks to retry after {at}");
+        }
+        Err(why)
     }
 }
 
@@ -484,11 +516,23 @@ fn list_newest(source: &Source) -> Result<(String, Vec<String>), String> {
     let built = |release: &Release| release.assets.contains(&archive);
     // Read until a built release no newer than this one, so every release an update may step
     // through is listed (G242); on GitHub that is almost always the first page of 100.
-    let releases = release_list(source, |releases| {
+    let listed = release_list(source, |releases| {
         releases
             .iter()
             .any(|release| built(release) && compare(&release.version, BAY) != Ordering::Greater)
-    })?;
+    });
+    let releases = match listed {
+        Ok(releases) => releases,
+        // The page names the newest release but not its builds or the ones before it: the
+        // download then finds whether this platform has a build, and no step is offered.
+        Err(why) if source.https_only => {
+            let newest = latest_from_page(source)
+                .map_err(|page| format!("{why}; the release page: {page}"))?;
+            State::record(Some(&newest));
+            return Ok((newest, Vec::new()));
+        }
+        Err(why) => return Err(why),
+    };
     let mut versions: Vec<String> = releases
         .into_iter()
         .filter(built)
@@ -504,6 +548,53 @@ fn list_newest(source: &Source) -> Result<(String, Vec<String>), String> {
         .filter(|version| compare(version, BAY) == Ordering::Greater)
         .collect();
     Ok((newest, steps))
+}
+
+/// The newest release, read from where [`LATEST_PAGE`] redirects (`…/releases/tag/v0.5.26`).
+fn latest_from_page(source: &Source) -> Result<String, String> {
+    let dir = TempDir::new(&std::env::temp_dir())?;
+    let landed = source.curl(
+        LATEST_PAGE,
+        &dir.0.join("latest.html"),
+        &["-w", "%{url_effective}"],
+    )?;
+    tag_of(&landed).ok_or_else(|| format!("{LATEST_PAGE} led to {landed}, which names no release"))
+}
+
+/// The version a release tag address names, when it is one bay reads.
+fn tag_of(address: &str) -> Option<String> {
+    let version = address.trim().rsplit_once("/releases/tag/")?.1;
+    let version = version.trim_start_matches('v');
+    valid(version).then(|| version.to_owned())
+}
+
+/// A GitHub token from the first of [`TOKEN_VARS`] that is set and not empty.
+fn api_token() -> Option<String> {
+    TOKEN_VARS
+        .iter()
+        .filter_map(|name| std::env::var(name).ok())
+        .map(|token| token.trim().to_owned())
+        .find(|token| !token.is_empty() && !token.contains(['"', '\\', '\n']))
+}
+
+/// When GitHub says a refused request may be sent again, from its response headers: a
+/// `retry-after` in seconds, or the `x-ratelimit-reset` time once `x-ratelimit-remaining` is 0.
+fn retry_at(headers: &str, now: u64) -> Option<String> {
+    let value = |name: &str| {
+        headers.lines().rev().find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.trim()
+                .eq_ignore_ascii_case(name)
+                .then(|| value.trim().to_owned())
+        })
+    };
+    if let Some(after) = value("retry-after").and_then(|after| after.parse::<u64>().ok()) {
+        return Some(crate::clock::rfc3339_of(now + after));
+    }
+    (value("x-ratelimit-remaining").as_deref() == Some("0"))
+        .then(|| value("x-ratelimit-reset")?.parse::<u64>().ok())
+        .flatten()
+        .map(crate::clock::rfc3339_of)
 }
 
 /// Whether a box whose pin is `pin` runs bay `version`: the pin itself, or a newer version that
@@ -1148,13 +1239,42 @@ impl Drop for TempDir {
 
 #[cfg(test)]
 mod tests {
-    use super::{RELEASE_KEYS, TempDir, allowed_signers, compare, key_lines, sum_of, valid};
+    use super::{
+        RELEASE_KEYS, TempDir, allowed_signers, compare, key_lines, retry_at, sum_of, tag_of, valid,
+    };
     use std::cmp::Ordering;
     use std::process::Command;
 
     /// A hardware key held in a secure enclave, as OpenSSH writes its public line
     /// (`sk-ecdsa-sha2-nistp256@openssh.com`): a well-formed fixture with no device behind it.
     const SK_ECDSA: &str = "sk-ecdsa-sha2-nistp256@openssh.com AAAAInNrLWVjZHNhLXNoYTItbmlzdHAyNTZAb3BlbnNzaC5jb20AAAAIbmlzdHAyNTYAAABBBGsX0fLhLEJH+Lzm5WOkQPJ3A32BLeszoPShOUXYmMKWT+NC4v4af5uO5+tKfA+eFivOM1drMV7Oy7ZAaDe/UfUAAAAEc3NoOg==";
+
+    #[test]
+    fn the_release_page_names_the_newest_tag() {
+        let page = "https://github.com/gudjon/bay/releases/tag/v0.5.26";
+        assert_eq!(tag_of(page).as_deref(), Some("0.5.26"));
+        assert_eq!(tag_of("https://github.com/gudjon/bay/releases"), None);
+        assert_eq!(
+            tag_of("https://github.com/gudjon/bay/releases/tag/nightly"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_refusal_says_when_github_takes_requests_again() {
+        let spent = "HTTP/2 403\r\nx-ratelimit-remaining: 0\r\nx-ratelimit-reset: 1793102400\r\n";
+        assert_eq!(retry_at(spent, 0).as_deref(), Some("2026-10-27T12:00:00Z"));
+        let wait = "HTTP/2 429\r\nRetry-After: 60\r\n";
+        assert_eq!(
+            retry_at(wait, 1_793_102_400).as_deref(),
+            Some("2026-10-27T12:01:00Z")
+        );
+        // A failure GitHub gives no time for names none.
+        assert_eq!(
+            retry_at("HTTP/2 404\r\nx-ratelimit-remaining: 41\r\n", 0),
+            None
+        );
+    }
 
     #[test]
     fn the_pinned_list_and_the_release_scripts_allowed_signers_agree() {

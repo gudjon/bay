@@ -937,6 +937,7 @@ fn submit_land(
     ctx.chain.sign_with(agent);
 
     step.set("freeze");
+    stand_on_view_base(&mut ctx, &trunk);
     let revision = match freeze(&ctx)? {
         Ok(revision) => revision,
         Err(refusal) => return Ok(refusal),
@@ -3743,6 +3744,15 @@ fn verify_request(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, Strin
         .with_change(ctx.id.clone())
         .with_op(op_id),
     ))
+}
+
+/// G416: the change stands on the base its view stands on, when that is newer than the one it
+/// records ([`crate::change::newer_base`]), so its draft holds only its own work.
+fn stand_on_view_base(ctx: &mut Ctx, trunk: &str) {
+    let view = Git::new(ctx.repo.view_path(&ctx.id));
+    if let Some(base) = crate::change::newer_base(&view, &ctx.record.base, trunk) {
+        ctx.record.base = base;
+    }
 }
 
 /// Step 1: freezes the view into the revision. An unchanged view keeps the latest draft, so a

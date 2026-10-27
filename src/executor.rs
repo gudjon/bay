@@ -638,7 +638,7 @@ fn pass(
     // publishes the head, waited behind them; nothing landed for 40 minutes. A pass does at most
     // one piece of this work, and none past its bound; the next pass, or another runner, does
     // the next.
-    if began.elapsed() < bound {
+    if began.elapsed() < bound && !holds_the_head(repo) {
         if let Some(post) = crate::bisect::tips(repo) {
             ran.push(json!({"post": post}));
         } else if let Some(warm) = crate::bisect::warm(repo) {
@@ -665,6 +665,36 @@ fn pass(
     }
     advanced.extend(advance(repo));
     Ok(ran)
+}
+
+/// Whether this runner holds the queue head's operation, still running or checked and not yet
+/// published. Such a runner does no post-merge work: its next pass publishes the head (a fleet
+/// finding, 2026-10-27: a runner that held a checked head ran five post checks first, two of
+/// them waiting 300 s each for a worker, and the head waited 40 minutes; every other runner
+/// rightly waited on its lease).
+fn holds_the_head(repo: &Repo) -> bool {
+    let Some(head) = Queue::read(repo)
+        .ok()
+        .and_then(|queue| queue.head().cloned())
+    else {
+        return false;
+    };
+    let mine = Keys::load(&repo.git).executor_name;
+    Chain::new(&repo.git)
+        .read(&head.change)
+        .ok()
+        .and_then(|(_, record)| {
+            record
+                .operations
+                .into_iter()
+                .find(|op| op.op_id == head.op_id)
+        })
+        .is_some_and(|op| held_by(&op, &mine))
+}
+
+/// Whether `op` is `me`'s, still running or checked, so `me` publishes it next.
+fn held_by(op: &crate::change::Operation, me: &str) -> bool {
+    op.owner.as_deref() == Some(me) && matches!(op.state, OpState::Running | OpState::Checked)
 }
 
 /// How long a check's scratch directory may stand untouched before a pass removes it.
@@ -1171,6 +1201,24 @@ mod tests {
             committed,
             record,
         }
+    }
+
+    /// A fleet finding (2026-10-27): a runner that held a checked head ran five post checks
+    /// first and the head waited 40 minutes. A runner that holds the head's operation, running or
+    /// checked, does no post-merge work; another runner's hold, or an ended one, does not stop it.
+    #[test]
+    fn a_runner_holding_the_head_does_no_post_work() {
+        let mut op = held("head0001", "checked", 1).record.operations.remove(0);
+        op.owner = Some("runner-a".to_owned());
+        assert!(super::held_by(&op, "runner-a"));
+        assert!(!super::held_by(&op, "runner-b"), "another runner's hold");
+        op.state = crate::change::OpState::Running;
+        assert!(super::held_by(&op, "runner-a"));
+        op.state = crate::change::OpState::Published;
+        assert!(!super::held_by(&op, "runner-a"), "a published head is done");
+        op.owner = None;
+        op.state = crate::change::OpState::Checked;
+        assert!(!super::held_by(&op, "runner-a"), "a head nobody holds");
     }
 
     /// A fleet finding (2026-10-27): an abandoned change's older operation was queued after the
