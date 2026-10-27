@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.29
+
+- A runner runs its one post-merge check every pass again; in 0.5.28 a busy queue skipped them all.
+- `bay start` on a change already on main is refused instead of reopening it, and its view is untouched.
+
 ## 0.5.28
 
 - `bay update` reads with a GitHub token when one is set, else the release page, and says when to retry.

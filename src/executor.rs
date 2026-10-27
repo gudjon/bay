@@ -636,9 +636,11 @@ fn pass(
     // then the culprit of a red one (G244d). A fleet finding (2026-10-27): once every post check
     // ran, a pass ran all five one after another, minutes each, and the next pass, which
     // publishes the head, waited behind them; nothing landed for 40 minutes. A pass does at most
-    // one piece of this work, and none past its bound; the next pass, or another runner, does
-    // the next.
-    if began.elapsed() < bound && !holds_the_head(repo) {
+    // one piece of this work; the next pass, or another runner, does the next.
+    // A fleet finding (2026-10-27, 0.5.28): a pass also skipped this work once past its bound, and
+    // with a deep queue every pass reaches its bound, so no post check ran at all. One job a pass
+    // is the bound; the runner that holds the head does none (`holds_the_head`).
+    if !holds_the_head(repo) {
         if let Some(post) = crate::bisect::tips(repo) {
             ran.push(json!({"post": post}));
         } else if let Some(warm) = crate::bisect::warm(repo) {

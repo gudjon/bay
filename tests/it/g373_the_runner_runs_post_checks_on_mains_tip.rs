@@ -144,3 +144,38 @@ fn every_post_check_on_a_tip_runs_not_only_the_first() {
     }
     assert_eq!(checks, ["suite", "lint"]);
 }
+
+/// A fleet finding (2026-10-27, 0.5.28): post work ran only within the pass bound, and with a
+/// deep queue every pass reached it, so no post check ran at all. A pass past its bound still
+/// runs its one post check.
+#[test]
+fn a_pass_past_its_bound_still_runs_one_post_check() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let mut files = check_files("true", &passing_result(1), 1, 60);
+    for (path, text) in &mut files {
+        if path == ".bay/policy.toml" {
+            text.push_str(POST);
+        }
+    }
+    files.push((
+        ".bay/config.toml".to_owned(),
+        "[runner]\npost = true\n".to_owned(),
+    ));
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    land(&test_box, &repo, "src/l0.rs");
+    let (code, result) = result_json(
+        test_box
+            .bay(&repo)
+            .env("BAY_TEST_PASS_BOUND_S", "0")
+            .args(["runner", "run", "--once"]),
+    );
+    assert_eq!(code, 0, "{result}");
+    let post = result["detail"]["ran"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|row| row.get("post"))
+        .unwrap_or_else(|| panic!("no post check past the bound: {result}"));
+    assert_eq!(post[0]["verdict"], "pass", "{post}");
+}

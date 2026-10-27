@@ -1430,9 +1430,26 @@ fn replace_draft(
     Ok(Ok(taken.draft))
 }
 
+/// G417 (a fleet finding, 2026-10-27): `bay start` on a change already on main reopened it,
+/// `bay merge` queued a new edit behind the merged revision, and that edit was refused later
+/// with no word to its author. A change on main is never reopened; more work is a new change.
+/// Nothing in its view is touched.
+fn already_on_main(repo: &Repo, id: &str, record: &ChangeRecord) -> Option<BayResult> {
+    matches!(record.state, ChangeState::Landed | ChangeState::NoEffect).then(|| {
+        BayResult::blocked(Reason::ChangeAlreadyLanded)
+            .with_change(id)
+            .with_detail(json!({
+                "state": record.state,
+                "view": repo.view_path(id).display().to_string(),
+                "next_step": "this change is already on main; for more edits start a new change with its own intent, and copy any new work from the view shown",
+            }))
+    })
+}
+
 /// Picks up change `id`; with `from`, a branch made outside bay (`start <CHANGE> --from`), its
 /// net change on the newest trunk replaces the change's draft, after the view's own edits are
 /// checkpointed, so a rebased branch lands under its change and never needs a new name.
+#[allow(clippy::too_many_lines)]
 fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String> {
     if !is_change_id(id) {
         return Err(format!("{id} is not a change id"));
@@ -1446,7 +1463,12 @@ fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String
             )
         })?;
     }
+    // The remote's chain says whether the change landed since this store last read it.
+    let _ = repo.remote_chain(id);
     let (mut head, mut record) = chain.read(id).map_err(|error| error.message())?;
+    if let Some(refused) = already_on_main(repo, id, &record) {
+        return Ok(refused);
+    }
     // G272: a change that ended without landing is never resumed behind a newer generation of
     // its intent (plain `start` adopts only the newest claim's change).
     if let Some(newer) = newer_generation(repo, &record)? {
