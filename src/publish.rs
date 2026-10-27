@@ -1929,8 +1929,15 @@ fn batch_plan(
         .map_while(|entry| throughput::Queued::read(git, entry))
         .collect();
     let by_lane = repo.config.footprint_lanes();
-    let (mut members, mut stopped) =
-        throughput::plan_batch(git, &policy, trunk, &head, &behind, bounds.max, by_lane)?;
+    let (mut members, mut stopped) = throughput::plan_batch(
+        git,
+        &policy,
+        trunk,
+        &head,
+        &behind,
+        batch_size(git, &queue, &policy, bounds.max),
+        by_lane,
+    )?;
     if stopped == "end_of_line" && behind.len() < waiting.len() {
         stopped = "unreadable";
     }
@@ -1975,6 +1982,19 @@ fn batch_plan(
     }
     said("planned", stopped);
     Ok(Some((policy, members, stopped)))
+}
+
+/// How many members a batch is planned with: `max`, or fewer while recent checks fail
+/// ([`throughput::sized_batch`] of the failure rate over the last
+/// [`throughput::RATE_WINDOW`] outcomes). The head and every speculating runner size it alike,
+/// so they plan the same batch.
+fn batch_size(
+    git: &Git,
+    queue: &crate::queue::Queue,
+    policy: &policy::Policy,
+    max: usize,
+) -> usize {
+    throughput::sized_batch(lane_failure_rate(git, queue, policy, None), max)
 }
 
 /// The failure rate of the last [`throughput::RATE_WINDOW`] check outcomes of released queue
@@ -3104,7 +3124,7 @@ fn speculate_batch(
             &base,
             head,
             &line[at + 1..],
-            bounds.max,
+            batch_size(git, &queue, &at_trunk, bounds.max),
             false,
         )?;
         let Some(last) = members.last() else {

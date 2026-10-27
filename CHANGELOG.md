@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.22
+
+- A batch is sized to the recent failure rate, about one member per expected failure, at most `batch.max`.
+
 ## 0.5.21
 
 - A batch also passes over a member that may not join it, or has ended, and leaves it for its own turn.

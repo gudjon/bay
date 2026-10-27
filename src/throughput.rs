@@ -1087,6 +1087,22 @@ pub fn is_check_outcome(reason: &str) -> bool {
     matches!(reason, "published" | "check_failed" | "check_flaky")
 }
 
+/// The batch size that pays at failure rate `rate`, at most `max` and at least 2: about one
+/// member per expected failure (`1 / rate`). A batch of n is green with probability
+/// (1 - rate)^n, and a red one costs a bisection of about log2(n) checks, so batches far larger
+/// than `1 / rate` are nearly always red (measured 2026-10-27: at about one failure in four,
+/// every batch of 24 went red and its bisection took sixteen minutes).
+#[must_use]
+pub fn sized_batch(rate: f64, max: usize) -> usize {
+    if rate <= 0.0 || !rate.is_finite() {
+        return max;
+    }
+    // A float of a small positive count; the cast cannot lose a value that matters here.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let fit = (1.0 / rate).round() as usize;
+    fit.clamp(2, max.max(2))
+}
+
 /// The share of `outcomes` (release reasons, each a check outcome) that is not a landing; 0
 /// for none.
 #[must_use]
@@ -1412,6 +1428,15 @@ mod tests {
             assert!(super::is_check_outcome(counted), "{counted}");
         }
         assert!(!super::is_check_outcome("check_unknown"));
+    }
+
+    #[test]
+    fn a_batch_is_sized_to_the_failure_rate() {
+        assert_eq!(super::sized_batch(0.0, 24), 24, "no failures: the most");
+        assert_eq!(super::sized_batch(0.25, 24), 4, "one in four: four");
+        assert_eq!(super::sized_batch(0.05, 24), 20);
+        assert_eq!(super::sized_batch(0.01, 24), 24, "never more than the most");
+        assert_eq!(super::sized_batch(0.9, 24), 2, "never fewer than two");
     }
 
     #[test]
