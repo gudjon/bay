@@ -1783,7 +1783,7 @@ fn batch(
     at: u64,
 ) -> Result<Option<BayResult>, String> {
     let repo = ctx.repo;
-    let Some((policy, members)) = batch_plan(ctx, op_id, revision, trunk, at)? else {
+    let Some((policy, members, stopped)) = batch_plan(ctx, op_id, revision, trunk, at)? else {
         return Ok(None);
     };
     // N-8: a held trunk publishes no batch, whose members need not all be fixes; the head
@@ -1820,6 +1820,7 @@ fn batch(
         Ok(Some(mut result)) => {
             if let Some(detail) = result.detail.as_mut() {
                 detail["batch"]["checks"] = json!(checks);
+                detail["batch"]["stopped"] = json!(stopped);
                 detail["batch"]["members"] = json!(
                     landing
                         .iter()
@@ -1850,6 +1851,9 @@ fn batch(
     }
 }
 
+/// A planned batch: the policy it is judged by, its members, and why it ended (R7).
+type Planned = (policy::Policy, Vec<throughput::Member>, &'static str);
+
 /// The batch the head `op_id` at place `at` would form on `trunk`, with the policy at
 /// `trunk`: `None` when batching is off, reuse cannot stand for a run (§ 7,
 /// [`Ctx::reuse_trusted`]), the head is a repair, a culprit or names inputs, a check is keyed
@@ -1861,7 +1865,7 @@ fn batch_plan(
     revision: &str,
     trunk: &str,
     at: u64,
-) -> Result<Option<(policy::Policy, Vec<throughput::Member>)>, String> {
+) -> Result<Option<Planned>, String> {
     let repo = ctx.repo;
     let git = &repo.git;
     let Some(bounds) = repo.config.batch() else {
@@ -1892,14 +1896,17 @@ fn batch_plan(
         checked: None,
         fails_on: Vec::new(),
     };
-    let behind: Vec<throughput::Queued> = queue
-        .behind(at)
-        .into_iter()
+    let waiting = queue.behind(at);
+    let behind: Vec<throughput::Queued> = waiting
+        .iter()
         .map_while(|entry| throughput::Queued::read(git, entry))
         .collect();
     let by_lane = repo.config.footprint_lanes();
-    let mut members =
+    let (mut members, mut stopped) =
         throughput::plan_batch(git, &policy, trunk, &head, &behind, bounds.max, by_lane)?;
+    if stopped == "end_of_line" && behind.len() < waiting.len() {
+        stopped = "unreadable";
+    }
     // Owner ruling 2026-10-21: a member over the size limits never lands in a batch; the batch
     // ends before it, and it is refused at its own candidate build.
     if policy.limits.is_set() {
@@ -1912,9 +1919,20 @@ fn batch_plan(
             from.clone_from(&member.tree);
             within += 1;
         }
+        if within < members.len() {
+            stopped = "size_limits";
+        }
         members.truncate(within);
     }
+    // R7: one journal line per batch decision, naming why the batch ended.
+    let said = |how: &str, stopped: &str| {
+        eprintln!(
+            "bay runner: {op_id} batch of {} {how}, stopped: {stopped}",
+            members.len()
+        );
+    };
     if members.len() < bounds.min.max(2) {
+        said("not formed", stopped);
         return Ok(None);
     }
     // NEW-10: the lane is the places whose footprint overlaps the head's.
@@ -1925,9 +1943,11 @@ fn batch_plan(
         None
     };
     if lane_failure_rate(git, &queue, &policy, lane.as_ref()) > bounds.max_failure_rate {
+        said("not formed", "failure_rate");
         return Ok(None);
     }
-    Ok(Some((policy, members)))
+    said("planned", stopped);
+    Ok(Some((policy, members, stopped)))
 }
 
 /// The failure rate of the last [`throughput::RATE_WINDOW`] check outcomes of released queue
@@ -2881,6 +2901,10 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
     if !repo.config.evidence_reuse() || !inputs::names(&ctx.record.declared_inputs).is_empty() {
         return Ok(None);
     }
+    // With batching on, runners check whole batches ahead of their turn, never one entry.
+    if repo.config.batch().is_some() {
+        return speculate_batch(ctx, op_id, trunk);
+    }
     let queue = crate::queue::Queue::local(git)?;
     let Some(place) = queue.of(op_id).map(|entry| entry.seq) else {
         return Ok(None);
@@ -2975,6 +2999,168 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
         "tree": tree,
         "verdict": verdict,
     })))
+}
+
+/// Speculative batches (owner, 2026-10-27: "go for speculative batch pipelining"; a fleet
+/// finding the same night: one batch was checked at a time, on a check of under two minutes,
+/// while runners spent about half their time pre-checking single entries the batch would check
+/// again). From the trunk tip, the batches the heads will form are planned one after another,
+/// each on the tip the one before it predicts ([`throughput::plan_batch`], the very plan the
+/// head makes). When `op_id` leads one of them other than the first, the first being the head's
+/// own, that batch's combined tree is checked now on its predicted base, by this executor's
+/// producer, as the head will check it (`bisect_batch`: a tip naming no change). When its turn
+/// comes and trunk is what was predicted, the head's plan is the same members on the same base,
+/// so its tree is the same, and exact reuse lands it with no new run. A miss is a record about
+/// another tree, never trusted. `None` when `op_id` leads no batch past the first, is a member
+/// that is not a batch's first, the batch is smaller than `[runner] batch` lets form, batching
+/// is off by the failure rate, the plan passes `[runner] ahead` entries, a policy change ends
+/// the prediction, or this tree on this base was checked already.
+fn speculate_batch(
+    ctx: &mut Ctx,
+    op_id: &str,
+    trunk: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let repo = ctx.repo;
+    let git = &repo.git;
+    let Some(bounds) = repo.config.batch() else {
+        return Ok(None);
+    };
+    let Ok(Some(at_trunk)) = policy::load_at(git, trunk) else {
+        return Ok(None);
+    };
+    if !ctx.reuse_trusted(trunk) || at_trunk.unchecked {
+        return Ok(None);
+    }
+    let queue = crate::queue::Queue::local(git)?;
+    if lane_failure_rate(git, &queue, &at_trunk, None) > bounds.max_failure_rate {
+        return Ok(None);
+    }
+    let line: Vec<throughput::Queued> = queue
+        .entries
+        .values()
+        .filter(|entry| !queue.released.contains(&entry.seq))
+        .map_while(|entry| throughput::Queued::read(git, entry))
+        .collect();
+    let mut base = trunk.to_owned();
+    let mut covered = 0;
+    let mut at = 0;
+    let mut first = true;
+    while at < line.len() && covered <= repo.config.ahead() {
+        let head = &line[at];
+        if !head.live {
+            at += 1;
+            continue;
+        }
+        let (members, stopped) = throughput::plan_batch(
+            git,
+            &at_trunk,
+            &base,
+            head,
+            &line[at + 1..],
+            bounds.max,
+            false,
+        )?;
+        let Some(last) = members.last() else {
+            // Its head does not fold onto the predicted tip: a policy change ends the
+            // prediction; a conflict or no effect is predicted not to land.
+            if stopped == "policy" {
+                return Ok(None);
+            }
+            at += 1;
+            continue;
+        };
+        if members.iter().any(|member| member.op_id == op_id) {
+            if first || members[0].op_id != op_id || members.len() < bounds.min.max(2) {
+                return Ok(None);
+            }
+            let (commit, tree) = (last.commit.clone(), last.tree.clone());
+            return checked_ahead(ctx, op_id, &base, &commit, &tree, members.len()).map(Some);
+        }
+        let last_seq = last.seq;
+        base.clone_from(&last.commit);
+        covered += members.len();
+        first = false;
+        at = line
+            .iter()
+            .position(|queued| queued.seq == last_seq)
+            .map_or(line.len(), |position| position + 1);
+    }
+    Ok(None)
+}
+
+/// Checks the speculative batch led by `op_id`, of `size` members, whose combined tip is
+/// `commit` with `tree` on the predicted `base`, and records it in the operation's
+/// `prechecks`; a tree already checked on that base is not run again.
+fn checked_ahead(
+    ctx: &mut Ctx,
+    op_id: &str,
+    base: &str,
+    commit: &str,
+    tree: &str,
+    size: usize,
+) -> Result<serde_json::Value, String> {
+    let repo = ctx.repo;
+    let git = &repo.git;
+    let base_tree = tree_of(git, base)?;
+    let done = |precheck: &Precheck| precheck.tree == tree && precheck.base_tree == base_tree;
+    if ctx.op(op_id).prechecks.iter().any(done) {
+        return Ok(json!({"on": "batch", "size": size, "tree": tree, "checked": "before"}));
+    }
+    let Ok(Some(policy)) = policy::load_at(git, base) else {
+        return Ok(json!({"on": "batch", "size": size, "unchecked": "no policy at the base"}));
+    };
+    let candidate_id = format!("spec-{op_id}-{}", now_ms());
+    ctx.ahead_of_turn = true;
+    // As the head checks a batch's tip (`bisect_batch`): a tip naming no one change.
+    let ran = run_policy(
+        ctx,
+        op_id,
+        &candidate_id,
+        (commit, tree, None),
+        base,
+        &policy,
+        base,
+        &[],
+    );
+    ctx.ahead_of_turn = false;
+    let (verdict, refusal) = ran?;
+    if refusal
+        .as_ref()
+        .is_some_and(|refusal| refusal.reason == Some(Reason::CheckUnavailable))
+    {
+        return Ok(json!({"on": "batch", "size": size, "unchecked": "no worker answered"}));
+    }
+    push_and_read_back_evidence(repo, &ctx.producer()?.0)?;
+    let revision = ctx.op(op_id).revision.clone();
+    let op = ctx.op_mut(op_id);
+    op.prechecks.push(Precheck {
+        base: base.to_owned(),
+        base_tree: base_tree.clone(),
+        tree: tree.to_owned(),
+        verdict: verdict.to_owned(),
+        at_ms: now_ms(),
+    });
+    let excess = op
+        .prechecks
+        .len()
+        .saturating_sub(throughput::PRECHECKS_KEPT);
+    if excess > 0 {
+        op.prechecks = op.prechecks.split_off(excess);
+    }
+    ctx.save(
+        &revision,
+        None,
+        &format!("checked the batch of {size} it leads ahead of its turn, on {base}"),
+    )?;
+    ctx.push_chain();
+    Ok(json!({
+        "on": "batch",
+        "size": size,
+        "base": base,
+        "base_tree": base_tree,
+        "tree": tree,
+        "verdict": verdict,
+    }))
 }
 
 /// G177: records on the queued operation `op_id` of change `id` the conflict the executor's
@@ -3907,7 +4093,9 @@ fn lane_leak(ctx: &Ctx, trunk: &str, revision: &str) -> Result<Option<BayResult>
                 "leaks": leaks.iter().map(crate::lane::Leak::to_json).collect::<Vec<_>>(),
                 "trunk": trunk,
                 "tips_truncated": truncated,
-                "repair": "take the lane's commits out of the view (reset it to the change's base and redo the work there), then bay merge again; or start the work in the lane: bay start <intent> --lane <lane>",
+                // Never a destructive repair (the no-work-is-lost rule, 2026-10-27): `--from`
+                // checkpoints the view's edits before its draft is replaced.
+                "repair": "bay start <change> --from <a branch without the lane's commits> (the view's edits are checkpointed first), then bay merge again; or start the work in the lane: bay start <intent> --lane <lane>",
             })),
     ))
 }

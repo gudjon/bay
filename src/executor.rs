@@ -581,6 +581,8 @@ fn pass(
     notes.extend(early_conflicts(repo, &queue));
     let due = publish::retention_due(repo, &chains);
     let reach = within_reach(repo, &queue);
+    let began = std::time::Instant::now();
+    let bound = pass_bound();
     // The heads this pass took between its operations: the loop, which reads the chains as the
     // pass began, never runs one of them again.
     let mut taken: HashSet<String> = HashSet::new();
@@ -602,6 +604,13 @@ fn pass(
                 ran.push(json!({"change": id, "retention_cut": head}));
             }
             continue;
+        }
+        // A fleet finding (2026-10-27): passes ran one and a half to two hours, and a change
+        // submitted after a pass began was seen by no runner until it ended, while post checks,
+        // which run after the loop, waited as long. Past its bound a pass starts no operation:
+        // the next pass reads every chain again, the unplaced first.
+        if !ran.is_empty() && began.elapsed() >= bound {
+            break;
         }
         for op_id in queued {
             if binary.is_some_and(Binary::changed) {
@@ -638,6 +647,21 @@ fn pass(
     }
     advanced.extend(advance(repo));
     Ok(ran)
+}
+
+/// How long a pass starts operations before it ends and the next reads every chain again.
+const PASS_BOUND: Duration = Duration::from_secs(300);
+
+/// [`PASS_BOUND`]; a test build honours `BAY_TEST_PASS_BOUND_S`, a release build never does.
+fn pass_bound() -> Duration {
+    if option_env!("BAY_RELEASE_VERSION").is_none()
+        && let Some(secs) = std::env::var("BAY_TEST_PASS_BOUND_S")
+            .ok()
+            .and_then(|secs| secs.parse().ok())
+    {
+        return Duration::from_secs(secs);
+    }
+    PASS_BOUND
 }
 
 /// The one journal line of a pass's outcome for `op_id`: the decision, the reason code when
@@ -688,6 +712,7 @@ fn run_op(
     // operation and once a heartbeat during it, naming it, never only at the pass's start, so a
     // busy runner never reads as gone.
     let step = Cell::new("read");
+    let began = std::time::Instant::now();
     let (result, last_step) = beat.during(repo, op_id, depth, || {
         let result = publish::execute(repo, id, op_id, &step).unwrap_or_else(BayResult::failed);
         (result, step.get())
@@ -702,7 +727,13 @@ fn run_op(
     }
     // One line per operation on stderr (a service's journal), so a stalled queue can be read
     // without the refs: what each pass did with each change, and why.
-    eprintln!("bay runner: {}", op_line(op_id, &result));
+    // A fleet finding (2026-10-27): batches landed every ten minutes on a check of under two,
+    // and no record said where the rest went. Each line names how long its operation took.
+    eprintln!(
+        "bay runner: {} ({}s)",
+        op_line(op_id, &result),
+        began.elapsed().as_secs()
+    );
     json!({
         "change": id,
         "op_id": op_id,

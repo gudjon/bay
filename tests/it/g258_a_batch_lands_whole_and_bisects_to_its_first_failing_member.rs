@@ -74,6 +74,12 @@ fn a_passing_batch_lands_every_member_in_queue_order_on_one_check() {
     for id in &ids {
         assert!(landed(&pass, id), "{pass}");
     }
+    // R7: the batch names why it ended; here, nothing more was queued behind it.
+    assert_eq!(
+        ran_for(&pass, &ids[0])["detail"]["batch"]["stopped"],
+        "end_of_line",
+        "{pass}"
+    );
     let requests = held.requests();
     assert_eq!(
         requests.len(),

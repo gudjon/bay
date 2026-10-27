@@ -97,19 +97,21 @@ pub fn configured(repo: &Repo) -> bool {
 fn asked(repo: &Repo, request: &Value, with_why: bool) -> Value {
     let plugin = repo.config.plugin.wake.as_ref();
     let timeout = plugin.map_or(WAKE_TIMEOUT, |plugin| plugin.timeout(WAKE_TIMEOUT));
-    let Some(cmd) = plugin
+    let deadline = Instant::now() + timeout;
+    let Some(made) = plugin
         .and_then(|wake| wake.command.as_deref())
-        .and_then(|command| crate::run::command(&repo.work_root, command))
+        .and_then(|command| crate::run::at_trunk(repo, "wake adapter", command, "wake", deadline))
     else {
         return json!({"result": "not_attempted", "reason": "NO_WAKE_ADAPTER"});
     };
-    // A `#!` script bay cannot start on Windows fails as an adapter that cannot start does.
-    let cmd = match cmd {
-        Ok(cmd) => cmd,
+    // A script not on main, or one bay cannot start here (a `#!` script on Windows), fails as
+    // an adapter that cannot start does.
+    let made = match made {
+        Ok(made) => made,
         Err(why) if with_why => return failed_because(&format!("it did not start: {why}"), &[]),
         Err(_) => return failed(),
     };
-    let answer = ask(cmd, request, timeout);
+    let answer = ask(made.command, request, timeout);
     if with_why {
         recorded_with_why(&answer, timeout)
     } else {

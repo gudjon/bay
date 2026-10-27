@@ -1259,7 +1259,9 @@ impl Judge<'_> {
         adopted_head: Option<&str>,
         actor: &str,
     ) -> Result<(), String> {
-        let config = crate::config::Config::load_or_committed(self.git.dir(), self.git)?;
+        // Spec 05: while main's newest config does not load, the last valid one (`Config::at`).
+        let config = crate::config::Config::load_or_committed(self.git.dir(), self.git)
+            .or_else(|_| crate::config::Config::at(self.git, "HEAD"))?;
         let window = config.takeover().as_secs();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

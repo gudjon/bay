@@ -26,9 +26,25 @@ pub fn log_ref(executor: &str) -> String {
 /// Fetches every executor's log from the remote (best effort: offline keeps what is local).
 pub fn fetch(repo: &Repo) {
     let refspec = format!("+{LOG_PREFIX}*:{LOG_PREFIX}*");
-    let _ = repo
-        .git
-        .run(&["fetch", "-q", "--no-tags", repo.remote(), &refspec]);
+    // A10 (the no-work-is-lost rule, 2026-10-27): this executor's own log is never forced, so a
+    // record whose push has not reached the remote yet is never fetched over; the remote's
+    // moves it only forward.
+    let own = log_ref(&crate::signing::Keys::load(&repo.git).executor_name);
+    let _ = repo.git.run(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        repo.remote(),
+        &refspec,
+        &format!("^{own}"),
+    ]);
+    let _ = repo.git.run(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        repo.remote(),
+        &format!("{own}:{own}"),
+    ]);
 }
 
 /// Appends `record` to this executor's log and pushes it. Only this executor writes its log.
@@ -280,6 +296,59 @@ pub fn events_since(
         }
     }
     Ok(out)
+}
+
+/// How many of the newest events of each log [`wake_failing`] reads.
+const WAKE_WINDOW: usize = 40;
+
+/// How many attempted wakes, at least, must all have failed for [`wake_failing`] to warn.
+const WAKE_FAILED_AT_LEAST: usize = 3;
+
+/// R11 (2026-10-27: 0 of 102 wakes reached a seat in a day, and nothing showed it): a
+/// `wake_failing` warning when every wake attempted among the newest events of the logs this
+/// repository holds failed, and there were at least [`WAKE_FAILED_AT_LEAST`]. It names how many
+/// failed, the newest failure's cause (`why`, when its runner recorded one) and its change.
+/// `None` when a wake got through, too few were attempted, or nothing can be read.
+#[must_use]
+pub fn wake_failing(git: &Git) -> Option<Value> {
+    let tips = tips(git).ok()?;
+    let mut wakes: Vec<(String, Value)> = Vec::new();
+    for tip in tips.values() {
+        let listed = git
+            .run(&["log", &format!("-{WAKE_WINDOW}"), "--format=%H %s", tip])
+            .ok()?;
+        let events: Vec<&str> = listed
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .filter(|(_, subject)| subject.starts_with("event "))
+            .map(|(commit, _)| commit)
+            .collect();
+        for text in records(git, &events).ok()?.into_iter().flatten() {
+            if let Ok(record) = serde_json::from_str::<Value>(&text)
+                && record["wake"].is_object()
+                && record["wake"]["result"] != "not_attempted"
+            {
+                let at = record["at"].as_str().unwrap_or_default().to_owned();
+                wakes.push((at, record));
+            }
+        }
+    }
+    if wakes.len() < WAKE_FAILED_AT_LEAST
+        || wakes
+            .iter()
+            .any(|(_, record)| record["wake"]["result"] != "uncertain")
+    {
+        return None;
+    }
+    let (_, newest) = wakes.iter().max_by(|a, b| a.0.cmp(&b.0))?;
+    Some(serde_json::json!({
+        "code": "wake_failing",
+        "failed": wakes.len(),
+        "why": newest["wake"]["why"],
+        "change": newest["change"],
+        "at": newest["at"],
+        "note": "every recent wake of a change's author failed, so no one is told of refusals: run bay plugin test wake",
+    }))
 }
 
 /// The `record.json` of each of `commits`, read in one `cat-file --batch`: `None` for a commit

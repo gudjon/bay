@@ -186,6 +186,73 @@ fn a_failed_wake_names_why_on_the_outcome_event() {
     assert!(why.contains("no pane for this seat"), "{blocked}");
 }
 
+/// A fleet finding (2026-10-26): 0 of 102 wakes reached a seat, since each runner looked the
+/// wake adapter up in its own checkout, sparse and at an old commit, which lacked the script
+/// main had gained. The adapter runs as main holds it, whatever the runner's checkout holds.
+///
+/// Guard to mutate, in `src/run.rs`: `at_trunk` running the work tree's copy.
+#[test]
+fn a_wake_adapter_missing_from_the_runners_checkout_still_runs() {
+    let (test_box, repo, remote, woken) = trunk(&failing(), false);
+    // The runner's clone is made before main names the adapter, and its checkout lacks the
+    // script, as a sparse checkout at an old commit does.
+    let executor = test_box.clone_of(&remote, "executor");
+    std::fs::remove_file(executor.join("scripts/bay-wake")).unwrap();
+    let config = std::fs::read_to_string(repo.join(".bay/config.toml")).unwrap_or_default();
+    test_box.commit_config(
+        &repo,
+        &format!("{config}\n[plugin.wake]\ncommand = \"scripts/bay-wake\"\n"),
+    );
+    let (id, view) = test_box.start_and_edit(&repo);
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    assert_eq!(code, 0, "{queued}");
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert!(
+        !executor.join("scripts/bay-wake").exists(),
+        "the runner's checkout never had the adapter"
+    );
+    assert_eq!(requests(&woken).len(), 1, "the adapter main holds ran");
+    let blocked = event(&test_box, &view, &id, "check_failed");
+    assert_eq!(blocked["wake"]["result"], "woken", "{blocked}");
+}
+
+/// R11 (2026-10-27: 0 of 102 wakes reached a seat in a day, and nothing showed it): when every
+/// recent wake failed, `bay status` warns `wake_failing`, naming the newest failure's cause.
+///
+/// Guard to mutate, in `src/status.rs`: the `wake_failing` warning (remove it).
+#[test]
+fn every_wake_failing_is_a_warning_in_status() {
+    let (test_box, repo, remote, _woken) = trunk_with(
+        &failing(),
+        true,
+        "echo 'connector: no pane for this seat' >&2; exit 3",
+    );
+    for _ in 0..3 {
+        let (_, view) = test_box.start_and_edit(&repo);
+        let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+        assert_eq!(code, 0, "{queued}");
+    }
+    let executor = test_box.clone_of(&remote, "executor");
+    test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    let status = test_box.bay_ok(&repo, &["status"]);
+    let warned = status["detail"]["warnings"]
+        .as_array()
+        .and_then(|warnings| {
+            warnings
+                .iter()
+                .find(|warning| warning["code"] == "wake_failing")
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("no wake_failing warning: {status}"));
+    assert_eq!(warned["failed"], 3, "{warned}");
+    assert!(
+        warned["why"]
+            .as_str()
+            .is_some_and(|why| why.contains("no pane for this seat")),
+        "{warned}"
+    );
+}
+
 #[test]
 fn a_landing_the_executor_reached_wakes_its_author_once() {
     let (test_box, repo, remote, woken) = trunk(&passing_result(1), true);

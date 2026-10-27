@@ -103,6 +103,7 @@ Changes merge one push at a time, in queue order, so what you submit sets the pa
   what it waits for. Do not report it as merged.
 - A `merged` result with `detail.batch` merged on one check of several changes' combined tree, not of
   yours alone. Report it merged, and name the batch.
+- `bay status` `detail.warnings` with `wake_failing` means no session is being told of refusals; its `why` names the cause. Tell the user.
 - `bay status` lists in `detail.red` each check that turned main red after a merge, with its `culprit`
   once the evidence names one merge. If that is yours, fix it first: `bay start <intent> --fixes <change>`.
 - While a change waits in the queue, `bay status <change>` may show `operation.conflict`: main

@@ -38,6 +38,98 @@ pub fn command(work_root: &Path, command: &str) -> Option<Result<Command, String
     }))
 }
 
+/// An adapter named in the config at trunk, as trunk holds it: its program is materialized
+/// from the trunk tip into a scratch directory of its own, removed when this is dropped, and
+/// the command runs there (a fleet finding, 2026-10-26: 0 of 102 wakes reached a seat, since
+/// every runner looked the connector up in its own checkout, sparse and at an old commit, which
+/// lacked it). A program named by an absolute path runs as named, with no copy.
+pub struct AtTrunk {
+    pub command: Command,
+    _scratch: Option<Scratch>,
+}
+
+/// A scratch directory, removed when dropped.
+struct Scratch(std::path::PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// [`AtTrunk`] for `command` of the adapter `what`, as the trunk tip this repository fetched
+/// holds it, materialized under `<common-dir>/bay/<runs>/`; `None` for an empty command.
+///
+/// # Errors
+///
+/// The program is not at `trunk`, it could not be materialized by `deadline`, or it cannot be
+/// started here.
+pub fn at_trunk(
+    repo: &crate::repo::Repo,
+    what: &str,
+    command: &str,
+    runs: &str,
+    deadline: Instant,
+) -> Option<Result<AtTrunk, String>> {
+    let program = command.split_whitespace().next()?.to_owned();
+    let tip = repo
+        .git
+        .run(&[
+            "rev-parse",
+            "--verify",
+            "-q",
+            &format!("{}^{{commit}}", repo.trunk_tracking_ref()),
+        ])
+        .ok();
+    // With no trunk to read (a repository that never fetched one), the work tree's copy runs.
+    let Some(trunk) = tip.filter(|_| !Path::new(&program).is_absolute()) else {
+        return self::command(&repo.work_root, command).map(|built| {
+            built.map(|command| AtTrunk {
+                command,
+                _scratch: None,
+            })
+        });
+    };
+    let id = match crate::ids::new_change_id() {
+        Ok(id) => id,
+        Err(error) => return Some(Err(error.to_string())),
+    };
+    let scratch = repo
+        .common_dir
+        .join("bay")
+        .join(runs)
+        .join(format!("run-{}-{id}", std::process::id()));
+    let guard = Scratch(scratch.clone());
+    let paths = [program.clone()];
+    if let Err(unmade) = crate::materialize::materialize(
+        &repo.git,
+        &trunk,
+        Some(&paths[..]),
+        &scratch,
+        deadline,
+        &mut || {},
+    ) {
+        return Some(Err(match unmade {
+            crate::materialize::Unmade::TimedOut => {
+                format!("materializing {program} from main ran past its bound")
+            }
+            crate::materialize::Unmade::Refused(why) | crate::materialize::Unmade::Failed(why) => {
+                why
+            }
+            crate::materialize::Unmade::DiskLow(low) => low.message(),
+        }));
+    }
+    if !scratch.join(&program).is_file() {
+        return Some(Err(format!(
+            "the {what} {program} is not in main ({trunk})"
+        )));
+    }
+    Some(self::command(&scratch, command)?.map(|command| AtTrunk {
+        command,
+        _scratch: Some(guard),
+    }))
+}
+
 /// What becomes of an adapter's stdout and stderr.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Streams {

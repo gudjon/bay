@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.18
+
+- While the head checks its batch, other runners check the next batches; a batch whose turn comes lands on that check.
+- A runner pass ends after five minutes, so a newly submitted change gets its place within minutes.
+- A plugin's script runs as committed on main, never from a runner's older checkout.
+- `bay status` warns `wake_failing` when every recent wake failed, and names why.
+- A batch records why it stopped, in `detail.batch.stopped` and the runner's journal.
+- An unknown check result no longer turns batching off.
+- The host's takeover window reads the last valid config while main's does not load.
+- `VIEW_INCOMPLETE` says to copy back the files `bay start` kept aside.
+- A runner's own log records not yet pushed are never fetched over.
+- `LANE_LEAK`'s repair no longer says to reset the view; `bay start <change> --from` saves its edits first.
+
 ## 0.5.17
 
 - `bay start` never deletes a view's unsaved files; it keeps them aside and names the place.

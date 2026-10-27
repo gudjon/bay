@@ -1036,7 +1036,7 @@ impl Reason {
                 "Tell the user main has no `.bay/policy.toml`, so nothing can merge; set it up only if they ask."
             }
             Self::ViewIncomplete => {
-                "Run `bay start <change>` to finish the interrupted step, then go on."
+                "Run `bay start <change>`; copy back any files `detail.unsaved_kept` names, then `bay merge`."
             }
             Self::PublishOutcomeUnknown => {
                 "Do nothing yet: bay reads main again. Never report it merged; `bay status <change>` shows the outcome."
@@ -1134,7 +1134,7 @@ impl Reason {
                 "Push the commit `bay status` names promotable for that target, or wait until one is."
             }
             Self::LaneLeak => {
-                "Redo the work without the lane commits `detail` names, or start it as a lane change: `bay start <intent> --paths <paths> --lane <lane>`."
+                "Take the lane commits out with `bay start <change> --from <branch>`, or start a lane change: `bay start <intent> --lane <lane>`."
             }
             Self::ApprovalPending => {
                 "Tell the user who can approve (`detail.approval`); the approver runs `bay approve <change>`. Then the runner merges it, or `bay merge --wait`."

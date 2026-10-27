@@ -1677,3 +1677,33 @@ fn a_burst_of_hook_events_ends_published_and_a_refused_live_push_shows_in_doctor
     }
     assert_eq!(live_tip(&test_box, &host, "box-b"), Some(own));
 }
+
+/// Spec 05 (the refactoring research, 2026-10-27): the host's takeover window reads the config
+/// the way every other reader does: while main's newest config does not load, from the last
+/// valid one (B2 for the config), never an error that stops every adoption.
+///
+/// Guard to mutate: `src/hook.rs` `takeover_window` reading `Config::load_or_committed` alone.
+#[test]
+fn the_takeover_window_reads_the_last_valid_config() {
+    let (test_box, host, repo, b, b_key) = live_case();
+    let started = test_box.bay_ok(&repo, &["start", LIVE_INTENT, "--paths", "src/"]);
+    let id = started["change"].as_str().unwrap().to_owned();
+    // A config that does not load reaches main around bay, as a person's merge would.
+    let outside = test_box.clone_of(&host, "outside");
+    let config = outside.join(".bay/config.toml");
+    let valid = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("not_a_bay_key = 1\n{valid}")).unwrap();
+    test_box.git_ok(
+        &outside,
+        &["commit", "-q", "-am", "a config bay cannot load"],
+    );
+    let outside_path = outside.display().to_string();
+    test_box.git_bare(&host, &["fetch", "-q", &outside_path, "HEAD:refs/x/broken"]);
+    test_box.git_bare(&host, &["update-ref", "refs/heads/main", "refs/x/broken"]);
+    let adopt = adopt_commit(&test_box, &b, &b_key, &id);
+    let change_ref = format!("refs/bay/changes/{id}");
+    let why = refused(&test_box, &b, &[&format!("{adopt}:{change_ref}")]);
+    // Judged by the window, from the last valid config, and the fallback is said.
+    assert!(why.contains("the takeover window is"), "{why}");
+    assert!(why.contains("judging by the last valid"), "{why}");
+}

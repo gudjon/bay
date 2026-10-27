@@ -29,26 +29,26 @@ pub enum Delivery {
 }
 
 /// Calls the configured notify adapter once with `event` on stdin. The command is a program
-/// path relative to the main work tree, then its arguments, as `[runner] command` is, run
-/// from the work tree with only `PATH` and `HOME` from bay's environment (`crate::run`).
+/// path relative to the repository's top, then its arguments, run as main holds it
+/// (`crate::run::at_trunk`), with only `PATH` and `HOME` from bay's environment.
 #[must_use]
 pub fn notify(repo: &Repo, event: &Value) -> Delivery {
     let Some(plugin) = repo.config.plugin.notify.as_ref() else {
         return Delivery::Unconfigured;
     };
     let timeout = plugin.timeout(NOTIFY_TIMEOUT);
-    let Some(cmd) = plugin
-        .command
-        .as_deref()
-        .and_then(|command| crate::run::command(&repo.work_root, command))
-    else {
+    let deadline = std::time::Instant::now() + timeout;
+    let Some(made) = plugin.command.as_deref().and_then(|command| {
+        crate::run::at_trunk(repo, "notify adapter", command, "notify", deadline)
+    }) else {
         return Delivery::Unconfigured;
     };
-    // A `#!` script bay cannot start on Windows is lost as an adapter that cannot start is.
-    let Ok(cmd) = cmd else {
+    // A script not on main, or one bay cannot start here (a `#!` script on Windows), is lost
+    // as an adapter that cannot start is.
+    let Ok(made) = made else {
         return Delivery::Lost;
     };
-    send(cmd, notice(event).as_bytes(), timeout).delivery(timeout)
+    send(made.command, notice(event).as_bytes(), timeout).delivery(timeout)
 }
 
 /// The bytes one notice of `event` puts on the adapter's stdin: its JSON and a newline.

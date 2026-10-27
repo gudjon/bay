@@ -317,6 +317,8 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
         .collect();
     // N-20: each outside merge in the red window that pushed bay landings off the line.
     warnings.extend(not_linear(&repo.git, &trunk));
+    // R11: delivery that fails is never silent.
+    warnings.extend(crate::log::wake_failing(&repo.git));
     if let Some(detail) = result.detail.as_mut()
         && !warnings.is_empty()
     {

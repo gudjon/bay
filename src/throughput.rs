@@ -228,8 +228,9 @@ pub enum Fold {
         tree: String,
         changed: Vec<String>,
     },
-    /// It will not land on this base: it conflicts, or its work is already there.
-    Skipped,
+    /// It will not land on this base: it conflicts (`conflict`), or its work is already there
+    /// (`no_effect`).
+    Skipped(&'static str),
     /// It changes the policy or an adapter path, so what follows it is judged by another
     /// policy: nothing is predicted past it.
     Stop,
@@ -244,10 +245,10 @@ pub enum Fold {
 pub fn fold(git: &Git, policy: &Policy, base: &str, revision: &str) -> Result<Fold, String> {
     let tree = match merge_onto(git, base, revision).map_err(|error| error.message())? {
         Merge::Clean(tree) => tree,
-        Merge::Conflict(..) => return Ok(Fold::Skipped),
+        Merge::Conflict(..) => return Ok(Fold::Skipped("conflict")),
     };
     if tree == tree_of(git, base)? {
-        return Ok(Fold::Skipped);
+        return Ok(Fold::Skipped("no_effect"));
     }
     let changed = crate::check::changed_paths(git, base, &tree)?;
     if policy.touches_policy(&changed) {
@@ -290,7 +291,7 @@ pub fn predict(
         }
         match fold(git, policy, &base, &queued.revision)? {
             Fold::Applied { commit, .. } => base = commit,
-            Fold::Skipped => {}
+            Fold::Skipped(_) => {}
             Fold::Stop => return Ok(None),
         }
     }
@@ -949,14 +950,23 @@ pub fn plan_batch(
     behind: &[Queued],
     max: usize,
     by_lane: bool,
-) -> Result<Vec<Member>, String> {
+) -> Result<(Vec<Member>, &'static str), String> {
     let mut members: Vec<Member> = Vec::new();
     let mut lane: Option<Footprint> = None;
+    // R7 (2026-10-27): why the batch ended, recorded with it, so a measured window can say
+    // which rule kept batches small.
+    let mut stopped = "end_of_line";
     for queued in std::iter::once(head).chain(behind) {
         if members.len() >= max {
+            stopped = "max";
             break;
         }
-        if !members.is_empty() && (!queued.live || !queued.batchable) {
+        if !members.is_empty() && !queued.live {
+            stopped = "not_live";
+            break;
+        }
+        if !members.is_empty() && !queued.batchable {
+            stopped = "not_batchable";
             break;
         }
         let base = members
@@ -967,20 +977,30 @@ pub fn plan_batch(
         if !members.is_empty() && queued.fails_on(&tree_of(git, &base)?) {
             continue;
         }
-        let Fold::Applied {
-            commit,
-            tree,
-            changed,
-        } = fold(git, policy, &base, &queued.revision)?
-        else {
-            break;
+        let (commit, tree, changed) = match fold(git, policy, &base, &queued.revision)? {
+            Fold::Applied {
+                commit,
+                tree,
+                changed,
+            } => (commit, tree, changed),
+            Fold::Skipped(why) => {
+                stopped = why;
+                break;
+            }
+            Fold::Stop => {
+                stopped = "policy";
+                break;
+            }
         };
         if by_lane {
             let footprint = Footprint::of(policy, &changed);
             match &lane {
                 None => lane = Some(footprint),
                 Some(first) if first.overlaps(&footprint) => {}
-                Some(_) => break,
+                Some(_) => {
+                    stopped = "footprint";
+                    break;
+                }
             }
         }
         members.push(Member {
@@ -992,7 +1012,7 @@ pub fn plan_batch(
             tree,
         });
     }
-    Ok(members)
+    Ok((members, stopped))
 }
 
 /// The search for a batch's largest passing prefix on one trunk tip: the whole batch first,
@@ -1052,13 +1072,14 @@ impl Bisect {
     }
 }
 
-/// Whether a queue place's release `reason` is a check's verdict on its candidate.
+/// Whether a queue place's release `reason` is a check's verdict on its candidate, as the
+/// batching failure rate counts it. `check_unknown` is not: an unknown result is the check's
+/// own (a file it was not given, a worker that did not answer), never the change's, so it
+/// neither blames the change nor turns batching off for every change (R5 (a), 2026-10-27: a
+/// check that could not open its files failed every change, and batching stopped for all).
 #[must_use]
 pub fn is_check_outcome(reason: &str) -> bool {
-    matches!(
-        reason,
-        "published" | "check_failed" | "check_flaky" | "check_unknown"
-    )
+    matches!(reason, "published" | "check_failed" | "check_flaky")
 }
 
 /// The share of `outcomes` (release reasons, each a check outcome) that is not a landing; 0
@@ -1268,7 +1289,7 @@ mod tests {
             queued(2, &revisions[1], vec![red_on]),
             queued(3, &revisions[2], Vec::new()),
         ];
-        let members = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        let (members, _) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
         let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
         assert_eq!(seqs, [1, 3]);
         let base = predict(&git, &policy, &trunk, &[head, behind[0].clone()])
@@ -1341,6 +1362,14 @@ mod tests {
     }
 
     /// The failure rate counts landings and failures alike, and none is no failure.
+    #[test]
+    fn an_unknown_check_result_is_not_counted_as_a_failure() {
+        for counted in ["published", "check_failed", "check_flaky"] {
+            assert!(super::is_check_outcome(counted), "{counted}");
+        }
+        assert!(!super::is_check_outcome("check_unknown"));
+    }
+
     #[test]
     fn the_failure_rate_is_the_share_of_outcomes_that_did_not_land() {
         assert!(failure_rate([]).abs() < f64::EPSILON);
