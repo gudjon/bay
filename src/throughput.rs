@@ -962,12 +962,13 @@ pub fn plan_batch(
             break;
         }
         if !members.is_empty() && !queued.live {
-            stopped = "not_live";
-            break;
+            continue;
         }
+        // A member that may not join a batch (a lane, named inputs, a culprit's note) is passed
+        // over and left for its own turn, never the end of the batch (measured on 0.5.20,
+        // 2026-10-27: two batches of four ended at such a member, at 8 and 9).
         if !members.is_empty() && !queued.batchable {
-            stopped = "not_batchable";
-            break;
+            continue;
         }
         let base = members
             .last()
@@ -1273,6 +1274,21 @@ mod tests {
             checked: None,
             fails_on,
         }
+    }
+
+    /// Measured on 0.5.20 (2026-10-27): batches ended at a member that may not join one. It is
+    /// passed over and left for its own turn.
+    #[test]
+    fn a_member_that_may_not_batch_is_passed_over() {
+        let (_dir, git, trunk, revisions) = three_on_a_base();
+        let policy = crate::policy::load_at(&git, &trunk).unwrap().unwrap();
+        let head = queued(1, &revisions[0], Vec::new());
+        let mut alone = queued(2, &revisions[1], Vec::new());
+        alone.batchable = false;
+        let behind = [alone, queued(3, &revisions[2], Vec::new())];
+        let (members, _) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
+        assert_eq!(seqs, [1, 3]);
     }
 
     /// Measured on 0.5.18 (2026-10-27): both batches of the first hour ended at a conflicting

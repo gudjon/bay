@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.21
+
+- A batch also passes over a member that may not join it, or has ended, and leaves it for its own turn.
+
 ## 0.5.20
 
 - A batch passes over a member that conflicts and leaves it for its own turn, instead of ending there.
