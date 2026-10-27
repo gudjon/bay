@@ -50,6 +50,25 @@ pub struct Intent {
     pub revision: String,
 }
 
+/// The longest an intent is shown in a sentence, in characters; a longer one is cut there.
+const SHOWN_INTENT: usize = 60;
+
+/// How a sentence names change `id`: its intent first, the name people know it by, and the id
+/// a command takes in parentheses (owner ruling 2026-10-27). An intent that is empty or the id
+/// itself shows the id alone.
+#[must_use]
+pub fn shown(intent: &str, id: &str) -> String {
+    let intent = intent.trim();
+    if intent.is_empty() || intent == id {
+        return id.to_owned();
+    }
+    let mut short: String = intent.chars().take(SHOWN_INTENT).collect();
+    if intent.chars().count() > SHOWN_INTENT {
+        short.push('…');
+    }
+    format!("{short} ({id})")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Actor {
     pub name: String,
@@ -1131,4 +1150,24 @@ pub fn commit_on(git: &Git, tree: &str, parent: &str, message: &str) -> Result<S
         RECORD_IDENTITY,
         None,
     )
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::shown;
+
+    #[test]
+    fn a_change_is_named_by_its_intent_then_its_id() {
+        assert_eq!(
+            shown("CARD-7 the ball lane", "abcd1234"),
+            "CARD-7 the ball lane (abcd1234)"
+        );
+        assert_eq!(shown("", "abcd1234"), "abcd1234");
+        assert_eq!(shown("abcd1234", "abcd1234"), "abcd1234");
+        let long = "x".repeat(80);
+        assert_eq!(
+            shown(&long, "abcd1234"),
+            format!("{}… (abcd1234)", "x".repeat(60))
+        );
+    }
 }

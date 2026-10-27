@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.26
+
+- Every post check on main's tip runs; before, only the first one in the policy did.
+- A runner makes retention cuts after the queue's work, so they never hold up admission.
+- `bay status <change>` says that change's own state, never "Done" for a change still in line.
+- Status, wake lines and runner logs name a change by its intent, with its id.
+
 ## 0.5.25
 
 - A clean view of a landed change is released even when its author committed in it.

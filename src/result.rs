@@ -1481,7 +1481,7 @@ impl BayResult {
                 ),
                 _ => "Saved. bay checks it and adds it to main next.".to_owned(),
             },
-            Decision::Ok => ok_say(self).to_owned(),
+            Decision::Ok => change_say(self).unwrap_or_else(|| ok_say(self).to_owned()),
             Decision::Blocked => {
                 "Not done yet; read the detail for what is needed, then try again.".to_owned()
             }
@@ -1532,6 +1532,51 @@ fn answered_say(detail: Option<&Value>) -> Option<&'static str> {
             "Waived; the change is added once its author saves it again, with that check named as not passed."
         }
     })
+}
+
+/// The sentence of a status read of one change, from that change's own row (fleet findings,
+/// 2026-10-27: four seats read "Done; nothing else is needed" for a change still in line).
+fn change_say(result: &BayResult) -> Option<String> {
+    let id = result.change.as_deref()?;
+    let [row] = result
+        .detail
+        .as_ref()?
+        .get("changes")?
+        .as_array()?
+        .as_slice()
+    else {
+        return None;
+    };
+    if row["change"] != id {
+        return None;
+    }
+    let id = &crate::change::shown(row["intent"].as_str().unwrap_or_default(), id);
+    match row["state"].as_str() {
+        Some("merged") => return Some(format!("{id} is on main.")),
+        Some("abandoned") => {
+            return Some(format!("{id} was given up; nothing more happens to it."));
+        }
+        _ => {}
+    }
+    let op = &row["operation"];
+    if op.is_null() {
+        return Some(format!(
+            "{id} is not submitted yet; run `bay merge` on it when it is ready."
+        ));
+    }
+    if !op["lease"].is_null() {
+        return Some(format!("{id} is being checked now."));
+    }
+    let outcome = op["outcome"].as_str()?;
+    if outcome == Reason::Queued.code() {
+        return Some(match op["place"].as_u64() {
+            Some(place) => format!(
+                "{id} waits in line at place {place}; bay checks it and adds it to main in its turn."
+            ),
+            None => format!("{id} waits in line; bay checks it and adds it to main in its turn."),
+        });
+    }
+    Reason::from_code(outcome).map(|reason| format!("{id}: {}", reason.say(None)))
 }
 
 /// The sentence of an `ok` result with no reason, by what it carries.
@@ -1594,6 +1639,33 @@ mod tests {
     use super::{BayResult, Decision, Freshness, Reason, SCHEMA, plain, unplain};
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_status_of_one_change_says_that_changes_state() {
+        let named = BayResult::ok(json!({"changes": [{"change": "abcd1234",
+            "intent": "CARD-7 the ball lane", "state": "merged", "operation": {}}]}))
+        .with_change("abcd1234".to_owned())
+        .say();
+        assert!(
+            named.starts_with("CARD-7 the ball lane (abcd1234)"),
+            "{named}"
+        );
+        let read = |row: serde_json::Value| {
+            BayResult::ok(json!({"changes": [row]}))
+                .with_change("abcd1234".to_owned())
+                .say()
+        };
+        let queued = read(json!({"change": "abcd1234", "state": "ready",
+            "operation": {"lease": null, "outcome": Reason::Queued.code(), "state": "admitted"}}));
+        assert!(queued.contains("waits in line"), "{queued}");
+        let merged = read(json!({"change": "abcd1234", "state": "merged", "operation": {}}));
+        assert!(merged.contains("is on main"), "{merged}");
+        let draft = read(json!({"change": "abcd1234", "state": "open", "operation": null}));
+        assert!(draft.contains("not submitted"), "{draft}");
+        let refused = read(json!({"change": "abcd1234", "state": "ready",
+            "operation": {"lease": null, "outcome": Reason::CheckFailed.code()}}));
+        assert!(!refused.contains("nothing else is needed"), "{refused}");
+    }
 
     #[test]
     fn ok_json_names_the_schema_and_decision() {

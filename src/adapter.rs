@@ -486,6 +486,7 @@ fn test_wake(dir: &Path, command: &str) -> BayResult {
     let outcome = wake::outcome_request(
         &wake::Outcome {
             change: "adaptertest",
+            intent: "the adapter test",
             op_id: "adaptertest.1",
             decision: Decision::Blocked,
             reason: Some(Reason::CheckFailed),

@@ -103,3 +103,42 @@ fn a_red_tip_is_found_and_its_culprit_named_with_no_outside_producer() {
     assert_eq!(red[0]["check"], "suite", "{red}");
     assert_eq!(red[0]["culprit"]["change"], breaking.as_str(), "{red}");
 }
+
+/// A fleet finding (2026-10-27): every post check on a tip took one evidence id, so the second
+/// one's record was refused and no post check after the first ever ran (four of five silent for
+/// 22 hours). Two post checks on one tip both run in one pass, each with its own record.
+#[test]
+fn every_post_check_on_a_tip_runs_not_only_the_first() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let mut files = check_files("true", &passing_result(1), 1, 60);
+    for (path, text) in &mut files {
+        if path == ".bay/policy.toml" {
+            text.push_str(POST);
+            text.push_str(
+                &POST
+                    .replace("\"suite\"", "\"lint\"")
+                    .replace("bay-check suite", "bay-check lint"),
+            );
+        }
+    }
+    files.push((
+        ".bay/config.toml".to_owned(),
+        "[runner]\npost = true\n".to_owned(),
+    ));
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    land(&test_box, &repo, "src/l0.rs");
+    let ran = pass(&test_box, &repo);
+    let post = ran
+        .iter()
+        .find_map(|row| row.get("post"))
+        .unwrap_or_else(|| panic!("no post check ran: {ran:?}"));
+    let checks: Vec<&str> = post
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["verdict"] == "pass")
+        .filter_map(|row| row["check"].as_str())
+        .collect();
+    assert_eq!(checks, ["suite", "lint"], "{post}");
+}

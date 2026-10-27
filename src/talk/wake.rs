@@ -67,6 +67,8 @@ pub fn wake(repo: &Repo, talk: &Talk, me: &Actor) -> Value {
 /// the change record names as the one to wake.
 pub struct Outcome<'a> {
     pub change: &'a str,
+    /// The change's intent, which its `line` names it by.
+    pub intent: &'a str,
     pub op_id: &'a str,
     pub decision: Decision,
     pub reason: Option<Reason>,
@@ -140,9 +142,10 @@ pub fn request(talk: &str, me: &Actor, machine: &str, urgent: bool, line: &str) 
 pub fn outcome_request(outcome: &Outcome, machine: &str) -> Value {
     let reason = outcome.reason.map(Reason::code);
     let decision = outcome.decision.word();
+    let named = crate::change::shown(outcome.intent, outcome.change);
     let line = match reason {
-        Some(code) => format!("change {} {decision}: {code}", outcome.change),
-        None => format!("change {} {decision}", outcome.change),
+        Some(code) => format!("change {named} {decision}: {code}"),
+        None => format!("change {named} {decision}"),
     };
     json!({
         "schema": "bay.wake/1", "op": "wake", "cause": "outcome",
@@ -287,4 +290,37 @@ pub fn failed_because(why: &str, stderr: &[u8]) -> Value {
     let mut value = failed();
     value["why"] = json!(why);
     value
+}
+
+#[cfg(test)]
+mod outcome_tests {
+    use super::{Outcome, outcome_request};
+    use crate::change::Actor;
+    use crate::result::Decision;
+
+    #[test]
+    fn an_outcome_line_names_the_change_by_its_intent() {
+        let actor = Actor {
+            name: "seat".to_owned(),
+            session: "s1".to_owned(),
+        };
+        let request = outcome_request(
+            &Outcome {
+                change: "abcd1234",
+                intent: "CARD-7 the ball lane",
+                op_id: "abcd1234.1",
+                decision: Decision::Landed,
+                reason: None,
+                actor: &actor,
+            },
+            "box",
+        );
+        assert_eq!(request["change"], "abcd1234");
+        assert!(
+            request["line"]
+                .as_str()
+                .is_some_and(|line| line.starts_with("change CARD-7 the ball lane (abcd1234)")),
+            "{request}"
+        );
+    }
 }

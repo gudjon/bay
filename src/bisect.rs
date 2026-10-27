@@ -93,15 +93,16 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
         if writer.records(git, &tree, &id)? > 0 {
             continue;
         }
+        // One check's fault is that check's, said in its row; the post checks after it still run.
         let verdict = match run_at(
             repo,
             &keys,
             &writer,
             (&id, ("post", json!({"tip": tip}))),
             &tip,
-        )? {
-            Ok(verdict) => json!(verdict),
-            Err(why) => json!({"not_run": why}),
+        ) {
+            Ok(Ok(verdict)) => json!(verdict),
+            Ok(Err(why)) | Err(why) => json!({"not_run": why}),
         };
         reports.push(json!({"check": entry.id, "environment": entry.environment, "tip": tip, "verdict": verdict}));
     }
@@ -374,7 +375,21 @@ fn run_at(
     let changed = check::changed_paths(git, &base, commit)?;
     let run = writer.records(git, &tree, id)? + 1;
     let short = commit.get(..12).unwrap_or(commit);
-    let candidate_id = format!("{field}-{short}-{run}");
+    // A fleet finding (2026-10-27): the id named no check, so the second post check on a tip
+    // took the first one's evidence id, its record was refused as a second record under one id,
+    // and every later post check of that tip never ran: four of five were silent for 22 hours.
+    let check: String = id
+        .id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let candidate_id = format!("{field}-{check}-{short}-{run}");
     let scratch = repo
         .common_dir
         .join("bay")

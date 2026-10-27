@@ -601,11 +601,6 @@ fn pass(
             .map(|op| op.op_id.clone())
             .collect();
         if queued.is_empty() {
-            if due.contains(id)
-                && let Ok(Some(head)) = publish::retain(repo, id)
-            {
-                ran.push(json!({"change": id, "retention_cut": head}));
-            }
             continue;
         }
         // A fleet finding (2026-10-27): passes ran one and a half to two hours, and a change
@@ -647,6 +642,21 @@ fn pass(
     // G244d: after the queue's work, never ahead of it, the culprit of a red post check.
     if let Some(bisect) = crate::bisect::run(repo) {
         ran.push(json!({"bisect": bisect}));
+    }
+    // A fleet finding (2026-10-27): a retention cut costs a fetch of its chain, and one that
+    // does not happen leaves the chain due again; read inside the loop, hundreds of closed chains
+    // kept a runner silent for minutes ahead of every change sorted after them, nothing admitted.
+    // Cuts come after the queue's work and its post checks, while the pass is within its bound.
+    for record in records
+        .iter()
+        .filter(|record| due.contains(record.id.as_str()))
+    {
+        if began.elapsed() >= bound {
+            break;
+        }
+        if let Ok(Some(head)) = publish::retain(repo, &record.id) {
+            ran.push(json!({"change": record.id, "retention_cut": head}));
+        }
     }
     advanced.extend(advance(repo));
     Ok(ran)
@@ -732,11 +742,17 @@ fn run_op(
     // without the refs: what each pass did with each change, and why.
     // A fleet finding (2026-10-27): batches landed every ten minutes on a check of under two,
     // and no record said where the rest went. Each line names how long its operation took.
-    eprintln!(
-        "bay runner: {} ({}s)",
-        op_line(op_id, &result),
-        began.elapsed().as_secs()
-    );
+    // Owner ruling 2026-10-27: a line names the change by its intent too, after the operation
+    // id a reader's tools find first.
+    let line = op_line(op_id, &result);
+    let line = match crate::change::Chain::new(&repo.git).read(id) {
+        Ok((_, record)) if !record.intent.reference.trim().is_empty() => {
+            let intent: String = record.intent.reference.chars().take(60).collect();
+            line.replacen(op_id, &format!("{op_id} [{intent}]"), 1)
+        }
+        _ => line,
+    };
+    eprintln!("bay runner: {line} ({}s)", began.elapsed().as_secs());
     json!({
         "change": id,
         "op_id": op_id,

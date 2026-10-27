@@ -1306,6 +1306,7 @@ fn wake_author(
         ctx.repo,
         &crate::talk::wake::Outcome {
             change: &ctx.id,
+            intent: &ctx.record.intent.reference,
             op_id,
             decision,
             reason,
