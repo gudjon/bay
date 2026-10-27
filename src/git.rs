@@ -50,8 +50,6 @@ pub struct Git {
     /// `dir` is itself a bare repository. Git 3.0 sets `safe.bareRepository=explicit`,
     /// which stops discovering a bare repository from `-C`, so bay names it with `--git-dir`.
     bare_dir: bool,
-    /// G200: the config as this handle last listed it, for [`Git::config_get`].
-    config: Mutex<Option<Snapshot>>,
     /// G104b: Git may fetch an absent object as this handle's calls read it ([`Git::fetching`]).
     lazy_fetch: bool,
     /// This handle's calls write a work tree byte for byte ([`Git::writing_tree`]).
@@ -119,6 +117,10 @@ struct ConfigEntry {
 /// before the latest one is read again.
 static CONFIG_WRITES: AtomicU64 = AtomicU64::new(0);
 
+/// The config snapshot of each directory a handle reads, shared by every handle on it.
+static SNAPSHOTS: std::sync::LazyLock<Mutex<std::collections::HashMap<PathBuf, Option<Snapshot>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
 /// G200: the common directory of each directory a handle asked, by the path it was given.
 static COMMON_DIRS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
 
@@ -167,7 +169,6 @@ impl Git {
         Self {
             dir,
             bare_dir,
-            config: Mutex::new(None),
             lazy_fetch: false,
             writes_tree: false,
         }
@@ -181,7 +182,6 @@ impl Git {
         Self {
             dir: self.dir.clone(),
             bare_dir: self.bare_dir,
-            config: Mutex::new(None),
             lazy_fetch: true,
             writes_tree: self.writes_tree,
         }
@@ -196,7 +196,6 @@ impl Git {
         Self {
             dir: self.dir.clone(),
             bare_dir: self.bare_dir,
-            config: Mutex::new(None),
             lazy_fetch: self.lazy_fetch,
             writes_tree: true,
         }
@@ -245,7 +244,10 @@ impl Git {
         let Some(wanted) = bay_key(key) else {
             return ask_git();
         };
-        let mut slot = self.config.lock().unwrap_or_else(PoisonError::into_inner);
+        // One snapshot per directory for the whole process (a fleet finding, 2026-10-27: one
+        // agent hook listed the same config five times, once per handle on the same directory).
+        let mut snapshots = SNAPSHOTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let slot = snapshots.entry(self.dir.clone()).or_default();
         let writes = CONFIG_WRITES.load(Ordering::SeqCst);
         if slot
             .as_ref()
@@ -574,7 +576,8 @@ impl Git {
     /// snapshot: `extensions.partialClone`, else the first remote whose `remote.<name>.promisor`
     /// is true. `None` in a full clone, or for a name Git would read as an option.
     fn promisor_remote(&self) -> Option<String> {
-        let mut slot = self.config.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut snapshots = SNAPSHOTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let slot = snapshots.entry(self.dir.clone()).or_default();
         let writes = CONFIG_WRITES.load(Ordering::SeqCst);
         if slot
             .as_ref()

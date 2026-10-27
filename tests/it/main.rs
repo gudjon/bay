@@ -315,6 +315,7 @@ mod release_script_takes_an_external_signature;
 mod runtime_evidence_and_completion_profiles;
 mod session_record;
 mod the_config_is_the_one_committed_at_trunk;
+mod the_newest_changelog_lines_fit_the_site;
 mod update_auto_checks_at_most_once_an_hour;
 mod update_env_overrides_the_box_settings;
 mod update_never_waits_for_an_executor;
