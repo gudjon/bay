@@ -5674,6 +5674,10 @@ fn run_policy(
         .join("bay")
         .join("check")
         .join(candidate_id);
+    // A fleet finding (2026-10-27): the scratch was removed only after a check run that
+    // returned, so an error left it behind, and one box's runners held 17 GB of finished
+    // candidates. It goes on every path out.
+    let _cleanup = crate::run::Scratch(scratch.clone());
     let (producer, producer_signer) = ctx.producer()?;
     // A candidate's own new policy reaches trunk through this publication; the base's policy
     // reached it however its paths last changed.

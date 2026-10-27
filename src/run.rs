@@ -49,7 +49,9 @@ pub struct AtTrunk {
 }
 
 /// A scratch directory, removed when dropped.
-struct Scratch(std::path::PathBuf);
+/// A scratch directory removed when it goes out of scope, on every path out of its owner: a
+/// return, an error, a panic.
+pub(crate) struct Scratch(pub(crate) std::path::PathBuf);
 
 impl Drop for Scratch {
     fn drop(&mut self) {

@@ -105,6 +105,8 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
             Ok(Err(why)) | Err(why) => json!({"not_run": why}),
         };
         reports.push(json!({"check": entry.id, "environment": entry.environment, "tip": tip, "verdict": verdict}));
+        // One post check a pass: the next pass runs the next (see `executor::pass`).
+        break;
     }
     Ok(reports)
 }
@@ -395,6 +397,7 @@ fn run_at(
         .join("bay")
         .join("check")
         .join(&candidate_id);
+    let _cleanup = crate::run::Scratch(scratch.clone());
     let mut keep = |record: &mut EvidenceRecord| -> Result<(), String> {
         // Post evidence, as a post producer writes it: no pre-publication provenance. A warm
         // record is pre-publication evidence of the tip, and keeps it, so a candidate carries it.

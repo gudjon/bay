@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.27
+
+- A runner does at most one post-merge check a pass, so post checks never hold up the line.
+- A check's scratch folder is removed however its run ends, and a runner clears folders untouched for six hours.
+
 ## 0.5.26
 
 - Every post check on main's tip runs; before, only the first one in the policy did.

@@ -106,7 +106,7 @@ fn a_red_tip_is_found_and_its_culprit_named_with_no_outside_producer() {
 
 /// A fleet finding (2026-10-27): every post check on a tip took one evidence id, so the second
 /// one's record was refused and no post check after the first ever ran (four of five silent for
-/// 22 hours). Two post checks on one tip both run in one pass, each with its own record.
+/// 22 hours). Two post checks on one tip both run, each with its own record, one a pass.
 #[test]
 fn every_post_check_on_a_tip_runs_not_only_the_first() {
     let test_box = TestBox::new();
@@ -128,17 +128,19 @@ fn every_post_check_on_a_tip_runs_not_only_the_first() {
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     land(&test_box, &repo, "src/l0.rs");
-    let ran = pass(&test_box, &repo);
-    let post = ran
-        .iter()
-        .find_map(|row| row.get("post"))
-        .unwrap_or_else(|| panic!("no post check ran: {ran:?}"));
-    let checks: Vec<&str> = post
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|row| row["verdict"] == "pass")
-        .filter_map(|row| row["check"].as_str())
-        .collect();
-    assert_eq!(checks, ["suite", "lint"], "{post}");
+    // A pass runs one post check, so the line is never held behind them; the next pass runs
+    // the next (a fleet finding, 2026-10-27: five in one pass held the head 40 minutes).
+    let mut checks = Vec::new();
+    for _ in 0..2 {
+        let ran = pass(&test_box, &repo);
+        let post = ran
+            .iter()
+            .find_map(|row| row.get("post"))
+            .unwrap_or_else(|| panic!("no post check ran: {ran:?}"));
+        let rows = post.as_array().unwrap();
+        assert_eq!(rows.len(), 1, "one post check a pass: {post}");
+        assert_eq!(rows[0]["verdict"], "pass", "{post}");
+        checks.push(rows[0]["check"].as_str().unwrap().to_owned());
+    }
+    assert_eq!(checks, ["suite", "lint"]);
 }

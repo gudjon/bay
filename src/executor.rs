@@ -546,6 +546,7 @@ fn pass(
     beat: &mut crate::presence::Beat,
 ) -> Result<Vec<Value>, String> {
     let _ = receipts::sync(repo);
+    sweep_check_scratch(repo);
     // G289, G294: never forced; a chain ahead of the remote keeps its work, one apart from it
     // is set aside.
     repo.fetch_chains().map_err(|error| error.message())?;
@@ -632,16 +633,20 @@ fn pass(
     ran.extend(compaction(repo, &chain));
     ran.extend(recovered.take());
     // After the queue's work, never ahead of it: the runner's own post checks on main's tip,
-    // then the culprit of a red one (G244d).
-    if let Some(post) = crate::bisect::tips(repo) {
-        ran.push(json!({"post": post}));
-    }
-    if let Some(warm) = crate::bisect::warm(repo) {
-        ran.push(json!({"warm": warm}));
-    }
-    // G244d: after the queue's work, never ahead of it, the culprit of a red post check.
-    if let Some(bisect) = crate::bisect::run(repo) {
-        ran.push(json!({"bisect": bisect}));
+    // then the culprit of a red one (G244d). A fleet finding (2026-10-27): once every post check
+    // ran, a pass ran all five one after another, minutes each, and the next pass, which
+    // publishes the head, waited behind them; nothing landed for 40 minutes. A pass does at most
+    // one piece of this work, and none past its bound; the next pass, or another runner, does
+    // the next.
+    if began.elapsed() < bound {
+        if let Some(post) = crate::bisect::tips(repo) {
+            ran.push(json!({"post": post}));
+        } else if let Some(warm) = crate::bisect::warm(repo) {
+            ran.push(json!({"warm": warm}));
+        } else if let Some(bisect) = crate::bisect::run(repo) {
+            // G244d: after the queue's work, never ahead of it, the culprit of a red post check.
+            ran.push(json!({"bisect": bisect}));
+        }
     }
     // A fleet finding (2026-10-27): a retention cut costs a fetch of its chain, and one that
     // does not happen leaves the chain due again; read inside the loop, hundreds of closed chains
@@ -660,6 +665,30 @@ fn pass(
     }
     advanced.extend(advance(repo));
     Ok(ran)
+}
+
+/// How long a check's scratch directory may stand untouched before a pass removes it.
+const STALE_SCRATCH: Duration = Duration::from_hours(6);
+
+/// Removes each check scratch directory under `<common-dir>/bay/check/` that nothing has
+/// touched for [`STALE_SCRATCH`]: a check that returns removes its own, so these are what a
+/// killed or re-executed process left (a fleet finding, 2026-10-27: 17 GB on one box's runners).
+/// A directory a running check writes to is newer than that, and is kept.
+fn sweep_check_scratch(repo: &Repo) {
+    let Ok(entries) = std::fs::read_dir(repo.common_dir.join("bay").join("check")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age >= STALE_SCRATCH);
+        if stale && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// How long a pass starts operations before it ends and the next reads every chain again.
