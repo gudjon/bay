@@ -284,7 +284,7 @@ pub fn discard(repo: &Repo, id: &str, saved: &str) -> Result<Option<PathBuf>, Gi
         let aside = repo
             .views_dir()
             .join(format!("{id}.unsaved-{}", unix_now()));
-        std::fs::rename(&path, &aside).map_err(GitError::Spawn)?;
+        crate::durable::rename(&path, &aside).map_err(GitError::Spawn)?;
         kept = Some(aside);
     } else {
         let _ = repo
@@ -300,8 +300,9 @@ pub fn discard(repo: &Repo, id: &str, saved: &str) -> Result<Option<PathBuf>, Gi
 }
 
 /// Whether the view at `path` holds a file that `saved` does not: one changed or added against
-/// its tree, or untracked. A file the view lacks is no work (a view made only in part lacks
-/// many), and a view that cannot be read is taken to hold work.
+/// its tree, or untracked, ignored ones too (an `.env` is work no draft holds). A file the view
+/// lacks is no work (a view made only in part lacks many), and a view that cannot be read is
+/// taken to hold work.
 fn holds_unsaved(path: &Path, saved: &str) -> bool {
     let git = Git::new(path);
     let tree = format!("{saved}^{{tree}}");
@@ -311,7 +312,12 @@ fn holds_unsaved(path: &Path, saved: &str) -> bool {
     };
     changed
         || git
-            .run(&["ls-files", "--others", "--exclude-standard"])
+            .run(&[
+                "ls-files",
+                "--others",
+                "--directory",
+                "--no-empty-directory",
+            ])
             .map_or(true, |untracked| !untracked.is_empty())
 }
 

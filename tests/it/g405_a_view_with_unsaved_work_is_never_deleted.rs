@@ -22,6 +22,10 @@ fn a_view_whose_journal_was_lost_keeps_its_unsaved_edits() {
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/a.rs"), "fn a() { edited }\n").unwrap();
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
+    // An ignored file is work no draft holds too.
+    std::fs::create_dir_all(repo.join(".git/info")).unwrap();
+    std::fs::write(repo.join(".git/info/exclude"), "*.env\n").unwrap();
+    std::fs::write(view.join("src/local.env"), "TOKEN=x\n").unwrap();
     let journal = repo.join(".git/bay/views").join(format!("{id}.journal"));
     assert!(journal.exists(), "{journal:?}");
     std::fs::remove_file(&journal).unwrap();
@@ -39,6 +43,10 @@ fn a_view_whose_journal_was_lost_keeps_its_unsaved_edits() {
     assert_eq!(
         std::fs::read_to_string(kept.join("src/new.rs")).unwrap(),
         "fn new() {}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(kept.join("src/local.env")).unwrap(),
+        "TOKEN=x\n"
     );
 }
 

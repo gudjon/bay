@@ -146,11 +146,9 @@ fn wake_fails_exactly(script: &str, failing: &[&str]) {
     assert_eq!(named(&by_name, "fail"), failing, "{result}");
     assert_eq!(by_name.len(), WAKE_CASES.len(), "{result}");
     assert!(named(&by_name, "not_judged").is_empty(), "{result}");
-    assert_eq!(
-        result["detail"]["bay_records"],
-        serde_json::json!({"result": "uncertain", "reason": "WAKE_ADAPTER_FAILED"}),
-        "{result}"
-    );
+    let records = &result["detail"]["bay_records"];
+    assert_eq!(records["result"], "uncertain", "{result}");
+    assert_eq!(records["reason"], "WAKE_ADAPTER_FAILED", "{result}");
 }
 
 #[test]

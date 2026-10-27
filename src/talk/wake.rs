@@ -59,7 +59,7 @@ pub fn wake(repo: &Repo, talk: &Talk, me: &Actor) -> Value {
         talk.body["urgent"].as_bool().unwrap_or(false),
         talk.body["what"].as_str().unwrap_or_default(),
     );
-    asked(repo, &request)
+    asked(repo, &request, false)
 }
 
 /// One outcome the executor reached that a session must act on (G307): operation `op_id` of
@@ -78,7 +78,7 @@ pub struct Outcome<'a> {
 #[must_use]
 pub fn wake_outcome(repo: &Repo, outcome: &Outcome) -> Value {
     let machine = crate::live::machine(&repo.git).unwrap_or_default();
-    asked(repo, &outcome_request(outcome, &machine))
+    asked(repo, &outcome_request(outcome, &machine), true)
 }
 
 /// Whether a `[plugin.wake] command` is configured. Without one nothing is asked.
@@ -92,8 +92,9 @@ pub fn configured(repo: &Repo) -> bool {
 }
 
 /// Runs the configured adapter once with `request`, and returns what bay records of its
-/// answer: the one path a talk's wake and an outcome's take.
-fn asked(repo: &Repo, request: &Value) -> Value {
+/// answer: the one path a talk's wake and an outcome's take. An outcome's record names why a
+/// failed wake failed (`with_why`); a talk's ack keeps its two fields.
+fn asked(repo: &Repo, request: &Value, with_why: bool) -> Value {
     let plugin = repo.config.plugin.wake.as_ref();
     let timeout = plugin.map_or(WAKE_TIMEOUT, |plugin| plugin.timeout(WAKE_TIMEOUT));
     let Some(cmd) = plugin
@@ -103,10 +104,17 @@ fn asked(repo: &Repo, request: &Value) -> Value {
         return json!({"result": "not_attempted", "reason": "NO_WAKE_ADAPTER"});
     };
     // A `#!` script bay cannot start on Windows fails as an adapter that cannot start does.
-    let Ok(cmd) = cmd else {
-        return failed();
+    let cmd = match cmd {
+        Ok(cmd) => cmd,
+        Err(why) if with_why => return failed_because(&format!("it did not start: {why}"), &[]),
+        Err(_) => return failed(),
     };
-    recorded(&ask(cmd, request, timeout), timeout)
+    let answer = ask(cmd, request, timeout);
+    if with_why {
+        recorded_with_why(&answer, timeout)
+    } else {
+        recorded(&answer, timeout)
+    }
 }
 
 /// The `bay.wake/1` request for `talk` to `me` on `machine`; `line` is cut to 200 characters.
@@ -244,4 +252,37 @@ pub fn recorded(answer: &Answer, limit: Duration) -> Value {
         return failed();
     }
     answered(answer).unwrap_or_else(|_| failed())
+}
+
+/// [`recorded`] for an outcome's wake on an executor's log, which names why a failed wake
+/// failed ([`failed_because`]). A talk's ack keeps [`recorded`]'s two fields: its shape is
+/// signed and judged by every reader (`crate::talk`).
+#[must_use]
+pub fn recorded_with_why(answer: &Answer, limit: Duration) -> Value {
+    if answer.elapsed > limit && answer.error.is_none() {
+        return failed_because(
+            &format!("it answered after {} s", limit.as_secs_f64()),
+            &answer.stderr,
+        );
+    }
+    answered(answer).unwrap_or_else(|why| failed_because(&why, &answer.stderr))
+}
+
+/// [`failed`], naming why (a fleet finding, 2026-10-26: 67 wakes failed in a day, each recorded
+/// only as `WAKE_ADAPTER_FAILED`, and nobody could tell why from the record): bay's cause and
+/// the first line the adapter wrote on stderr, at most 200 characters in all.
+#[must_use]
+pub fn failed_because(why: &str, stderr: &[u8]) -> Value {
+    let said = String::from_utf8_lossy(stderr);
+    let first = said.lines().map(str::trim).find(|line| !line.is_empty());
+    let why: String = match first {
+        Some(line) => format!("{why}: {line}"),
+        None => why.to_owned(),
+    }
+    .chars()
+    .take(200)
+    .collect();
+    let mut value = failed();
+    value["why"] = json!(why);
+    value
 }

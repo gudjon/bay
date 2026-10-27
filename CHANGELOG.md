@@ -3,6 +3,8 @@
 ## 0.5.17
 
 - `bay start` never deletes a view's unsaved files; it keeps them aside and names the place.
+- Ignored files, such as `.env`, count as unsaved work and are kept too.
+- A failed wake of a change's author records why it failed.
 
 ## 0.5.16
 

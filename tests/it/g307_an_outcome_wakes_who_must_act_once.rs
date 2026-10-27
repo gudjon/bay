@@ -39,6 +39,15 @@ use support::{TestBox, check_files, passing_result, result_json, write_executabl
 /// it in `[plugin.wake] command`; without, the script is there and nothing names it. Returns the box,
 /// the work repository, the remote and the request file.
 fn trunk(result: &str, wake: bool) -> (TestBox, PathBuf, PathBuf, PathBuf) {
+    trunk_with(
+        result,
+        wake,
+        "printf '{\"schema\":\"bay.wake-result/1\",\"result\":\"woken\",\"reason\":null}'",
+    )
+}
+
+/// [`trunk`], with the adapter answering by the shell line `answer` after it records the request.
+fn trunk_with(result: &str, wake: bool, answer: &str) -> (TestBox, PathBuf, PathBuf, PathBuf) {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
@@ -46,10 +55,7 @@ fn trunk(result: &str, wake: bool) -> (TestBox, PathBuf, PathBuf, PathBuf) {
     std::fs::create_dir_all(repo.join("scripts")).unwrap();
     write_executable(
         &repo.join("scripts/bay-wake"),
-        &format!(
-            "#!/bin/sh\ncat >> '{}'\nprintf '{{\"schema\":\"bay.wake-result/1\",\"result\":\"woken\",\"reason\":null}}'\n",
-            woken.display()
-        ),
+        &format!("#!/bin/sh\ncat >> '{}'\n{answer}\n", woken.display()),
     );
     let mut files = check_files("", result, 1, 60);
     if wake {
@@ -154,6 +160,30 @@ fn a_block_the_executor_reached_wakes_its_author_once() {
     let again = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(again["detail"]["ran"], json!([]), "{again}");
     assert_eq!(requests(&woken).len(), 1, "a wake is asked once");
+}
+
+/// A fleet finding (2026-10-26): 67 wakes failed in a day, each recorded only as
+/// `WAKE_ADAPTER_FAILED`, and nobody could tell why from the record. A failed wake's record on
+/// the outcome event names why: bay's cause and the adapter's first line on stderr.
+///
+/// Guard to mutate, in `src/talk/wake.rs`: `asked` records with `recorded` for an outcome.
+#[test]
+fn a_failed_wake_names_why_on_the_outcome_event() {
+    let (test_box, repo, remote, _woken) = trunk_with(
+        &failing(),
+        true,
+        "echo 'connector: no pane for this seat' >&2; exit 3",
+    );
+    let (id, _executor, _ran, view) = submitted_and_run(&test_box, &repo, &remote);
+    let blocked = event(&test_box, &view, &id, "check_failed");
+    assert_eq!(blocked["wake"]["result"], "uncertain", "{blocked}");
+    assert_eq!(
+        blocked["wake"]["reason"], "WAKE_ADAPTER_FAILED",
+        "{blocked}"
+    );
+    let why = blocked["wake"]["why"].as_str().unwrap_or_default();
+    assert!(why.contains("exited"), "{blocked}");
+    assert!(why.contains("no pane for this seat"), "{blocked}");
 }
 
 #[test]
