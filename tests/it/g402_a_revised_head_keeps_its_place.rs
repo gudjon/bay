@@ -5,8 +5,15 @@
 //!
 //! Guard to mutate, in `src/executor.rs`: `successor` returning `None` (the place of a
 //! superseded head is released, and its new revision joins at the back).
+//!
+//! The revision starts with an adoption, whose push can meet a chain the head's runner moved in
+//! between (a heartbeat); the adoption reads the chain again and adopts on it, never a failed
+//! start (#43, which flaked this test). Guard to mutate, in `src/start.rs`: the `ref_moved`
+//! retry in `adopt_or_refuse`.
 
 #![cfg(unix)]
+
+use std::os::unix::fs::PermissionsExt;
 
 use crate::support;
 
@@ -57,4 +64,44 @@ fn a_new_revision_of_the_head_runs_from_the_heads_place() {
     );
     held.go();
     let _ = finished(runner_a);
+}
+
+#[test]
+fn an_adoption_whose_push_meets_a_moved_chain_reads_it_again() {
+    let held = host(&Check {
+        config: "[runner]\nlease_s = 30\nheartbeat_s = 1\n",
+        policy: None,
+        seed: &[("src/a.rs", "fn a() {}\n")],
+        hold_first: false,
+        fails: "false",
+    });
+    let one = held.queue("one", "src");
+    // The host refuses the adoption's push once with git's words for a ref another writer
+    // holds, as a runner's heartbeat on the chain makes it do.
+    let refused = held.test_box.path().join("refused-once");
+    let hook = held.test_box.path().join("refuse-once.sh");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\n[ \"$1\" = refs/bay/changes/{one} ] || exit 0\n[ -e '{marker}' ] && exit 0\n: > '{marker}'\necho \"error: cannot lock ref '$1': is at $2 but expected $3\" >&2\nexit 1\n",
+            marker = refused.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    held.test_box.git_bare(
+        &held.remote,
+        &["config", "hook.refuse-once.event", "update"],
+    );
+    held.test_box.git_bare(
+        &held.remote,
+        &["config", "hook.refuse-once.command", hook.to_str().unwrap()],
+    );
+    let started = held.test_box.bay_ok(&held.repo, &["start", "one"]);
+    assert_eq!(started["change"], one.as_str(), "{started}");
+    assert_eq!(started["detail"]["adopted"], true, "{started}");
+    assert!(
+        refused.exists(),
+        "the host never refused the push: {started}"
+    );
 }

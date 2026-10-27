@@ -482,7 +482,7 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
                                     up; bay start {intent} without --new adopts it")})));
                     }
                     (false, false) => {
-                        return adopt_or_refuse(repo, request, &me, change, &base, limit);
+                        return adopt_or_refuse(repo, request, &me, change, &base, limit, 1);
                     }
                 }
             }
@@ -1137,11 +1137,17 @@ fn add_dependencies(
     Ok(())
 }
 
+/// How many times an adoption reads the chain and pushes before a moving chain fails it.
+const ADOPT_ATTEMPTS: usize = 3;
+
 /// The intent already has a live change (§ 4): the same actor adopts it, unless another live
 /// session of that name holds it (`CHANGE_HELD`, [`live_holder`]); anyone adopts it once it is
 /// abandoned, superseded without a landing, or idle past the takeover window on this observer's
 /// clock; otherwise `CHANGE_SUPERSEDED` names it. Adopting another actor's change is one more
-/// live change `me` holds, so the policy's `limit` applies to it (G264).
+/// live change `me` holds, so the policy's `limit` applies to it (G264). An adoption whose push
+/// meets a chain a runner moved in between reads it again and adopts on it, up to
+/// [`ADOPT_ATTEMPTS`] times (G402).
+#[allow(clippy::too_many_lines)]
 fn adopt_or_refuse(
     repo: &Repo,
     request: &StartRequest,
@@ -1149,6 +1155,7 @@ fn adopt_or_refuse(
     change: &str,
     base: &str,
     limit: Option<u64>,
+    attempt: usize,
 ) -> Result<BayResult, String> {
     let name = change_ref(change);
     // G289: this store's chain moves only forward; local work the remote lacks is kept, and an
@@ -1229,6 +1236,10 @@ fn adopt_or_refuse(
                     .with_change(change)
                     .with_detail(json!({"held_by": previous,
                         "held_by_source": previous_source, "why": why})));
+            }
+            // A runner wrote the chain between the read and this push (a heartbeat, a receipt).
+            if crate::git::ref_moved(&why) && attempt < ADOPT_ATTEMPTS {
+                return adopt_or_refuse(repo, request, me, change, base, limit, attempt + 1);
             }
             return Err(format!("the adoption could not be pushed: {why}"));
         }

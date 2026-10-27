@@ -28,7 +28,6 @@
 //! (`crate::presence`, G67), so a box that runs no executor, or one that stopped, can be seen
 //! from every other box; `--once` names the write in `detail.presence`.
 
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -785,13 +784,11 @@ fn run_op(
     // A pass carries the whole queue, so it can run long: its presence beats before each
     // operation and once a heartbeat during it, naming it, never only at the pass's start, so a
     // busy runner never reads as gone.
-    let step = Cell::new("read");
+    let step = publish::Step::new("read");
     let began = std::time::Instant::now();
-    let (result, last_step) = beat.during(repo, op_id, depth, || {
-        let result = publish::execute(repo, id, op_id, &step).unwrap_or_else(BayResult::failed);
-        (result, step.get())
+    let result = beat.during(repo, op_id, depth, || {
+        publish::execute(repo, id, op_id, &step).unwrap_or_else(BayResult::failed)
     });
-    step.set(last_step);
     let result = receipted(repo, id, step.get(), result).with_op(op_id.to_owned());
     // Trunk moved: what waits behind the new head hears of a conflict now (G177).
     if result.decision == Decision::Landed
@@ -813,7 +810,22 @@ fn run_op(
         }
         _ => line,
     };
-    eprintln!("bay runner: {line} ({}s)", began.elapsed().as_secs());
+    // A fleet finding (2026-10-27): a merge took five to eight minutes on a loaded box, and the
+    // line did not say where; it names each step of a second or more.
+    let steps: Vec<String> = step
+        .seconds()
+        .into_iter()
+        .map(|(name, secs)| format!("{name} {secs}s"))
+        .collect();
+    if steps.len() > 1 {
+        eprintln!(
+            "bay runner: {line} ({}s: {})",
+            began.elapsed().as_secs(),
+            steps.join(", ")
+        );
+    } else {
+        eprintln!("bay runner: {line} ({}s)", began.elapsed().as_secs());
+    }
     json!({
         "change": id,
         "op_id": op_id,

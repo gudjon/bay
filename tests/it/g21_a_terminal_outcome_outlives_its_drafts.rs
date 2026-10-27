@@ -15,7 +15,6 @@
 
 use crate::support;
 
-use std::cell::Cell;
 use std::path::Path;
 
 use support::{TestBox, check_files, passing_result, result_json, write_executable};
@@ -91,7 +90,7 @@ fn the_outcome_is_explained_after_retention_and_gc() {
 
     // A retry of the expired op id is refused as ambiguous.
     let opened = bay::repo::Repo::open(&executor).unwrap();
-    let step = Cell::new("read");
+    let step = bay::publish::Step::new("read");
     let retry = bay::publish::execute(&opened, &id, &format!("{id}.1"), &step).unwrap();
     assert_eq!(retry.decision, bay::result::Decision::Failed);
     assert!(retry.to_json().unwrap().contains("ambiguous"));

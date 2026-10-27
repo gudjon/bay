@@ -8,7 +8,7 @@
 //! `bay merge` does the agent's part and returns at once; `bay runner run` (or `land --wait`)
 //! does the rest. After two moves of trunk the operation joins the publication queue (§ 6).
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -33,6 +33,60 @@ use crate::result::{BayResult, Decision, Reason};
 use crate::signing::{self, Keys, Signer};
 use crate::throughput;
 use crate::view;
+
+/// The step a publication is at, and when it entered each one: what a runner's journal line
+/// says an operation's time went to (a fleet finding, 2026-10-27: merges took five to eight
+/// minutes on a loaded box and no record said in which step).
+pub struct Step {
+    now: Cell<&'static str>,
+    entered: RefCell<Vec<(&'static str, std::time::Instant)>>,
+}
+
+impl Step {
+    #[must_use]
+    pub fn new(first: &'static str) -> Self {
+        Self {
+            now: Cell::new(first),
+            entered: RefCell::new(vec![(first, std::time::Instant::now())]),
+        }
+    }
+
+    pub fn set(&self, step: &'static str) {
+        if self.now.get() != step {
+            self.now.set(step);
+            self.entered
+                .borrow_mut()
+                .push((step, std::time::Instant::now()));
+        }
+    }
+
+    #[must_use]
+    pub fn get(&self) -> &'static str {
+        self.now.get()
+    }
+
+    /// The whole seconds spent in each step, in the order first entered, each step once; steps
+    /// under a second are left out.
+    #[must_use]
+    pub fn seconds(&self) -> Vec<(&'static str, u64)> {
+        let entered = self.entered.borrow();
+        let mut out: Vec<(&'static str, std::time::Duration)> = Vec::new();
+        for (index, (step, at)) in entered.iter().enumerate() {
+            let until = entered
+                .get(index + 1)
+                .map_or_else(std::time::Instant::now, |(_, next)| *next);
+            let spent = until.duration_since(*at);
+            match out.iter_mut().find(|(seen, _)| seen == step) {
+                Some((_, total)) => *total += spent,
+                None => out.push((step, spent)),
+            }
+        }
+        out.into_iter()
+            .filter(|(_, spent)| spent.as_secs() >= 1)
+            .map(|(step, spent)| (step, spent.as_secs()))
+            .collect()
+    }
+}
 
 /// The producer name of the built-in local executor's evidence.
 pub const LOCAL_PRODUCER: &str = "local";
@@ -130,7 +184,7 @@ pub fn land(
     // G56 (ruling T9): the talks on this change, fetched before the landing and named in its
     // result. A talk never blocks a landing.
     let open_talks = crate::talk::open_on(&repo, &id);
-    let step = Cell::new("read");
+    let step = Step::new("read");
     let mut result = Err(CHAIN_MOVED.to_owned());
     for _ in 0..3 {
         adopt_remote_chain(&repo, &id);
@@ -161,7 +215,7 @@ pub fn land(
 /// reads the chain again and goes on until the operation has one. It runs it, waits out the
 /// holder's lease and takes it over, or reports the holder's landing or refusal. It never
 /// answers `ok` for an operation it did not see land.
-fn wait_land(repo: &Repo, id: &str, step: &Cell<&'static str>) -> Result<BayResult, String> {
+fn wait_land(repo: &Repo, id: &str, step: &Step) -> Result<BayResult, String> {
     loop {
         let result = submit_land(repo, id, step, true)?;
         if !not_taken(&result) {
@@ -241,7 +295,7 @@ fn observe_land(
     repo: &Repo,
     dir: &Path,
     id: &str,
-    step: &Cell<&'static str>,
+    step: &Step,
     timeout: Duration,
 ) -> Result<BayResult, String> {
     let submitted = submit_land(repo, id, step, false)?;
@@ -465,7 +519,7 @@ pub fn verifies_under(git: &Git, commit: &str, registry: &Registry, committer: &
 struct Ctx<'a> {
     repo: &'a Repo,
     /// The publication step in progress, named in a receipt if it fails.
-    step: &'a Cell<&'static str>,
+    step: &'a Step,
     chain: Chain<'a>,
     id: String,
     head: String,
@@ -516,7 +570,7 @@ struct Ctx<'a> {
 }
 
 impl<'a> Ctx<'a> {
-    fn load(repo: &'a Repo, step: &'a Cell<&'static str>, id: &str) -> Result<Self, String> {
+    fn load(repo: &'a Repo, step: &'a Step, id: &str) -> Result<Self, String> {
         let keys = Keys::load(&repo.git);
         keys.validate()?;
         let chain = Chain::new(&repo.git);
@@ -896,12 +950,7 @@ impl Drop for Ctx<'_> {
 
 /// The agent's part of `land` (§ 9a): freeze, scan, and append the request. Returns at once
 /// with the operation id; with `wait` it also runs the executor's part inline.
-fn submit_land(
-    repo: &Repo,
-    id: &str,
-    step: &Cell<&'static str>,
-    wait: bool,
-) -> Result<BayResult, String> {
+fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
     // § 10a offline work: with the remote unreachable, the request is committed locally and
     // pushed by a later bay command when the remote returns.
@@ -1239,12 +1288,7 @@ fn with_progress(git: &Git, op: &Operation, mut result: BayResult) -> BayResult 
 /// # Errors
 ///
 /// A fault of bay's own; refusals are results.
-pub fn execute(
-    repo: &Repo,
-    id: &str,
-    op_id: &str,
-    step: &Cell<&'static str>,
-) -> Result<BayResult, String> {
+pub fn execute(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
     ctx.yields = true;
     if !ctx.record.operations.iter().any(|op| op.op_id == op_id) {
@@ -1910,8 +1954,20 @@ fn batch_plan(
     let Ok(Some(policy)) = policy::load_at(git, trunk) else {
         return Ok(None);
     };
-    let commit_keyed = policy.checks.iter().any(policy::CheckEntry::commit_keyed);
-    if !ctx.reuse_trusted(trunk) || policy.unchecked || commit_keyed {
+    // R7, G420: a rule that keeps every batch off says so in the journal, as a batch that ends
+    // does (measured 2026-10-27: one changed-only check kept a fleet's batches off unseen).
+    let commit_keyed = policy.checks.iter().find(|entry| entry.commit_keyed());
+    let why = if let Some(entry) = commit_keyed {
+        format!("check {} is keyed by its commit", entry.id)
+    } else if policy.unchecked {
+        "the policy is unchecked".to_owned()
+    } else if !ctx.reuse_trusted(trunk) {
+        "the policy does not reuse unsigned evidence".to_owned()
+    } else {
+        String::new()
+    };
+    if !why.is_empty() {
+        eprintln!("bay runner: {op_id} no batch: {why}");
         return Ok(None);
     }
     let queue = crate::queue::Queue::local(git)?;
@@ -2329,7 +2385,7 @@ fn publish_batch_push(repo: &Repo, tip: &str, members: &[BatchPush]) -> Result<(
 /// the early-conflict note (G177) it takes no ownership and moves neither the operation's
 /// state nor its place. Returns whether the chain was pushed.
 fn note_culprit(repo: &Repo, id: &str, op_id: &str, batch: &str) -> Result<bool, String> {
-    let step = Cell::new("batch");
+    let step = Step::new("batch");
     let mut ctx = Ctx::load(repo, &step, id)?;
     let Some(op) = ctx.record.operations.iter().find(|op| op.op_id == op_id) else {
         return Ok(false);
@@ -3247,7 +3303,7 @@ pub fn note_early_conflict(
     op_id: &str,
     conflict: Option<crate::change::EarlyConflict>,
 ) -> Result<bool, String> {
-    let step = Cell::new("probe");
+    let step = Step::new("probe");
     let mut ctx = Ctx::load(repo, &step, id)?;
     let Some(op) = ctx.record.operations.iter().find(|op| op.op_id == op_id) else {
         return Ok(false);
@@ -3881,7 +3937,7 @@ const CHAIN_MOVED: &str = "the change chain moved on the remote while the reques
 fn abandon_change(
     repo: &Repo,
     id: &str,
-    step: &Cell<&'static str>,
+    step: &Step,
     why: Option<&str>,
 ) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
@@ -6991,6 +7047,29 @@ fn scanned(ctx: &mut Ctx, trunk: &str, revision: &str) -> Result<Option<BayResul
         }
         return Ok(Some(result));
     }
+    // G421 (a fleet finding, 2026-10-27): trunk held the change from a push around bay, its
+    // Change-Id and no Revision-Id. The refusal was written nowhere, so every runner ran it
+    // again each pass and its place held the whole line. The refusal ends the operation, and
+    // the sweep releases its place.
+    if let Some(op_id) = ctx
+        .record
+        .operations
+        .iter()
+        .find(|op| {
+            op.revision == revision && !op.state.is_terminal() && op.state != OpState::Blocked
+        })
+        .map(|op| op.op_id.clone())
+    {
+        let op = ctx.op_mut(&op_id);
+        op.state = OpState::Blocked;
+        op.outcome = Some(Reason::ChangeAlreadyLanded.code().to_owned());
+        ctx.save(
+            revision,
+            None,
+            &format!("blocked {op_id}: the change is already on main"),
+        )?;
+        ctx.push_chain();
+    }
     Ok(Some(
         BayResult::blocked(Reason::ChangeAlreadyLanded)
             .with_change(ctx.id.clone())
@@ -7812,7 +7891,7 @@ pub fn retention_due(repo: &Repo, chains: &[HeldChain]) -> BTreeSet<String> {
 ///
 /// A fault of bay's own.
 pub fn retain(repo: &Repo, id: &str) -> Result<Option<String>, String> {
-    let step = Cell::new("retention");
+    let step = Step::new("retention");
     let mut ctx = Ctx::load(repo, &step, id)?;
     if ctx.refetch().is_err() || ctx.record.retention_cut {
         return Ok(None);
@@ -7867,6 +7946,25 @@ mod tests {
     use crate::git::Git;
 
     /// A test pause ends: at its release, at its time limit, or once its parent is gone.
+    /// A runner's line names where an operation's time went: each step's seconds, in order.
+    #[test]
+    fn a_step_reports_the_seconds_spent_in_each() {
+        let step = super::Step::new("read");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        step.set("check");
+        step.set("check");
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        step.set("publish");
+        let seconds = step.seconds();
+        assert_eq!(step.get(), "publish");
+        assert_eq!(
+            seconds.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            ["read", "check"],
+            "steps under a second are left out: {seconds:?}"
+        );
+        assert!(seconds.iter().all(|(_, secs)| *secs == 1), "{seconds:?}");
+    }
+
     #[test]
     fn a_test_pause_never_waits_forever() {
         use std::time::{Duration, Instant};

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.31
+
+- A runner's journal line says how many seconds each step of a change took.
+- A runner says when a rule keeps every batch off, naming the check keyed by its commit.
+- `bay start` adopting a change reads the chain again when a runner moved it, instead of failing.
+- A queued change already on main from a push around bay frees its place, so the line moves.
+
 ## 0.5.30
 
 - A runner runs the post check that has gone longest unanswered first, so none starves while main moves.

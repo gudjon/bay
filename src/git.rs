@@ -1108,16 +1108,24 @@ fn host_refused(args: &[&str], stderr: &[u8]) -> bool {
         return false;
     }
     let text = String::from_utf8_lossy(stderr);
-    text.contains("[remote rejected]")
-        && ![
-            "cannot lock ref",
-            "stale info",
-            "fetch first",
-            "non-fast-forward",
-            "already exists",
-        ]
-        .iter()
-        .any(|moved| text.contains(moved))
+    text.contains("[remote rejected]") && !ref_moved(&text)
+}
+
+/// The words of a push refused because a ref moved under it: a lease, a lock held by another
+/// writer, a fetch first.
+const REF_MOVED: [&str; 5] = [
+    "cannot lock ref",
+    "stale info",
+    "fetch first",
+    "non-fast-forward",
+    "already exists",
+];
+
+/// Whether a failed push's words say a ref moved under it ([`REF_MOVED`]), so its caller reads
+/// the ref again rather than failing.
+#[must_use]
+pub fn ref_moved(why: &str) -> bool {
+    REF_MOVED.iter().any(|moved| why.contains(moved))
 }
 
 /// Whether the words of a `push` or `fetch` after its remote name only bay's records: every
