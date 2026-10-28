@@ -141,15 +141,26 @@ pub const QUESTION: &str = "question:";
 pub const PLAN: &str = "plan:";
 
 /// Dossier 63 item 4: the value of `talk`'s standing answer when its commit is signed by a key
-/// enrolled for the name the answer gives, as `registry` holds it: an approver or registry key
-/// (a person), or the agent key of `who` or `decides`. A recipient judges it itself: on a remote
-/// with no bay host, no hook judged the push. `None` with no answer, or one not so signed.
+/// enrolled for the name the answer gives, as the registry holds it: an approver or registry key
+/// (a person), or the agent key of `who` or `decides`. Under `signing = "approvals"` (G445) an
+/// answer by `who` or `decides` counts by its name, as a merge does, and a person's still by an
+/// approver or registry key, as an approval is signed. A recipient judges it itself: on a remote
+/// with no bay host, no hook judged the push. `None` with no answer, or one not so given.
 #[must_use]
-pub fn verified_answer(git: &Git, registry: &Registry, talk: &Talk) -> Option<String> {
+pub fn verified_answer(git: &Git, trust: &Trust, talk: &Talk) -> Option<String> {
     let (commit, entry) = talk.standing_answer(git).ok()??;
     let name = entry["actor"]["name"].as_str()?;
     let value = entry["value"].as_str()?;
     let party = name == talk.who || talk.body["decides"].as_str() == Some(name);
+    let held;
+    let registry = match trust {
+        Trust::Keys(registry) => registry,
+        Trust::Names if party => return Some(value.to_owned()),
+        Trust::Names => {
+            held = Registry::current(git).ok()??;
+            &held
+        }
+    };
     let classes: &[KeyClass] = if party {
         &[KeyClass::Agent, KeyClass::Approver, KeyClass::Registry]
     } else {

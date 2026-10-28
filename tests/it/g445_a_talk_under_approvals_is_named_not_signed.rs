@@ -3,7 +3,9 @@
 //! its recipient. No key registry is needed, and none is fetched. The rules of who writes what stay,
 //! judged by actor name: only the sender or `decides` supersedes, only `who` or `decides` answers.
 //! Every talk row says whether a key signed its sender (`signed`), so a reader can tell a
-//! claimed name from a signed one.
+//! claimed name from a signed one. An answer by `who` counts by its name; one written around bay
+//! by a third actor does not. A fetching command (`bay status`) fetches talks at most once per
+//! poll interval, on the live hook's state: inside it the outcome is `not_due`.
 //!
 //! Under `signing = "all"` nothing changes: a talk is signed by a registry actor's key, and an
 //! unsigned one is refused at accept and never acked. A clone that never fetched the registry, or
@@ -24,6 +26,9 @@
 //!   the registry is not acked).
 //! - `src/talk/accept.rs` `accept`: drop the refetch on an unknown sender (a talk from a sender
 //!   enrolled after the last fetch is refused).
+//! - `src/talk.rs` `verified_answer`: `Trust::Names if party` to `Trust::Names` (the answer by
+//!   name is not read), or drop `if party` (the third actor's answer counts).
+//! - `src/talk/poll.rs` `command`: drop the interval check (the second status fetches again).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -64,6 +69,7 @@ impl Case {
                 .bay(self.clone_of(actor))
                 .env("BAY_ACTOR", actor)
                 .env("BAY_SESSION", format!("s-{actor}"))
+                .env_remove("BAY_TEST_TALK_COMMAND_UNBOUNDED")
                 .args(args),
         )
     }
@@ -103,6 +109,18 @@ impl Case {
             .lines()
             .take_while(|line| !line.is_empty())
             .any(|line| line.starts_with("gpgsig"))
+    }
+
+    /// The answer `b`'s bay reads on talk `name` under approvals, after a fetch of it.
+    fn answer(&self, name: &str) -> Option<String> {
+        self.test_box.git_ok(
+            &self.b,
+            &["fetch", "-q", "origin", &format!("+{name}:{name}")],
+        );
+        let git = bay::git::Git::new(&self.b);
+        let tip = git.run(&["rev-parse", name]).unwrap();
+        let talk = bay::talk::Talk::read(&git, name, &tip).unwrap();
+        bay::talk::verified_answer(&git, &bay::talk::Trust::Names, &talk)
     }
 
     fn entry(&self, rev: &str, path: &str) -> Value {
@@ -251,8 +269,13 @@ fn under_approvals_a_talk_is_sent_unsigned_and_acked_by_name() {
     // The sender sees the ack after its own fetch; a second accept writes nothing.
     let (code, _) = case.bay("agent", &["status"]);
     assert_eq!(code, 0);
+    // Inside the poll interval a status fetches no talks, and says so.
     let (code, again) = case.bay("agent-b", &["status"]);
     assert_eq!(code, 0, "{again}");
+    assert_eq!(
+        again["detail"]["talk_accept"]["state"], "not_due",
+        "{again}"
+    );
     assert_eq!(
         again["detail"]["talk_accept"]["acked"],
         json!([]),
@@ -280,13 +303,43 @@ fn under_approvals_only_who_or_decides_answers_and_only_the_sender_supersedes() 
     assert_ne!(code, 0, "{answer}");
     assert_eq!(case.remote_tip(&name), before, "agent-c wrote on {name}");
 
-    // `who` answers, by name, unsigned; the sender supersedes its own talk.
+    // `who` answers, by name, unsigned, and the answer counts by that name.
     let (code, answer) = case.bay("agent-b", &["talk", "--answer", &id, "--value", "json"]);
     assert_eq!(code, 0, "{answer}");
     let answered = case.remote_tip(&name).unwrap();
     assert!(!case.signed(&answered), "{answered} is signed");
-    let (code, later) = discovery(&case, "agent", "Pick msgpack", &["--supersedes", &id]);
+    assert_eq!(case.answer(&name).as_deref(), Some("json"));
+
+    // The sender supersedes its own talk.
+    let (code, second) = discovery(&case, "agent", "Pick the log format", &[]);
+    assert_eq!(code, 0, "{second}");
+    let second = second["detail"]["talk"].as_str().unwrap().to_owned();
+    let (code, later) = discovery(
+        &case,
+        "agent",
+        "Pick json lines",
+        &["--supersedes", &second],
+    );
     assert_eq!(code, 0, "{later}");
+
+    // A third actor's answer, written around bay, does not count.
+    let later = talk_ref("agent-b", later["detail"]["talk"].as_str().unwrap());
+    case.test_box.git_ok(
+        &case.c,
+        &["fetch", "-q", "origin", &format!("+{later}:{later}")],
+    );
+    let git = bay::git::Git::new(&case.c);
+    let tip = git.run(&["rev-parse", &later]).unwrap();
+    let entry = json!({"schema": "bay.talk/1", "entry": "answer",
+        "talk": later.rsplit('/').next().unwrap(),
+        "actor": {"name": "agent-c", "session": "s-agent-c"}, "value": "cbor",
+        "at": bay::clock::now_rfc3339()});
+    let forged = bay::talk::entry_commit_as(&git, &tip, &entry, None, "agent-c").unwrap();
+    case.test_box.git_ok(
+        &case.c,
+        &["push", "-q", "origin", &format!("{forged}:{later}")],
+    );
+    assert_eq!(case.answer(&later), None);
 }
 
 #[test]

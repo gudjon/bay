@@ -238,6 +238,9 @@ impl TestBox {
             .env("GIT_CONFIG_GLOBAL", &self.global_config)
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CEILING_DIRECTORIES", self.path())
+            // A fetching command accepts talks on every run, not once per poll interval: only
+            // G445 drops this to read the bound.
+            .env("BAY_TEST_TALK_COMMAND_UNBOUNDED", "1")
             // The host's user-namespace restriction never reaches a test: see `userns_restricted`.
             .env(
                 "BAY_TEST_USERNS_RESTRICT",

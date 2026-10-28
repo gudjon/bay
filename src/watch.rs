@@ -187,7 +187,7 @@ fn run(dir: &Path, since: Option<&Cursor>, landed_only: bool) -> Result<BayResul
     // § 11c: a fetching command on the recipient's machine accepts and acks its talks.
     let talk_accept = fetched_at
         .is_some()
-        .then(|| crate::talk::receive(&repo))
+        .then(|| crate::talk::poll::command(&repo, crate::live::unix_now()))
         .flatten();
     let trunk = repo
         .git

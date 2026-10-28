@@ -5,6 +5,7 @@
 - Under `signing = "approvals"` a talk is sent, acked and answered unsigned, by actor name; no registry is needed.
 - A clone fetches the key registry before it judges a talk, so a newly enrolled sender's talk arrives.
 - `bay status` talk rows say `signed`: whether a key signed the sender, or the name is a claim.
+- `bay status` fetches talks at most once per 30 s, as a session's hook does; inside, it says `not_due`.
 
 ## 0.5.40
 

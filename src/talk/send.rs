@@ -648,7 +648,27 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
             ),
             None => (Some(agent_key(&repo.git, registry, &me.name)?), me, false),
         },
-        Trust::Names => (None, me, false),
+        // A person still answers with their approver key, as an approval is signed.
+        Trust::Names => {
+            let person = if super::asks_a_person(&talk.body) {
+                repo.fetch_registry();
+                Registry::current(&repo.git)?
+                    .and_then(|registry| approver_key(&repo.git, &registry))
+            } else {
+                None
+            };
+            match person {
+                Some((key, name)) => (
+                    Some(key),
+                    Actor {
+                        name,
+                        session: me.session,
+                    },
+                    true,
+                ),
+                None => (None, me, false),
+            }
+        }
     };
     if talk.body["kind"] != "discovery" {
         return Err(Refusal::invalid(format!(

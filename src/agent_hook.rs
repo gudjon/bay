@@ -528,14 +528,14 @@ fn answered(payload: &Payload, value: &Value, talks: &[String]) -> Option<Value>
             repo.remote(),
             &format!("+{prefix}*:{prefix}*"),
         ]);
-        let registry = crate::registry::Registry::current(&repo.git).ok()??;
+        let trust = crate::talk::Trust::current(&repo.git).ok()??;
         let values: Option<Vec<String>> = talks
             .iter()
             .map(|id| {
                 let name = crate::talk::talk_ref(&actor.name, id);
                 let tip = repo.git.ref_target(&name).ok()??;
                 let talk = crate::talk::Talk::read(&repo.git, &name, &tip).ok()?;
-                crate::talk::verified_answer(&repo.git, &registry, &talk)
+                crate::talk::verified_answer(&repo.git, &trust, &talk)
             })
             .collect();
         if let Some(values) = values {

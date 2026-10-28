@@ -81,6 +81,23 @@ pub fn live(repo: &Repo, now: u64) -> Option<Value> {
     crate::talk::receive(repo)
 }
 
+/// A fetching command (`bay status`, `bay status --since`): accepts this actor's talks as a live
+/// session's hook does, at most once per [`BAY_TALK_POLL_S`] and on the same state, so a status
+/// right after a prompt fetches nothing again (G445). Inside the interval the outcome is
+/// `not_due`, naming the last fetch; `None` where no talk can exist here.
+#[must_use]
+pub fn command(repo: &Repo, now: u64) -> Option<Value> {
+    if TEST_HOOKS && std::env::var_os("BAY_TEST_TALK_COMMAND_UNBOUNDED").is_some() {
+        return crate::talk::receive(repo);
+    }
+    let path = state_file(repo);
+    if let Some(last) = read_last(&path).filter(|last| now < last.saturating_add(BAY_TALK_POLL_S)) {
+        return super::accept::not_due(repo, last, now);
+    }
+    write_last(&path, now);
+    crate::talk::receive(repo)
+}
+
 /// `bay talk wait`: polls this actor's talks on the schedule of [`interval`] for at most
 /// `max_s` seconds. Returns 2 (the wake) with the accepted talks when one arrives, else 0.
 #[must_use]

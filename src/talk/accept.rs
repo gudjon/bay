@@ -21,7 +21,8 @@
 //! The same pass fetches the talks this actor sent, so the sender sees acks after its own fetch.
 //!
 //! The outcome, `detail.talk_accept`, has one shape on every path: `state` (`accepted`,
-//! `skipped` with `why`, `not_fetched`, or `error` with `why`: never an empty inbox in disguise),
+//! `skipped` with `why`, `not_fetched`, `not_due` with `why` (a fetching command inside the
+//! poll interval, G445), or `error` with `why`: never an empty inbox in disguise),
 //! and the lists `acked`, `closed`, `refused` (a talk that fails accept) and `failed` (a talk
 //! whose entry could not be written here), and `pushed`. One talk that fails never stops the
 //! others.
@@ -68,6 +69,21 @@ pub fn receive(repo: &Repo) -> Option<Value> {
             .unwrap_or_else(|why| Outcome::new("error").why(why))
             .value(),
     )
+}
+
+/// A fetching command's outcome inside the poll interval (G445): nothing fetched, the last fetch
+/// `now - last` seconds ago. `None` where no talk can exist here, as [`receive`] says.
+pub(crate) fn not_due(repo: &Repo, last: u64, now: u64) -> Option<Value> {
+    let due = last.saturating_add(super::poll::BAY_TALK_POLL_S);
+    matches!(Trust::current(&repo.git), Ok(Some(_))).then(|| {
+        Outcome::new("not_due")
+            .why(format!(
+                "this actor's talks were fetched {} s ago; the next fetch is due in {} s",
+                now.saturating_sub(last),
+                due.saturating_sub(now)
+            ))
+            .value()
+    })
 }
 
 /// F1: `trust` with the registry fetched again, when it is due, if this actor's key or the

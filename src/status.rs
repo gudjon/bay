@@ -227,7 +227,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     // § 11c: a fetching command on the recipient's machine accepts and acks its talks.
     let talk_accept = fetched_at
         .is_some()
-        .then(|| crate::talk::receive(&repo))
+        .then(|| crate::talk::poll::command(&repo, crate::live::unix_now()))
         .flatten();
     let chain = Chain::new(&repo.git);
     let ids = listed(
