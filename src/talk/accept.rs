@@ -600,14 +600,23 @@ fn push_moved(
     }
 }
 
-/// Fetches, fast-forward only, the talks this actor sent to others, so it sees their acks.
+/// The most sent talks one accept fetches: the newest open ones.
+const SENT_FETCH_MAX: usize = 64;
+
+/// Fetches, fast-forward only, the talks this actor sent to others that hold no close here, the
+/// newest [`SENT_FETCH_MAX`], so it sees their acks and answers. A chain takes no entry after its
+/// close, so there is nothing more to fetch; the list stays flat however many talks the actor has
+/// sent. An answered discovery talk is still fetched: a later answer may supersede its answer.
 fn fetch_sent(repo: &Repo, own: &str, me: &str) -> Result<(), String> {
-    let refspecs: Vec<String> = talks_where(&repo.git, TALK_PREFIX, |talk| {
-        !talk.name.starts_with(own) && talk.from_name() == me
-    })?
-    .into_iter()
-    .map(|talk| format!("{0}:{0}", talk.name))
-    .collect();
+    let mut sent = talks_where(&repo.git, TALK_PREFIX, |talk| {
+        !talk.name.starts_with(own) && talk.from_name() == me && !talk.has("close")
+    })?;
+    sent.sort_by(|a, b| (b.sent(), &b.id).cmp(&(a.sent(), &a.id)));
+    let refspecs: Vec<String> = sent
+        .iter()
+        .take(SENT_FETCH_MAX)
+        .map(|talk| format!("{0}:{0}", talk.name))
+        .collect();
     if refspecs.is_empty() {
         return Ok(());
     }
