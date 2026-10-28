@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.39
+
+- A landing makes no log scan and no place re-check after its own publishing push.
+
 ## 0.5.38
 
 - A head judges main red from the last judgement, reading only the landings and notes that moved.

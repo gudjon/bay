@@ -558,6 +558,10 @@ struct Ctx<'a> {
     /// A check of this operation runs ahead of its turn (`crate::throughput`): this process
     /// does not hold it, so no heartbeat renews a lease on its chain.
     ahead_of_turn: bool,
+    /// BACKLOG 99: the commit this process's own publishing push just landed, releasing the
+    /// operation's place in that push, so its landing reads nothing a later visit's would need:
+    /// no other runner can hold a terminal record of it, and its place is already released.
+    pushed_landing: Option<String>,
     /// G284: the operation this process re-armed from `APPROVAL_PENDING` because the evidence
     /// on its candidate, or trunk, changed ([`retry_blocked`]): that candidate is checked
     /// again, never rebuilt, while trunk stands where it was merged onto
@@ -594,6 +598,7 @@ impl<'a> Ctx<'a> {
             deferred: std::cell::RefCell::new(Vec::new()),
             retries_here: 0,
             ahead_of_turn: false,
+            pushed_landing: None,
             approved: None,
             yields: false,
         })
@@ -1730,8 +1735,10 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
                 .as_ref()
                 .is_some_and(|detail| detail["yielded"] == true)
     });
+    // BACKLOG 99: a landing of this process's own push released the place in that push.
     if let Some(at) = seq
         && !given_up
+        && ctx.pushed_landing.is_none()
         && holds_place(ctx, op_id)
         && !crate::queue::Queue::read(ctx.repo)?.released.contains(&at)
     {
@@ -1898,6 +1905,7 @@ fn run_attempts(
         ) {
             Ok(()) => {
                 kill_point("after-publish");
+                ctx.pushed_landing = Some(attempt.commit.clone());
                 return derive_landed(ctx, op_id, &revision, &attempt.commit);
             }
             Err(error) => {
@@ -2371,10 +2379,12 @@ fn land_batch<'a>(
     drop(anchors);
     for (index, member) in members.iter().enumerate().skip(1) {
         let other = &mut others[index - 1];
+        other.pushed_landing = Some(built[index].commit.clone());
         // A landing whose record could not be written now is derived from trunk on a later run.
         let _ = derive_landed(other, &member.op_id, &member.revision, &built[index].commit);
         other.tell_deferred();
     }
+    ctx.pushed_landing = Some(built[0].commit.clone());
     derive_landed(
         ctx,
         &members[0].op_id,
@@ -7816,13 +7826,17 @@ fn write_terminal(
     published: Option<&str>,
 ) -> Result<(), String> {
     let executor = ctx.executor_name();
-    crate::log::fetch(ctx.repo);
-    let existing = crate::log::records_for(&ctx.repo.git, &ctx.id)?;
-    if existing
-        .iter()
-        .any(|record| record["op_id"] == op_id && record["outcome"] == outcome)
-    {
-        return Ok(());
+    // BACKLOG 99: after this process's own push landed the operation, no runner can hold its
+    // terminal record (that push would have been refused), so no log is fetched to look for one.
+    if ctx.pushed_landing.is_none() {
+        crate::log::fetch(ctx.repo);
+        let existing = crate::log::records_for(&ctx.repo.git, &ctx.id)?;
+        if existing
+            .iter()
+            .any(|record| record["op_id"] == op_id && record["outcome"] == outcome)
+        {
+            return Ok(());
+        }
     }
     let op = ctx.op(op_id);
     let attempt = op.attempts.last();
