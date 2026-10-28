@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.42
+
+- A check's tree is made in bay's state directory, never under `.git`, where TypeScript dropped its symlinks (TS2742).
+- Stale check scratch is removed whole, read-only adapter copies too, and so are leftovers under `.git/bay/check`.
+- A box read path that holds the checks' scratch refuses the check, as one over the repository does.
+
 ## 0.5.41
 
 - Under `signing = "approvals"` a talk is sent, acked and answered unsigned, by actor name; no registry is needed.

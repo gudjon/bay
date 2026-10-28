@@ -4,7 +4,8 @@
 //! system files a program needs to start, a private `/tmp`, `/proc` and `/dev`, and nothing
 //! else. A file in the executor's `HOME`, in a temporary directory outside the repository, the
 //! box's global Git config and the repository's own `.git/config` are all absent, while the
-//! candidate's files are there. The network is denied unless the check's `[[check]]` entry says
+//! candidate's files are there. The check's scratch is under the executor's `HOME`
+//! (`check::scratch_root`), so `HOME` holds one entry there, `.local`, the path to it. The network is denied unless the check's `[[check]]` entry says
 //! `network = true`; that entry is judged at the base, so a candidate that adds it to its own
 //! policy does not get the network (the G26 property).
 //!
@@ -106,7 +107,14 @@ fn a_check_cannot_see_home_a_temporary_file_or_the_repository() {
     let repo_config = repo.join(".git").join("config");
     assert!(repo_config.is_file(), "{}", repo_config.display());
     let global = test_box.global_config.clone();
-    let before = sees_none_of(&[&in_home, &outside, &global, &repo_config, &test_box.home]);
+    // The check's scratch is under the executor's HOME (`check::scratch_root`), as a runner's
+    // store is on a box, so HOME exists in the sandbox as the path to that scratch: its one
+    // entry is `.local`, and nothing else of HOME is there.
+    let home = test_box.home.display();
+    let before = format!(
+        "{}\nseen=$(ls -A '{home}' 2>/dev/null); [ -z \"$seen\" ] || [ \"$seen\" = .local ] || {{ echo \"the check saw HOME: $seen\" >&2; exit 3; }}",
+        sees_none_of(&[&in_home, &outside, &global, &repo_config])
+    );
     let remote = test_box.path().join("repo-remote.git");
     test_box.seed_with_check(
         &repo,

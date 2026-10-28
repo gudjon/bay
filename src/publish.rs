@@ -5916,15 +5916,10 @@ fn run_policy(
 ) -> Result<(&'static str, Option<BayResult>), String> {
     let git = &ctx.repo.git;
     let base_tree = tree_of(git, trunk)?;
-    // The checks' scratch stays inside the git common dir: private to the repository, on its
-    // filesystem, and hidden from every check but its own part (G26, G62). Its path holds a
-    // `.git` part, so an adapter judges paths relative to its tree (G241).
-    let scratch = ctx
-        .repo
-        .common_dir
-        .join("bay")
-        .join("check")
-        .join(candidate_id);
+    // The checks' scratch is the repository's own, in bay's state directory, and hidden from
+    // every check but its own part (G26, G62). It is never under the repository: its path
+    // holds no `/.git`, which some tools leave out (G241, `check::scratch_root`).
+    let scratch = check::scratch_root(&ctx.repo.common_dir)?.join(candidate_id);
     // A fleet finding (2026-10-27): the scratch was removed only after a check run that
     // returned, so an error left it behind, and one box's runners held 17 GB of finished
     // candidates. It goes on every path out.

@@ -1057,7 +1057,8 @@ fn run_check(
     let look: &mut dyn FnMut(&check::Exchange) = &mut look;
     let ran = check::run_all(
         git,
-        &git_dir.join("bay/check").join(CANDIDATE_ID),
+        // Outside the repository's `.git`, as every check's scratch is (`check::scratch_root`).
+        &work.join("check").join(CANDIDATE_ID),
         &policy,
         &check::Candidate {
             commit: candidate,

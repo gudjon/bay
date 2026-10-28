@@ -356,12 +356,41 @@ pub struct Baseline {
     pub records: Vec<EvidenceRecord>,
 }
 
+/// The root of this repository's check scratch: `<bay state dir>/check/<id>`, `<id>` naming the
+/// repository's common directory, so each repository has its own.
+///
+/// Never under the repository: a tool may leave out every path that holds `/.git`, and then a
+/// tree there is not what it is elsewhere. TypeScript keeps no symlink whose path holds `/.git`,
+/// so in a pnpm workspace there it cannot name a type through the package that links it, and
+/// declarations fail with `TS2742` (a fleet's `world-fast`: 105 units, 2026-10-28).
+///
+/// # Errors
+///
+/// Neither `XDG_STATE_HOME` nor `HOME` is set.
+pub fn scratch_root(common_dir: &Path) -> Result<PathBuf, String> {
+    let state = crate::update::state_dir()
+        .ok_or("the check scratch needs XDG_STATE_HOME or HOME, and neither is set")?;
+    Ok(scratch_root_in(&state, common_dir))
+}
+
+/// [`scratch_root`] under the bay state directory `state`.
+#[must_use]
+pub fn scratch_root_in(state: &Path, common_dir: &Path) -> PathBuf {
+    let digest = crate::agent_settings::hex(&<sha2::Sha256 as sha2::Digest>::digest(
+        real(common_dir).as_os_str().as_encoded_bytes(),
+    ));
+    state.join("check").join(&digest[..16])
+}
+
 /// What an adapter, a check's or an input provider's, may neither read nor write (§ 7): the
-/// repository with every view in it, and every key this machine holds, so code under test can
-/// never read a producer key or write a signed record.
+/// repository with every view in it, the other checks' scratch, and every key this machine
+/// holds, so code under test can never read a producer key or write a signed record.
 #[must_use]
 pub fn hidden_for(repo: &crate::repo::Repo, keys: &crate::signing::Keys) -> Vec<PathBuf> {
     let mut hidden = vec![repo.work_root.clone(), repo.common_dir.clone()];
+    if let Ok(root) = scratch_root(&repo.common_dir) {
+        hidden.push(root);
+    }
     // A linked worktree bay was started in is the repository's too (a view is already under
     // the common directory).
     if let Ok(top) = Git::new(&repo.opened_in).run(&["rev-parse", "--show-toplevel"]) {
@@ -575,7 +604,8 @@ pub fn read_paths(git: &Git) -> Result<Vec<PathBuf>, String> {
 }
 
 /// G285: why a box read path is not bound: it lies inside a path a check never reads (the
-/// repository, a view, a key), or holds one, so binding it would show what is hidden.
+/// repository, a view, a key, the checks' scratch), or holds one, so binding it would show what
+/// is hidden.
 fn read_path_overlap(read: &[PathBuf], hidden: &[PathBuf]) -> Option<String> {
     read.iter().find_map(|path| {
         let path_real = real(path);
@@ -588,7 +618,7 @@ fn read_path_overlap(read: &[PathBuf], hidden: &[PathBuf]) -> Option<String> {
             .map(|hidden| {
                 format!(
                     "{READ_PATH_KEY} = \"{}\" overlaps {}, which a check never reads (the \
-                     repository, a view or a key)",
+                     repository, a view, a key or the checks' scratch)",
                     path.display(),
                     hidden.display()
                 )
@@ -1367,7 +1397,7 @@ fn run_once(
 ) -> Result<(Judged, Instant), String> {
     let budget = limits.budget;
     let dir = work_dir.join(format!("check-{index}"));
-    let _ = std::fs::remove_dir_all(&dir);
+    let _ = remove_tree(&dir);
     let tree_dir = dir.join("candidate");
     let adapter_dir = dir.join("adapter");
     // R14: with no sandbox and no choice by the box, nothing of the check runs. G285: nor
@@ -1940,7 +1970,7 @@ fn run_one(
     // names everything it could read: `PATH` from the policy, `HOME` and `TMPDIR` inside the
     // sandbox's scratch, `LANG=C.UTF-8`, bay's own `BAY_ADAPTER_DIR`, and the declared names.
     // The working directory is the candidate tree, the root an adapter judges its paths from:
-    // the tree's absolute path usually holds a `.git` part, a path inside it never does (G241).
+    // neither its absolute path nor a path inside it holds `/.git` (G241, `scratch_root`).
     cmd.current_dir(tree_dir)
         .env_clear()
         .env("BAY_ADAPTER_DIR", adapter_dir)
@@ -2439,6 +2469,21 @@ fn make_read_only(dir: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     walk(dir, 0o555, true);
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555));
+}
+
+/// Removes `dir` and everything in it. An adapter's copy is read-only, and `remove_dir_all`
+/// cannot unlink a file in a read-only directory, so every directory is made writable first
+/// (BACKLOG 114: such scratch outlived each removal, 1.6 GB on one runner, 2026-10-28).
+///
+/// # Errors
+///
+/// A part of `dir` that could not be removed; one that is already gone is no error.
+pub(crate) fn remove_tree(dir: &Path) -> std::io::Result<()> {
+    make_writable(dir);
+    match std::fs::remove_dir_all(dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        done => done,
+    }
 }
 
 #[cfg(unix)]

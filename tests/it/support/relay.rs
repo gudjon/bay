@@ -120,8 +120,10 @@ fn git_dirs(dir: &Path, depth: u32, found: &mut Vec<PathBuf>) {
     }
 }
 
-/// Every unanswered request: `<git dir>/bay/check/<candidate>/check-<n>/home/.bay-relay/<n>`
-/// for a check, `<git dir>/bay/inputs-run/<run>/home/.bay-relay/<n>` for an input provider.
+/// Every unanswered request: `<scratch root>/<candidate>/check-<n>/home/.bay-relay/<n>` for a
+/// check (the box's `HOME` is `<root>/home`, so each repository's scratch root is under
+/// `<root>/home/.local/state/bay/check/`, `check::scratch_root`), and
+/// `<git dir>/bay/inputs-run/<run>/home/.bay-relay/<n>` for an input provider.
 fn requests(root: &Path) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     git_dirs(root, 4, &mut dirs);
@@ -131,14 +133,15 @@ fn requests(root: &Path) -> Vec<PathBuf> {
             .unwrap_or_default()
     };
     let mut homes = Vec::new();
-    for git_dir in dirs {
-        let bay = git_dir.join("bay");
-        for candidate in children(&bay.join("check")) {
+    for scratch_root in children(&root.join("home/.local/state/bay/check")) {
+        for candidate in children(&scratch_root) {
             for check in children(&candidate) {
                 homes.push(check.join("home"));
             }
         }
-        for run in children(&bay.join("inputs-run")) {
+    }
+    for git_dir in dirs {
+        for run in children(&git_dir.join("bay").join("inputs-run")) {
             homes.push(run.join("home"));
         }
     }

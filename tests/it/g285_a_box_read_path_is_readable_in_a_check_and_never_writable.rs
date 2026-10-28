@@ -10,7 +10,11 @@
 //! in `sandbox_read`, next to `sandbox`. `bay doctor` lists them in its `check-read-paths` row,
 //! and a path that does not exist is degraded.
 //!
-//! The guards to mutate: in `src/check.rs`, `run_one` adds the box's paths to the run's
+//! A read path that overlaps the checks' scratch root refuses the check, as one over the
+//! repository does.
+//!
+//! The guards to mutate: in `src/check.rs`, `hidden_for` adds the scratch root (drop it, and a
+//! read path over the scratch is bound); `run_one` adds the box's paths to the run's
 //! read-only list with `read_only.extend(place.read.iter()...)` (drop it, and the read fails
 //! in the configured case); `src/check/sandbox.rs` `bwrap_args` binds each `read_only`
 //! directory with `"--ro-bind"` (make it `"--bind"`, and the write lands); `read_path` refuses
@@ -167,6 +171,31 @@ fn a_relative_read_path_refuses_the_check_by_name() {
             && text.contains("relative/store")
             && text.contains("is not an absolute path"),
         "the refusal does not name the relative read path: {refused}"
+    );
+}
+
+#[test]
+fn a_read_path_over_the_checks_scratch_refuses_the_check_by_name() {
+    // The checks' scratch is hidden like the repository (`check::hidden_for`): a read path that
+    // holds it would show every other check's tree to this one.
+    if support::sandbox().is_none() {
+        eprintln!("no check sandbox on this machine; G285 cannot run");
+        return;
+    }
+    let test_box = TestBox::new();
+    let store = store(&test_box);
+    add_read_path(&test_box, "~/.local/state");
+    let (_repo, view) = submitted(&test_box, &store);
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(
+        code, 10,
+        "a read path over the checks' scratch did not refuse the check: {refused}"
+    );
+    assert_eq!(refused["reason"], "CHECK_UNKNOWN", "{refused}");
+    let text = refused.to_string();
+    assert!(
+        text.contains("overlaps") && text.contains(".local/state/bay/check/"),
+        "the refusal does not name the checks' scratch: {refused}"
     );
 }
 

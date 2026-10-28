@@ -517,11 +517,7 @@ fn run_at(
         })
         .collect();
     let candidate_id = format!("{field}-{check}-{short}-{run}");
-    let scratch = repo
-        .common_dir
-        .join("bay")
-        .join("check")
-        .join(&candidate_id);
+    let scratch = check::scratch_root(&repo.common_dir)?.join(&candidate_id);
     let _cleanup = crate::run::Scratch(scratch.clone());
     let mut keep = |record: &mut EvidenceRecord| -> Result<(), String> {
         // Post evidence, as a post producer writes it: no pre-publication provenance. A warm

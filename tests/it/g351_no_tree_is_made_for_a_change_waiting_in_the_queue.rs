@@ -3,11 +3,11 @@
 //!
 //! A fleet's merge queue made each run's tree when the run joined the queue: 21 waiting trees
 //! held 41 GB of a box's disk. bay makes a candidate's check tree only when its check runs
-//! (`<git-common-dir>/bay/check/<candidate>`) and removes it when the check ends. So changes
+//! (`<scratch root>/<candidate>`, `check::scratch_root`) and removes it when the check ends. So changes
 //! waiting in the queue hold no tree and no worktree, and after the runner merges them none is
 //! left.
 //!
-//! Guard to mutate: `src/publish.rs`, the check step: drop the `remove_dir_all` of the checks'
+//! Guard to mutate: `src/run.rs`, the `Scratch` guard: drop its `remove_tree` of the checks'
 //! scratch (each merged change leaves its tree behind).
 
 use crate::support;
@@ -16,9 +16,11 @@ use std::path::{Path, PathBuf};
 
 use support::{TestBox, check_files, passing_result, result_json};
 
-/// The folders under `<repo>/.git/bay/check`; none when it does not exist.
-fn check_trees(repo: &Path) -> Vec<String> {
-    std::fs::read_dir(repo.join(".git/bay/check"))
+/// The folders under `repo`'s check scratch root; none when it does not exist.
+fn check_trees(test_box: &TestBox, repo: &Path) -> Vec<String> {
+    let root =
+        bay::check::scratch_root_in(&test_box.home.join(".local/state/bay"), &repo.join(".git"));
+    std::fs::read_dir(root)
         .map(|dir| {
             dir.filter_map(Result::ok)
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
@@ -62,12 +64,12 @@ fn queued_changes_hold_no_tree_and_merged_ones_leave_none() {
         assert_eq!(queued["decision"], "queued", "{queued}");
     }
     assert_eq!(
-        check_trees(&repo),
+        check_trees(&test_box, &repo),
         Vec::<String>::new(),
         "a waiting change made a tree"
     );
     assert_eq!(
-        check_trees(&runner),
+        check_trees(&test_box, &runner),
         Vec::<String>::new(),
         "a waiting change made a tree"
     );
@@ -91,7 +93,7 @@ fn queued_changes_hold_no_tree_and_merged_ones_leave_none() {
         "the runner merged them all: {main}"
     );
     assert_eq!(
-        check_trees(&runner),
+        check_trees(&test_box, &runner),
         Vec::<String>::new(),
         "a merged change left its tree"
     );

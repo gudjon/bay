@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::change::{Chain, ChangeRecord, EarlyConflict, HeldChain, OpState};
+use crate::check;
 use crate::publish;
 use crate::queue::Queue;
 use crate::receipts;
@@ -777,23 +778,29 @@ fn held_by(op: &crate::change::Operation, me: &str) -> bool {
 /// How long a check's scratch directory may stand untouched before a pass removes it.
 const STALE_SCRATCH: Duration = Duration::from_hours(6);
 
-/// Removes each check scratch directory under `<common-dir>/bay/check/` that nothing has
-/// touched for [`STALE_SCRATCH`]: a check that returns removes its own, so these are what a
-/// killed or re-executed process left (a fleet finding, 2026-10-27: 17 GB on one box's runners).
-/// A directory a running check writes to is newer than that, and is kept.
+/// Removes each check scratch directory of this repository that nothing has touched for
+/// [`STALE_SCRATCH`]: a check that returns removes its own, so these are what a killed or
+/// re-executed process left (a fleet finding, 2026-10-27: 17 GB on one box's runners). A
+/// directory a running check writes to is newer than that, and is kept. Both roots are swept:
+/// the scratch root ([`check::scratch_root`]) and `<common-dir>/bay/check/`, where a bay before
+/// 0.5.42 made its checks' trees.
 fn sweep_check_scratch(repo: &Repo) {
-    let Ok(entries) = std::fs::read_dir(repo.common_dir.join("bay").join("check")) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let stale = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|at| at.elapsed().ok())
-            .is_some_and(|age| age >= STALE_SCRATCH);
-        if stale && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            let _ = std::fs::remove_dir_all(entry.path());
+    let mut roots = vec![repo.common_dir.join("bay").join("check")];
+    roots.extend(check::scratch_root(&repo.common_dir));
+    for root in roots {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let stale = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|age| age >= STALE_SCRATCH);
+            if stale && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                let _ = check::remove_tree(&entry.path());
+            }
         }
     }
 }
