@@ -682,9 +682,10 @@ impl Repo {
     }
 
     /// Every change chain of the remote, read by [`Repo::remote_chain`]'s rule in one batch:
-    /// one fast-forward fetch of them all. Only when git refuses some ref is each chain whose
-    /// local head differs from the remote's read on its own, so a batch the remote and this
-    /// store agree on costs one fetch, however many chains there are (G200b).
+    /// one fast-forward fetch of them all. Only when git refuses some ref are the chains whose
+    /// local head differs from the remote's read again, together in one more fetch
+    /// ([`Repo::remote_chains`]), so a pass costs a fetch or two however many chains there are
+    /// or differ (G200b, G426).
     ///
     /// # Errors
     ///
@@ -709,17 +710,20 @@ impl Repo {
         let local = self
             .git
             .run(&["for-each-ref", "--format=%(objectname) %(refname)", prefix])?;
-        for (head, name) in listed.lines().filter_map(|line| line.split_once('\t')) {
-            let Some(change) = name.strip_prefix(prefix) else {
-                continue;
-            };
-            let same = local
-                .lines()
-                .any(|line| line.split_once(' ') == Some((head, name)));
-            if !same {
-                let _ = self.remote_chain(change);
-            }
-        }
+        let differing: Vec<String> = listed
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .filter(|&(head, name)| {
+                !local
+                    .lines()
+                    .any(|line| line.split_once(' ') == Some((head, name)))
+            })
+            .filter_map(|(_, name)| name.strip_prefix(prefix).map(str::to_owned))
+            .collect();
+        // G426 (a fleet finding, 2026-10-28): the chains the glob fetch refused are read in one
+        // fetch, never one or two each. A chain apart from the remote stays refused pass after
+        // pass, and each single fetch cost about fifty seconds on a loaded box.
+        self.remote_chains(&differing);
         Ok(())
     }
 

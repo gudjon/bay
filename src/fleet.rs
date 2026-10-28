@@ -163,6 +163,17 @@ fn recorded(repo: &Repo, remote: &str, url: &str) -> Result<Option<Fetched>, Str
     }))
 }
 
+/// G427: how long ago, on this machine's clock, the recorded fetch of the fleet refs ran;
+/// `None` when this cache records none, or its time cannot be read.
+#[must_use]
+pub fn fetched_age_s(repo: &Repo) -> Option<u64> {
+    let url = repo.git.remote_url(repo.remote()).ok()??;
+    let fetched = recorded(repo, repo.remote(), &url).ok()??;
+    let at = unix_of(&fetched.at)?;
+    // The record is stamped on this machine's own clock, so its age is read on that clock too.
+    Some(crate::live::unix_now().saturating_sub(at))
+}
+
 /// `bay status`'s fetch of the remote's live refs into [`FLEET_PREFIX`], pruned to what the
 /// remote holds, then the record [`recorded`] reads. Best effort, as the trunk fetch is: a
 /// failed fetch keeps the earlier record, whose age `--all` shows. A summary commit the

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.32
+
+- A runner keeps its presence fresh while it runs a post check, so no other runner takes its work.
+- A post check keyed by its commit no longer turns batching off; only pre-merge checks decide.
+- A newer revision never takes a queue place already released; it joins at its own turn.
+- A head left waiting for a worker is taken at once by a runner that serves it.
+- A wait for a worker ends once main's policy no longer needs that environment for the change.
+- A pass reads every chain its fetch refused in one more fetch, never one fetch each.
+- The no-runner session line refreshes a stale record of runners first, so it is never said falsely.
+- A head that cannot land refuses before its input providers run: merge first, then main's red.
+- Main's red is judged once per tip in a runner, never once for each head.
+- A runner's journal names its claim, batch, red, evidence and join steps, and each post check.
+
 ## 0.5.31
 
 - A runner's journal line says how many seconds each step of a change took.

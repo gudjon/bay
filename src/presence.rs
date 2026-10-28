@@ -98,6 +98,19 @@ impl Beat {
         work: impl FnOnce() -> T,
     ) -> T {
         self.publish(repo, Some(holding), queue_depth);
+        self.meanwhile(repo, holding, queue_depth, work)
+    }
+
+    /// Beats once a heartbeat on a thread of its own while `work` runs, never before it, so work
+    /// that ends within a heartbeat writes nothing: a pass's post work, which mostly finds
+    /// nothing to run, never renames the operation the presence names (G423).
+    pub fn meanwhile<T>(
+        &mut self,
+        repo: &Repo,
+        holding: &str,
+        queue_depth: usize,
+        work: impl FnOnce() -> T,
+    ) -> T {
         let mut ticker = Self {
             git: self.git.clone(),
             interval_s: self.interval_s,

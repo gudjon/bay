@@ -509,9 +509,37 @@ fn pass_on_or_release(
 ) -> Result<(), String> {
     let signer = Keys::load(&repo.git).executor;
     match record.and_then(|record| successor(record, &entry.op_id)) {
-        Some(next) => crate::queue::replace(repo, signer.as_ref(), entry, &next),
+        // A place released meanwhile is not replaced; the newer operation joins at its turn.
+        Some(next) => crate::queue::replace(repo, signer.as_ref(), entry, &next).map(|_| ()),
         None => crate::queue::release(repo, signer.as_ref(), entry.seq, &entry.op_id, reason),
     }
+}
+
+/// The journal words for one piece of post work: each post check run, as `post <check> on
+/// <tip>: <verdict>`, or the warm or bisect work by its kind.
+fn post_line(done: &Value) -> String {
+    if let Some(rows) = done.get("post").and_then(Value::as_array) {
+        let runs: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                let tip: String = row["tip"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(10)
+                    .collect();
+                format!(
+                    "post {} on {tip}: {}",
+                    row["check"].as_str().unwrap_or("?"),
+                    row["verdict"].as_str().unwrap_or("?")
+                )
+            })
+            .collect();
+        return runs.join("; ");
+    }
+    done.as_object()
+        .and_then(|object| object.keys().next())
+        .map_or_else(|| "post work".to_owned(), |kind| format!("{kind} work"))
 }
 
 /// A state's snake-case word, as the change chain spells it.
@@ -536,6 +564,7 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 ///
 /// N-7: after the queue's work, the targets with `advance = true` are fast-forwarded to their
 /// newest promotable commit (`crate::target::advance`); each move goes to `advanced`.
+#[allow(clippy::too_many_lines)]
 fn pass(
     repo: &Repo,
     binary: Option<&Binary>,
@@ -639,15 +668,31 @@ fn pass(
     // A fleet finding (2026-10-27, 0.5.28): a pass also skipped this work once past its bound, and
     // with a deep queue every pass reaches its bound, so no post check ran at all. One job a pass
     // is the bound; the runner that holds the head does none (`holds_the_head`).
+    // G423 (a fleet finding, 2026-10-28): a post check runs for minutes, and its runner wrote no
+    // presence meanwhile, so the others read it as gone and took work only it serves, which then
+    // waited out a lease. It beats once a heartbeat while that work runs.
     if !holds_the_head(repo) {
-        if let Some(post) = crate::bisect::tips(repo) {
-            ran.push(json!({"post": post}));
-        } else if let Some(warm) = crate::bisect::warm(repo) {
-            ran.push(json!({"warm": warm}));
-        } else if let Some(bisect) = crate::bisect::run(repo) {
-            // G244d: after the queue's work, never ahead of it, the culprit of a red post check.
-            ran.push(json!({"bisect": bisect}));
+        let began = std::time::Instant::now();
+        let work = beat.meanwhile(repo, "post", depth, || {
+            if let Some(post) = crate::bisect::tips(repo) {
+                Some(json!({"post": post}))
+            } else if let Some(warm) = crate::bisect::warm(repo) {
+                Some(json!({"warm": warm}))
+            } else {
+                // G244d: after the queue's work, never ahead of it, the culprit of a red post
+                // check.
+                crate::bisect::run(repo).map(|bisect| json!({"bisect": bisect}))
+            }
+        });
+        // E21: post work writes its own journal line, as an operation does.
+        if let Some(done) = &work {
+            eprintln!(
+                "bay runner: {} ({}s)",
+                post_line(done),
+                began.elapsed().as_secs()
+            );
         }
+        ran.extend(work);
     }
     // A fleet finding (2026-10-27): a retention cut costs a fetch of its chain, and one that
     // does not happen leaves the chain due again; read inside the loop, hundreds of closed chains
@@ -789,7 +834,11 @@ fn run_op(
     let result = beat.during(repo, op_id, depth, || {
         publish::execute(repo, id, op_id, &step).unwrap_or_else(BayResult::failed)
     });
-    let result = receipted(repo, id, step.get(), result).with_op(op_id.to_owned());
+    // E21: what follows the operation (its receipt, the conflicts it tells the line of) is its
+    // own step, never the last one the operation set. The receipt names that last one.
+    let last = step.get();
+    step.set("record");
+    let result = receipted(repo, id, last, result).with_op(op_id.to_owned());
     // Trunk moved: what waits behind the new head hears of a conflict now (G177).
     if result.decision == Decision::Landed
         && let Ok(queue) = Queue::read(repo)
@@ -1229,6 +1278,22 @@ mod tests {
             committed,
             record,
         }
+    }
+
+    /// E21: post work writes a journal line naming each check, its tip and its verdict.
+    #[test]
+    fn post_work_names_each_check_its_tip_and_verdict() {
+        let done = serde_json::json!({"post": [
+            {"check": "suite", "tip": "24e619a45e67bf46", "verdict": "product_failure"},
+        ]});
+        assert_eq!(
+            super::post_line(&done),
+            "post suite on 24e619a45e: product_failure"
+        );
+        assert_eq!(
+            super::post_line(&serde_json::json!({"bisect": {}})),
+            "bisect work"
+        );
     }
 
     /// A fleet finding (2026-10-27): a change reopened after it merged kept a revision

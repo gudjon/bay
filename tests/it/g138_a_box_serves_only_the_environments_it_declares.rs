@@ -4,7 +4,9 @@
 //! `bay.checkEnvironment`, globally or for one clone, never in `.bay/config.toml`. An executor
 //! whose box does not serve a required environment records `CHECK_UNAVAILABLE` on the
 //! operation, runs nothing and stops renewing its lease, so an executor whose box serves it
-//! claims the operation after the lease, with a higher epoch, and lands it once. While it waits,
+//! claims the operation at once, with a higher epoch, and lands it once (G425: a waiting
+//! operation holds no lease against a box that serves it). A wait recorded under an older
+//! policy keeps only the environments the policy at trunk still requires (G431). While it waits,
 //! `bay status` says it waits for a worker and names the environment. Doctor's `environments`
 //! row names what the box serves and whether that was declared. A box that declares nothing
 //! serves every environment, as before the declaration existed, so an upgrade stops no executor
@@ -22,6 +24,12 @@ use support::{TestBox, check_files, passing_result, result_json, row};
 /// A trunk whose one required check runs in `env-b` and appends a line to `runs` each time it
 /// runs, and a change submitted for an executor. Returns (change id, repo, remote, runs).
 fn submitted(test_box: &TestBox) -> (String, PathBuf, PathBuf, PathBuf) {
+    submitted_with(test_box, None)
+}
+
+/// [`submitted`], with `.bay/config.toml` set to `config` (the test seed keeps a lease the
+/// config names, and gives every other one two seconds).
+fn submitted_with(test_box: &TestBox, config: Option<&str>) -> (String, PathBuf, PathBuf, PathBuf) {
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
     let runs = test_box.path().join("runs");
@@ -33,6 +41,7 @@ fn submitted(test_box: &TestBox) -> (String, PathBuf, PathBuf, PathBuf) {
     )
     .into_iter()
     .map(|(path, text)| (path, text.replace("\"local\"", "\"env-b\"")))
+    .chain(config.map(|text| (".bay/config.toml".to_owned(), text.to_owned())))
     .collect();
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let (id, view) = test_box.start_and_edit(&repo);
@@ -59,7 +68,7 @@ fn line_count(path: &Path) -> usize {
 
 /// E1 declares `env-a` and E2 declares `env-b`, under a policy that needs `env-b`. E1 records
 /// `CHECK_UNAVAILABLE`, runs nothing, and keeps making passes that never renew the lease; E2
-/// claims the operation after one lease with epoch 2 and lands it once.
+/// claims the operation with epoch 2 and lands it once.
 #[test]
 fn a_box_serves_only_the_environments_it_declares() {
     let test_box = TestBox::new();
@@ -84,7 +93,7 @@ fn a_box_serves_only_the_environments_it_declares() {
     assert_eq!(op["environments"], serde_json::json!(["env-b"]), "{status}");
     assert_eq!(op["owner"], "exec-a", "{status}");
 
-    // E1 keeps passing over the operation while E2 watches its lease: it never renews it.
+    // E1 keeps passing over the operation and never renews its lease.
     let mut looping = test_box
         .bay_process(&e1)
         .args(["--json", "runner", "run", "--interval-s", "1"])
@@ -291,4 +300,64 @@ fn a_box_that_cannot_serve_the_head_leaves_it_to_a_live_one_that_can() {
     let mut both = vec![first, second];
     both.sort();
     assert_eq!(landed, both, "the box that serves env-b merged both");
+}
+
+/// G425 (a fleet finding, 2026-10-28): an operation its holder left waiting for a worker holds
+/// no lease against a box that serves it. Before, that box watched a full lease, ten minutes
+/// on one fleet, while it ran nothing else, and only then took it over.
+#[test]
+fn a_box_that_serves_a_waiting_operation_takes_it_at_once() {
+    let test_box = TestBox::new();
+    let (id, _repo, remote, runs) =
+        submitted_with(&test_box, Some("[runner]\nlease_s = 60\nheartbeat_s = 1\n"));
+    let e1 = executor(&test_box, &remote, "exec-a", "env-a");
+    let e2 = executor(&test_box, &remote, "exec-b", "env-b");
+    let first = test_box.bay_ok(&e1, &["runner", "run", "--once"]);
+    assert_eq!(
+        first["detail"]["ran"][0]["reason"], "CHECK_UNAVAILABLE",
+        "{first}"
+    );
+    let started = std::time::Instant::now();
+    let second = test_box.bay_ok(&e2, &["runner", "run", "--once"]);
+    let took = started.elapsed();
+    assert_eq!(second["detail"]["ran"][0]["decision"], "merged", "{second}");
+    assert_eq!(test_box.trunk_change_ids(&remote), vec![id]);
+    assert_eq!(line_count(&runs), 1, "one check ran, on E2");
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "E2 watched {took:?} before it took the waiting operation; the lease is 60 s"
+    );
+}
+
+/// G431 (a fleet finding, 2026-10-28): a wait recorded under an older policy names an
+/// environment the policy at trunk no longer requires of the change. Only an environment still
+/// required keeps the wait, so a box that serves what the policy now needs takes the change;
+/// before, every box that did not serve the recorded one passed it over for hours.
+#[test]
+fn a_wait_for_an_environment_the_policy_no_longer_needs_is_over() {
+    let test_box = TestBox::new();
+    let (id, repo, remote, runs) = submitted(&test_box);
+    let e1 = executor(&test_box, &remote, "exec-a", "env-a");
+    let first = test_box.bay_ok(&e1, &["runner", "run", "--once"]);
+    assert_eq!(
+        first["detail"]["ran"][0]["reason"], "CHECK_UNAVAILABLE",
+        "{first}"
+    );
+    // The policy moves the check to env-a, which E1 serves.
+    test_box.git_ok(&repo, &["checkout", "-q", "main"]);
+    test_box.git_ok(&repo, &["pull", "-q", "--ff-only", "origin", "main"]);
+    let policy = std::fs::read_to_string(repo.join(".bay/policy.toml")).unwrap();
+    std::fs::write(
+        repo.join(".bay/policy.toml"),
+        policy.replace("\"env-b\"", "\"env-a\""),
+    )
+    .unwrap();
+    test_box.git_ok(&repo, &["commit", "-q", "-am", "the check runs in env-a"]);
+    test_box.git_ok(&repo, &["push", "-q", "origin", "HEAD:main"]);
+    let second = test_box.bay_ok(&e1, &["runner", "run", "--once"]);
+    assert!(
+        test_box.trunk_change_ids(&remote).contains(&id),
+        "a wait for env-b outlived the policy that asked for it: {second}"
+    );
+    assert_eq!(line_count(&runs), 1, "one check ran, on E1");
 }

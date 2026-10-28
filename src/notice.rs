@@ -907,7 +907,18 @@ pub const NO_EXECUTOR: &str = "bay: no runner is running for this repository; qu
 #[must_use]
 pub fn no_executor(repo: &Repo, state_dir: &Path) -> Option<&'static str> {
     let mut cursor = read(state_dir).ok()?;
-    let waiting = crate::presence::no_live_executor(repo, crate::presence::queued(repo)).is_some();
+    // G427 (a fleet finding, 2026-10-28): presence is judged from the last recorded fetch of
+    // the fleet refs, which only `bay status` made. On a store where no one ran it for a
+    // presence window, every presence read stale and every session was told no runner runs
+    // while runners merged; a seat that believes it starts one of its own. A record older than
+    // the window is fetched again first, and one that still cannot be had tells nothing.
+    let window = repo.config.takeover().as_secs();
+    let fresh = |repo: &Repo| crate::fleet::fetched_age_s(repo).is_some_and(|age| age <= window);
+    if !fresh(repo) {
+        crate::fleet::fetch(repo);
+    }
+    let waiting = fresh(repo)
+        && crate::presence::no_live_executor(repo, crate::presence::queued(repo)).is_some();
     if waiting == cursor.no_executor {
         return None;
     }

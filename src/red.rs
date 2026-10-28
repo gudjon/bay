@@ -291,8 +291,42 @@ struct Moved {
 ///
 /// A git fault, or a committed config bay cannot read.
 pub fn red(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Vec<Red>, String> {
-    Ok(state(git, trunk, registry)?.red)
+    // G430 (a fleet finding, 2026-10-28): judged once per main tip, registry and evidence in this
+    // process. Every head's turn judged the whole window from scratch, five to twelve minutes a
+    // head on a loaded box with a window of 250, though nothing it reads had changed since the
+    // head before. A new record moves an evidence tip, so it is judged again.
+    static LAST: std::sync::Mutex<Option<(String, Vec<Red>)>> = std::sync::Mutex::new(None);
+    let key = format!(
+        "{trunk} {} {:?}",
+        registry.map_or("", |registry| registry.commit.as_str()),
+        evidence_tips(git)?
+    );
+    if let Ok(last) = LAST.lock()
+        && let Some((judged, reds)) = last.as_ref()
+        && *judged == key
+    {
+        return Ok(reds.clone());
+    }
+    if TEST_HOOKS && let Some(path) = std::env::var_os("BAY_TEST_RED_TRACE") {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(file, "{trunk}");
+        }
+    }
+    let reds = state(git, trunk, registry)?.red;
+    if let Ok(mut last) = LAST.lock() {
+        *last = Some((key, reds.clone()));
+    }
+    Ok(reds)
 }
+
+/// A test build writes a line to the file `BAY_TEST_RED_TRACE` names for each judgement
+/// [`red`] makes in full (G430); a release build never reads the variable.
+const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
 
 /// The red and the pending checks of `trunk` (G244, NEW-6).
 ///

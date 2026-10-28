@@ -89,6 +89,12 @@ fn an_agents_own_save_takes_its_hooks_lock_and_a_terminals_does_not() {
         &[
             (".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned()),
             (".gitattributes".to_owned(), "art/** lockable\n".to_owned()),
+            // A lock is held for the takeover window, twice the lease; the seed's two-second
+            // lease let the agent's lock lapse before the terminal's save on a loaded box.
+            (
+                ".bay/config.toml".to_owned(),
+                "[runner]\nlease_s = 30\nheartbeat_s = 1\n".to_owned(),
+            ),
         ],
     );
     let remote = test_box.path().join("repo-remote.git");

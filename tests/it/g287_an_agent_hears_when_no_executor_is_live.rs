@@ -85,10 +85,20 @@ fn last_line(repo: &Path, session: &str) -> Value {
 
 /// A repository set up for bay with no checks, its remote, and a clone an executor runs in.
 fn seeded() -> (TestBox, PathBuf, PathBuf) {
+    seeded_with(None)
+}
+
+/// [`seeded`], with `.bay/config.toml` set to `config` (the seed keeps a lease the config
+/// names, and gives every other one two seconds).
+fn seeded_with(config: Option<&str>) -> (TestBox, PathBuf, PathBuf) {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
-    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &unchecked_files());
+    let mut files = unchecked_files();
+    if let Some(config) = config {
+        files.push((".bay/config.toml".to_owned(), config.to_owned()));
+    }
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let executor = test_box.clone_of(&remote, "executor");
     (test_box, repo, executor)
 }
@@ -142,4 +152,39 @@ fn queued_work_with_no_executor_is_told_once_per_state() {
     let stale = prompt(&test_box, &repo, "s-1", 3600);
     assert!(stale.contains(LINE), "{stale}");
     assert!(!prompt(&test_box, &repo, "s-1", 3600).contains(LINE));
+}
+
+/// G427 (a fleet finding, 2026-10-28): the line judges presence from the last recorded fetch of
+/// the fleet refs, which only `bay status` makes. A record older than the presence window is
+/// fetched again first, so a live runner whose newer presence the record lacks is never
+/// reported missing, which sent seats to start runners of their own.
+#[test]
+fn a_live_runner_is_never_reported_missing_from_an_old_record() {
+    // A takeover window of ten seconds: twice this lease.
+    let (test_box, repo, executor) = seeded_with(Some("[runner]\nlease_s = 5\nheartbeat_s = 1\n"));
+    // A session with a cursor, which is what the line is told to.
+    let started = hook(&test_box, &repo, "s-1", "session.start", 0);
+    assert!(!started.contains(LINE), "{started}");
+    let pass = || {
+        let (code, ran) = result_json(test_box.bay(&executor).args([
+            "runner",
+            "run",
+            "--once",
+            "--interval-s",
+            "1",
+        ]));
+        assert_eq!(code, 0, "{ran}");
+    };
+    pass();
+    let (code, status) = result_json(test_box.bay(&repo).arg("status"));
+    assert_eq!(code, 0, "{status}");
+    // The record ages past the window while the runner writes a newer presence it lacks.
+    std::thread::sleep(std::time::Duration::from_secs(12));
+    pass();
+    queue_one(&test_box, &repo);
+    let told = prompt(&test_box, &repo, "s-1", 0);
+    assert!(
+        !told.contains(LINE),
+        "a live runner was reported missing from an old record: {told}"
+    );
 }

@@ -1559,7 +1559,7 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     if let Some(refusal) = verify_request(ctx, op_id)? {
         return Ok(refusal);
     }
-    if let Some(waiting) = waits_for_worker(ctx, op_id) {
+    if let Some(waiting) = waits_for_worker(ctx, op_id, &revision, &trunk) {
         return Ok(waiting);
     }
     // B3: a change whose own config does not load never waits in line for a merge that would
@@ -1829,6 +1829,8 @@ fn batch(
     at: u64,
 ) -> Result<Option<BayResult>, String> {
     let repo = ctx.repo;
+    // E21: each part of a head's work names its own step, so a line says where the time went.
+    ctx.step.set("batch");
     let Some((policy, members, stopped)) = batch_plan(ctx, op_id, revision, trunk, at)? else {
         return Ok(None);
     };
@@ -1853,6 +1855,7 @@ fn batch(
         return Ok(None);
     }
     let landing = &members[..search.passed()];
+    ctx.step.set("join");
     let mut others = Vec::new();
     for member in &landing[1..] {
         if let Ok(Some(other)) = joined(ctx, member, trunk) {
@@ -1956,17 +1959,7 @@ fn batch_plan(
     };
     // R7, G420: a rule that keeps every batch off says so in the journal, as a batch that ends
     // does (measured 2026-10-27: one changed-only check kept a fleet's batches off unseen).
-    let commit_keyed = policy.checks.iter().find(|entry| entry.commit_keyed());
-    let why = if let Some(entry) = commit_keyed {
-        format!("check {} is keyed by its commit", entry.id)
-    } else if policy.unchecked {
-        "the policy is unchecked".to_owned()
-    } else if !ctx.reuse_trusted(trunk) {
-        "the policy does not reuse unsigned evidence".to_owned()
-    } else {
-        String::new()
-    };
-    if !why.is_empty() {
+    if let Some(why) = no_batch(ctx, &policy, trunk) {
         eprintln!("bay runner: {op_id} no batch: {why}");
         return Ok(None);
     }
@@ -2040,6 +2033,25 @@ fn batch_plan(
     }
     said("planned", stopped);
     Ok(Some((policy, members, stopped)))
+}
+
+/// Why no batch forms on `trunk` under `policy`, whatever the change: a pre-merge check keyed
+/// by its commit, an unchecked policy, or unsigned evidence the policy does not reuse. A post
+/// check judges main's tip after a landing, never a batch's candidate, so its keying never
+/// keeps a batch off (G420). The head and every speculating runner read this one rule, so they
+/// plan alike.
+fn no_batch(ctx: &Ctx, policy: &policy::Policy, trunk: &str) -> Option<String> {
+    if let Some(entry) = policy
+        .checks
+        .iter()
+        .find(|entry| entry.stage != policy::Stage::Post && entry.commit_keyed())
+    {
+        return Some(format!("check {} is keyed by its commit", entry.id));
+    }
+    if policy.unchecked {
+        return Some("the policy is unchecked".to_owned());
+    }
+    (!ctx.reuse_trusted(trunk)).then(|| "the policy does not reuse unsigned evidence".to_owned())
 }
 
 /// How many members a batch is planned with: `max`, or fewer while recent checks fail
@@ -2860,7 +2872,8 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
         // A newer revision takes its entry's place, the head's too (the trust-agents ruling,
         // 2026-10-26: a head revised to repair it was sent behind 120 changes). A head revised
         // again and again is still bounded by its deadline releases.
-        crate::queue::replace(ctx.repo, signer.as_ref(), &older, op_id)?;
+        // A place released since the read is not replaced (G424): this revision joins behind.
+        let _ = crate::queue::replace(ctx.repo, signer.as_ref(), &older, op_id)?;
         queue = crate::queue::Queue::read(ctx.repo)?;
     }
     // § 6: a head released because no worker answered rejoins at the back once it is served
@@ -2998,6 +3011,7 @@ fn ahead_of_turn(ctx: &mut Ctx, op_id: &str, trunk: &str, mut result: BayResult)
     if result.decision != Decision::Queued || (config.ahead() == 0 && !config.footprint_lanes()) {
         return result;
     }
+    ctx.step.set("ahead");
     let precheck = match precheck(ctx, op_id, trunk) {
         Ok(None) => return result,
         Ok(Some(precheck)) => precheck,
@@ -3153,7 +3167,7 @@ fn speculate_batch(
     let Ok(Some(at_trunk)) = policy::load_at(git, trunk) else {
         return Ok(None);
     };
-    if !ctx.reuse_trusted(trunk) || at_trunk.unchecked {
+    if no_batch(ctx, &at_trunk, trunk).is_some() {
         return Ok(None);
     }
     let queue = crate::queue::Queue::local(git)?;
@@ -3336,6 +3350,8 @@ fn claim(
     revision: &str,
     trunk: &str,
 ) -> Result<Option<BayResult>, String> {
+    // A lease watched out here is the claim's time, never the fetch's.
+    ctx.step.set("claim");
     if ctx.refetch().is_err() {
         // Offline or unpushed: the local chain is the newest this executor can see.
         ctx.pushed_head = None;
@@ -3351,11 +3367,16 @@ fn claim(
     let Some(op) = ctx.find_op(op_id) else {
         return Err(CHAIN_MOVED.to_owned());
     };
-    // An operation this executor left waiting for a worker holds no lease against it: it
-    // takes it back at once once its box serves it (§ 7).
-    let own_wait = op.unavailable.is_some() && op.owner.as_deref() == Some(name.as_str());
+    // An operation waiting for a worker holds no lease against a box that serves it: its holder
+    // recorded that it cannot run it and writes nothing more, so this executor, its own holder
+    // or another, takes it at once (§ 7). A box that does not serve it passed it over already
+    // (`waits_for_worker`). G425 (a fleet finding, 2026-10-28): each serving runner watched a
+    // full lease, ten minutes, before taking over a head another runner had left waiting, and
+    // ran nothing meanwhile. The claim raises the epoch by compare-and-swap, so two serving
+    // runners never both hold it.
+    let waiting = op.unavailable.is_some();
     let held =
-        op.owner.is_some() && matches!(op.state, OpState::Running | OpState::Checked) && !own_wait;
+        op.owner.is_some() && matches!(op.state, OpState::Running | OpState::Checked) && !waiting;
     // Another process holds the operation: take it over only once its lease expired, on this
     // process's own clock. A restarted supervisor watches a full lease again. A holder whose
     // executor key the registry revoked holds no lease (§ 10a).
@@ -4253,6 +4274,7 @@ fn red_gate(
     revision: &str,
     trunk: &str,
 ) -> Result<Option<BayResult>, String> {
+    ctx.step.set("red");
     let git = &ctx.repo.git;
     let reds = crate::red::red(git, trunk, ctx.registry.as_ref())?;
     if reds.is_empty() {
@@ -4953,16 +4975,6 @@ fn build_and_check(
     trunk: &str,
     approved: Option<Attempt>,
 ) -> Result<Result<Attempt, BayResult>, String> {
-    let judged = match input_gate(ctx, op_id, revision, trunk)? {
-        Ok(judged) => judged,
-        Err(refusal) => return Ok(Err(refusal)),
-    };
-    // NEW-4: a red trunk holds landings; a lane change never lands, so its checks run.
-    if ctx.record.lane.is_none()
-        && let Some(red) = red_gate(ctx, op_id, revision, trunk)?
-    {
-        return Ok(Err(red));
-    }
     let again = approved.is_some();
     // G284: the candidate an approval arrived for, on the trunk it was merged onto: that same
     // commit is checked again, so the evidence it already has answers its checks.
@@ -5011,6 +5023,22 @@ fn build_and_check(
     };
 
     // Step 4: check the exact candidate under the policy at its base.
+    // NEW-4: a red trunk holds landings; a lane change never lands, so its checks run.
+    // G428, G429 (fleet findings, 2026-10-28): asked once the candidate merges, and before the
+    // input providers run, as a batch asks it first. A head that conflicted with main judged
+    // main's red for minutes before its twenty-second merge refused it.
+    if ctx.record.lane.is_none()
+        && let Some(red) = red_gate(ctx, op_id, revision, trunk)?
+    {
+        return Ok(Err(red));
+    }
+    // G429 (a fleet finding, 2026-10-28): the input providers run once the candidate is known to
+    // merge and to be landable. A head that conflicted with main ran them for four to eight
+    // minutes first; they judge main's version of an input, never the merged candidate.
+    let judged = match input_gate(ctx, op_id, revision, trunk)? {
+        Ok(judged) => judged,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
     ctx.step.set("check");
     let (has_policy, verdict, refusal) = check_candidate(
         ctx,
@@ -5718,7 +5746,7 @@ fn counted_and_carried(
 /// Runs `policy`'s checks on the candidate with the adapter materialized from `adapter_from`,
 /// and combines the evidence on its tree under that policy's manifest. `change` is the change
 /// the candidate lands, when it lands one (a batch's lands several).
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_policy(
     ctx: &Ctx,
     op_id: &str,
@@ -5744,6 +5772,9 @@ fn run_policy(
     // returned, so an error left it behind, and one box's runners held 17 GB of finished
     // candidates. It goes on every path out.
     let _cleanup = crate::run::Scratch(scratch.clone());
+    // E21: what is read before the checks run (provenance, the evidence that already answers
+    // them, the changed paths) is its own step; about a minute before each bisection run.
+    ctx.step.set("evidence");
     let (producer, producer_signer) = ctx.producer()?;
     // A candidate's own new policy reaches trunk through this publication; the base's policy
     // reached it however its paths last changed.
@@ -5782,6 +5813,7 @@ fn run_policy(
         }
         evidence::append(git, &producer, record)
     };
+    ctx.step.set("check");
     let check::Ran {
         records,
         unavailable: outage,
@@ -6221,17 +6253,24 @@ fn live_runner_serving(ctx: &Ctx, environments: &[String]) -> bool {
 /// box does not serve what it waits for, and, after an adapter's `unavailable` answer, until
 /// its rejoin gap has passed ([`rejoin_gap`]). Writing nothing is what lets the lease of the
 /// executor that recorded the wait lapse, so an executor that serves it takes it over (§ 9a).
-fn waits_for_worker(ctx: &Ctx, op_id: &str) -> Option<BayResult> {
+fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Option<BayResult> {
     let op = ctx.op(op_id);
     let waiting = op.unavailable.as_ref()?;
     if op.state.is_terminal() || op.state == OpState::Blocked {
         return None;
     }
     let served = check::Served::read(&ctx.repo.git);
-    let unserved = waiting
-        .environments
-        .iter()
-        .any(|environment| !served.serves(environment));
+    // G431 (a fleet finding, 2026-10-28): a wait recorded under an older policy named an
+    // environment the policy at trunk no longer requires of this change, and every runner that
+    // did not serve it passed the change over for hours. Only an environment still required
+    // keeps the wait; a policy that cannot be read keeps every one.
+    let still = required_environments(ctx, revision, trunk);
+    let unserved = waiting.environments.iter().any(|environment| {
+        !served.serves(environment)
+            && still
+                .as_ref()
+                .is_none_or(|still| still.contains(environment))
+    });
     let early = waiting.adapter.is_some() && {
         let gap = rejoin_gap(ctx.repo.config.lease(), waiting.repeats);
         now_ms()
@@ -6248,6 +6287,23 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str) -> Option<BayResult> {
         &waiting.environments,
         waiting.adapter.as_deref(),
     ))
+}
+
+/// The environments the policy at `trunk` runs checks in for `revision`'s change (G431);
+/// `None` when that cannot be read.
+fn required_environments(ctx: &Ctx, revision: &str, trunk: &str) -> Option<Vec<String>> {
+    let git = &ctx.repo.git;
+    let policy = policy::load_at(git, trunk).ok()??;
+    let base = git.run(&["merge-base", trunk, revision]).ok()?;
+    let changed = check::changed_paths(git, &base, revision).ok()?;
+    Some(
+        policy
+            .checks
+            .iter()
+            .filter(|entry| policy.runs(entry, &changed))
+            .map(|entry| entry.environment.clone())
+            .collect(),
+    )
 }
 
 /// The verdict of `policy` over every counted record on the tree (`all`): `None` for a pass,

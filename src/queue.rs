@@ -456,7 +456,11 @@ pub fn join(
     ))
 }
 
-/// Replaces a non-head entry in place with a newer operation of the same change (§ 6).
+/// Replaces a non-head entry in place with a newer operation of the same change (§ 6), and says
+/// whether it did. A place released since the caller read the queue is never replaced (G424, a
+/// fleet finding, 2026-10-27: a revision written onto a place released as published was retaken
+/// every pass for ten hours); the newer operation joins at its own turn instead. The lease
+/// guards only the entry's ref, so its release is read on the remote just before the push.
 ///
 /// # Errors
 ///
@@ -466,7 +470,15 @@ pub fn replace(
     signer: Option<&Signer>,
     entry: &Entry,
     op_id: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let released = format!("{DONE_PREFIX}{}", entry.seq);
+    let listed = repo
+        .git
+        .run(&["ls-remote", repo.remote(), &released])
+        .map_err(|error| error.message())?;
+    if !listed.trim().is_empty() {
+        return Ok(false);
+    }
     let reservation = commit(
         &repo.git,
         signer,
@@ -483,7 +495,7 @@ pub fn replace(
             repo.remote(),
             &format!("{reservation}:{name}"),
         ])
-        .map(|_| ())
+        .map(|_| true)
         .map_err(|error| error.message())
 }
 
