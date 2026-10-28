@@ -53,8 +53,7 @@ fn a_pinned_runner_stays_on_its_version_when_its_binary_becomes_another() {
     let version = String::from_utf8(
         Command::new(&installed)
             .arg("--version")
-            .output()
-            .unwrap()
+            .output_busy()
             .stdout,
     )
     .unwrap()
