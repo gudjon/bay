@@ -21,5 +21,28 @@
     "verdict": "pass",
     "at": "2026-10-28T00:29:29Z",
     "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgWA9Do2pD/ZhdNBpan5FFOcD6gT\nXTtW6oxP9R8E+vkioAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQDuwCjOYBDsjlmzPmnUoJJ+5QaQ0QZgr3d5X5P+E2EHgqiMtHdegQd\nlrORq63EQ5t5c3sf6+pca7wRXizn+eKAQ=\n-----END SSH SIGNATURE-----\n"
+  },
+  {
+    "schema": "bay.evidence/1",
+    "id": "linux-1/clippy-linux-x86_64-git2.56.0-0417821a65e0",
+    "kind": "check",
+    "subject": {
+      "tree": "4944fffe6da5b29ec2536a36d6a4091fa57b54f0",
+      "commit": "0417821a65e0ece280ba34c1d6db4390abcab415",
+      "base_tree": "22cd7e85dc3c1530681921cf3a2739287e359297"
+    },
+    "check": {
+      "id": "clippy",
+      "environment": "linux-x86_64-git2.56.0"
+    },
+    "policy_revision": 0,
+    "manifest_digest": "gate",
+    "producer": {
+      "name": "linux-1",
+      "version": "0.5.32"
+    },
+    "verdict": "pass",
+    "at": "2026-10-28T00:30:32Z",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgWA9Do2pD/ZhdNBpan5FFOcD6gT\nXTtW6oxP9R8E+vkioAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQCQLF5SVZR0n2ElWgWHvBe+3HmTE6qir5zO1WY++KPvqUJ4UU+DFox\naIsNiZbUS6hifgAVJceS/C4WjpRE2Bnww=\n-----END SSH SIGNATURE-----\n"
   }
 ]
