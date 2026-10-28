@@ -112,6 +112,21 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
                 .collect()
         })
         .unwrap_or_default();
+    // A fleet finding (2026-10-28: scripts-fast stayed red for three hours after both of its
+    // causes were fixed in files off its paths, and every change on its paths waited on it): a
+    // red check runs again on each new tip, first, even when nothing on its paths changed, so
+    // a fix that landed anywhere can clear it.
+    let red: Vec<(String, String)> = crate::red::red(git, &tip, registry.as_ref())
+        .map(|reds| {
+            reds.into_iter()
+                .map(|red| (red.check, red.environment))
+                .collect()
+        })
+        .unwrap_or_default();
+    let is_red = |entry: &crate::policy::CheckEntry| {
+        red.iter()
+            .any(|(check, environment)| *check == entry.id && *environment == entry.environment)
+    };
     let mut entries: Vec<&crate::policy::CheckEntry> = policy
         .checks
         .iter()
@@ -132,7 +147,7 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
             .get(&(entry.id.clone(), entry.environment.clone()))
             .copied()
             .unwrap_or(usize::MAX);
-        (std::cmp::Reverse(ago), !pending)
+        (!is_red(entry), std::cmp::Reverse(ago), !pending)
     });
     let mut reports = Vec::new();
     for entry in entries {
@@ -156,9 +171,10 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
                 || span_start(git, &tip),
                 |ago| rev(git, &format!("{tip}~{ago}")),
             )?;
-        if policy
-            .unwoken(entry, &check::changed_paths(git, &since, &tip)?)
-            .is_some()
+        if !is_red(entry)
+            && policy
+                .unwoken(entry, &check::changed_paths(git, &since, &tip)?)
+                .is_some()
         {
             continue;
         }

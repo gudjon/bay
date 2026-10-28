@@ -3111,11 +3111,7 @@ fn repairs_red(ctx: &Ctx, trunk: &str) -> Result<bool, String> {
     // a repair, so a runner never judges a repair on a stale reading.
     ctx.repo.fetch_evidence(&ctx.keys);
     let reds = crate::red::red(&ctx.repo.git, trunk, ctx.registry.as_ref())?;
-    Ok(reds.iter().any(|red| {
-        red.change
-            .as_ref()
-            .is_some_and(|owner| names.contains(&owner))
-    }))
+    Ok(reds.iter().any(|red| red.answered_by(&names)))
 }
 
 /// Holds a place in the queue: reserves one if the operation has none, gives up ownership so
@@ -4452,11 +4448,7 @@ fn red_gate(
     let blocking: Vec<&crate::red::Red> = reds
         .iter()
         .filter(|red| red.covers(&changed))
-        .filter(|red| {
-            red.change
-                .as_ref()
-                .is_none_or(|owner| !names.contains(&owner))
-        })
+        .filter(|red| !red.answered_by(&names))
         .collect();
     if blocking.is_empty() {
         return Ok(None);

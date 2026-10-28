@@ -23,11 +23,13 @@
 //!   the newest failure. A post producer, or an executor with `[runner] bisect_post`
 //!   (`crate::bisect`), narrows the range by recording runs on its midpoints.
 //! - A `product_failure` is cleared by a later landing whose `Fixes:`, `Reverts:` or
-//!   `Supersedes:` names the owning change, or by a quarantine of the check at trunk.
+//!   `Supersedes:` names the owning change or the first failure of the suspect range (a landing
+//!   newer than the newest failure), or by a quarantine of the check at trunk.
 //!
 //! While red, the executor refuses a candidate that touches those paths with `MAIN_RED`,
-//! naming the owner and the ways out; a change that names the owning change in `--fixes`, an
-//! undo of it, or a superseding change is never refused.
+//! naming the owner and the ways out; a change that names the owning change or the first
+//! failure in `--fixes`, an undo of it, or a superseding change is never refused, and it runs
+//! ahead of the line.
 //!
 //! G195: `bay status --since` judges from what its cursor carries ([`Judged`]): how each check
 //! was decided, at which trunk, under which evidence tips and registry. It reads the answers of
@@ -216,6 +218,23 @@ impl Red {
         self.suspect
             .as_ref()
             .and_then(|suspect| suspect.culprit.as_ref())
+    }
+
+    /// Whether a change that names `names` (its `Fixes:`, `Reverts:` and `Supersedes:`) answers
+    /// this red: they name the owning change, or the first failure of its suspect range. A
+    /// fleet finding (2026-10-28): with no culprit pinned the owner is the newest failure, the
+    /// landing the check last ran on, and three fixes naming the first failure, the change bay
+    /// itself names as the suspect, waited behind the red they were written to clear.
+    #[must_use]
+    pub fn answered_by(&self, names: &[&String]) -> bool {
+        self.change
+            .iter()
+            .chain(
+                self.suspect
+                    .as_ref()
+                    .and_then(|suspect| suspect.failed.change.as_ref()),
+            )
+            .any(|change| names.contains(&change))
     }
 
     /// Whether this is the same red as `other`: the same check, owned by the same landing. Its
@@ -512,6 +531,15 @@ fn decide(
         // The culprit, when the evidence pins one, owns the red in place of the newest failure.
         let (suspect, owner) = answers.suspect(post, at)?;
         if owner != at && answered(owner) {
+            continue;
+        }
+        // A landing newer than the newest failure that names the first failure clears it too
+        // (`Red::answered_by`).
+        if suspect.failed.change.as_ref().is_some_and(|change| {
+            landings[..at]
+                .iter()
+                .any(|later| later.names.contains(change))
+        }) {
             continue;
         }
         let landing = &landings[owner];

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.44
+
+- A fix that names a red check's first failure runs ahead of the line, and its landing clears the red.
+- A red post check runs again on each new tip of main, so a fix off its paths clears it.
+
 ## 0.5.43
 
 - A post check that no worker answers waits an hour on that box, and the next post check runs meanwhile.
