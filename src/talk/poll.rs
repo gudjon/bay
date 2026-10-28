@@ -55,9 +55,9 @@ fn write_last(path: &Path, last: u64) {
     }
 }
 
-/// F1: whether this clone may fetch the key registry for its talks now, at most once per
-/// [`BAY_TALK_POLL_S`], so a clone with no registry, or one that fetched it before a sender was
-/// enrolled, pays one fetch per poll and not one per command. Records the fetch when it is due.
+/// F1: whether a session's poll may fetch the key registry its clone does not hold, at most once
+/// per [`BAY_TALK_POLL_S`], so a repository with no registry pays one fetch per poll interval and
+/// never one per command. Records the fetch when it is due.
 #[must_use]
 pub fn registry_due(repo: &Repo, now: u64) -> bool {
     let path = repo.common_dir.join("bay").join("talk-registry.json");
@@ -78,7 +78,7 @@ pub fn live(repo: &Repo, now: u64) -> Option<Value> {
         return None;
     }
     write_last(&path, now);
-    crate::talk::receive(repo)
+    super::accept::receive_polled(repo)
 }
 
 /// A fetching command (`bay status`, `bay status --since`): accepts this actor's talks as a live
@@ -105,7 +105,7 @@ pub fn wait(repo: &Repo, max_s: u64) -> (u8, Value) {
     let mut empty = 0u32;
     let mut slept = 0u64;
     loop {
-        if let Some(outcome) = crate::talk::receive(repo)
+        if let Some(outcome) = super::accept::receive_polled(repo)
             && outcome["acked"]
                 .as_array()
                 .is_some_and(|acked| !acked.is_empty())

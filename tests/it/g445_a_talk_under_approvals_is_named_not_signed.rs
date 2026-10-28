@@ -8,9 +8,10 @@
 //! poll interval, on the live hook's state: inside it the outcome is `not_due`.
 //!
 //! Under `signing = "all"` nothing changes: a talk is signed by a registry actor's key, and an
-//! unsigned one is refused at accept and never acked. A clone that never fetched the registry, or
-//! fetched it before the sender was enrolled, fetches it before it judges (F1): a talk is never
-//! dropped for want of a registry the remote holds.
+//! unsigned one is refused at accept and never acked. A session's poll on a clone that never
+//! fetched the registry fetches it before it judges, and any accept fetches it again when the
+//! remote's tip moved, read from the listing it makes anyway (F1): a talk is never dropped for
+//! want of a registry the remote holds, and a repository with no registry pays nothing for it.
 //!
 //! Every remote here is a plain Git remote, as a forge is: no bay hook judges a push, so each
 //! rule is the sender's or the recipient's bay.
@@ -22,10 +23,10 @@
 //! - `src/talk/accept.rs` `receive`: the `Trust::Names` arm to `return None` (nothing is acked).
 //! - `src/talk/accept.rs` `verify`: drop the signature check under `Trust::Keys` (the unsigned
 //!   talk under `all` is acked).
-//! - `src/talk/accept.rs` `receive`: drop the registry fetch (a talk to a clone that never fetched
-//!   the registry is not acked).
-//! - `src/talk/accept.rs` `accept`: drop the refetch on an unknown sender (a talk from a sender
-//!   enrolled after the last fetch is refused).
+//! - `src/talk/accept.rs` `receive_with`: drop the registry fetch (the idle wait on a clone that
+//!   never fetched the registry never wakes).
+//! - `src/talk/accept.rs` `refreshed`: return `trust` unchanged (a talk from a sender enrolled
+//!   after the last fetch is refused).
 //! - `src/talk.rs` `verified_answer`: `Trust::Names if party` to `Trust::Names` (the answer by
 //!   name is not read), or drop `if party` (the third actor's answer counts).
 //! - `src/talk/poll.rs` `command`: drop the interval check (the second status fetches again).
@@ -345,6 +346,10 @@ fn under_approvals_only_who_or_decides_answers_and_only_the_sender_supersedes() 
 #[test]
 fn under_all_an_unsigned_talk_is_refused_and_never_acked() {
     let (case, _keys, _b_key, _c_key) = signed(false);
+    case.test_box.git_ok(
+        &case.b,
+        &["fetch", "-q", "origin", &format!("+{REGISTRY}:{REGISTRY}")],
+    );
     // The sender's bay writes the body; a raw commit with no signature carries it to the remote.
     let (code, dry) = case.bay(
         "agent",
@@ -417,7 +422,7 @@ fn under_all_an_unsigned_talk_is_refused_and_never_acked() {
 }
 
 #[test]
-fn under_all_a_clone_that_never_fetched_the_registry_fetches_it_before_it_judges() {
+fn under_all_an_idle_wait_on_a_clone_that_never_fetched_the_registry_fetches_it() {
     let (case, _keys, _b_key, _c_key) = signed(false);
     assert!(!case.holds(&case.b, REGISTRY));
     let (code, sent) = delivery(&case, "agent", "Review the parser change");
@@ -425,13 +430,29 @@ fn under_all_a_clone_that_never_fetched_the_registry_fetches_it_before_it_judges
     let id = sent["detail"]["talk"].as_str().unwrap().to_owned();
     let name = talk_ref("agent-b", &id);
 
+    // The idle wait, a session's poll, fetches the registry before it judges (F1), and wakes.
+    let out = case
+        .test_box
+        .bay_process(&case.b)
+        .env("BAY_ACTOR", "agent-b")
+        .env("BAY_SESSION", "s-agent-b")
+        .env("BAY_TEST_TALK_POLL_MS", "1")
+        .args(["hook", "talk-wait"])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        case.holds(&case.b, REGISTRY),
+        "b did not fetch the registry"
+    );
     let (code, status) = case.bay("agent-b", &["status"]);
     assert_eq!(code, 0, "{status}");
-    assert_eq!(
-        status["detail"]["talk_accept"]["acked"],
-        json!([id.as_str()]),
-        "{status}"
-    );
     let acked = case.remote_tip(&name).unwrap();
     assert!(case.signed(&acked), "{acked} is not signed");
     let row = talk_rows(&status)

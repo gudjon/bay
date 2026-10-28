@@ -615,6 +615,41 @@ fn with_predecessor(repo: &Repo, body: &Value, refspec: String) -> Result<Vec<St
     Ok(refspecs)
 }
 
+/// Who answers `talk` here, with the key that signs the answer, and whether it is a person.
+/// Dossier 63: a person answers a talk that asks one with their approver key (as they approve),
+/// under the name the registry enrols it for; anyone else answers as an agent, by its agent key.
+/// G445: under approvals no agent key signs an answer, and `who` or `decides` answers by name; a
+/// person still answers with their approver key, as an approval is signed.
+fn answerer(
+    repo: &Repo,
+    trust: &Trust,
+    talk: &Talk,
+    me: Actor,
+) -> Result<(Option<PathBuf>, Actor, bool), Stop> {
+    let person = match trust {
+        Trust::Keys(registry) => super::asks_a_person(&talk.body)
+            .then(|| approver_key(&repo.git, registry))
+            .flatten(),
+        Trust::Names if super::asks_a_person(&talk.body) => {
+            repo.fetch_registry();
+            Registry::current(&repo.git)?.and_then(|registry| approver_key(&repo.git, &registry))
+        }
+        Trust::Names => None,
+    };
+    if let Some((key, name)) = person {
+        let person = Actor {
+            name,
+            session: me.session,
+        };
+        return Ok((Some(key), person, true));
+    }
+    let key = match trust {
+        Trust::Keys(registry) => Some(agent_key(&repo.git, registry, &me.name)?),
+        Trust::Names => None,
+    };
+    Ok((key, me, false))
+}
+
 fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
     let (repo, trust, me) = open(dir)?;
     let value = fold(
@@ -630,46 +665,7 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
     let id = request.talk.as_str();
     let talk = find(&repo, id)?
         .ok_or_else(|| Refusal::invalid(format!("no talk {id} is here or on the remote")))?;
-    // Dossier 63: a person answers a talk that asks one with their approver key (as they
-    // approve), under the name the registry enrols it for; anyone else answers as an agent.
-    // G445: under approvals no key signs an answer, and `who` or `decides` answers by name.
-    let (key, me, by_person) = match &trust {
-        Trust::Keys(registry) => match super::asks_a_person(&talk.body)
-            .then(|| approver_key(&repo.git, registry))
-            .flatten()
-        {
-            Some((key, name)) => (
-                Some(key),
-                Actor {
-                    name,
-                    session: me.session,
-                },
-                true,
-            ),
-            None => (Some(agent_key(&repo.git, registry, &me.name)?), me, false),
-        },
-        // A person still answers with their approver key, as an approval is signed.
-        Trust::Names => {
-            let person = if super::asks_a_person(&talk.body) {
-                repo.fetch_registry();
-                Registry::current(&repo.git)?
-                    .and_then(|registry| approver_key(&repo.git, &registry))
-            } else {
-                None
-            };
-            match person {
-                Some((key, name)) => (
-                    Some(key),
-                    Actor {
-                        name,
-                        session: me.session,
-                    },
-                    true,
-                ),
-                None => (None, me, false),
-            }
-        }
-    };
+    let (key, me, by_person) = answerer(&repo, &trust, &talk, me)?;
     if talk.body["kind"] != "discovery" {
         return Err(Refusal::invalid(format!(
             "only a discovery talk takes an answer; {id} is a {} talk",

@@ -40,20 +40,32 @@ use super::{
 use crate::change::{Actor, Chain, change_ref};
 use crate::clock::{now_rfc3339, unix_of};
 use crate::ids::is_change_id;
-use crate::registry::{KeyClass, Registry};
+use crate::registry::{KeyClass, REGISTRY_REF, Registry};
 use crate::repo::Repo;
 use crate::result::Reason;
 use crate::signing;
 
 /// Accepts this actor's new talks and acks them. Under `[policy] signing = "approvals"` (N-21,
-/// G445) no registry is read: talks are judged by name and acked unsigned. Under `all` a clone
-/// with no registry fetches it first (F1, at most once per poll); `None` when the remote holds
-/// none either, where no talk exists. The value is the outcome: see the module doc.
+/// G445) no registry is read: talks are judged by name and acked unsigned. Under `all`, `None`
+/// without a registry here, where no talk can be judged. The value is the outcome: see the
+/// module doc.
 #[must_use]
 pub fn receive(repo: &Repo) -> Option<Value> {
+    receive_with(repo, false)
+}
+
+/// [`receive`] for a session's poll ([`super::poll`]): under `all`, a clone that holds no
+/// registry fetches it first, at most once per poll interval (F1). A command (`bay status`)
+/// never does, so a repository with no registry pays nothing there.
+#[must_use]
+pub fn receive_polled(repo: &Repo) -> Option<Value> {
+    receive_with(repo, true)
+}
+
+fn receive_with(repo: &Repo, discover: bool) -> Option<Value> {
     let trust = match Trust::current(&repo.git) {
         Ok(Some(trust)) => trust,
-        Ok(None) if super::poll::registry_due(repo, crate::live::unix_now()) => {
+        Ok(None) if discover && super::poll::registry_due(repo, crate::live::unix_now()) => {
             repo.fetch_registry();
             match Trust::current(&repo.git) {
                 Ok(Some(trust)) => trust,
@@ -86,22 +98,19 @@ pub(crate) fn not_due(repo: &Repo, last: u64, now: u64) -> Option<Value> {
     })
 }
 
-/// F1: `trust` with the registry fetched again, when it is due, if this actor's key or the
-/// sender of a talk waiting in `talks` is not enrolled in the registry this clone holds: one
-/// enrolled since the last fetch is then judged on the remote's registry, never refused.
-fn refreshed(repo: &Repo, trust: Trust, me: &str, talks: Option<&[Talk]>) -> Result<Trust, String> {
-    let Trust::Keys(registry) = &trust else {
+/// F1: `trust` with the registry fetched again when the remote's tip, `remote`, is not the one
+/// this clone holds: a sender enrolled since the last fetch is judged on the remote's registry,
+/// never refused. The tip comes from the listing accept makes anyway, so an unchanged registry
+/// costs no round trip.
+fn refreshed(repo: &Repo, trust: Trust, remote: Option<&str>) -> Result<Trust, String> {
+    if !matches!(trust, Trust::Keys(_)) {
         return Ok(trust);
-    };
-    let unknown = talks.map_or_else(
-        || !registry.enrols(KeyClass::Agent, me),
-        |talks| {
-            talks
-                .iter()
-                .any(|talk| !talk.has("ack") && super::sender_class(registry, &talk.body).is_none())
-        },
-    );
-    if !unknown || !super::poll::registry_due(repo, crate::live::unix_now()) {
+    }
+    let local = repo
+        .git
+        .ref_target(REGISTRY_REF)
+        .map_err(|error| error.message())?;
+    if remote.is_none() || remote == local.as_deref() {
         return Ok(trust);
     }
     repo.fetch_registry();
@@ -147,19 +156,25 @@ impl Outcome {
     }
 }
 
-/// The remote's tips under `prefix`, or `None` when the remote did not answer.
-fn remote_tips(repo: &Repo, prefix: &str) -> Option<BTreeMap<String, String>> {
+/// The remote's tips under `prefix`, and its registry's tip, in one listing; `None` when the
+/// remote did not answer.
+fn remote_tips(repo: &Repo, prefix: &str) -> Option<(BTreeMap<String, String>, Option<String>)> {
     let listed = repo
         .git
-        .run(&["ls-remote", repo.remote(), &format!("{prefix}*")])
+        .run(&[
+            "ls-remote",
+            repo.remote(),
+            &format!("{prefix}*"),
+            REGISTRY_REF,
+        ])
         .ok()?;
-    Some(
-        listed
-            .lines()
-            .filter_map(|line| line.split_once('\t'))
-            .map(|(tip, name)| (name.to_owned(), tip.to_owned()))
-            .collect(),
-    )
+    let mut tips: BTreeMap<String, String> = listed
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(tip, name)| (name.to_owned(), tip.to_owned()))
+        .collect();
+    let registry = tips.remove(REGISTRY_REF);
+    Some((tips, registry))
 }
 
 fn accept(repo: &Repo, trust: &Trust) -> Result<Outcome, String> {
@@ -169,23 +184,22 @@ fn accept(repo: &Repo, trust: &Trust) -> Result<Outcome, String> {
             Outcome::new("skipped").why(format!("the actor name is not a talk recipient: {why}"))
         );
     }
-    let trust = refreshed(repo, trust.clone(), &me.name, None)?;
     // G445: under approvals no key signs the ack; the recipient is its actor name.
-    if let Trust::Keys(registry) = &trust
+    if let Trust::Keys(registry) = trust
         && let Err(refusal) = agent_key(&repo.git, registry, &me.name)
     {
         return Ok(Outcome::new("skipped").why(refusal.why));
     }
     let prefix = format!("{TALK_PREFIX}{}/", me.name);
     fetch_sent(repo, &prefix, &me.name)?;
-    let Some(remote) = remote_tips(repo, &prefix) else {
+    let Some((remote, registry_tip)) = remote_tips(repo, &prefix) else {
         return Ok(Outcome::new("not_fetched")
             .why("the remote did not list this actor's talks".to_owned()));
     };
+    let trust = refreshed(repo, trust.clone(), registry_tip.as_deref())?;
     fetch_matching(repo, &format!("{prefix}*"));
     let mut outcome = Outcome::new("accepted");
     let talks = talks_matching(&repo.git, &prefix)?;
-    let trust = refreshed(repo, trust, &me.name, Some(&talks))?;
     let key = match &trust {
         Trust::Keys(registry) => match agent_key(&repo.git, registry, &me.name) {
             Ok(key) => Some(key),
@@ -257,7 +271,7 @@ pub fn end_questions(repo: &Repo, ids: &[String]) {
         Trust::Names => None,
     };
     let prefix = format!("{TALK_PREFIX}{}/", me.name);
-    let Some(remote) = remote_tips(repo, &prefix) else {
+    let Some((remote, _)) = remote_tips(repo, &prefix) else {
         return;
     };
     fetch_matching(repo, &format!("{prefix}*"));
