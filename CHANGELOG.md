@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.38
+
+- A head judges main red from the last judgement, reading only the landings and notes that moved.
+
 ## 0.5.37
 
 - A batch the host refused while main stood still is pushed again as built, not rebuilt.
