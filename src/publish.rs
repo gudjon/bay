@@ -951,6 +951,7 @@ impl Drop for Ctx<'_> {
 
 /// The agent's part of `land` (§ 9a): freeze, scan, and append the request. Returns at once
 /// with the operation id; with `wait` it also runs the executor's part inline.
+#[allow(clippy::too_many_lines)]
 fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
     // § 10a offline work: with the remote unreachable, the request is committed locally and
@@ -1001,6 +1002,9 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     if ctx.record.lane.is_none()
         && let Some(refusal) = lane_leak(&ctx, &trunk, &revision)?
     {
+        return Ok(refusal);
+    }
+    if let Some(refusal) = markers_left_at_submit(&ctx, &trunk, &revision)? {
         return Ok(refusal);
     }
     // Owner ruling 2026-10-21: a change over the size limits of the policy at the base is
@@ -1136,6 +1140,78 @@ fn with_main_changed(mut result: BayResult, moved: Option<serde_json::Value>) ->
         Some(_) => {}
     }
     result
+}
+
+/// BACKLOG 90: `MERGE_CONFLICT` at submit when the change's own edits, from where `revision`
+/// meets `trunk`, still add a conflict marker a refresh wrote in its view: `<<<<<<< <commit>` or
+/// `>>>>>>> <commit>`, the labels `git merge-tree` gives the two sides. A line of any other shape
+/// is the change's own text. Nothing is written.
+fn markers_left_at_submit(
+    ctx: &Ctx,
+    trunk: &str,
+    revision: &str,
+) -> Result<Option<BayResult>, String> {
+    let git = &ctx.repo.git;
+    let from = git
+        .run(&["merge-base", trunk, revision])
+        .unwrap_or_else(|_| trunk.to_owned());
+    // A content diff reads the blobs both sides changed: in a blob-less store, Git fetches them.
+    let diff = git
+        .fetching()
+        .run(&[
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-color",
+            "--no-renames",
+            "-U0",
+            &from,
+            revision,
+        ])
+        .map_err(|error| error.message())?;
+    let paths = marked_paths(&diff);
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(
+        BayResult::blocked(Reason::MergeConflict)
+            .with_change(ctx.id.clone())
+            .with_detail(json!({
+                "conflicts": paths,
+                "trunk": trunk,
+                "next": "the view still holds conflict markers in the listed paths: resolve \
+                    them, then bay merge",
+            })),
+    ))
+}
+
+/// The paths a `git diff -U0` adds a `git merge-tree` conflict marker to, in diff order.
+fn marked_paths(diff: &str) -> Vec<String> {
+    let is_commit = |label: &str| {
+        matches!(label.len(), 40 | 64) && label.bytes().all(|byte| byte.is_ascii_hexdigit())
+    };
+    let mut paths: Vec<String> = Vec::new();
+    let mut path: Option<&str> = None;
+    let mut header = false;
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") {
+            (header, path) = (true, None);
+        } else if header {
+            if line.starts_with("@@") {
+                header = false;
+            } else if let Some(name) = line.strip_prefix("+++ ") {
+                path = name.strip_prefix("b/");
+            }
+        } else if let Some(name) = path
+            && ["+<<<<<<< ", "+>>>>>>> "]
+                .iter()
+                .any(|open| line.strip_prefix(open).is_some_and(is_commit))
+            && !paths.iter().any(|known| known == name)
+        {
+            paths.push(name.to_owned());
+        }
+    }
+    paths
 }
 
 /// `CHANGE_TOO_LARGE` at submit (owner ruling 2026-10-21): the change's own edits, from where
@@ -8021,6 +8097,26 @@ mod tests {
 
     use super::{UNCHECKED, UNCHECKED_BY_POLICY, unchecked_reason};
     use crate::git::Git;
+
+    /// BACKLOG 90: only an added `git merge-tree` marker (labelled with a commit) marks a path;
+    /// a removed one, one with another label, and a content line that looks like a header do not.
+    #[test]
+    fn only_an_added_merge_tree_marker_marks_its_path() {
+        let main = "a".repeat(40);
+        let draft = "b".repeat(64);
+        let diff = format!(
+            "diff --git a/src/a.rs b/src/a.rs\nindex 1..2 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n\
+             @@ -1 +1,5 @@\n+<<<<<<< {main}\n+x\n+=======\n+y\n+>>>>>>> {draft}\n\
+             diff --git a/doc.md b/doc.md\n--- a/doc.md\n+++ b/doc.md\n@@ -1,2 +1,2 @@\n\
+             -<<<<<<< {main}\n+<<<<<<< HEAD\n+++ b/src/a.rs\n\
+             diff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n\
+             -<<<<<<< {main}\n\
+             diff --git a/src/b.rs b/src/b.rs\n--- a/src/b.rs\n+++ b/src/b.rs\n@@ -0,0 +1 @@\n\
+             +>>>>>>> {main}\n"
+        );
+        assert_eq!(super::marked_paths(&diff), vec!["src/a.rs", "src/b.rs"]);
+        assert_eq!(super::marked_paths(""), Vec::<String>::new());
+    }
 
     /// A test pause ends: at its release, at its time limit, or once its parent is gone.
     /// A runner's line names where an operation's time went: each step's seconds, in order.

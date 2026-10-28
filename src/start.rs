@@ -1658,7 +1658,8 @@ fn checkpoint_here(repo: &Repo, id: &str) -> Result<BayResult, String> {
 }
 
 /// Merges the draft onto the newer trunk, moves the view there and records the new base.
-/// Returns the declared paths trunk changed, or the `MERGE_CONFLICT` refusal.
+/// Returns the declared paths trunk changed, or the `MERGE_CONFLICT` refusal, with the view on
+/// trunk and the conflicts marked in its files.
 fn bring_in_trunk(
     repo: &Repo,
     chain: &Chain,
@@ -1681,35 +1682,49 @@ fn bring_in_trunk(
     args.extend(declared.iter().map(String::as_str));
     let changed = repo.git.run(&args).map_err(|error| error.message())?;
     let changed: Vec<String> = changed.lines().map(str::to_owned).collect();
-    match merge_onto(&repo.git, trunk, draft).map_err(|error| error.message())? {
-        Merge::Conflict(paths, _) => Ok(Err(BayResult::blocked(Reason::MergeConflict)
+    let merged = merge_onto(&repo.git, trunk, draft).map_err(|error| error.message())?;
+    let (tree, conflicts) = match merged {
+        Merge::Clean(tree) => (tree, None),
+        Merge::Conflict(paths, tree) => (tree, Some(paths)),
+    };
+    // A fleet finding (2026-10-26): a refresh keeps the draft's own message and author; it used
+    // to replace them with "resume onto trunk".
+    let message = repo
+        .git
+        .run(&["log", "-1", "--format=%B", draft])
+        .ok()
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "resume onto trunk".to_owned());
+    let rebased = crate::change::commit_on_by(&repo.git, &tree, trunk, &message, draft)
+        .map_err(|error| error.message())?;
+    // G212: the sparse checkout fetches only the declared files it writes.
+    Git::new(repo.view_path(&record.id))
+        .fetching()
+        .writing_tree()
+        .run(&["checkout", "-q", "-f", "--detach", &rebased])
+        .map_err(|error| error.message())?;
+    // BACKLOG 90: a conflict moves the view onto trunk too, with the conflict markers in the
+    // listed paths, so the repair is made against main (as `bay undo` leaves its view). The
+    // view's base is trunk now (G416 reads it at the next freeze); the chain keeps the last
+    // draft, which holds no markers, and `bay merge` refuses one that still does.
+    if let Some(paths) = conflicts {
+        return Ok(Err(BayResult::blocked(Reason::MergeConflict)
             .with_change(record.id.clone())
-            .with_detail(json!({"conflicts": paths, "trunk": trunk, "base": old_base})))),
-        Merge::Clean(tree) => {
-            // A fleet finding (2026-10-26): a refresh keeps the draft's own message and author;
-            // it used to replace them with "resume onto trunk".
-            let message = repo
-                .git
-                .run(&["log", "-1", "--format=%B", draft])
-                .ok()
-                .filter(|text| !text.trim().is_empty())
-                .unwrap_or_else(|| "resume onto trunk".to_owned());
-            let rebased = crate::change::commit_on_by(&repo.git, &tree, trunk, &message, draft)
-                .map_err(|error| error.message())?;
-            // G212: the sparse checkout fetches only the declared files it writes.
-            Git::new(repo.view_path(&record.id))
-                .fetching()
-                .writing_tree()
-                .run(&["checkout", "-q", "-f", "--detach", &rebased])
-                .map_err(|error| error.message())?;
-            trunk.clone_into(&mut record.base);
-            trunk.clone_into(&mut record.observed_remote);
-            chain
-                .append(head, record, &rebased, "resume: trunk moved")
-                .map_err(|error| error.message())?;
-            Ok(Ok(changed))
-        }
+            .with_detail(json!({
+                "conflicts": paths,
+                "trunk": trunk,
+                "base": old_base,
+                "view": repo.view_path(&record.id).display().to_string(),
+                "next": "the view is on main now, with conflict markers in the listed paths: \
+                    resolve them there, then bay merge",
+            }))));
     }
+    trunk.clone_into(&mut record.base);
+    trunk.clone_into(&mut record.observed_remote);
+    chain
+        .append(head, record, &rebased, "resume: trunk moved")
+        .map_err(|error| error.message())?;
+    Ok(Ok(changed))
 }
 
 /// The newest draft of change `id` ([`Chain::latest_draft`]).

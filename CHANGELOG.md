@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.36
+
+- A refresh that conflicts moves the view to main with conflict markers; `bay merge` refuses markers left in.
+
 ## 0.5.35
 
 - A post check is asked what changed since it last answered, and skipped when nothing wakes it.
