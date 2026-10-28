@@ -285,6 +285,10 @@ struct Moved {
     trees: HashSet<String>,
 }
 
+/// The last judgement [`red`] made in this process: its key (main tip, registry, evidence tips),
+/// its red checks, and what decided them, for the next judgement to start from.
+type Last = Option<(String, Vec<Red>, Option<Judged>)>;
+
 /// The red checks of `trunk` (G244). A pending check is not among them: it refuses nothing.
 ///
 /// # Errors
@@ -298,8 +302,7 @@ pub fn red(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Vec<Re
     // BACKLOG 97 (a fleet finding, 2026-10-28: the head's `red` step was its largest, p50 78 s,
     // p90 157 s, because on a busy line main or a note moves before almost every head): the next
     // judgement starts from the last one ([`judge`], G195), so it reads only what moved.
-    static LAST: std::sync::Mutex<Option<(String, Vec<Red>, Option<Judged>)>> =
-        std::sync::Mutex::new(None);
+    static LAST: std::sync::Mutex<Last> = std::sync::Mutex::new(None);
     let key = format!(
         "{trunk} {} {:?}",
         registry.map_or("", |registry| registry.commit.as_str()),
