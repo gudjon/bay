@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.37
+
+- A batch the host refused while main stood still is pushed again as built, not rebuilt.
+- A refused push's record names what the host said; a yield names its real cause.
+
 ## 0.5.36
 
 - A refresh that conflicts moves the view to main with conflict markers; `bay merge` refuses markers left in.

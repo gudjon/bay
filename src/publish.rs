@@ -1991,12 +1991,17 @@ fn batch(
                         ctx,
                         op_id,
                         revision,
-                        &format!("the host refused the batch's push ({})", first_line(&why)),
+                        &format!("the host refused the batch's push ({})", host_said(&why)),
                     )?
                 {
                     return Ok(Some(blocked));
                 }
-                return yield_head(ctx, op_id, revision, at).map(Some);
+                let cause = if now.as_str() == trunk {
+                    "the host refused its batch's push"
+                } else {
+                    "main moved"
+                };
+                return yield_head(ctx, op_id, revision, at, cause).map(Some);
             }
             Err(why)
         }
@@ -2011,6 +2016,32 @@ fn batch(
 /// `remote: bay: ...`): a judgement, never a fault to retry.
 fn judged_by_bay(error: &str) -> bool {
     error.contains("remote: bay:")
+}
+
+/// BACKLOG 81: what the host said when it refused a push, for a one-line record: git's own
+/// refusal lines (`remote: ...`, ` ! [remote rejected] ...`, `error: ...`, `fatal: ...`), each
+/// once, at most 300 characters. A batch's push names thirty refs or more, so the command line
+/// filled the record and the host's reason was lost (2026-10-27/28). The lines are read from
+/// git's stderr, after the `failed: ` of [`crate::git::GitError::message`], whose first line
+/// shares the command's line. Without such lines, the first line of `text`.
+fn host_said(text: &str) -> String {
+    let stderr = text
+        .split_once(" failed: ")
+        .map_or(text, |(_, stderr)| stderr);
+    let mut said: Vec<&str> = Vec::new();
+    for line in stderr.lines().map(str::trim) {
+        let refusal = ["remote:", "! [", "error:", "fatal:"]
+            .iter()
+            .any(|start| line.starts_with(start))
+            && line.trim_start_matches("remote:").trim() != "";
+        if refusal && !said.contains(&line) {
+            said.push(line);
+        }
+    }
+    if said.is_empty() {
+        return first_line(text);
+    }
+    said.join("; ").chars().take(300).collect()
 }
 
 /// The first non-empty line of `text`, at most 160 characters, for a one-line record.
@@ -2320,8 +2351,22 @@ fn land_batch<'a>(
     }
     let tip = &built[members.len() - 1].commit;
     kill_point("before-publish");
-    publish_batch_push(repo, tip, &pushes)
-        .map_err(|error| format!("batch {id} was refused: {error}"))?;
+    let mut answer = publish_batch_push(repo, tip, &pushes);
+    // BACKLOG 83 (2026-10-28: the host refused one batch twice with main unmoved, and each
+    // refusal gave the batch back to be built and checked again, 4.5 min each; the third push of
+    // the same refs landed): a refusal on an unmoved main, other than bay's own judgement, is
+    // pushed again as built, as a single change's is (B4), before the batch is given back.
+    let mut again = 0;
+    while let Err(error) = &answer
+        && again < BATCH_REPUSH_LIMIT
+        && !judged_by_bay(error)
+        && repo.fetch_trunk().is_ok_and(|now| now == trunk)
+    {
+        again += 1;
+        std::thread::sleep(HOOK_RETRY_WAIT);
+        answer = publish_batch_push(repo, tip, &pushes);
+    }
+    answer.map_err(|error| format!("batch {id} was refused: {error}"))?;
     kill_point("after-publish");
     drop(anchors);
     for (index, member) in members.iter().enumerate().skip(1) {
@@ -2621,7 +2666,7 @@ fn after_refused_push(
             revision,
             &format!(
                 "the host refused the publishing push ({})",
-                first_line(error)
+                host_said(error)
             ),
         )? {
             return Ok(Some(blocked));
@@ -2756,6 +2801,9 @@ fn executor_key_valid(ctx: &Ctx, registry: &Registry) -> Result<bool, String> {
 const PUBLISH_RETRY_LIMIT: u32 = 5;
 /// The short wait before a publishing push the hook timed out is tried again.
 const HOOK_RETRY_WAIT: Duration = Duration::from_secs(1);
+/// How many times a batch's push the host refused on an unmoved main is pushed again as built
+/// before the batch is given back (BACKLOG 83).
+const BATCH_REPUSH_LIMIT: u32 = 2;
 
 /// The trunk hook timed out on the publishing push: retry the same candidate after a short wait
 /// (`None`), uncounted toward `MAIN_MOVED` and the queue's deadline (`INTERFACES` § 2).
@@ -2876,7 +2924,7 @@ fn after_trunk_moved(
     if let Some(at) = *seq
         && ctx.yields
     {
-        return yield_head(ctx, op_id, revision, at).map(Some);
+        return yield_head(ctx, op_id, revision, at, "main moved").map(Some);
     }
     // § 6: bay retries once more, then the operation joins the publication queue.
     if ctx.op(op_id).trunk_moved >= TRUNK_MOVED_LIMIT && seq.is_none() {
@@ -2889,16 +2937,18 @@ fn after_trunk_moved(
 /// outside bay, and no other change was given a place for an hour): the head gives its claim
 /// back and keeps its place, so the runner's pass goes on to every other change. The next pass
 /// runs it again, as the head, with a batch of the places behind it when `batch` is set.
-fn yield_head(ctx: &mut Ctx, op_id: &str, revision: &str, at: u64) -> Result<BayResult, String> {
+fn yield_head(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    at: u64,
+    cause: &str,
+) -> Result<BayResult, String> {
     let op = ctx.op_mut(op_id);
     op.state = OpState::Admitted;
     op.owner = None;
     op.outcome = Some(Reason::Queued.code().to_owned());
-    ctx.save(
-        revision,
-        None,
-        &format!("yielded {op_id} at {at}: main moved"),
-    )?;
+    ctx.save(revision, None, &format!("yielded {op_id} at {at}: {cause}"))?;
     ctx.push_chain();
     let mut result = BayResult::new(Decision::Queued)
         .with_change(ctx.id.clone())
@@ -8097,6 +8147,27 @@ mod tests {
 
     use super::{UNCHECKED, UNCHECKED_BY_POLICY, unchecked_reason};
     use crate::git::Git;
+
+    /// BACKLOG 81: a refusal record keeps what the host said, never the command line.
+    #[test]
+    fn a_refusal_names_what_the_host_said() {
+        // git prints the hook's lines first, so the first of them shares the command's line.
+        let why = "batch b1 was refused: git push -q --atomic origin x:refs/heads/main \
+            y:refs/bay/landed/a failed: remote: error: GH013: Repository rule violations found \
+            for refs/heads/main.\nremote: \nremote: error: GH013: Repository rule violations \
+            found for refs/heads/main.\nTo https://example/repo.git\n ! [remote rejected] x -> main \
+            (push declined due to repository rule violations)\nerror: failed to push some refs\n";
+        assert_eq!(
+            super::host_said(why),
+            "remote: error: GH013: Repository rule violations found for refs/heads/main.; ! \
+             [remote rejected] x -> main (push declined due to repository rule violations); error: \
+             failed to push some refs"
+        );
+        assert_eq!(
+            super::host_said("git push failed: timed out\n"),
+            "git push failed: timed out"
+        );
+    }
 
     /// BACKLOG 90: only an added `git merge-tree` marker (labelled with a commit) marks a path;
     /// a removed one, one with another label, and a content line that looks like a header do not.
