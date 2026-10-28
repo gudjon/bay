@@ -264,6 +264,12 @@ pub struct Judged {
     pub registry: Option<String>,
     /// How each post check judged was decided.
     pub decided: Vec<Decided>,
+    /// The `[red] window` it was judged over (BACKLOG 113, a review: a judgement from the last one
+    /// read only the landings after its trunk, so a window grown since never read the older ones
+    /// and missed a red there for the life of the process). A cursor written before it reads as
+    /// 0 and is judged in full once.
+    #[serde(default)]
+    pub window: usize,
 }
 
 /// The newest landing in the window whose answer to one post check is a pass or a
@@ -285,9 +291,9 @@ struct Moved {
     trees: HashSet<String>,
 }
 
-/// The last judgement [`red`] made in this process: its key (main tip, registry, evidence tips),
-/// its red checks, and what decided them, for the next judgement to start from.
-type Last = Option<(String, Vec<Red>, Option<Judged>)>;
+/// The last judgement [`judged`] made in this process: its key (main tip, registry, evidence
+/// tips), what it found, and what decided it, for the next judgement to start from.
+type Last = Option<(String, Judgement, Option<Judged>)>;
 
 /// The red checks of `trunk` (G244). A pending check is not among them: it refuses nothing.
 ///
@@ -295,33 +301,45 @@ type Last = Option<(String, Vec<Red>, Option<Judged>)>;
 ///
 /// A git fault, or a committed config bay cannot read.
 pub fn red(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Vec<Red>, String> {
+    Ok(judged(git, trunk, registry)?.red)
+}
+
+/// The red and the pending checks of `trunk`, as [`state`] judges them, judged once per main tip,
+/// registry and evidence in this process, each judgement starting from the last ([`judge`]).
+///
+/// # Errors
+///
+/// A git fault, or a committed config bay cannot read.
+pub fn judged(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Judgement, String> {
     // G430 (a fleet finding, 2026-10-28): judged once per main tip, registry and evidence in this
     // process. Every head's turn judged the whole window from scratch, five to twelve minutes a
     // head on a loaded box with a window of 250, though nothing it reads had changed since the
     // head before. A new record moves an evidence tip, so it is judged again.
     // BACKLOG 97 (a fleet finding, 2026-10-28: the head's `red` step was its largest, p50 78 s,
     // p90 157 s, because on a busy line main or a note moves before almost every head): the next
-    // judgement starts from the last one ([`judge`], G195), so it reads only what moved.
+    // judgement starts from the last one ([`judge`], G195), so it reads only what moved. The post
+    // work shares it (BACKLOG 113), so a pass judges main once, for its heads and its post checks.
     static LAST: std::sync::Mutex<Last> = std::sync::Mutex::new(None);
+    // The registry as the judgement counts it: its commit and, under `signing = "approvals"`,
+    // its mode (N-21), so a mode switch at the same commit is never served the old judgement.
     let key = format!(
         "{trunk} {} {:?}",
-        registry.map_or("", |registry| registry.commit.as_str()),
+        registry.map(Registry::judged_key).unwrap_or_default(),
         evidence_tips(git)?
     );
     let before = match LAST.lock() {
         Ok(last) => match last.as_ref() {
-            Some((judged, reds, _)) if *judged == key => return Ok(reds.clone()),
+            Some((judged, judgement, _)) if *judged == key => return Ok(judgement.clone()),
             Some((_, _, before)) => before.clone(),
             None => None,
         },
         Err(_) => None,
     };
     let (judgement, judged) = judge(git, trunk, registry, before.as_ref())?;
-    let reds = judgement.red;
     if let Ok(mut last) = LAST.lock() {
-        *last = Some((key, reds.clone(), judged));
+        *last = Some((key, judgement.clone(), judged));
     }
-    Ok(reds)
+    Ok(judgement)
 }
 
 /// A test build writes a line to the file `BAY_TEST_RED_TRACE` names for each judgement
@@ -385,7 +403,7 @@ pub fn judge(
     let evidence = evidence_tips(git)?;
     let (landings, full) = landings(git, trunk, window)?;
     let known = before.and_then(|before| {
-        moved(git, before, &evidence, registry, &landings).map(|moved| (before, moved))
+        moved(git, before, &evidence, registry, &landings, window).map(|moved| (before, moved))
     });
     trace(trunk, known.as_ref().map(|(before, _)| *before));
     let (judgement, decided) = decide(
@@ -403,6 +421,7 @@ pub fn judge(
             evidence,
             registry: registry.map(Registry::judged_key),
             decided,
+            window,
         }),
     ))
 }
@@ -680,6 +699,12 @@ impl Answers<'_> {
                 .iter()
                 .position(|landing| &landing.commit == commit)
         });
+        // A review (2026-10-28): a landing that decided before and is no longer on the landing
+        // line (an outside merge moved it off) says nothing of the older landings, which may
+        // still decide: the whole window is read.
+        if then.landing.is_some() && carried.is_none() {
+            return self.newest(post);
+        }
         for at in 0..self.landings.len() {
             if at < moved.new || moved.trees.contains(&self.landings[at].tree) {
                 if let Some(failed) = self.decides(at, post)? {
@@ -725,8 +750,10 @@ fn moved(
     evidence: &BTreeMap<String, String>,
     registry: Option<&Registry>,
     landings: &[Landing],
+    window: usize,
 ) -> Option<Moved> {
-    if before.registry != registry.map(Registry::judged_key)
+    if before.window != window
+        || before.registry != registry.map(Registry::judged_key)
         || before
             .evidence
             .keys()

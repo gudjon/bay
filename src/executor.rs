@@ -593,6 +593,10 @@ fn pass(
 ) -> Result<Vec<Value>, String> {
     // G438: this pass's visits share what it reads from the remote.
     repo.share_reads(true);
+    // BACKLOG 113 (a review, 2026-10-28): a head's red gate judges main from this box's copy of
+    // the post records. Only the post work fetched them, at a pass's end, so a box that runs no
+    // post check judged a red main green and landed on it. The pass reads them before any visit.
+    repo.fetch_evidence(&Keys::load(&repo.git));
     let _ = receipts::sync(repo);
     sweep_check_scratch(repo);
     // G289, G294: never forced; a chain ahead of the remote keeps its work, one apart from it

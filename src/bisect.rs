@@ -69,12 +69,16 @@ pub fn tips(repo: &Repo) -> Option<Value> {
     }
 }
 
+/// Whether this box serves the environment of at least one of `policy`'s post checks.
+fn serves_a_post_check(policy: &crate::policy::Policy, served: &check::Served) -> bool {
+    policy
+        .checks
+        .iter()
+        .any(|entry| entry.stage == crate::policy::Stage::Post && served.serves(&entry.environment))
+}
+
 fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
     let git = &repo.git;
-    let keys = Keys::load(git);
-    repo.fetch_registry();
-    repo.fetch_evidence(&keys);
-    let registry = Registry::current(git)?;
     let tip = repo.fetch_trunk().map_err(|error| error.message())?;
     let Ok(base) = rev(git, &format!("{tip}^1")) else {
         return Ok(Vec::new());
@@ -83,12 +87,23 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
         return Ok(Vec::new());
     };
     let served = check::Served::read(git);
+    // BACKLOG 113 (a fleet finding, 2026-10-28: runners that serve no post check's environment
+    // spent 140-166 s of every pass here, fetching evidence and judging main in full, and a new
+    // change waited for that pass to end before any runner visited it): a box that can run none
+    // of the policy's post checks reads nothing for them.
+    if !serves_a_post_check(&policy, &served) {
+        return Ok(Vec::new());
+    }
+    let keys = Keys::load(git);
+    repo.fetch_registry();
+    repo.fetch_evidence(&keys);
+    let registry = Registry::current(git)?;
     let tree = tree_of(git, &tip)?;
     let writer = Writer::of(git, &keys, registry.as_ref())?;
     // A fleet finding (2026-10-27, 0.5.29): with one post check a pass and main moving every few
     // minutes, each new tip began again at the policy's first post check, and the later ones never
     // ran. The checks no landing in the red window answers (`crate::red`'s pending) go first.
-    let pending: Vec<(String, String)> = crate::red::state(git, &tip, registry.as_ref())
+    let pending: Vec<(String, String)> = crate::red::judged(git, &tip, registry.as_ref())
         .map(|judged| {
             judged
                 .pending
@@ -280,13 +295,24 @@ fn probes(landings: usize) -> usize {
 
 fn all(repo: &Repo) -> Result<Vec<Value>, String> {
     let git = &repo.git;
+    let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
+    let served = check::Served::read(git);
+    // BACKLOG 113: a box that can run none of the policy's post checks finds no culprit, so it
+    // judges nothing for them.
+    let post_work = match crate::policy::load_at(git, &trunk) {
+        Ok(Some(policy)) => serves_a_post_check(&policy, &served),
+        // An invalid policy has no post check to bisect, as the red judgement reads it.
+        Ok(None) | Err(crate::policy::LoadError::Invalid(_)) => false,
+        Err(crate::policy::LoadError::Git(why)) => return Err(why),
+    };
+    if !post_work {
+        return Ok(Vec::new());
+    }
     let keys = Keys::load(git);
     repo.fetch_registry();
     repo.fetch_evidence(&keys);
     let registry = Registry::current(git)?;
-    let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
-    let judgement = crate::red::state(git, &trunk, registry.as_ref())?;
-    let served = check::Served::read(git);
+    let judgement = crate::red::judged(git, &trunk, registry.as_ref())?;
     let mut reports = Vec::new();
     for red in &judgement.red {
         let Some(suspect) = red

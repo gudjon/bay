@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.40
+
+- A box that serves no post check skips post work; each pass reads post records before its visits.
+
 ## 0.5.39
 
 - A landing makes no log scan and no place re-check after its own publishing push.

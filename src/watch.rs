@@ -927,6 +927,7 @@ mod tests {
                     landing: Some("c".repeat(40)),
                     failed: true,
                 }],
+                window: 50,
             }),
             targets: [("staging".to_owned(), "e".repeat(40))].into(),
         };

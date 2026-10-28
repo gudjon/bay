@@ -271,3 +271,172 @@ fn a_watch_from_a_cursor_judges_red_as_the_full_walk_does() {
     assert_eq!(turned, [("suite".to_owned(), new.clone())], "{next}");
     assert_eq!(trunk.status_red(), turned);
 }
+
+impl Trunk {
+    /// main's tip on the remote, with every bay ref and note fetched into the main checkout, so
+    /// the library reads the records the remote holds.
+    fn fetched_tip(&self) -> String {
+        self.test_box.git_ok(
+            &self.repo,
+            &[
+                "fetch",
+                "-q",
+                "origin",
+                "+refs/heads/main:refs/remotes/origin/main",
+                "+refs/notes/bay/*:refs/notes/bay/*",
+                "+refs/bay/*:refs/bay/*",
+            ],
+        );
+        self.test_box
+            .git_ok(&self.repo, &["rev-parse", "refs/remotes/origin/main"])
+    }
+}
+
+/// BACKLOG 113: the runner's post work now judges main from the last judgement (`red::judged`,
+/// as the heads do since 0.5.38), and reads more of it than the red owner: the pending checks
+/// order its post checks, and a red check's suspect range is where the culprit finding runs its
+/// midpoints. At every step of a red that turns, clears and turns again, the judgement from the
+/// last one equals the full judgement in every field.
+#[test]
+fn the_judgement_from_the_last_one_is_the_full_one_in_every_field() {
+    let trunk = Trunk::new();
+    let git = bay::git::Git::new(&trunk.repo);
+    let names: Vec<String> = (0..12).map(|n| format!("h{n}")).collect();
+    let history = trunk.push(&names);
+    let mut before: Option<bay::red::Judged> = None;
+    let step = |label: &str, before: &mut Option<bay::red::Judged>| {
+        let tip = trunk.fetched_tip();
+        let registry = bay::registry::Registry::current(&git).unwrap();
+        let full = bay::red::state(&git, &tip, registry.as_ref()).unwrap();
+        let (from_last, judged) =
+            bay::red::judge(&git, &tip, registry.as_ref(), before.as_ref()).unwrap();
+        assert_eq!(
+            from_last, full,
+            "{label}: the judgement from the last one differs"
+        );
+        *before = judged;
+        full
+    };
+    let none = step("no record", &mut before);
+    assert!(none.red.is_empty(), "{none:?}");
+    trunk.suite(&history[2], "pass");
+    trunk.suite(&history[3], "product_failure");
+    trunk.push(&["new".to_owned()]);
+    let red = step("a failure, then a new commit", &mut before);
+    assert_eq!(red.red.len(), 1, "{red:?}");
+    trunk.suite(&history[8], "pass");
+    let cleared = step("a later pass, no new commit", &mut before);
+    assert!(cleared.red.is_empty(), "{cleared:?}");
+    trunk.suite(&history[5], "product_failure");
+    let newest = trunk.push(&["newest".to_owned()]).pop().unwrap();
+    trunk.suite(&newest, "product_failure");
+    let again = step("an older failure and the newest", &mut before);
+    assert_eq!(again.red.len(), 1, "{again:?}");
+    let more = trunk.push(&["n1".to_owned(), "n2".to_owned(), "n3".to_owned()]);
+    trunk.suite(&more[2], "product_failure");
+    let ranged = step("a red with a range of several landings", &mut before);
+    assert_eq!(ranged.red.len(), 1, "{ranged:?}");
+}
+
+impl Trunk {
+    /// Writes `path` with `text` in the main checkout, commits it and pushes it to trunk outside
+    /// bay; returns the commit.
+    fn push_file(&self, path: &str, text: &str) -> String {
+        let full = self.repo.join(path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, text).unwrap();
+        self.test_box.git_ok(&self.repo, &["add", path]);
+        self.test_box
+            .git_ok(&self.repo, &["commit", "-q", "-m", path]);
+        self.test_box
+            .git_ok(&self.repo, &["push", "-q", "origin", "HEAD:main"]);
+        self.test_box.git_ok(&self.repo, &["rev-parse", "HEAD"])
+    }
+}
+
+impl Trunk {
+    /// Producer `suite-1` answers post check `check` on `landing` with `verdict`.
+    fn answer(&self, check: &str, landing: &str, verdict: &str) {
+        let (code, written) = result_json(self.test_box.bay(&self.suite_box).args([
+            "evidence",
+            "record",
+            "--kind",
+            "check",
+            "--check",
+            check,
+            "--environment",
+            "local",
+            "--verdict",
+            verdict,
+            "--commit",
+            landing,
+        ]));
+        assert_eq!(code, 0, "{written}");
+    }
+}
+
+/// BACKLOG 113, from a review: the judgement from the last one equals the full one also where its
+/// shortcuts and its window reach: a new commit with no record while red (the carried decision
+/// answers), a second post check answered only long ago (pending in a small window), and a `[red]
+/// window` grown between two judgements, which reaches that old answer.
+#[test]
+fn the_judgement_from_the_last_one_holds_across_its_shortcuts_and_a_grown_window() {
+    let trunk = Trunk::new();
+    let git = bay::git::Git::new(&trunk.repo);
+    let policy = std::fs::read_to_string(trunk.repo.join(".bay/policy.toml")).unwrap();
+    trunk.push_file(
+        ".bay/policy.toml",
+        &format!("{policy}{}", POST.replace("\"suite\"", "\"silent\"")),
+    );
+    trunk.push_file(".bay/config.toml", "[red]\nwindow = 4\n");
+    let names: Vec<String> = (0..10).map(|n| format!("w{n}")).collect();
+    let history = trunk.push(&names);
+    let mut before: Option<bay::red::Judged> = None;
+    let step = |label: &str, before: &mut Option<bay::red::Judged>| {
+        let tip = trunk.fetched_tip();
+        let registry = bay::registry::Registry::current(&git).unwrap();
+        let full = bay::red::state(&git, &tip, registry.as_ref()).unwrap();
+        let (from_last, judged) =
+            bay::red::judge(&git, &tip, registry.as_ref(), before.as_ref()).unwrap();
+        assert_eq!(
+            from_last, full,
+            "{label}: the judgement from the last one differs"
+        );
+        *before = judged;
+        full
+    };
+    // `suite` red on the newest landing; `silent` answered only on a landing the window of 4 does
+    // not reach.
+    trunk.answer("suite", &history[9], "product_failure");
+    trunk.answer("silent", &history[2], "product_failure");
+    let small = step("a red in a window of 4", &mut before);
+    assert!(
+        small.red.iter().any(|red| red.check == "suite"),
+        "{small:?}"
+    );
+    assert!(
+        !small.red.iter().any(|red| red.check == "silent"),
+        "{small:?}"
+    );
+    assert!(
+        small
+            .pending
+            .iter()
+            .any(|pending| pending.check == "silent"),
+        "{small:?}"
+    );
+    // A new commit with no record while red: the carried decision answers.
+    trunk.push(&["quiet".to_owned()]);
+    let quiet = step("a new commit with no record while red", &mut before);
+    assert!(
+        quiet.red.iter().any(|red| red.check == "suite"),
+        "{quiet:?}"
+    );
+    // The window grows: it now reaches `silent`'s old failure.
+    trunk.push_file(".bay/config.toml", "[red]\nwindow = 50\n");
+    let grown = step("a grown window", &mut before);
+    assert!(
+        grown.red.iter().any(|red| red.check == "silent"),
+        "the grown window reaches the old failure: {grown:?}"
+    );
+}
