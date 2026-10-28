@@ -158,13 +158,19 @@ fn a_talk_read_after_it_expires_prints_expired_and_owes_no_backbrief() {
     let told = hook(&case, "step.end", "08-PostToolBatch.json");
     assert!(
         told.contains(&format!(
-            "bay: EXPIRED: talk {late} (delivery) arrived for agent-b after its `expires`, so it owes no backbrief: read it with `git show refs/bay/talk/agent-b/{late}:talk.json`\n"
+            "bay: EXPIRED: talk {late} (delivery) from agent arrived for agent-b after its `expires`, so it owes no reply: read it with `git show refs/bay/talk/agent-b/{late}:talk.json`\n"
         )),
         "{told}"
     );
+    let in_time_line = told
+        .lines()
+        .find(|line| line.starts_with(&format!("bay: talk {in_time} ")))
+        .unwrap_or_else(|| panic!("no line for the in-time talk: {told}"));
     assert!(
-        told.contains(&format!(
-            "bay: talk {in_time} (delivery) arrived for agent-b: read it with `git show refs/bay/talk/agent-b/{in_time}:talk.json`\n"
+        in_time_line.starts_with(&format!(
+            "bay: talk {in_time} (delivery) from agent arrived for agent-b, reply owed by "
+        )) && in_time_line.ends_with(&format!(
+            ": read it with `git show refs/bay/talk/agent-b/{in_time}:talk.json`"
         )),
         "{told}"
     );

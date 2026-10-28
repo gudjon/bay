@@ -3,9 +3,10 @@
 //!
 //! A talk has arrived when the recipient's accept acked it (a fetching command, `bay status`).
 //! The hook reads the talk refs this repository holds, no fetch, and tells the session's own
-//! agent at its next `step.end` or `turn.start`: one line naming the talk's id, its kind
-//! and where to read it, never its prose. The delivered-notice cursor keeps the talk ids, so the
-//! same talk is never told again in that session. A talk fetched but not acked is not arrived.
+//! agent at its next `step.end` or `turn.start`: one line naming the talk's id, kind and sender,
+//! when the reply is owed and where to read it, never its prose. The delivered-notice cursor
+//! keeps the talk ids, so the same talk is never told again in that session. A talk fetched but
+//! not acked is not arrived.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -114,8 +115,8 @@ fn a_talk_that_arrives_is_one_notice_and_never_again() {
     assert_eq!(
         told,
         format!(
-            "bay: talk {id} (delivery) arrived for agent-b: read it with \
-             `git show refs/bay/talk/agent-b/{id}:talk.json`\n"
+            "bay: talk {id} (delivery) from agent arrived for agent-b, reply owed by \
+             {follow_up}: read it with `git show refs/bay/talk/agent-b/{id}:talk.json`\n"
         )
     );
     assert!(
