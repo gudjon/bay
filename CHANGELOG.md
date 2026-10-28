@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.5.34
+## 0.5.35
 
+- A post check is asked what changed since it last answered, and skipped when nothing wakes it.
 - `bay status` of a merged change says it is on main.
 - A runner's waiting visits reuse its last read of main and the queue; a head reads afresh.
 - A post check that was not run says why in the runner's journal.

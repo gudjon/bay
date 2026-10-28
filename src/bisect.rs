@@ -125,13 +125,30 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
         if writer.records(git, &tree, &id)? > 0 {
             continue;
         }
+        // G439 (a fleet finding, 2026-10-28): a post run on the tip was asked about the tip's
+        // last landing alone, so a check whose adapter picks its tests by changed paths ran
+        // nothing ("collected 0 of 1") unless that one landing touched them. It is asked what
+        // changed since this box last answered it, and not run when nothing in that range
+        // wakes it.
+        let since = ran
+            .get(&(entry.id.clone(), entry.environment.clone()))
+            .map_or_else(
+                || span_start(git, &tip),
+                |ago| rev(git, &format!("{tip}~{ago}")),
+            )?;
+        if policy
+            .unwoken(entry, &check::changed_paths(git, &since, &tip)?)
+            .is_some()
+        {
+            continue;
+        }
         // One check's fault is that check's, said in its row; the post checks after it still run.
         let verdict = match run_at(
             repo,
             &keys,
             &writer,
             (&id, ("post", json!({"tip": tip}))),
-            &tip,
+            (&tip, Some(&since)),
         ) {
             Ok(Ok(verdict)) => json!(verdict),
             Ok(Err(why)) | Err(why) => json!({"not_run": why}),
@@ -178,6 +195,18 @@ fn last_runs(
 /// How far back main's line [`last_runs`] reads: a check this box ran on none of these many
 /// landings goes before every one it ran on.
 const RAN_SPAN: usize = 64;
+
+/// G439: the oldest commit of main's newest [`RAN_SPAN`] first-parent commits from `tip`, the
+/// start of the range a post check that this box never answered there is asked about.
+fn span_start(git: &Git, tip: &str) -> Result<String, String> {
+    let span = RAN_SPAN.to_string();
+    git.run(&["rev-list", "--first-parent", "--max-count", &span, tip])
+        .map_err(|error| error.message())?
+        .lines()
+        .last()
+        .map(str::to_owned)
+        .ok_or_else(|| format!("{tip} has no history"))
+}
 
 /// Items 1 and 2: the runner warms results on main's tip (`[runner] warm`). After its queue's
 /// work, each pre check with `footprint = "observed"` in the policy at main's newest tip runs
@@ -226,7 +255,7 @@ fn warm_runs(repo: &Repo) -> Result<Vec<Value>, String> {
             &keys,
             &writer,
             (&id, ("warm", json!({"tip": tip}))),
-            &tip,
+            (&tip, None),
         )? {
             Ok(verdict) => json!(verdict),
             Err(why) => json!({"not_run": why}),
@@ -361,7 +390,7 @@ fn bisect(
             keys,
             writer,
             (&id, ("bisect", window.clone())),
-            &mark.landing,
+            (&mark.landing, None),
         )? {
             Ok(verdict) => verdict,
             Err(why) => return Ok(not_run(red, &why, &tested)),
@@ -387,7 +416,7 @@ fn bisect(
                 keys,
                 writer,
                 (&id, ("bisect", window.clone())),
-                &mark.landing,
+                (&mark.landing, None),
             )? {
                 Ok(verdict) => verdict,
                 Err(why) => return Ok(not_run(red, &why, &tested)),
@@ -419,7 +448,7 @@ fn run_at(
     keys: &Keys,
     writer: &Writer,
     (id, why): (&CheckId, (&str, Value)),
-    commit: &str,
+    (commit, since): (&str, Option<&str>),
 ) -> Result<Result<Verdict, String>, String> {
     let git = &repo.git;
     let (field, body) = why;
@@ -442,7 +471,9 @@ fn run_at(
         Ok(only) => only,
         Err(why) => return Ok(Err(why)),
     };
-    let changed = check::changed_paths(git, &base, commit)?;
+    // A post run on the tip names what changed since `since` (G439); a bisect step names its
+    // landing's own change, which is what it judges.
+    let changed = check::changed_paths(git, since.unwrap_or(&base), commit)?;
     let run = writer.records(git, &tree, id)? + 1;
     let short = commit.get(..12).unwrap_or(commit);
     // A fleet finding (2026-10-27): the id named no check, so the second post check on a tip
