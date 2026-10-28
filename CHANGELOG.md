@@ -6,6 +6,10 @@
 - A clone fetches the key registry before it judges a talk, so a newly enrolled sender's talk arrives.
 - `bay status` talk rows say `signed`: whether a key signed the sender, or the name is a claim.
 - `bay status` fetches talks at most once per 30 s, as a session's hook does; inside, it says `not_due`.
+- A talk's notice names its sender, when the reply is owed, and the command that answers a discovery talk.
+- A talk judged by name, not by key, says so in its notice: `(name not verified)`.
+- A session's first prompt tells the talk it accepted, not one prompt later.
+- A talk's sender is told each ack, backbrief, answer and close once, on its next prompt.
 
 ## 0.5.40
 

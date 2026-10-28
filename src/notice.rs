@@ -95,8 +95,8 @@ const MAX_TOLD: usize = 256;
 /// The longest notice line, in characters.
 const MAX_LINE: usize = 300;
 /// The cap of a talk's line. Each part of it is bounded (names of at most 32 characters, a
-/// 16-character id, a 20-character time), so the longest is 323 characters and is never cut:
-/// the cap only guards.
+/// 16-character id, a 20-character time, the fixed words), so the longest is 343 characters and
+/// is never cut: the cap only guards.
 const TALK_LINE: usize = 400;
 
 /// The line for notices withheld by the budget.
@@ -455,6 +455,8 @@ struct Arrived {
     kind: Option<&'static str>,
     /// The sender's name, only when it is a valid name: never prose (ruling R13).
     from: Option<String>,
+    /// Judged by name, not by key (`signing = "approvals"`, G445): the name is a claim.
+    claimed: bool,
     /// When the reply is owed, as bay writes a time: never the sender's text.
     follow_up: Option<String>,
     tell: bool,
@@ -489,6 +491,10 @@ fn arrived(repo: &Repo, actor: &str, cursor: &Cursor) -> Vec<Arrived> {
     if new.is_empty() {
         return Vec::new();
     }
+    let claimed = matches!(
+        crate::registry::signing_mode(&repo.git),
+        Ok(crate::policy::Signing::Approvals)
+    );
     crate::talk::read_created(&repo.git, &new)
         .into_iter()
         .filter(|talk| talk.has("ack"))
@@ -501,6 +507,7 @@ fn arrived(repo: &Repo, actor: &str, cursor: &Cursor) -> Vec<Arrived> {
                     .copied()
                     .find(|kind| talk.body["kind"] == *kind),
                 from: shown_name(talk.from_name()),
+                claimed,
                 follow_up: talk.body["follow_up"].as_str().and_then(shown_time),
                 tell: (expired || !talk.closed()) && talk.from_name() != actor,
                 expired,
@@ -837,10 +844,11 @@ fn shown_time(text: &str) -> Option<String> {
 /// was read after its `expires` (G52). Every part is a name, a time or bay's own id: the talk's
 /// prose stays in its record (ruling R13), read as data with `git show`.
 fn talk_line(actor: &str, talk: &Arrived) -> String {
-    let from = talk
-        .from
-        .as_ref()
-        .map_or_else(String::new, |name| format!(" from {name}"));
+    let from = match (&talk.from, talk.claimed) {
+        (Some(name), false) => format!(" from {name}"),
+        (Some(name), true) => format!(" from {name} (name not verified)"),
+        (None, _) => String::new(),
+    };
     let id = &talk.id;
     let read = format!(
         "read it with `git show {}{actor}/{id}:{}`",
@@ -1278,6 +1286,7 @@ mod tests {
             id: id.to_owned(),
             kind: Some("delivery"),
             from: None,
+            claimed: false,
             follow_up: None,
             tell,
             expired: false,
@@ -1315,6 +1324,7 @@ mod tests {
             id: "t1".to_owned(),
             kind: Some("discovery"),
             from: Some("beta".to_owned()),
+            claimed: false,
             follow_up: Some("2026-10-28T19:00:00Z".to_owned()),
             tell: true,
             expired: false,
@@ -1324,6 +1334,23 @@ mod tests {
             "bay: talk t1 (discovery) from beta arrived for alpha, reply owed by \
              2026-10-28T19:00:00Z: read it with `git show refs/bay/talk/alpha/t1:talk.json`; \
              answer with `bay talk --answer t1 --value <answer>`\n"
+        );
+        // G445: a talk judged by name, not by key, says its sender's name is a claim.
+        let claimed = super::Arrived {
+            claimed: true,
+            kind: Some("delivery"),
+            from: talk.from.clone(),
+            follow_up: talk.follow_up.clone(),
+            id: talk.id.clone(),
+            tell: true,
+            expired: false,
+        };
+        assert!(
+            super::talk_line("alpha", &claimed).starts_with(
+                "bay: talk t1 (delivery) from beta (name not verified) arrived for alpha,"
+            ),
+            "{}",
+            super::talk_line("alpha", &claimed)
         );
         // A delivery or reliability talk takes no answer, so its line names none.
         let delivery = super::Arrived {
@@ -1356,12 +1383,13 @@ mod tests {
             id: id.to_owned(),
             kind: Some("discovery"),
             from: Some("a".repeat(32)),
+            claimed: true,
             follow_up: Some("2026-10-28T19:00:00Z".to_owned()),
             tell: true,
             expired: false,
         };
         let line = super::talk_line(&"b".repeat(32), &talk);
-        assert_eq!(line.chars().count(), 324, "{line}");
+        assert_eq!(line.chars().count(), 344, "{line}");
         assert!(
             line.ends_with(&format!("`bay talk --answer {id} --value <answer>`\n")),
             "{line}"
