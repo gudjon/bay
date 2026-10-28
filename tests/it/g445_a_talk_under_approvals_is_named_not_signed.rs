@@ -154,10 +154,14 @@ fn signed(with_c: bool) -> (Case, TestKeys, PathBuf, PathBuf) {
     case.test_box
         .enroll_with(&case.a, &keys, &keys.executor, &agents);
     case.test_box.use_keys(&case.a, &keys);
-    case.test_box
-        .git_ok(&case.b, &["config", "bay.agentKey", b_key.to_str().unwrap()]);
-    case.test_box
-        .git_ok(&case.c, &["config", "bay.agentKey", c_key.to_str().unwrap()]);
+    case.test_box.git_ok(
+        &case.b,
+        &["config", "bay.agentKey", b_key.to_str().unwrap()],
+    );
+    case.test_box.git_ok(
+        &case.c,
+        &["config", "bay.agentKey", c_key.to_str().unwrap()],
+    );
     (case, keys, b_key, c_key)
 }
 
@@ -339,8 +343,10 @@ fn under_all_an_unsigned_talk_is_refused_and_never_acked() {
         )
         .unwrap();
     let name = talk_ref("agent-b", &id);
-    case.test_box
-        .git_ok(&case.a, &["push", "-q", "origin", &format!("{commit}:{name}")]);
+    case.test_box.git_ok(
+        &case.a,
+        &["push", "-q", "origin", &format!("{commit}:{name}")],
+    );
 
     let (code, status) = case.bay("agent-b", &["status"]);
     assert_eq!(code, 0, "{status}");
@@ -348,8 +354,10 @@ fn under_all_an_unsigned_talk_is_refused_and_never_acked() {
     assert_eq!(accept["acked"], json!([]), "{status}");
     let refused = accept["refused"].as_array().unwrap();
     assert!(
-        refused.iter().any(|row| row["talk"] == id.as_str()
-            && row["why"].as_str().unwrap().contains("not signed")),
+        refused
+            .iter()
+            .any(|row| row["talk"] == id.as_str()
+                && row["why"].as_str().unwrap().contains("not signed")),
         "{status}"
     );
     assert_eq!(case.remote_tip(&name).as_deref(), Some(commit.as_str()));
@@ -384,8 +392,10 @@ fn under_all_a_clone_that_never_fetched_the_registry_fetches_it_before_it_judges
 fn under_all_a_sender_enrolled_after_the_last_fetch_is_judged_on_the_new_registry() {
     let (case, keys, b_key, c_key) = signed(false);
     // B holds the registry from before agent-c was enrolled.
-    case.test_box
-        .git_ok(&case.b, &["fetch", "-q", "origin", &format!("+{REGISTRY}:{REGISTRY}")]);
+    case.test_box.git_ok(
+        &case.b,
+        &["fetch", "-q", "origin", &format!("+{REGISTRY}:{REGISTRY}")],
+    );
     case.test_box.enroll_with(
         &case.a,
         &keys,
