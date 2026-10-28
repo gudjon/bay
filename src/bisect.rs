@@ -140,6 +140,11 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
         if writer.records(git, &tree, &id)? > 0 {
             continue;
         }
+        // BACKLOG 117: a check no worker answered here lately waits, and this pass runs the
+        // next one.
+        if waits_for_a_worker(repo, &id).is_some() {
+            continue;
+        }
         // G439 (a fleet finding, 2026-10-28): a post run on the tip was asked about the tip's
         // last landing alone, so a check whose adapter picks its tests by changed paths ran
         // nothing ("collected 0 of 1") unless that one landing touched them. It is asked what
@@ -469,6 +474,72 @@ fn bisect(
 
 /// Runs `red`'s post check on landing `commit` and records its verdict as this box's post
 /// evidence on the landing's tree, pushed. `Ok(Err(why))` when it cannot run here.
+/// How long a check that no worker answered on this box waits before this box tries it again
+/// (BACKLOG 117, a fleet finding, 2026-10-28: the one post runner waited 383-400 s on each of
+/// eight venue6 tickets that never started, and wrote no record, so the same check came first
+/// in every pass and its other post checks were silent for two hours). A record of the check
+/// ends the wait.
+const UNAVAILABLE_WAIT: std::time::Duration = std::time::Duration::from_hours(1);
+
+/// [`UNAVAILABLE_WAIT`]; a test build honours `BAY_TEST_UNAVAILABLE_WAIT_S`, a release build
+/// never does.
+fn unavailable_wait() -> std::time::Duration {
+    if option_env!("BAY_RELEASE_VERSION").is_none()
+        && let Some(secs) = std::env::var("BAY_TEST_UNAVAILABLE_WAIT_S")
+            .ok()
+            .and_then(|secs| secs.parse().ok())
+    {
+        return std::time::Duration::from_secs(secs);
+    }
+    UNAVAILABLE_WAIT
+}
+
+/// The file where this box notes when no worker answered each check: `<check>@<environment>`
+/// to the Unix second.
+fn unavailable_file(repo: &Repo) -> std::path::PathBuf {
+    repo.common_dir.join("bay").join("post-unavailable.json")
+}
+
+fn unavailable_key(id: &CheckId) -> String {
+    format!("{}@{}", id.id, id.environment)
+}
+
+fn unavailable_notes(repo: &Repo) -> std::collections::BTreeMap<String, u64> {
+    std::fs::read_to_string(unavailable_file(repo))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// Records that no worker answered `id` at `now`, or, with `None`, that it has a record again.
+fn note_unavailable(repo: &Repo, id: &CheckId, now: Option<u64>) {
+    let mut notes = unavailable_notes(repo);
+    let key = unavailable_key(id);
+    let changed = match now {
+        Some(now) => notes.insert(key, now) != Some(now),
+        None => notes.remove(&key).is_some(),
+    };
+    if !changed {
+        return;
+    }
+    let path = unavailable_file(repo);
+    let tmp = path.with_extension("tmp");
+    if let Ok(text) = serde_json::to_string(&notes)
+        && std::fs::write(&tmp, text).is_ok()
+    {
+        let _ = crate::durable::rename(&tmp, &path);
+    }
+}
+
+/// The seconds `id` still waits, when no worker answered it here within [`unavailable_wait`].
+fn waits_for_a_worker(repo: &Repo, id: &CheckId) -> Option<u64> {
+    let at = *unavailable_notes(repo).get(&unavailable_key(id))?;
+    let left = at
+        .saturating_add(unavailable_wait().as_secs())
+        .saturating_sub(crate::live::unix_now());
+    (left > 0).then_some(left)
+}
+
 fn run_at(
     repo: &Repo,
     keys: &Keys,
@@ -476,6 +547,11 @@ fn run_at(
     (id, why): (&CheckId, (&str, Value)),
     (commit, since): (&str, Option<&str>),
 ) -> Result<Result<Verdict, String>, String> {
+    if let Some(left) = waits_for_a_worker(repo, id) {
+        return Ok(Err(format!(
+            "no worker answered the check here lately; it is tried again in {left} s"
+        )));
+    }
     let git = &repo.git;
     let (field, body) = why;
     // A warm run is a candidate of no change on the tip, judged as one on that tip: its base
@@ -566,16 +642,29 @@ fn run_at(
             seen: None,
         },
     );
-    let _ = std::fs::remove_dir_all(&scratch);
-    let ran = ran?;
+    let _ = check::remove_tree(&scratch);
+    answered(repo, writer, id, ran?)
+}
+
+/// What `ran` answered for `id`: its verdict, its record pushed; or why it gave none. A check
+/// no worker answers is noted, so this box waits before it tries it again (BACKLOG 117).
+fn answered(
+    repo: &Repo,
+    writer: &Writer,
+    id: &CheckId,
+    ran: check::Ran,
+) -> Result<Result<Verdict, String>, String> {
     if let Some((_, reason)) = ran.unavailable {
+        note_unavailable(repo, id, Some(crate::live::unix_now()));
         return Ok(Err(format!("no worker answers the check: {reason}")));
     }
     let Some(verdict) = ran.records.first().map(|record| record.verdict) else {
         return Ok(Err("the check wrote no record".to_owned()));
     };
+    note_unavailable(repo, id, None);
     let notes = evidence::notes_ref(&writer.name);
-    git.run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
+    repo.git
+        .run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
         .map_err(|error| {
             format!(
                 "the post check's record is written here but not pushed: {}",

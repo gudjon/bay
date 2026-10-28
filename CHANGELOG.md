@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.43
+
+- A post check that no worker answers waits an hour on that box, and the next post check runs meanwhile.
+- `bay hook talk-wait` prints the talk line a prompt's notice gives: sender, reply time and the answer command.
+- A sender's line for an answer shows the answer when it is a short plain word, never text.
+
 ## 0.5.42
 
 - A check's tree is made in bay's state directory, never under `.git`, where TypeScript dropped its symlinks (TS2742).

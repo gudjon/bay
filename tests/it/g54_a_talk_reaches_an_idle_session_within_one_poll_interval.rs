@@ -2,8 +2,9 @@
 //! fetch twice inside one (ruling T5; `DESIGN` § 11c).
 //!
 //! The idle wait (`bay hook talk-wait`, run by an asynchronous hook) polls the actor's talks every
-//! `BAY_TALK_POLL_S` and exits 2, the wake, at the first talk it accepts. A live session's hooks
-//! (`turn.start`, `step.end`) accept talks at most once per `BAY_TALK_POLL_S`. The
+//! `BAY_TALK_POLL_S` and exits 2, the wake, at the first talk it accepts, with the line a
+//! prompt's notice gives for it (H3: sender, reply time, the answer command). A live session's
+//! hooks (`turn.start`, `step.end`) accept talks at most once per `BAY_TALK_POLL_S`. The
 //! backoff (ten empty polls double the interval) is the unit test in `talk::poll`. A test build
 //! scales the schedule's second by `BAY_TEST_TALK_POLL_MS`.
 
@@ -81,6 +82,19 @@ fn an_idle_wait_wakes_on_the_first_talk_within_one_interval() {
         sent.elapsed()
     );
     assert!(acked(&case, &id), "the wait accepted it");
+    // H3: the wake says what a prompt's notice says of the talk: id, kind, sender, reply time.
+    let mut stderr = String::new();
+    std::io::Read::read_to_string(&mut wait.stderr.take().unwrap(), &mut stderr).unwrap();
+    assert!(
+        stderr.contains(&format!(
+            "bay: talk {id} (delivery) from agent arrived for agent-b, reply owed by "
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("parser"),
+        "the prose never reaches the line"
+    );
 }
 
 #[test]

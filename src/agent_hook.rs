@@ -767,10 +767,10 @@ fn talk_wait(dir: &Path) -> Outcome {
                     .collect()
             })
             .unwrap_or_default();
-        format!(
-            "bay: a talk arrived: {} (bay status shows it)\n",
-            talks.join(", ")
-        )
+        // H3: the same line a prompt's notice gives for each talk it accepted.
+        crate::change::current_actor(&repo.common_dir)
+            .map(|me| crate::notice::talk_lines(&repo, &me.name, &talks))
+            .unwrap_or_default()
     } else {
         String::new()
     };

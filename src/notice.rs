@@ -467,6 +467,34 @@ struct Arrived {
 /// The talks to `actor` this repository holds that `cursor` has not passed, read at most
 /// [`MAX_READ`] at a time; those with no ack yet are left for a later hook.
 fn arrived(repo: &Repo, actor: &str, cursor: &Cursor) -> Vec<Arrived> {
+    let new: Vec<(String, String)> = talk_refs(repo, actor)
+        .into_iter()
+        .filter(|(_, id, _)| !cursor.talks.iter().any(|told| told == id))
+        .take(MAX_READ)
+        .map(|(name, _, tip)| (name, tip))
+        .collect();
+    arrived_from(repo, actor, &new)
+}
+
+/// The lines, as a prompt's notice gives them, of the talks `ids` to `actor` that this
+/// repository holds acked: what `bay hook talk-wait` prints when it accepts them (H3).
+#[must_use]
+pub fn talk_lines(repo: &Repo, actor: &str, ids: &[String]) -> String {
+    let refs: Vec<(String, String)> = talk_refs(repo, actor)
+        .into_iter()
+        .filter(|(_, id, _)| ids.contains(id))
+        .map(|(name, _, tip)| (name, tip))
+        .collect();
+    arrived_from(repo, actor, &refs)
+        .iter()
+        .filter(|talk| talk.tell)
+        .map(|talk| talk_line(actor, talk))
+        .collect()
+}
+
+/// The talk refs to `actor` this repository holds: (ref, id, tip); none for a name that is no
+/// talk recipient.
+fn talk_refs(repo: &Repo, actor: &str) -> Vec<(String, String, String)> {
     if crate::names::operator_name(actor).is_err() {
         return Vec::new();
     }
@@ -477,25 +505,26 @@ fn arrived(repo: &Repo, actor: &str, cursor: &Cursor) -> Vec<Arrived> {
     else {
         return Vec::new();
     };
-    let new: Vec<(String, String)> = listed
+    listed
         .lines()
         .filter_map(|line| line.split_once(' '))
-        .filter(|(name, _)| {
-            name.strip_prefix(&prefix).is_some_and(|id| {
-                crate::talk::is_talk_id(id) && !cursor.talks.iter().any(|told| told == id)
-            })
+        .filter_map(|(name, tip)| {
+            let id = name.strip_prefix(&prefix)?;
+            crate::talk::is_talk_id(id).then(|| (name.to_owned(), id.to_owned(), tip.to_owned()))
         })
-        .take(MAX_READ)
-        .map(|(name, tip)| (name.to_owned(), tip.to_owned()))
-        .collect();
-    if new.is_empty() {
+        .collect()
+}
+
+/// The acked talks of `refs` (ref, tip) as a notice tells them.
+fn arrived_from(repo: &Repo, actor: &str, refs: &[(String, String)]) -> Vec<Arrived> {
+    if refs.is_empty() {
         return Vec::new();
     }
     let claimed = matches!(
         crate::registry::signing_mode(&repo.git),
         Ok(crate::policy::Signing::Approvals)
     );
-    crate::talk::read_created(&repo.git, &new)
+    crate::talk::read_created(&repo.git, refs)
         .into_iter()
         .filter(|talk| talk.has("ack"))
         .map(|talk| {

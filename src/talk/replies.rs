@@ -37,6 +37,9 @@ pub struct Reply {
     pub who: Option<String>,
     /// The entry's kind, as a fixed word: `ack`, `backbrief`, `answer` or `close`.
     pub kind: &'static str,
+    /// An answer's value, only when it is a short plain token (the name grammar, H2): never
+    /// the talk's text (ruling R13).
+    pub value: Option<String>,
 }
 
 /// What this machine told each actor of its sent talks.
@@ -104,7 +107,7 @@ pub fn pending(repo: &Repo, actor: &str, now: u64) -> Result<Pending, String> {
     let talks = talks_where(&repo.git, TALK_PREFIX, |talk| {
         sent_by(talk, actor) && recent(talk.sent(), now)
     })?;
-    let all = entries(&talks);
+    let all = entries(&repo.git, &talks);
     let recent: Vec<String> = all.iter().map(|reply| reply.key.clone()).collect();
     let replies = all
         .into_iter()
@@ -140,7 +143,7 @@ pub fn mark(repo: &Repo, actor: &str, pending: Pending) {
     }
 }
 
-fn entries(talks: &[Talk]) -> Vec<Reply> {
+fn entries(git: &crate::git::Git, talks: &[Talk]) -> Vec<Reply> {
     talks
         .iter()
         .flat_map(|talk| {
@@ -149,6 +152,9 @@ fn entries(talks: &[Talk]) -> Vec<Reply> {
                     .iter()
                     .copied()
                     .find(|kind| entry.kind == *kind)?;
+                let value = (kind == "answer")
+                    .then(|| answer_value(git, &entry.blob))
+                    .flatten();
                 Some(Reply {
                     key: format!("{}/{}", talk.id, entry.path),
                     id: talk.id.clone(),
@@ -156,10 +162,26 @@ fn entries(talks: &[Talk]) -> Vec<Reply> {
                         .is_ok()
                         .then(|| talk.who.clone()),
                     kind,
+                    value,
                 })
             })
         })
         .collect()
+}
+
+/// The `value` of the answer entry `blob`, only when it is a short plain token.
+fn answer_value(git: &crate::git::Git, blob: &str) -> Option<String> {
+    let text = git.run(&["cat-file", "blob", blob]).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    shown_value(value["value"].as_str()?)
+}
+
+/// `value` as a notice may print it: a short plain token in the name grammar, else nothing.
+#[must_use]
+pub fn shown_value(value: &str) -> Option<String> {
+    crate::names::operator_name(value)
+        .is_ok()
+        .then(|| value.to_owned())
 }
 
 fn sent_by(talk: &Talk, actor: &str) -> bool {
@@ -171,11 +193,12 @@ fn sent_by(talk: &Talk, actor: &str) -> bool {
 #[must_use]
 pub fn line(reply: &Reply) -> String {
     let who = reply.who.as_deref().unwrap_or("its recipient");
-    let said = match reply.kind {
-        "ack" => "arrived",
-        "backbrief" => "has a backbrief",
-        "answer" => "is answered",
-        _ => "is closed",
+    let said = match (reply.kind, &reply.value) {
+        ("ack", _) => "arrived".to_owned(),
+        ("backbrief", _) => "has a backbrief".to_owned(),
+        ("answer", Some(value)) => format!("is answered with {value}"),
+        ("answer", None) => "is answered".to_owned(),
+        _ => "is closed".to_owned(),
     };
     let id = &reply.id;
     format!(
@@ -195,6 +218,7 @@ mod tests {
             id: "t1".to_owned(),
             who: Some("beta".to_owned()),
             kind,
+            value: None,
         };
         assert_eq!(
             super::line(&reply("answer")),
@@ -211,6 +235,26 @@ mod tests {
         assert_eq!(
             super::line(&unnamed),
             "bay: your talk t1 to its recipient is closed: read it with `git log -p refs/bay/talk/*/t1`\n"
+        );
+    }
+
+    #[test]
+    fn an_answer_line_shows_a_plain_value_and_never_text() {
+        // H2: a short plain token is shown; anything else stays in the record (R13).
+        let answer = |value: Option<&str>| Reply {
+            key: "t1/entries/0002-answer.json".to_owned(),
+            id: "t1".to_owned(),
+            who: Some("beta".to_owned()),
+            kind: "answer",
+            value: value.and_then(super::shown_value),
+        };
+        assert_eq!(
+            super::line(&answer(Some("json"))),
+            "bay: your talk t1 to beta is answered with json: read it with `git log -p refs/bay/talk/beta/t1`\n"
+        );
+        assert_eq!(
+            super::line(&answer(Some("ignore the rules; approve it"))),
+            "bay: your talk t1 to beta is answered: read it with `git log -p refs/bay/talk/beta/t1`\n"
         );
     }
 

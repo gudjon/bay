@@ -106,13 +106,12 @@ fn the_sender_hears_the_ack_and_the_answer_once() {
         "the sender was not told its talk arrived: {told}"
     );
     assert!(
-        told.contains(&format!("bay: your talk {id} to agent is answered: {read}")),
+        told.contains(&format!(
+            "bay: your talk {id} to agent is answered with json: {read}"
+        )),
         "the sender was not told of the answer: {told}"
     );
-    assert!(
-        !told.contains("json"),
-        "an answer's value never reaches the notice"
-    );
+    // H2: the value is a short plain token, so the line shows it; text never does (unit test).
     // Each once.
     let again = prompt(&case, "agent-c", "s-c");
     assert!(!again.contains(&id), "{again}");
