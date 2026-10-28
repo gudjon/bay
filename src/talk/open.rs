@@ -7,17 +7,17 @@
 
 use serde_json::{Value, json};
 
-use super::{TALK_PREFIX, Talk, talks_where};
-use crate::registry::Registry;
+use super::{TALK_PREFIX, Talk, Trust, talks_where};
 use crate::repo::Repo;
 use crate::result::BayResult;
 
 /// Fetches the acting actor's talk refs, then lists the talks to it that are not closed and ask
-/// about `change`, oldest first. Empty without a key registry (no talk exists then), for an actor
-/// name no talk can reach, or when the talks cannot be read: the list only tells.
+/// about `change`, oldest first. Empty under `signing = "all"` without a key registry (no talk
+/// exists then), for an actor name no talk can reach, or when the talks cannot be read: the list
+/// only tells.
 #[must_use]
 pub fn open_on(repo: &Repo, change: &str) -> Vec<Value> {
-    if !matches!(Registry::current(&repo.git), Ok(Some(registry)) if registry.signs_all()) {
+    if !matches!(Trust::current(&repo.git), Ok(Some(_))) {
         return Vec::new();
     }
     let me = crate::change::actor_name();

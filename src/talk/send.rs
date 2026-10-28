@@ -11,8 +11,9 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 
 use super::{
-    Refusal, TALK_PREFIX, TALK_SCHEMA, Talk, backlog, check_actors, check_body, entry_commit, fold,
-    is_talk_id, plain, root_commit, talk_id, talk_ref, talks_matching, talks_where,
+    Refusal, TALK_PREFIX, TALK_SCHEMA, Talk, Trust, backlog, check_body, check_parties,
+    entry_commit_as, fold, is_talk_id, plain, root_commit_as, talk_id, talk_ref, talks_matching,
+    talks_where,
 };
 use crate::change::Actor;
 use crate::clock::rfc3339_of;
@@ -103,22 +104,21 @@ pub fn answer(dir: &Path, answer: &Answer) -> BayResult {
     finish(give_answer(dir, answer))
 }
 
-/// The repository, its registry (fetched first) and the acting actor.
-fn open(dir: &Path) -> Result<(Repo, Registry, Actor), Stop> {
+/// The repository, the trust its talks are judged by, and the acting actor. Under
+/// `signing = "all"` the registry is fetched first; under `approvals` (G445) none is read.
+fn open(dir: &Path) -> Result<(Repo, Trust, Actor), Stop> {
     let repo = Repo::open(dir)?;
-    repo.fetch_registry();
-    // N-21: under `[policy] signing = "approvals"` no agent signs, so no talk exists, as
-    // without a registry.
-    let registry = Registry::current(&repo.git)?
-        .filter(Registry::signs_all)
-        .ok_or_else(|| {
-            Refusal::invalid(format!(
-                "a talk needs the repository's key registry ({}): the sender and `who` are registry actors, and the policy's [policy] signing must be \"all\"",
-                crate::names::REGISTRY
-            ))
-        })?;
+    if crate::registry::signing_mode(&repo.git)? == crate::policy::Signing::All {
+        repo.fetch_registry();
+    }
+    let trust = Trust::current(&repo.git)?.ok_or_else(|| {
+        Refusal::invalid(format!(
+            "under [policy] signing = \"all\" a talk needs the repository's key registry ({}): the sender and `who` are registry actors",
+            crate::names::REGISTRY
+        ))
+    })?;
     let actor = crate::change::current_actor(&repo.common_dir)?;
-    Ok((repo, registry, actor))
+    Ok((repo, trust, actor))
 }
 
 /// This machine's agent key, when the registry enrols it for `name`: the only key a talk or an
@@ -303,9 +303,9 @@ fn ask_of(body: &Value) -> Value {
 }
 
 fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
-    let (repo, registry, sender) = open(dir)?;
+    let (repo, trust, sender) = open(dir)?;
     let Some(to_change) = &ask.to_change else {
-        return deliver(&repo, &registry, &sender, ask);
+        return deliver(&repo, &trust, &sender, ask);
     };
     if ask.who.is_some() {
         return Err(Refusal::invalid(
@@ -318,7 +318,7 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
         who: Some(lander.who.clone()),
         ..ask.clone()
     };
-    let mut result = deliver(&repo, &registry, &sender, &addressed)?;
+    let mut result = deliver(&repo, &trust, &sender, &addressed)?;
     if let Some(detail) = result.detail.as_mut() {
         detail["to_change"] = lander.to_json();
     }
@@ -326,19 +326,26 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
 }
 
 /// Sends `ask` from `sender`: every refusal first, then the commit and its push.
-fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Result<BayResult, Stop> {
+fn deliver(repo: &Repo, trust: &Trust, sender: &Actor, ask: &Ask) -> Result<BayResult, Stop> {
     let sent = crate::live::unix_now();
     let mut body = build(ask, sender, sent)?;
     check_body(&body)?;
-    check_actors(registry, &body)?;
-    let reviewer = super::sender_class(registry, &body) == Some(KeyClass::Reviewer);
-    let key = if reviewer {
-        // G149: a reviewer talks only about a landing it reviewed, under its reviewer key.
-        let _ = repo.fetch_trunk();
-        super::reviewed(&repo.git, registry, &repo.trunk_tracking_ref(), &body)?;
-        reviewer_key(&repo.git, registry, &sender.name)?
-    } else {
-        agent_key(&repo.git, registry, &sender.name)?
+    check_parties(trust, &body)?;
+    // G445: under approvals no key signs a talk; the sender is its actor name.
+    let (reviewer, key) = match trust {
+        Trust::Keys(registry) => {
+            let reviewer = super::sender_class(registry, &body) == Some(KeyClass::Reviewer);
+            let key = if reviewer {
+                // G149: a reviewer talks only about a landing it reviewed, under its reviewer key.
+                let _ = repo.fetch_trunk();
+                super::reviewed(&repo.git, registry, &repo.trunk_tracking_ref(), &body)?;
+                reviewer_key(&repo.git, registry, &sender.name)?
+            } else {
+                agent_key(&repo.git, registry, &sender.name)?
+            };
+            (reviewer, Some(key))
+        }
+        Trust::Names => (false, None),
     };
     let who = body["who"].as_str().unwrap_or_default().to_owned();
     fetch_matching(repo, &format!("{TALK_PREFIX}{who}/*"));
@@ -385,7 +392,7 @@ fn deliver(repo: &Repo, registry: &Registry, sender: &Actor, ask: &Ask) -> Resul
             json!({"dry_run": true, "talk": id, "ref": name, "body": body}),
         ));
     }
-    let commit = root_commit(&repo.git, &body, &key, &sender.name)?;
+    let commit = root_commit_as(&repo.git, &body, key.as_deref(), &sender.name)?;
     repo.git
         .run(&["update-ref", &name, &commit, ""])
         .map_err(|error| error.message())?;
@@ -609,7 +616,7 @@ fn with_predecessor(repo: &Repo, body: &Value, refspec: String) -> Result<Vec<St
 }
 
 fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
-    let (repo, registry, me) = open(dir)?;
+    let (repo, trust, me) = open(dir)?;
     let value = fold(
         request
             .value
@@ -625,19 +632,23 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
         .ok_or_else(|| Refusal::invalid(format!("no talk {id} is here or on the remote")))?;
     // Dossier 63: a person answers a talk that asks one with their approver key (as they
     // approve), under the name the registry enrols it for; anyone else answers as an agent.
-    let person = super::asks_a_person(&talk.body)
-        .then(|| approver_key(&repo.git, &registry))
-        .flatten();
-    let by_person = person.is_some();
-    let (key, me) = match person {
-        Some((key, name)) => (
-            key,
-            Actor {
-                name,
-                session: me.session,
-            },
-        ),
-        None => (agent_key(&repo.git, &registry, &me.name)?, me),
+    // G445: under approvals no key signs an answer, and `who` or `decides` answers by name.
+    let (key, me, by_person) = match &trust {
+        Trust::Keys(registry) => match super::asks_a_person(&talk.body)
+            .then(|| approver_key(&repo.git, registry))
+            .flatten()
+        {
+            Some((key, name)) => (
+                Some(key),
+                Actor {
+                    name,
+                    session: me.session,
+                },
+                true,
+            ),
+            None => (Some(agent_key(&repo.git, registry, &me.name)?), me, false),
+        },
+        Trust::Names => (None, me, false),
     };
     if talk.body["kind"] != "discovery" {
         return Err(Refusal::invalid(format!(
@@ -679,7 +690,7 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
     if let Some(commit) = &request.supersedes {
         entry["supersedes"] = json!(commit);
     }
-    let commit = entry_commit(&repo.git, &talk.tip, &entry, &key, &me.name)?;
+    let commit = entry_commit_as(&repo.git, &talk.tip, &entry, key.as_deref(), &me.name)?;
     repo.git
         .run(&["update-ref", &talk.name, &commit, &talk.tip])
         .map_err(|error| error.message())?;

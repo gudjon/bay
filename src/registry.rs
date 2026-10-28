@@ -751,6 +751,19 @@ fn accepted_base(git: &Git) -> Result<Option<String>, String> {
         .map_err(|error| error.message())
 }
 
+/// The `[policy] signing` mode at the accepted base (N-21), read with no registry: for a reader
+/// that must know the mode before it knows whether a registry exists, such as talk (G445). With no
+/// base known the mode is `all`, so unknown never weakens signing.
+///
+/// # Errors
+///
+/// A git fault, or a policy at the base that cannot be read.
+pub fn signing_mode(git: &Git) -> Result<Signing, String> {
+    accepted_base(git)?.map_or(Ok(Signing::All), |base| {
+        crate::policy::signing_at(git, &base)
+    })
+}
+
 /// Whether trunk commit `commit` landed with every write signed (N-21): the policy at its first
 /// parent, the base it was judged at, does not say `signing = "approvals"`. A parent or policy
 /// that cannot be read is signed, so unknown never weakens a check. Asked only where a registry

@@ -12,6 +12,9 @@
 //!   it is never `lost` or `stale`. The recipient's accept closes a talk read after `expires`.
 //!
 //! A closed talk is not listed. A backbrief that says `done` closes nothing: only evidence does.
+//!
+//! Each row says `signed`: whether a key signed the talk's sender. Under `[policy] signing =
+//! "approvals"` (G445) it is `false`, and `from` is the name the sender claims.
 
 use serde_json::{Value, json};
 
@@ -208,6 +211,8 @@ fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
         "talk": talk.id,
         "kind": talk.body["kind"],
         "from": talk.from_name(),
+        // G445: whether a key signed the sender, or `from` is a name it claims (`approvals`).
+        "signed": talk.signed(git)?,
         "who": talk.who,
         "owes": owes,
         "what": talk.body["what"],

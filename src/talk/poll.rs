@@ -55,6 +55,19 @@ fn write_last(path: &Path, last: u64) {
     }
 }
 
+/// F1: whether this clone may fetch the key registry for its talks now, at most once per
+/// [`BAY_TALK_POLL_S`], so a clone with no registry, or one that fetched it before a sender was
+/// enrolled, pays one fetch per poll and not one per command. Records the fetch when it is due.
+#[must_use]
+pub fn registry_due(repo: &Repo, now: u64) -> bool {
+    let path = repo.common_dir.join("bay").join("talk-registry.json");
+    if read_last(&path).is_some_and(|last| now < last.saturating_add(BAY_TALK_POLL_S)) {
+        return false;
+    }
+    write_last(&path, now);
+    true
+}
+
 /// A live session's hook (`UserPromptSubmit`, `PostToolUse`): accepts this actor's talks when
 /// the last fetch was [`BAY_TALK_POLL_S`] or more ago, and returns what it accepted; `None`
 /// when it was not due.

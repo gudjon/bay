@@ -1,7 +1,9 @@
 //! Accept and ack (`DESIGN` § 11c): what a fetching bay command does on the recipient's machine.
 //!
 //! The recipient is this machine's actor, judged by its agent key: the registry must enrol the
-//! key for the actor's name, or nothing is accepted here. Accept fetches the actor's talk refs
+//! key for the actor's name, or nothing is accepted here. Under `[policy] signing = "approvals"`
+//! (G445) the recipient and the sender are their names: no key is asked, and the ack is
+//! unsigned. Accept fetches the actor's talk refs
 //! (`refs/bay/talk/<actor>/*`, ruling T6), checks each talk without an ack (the body's rules, the
 //! registry actors, the root commit signed by the sender's agent key at `sent`), and writes the ack
 //! on the same chain, signed by the recipient's key and naming its session. A talk that fails
@@ -31,8 +33,8 @@ use serde_json::{Value, json};
 
 use super::send::{Pushed, agent_key, fetch_matching, push};
 use super::{
-    ANSWERS, Known, TALK_PREFIX, TALK_SCHEMA, Talk, check_actors, check_body, entry_commit, files,
-    open_findings, split_values, talks_matching, talks_where,
+    ANSWERS, Known, TALK_PREFIX, TALK_SCHEMA, Talk, Trust, check_body, check_parties,
+    entry_commit_as, files, open_findings, split_values, talks_matching, talks_where,
 };
 use crate::change::{Actor, Chain, change_ref};
 use crate::clock::{now_rfc3339, unix_of};
@@ -42,21 +44,52 @@ use crate::repo::Repo;
 use crate::result::Reason;
 use crate::signing;
 
-/// Accepts this actor's new talks and acks them; `None` without a key registry, where no talk
-/// exists, or one under `[policy] signing = "approvals"` (N-21), where no agent signs a talk.
-/// The value is the outcome: see the module doc.
+/// Accepts this actor's new talks and acks them. Under `[policy] signing = "approvals"` (N-21,
+/// G445) no registry is read: talks are judged by name and acked unsigned. Under `all` a clone
+/// with no registry fetches it first (F1, at most once per poll); `None` when the remote holds
+/// none either, where no talk exists. The value is the outcome: see the module doc.
 #[must_use]
 pub fn receive(repo: &Repo) -> Option<Value> {
-    let registry = match Registry::current(&repo.git) {
-        Ok(Some(registry)) if registry.signs_all() => registry,
-        Ok(_) => return None,
+    let trust = match Trust::current(&repo.git) {
+        Ok(Some(trust)) => trust,
+        Ok(None) if super::poll::registry_due(repo, crate::live::unix_now()) => {
+            repo.fetch_registry();
+            match Trust::current(&repo.git) {
+                Ok(Some(trust)) => trust,
+                Ok(None) => return None,
+                Err(why) => return Some(Outcome::new("error").why(why).value()),
+            }
+        }
+        Ok(None) => return None,
         Err(why) => return Some(Outcome::new("error").why(why).value()),
     };
     Some(
-        accept(repo, &registry)
+        accept(repo, &trust)
             .unwrap_or_else(|why| Outcome::new("error").why(why))
             .value(),
     )
+}
+
+/// F1: `trust` with the registry fetched again, when it is due, if this actor's key or the
+/// sender of a talk waiting in `talks` is not enrolled in the registry this clone holds: one
+/// enrolled since the last fetch is then judged on the remote's registry, never refused.
+fn refreshed(repo: &Repo, trust: Trust, me: &str, talks: Option<&[Talk]>) -> Result<Trust, String> {
+    let Trust::Keys(registry) = &trust else {
+        return Ok(trust);
+    };
+    let unknown = talks.map_or_else(
+        || !registry.enrols(KeyClass::Agent, me),
+        |talks| {
+            talks
+                .iter()
+                .any(|talk| !talk.has("ack") && super::sender_class(registry, &talk.body).is_none())
+        },
+    );
+    if !unknown || !super::poll::registry_due(repo, crate::live::unix_now()) {
+        return Ok(trust);
+    }
+    repo.fetch_registry();
+    Ok(Trust::current(&repo.git)?.unwrap_or(trust))
 }
 
 /// What one accept did.
@@ -113,17 +146,20 @@ fn remote_tips(repo: &Repo, prefix: &str) -> Option<BTreeMap<String, String>> {
     )
 }
 
-fn accept(repo: &Repo, registry: &Registry) -> Result<Outcome, String> {
+fn accept(repo: &Repo, trust: &Trust) -> Result<Outcome, String> {
     let me = crate::change::current_actor(&repo.common_dir)?;
     if let Err(why) = crate::names::operator_name(&me.name) {
         return Ok(
             Outcome::new("skipped").why(format!("the actor name is not a talk recipient: {why}"))
         );
     }
-    let key = match agent_key(&repo.git, registry, &me.name) {
-        Ok(key) => key,
-        Err(refusal) => return Ok(Outcome::new("skipped").why(refusal.why)),
-    };
+    let trust = refreshed(repo, trust.clone(), &me.name, None)?;
+    // G445: under approvals no key signs the ack; the recipient is its actor name.
+    if let Trust::Keys(registry) = &trust
+        && let Err(refusal) = agent_key(&repo.git, registry, &me.name)
+    {
+        return Ok(Outcome::new("skipped").why(refusal.why));
+    }
     let prefix = format!("{TALK_PREFIX}{}/", me.name);
     fetch_sent(repo, &prefix, &me.name)?;
     let Some(remote) = remote_tips(repo, &prefix) else {
@@ -133,11 +169,20 @@ fn accept(repo: &Repo, registry: &Registry) -> Result<Outcome, String> {
     fetch_matching(repo, &format!("{prefix}*"));
     let mut outcome = Outcome::new("accepted");
     let talks = talks_matching(&repo.git, &prefix)?;
+    let trust = refreshed(repo, trust, &me.name, Some(&talks))?;
+    let key = match &trust {
+        Trust::Keys(registry) => match agent_key(&repo.git, registry, &me.name) {
+            Ok(key) => Some(key),
+            Err(refusal) => return Ok(Outcome::new("skipped").why(refusal.why)),
+        },
+        Trust::Names => None,
+    };
+    let key = key.as_deref();
     for talk in &talks {
         if talk.has("ack") {
             continue;
         }
-        match verify(repo, registry, talk, &me.name, &talks) {
+        match verify(repo, &trust, talk, &me.name, &talks) {
             Ok(()) => {
                 // G58, G53: the wake adapter is asked once, at accept, and its answer is on the
                 // ack, so the sender sees whether its talk woke the recipient.
@@ -147,7 +192,7 @@ fn accept(repo: &Repo, registry: &Registry) -> Result<Outcome, String> {
                     "at": now_rfc3339(), "wake": wake});
                 // One talk whose ack cannot be written here (a sibling session moved its ref,
                 // a lock) is that talk's failure, not the whole accept's.
-                match append(repo, talk, &ack, &key, &me.name) {
+                match append(repo, talk, &ack, key, &me.name) {
                     Ok(()) => outcome.acked.push(talk.id.clone()),
                     Err(why) => outcome.failed.push(json!({"talk": talk.id, "why": why})),
                 }
@@ -155,9 +200,9 @@ fn accept(repo: &Repo, registry: &Registry) -> Result<Outcome, String> {
             Err(why) => outcome.refused.push(json!({"talk": talk.id, "why": why})),
         }
     }
-    close_superseded(repo, &prefix, &key, &me, &mut outcome)?;
-    close_expired(repo, &prefix, &key, &me, &mut outcome)?;
-    close_answered(repo, &prefix, &key, &me, &mut outcome)?;
+    close_superseded(repo, &prefix, key, &me, &mut outcome)?;
+    close_expired(repo, &prefix, key, &me, &mut outcome)?;
+    close_answered(repo, &prefix, key, &me, &mut outcome)?;
     outcome.pushed = push_moved(repo, &prefix, &remote)?;
     Ok(outcome)
 }
@@ -166,10 +211,10 @@ fn append(
     repo: &Repo,
     talk: &Talk,
     entry: &Value,
-    key: &std::path::Path,
+    key: Option<&std::path::Path>,
     name: &str,
 ) -> Result<(), String> {
-    let commit = entry_commit(&repo.git, &talk.tip, entry, key, name)?;
+    let commit = entry_commit_as(&repo.git, &talk.tip, entry, key, name)?;
     repo.git
         .run(&["update-ref", &talk.name, &commit, &talk.tip])
         .map(|_| ())
@@ -182,14 +227,18 @@ fn append(
 /// that cannot be written now is written by no later run, and the talk stays open on the remote
 /// until its `follow_up`.
 pub fn end_questions(repo: &Repo, ids: &[String]) {
-    let Ok(Some(registry)) = Registry::current(&repo.git) else {
+    let Ok(Some(trust)) = Trust::current(&repo.git) else {
         return;
     };
     let Ok(me) = crate::change::current_actor(&repo.common_dir) else {
         return;
     };
-    let Ok(key) = agent_key(&repo.git, &registry, &me.name) else {
-        return;
+    let key = match &trust {
+        Trust::Keys(registry) => match agent_key(&repo.git, registry, &me.name) {
+            Ok(key) => Some(key),
+            Err(_) => return,
+        },
+        Trust::Names => None,
     };
     let prefix = format!("{TALK_PREFIX}{}/", me.name);
     let Some(remote) = remote_tips(repo, &prefix) else {
@@ -210,24 +259,19 @@ pub fn end_questions(repo: &Repo, ids: &[String]) {
         let close = json!({"schema": TALK_SCHEMA, "entry": "close", "talk": talk.id,
             "actor": {"name": me.name, "session": me.session}, "state": "ended",
             "at": now_rfc3339()});
-        let _ = append(repo, &talk, &close, &key, &me.name);
+        let _ = append(repo, &talk, &close, key.as_deref(), &me.name);
     }
     let _ = push_moved(repo, &prefix, &remote);
 }
 
-/// Accept's check of a talk to `me`: the body's rules, the registry actors, and the root commit:
-/// `talk.json` alone, the same body, signed by the sender's agent key, committed at `sent`. A
-/// reviewer's talk also stands beside no other open talk of that reviewer about its change, among
-/// `talks` (G149b).
-fn verify(
-    repo: &Repo,
-    registry: &Registry,
-    talk: &Talk,
-    me: &str,
-    talks: &[Talk],
-) -> Result<(), String> {
+/// Accept's check of a talk to `me`: the body's rules, its parties, and the root commit:
+/// `talk.json` alone, the same body, committed at `sent`, and under `signing = "all"` signed by
+/// the sender's agent key. A reviewer's talk also stands beside no other open talk of that
+/// reviewer about its change, among `talks` (G149b). Under `approvals` (G445) the sender is its
+/// name, and no key is asked.
+fn verify(repo: &Repo, trust: &Trust, talk: &Talk, me: &str, talks: &[Talk]) -> Result<(), String> {
     check_body(&talk.body).map_err(|refusal| refusal.text())?;
-    check_actors(registry, &talk.body).map_err(|refusal| refusal.text())?;
+    check_parties(trust, &talk.body).map_err(|refusal| refusal.text())?;
     if talk.body["who"] != me || talk.body["id"] != talk.id.as_str() || talk.who != me {
         return Err(format!(
             "{} does not hold a talk to {me} with its id",
@@ -245,6 +289,29 @@ fn verify(
     if !matches!(root_files.as_slice(), [file] if file.oid == talk.body_blob) {
         return Err(format!("{root} does not hold the talk's body alone"));
     }
+    if let Trust::Keys(registry) = trust {
+        signed_by_sender(repo, registry, talk, root, talks)?;
+    }
+    let time = git
+        .run(&["show", "-s", "--format=%ct", root])
+        .map_err(|error| error.message())?;
+    if time.parse::<u64>().ok() != talk.body["sent"].as_str().and_then(unix_of) {
+        return Err(format!("{root} is not committed at the talk's `sent`"));
+    }
+    Ok(())
+}
+
+/// Under `signing = "all"`: `root` is signed by its sender's agent key, or a reviewer's delivery
+/// talk by its reviewer key, standing on its review record of the change's landing and beside no
+/// other open talk of that reviewer about that change (G149, G149b).
+fn signed_by_sender(
+    repo: &Repo,
+    registry: &Registry,
+    talk: &Talk,
+    root: &str,
+    talks: &[Talk],
+) -> Result<(), String> {
+    let git = &repo.git;
     let from = talk.from_name();
     // G149: a reviewer's delivery talk is signed by its reviewer key and stands on its review
     // record of the change's landing; every other talk by the sender's agent key.
@@ -282,12 +349,6 @@ fn verify(
             ));
         }
     }
-    let time = git
-        .run(&["show", "-s", "--format=%ct", root])
-        .map_err(|error| error.message())?;
-    if time.parse::<u64>().ok() != talk.body["sent"].as_str().and_then(unix_of) {
-        return Err(format!("{root} is not committed at the talk's `sent`"));
-    }
     Ok(())
 }
 
@@ -296,7 +357,7 @@ fn verify(
 fn close_superseded(
     repo: &Repo,
     prefix: &str,
-    key: &std::path::Path,
+    key: Option<&std::path::Path>,
     me: &Actor,
     outcome: &mut Outcome,
 ) -> Result<(), String> {
@@ -334,7 +395,7 @@ fn close_superseded(
 fn close_expired(
     repo: &Repo,
     prefix: &str,
-    key: &std::path::Path,
+    key: Option<&std::path::Path>,
     me: &Actor,
     outcome: &mut Outcome,
 ) -> Result<(), String> {
@@ -371,7 +432,7 @@ fn close_expired(
 fn close_answered(
     repo: &Repo,
     prefix: &str,
-    key: &std::path::Path,
+    key: Option<&std::path::Path>,
     me: &Actor,
     outcome: &mut Outcome,
 ) -> Result<(), String> {

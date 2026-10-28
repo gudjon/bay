@@ -26,6 +26,12 @@
 //! backbrief (G52, ruling T3). `land` and `undo` name the open talks on their change (G56,
 //! [`open_on`]).
 //!
+//! Under `[policy] signing = "approvals"` (N-21, G445) no key signs a talk, as no key signs a
+//! merge: the talk, its ack and every entry are written unsigned, by their actor's name
+//! (`BAY_ACTOR`), and the rules of who writes what are judged by that name ([`Trust::Names`]).
+//! No registry is read or needed. A talk row says `signed: false`, so a reader can tell a name
+//! the sender claims from one a key signed.
+//!
 //! Delivery is the recipient's fetch and accept ([`receive`]), which any fetching bay command on
 //! the recipient's machine runs (`bay status`, `bay status --since`): it writes the ack on the same chain,
 //! signed by the recipient's key. A push is not delivery, and a fetch without accept is not an
@@ -54,6 +60,7 @@ use sha2::{Digest, Sha256};
 use crate::canonical::canonical;
 use crate::clock::unix_of;
 use crate::git::Git;
+use crate::policy::Signing;
 use crate::registry::{KeyClass, REGISTRY_REF, Registry};
 use crate::result::{BayResult, Reason};
 use crate::signing::Signer;
@@ -218,6 +225,33 @@ pub(crate) const ANSWERS: [(&str, &str); 3] = [
     ("superseded_by", "Supersedes"),
 ];
 const ENTRY_COMMON: [&str; 5] = ["schema", "entry", "talk", "actor", "at"];
+
+/// How this repository knows who wrote a talk (N-21, G445): by key, or by name.
+#[derive(Clone, Debug)]
+pub enum Trust {
+    /// `[policy] signing = "all"`: the registry's actors, each write signed by the writer's key.
+    Keys(Registry),
+    /// `[policy] signing = "approvals"`: any actor, by its name (`BAY_ACTOR`), each write
+    /// unsigned, as a merge under approvals is. The sender's name is a claim, and a talk row says
+    /// so (`signed: false`).
+    Names,
+}
+
+impl Trust {
+    /// The trust of this clone's talks: the signing mode at the accepted base and, under `all`,
+    /// the registry this clone holds. `None` under `all` with no registry here, where no talk
+    /// can be judged. Under `approvals` no registry is read: none is needed.
+    ///
+    /// # Errors
+    ///
+    /// A git fault, or a policy or registry that cannot be read.
+    pub fn current(git: &Git) -> Result<Option<Self>, String> {
+        match crate::registry::signing_mode(git)? {
+            Signing::Approvals => Ok(Some(Self::Names)),
+            Signing::All => Ok(Registry::current(git)?.map(Self::Keys)),
+        }
+    }
+}
 
 /// G52 (ruling T3): whether a talk read at `read` (Unix seconds) was read after its `expires`.
 /// `read` is the time the read is on record at, the ack's commit time, never a later reader's
@@ -651,6 +685,33 @@ pub fn sender_class(registry: &Registry, body: &Value) -> Option<KeyClass> {
     }
 }
 
+/// The parties of `body` under `trust`: [`check_actors`] under `all`; under `approvals` (G445)
+/// `who`, `decides` and the sender are actor names a talk ref can hold, and any actor sends.
+///
+/// # Errors
+///
+/// See [`check_actors`]; under `approvals`, a name no actor can have, as `TALK_REFUSED` for the
+/// sender.
+pub fn check_parties(trust: &Trust, body: &Value) -> Result<(), Refusal> {
+    let Trust::Keys(registry) = trust else {
+        for field in ["who", "decides"] {
+            if let Some(name) = body[field].as_str() {
+                crate::names::operator_name(name).map_err(|why| {
+                    Refusal::invalid(format!("`{field}` {name:?} is not an actor name: {why}"))
+                })?;
+            }
+        }
+        let from = body["from"]["name"].as_str().unwrap_or_default();
+        return crate::names::operator_name(from).map_err(|why| {
+            Refusal::new(
+                Reason::TalkRefused,
+                format!("the sender {from:?} is not an actor name: {why}"),
+            )
+        });
+    };
+    check_actors(registry, body)
+}
+
 /// G149: a reviewer's talk about a change stands on the reviewer's own record: its notes ref
 /// holds a `review` record, signed by its reviewer key, about the change's landing on `trunk`
 /// (a verified bay publication carrying the change's `Change-Id`). A finding then reaches the
@@ -850,6 +911,27 @@ impl Talk {
         read_all(git, &[(name.to_owned(), tip.to_owned())])?
             .pop()
             .ok_or_else(|| format!("{name} could not be read"))
+    }
+
+    /// Whether a key signed this talk's root commit (G445). Under `signing = "all"` accept
+    /// verified that key; unsigned, under `approvals`, the sender's name is a claim. Each entry
+    /// is one commit on the one before it, so the root is the tip less one per entry.
+    ///
+    /// # Errors
+    ///
+    /// A root commit that cannot be read.
+    pub fn signed(&self, git: &Git) -> Result<bool, String> {
+        let root = git
+            .run(&[
+                "cat-file",
+                "commit",
+                &format!("{}~{}", self.tip, self.entries.len()),
+            ])
+            .map_err(|error| error.message())?;
+        Ok(root
+            .lines()
+            .take_while(|line| !line.is_empty())
+            .any(|line| line.starts_with("gpgsig")))
     }
 
     #[must_use]
@@ -1306,16 +1388,29 @@ fn make_tree(git: &Git, listing: &str) -> Result<String, String> {
         .map_err(|error| error.message())
 }
 
-fn signed_commit(
+/// A talk commit as `name`, signed by `key`, or unsigned with none (G445, `approvals`).
+fn talk_commit(
     git: &Git,
     tree: &str,
     parent: Option<&str>,
-    signer: &Signer,
+    key: Option<&Path>,
+    name: &str,
     at: u64,
     message: &str,
 ) -> Result<String, String> {
-    let mut args = signer.config_args();
-    args.extend(["commit-tree".to_owned(), tree.to_owned(), "-S".to_owned()]);
+    let signer = Signer {
+        key: key.map(Path::to_path_buf).unwrap_or_default(),
+        name: name.to_owned(),
+    };
+    let mut args = if key.is_some() {
+        signer.config_args()
+    } else {
+        Vec::new()
+    };
+    args.extend(["commit-tree".to_owned(), tree.to_owned()]);
+    if key.is_some() {
+        args.push("-S".to_owned());
+    }
     if let Some(parent) = parent {
         args.extend(["-p".to_owned(), parent.to_owned()]);
     }
@@ -1340,22 +1435,32 @@ fn signed_commit(
 ///
 /// A body with no `sent`, or a git or signing fault.
 pub fn root_commit(git: &Git, body: &Value, key: &Path, name: &str) -> Result<String, String> {
+    root_commit_as(git, body, Some(key), name)
+}
+
+/// [`root_commit`], unsigned with no `key` (G445, `approvals`).
+///
+/// # Errors
+///
+/// A body with no `sent`, or a git or signing fault.
+pub fn root_commit_as(
+    git: &Git,
+    body: &Value,
+    key: Option<&Path>,
+    name: &str,
+) -> Result<String, String> {
     let blob = write_blob(git, &canonical(body)?)?;
     let tree = make_tree(git, &format!("100644 blob {blob}\t{TALK_FILE}\n"))?;
     let sent = body["sent"]
         .as_str()
         .and_then(unix_of)
         .ok_or("the talk has no `sent` time")?;
-    let signer = Signer {
-        key: key.to_path_buf(),
-        name: name.to_owned(),
-    };
     let message = format!(
         "talk {} to {}",
         body["id"].as_str().unwrap_or_default(),
         body["who"].as_str().unwrap_or_default()
     );
-    signed_commit(git, &tree, None, &signer, sent, &message)
+    talk_commit(git, &tree, None, key, name, sent, &message)
 }
 
 /// The commit that appends `entry` (its `entry` field names its kind) to the chain at `tip`,
@@ -1369,6 +1474,21 @@ pub fn entry_commit(
     tip: &str,
     entry: &Value,
     key: &Path,
+    name: &str,
+) -> Result<String, String> {
+    entry_commit_as(git, tip, entry, Some(key), name)
+}
+
+/// [`entry_commit`], unsigned with no `key` (G445, `approvals`).
+///
+/// # Errors
+///
+/// An entry with no kind, a tip that is not a talk, or a git or signing fault.
+pub fn entry_commit_as(
+    git: &Git,
+    tip: &str,
+    entry: &Value,
+    key: Option<&Path>,
     name: &str,
 ) -> Result<String, String> {
     let kind = entry["entry"]
@@ -1398,16 +1518,13 @@ pub fn entry_commit(
         .as_str()
         .and_then(unix_of)
         .unwrap_or_else(crate::live::unix_now);
-    let signer = Signer {
-        key: key.to_path_buf(),
-        name: name.to_owned(),
-    };
     let talk = entry["talk"].as_str().unwrap_or_default();
-    signed_commit(
+    talk_commit(
         git,
         &tree,
         Some(tip),
-        &signer,
+        key,
+        name,
         at,
         &format!("{kind} {talk}"),
     )
