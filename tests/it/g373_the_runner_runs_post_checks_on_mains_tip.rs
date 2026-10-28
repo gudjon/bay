@@ -7,7 +7,8 @@
 //! named, and `[runner] bisect_post` narrows it to its culprit, with no outside post producer.
 //!
 //! Guard to mutate: `src/executor.rs` `pass`: drop the `crate::bisect::tips` call (no post check
-//! runs, and main is never found red).
+//! runs, and main is never found red). G433: the check the box ran longest ago goes first; order
+//! by pending alone in `bisect::tip_runs` and a check that never answers runs on every tip.
 
 // Each case runs shell scripts (adapters), so these run on Unix only.
 #![cfg(unix)]
@@ -218,4 +219,48 @@ fn a_post_check_nothing_answered_goes_before_one_answered_on_an_older_tip() {
         .find_map(|row| row.get("post"))
         .and_then(|post| post[0]["check"].as_str().map(str::to_owned));
     assert_eq!(ran_second.as_deref(), Some("lint"), "{second:?}");
+}
+
+/// G433 (a fleet finding, 2026-10-28): a post check that only ever answers `unknown` stays
+/// pending, so it went first on every new tip and the checks after it in the policy never ran
+/// (edge-py-fast, fifth on its box, ran on no tip for eight hours). The check this box ran
+/// longest ago goes first, so each runs in turn.
+#[test]
+fn a_post_check_that_never_answers_starves_no_other() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let mut files = check_files("true", &passing_result(1), 1, 60);
+    let named = |id: &str| {
+        POST.replace("\"suite\"", &format!("\"{id}\""))
+            .replace("bay-check suite", &format!("bay-check {id}"))
+    };
+    for (path, text) in &mut files {
+        if path == ".bay/policy.toml" {
+            // `vague` expects two units and the adapter sends one: unknown on every tip.
+            text.push_str(&named("vague").replace("expected_minimum = 1", "expected_minimum = 2"));
+            text.push_str(POST);
+            text.push_str(&named("lint"));
+        }
+    }
+    files.push((
+        ".bay/config.toml".to_owned(),
+        "[runner]\npost = true\n".to_owned(),
+    ));
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    let mut ran = Vec::new();
+    for n in 0..3 {
+        land(&test_box, &repo, &format!("src/l{n}.rs"));
+        let rows = pass(&test_box, &repo);
+        ran.push(
+            rows.iter()
+                .find_map(|row| row.get("post"))
+                .and_then(|post| post[0]["check"].as_str().map(str::to_owned))
+                .unwrap_or_default(),
+        );
+    }
+    assert_eq!(
+        ran,
+        ["vague", "suite", "lint"],
+        "a check that never answers went first on every tip"
+    );
 }

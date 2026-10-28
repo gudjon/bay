@@ -24,7 +24,8 @@
 //! asks for them by name: when the store lacks one, bay fetches exactly those objects in one
 //! `git fetch --stdin` from the promisor remote, the form Git's own promisor code uses, and
 //! reads again once. A handle made by [`Git::fetching`] lets Git fetch what it writes or
-//! merges: a view's declared files, a merge, a materialized tree. Git before 2.45 ignores the
+//! merges: a view's declared files, a merge, a materialized tree. A fetch that brings blobs may
+//! fetch the delta bases its thin pack names (G432). Git before 2.45 ignores the
 //! variable; the shared cache needs 2.48 (`GIT-FEATURES` § 1), so below it no store should
 //! have a promisor remote, and one that does fetches lazily as before.
 
@@ -493,6 +494,9 @@ impl Git {
         let run = || {
             let mut cmd = self.command();
             cmd.args(as_formatted(args));
+            if fetches_blobs(args) {
+                cmd.env("GIT_NO_LAZY_FETCH", "0");
+            }
             for (key, value) in envs {
                 cmd.env(key, value);
             }
@@ -1092,6 +1096,16 @@ fn as_formatted<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> {
         .into_iter()
         .chain(quiet)
         .chain(args.iter().skip(1).copied())
+}
+
+/// G432 (a fleet finding, 2026-10-28): whether `args` is a fetch that brings blobs, as bay's
+/// fetch of its records does (`--no-filter`). The remote sends a thin pack, each blob a delta
+/// against its version in a commit the store holds, and a blob-less store never fetched that
+/// version: Git fetches the base from the promisor remote, and with lazy fetch off the whole
+/// fetch failed, so no change chain of that pass arrived. Such a fetch may fetch the bases its
+/// pack names; a read still fetches nothing on its own (G104b).
+fn fetches_blobs(args: &[&str]) -> bool {
+    args.first() == Some(&"fetch") && as_formatted(args).any(|word| word == "--no-filter")
 }
 
 /// W10: the waits before a push of bay's records the host refused is tried again.

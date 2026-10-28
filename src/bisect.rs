@@ -104,10 +104,20 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
             entry.stage == crate::policy::Stage::Post && served.serves(&entry.environment)
         })
         .collect();
+    // G433 (a fleet finding, 2026-10-28): a check that only ever answers `unknown` stays pending,
+    // so it went first on every tip, and a check in the policy's tail (edge-py-fast, fifth on its
+    // box) ran on no tip for eight hours. The check this box ran longest ago goes first; ties
+    // keep the rule above.
+    let ran = last_runs(git, &writer, &tip, &entries);
     entries.sort_by_key(|entry| {
-        !pending
+        let pending = pending
             .iter()
-            .any(|(check, environment)| *check == entry.id && *environment == entry.environment)
+            .any(|(check, environment)| *check == entry.id && *environment == entry.environment);
+        let ago = ran
+            .get(&(entry.id.clone(), entry.environment.clone()))
+            .copied()
+            .unwrap_or(usize::MAX);
+        (std::cmp::Reverse(ago), !pending)
     });
     let mut reports = Vec::new();
     for entry in entries {
@@ -132,6 +142,42 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
     }
     Ok(reports)
 }
+
+/// How many landings back from `tip` this box last recorded each of `entries` (G433), over the
+/// newest [`RAN_SPAN`] commits of main's first-parent line; a check it ran in none is absent.
+/// Only an order: a line or a note it cannot read counts as no record, never as no post work.
+fn last_runs(
+    git: &Git,
+    writer: &Writer,
+    tip: &str,
+    entries: &[&crate::policy::CheckEntry],
+) -> std::collections::HashMap<(String, String), usize> {
+    let span = RAN_SPAN.to_string();
+    let mut ran = std::collections::HashMap::new();
+    let Ok(trees) = git.run(&["log", "--first-parent", "-n", &span, "--format=%T", tip]) else {
+        return ran;
+    };
+    for (ago, tree) in trees.lines().enumerate() {
+        if ran.len() == entries.len() {
+            break;
+        }
+        for record in evidence::producer_records(git, &writer.name, tree).unwrap_or_default() {
+            if record.kind == evidence::KIND_CHECK
+                && entries
+                    .iter()
+                    .any(|entry| record.check == CheckId::new(&entry.id, &entry.environment))
+            {
+                ran.entry((record.check.id, record.check.environment))
+                    .or_insert(ago);
+            }
+        }
+    }
+    ran
+}
+
+/// How far back main's line [`last_runs`] reads: a check this box ran on none of these many
+/// landings goes before every one it ran on.
+const RAN_SPAN: usize = 64;
 
 /// Items 1 and 2: the runner warms results on main's tip (`[runner] warm`). After its queue's
 /// work, each pre check with `footprint = "observed"` in the policy at main's newest tip runs

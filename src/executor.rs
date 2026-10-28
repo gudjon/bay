@@ -577,7 +577,12 @@ fn pass(
     sweep_check_scratch(repo);
     // G289, G294: never forced; a chain ahead of the remote keeps its work, one apart from it
     // is set aside.
-    repo.fetch_chains().map_err(|error| error.message())?;
+    // G434 (a fleet finding, 2026-10-28): fourteen submitted changes no pass could read went
+    // unnamed for hours, the fetch's error dropped. Each is named in the journal with Git's words.
+    for (change, why) in repo.fetch_chains().map_err(|error| error.message())? {
+        let why = why.lines().map(str::trim).collect::<Vec<_>>().join("; ");
+        eprintln!("bay runner: {change} could not be read from the remote: {why}");
+    }
     let chain = Chain::new(&repo.git);
     let mut chains = chain.read_all().map_err(|error| error.message())?;
     let queue = match seen.after {

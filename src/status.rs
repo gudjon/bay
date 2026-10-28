@@ -154,7 +154,7 @@ fn listed(repo: &Repo, chain: &Chain, named: Option<String>) -> Result<Vec<Strin
         .map(|name| name.trim_start_matches(CHANGES_PREFIX).to_owned())
         .filter(|id| !ended_here.contains(id))
         .collect();
-    repo.remote_chains(&ids);
+    let _ = repo.remote_chains(&ids);
     Ok(ids)
 }
 

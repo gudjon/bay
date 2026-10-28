@@ -603,9 +603,11 @@ impl Repo {
 
     /// [`Repo::remote_chain`] for each of `changes`, in one fetch per 200 of them rather than
     /// one or two each: what `bay status` refreshes when it lists changes (the 0.5.3 status
-    /// patch). A batch the remote refuses whole (a change it lacks) is read one by one.
-    pub fn remote_chains(&self, changes: &[String]) {
+    /// patch). A batch the remote refuses whole (a change it lacks) is read one by one. Returns
+    /// each change that could not be read even alone, with Git's words (G434).
+    pub fn remote_chains(&self, changes: &[String]) -> Vec<(String, String)> {
         let git = &self.git;
+        let mut unread = Vec::new();
         for batch in changes.chunks(200) {
             let specs: Vec<String> = batch
                 .iter()
@@ -621,7 +623,9 @@ impl Repo {
             args.extend(specs.iter().map(String::as_str));
             if git.run(&args).is_err() {
                 for change in batch {
-                    let _ = self.remote_chain(change);
+                    if let Err(error) = self.remote_chain(change) {
+                        unread.push((change.clone(), error.message()));
+                    }
                 }
                 continue;
             }
@@ -633,6 +637,7 @@ impl Repo {
                 }
             }
         }
+        unread
     }
 
     /// Moves this store's chain ref of `change` to the remote's head `remote` as
@@ -685,12 +690,13 @@ impl Repo {
     /// one fast-forward fetch of them all. Only when git refuses some ref are the chains whose
     /// local head differs from the remote's read again, together in one more fetch
     /// ([`Repo::remote_chains`]), so a pass costs a fetch or two however many chains there are
-    /// or differ (G200b, G426).
+    /// or differ (G200b, G426). Returns each chain that could not be read, with Git's words
+    /// (G434), so a change no pass can read is named, never silent.
     ///
     /// # Errors
     ///
     /// The remote cannot be read.
-    pub fn fetch_chains(&self) -> Result<(), GitError> {
+    pub fn fetch_chains(&self) -> Result<Vec<(String, String)>, GitError> {
         let prefix = crate::change::CHANGES_PREFIX;
         let Err(refused) = self.git.run(&[
             "fetch",
@@ -699,7 +705,7 @@ impl Repo {
             self.remote(),
             &format!("{prefix}*:{prefix}*"),
         ]) else {
-            return Ok(());
+            return Ok(Vec::new());
         };
         let Ok(listed) = self
             .git
@@ -723,8 +729,7 @@ impl Repo {
         // G426 (a fleet finding, 2026-10-28): the chains the glob fetch refused are read in one
         // fetch, never one or two each. A chain apart from the remote stays refused pass after
         // pass, and each single fetch cost about fifty seconds on a loaded box.
-        self.remote_chains(&differing);
-        Ok(())
+        Ok(self.remote_chains(&differing))
     }
 
     /// The view directory's change id, when `dir` is one of this repository's views.

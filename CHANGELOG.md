@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.33
+
+- A blob-less runner fetches a change whose files arrive as deltas, so no submitted change is left unread.
+- A runner's journal names each change it could not read from the remote, with Git's words.
+- Post work runs the check its box ran longest ago first, so no post check starves.
+
 ## 0.5.32
 
 - A runner keeps its presence fresh while it runs a post check, so no other runner takes its work.
