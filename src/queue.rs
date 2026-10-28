@@ -91,6 +91,20 @@ impl Queue {
         Self::local(&repo.git)
     }
 
+    /// [`Queue::read`], or the queue refs this store holds when the pass read them within
+    /// [`crate::repo::READ_REUSE`] (G438).
+    ///
+    /// # Errors
+    ///
+    /// A git fault.
+    pub fn read_shared(repo: &Repo) -> Result<Self, String> {
+        if repo.reuses(crate::repo::Shared::Queue) {
+            Self::local(&repo.git)
+        } else {
+            Self::read(repo)
+        }
+    }
+
     /// Reads the queue refs this repository holds. G200b: one `for-each-ref` lists them and
     /// one `git cat-file --batch` reads every entry and release, however long the queue's
     /// history; a file the batch cannot give is read on its own ([`Git::file_at`]), which

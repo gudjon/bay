@@ -467,6 +467,11 @@ fn deadlines(
 fn finished_head(repo: &Repo, head: &crate::queue::Entry) -> Option<String> {
     // The remote's record, never moving this store's chain back (G289).
     let record = repo.remote_record(&head.change).ok()?.record;
+    finished(&record, head)
+}
+
+/// [`finished_head`] on `record`, the head's change as the remote has it.
+fn finished(record: &ChangeRecord, head: &crate::queue::Entry) -> Option<String> {
     let Some(op) = record.operations.iter().find(|op| op.op_id == head.op_id) else {
         return if record.retention_cut {
             word(record.state)
@@ -528,10 +533,23 @@ fn post_line(done: &Value) -> String {
                     .chars()
                     .take(10)
                     .collect();
+                // A fleet finding (2026-10-28): a post check that was not run read "?", and
+                // its reason was only in the pass's result, which a looping runner never prints.
+                let verdict = row["verdict"].as_str().map_or_else(
+                    || {
+                        row["verdict"]["not_run"].as_str().map_or_else(
+                            || "?".to_owned(),
+                            |why| {
+                                let why: Vec<&str> = why.lines().map(str::trim).collect();
+                                format!("not run: {}", why.join("; "))
+                            },
+                        )
+                    },
+                    str::to_owned,
+                );
                 format!(
-                    "post {} on {tip}: {}",
-                    row["check"].as_str().unwrap_or("?"),
-                    row["verdict"].as_str().unwrap_or("?")
+                    "post {} on {tip}: {verdict}",
+                    row["check"].as_str().unwrap_or("?")
                 )
             })
             .collect();
@@ -573,6 +591,8 @@ fn pass(
     seen: Seen,
     beat: &mut crate::presence::Beat,
 ) -> Result<Vec<Value>, String> {
+    // G438: this pass's visits share what it reads from the remote.
+    repo.share_reads(true);
     let _ = receipts::sync(repo);
     sweep_check_scratch(repo);
     // G289, G294: never forced; a chain ahead of the remote keeps its work, one apart from it
@@ -650,11 +670,13 @@ fn pass(
                 return Ok(ran);
             }
             ran.push(run_op(repo, id, &op_id, depth, beat, notes));
+            forget_if_moved(repo, &ran);
             // F13 (2026-10-25, again 2026-10-26: a runner hung holding the head 19 minutes):
             // between operations, a head whose holder stopped writing is taken now, not at the
             // next pass's start an hour later.
             if let Some((head_id, head_op)) = abandoned_head(repo, &op_id) {
                 ran.push(run_op(repo, &head_id, &head_op, depth, beat, notes));
+                forget_if_moved(repo, &ran);
                 taken.insert(head_op);
             }
         }
@@ -724,7 +746,7 @@ fn pass(
 /// them waiting 300 s each for a worker, and the head waited 40 minutes; every other runner
 /// rightly waited on its lease).
 fn holds_the_head(repo: &Repo) -> bool {
-    let Some(head) = Queue::read(repo)
+    let Some(head) = Queue::read_shared(repo)
         .ok()
         .and_then(|queue| queue.head().cloned())
     else {
@@ -898,16 +920,15 @@ fn run_op(
 /// 2026-10-26: a superseded operation of an abandoned change held the head for five hours, and
 /// each runner "took" it after every operation, ran nothing, and moved on).
 fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
-    let head = Queue::read(repo).ok()?.head()?.clone();
+    // G438: the pass's shared reads, and the head's chain read once for all three questions.
+    let head = Queue::read_shared(repo).ok()?.head()?.clone();
     if head.op_id == just {
         return None;
     }
-    if let Some(reason) = finished_head(repo, &head) {
-        let record = repo
-            .remote_record(&head.change)
-            .ok()
-            .map(|remote| remote.record);
-        if let Err(why) = pass_on_or_release(repo, record.as_ref(), &head, &reason) {
+    let tip = repo.read_chain(&head.change).ok()?;
+    let record = Chain::new(&repo.git).record_at(&tip).ok()?;
+    if let Some(reason) = finished(&record, &head) {
+        if let Err(why) = pass_on_or_release(repo, Some(&record), &head, &reason) {
             eprintln!(
                 "bay runner: queue place {} could not be released: {why}",
                 head.seq
@@ -918,21 +939,18 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
     // A head nobody holds (one that yielded because main moved, or gave its claim back) is
     // taken now, never left to a later pass (a fleet finding, 2026-10-26: a yielded head waited
     // twenty minutes while all three runners pre-checked changes behind it).
-    if let Ok(remote) = repo.remote_record(&head.change)
-        && remote
-            .record
-            .operations
-            .iter()
-            .find(|op| op.op_id == head.op_id)
-            .is_some_and(|op| {
-                runs(op)
-                    && op.owner.is_none()
-                    && matches!(op.state, OpState::Submitted | OpState::Admitted)
-            })
+    if record
+        .operations
+        .iter()
+        .find(|op| op.op_id == head.op_id)
+        .is_some_and(|op| {
+            runs(op)
+                && op.owner.is_none()
+                && matches!(op.state, OpState::Submitted | OpState::Admitted)
+        })
     {
         return Some((head.change, head.op_id));
     }
-    let tip = repo.remote_chain(&head.change).ok()?;
     let written = repo
         .git
         .run(&["log", "-1", "--format=%ct", &tip])
@@ -941,6 +959,18 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
         .ok()?;
     let idle = crate::live::unix_now().saturating_sub(written);
     (idle > repo.config.lease().as_secs() * 2).then_some((head.change, head.op_id))
+}
+
+/// G438: forgets the pass's shared reads after an operation that moved anything (it landed,
+/// was refused or blocked, or gave up its place), so the next visit reads what it changed. A
+/// place it took is written to this store's own queue refs, which a shared read sees.
+fn forget_if_moved(repo: &Repo, ran: &[Value]) {
+    if ran
+        .last()
+        .is_some_and(|row| row["decision"].as_str() != Some("queued"))
+    {
+        repo.forget_reads();
+    }
 }
 
 /// Releases every queue place, anywhere in the line, whose operation has ended (a fleet
@@ -1298,6 +1328,14 @@ mod tests {
         assert_eq!(
             super::post_line(&serde_json::json!({"bisect": {}})),
             "bisect work"
+        );
+        let not_run = serde_json::json!({"post": [
+            {"check": "suite", "tip": "24e619a45e67bf46",
+             "verdict": {"not_run": "the evidence push was refused\nremote: busy"}},
+        ]});
+        assert_eq!(
+            super::post_line(&not_run),
+            "post suite on 24e619a45e: not run: the evidence push was refused; remote: busy"
         );
     }
 

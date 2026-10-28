@@ -668,8 +668,9 @@ impl<'a> Ctx<'a> {
     /// Fetches trunk and refuses a remote rewound behind what this change has seen.
     fn fetch_trunk(&mut self) -> Result<Result<String, BayResult>, String> {
         self.step.set("fetch");
-        let trunk = self.repo.fetch_trunk().map_err(|error| error.message())?;
-        self.repo.fetch_registry();
+        // G438: in a runner's pass, what the pass read within the reuse window stands in.
+        let trunk = self.repo.read_trunk().map_err(|error| error.message())?;
+        self.repo.read_registry();
         self.registry = Registry::current(&self.repo.git)?;
         if !self
             .repo
@@ -1289,6 +1290,22 @@ fn with_progress(git: &Git, op: &Operation, mut result: BayResult) -> BayResult 
 ///
 /// A fault of bay's own; refusals are results.
 pub fn execute(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<BayResult, String> {
+    // G438: a visit runs on the pass's shared reads; one whose operation may run reads afresh
+    // and starts again, so a head never claims or builds on what an earlier visit read.
+    let _ = repo.took_shared_read();
+    match execute_once(repo, id, op_id, step) {
+        Err(why) if why == READ_AGAIN => {
+            repo.forget_reads();
+            execute_once(repo, id, op_id, step)
+        }
+        other => other,
+    }
+}
+
+/// G438: the sentinel by which a visit on shared reads asks [`execute`] to read afresh.
+const READ_AGAIN: &str = "this visit read shared state and may run its operation: read again";
+
+fn execute_once(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
     ctx.yields = true;
     if !ctx.record.operations.iter().any(|op| op.op_id == op_id) {
@@ -1594,6 +1611,10 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
         Gate::Head(seq) => Some(seq),
         Gate::Free => None,
     };
+    kill_point("visit-gated");
+    if ctx.repo.took_shared_read() {
+        return Err(READ_AGAIN.to_owned());
+    }
     if let Some(waiting) = served_elsewhere(ctx, op_id, &revision, &trunk)? {
         return Ok(waiting);
     }
@@ -2848,7 +2869,7 @@ enum Gate {
 /// when it is the head; an operation that is not the head reserves a place and runs no check.
 fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     let signer = ctx.executor_signer().ok().flatten();
-    let mut queue = crate::queue::Queue::read(ctx.repo)?;
+    let mut queue = crate::queue::Queue::read_shared(ctx.repo)?;
     if queue.deadline_releases(op_id, &ctx.op(op_id).mid_publish_releases) >= 3 {
         let op = ctx.op_mut(op_id);
         op.state = OpState::Blocked;
@@ -2970,7 +2991,7 @@ fn enqueue(
     reason: Reason,
 ) -> Result<BayResult, String> {
     let signer = ctx.executor_signer().ok().flatten();
-    let mut queue = crate::queue::Queue::read(ctx.repo)?;
+    let mut queue = crate::queue::Queue::read_shared(ctx.repo)?;
     if queue.of(op_id).is_none() {
         crate::queue::join(ctx.repo, signer.as_ref(), op_id, &ctx.id)?;
         queue = crate::queue::Queue::read(ctx.repo)?;

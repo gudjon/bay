@@ -1581,8 +1581,10 @@ fn change_say(result: &BayResult) -> Option<String> {
         return None;
     }
     let id = &crate::change::shown(row["intent"].as_str().unwrap_or_default(), id);
+    // G437: the row's state is bay's own word (`landed`), read before the printed word
+    // (`merged`) replaces it; the sentence never matched what status writes.
     match row["state"].as_str() {
-        Some("merged") => return Some(format!("{id} is on main.")),
+        Some("landed") => return Some(format!("{id} is on main.")),
         Some("abandoned") => {
             return Some(format!("{id} was given up; nothing more happens to it."));
         }
@@ -1716,7 +1718,7 @@ mod tests {
     #[test]
     fn a_status_of_one_change_says_that_changes_state() {
         let named = BayResult::ok(json!({"changes": [{"change": "abcd1234",
-            "intent": "CARD-7 the ball lane", "state": "merged", "operation": {}}]}))
+            "intent": "CARD-7 the ball lane", "state": "landed", "operation": {}}]}))
         .with_change("abcd1234".to_owned())
         .say();
         assert!(
@@ -1731,7 +1733,7 @@ mod tests {
         let queued = read(json!({"change": "abcd1234", "state": "ready",
             "operation": {"lease": null, "outcome": Reason::Queued.code(), "state": "admitted"}}));
         assert!(queued.contains("waits in line"), "{queued}");
-        let merged = read(json!({"change": "abcd1234", "state": "merged", "operation": {}}));
+        let merged = read(json!({"change": "abcd1234", "state": "landed", "operation": {}}));
         assert!(merged.contains("is on main"), "{merged}");
         let draft = read(json!({"change": "abcd1234", "state": "open", "operation": null}));
         assert!(draft.contains("not submitted"), "{draft}");

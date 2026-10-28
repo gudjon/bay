@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.34
+
+- `bay status` of a merged change says it is on main.
+- A runner's waiting visits reuse its last read of main and the queue; a head reads afresh.
+- A post check that was not run says why in the runner's journal.
+
 ## 0.5.33
 
 - A blob-less runner fetches a change whose files arrive as deltas, so no submitted change is left unread.

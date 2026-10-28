@@ -163,6 +163,34 @@ pub struct Repo {
     fetched_at: Mutex<Option<String>>,
     /// Whether [`Repo::fetch_evidence_once`] has run.
     evidence_fetched: std::sync::atomic::AtomicBool,
+    /// G438: what a runner's pass last read from the remote, shared by its visits.
+    reads: Mutex<Reads>,
+}
+
+/// G438 (a fleet finding, 2026-10-28): a runner's pass visits every waiting change, and each
+/// visit fetched main, the registry and the queue, and the queue head's chain three times, 10 to
+/// 20 s of network a visit only to find that nothing moved. While a pass shares its reads
+/// ([`Repo::share_reads`]), a visit reuses what the pass read within [`READ_REUSE`]; a visit
+/// whose operation may run reads again first, and an operation that moved anything clears them.
+#[derive(Default)]
+struct Reads {
+    on: bool,
+    trunk: Option<std::time::Instant>,
+    registry: Option<std::time::Instant>,
+    queue: Option<std::time::Instant>,
+    chains: std::collections::HashMap<String, (std::time::Instant, String)>,
+    reused: bool,
+}
+
+/// How long a shared read stands for a fetch (G438).
+pub const READ_REUSE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The remote state a pass shares between its visits (G438).
+#[derive(Clone, Copy)]
+pub enum Shared {
+    Trunk,
+    Registry,
+    Queue,
 }
 
 /// Why [`Repo::open_with`] could not open a repository.
@@ -411,7 +439,99 @@ impl Repo {
             ),
             prefetched: Mutex::new(prefetched),
             evidence_fetched: std::sync::atomic::AtomicBool::new(false),
+            reads: Mutex::new(Reads::default()),
         })
+    }
+
+    /// G438: from now on (`on`) a visit may reuse what this process read from the remote within
+    /// [`READ_REUSE`]; what was read before is forgotten either way.
+    pub fn share_reads(&self, on: bool) {
+        if let Ok(mut reads) = self.reads.lock() {
+            *reads = Reads {
+                on,
+                ..Reads::default()
+            };
+        }
+    }
+
+    /// G438: forgets what was read, so the next read fetches.
+    pub fn forget_reads(&self) {
+        self.share_reads(self.reads.lock().is_ok_and(|reads| reads.on));
+    }
+
+    /// G438: whether a read since the last call stood in for a fetch.
+    pub fn took_shared_read(&self) -> bool {
+        self.reads
+            .lock()
+            .is_ok_and(|mut reads| std::mem::take(&mut reads.reused))
+    }
+
+    /// G438: whether the shared read of `what` may stand for a fetch now (and the visit is
+    /// marked as using one); when not, the caller fetches and this stamps it as read now.
+    pub fn reuses(&self, what: Shared) -> bool {
+        let Ok(mut reads) = self.reads.lock() else {
+            return false;
+        };
+        if !reads.on {
+            return false;
+        }
+        let stamp = match what {
+            Shared::Trunk => &mut reads.trunk,
+            Shared::Registry => &mut reads.registry,
+            Shared::Queue => &mut reads.queue,
+        };
+        if stamp.is_some_and(|at| at.elapsed() < READ_REUSE) {
+            reads.reused = true;
+            return true;
+        }
+        *stamp = Some(std::time::Instant::now());
+        false
+    }
+
+    /// [`Repo::fetch_trunk`], or the tracking ref the pass read within [`READ_REUSE`] (G438).
+    ///
+    /// # Errors
+    ///
+    /// The fetch fails, or the tracking ref cannot be read.
+    pub fn read_trunk(&self) -> Result<String, GitError> {
+        if self.reuses(Shared::Trunk)
+            && let Some(tip) = self.git.ref_target(&self.bootstrap.tracking_ref())?
+        {
+            return Ok(tip);
+        }
+        self.fetch_trunk()
+    }
+
+    /// [`Repo::fetch_registry`], unless the pass read it within [`READ_REUSE`] (G438).
+    pub fn read_registry(&self) {
+        if !self.reuses(Shared::Registry) {
+            self.fetch_registry();
+        }
+    }
+
+    /// [`Repo::remote_chain`], or the head the pass read within [`READ_REUSE`] (G438).
+    ///
+    /// # Errors
+    ///
+    /// The remote cannot be read.
+    pub fn read_chain(&self, change: &str) -> Result<String, GitError> {
+        if let Ok(mut reads) = self.reads.lock()
+            && reads.on
+            && let Some((at, head)) = reads.chains.get(change).cloned()
+            && at.elapsed() < READ_REUSE
+        {
+            reads.reused = true;
+            return Ok(head);
+        }
+        let head = self.remote_chain(change)?;
+        if let Ok(mut reads) = self.reads.lock()
+            && reads.on
+        {
+            reads
+                .chains
+                .insert(change.to_owned(), (std::time::Instant::now(), head.clone()));
+        }
+        Ok(head)
     }
 
     #[must_use]
