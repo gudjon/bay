@@ -15,13 +15,21 @@
 //!   its answer, if any, is older than the window: it is `pending_beyond_window`. When the window
 //!   holds all of trunk and a landing in it requires the check, it is `pending`. Either is listed
 //!   as [`Pending`], apart from the red checks: unknown, not a failure, so it refuses no landing.
-//! - A red check names its `suspect` range ([`Suspect`]): the newest pass older than the failure
-//!   (when the window holds one), the first failure after it, and the landings in between.
+//! - A red check names its `suspect` range ([`Suspect`]): the newest pass older than the failure,
+//!   the first failure after it, and the landings in between, on the check's paths or not (a
+//!   cause can sit in a file the check does not list).
+//! - B5: when the window holds no pass, the range reads on past it, down to `[red] reach`
+//!   first-parent commits of main (default [`DEFAULT_REACH`], never less than the window), for
+//!   the newest pass. With none there, `last_passed` is `null` and `searched` says how many main
+//!   commits it read: never a guessed range end.
 //! - Culprit finding: when the newest pass sits right below the first failure, one landing is
 //!   left in the range, and the evidence names it. That landing is the `culprit`, with the
 //!   answers `tested` from the pass up to the newest failure, and it owns the red in place of
 //!   the newest failure. A post producer, or an executor with `[runner] bisect_post`
 //!   (`crate::bisect`), narrows the range by recording runs on its midpoints.
+//! - BACKLOG 121: without a culprit, the owner (the newest failure) and the first failure are
+//!   only where the check was seen failing, never a proven cause; each red row's `say` says
+//!   which ([`Red::say`]).
 //! - A `product_failure` is cleared by a later landing whose `Fixes:`, `Reverts:` or
 //!   `Supersedes:` names the owning change or the first failure of the suspect range (a landing
 //!   newer than the newest failure), or by a quarantine of the check at trunk.
@@ -36,8 +44,10 @@
 //! the landings after that trunk and of those whose note moved (one `diff-tree` per moved
 //! producer ref), so its Git work grows with what changed, not with the window. Two reads are
 //! bounded by the window instead: while a check is red, its suspect range reads back to its
-//! last pass; and while no landing answers a check in a window that holds all of trunk, the
-//! landings are read until one requires it.
+//! last pass (B5: down to the reach); and while no landing answers a check in a window that
+//! holds all of trunk, the landings are read until one requires it. S4: a runner's next
+//! judgement keeps the answers of every landing it read, past the window too, whose notes did
+//! not move, so a read back to a far pass is paid once per runner, not once per head.
 //!
 //! BACKLOG 119: a change the red holds waits in its place in line, and no runner claims it
 //! while the red stands. The line passes such places in arrival order ([`holds_place`]), and
@@ -54,6 +64,13 @@ use crate::registry::Registry;
 /// How many first-parent trunk commits a red judgement reads back unless `[red] window` says.
 pub const DEFAULT_WINDOW: usize = 50;
 
+/// How many first-parent main commits a red check whose window holds no pass reads back for its
+/// last pass unless `[red] reach` says (B5): five default windows, about half a day of
+/// oz-platform's main at 2026-10-28's 500 merges a day. Each commit past the window costs one
+/// read of its evidence notes, paid only while a red check has no pass in its window, and once
+/// per runner process (S4).
+pub const DEFAULT_REACH: usize = 250;
+
 /// The [`Pending`] state of a check whose answer, if any, is older than the window.
 pub const PENDING_BEYOND_WINDOW: &str = "pending_beyond_window";
 
@@ -68,6 +85,12 @@ pub const PENDING: &str = "pending";
 /// The committed config cannot be read or does not parse: the window is then unknown.
 pub fn window(git: &Git, trunk: &str) -> Result<usize, String> {
     Ok(crate::config::Config::at(git, trunk)?.red_window())
+}
+
+/// `[red] window` and `[red] reach` (B5) in the config committed at `trunk`, read once.
+fn bounds(git: &Git, trunk: &str) -> Result<(usize, usize), String> {
+    let config = crate::config::Config::at(git, trunk)?;
+    Ok((config.red_window(), config.red_reach()))
 }
 
 /// Trunk red on one post-publication check. A `bay status --since` cursor carries the red checks it saw
@@ -92,8 +115,8 @@ pub struct Red {
 /// NEW-6: the landings one of which broke a red post check, so an operator can bisect.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Suspect {
-    /// The newest landing older than the failure whose answer is a pass; `None` when the window
-    /// holds none, and the range then runs to the window's oldest landing.
+    /// The newest landing older than the failure whose answer is a pass; `None` when none down
+    /// to the reach answers so (B5), and the range then runs to the oldest landing read.
     pub passed: Option<Mark>,
     /// The oldest landing after `passed` whose answer is a `product_failure`.
     pub failed: Mark,
@@ -101,6 +124,9 @@ pub struct Suspect {
     pub landings: Vec<Mark>,
     /// The one landing the evidence leaves, when the pass sits right below the first failure.
     pub culprit: Option<Culprit>,
+    /// B5: with no pass found, how many first-parent commits of main were read back for one;
+    /// `None` when `passed` names it.
+    pub searched: Option<usize>,
 }
 
 /// The landing that broke a red post check, as its evidence pins it: the newest pass is its
@@ -153,6 +179,14 @@ impl Mark {
     fn to_json(&self) -> Value {
         json!({"landing": self.landing, "change": self.change})
     }
+
+    /// How a sentence names it: its change, else its commit, short.
+    fn named(&self) -> String {
+        match &self.change {
+            Some(change) => format!("change {change}"),
+            None => format!("merge {}", &self.landing[..self.landing.len().min(12)]),
+        }
+    }
 }
 
 impl Suspect {
@@ -162,6 +196,7 @@ impl Suspect {
             "last_passed": self.passed.as_ref().map(Mark::to_json),
             "first_failed": self.failed.to_json(),
             "landings": self.landings.iter().map(Mark::to_json).collect::<Vec<_>>(),
+            "searched": self.searched,
         })
     }
 }
@@ -213,7 +248,53 @@ impl Red {
         json!({"check": self.check, "environment": self.environment, "paths": self.paths,
             "landing": self.landing, "change": self.change,
             "suspect": self.suspect.as_ref().map(Suspect::to_json),
-            "culprit": self.culprit().map(Culprit::to_json)})
+            "culprit": self.culprit().map(Culprit::to_json),
+            "say": self.say()})
+    }
+
+    /// BACKLOG 121 (a fleet finding, 2026-10-28: a red row named a change the check never
+    /// judged, and readers took it as the cause): what the row's owner is, in one plain
+    /// sentence. A culprit is a proven cause: the check passed right below it and failed on it.
+    /// Without one, the owner and the first failure are only where the check was seen failing,
+    /// and the cause is any merge of the range, on the check's paths or not. `None` for a red a
+    /// cursor carries, which holds no range.
+    #[must_use]
+    pub fn say(&self) -> Option<String> {
+        let suspect = self.suspect.as_ref()?;
+        let check = &self.check;
+        if let Some(culprit) = &suspect.culprit {
+            return Some(format!(
+                "{check}: {} broke it; the check passed on the merge before it and failed on it.",
+                culprit.mark.named()
+            ));
+        }
+        let owner = Mark {
+            landing: self.landing.clone(),
+            change: self.change.clone(),
+        };
+        let seen = if suspect.failed == owner {
+            format!("seen failing at {}", owner.named())
+        } else {
+            format!(
+                "seen failing at {} first and at {} last",
+                suspect.failed.named(),
+                owner.named()
+            )
+        };
+        let cause = match &suspect.passed {
+            Some(passed) => format!(
+                "the cause is one of the {} merges after its last pass at {}, on its paths or not",
+                suspect.landings.len(),
+                passed.named()
+            ),
+            None => format!(
+                "no merge of the newest {} on main passed it, so bay cannot narrow the cause",
+                suspect.searched.unwrap_or_default()
+            ),
+        };
+        Some(format!(
+            "{check}: {seen}, which is where it failed, not a proven cause; {cause}."
+        ))
     }
 
     /// The landing the evidence pins as the one that broke the check, when it pins one.
@@ -465,19 +546,17 @@ pub fn state(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Judg
     let Some(policy) = post_policy(git, trunk)? else {
         return Ok(Judgement::default());
     };
-    let window = window(git, trunk)?;
-    let (landings, full) = landings(git, trunk, window)?;
-    let unread = vec![None; landings.len()];
-    Ok(decide(
-        git,
-        &policy,
-        &landings,
-        (window, full),
-        registry,
-        None,
-        unread,
-    )?
-    .0)
+    let (window, reach) = bounds(git, trunk)?;
+    let line = line(git, trunk, window)?;
+    let unread = vec![None; line.landings.len()];
+    let past = Past {
+        trunk,
+        reach,
+        read: false,
+        kept: None,
+    };
+    let answers = Answers::new(git, registry, line, unread, past);
+    Ok(decide(&policy, window, None, answers)?.0)
 }
 
 /// The red and pending checks of `trunk`, as [`state`] judges them, and what decided them
@@ -512,16 +591,17 @@ fn judge_from(
     let Some(policy) = post_policy(git, trunk)? else {
         return Ok((Judgement::default(), None, Answered::new()));
     };
-    let window = window(git, trunk)?;
+    let (window, reach) = bounds(git, trunk)?;
     // The tips before the answers: a record written in between reads as moved next time.
     let evidence = evidence_tips(git)?;
-    let (landings, full) = landings(git, trunk, window)?;
+    let line = line(git, trunk, window)?;
     let known = before.and_then(|before| {
-        moved(git, before, &evidence, registry, &landings, window).map(|moved| (before, moved))
+        moved(git, before, &evidence, registry, &line.landings, window).map(|moved| (before, moved))
     });
     // S4: only under a judgement `moved` can compare with (the same registry, window and
     // producers), and only for a landing it judged whose notes did not move.
-    let carried: Vec<Option<Vec<Value>>> = landings
+    let carried: Vec<Option<Vec<Value>>> = line
+        .landings
         .iter()
         .enumerate()
         .map(|(at, landing)| {
@@ -531,20 +611,26 @@ fn judge_from(
                 .and_then(|_| answers.get(&landing.commit).cloned())
         })
         .collect();
+    // B5: the landings past the window are older than any new one, so only their notes decide.
+    let past = Past {
+        trunk,
+        reach,
+        read: false,
+        kept: known.as_ref().map(|(_, moved)| (answers, &moved.trees)),
+    };
     let (judgement, decided, read) = decide(
-        git,
         &policy,
-        &landings,
-        (window, full),
-        registry,
+        window,
         known.as_ref(),
-        carried,
+        Answers::new(git, registry, line, carried, past),
     )?;
     trace(trunk, known.as_ref().map(|(before, _)| *before), read.read);
-    let answers = landings
-        .iter()
+    let answers = read
+        .line
+        .landings
+        .into_iter()
         .zip(read.rows)
-        .filter_map(|(landing, rows)| Some((landing.commit.clone(), rows?)))
+        .filter_map(|(landing, rows)| Some((landing.commit, rows?)))
         .collect();
     Ok((
         judgement,
@@ -568,28 +654,16 @@ fn post_policy(git: &Git, trunk: &str) -> Result<Option<crate::policy::Policy>, 
     }
 }
 
-/// The red and pending checks over `landings`, the landing line of the newest `window`
-/// first-parent commits of trunk (`full` when the window held that many), and how each
-/// check was decided. With `known`, a check `known` decided is judged from what moved; any
-/// other check is judged over the window. `rows` holds each landing's answers where they are
-/// known already (S4); with the answers it holds after the judgement.
-fn decide(
-    git: &Git,
+/// The red and pending checks over `answers`' landings, the landing line of the newest `window`
+/// first-parent commits of trunk, and how each check was decided. With `known`, a check `known`
+/// decided is judged from what moved; any other check is judged over the window. With the
+/// answers, read and kept, after the judgement.
+fn decide<'a>(
     policy: &crate::policy::Policy,
-    landings: &[Landing],
-    (window, full): (usize, bool),
-    registry: Option<&Registry>,
+    window: usize,
     known: Option<&(&Judged, Moved)>,
-    rows: Vec<Option<Vec<Value>>>,
-) -> Result<(Judgement, Vec<Decided>, Read), String> {
-    let mut answers = Answers {
-        git,
-        registry,
-        landings,
-        full,
-        rows,
-        read: 0,
-    };
+    mut answers: Answers<'a>,
+) -> Result<(Judgement, Vec<Decided>, Answers<'a>), String> {
     let mut out = Judgement::default();
     let mut decided = Vec::new();
     for post in &policy.post {
@@ -614,7 +688,7 @@ fn decide(
         decided.push(Decided {
             check: post.id.clone(),
             environment: post.environment.clone(),
-            landing: answer.map(|(at, _)| landings[at].commit.clone()),
+            landing: answer.map(|(at, _)| answers.line.landings[at].commit.clone()),
             failed: answer.is_some_and(|(_, failed)| failed),
         });
         let Some((at, failed)) = answer else {
@@ -626,28 +700,20 @@ fn decide(
                     paths: entry.when_paths.clone(),
                     state,
                     window,
-                    oldest: landings.last().map(|landing| landing.commit.clone()),
+                    oldest: answers.line.landings[..answers.line.window]
+                        .last()
+                        .map(|landing| landing.commit.clone()),
                 });
             }
             continue;
         };
-        if !failed {
-            continue;
-        }
-        // A later landing that fixes, undoes or supersedes the owner clears it.
-        let answered = |owner: usize| {
-            landings[owner].change.as_ref().is_some_and(|change| {
-                landings[..owner]
-                    .iter()
-                    .any(|later| later.names.contains(change))
-            })
-        };
-        if answered(at) {
+        if !failed || cleared(&answers.line.landings, at) {
             continue;
         }
         // The culprit, when the evidence pins one, owns the red in place of the newest failure.
         let (suspect, owner) = answers.suspect(post, at)?;
-        if owner != at && answered(owner) {
+        let landings = &answers.line.landings;
+        if owner != at && cleared(landings, owner) {
             continue;
         }
         // A landing newer than the newest failure that names the first failure clears it too
@@ -669,33 +735,108 @@ fn decide(
             suspect: Some(suspect),
         });
     }
-    let read = Read {
-        rows: answers.rows,
-        read: answers.read,
-    };
-    Ok((out, decided, read))
+    Ok((out, decided, answers))
 }
 
-/// S4: the answers a judgement holds, landing by landing, and how many landings it read.
-struct Read {
-    rows: Vec<Option<Vec<Value>>>,
-    read: usize,
+/// Whether a landing newer than `landings[owner]` fixes, undoes or supersedes its change.
+fn cleared(landings: &[Landing], owner: usize) -> bool {
+    landings[owner].change.as_ref().is_some_and(|change| {
+        landings[..owner]
+            .iter()
+            .any(|later| later.names.contains(change))
+    })
 }
 
-/// The post answers of the window's landings, each read once and only when asked.
-struct Answers<'a> {
-    git: &'a Git,
-    registry: Option<&'a Registry>,
-    landings: &'a [Landing],
+/// N-20, B5: the landings a red judgement reads, newest first: the landing line of the window,
+/// then, once a red check's window holds no pass, the line past it down to the reach.
+struct Line {
+    landings: Vec<Landing>,
+    /// How many of `landings` are the window's.
+    window: usize,
+    /// How many first-parent commits of main `landings` covers.
+    depth: usize,
     /// Whether the window read as many first-parent commits as it holds: trunk may go on
     /// below it.
     full: bool,
+}
+
+/// B5: how a red judgement reads past its window for a red check's last pass.
+struct Past<'a> {
+    trunk: &'a str,
+    /// `[red] reach`: how many first-parent commits of main it reads back at most.
+    reach: usize,
+    /// Whether the landings past the window were read.
+    read: bool,
+    /// S4: the answers the judgement before read, and the trees whose notes moved since; `None`
+    /// when there is no judgement to keep them from.
+    kept: Option<(&'a Answered, &'a HashSet<String>)>,
+}
+
+/// The post answers of the line's landings, each read once and only when asked.
+struct Answers<'a> {
+    git: &'a Git,
+    registry: Option<&'a Registry>,
+    line: Line,
+    /// Each landing's answers where they are known (S4).
     rows: Vec<Option<Vec<Value>>>,
     /// How many landings' answers were read (S4).
     read: usize,
+    past: Past<'a>,
 }
 
-impl Answers<'_> {
+impl<'a> Answers<'a> {
+    fn new(
+        git: &'a Git,
+        registry: Option<&'a Registry>,
+        line: Line,
+        rows: Vec<Option<Vec<Value>>>,
+        past: Past<'a>,
+    ) -> Self {
+        Self {
+            git,
+            registry,
+            line,
+            rows,
+            read: 0,
+            past,
+        }
+    }
+
+    /// B5: reads the landings past the window, down to the reach, once: whether there were any.
+    /// A landing the judgement before read whose notes did not move keeps its answers (S4).
+    fn past(&mut self) -> Result<bool, String> {
+        if self.past.read || !self.line.full || self.past.reach <= self.line.depth {
+            return Ok(false);
+        }
+        self.past.read = true;
+        let deeper = line(self.git, self.past.trunk, self.past.reach)?;
+        let known = self.line.landings.len();
+        // The window's line is the start of the deeper one: one commit, one walk.
+        let commits = |landings: &[Landing]| -> Vec<String> {
+            landings
+                .iter()
+                .map(|landing| landing.commit.clone())
+                .collect()
+        };
+        if deeper.landings.get(..known).map(commits) != Some(commits(&self.line.landings)) {
+            return Err(format!(
+                "the landing line of {} read two ways",
+                self.past.trunk
+            ));
+        }
+        self.line.depth = deeper.depth;
+        for landing in deeper.landings.into_iter().skip(known) {
+            let kept = self
+                .past
+                .kept
+                .filter(|(_, moved)| !moved.contains(&landing.tree))
+                .and_then(|(answers, _)| answers.get(&landing.commit).cloned());
+            self.rows.push(kept);
+            self.line.landings.push(landing);
+        }
+        Ok(self.line.landings.len() > known)
+    }
+
     /// How landing `at` answers `post`: `Some(true)` for a `product_failure`, `Some(false)`
     /// for a pass, `None` when it does not decide (not answered yet, or not required of it).
     fn decides(
@@ -721,7 +862,7 @@ impl Answers<'_> {
             self.read += 1;
             self.rows[at] = Some(crate::publish::post_answers(
                 self.git,
-                &self.landings[at].commit,
+                &self.line.landings[at].commit,
                 self.registry,
                 true,
             )?);
@@ -746,10 +887,10 @@ impl Answers<'_> {
         &mut self,
         post: &crate::policy::ManifestEntry,
     ) -> Result<Option<&'static str>, String> {
-        if self.full {
+        if self.line.full {
             return Ok(Some(PENDING_BEYOND_WINDOW));
         }
-        for at in 0..self.landings.len() {
+        for at in 0..self.line.window {
             if self.requires(at, post)? {
                 return Ok(Some(PENDING));
             }
@@ -758,9 +899,9 @@ impl Answers<'_> {
     }
 
     /// NEW-6: the suspect range of `post`, red from landing `at`: older landings are read back
-    /// to the newest pass, and the oldest failure after it is the first failure. With it, the
-    /// landing that owns the red: the culprit when the pass sits right below the first failure,
-    /// else `at`.
+    /// to the newest pass, past the window down to the reach when it holds none (B5), and the
+    /// oldest failure after it is the first failure. With it, the landing that owns the red:
+    /// the culprit when the pass sits right below the first failure, else `at`.
     fn suspect(
         &mut self,
         post: &crate::policy::ManifestEntry,
@@ -768,7 +909,8 @@ impl Answers<'_> {
     ) -> Result<(Suspect, usize), String> {
         let mut first = at;
         let mut passed = None;
-        for older in at + 1..self.landings.len() {
+        let mut older = at + 1;
+        while older < self.line.landings.len() || self.past()? {
             match self.decides(older, post)? {
                 Some(true) => first = older,
                 Some(false) => {
@@ -777,24 +919,23 @@ impl Answers<'_> {
                 }
                 None => {}
             }
+            older += 1;
         }
-        let end = passed.unwrap_or(self.landings.len());
+        let end = passed.unwrap_or(self.line.landings.len());
         // Landings are newest first: the pass right below the first failure is at `first + 1`.
         let culprit = match passed {
             Some(older) if older == first + 1 => Some(self.culprit(post, first, at, older)?),
             _ => None,
         };
         let owner = if culprit.is_some() { first } else { at };
+        let landings = &self.line.landings;
         Ok((
             Suspect {
-                passed: passed.map(|older| Mark::of(&self.landings[older])),
-                failed: Mark::of(&self.landings[first]),
-                landings: self.landings[first..end]
-                    .iter()
-                    .rev()
-                    .map(Mark::of)
-                    .collect(),
+                passed: passed.map(|older| Mark::of(&landings[older])),
+                failed: Mark::of(&landings[first]),
+                landings: landings[first..end].iter().rev().map(Mark::of).collect(),
                 culprit,
+                searched: passed.is_none().then_some(self.line.depth),
             },
             owner,
         ))
@@ -818,23 +959,23 @@ impl Answers<'_> {
                 .map(str::to_owned);
             if let Some(verdict) = state {
                 tested.push(Tested {
-                    mark: Mark::of(&self.landings[index]),
+                    mark: Mark::of(&self.line.landings[index]),
                     verdict,
                 });
             }
         }
         Ok(Culprit {
-            mark: Mark::of(&self.landings[first]),
+            mark: Mark::of(&self.line.landings[first]),
             tested,
         })
     }
 
-    /// The newest landing that decides `post`, and whether it failed.
+    /// The newest landing of the window that decides `post`, and whether it failed.
     fn newest(
         &mut self,
         post: &crate::policy::ManifestEntry,
     ) -> Result<Option<(usize, bool)>, String> {
-        for at in 0..self.landings.len() {
+        for at in 0..self.line.window {
             if let Some(failed) = self.decides(at, post)? {
                 return Ok(Some((at, failed)));
             }
@@ -853,7 +994,7 @@ impl Answers<'_> {
         moved: &Moved,
     ) -> Result<Option<(usize, bool)>, String> {
         let carried = then.landing.as_ref().and_then(|commit| {
-            self.landings
+            self.line.landings[..self.line.window]
                 .iter()
                 .position(|landing| &landing.commit == commit)
         });
@@ -863,8 +1004,8 @@ impl Answers<'_> {
         if then.landing.is_some() && carried.is_none() {
             return self.newest(post);
         }
-        for at in 0..self.landings.len() {
-            if at < moved.new || moved.trees.contains(&self.landings[at].tree) {
+        for at in 0..self.line.window {
+            if at < moved.new || moved.trees.contains(&self.line.landings[at].tree) {
                 if let Some(failed) = self.decides(at, post)? {
                     return Ok(Some((at, failed)));
                 }
@@ -937,8 +1078,8 @@ fn moved(
 
 /// N-20: the landing line ([`crate::trunkline`]) of the newest `window` first-parent commits
 /// of `trunk`, newest first, with each bay landing an outside merge pushed off the first-parent
-/// line placed at that merge; and whether the window was full.
-fn landings(git: &Git, trunk: &str, window: usize) -> Result<(Vec<Landing>, bool), String> {
+/// line placed at that merge.
+fn line(git: &Git, trunk: &str, window: usize) -> Result<Line, String> {
     let line = crate::trunkline::walk(
         git,
         trunk,
@@ -946,8 +1087,8 @@ fn landings(git: &Git, trunk: &str, window: usize) -> Result<(Vec<Landing>, bool
         None,
         "%T%x1f%(trailers:key=Fixes,valueonly,separator=%x2c)%x1f%(trailers:key=Reverts,valueonly,separator=%x2c)%x1f%(trailers:key=Supersedes,valueonly,separator=%x2c)",
     )?;
-    let full = line.first_parent >= window;
-    let landings = line
+    let depth = line.first_parent;
+    let landings: Vec<Landing> = line
         .entries
         .into_iter()
         .filter_map(|entry| {
@@ -967,5 +1108,10 @@ fn landings(git: &Git, trunk: &str, window: usize) -> Result<(Vec<Landing>, bool
             })
         })
         .collect();
-    Ok((landings, full))
+    Ok(Line {
+        window: landings.len(),
+        landings,
+        depth,
+        full: depth >= window,
+    })
 }

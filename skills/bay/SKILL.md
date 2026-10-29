@@ -124,6 +124,10 @@ session is being told of its refusals; `waiting_for` says what a queued change w
   yours alone. Report it merged, and name the batch.
 - `bay status` lists in `detail.red` each check that turned main red after a merge, with its `culprit`
   once the evidence names one merge. If that is yours, fix it first: `bay start <intent> --fixes <change>`.
+  With no culprit, the row's `merge` and `suspect.first_failed` are only where the check was seen failing,
+  not a proven cause, and `say` says so: the cause is one of `suspect.merges`, on the check's paths or not.
+  With no pass in its `[red] window`, bay reads back down to `[red] reach` merges (default 250) for the
+  newest pass; with none, `suspect.last_passed` is `null` and `suspect.searched` says how many it read.
 - While a change waits in the queue, `bay status <change>` may show `operation.conflict`: main
   moved into a `MERGE_CONFLICT` on the listed paths. It keeps its place; refresh and repair now.
   The agent hook also tells your session once.

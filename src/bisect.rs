@@ -6,7 +6,8 @@
 //! range: the landings after its newest pass up to its first failure. Off by default, with
 //! `[runner] bisect_post = true` in `.bay/config.toml` at trunk, an executor pass narrows it:
 //!
-//! - Only a red check whose range holds more than one landing and has a pass below it, on a
+//! - Only a red check whose range holds more than one landing and has a pass below it (in the
+//!   `[red] window`, or past it down to `[red] reach`, B5), on a
 //!   box that serves the check's environment (`bay.checkEnvironment`), and only when the
 //!   check's `producers` list, if any, names this box's producer.
 //! - It runs the check on the range's midpoint landing, first parent, through the same adapter
@@ -357,11 +358,11 @@ fn all(repo: &Repo) -> Result<Vec<Value>, String> {
             continue;
         };
         if suspect.passed.is_none() {
-            reports.push(not_run(
-                red,
-                "no merge in the window passes the check, so the range has no good end",
-                &[],
-            ));
+            let why = format!(
+                "no merge of the newest {} on main passes the check, so the range has no good end",
+                suspect.searched.unwrap_or_default()
+            );
+            reports.push(not_run(red, &why, &[]));
             continue;
         }
         if !served.serves(&red.environment) {

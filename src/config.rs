@@ -321,10 +321,15 @@ pub struct View {
 /// [`MAX_RED_WINDOW`]. Read from the config committed at trunk, so the window is the landed
 /// one. A post check no commit in the window answers is pending, never green: a trunk that
 /// lands faster than its post checks answer needs a window as deep as their lag.
+///
+/// `[red] reach` (B5): how many first-parent trunk commits a red check whose window holds no
+/// pass reads back for its last pass, so its suspect range has a good end and a culprit can be
+/// found. Default [`crate::red::DEFAULT_REACH`]; from the window to [`MAX_RED_WINDOW`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Red {
     pub window: Option<usize>,
+    pub reach: Option<usize>,
 }
 
 /// The deepest `[red] window`: each commit in it may cost one read of its evidence notes.
@@ -627,6 +632,15 @@ impl Config {
         {
             return Err(format!(
                 "[red] window = {window}: the window is 1 to {MAX_RED_WINDOW} main commits"
+            ));
+        }
+        // B5: the reach reads back from main's tip, so it holds the window.
+        if let Some(reach) = config.red.as_ref().and_then(|red| red.reach)
+            && !(config.red_window()..=MAX_RED_WINDOW).contains(&reach)
+        {
+            return Err(format!(
+                "[red] reach = {reach}: the reach is the window ({}) to {MAX_RED_WINDOW} main commits",
+                config.red_window()
             ));
         }
         config.validate_targets()?;
@@ -973,6 +987,17 @@ impl Config {
             .unwrap_or(crate::red::DEFAULT_WINDOW)
     }
 
+    /// How many first-parent trunk commits a red check whose window holds no pass reads back
+    /// for its last pass (`[red] reach`, B5): never fewer than the window.
+    #[must_use]
+    pub fn red_reach(&self) -> usize {
+        self.red
+            .as_ref()
+            .and_then(|red| red.reach)
+            .unwrap_or(crate::red::DEFAULT_REACH)
+            .max(self.red_window())
+    }
+
     /// The instruction files (`[agent] instructions`, G155), paths relative to the top level.
     #[must_use]
     pub fn instructions(&self) -> Vec<String> {
@@ -1310,6 +1335,24 @@ product = "claude"                 # leave this table out when the box does not 
             "[red]\nwindow = -1\n",
             "[red]\nwindow = \"50\"\n",
             "[red]\nwidth = 50\n",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn the_red_reach_is_250_commits_and_never_less_than_the_window() {
+        // B5.
+        assert_eq!(Config::default().red_reach(), 250);
+        let reach = |text: &str| Config::parse(text).unwrap().red_reach();
+        assert_eq!(reach("[red]\nreach = 400\n"), 400);
+        assert_eq!(reach("[red]\nwindow = 3\nreach = 3\n"), 3);
+        assert_eq!(reach("[red]\nwindow = 900\n"), 900);
+        for text in [
+            "[red]\nwindow = 3\nreach = 2\n",
+            "[red]\nreach = 49\n",
+            "[red]\nreach = 10001\n",
+            "[red]\nreach = \"250\"\n",
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
