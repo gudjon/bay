@@ -1463,7 +1463,8 @@ fn execute_once(
     // G284: an operation waiting for a person's approval is asked again on every pass, as its
     // author's retry asks it: once the evidence on its candidate, or trunk, changed it is
     // re-armed and run below; unchanged, it keeps waiting, with nothing written and no event.
-    if awaits_approval(ctx.op(op_id)) {
+    // G574: so is one a check gave no clear answer ([`asked_again`]).
+    if asked_again(ctx.op(op_id)) {
         let executor = ctx.executor_signer()?;
         ctx.chain.sign_with(executor);
         if let Some(waiting) = retry_blocked(&mut ctx, op_id, &revision, &trunk)? {
@@ -4058,6 +4059,29 @@ fn waiver_answers(ctx: &Ctx, op_id: &str) -> Result<bool, String> {
 pub fn awaits_approval(op: &Operation) -> bool {
     op.state == OpState::Blocked
         && op.outcome.as_deref().and_then(Reason::from_code) == Some(Reason::ApprovalPending)
+}
+
+/// How many of an operation's candidates a check may leave with no clear answer before a pass
+/// stops asking it again ([`asked_again`]); then it waits for its author's `bay merge`.
+pub const UNKNOWN_RETRIES: usize = 3;
+
+/// Whether every executor pass asks blocked `op` again ([`retry_blocked`]): it waits for an
+/// approval ([`awaits_approval`]), or, G574 (a fleet finding, 2026-10-29: a pre check ran on
+/// its author's machine and printed no result, and the change waited for its author while its
+/// result said to wait), a check gave no clear answer on fewer than [`UNKNOWN_RETRIES`] of its
+/// candidates. Asked again, it is re-armed only once its condition changed (a moved trunk), so
+/// an unchanged one costs no run.
+#[must_use]
+pub fn asked_again(op: &Operation) -> bool {
+    awaits_approval(op)
+        || (op.state == OpState::Blocked
+            && op.outcome.as_deref().and_then(Reason::from_code) == Some(Reason::CheckUnknown)
+            && op
+                .attempts
+                .iter()
+                .filter(|attempt| attempt.verdict == "unknown")
+                .count()
+                < UNKNOWN_RETRIES)
 }
 
 /// G284: the candidate an approval arrived for, checked again rather than rebuilt: the last

@@ -1047,7 +1047,7 @@ impl Reason {
                 "Wait: bay retries once a worker can run the check. If `bay status --all` shows no live runner, tell the user."
             }
             Self::CheckUnknown => {
-                "Wait for the check's result with `bay merge --wait`; never treat it as a pass. Repair the change if the check cannot answer."
+                "Wait: a runner checks it again once main moves, up to three candidates; never treat it as a pass. If it stays unknown, repair the change or tell the user the check gives no result, then `bay merge` again."
             }
             Self::PolicyChanged => {
                 "Run `bay start <change>`, then `bay merge` again: the change is checked under the current policy."

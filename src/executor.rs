@@ -1428,18 +1428,21 @@ fn freed(ran: &[Value]) -> usize {
 }
 
 fn runs(op: &crate::change::Operation) -> bool {
-    !op.state.is_terminal() && (op.state != OpState::Blocked || publish::awaits_approval(op))
+    !op.state.is_terminal() && (op.state != OpState::Blocked || publish::asked_again(op))
 }
 
 /// `result`, the outcome a pass reached at `step` for change `id`, with its receipt
 /// ([`publish::with_receipt`]). G284: a wait for approval that nothing changed was told when it
-/// began, so a pass that finds it unchanged writes no receipt of its own.
+/// began, so a pass that finds it unchanged writes no receipt of its own; G574: so is a check
+/// that gave no clear answer.
 fn receipted(repo: &Repo, id: &str, step: &str, result: BayResult) -> BayResult {
-    let unchanged = result.reason == Some(Reason::ApprovalPending)
-        && result
-            .detail
-            .as_ref()
-            .is_some_and(|detail| detail["unchanged"] == true);
+    let unchanged = matches!(
+        result.reason,
+        Some(Reason::ApprovalPending | Reason::CheckUnknown)
+    ) && result
+        .detail
+        .as_ref()
+        .is_some_and(|detail| detail["unchanged"] == true);
     if unchanged {
         result.with_change(id)
     } else {
