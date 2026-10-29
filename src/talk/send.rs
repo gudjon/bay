@@ -72,7 +72,7 @@ pub struct Answer {
 }
 
 /// Why a send stopped: a refusal, or a fault.
-enum Stop {
+pub(super) enum Stop {
     Refused(Refusal),
     Failed(String),
 }
@@ -89,7 +89,7 @@ impl From<String> for Stop {
     }
 }
 
-fn finish(outcome: Result<BayResult, Stop>) -> BayResult {
+pub(super) fn finish(outcome: Result<BayResult, Stop>) -> BayResult {
     match outcome {
         Ok(result) => result,
         Err(Stop::Refused(refusal)) => refusal.result(),
@@ -109,7 +109,7 @@ pub fn answer(dir: &Path, answer: &Answer) -> BayResult {
 
 /// The repository, the trust its talks are judged by, and the acting actor. Under
 /// `signing = "all"` the registry is fetched first; under `approvals` (G445) none is read.
-fn open(dir: &Path) -> Result<(Repo, Trust, Actor), Stop> {
+pub(super) fn open(dir: &Path) -> Result<(Repo, Trust, Actor), Stop> {
     let repo = Repo::open(dir)?;
     if crate::registry::signing_mode(&repo.git)? == crate::policy::Signing::All {
         repo.fetch_registry();
@@ -473,7 +473,7 @@ fn later_finding(
     Ok(body)
 }
 
-fn sent_result(mut detail: Value, state: &str, not_pushed: Option<String>) -> BayResult {
+pub(super) fn sent_result(mut detail: Value, state: &str, not_pushed: Option<String>) -> BayResult {
     detail["pushed"] = json!(not_pushed.is_none());
     if let Some(why) = not_pushed {
         detail["why"] = json!(format!(
@@ -550,7 +550,7 @@ fn resend(repo: &Repo, body: &Value, existing: &Talk, dry_run: bool) -> Result<B
 }
 
 /// The talk `id`, from any recipient's refs, here or fetched from the remote.
-fn find(repo: &Repo, id: &str) -> Result<Option<Talk>, Stop> {
+pub(super) fn find(repo: &Repo, id: &str) -> Result<Option<Talk>, Stop> {
     if !is_talk_id(id) {
         return Err(Refusal::invalid(format!("{id:?} is not a talk id")).into());
     }

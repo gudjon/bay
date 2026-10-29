@@ -193,9 +193,13 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 | See merges, events (`main_red`, `main_red_cleared`, `outside_merge`, `main_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a discovery talk addressed to you (one decision) | `bay talk --answer <id> <value>` |
+| Reply to a delivery or reliability talk addressed to you: its status and what shows it | `bay talk --backbrief <id> ready\|blocked\|validated\|done [--evidence <ref>]` (`blocked` also takes `--reason <CODE> --follow-up <time>`) |
 
 Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 
+- The notice of a talk to you names its one reply command: `--answer` for a discovery talk,
+  `--backbrief` for a delivery or reliability talk. Send a new backbrief when the status changes;
+  the same one again writes nothing. The sender is told the status word, never your text.
 - A talk read after its `--expires` is void: the notice prints `EXPIRED`, and it owes no reply.
 - `bay merge` and `bay undo` list the open talks about that change in `detail.open_talks`. Read them;
   they never block the merge.

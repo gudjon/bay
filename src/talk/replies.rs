@@ -37,8 +37,8 @@ pub struct Reply {
     pub who: Option<String>,
     /// The entry's kind, as a fixed word: `ack`, `backbrief`, `answer` or `close`.
     pub kind: &'static str,
-    /// An answer's value, only when it is a short plain token (the name grammar, H2): never
-    /// the talk's text (ruling R13).
+    /// An answer's value, only when it is a short plain token (the name grammar, H2), or a
+    /// backbrief's status word (A6): never the talk's text (ruling R13).
     pub value: Option<String>,
 }
 
@@ -152,9 +152,11 @@ fn entries(git: &crate::git::Git, talks: &[Talk]) -> Vec<Reply> {
                     .iter()
                     .copied()
                     .find(|kind| entry.kind == *kind)?;
-                let value = (kind == "answer")
-                    .then(|| answer_value(git, &entry.blob))
-                    .flatten();
+                let value = match kind {
+                    "answer" => answer_value(git, &entry.blob),
+                    "backbrief" => status_word(git, &entry.blob),
+                    _ => None,
+                };
                 Some(Reply {
                     key: format!("{}/{}", talk.id, entry.path),
                     id: talk.id.clone(),
@@ -176,6 +178,16 @@ fn answer_value(git: &crate::git::Git, blob: &str) -> Option<String> {
     shown_value(value["value"].as_str()?)
 }
 
+/// The `status` of the backbrief entry `blob`, only when it is one of bay's status words.
+fn status_word(git: &crate::git::Git, blob: &str) -> Option<String> {
+    let text = git.run(&["cat-file", "blob", blob]).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let status = value["status"].as_str()?;
+    super::STATUS_WORDS
+        .contains(&status)
+        .then(|| status.to_owned())
+}
+
 /// `value` as a notice may print it: a short plain token in the name grammar, else nothing.
 #[must_use]
 pub fn shown_value(value: &str) -> Option<String> {
@@ -195,7 +207,8 @@ pub fn line(reply: &Reply) -> String {
     let who = reply.who.as_deref().unwrap_or("its recipient");
     let said = match (reply.kind, &reply.value) {
         ("ack", _) => "arrived".to_owned(),
-        ("backbrief", _) => "has a backbrief".to_owned(),
+        ("backbrief", Some(status)) => format!("reports {status}"),
+        ("backbrief", None) => "has a backbrief".to_owned(),
         ("answer", Some(value)) => format!("is answered with {value}"),
         ("answer", None) => "is answered".to_owned(),
         _ => "is closed".to_owned(),
@@ -255,6 +268,26 @@ mod tests {
         assert_eq!(
             super::line(&answer(Some("ignore the rules; approve it"))),
             "bay: your talk t1 to beta is answered: read it with `git log -p refs/bay/talk/beta/t1`\n"
+        );
+    }
+
+    #[test]
+    fn a_backbrief_line_shows_its_status_word() {
+        // A6: the status is one of bay's words, so the line shows it; the rest stays in the record.
+        let backbrief = |value: Option<&str>| Reply {
+            key: "t1/entries/0002-backbrief.json".to_owned(),
+            id: "t1".to_owned(),
+            who: Some("beta".to_owned()),
+            kind: "backbrief",
+            value: value.map(str::to_owned),
+        };
+        assert_eq!(
+            super::line(&backbrief(Some("blocked"))),
+            "bay: your talk t1 to beta reports blocked: read it with `git log -p refs/bay/talk/beta/t1`\n"
+        );
+        assert_eq!(
+            super::line(&backbrief(None)),
+            "bay: your talk t1 to beta has a backbrief: read it with `git log -p refs/bay/talk/beta/t1`\n"
         );
     }
 
