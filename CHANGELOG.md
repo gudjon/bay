@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.3
+
+- `bay queue` prints the live line head first as one `bay.queue/1` document, with changes no runner placed yet.
+- When a post check turns main red, bay tells the change that owns it, once.
+- A post check that reads history fetches the history of the paths a post run set aside.
+- A repair passes a check whose fix waits for its run; it still waits for a red check.
+- A red check no worker answered is tried again after five minutes, not an hour.
+- A runner asks a check with no clear answer again once main moves, up to three candidates.
+- A runner reaps each process it starts in the background, so it keeps no exited child.
+- When a red's newest failure changed the check itself, the red says so and names the `--fixes` step.
+
 ## 0.6.2
 
 - A red clears only when a check run passes after the fix; a fix's name alone no longer clears it.
