@@ -6122,6 +6122,7 @@ fn run_policy(
             policy_provenance,
             inputs,
             turn: Some(if ctx.ahead_of_turn { "ahead" } else { "head" }),
+            rerun: &[],
         },
         &producer,
         &check::Limits {

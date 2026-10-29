@@ -50,6 +50,10 @@ pub struct Candidate<'a> {
     /// a worker first (a batch is the head's run). `None` for every other run (a bisection, a
     /// post check of main, a test of the adapter): the request then has no `turn`.
     pub turn: Option<&'static str>,
+    /// G540: a red post check's run on main's tip names the units that failed in the red's
+    /// newest failing record, sorted: the request's `rerun`. Empty for every other run, and the
+    /// request then has no `rerun`.
+    pub rerun: &'a [String],
 }
 
 /// The change behind a candidate, as its check request names it (`INTERFACES` § 3).
@@ -829,10 +833,17 @@ struct Plan {
     /// `declared_empty` when the adapter's map selects nothing for this candidate (§ 7).
     #[serde(default)]
     selection: Option<String>,
+    /// G540: the units of the request's `rerun` the adapter no longer has.
+    #[serde(default)]
+    gone: Vec<String>,
 }
 
 /// The one recorded value of `plan.selection` (`INTERFACES` § 7).
 pub const DECLARED_EMPTY: &str = "declared_empty";
+
+/// G540: the record field naming the units of the request's `rerun` the adapter no longer has,
+/// as its `plan.gone` named them. Absent when it named none.
+pub const GONE: &str = "gone";
 
 /// What one check's run returns: its verdict, why it is not `pass`, its units, and its
 /// `selection` when the selection was declared empty; or, set in `unavailable`, the adapter's
@@ -850,6 +861,8 @@ struct Judged {
     /// Items 1 and 2: a check with `footprint = "observed"`, its observed footprint
     /// ([`crate::throughput::observed_stamp`]), when bay could observe the run.
     observed: Option<serde_json::Value>,
+    /// G540: the units of the request's `rerun` the result names in `plan.gone`.
+    gone: Vec<String>,
 }
 
 /// N-3: the judgement of a failed result past its failing units: its other units, its plan
@@ -870,6 +883,7 @@ impl Judged {
             unavailable: None,
             excused: None,
             observed: None,
+            gone: Vec::new(),
         }
     }
 }
@@ -1502,6 +1516,9 @@ fn evidence(
     if let Some(stamp) = judged.observed {
         unknown.insert(crate::throughput::FOOTPRINT.to_owned(), stamp);
     }
+    if !judged.gone.is_empty() {
+        unknown.insert(GONE.to_owned(), json!(judged.gone));
+    }
     EvidenceRecord {
         schema: EVIDENCE_SCHEMA.to_owned(),
         id: run_id(producer, candidate.id, index, run),
@@ -1631,6 +1648,7 @@ fn base_answer(
         policy_provenance: candidate.policy_provenance,
         inputs: candidate.inputs,
         turn: None,
+        rerun: &[],
     };
     let (mut judged, ran) = run_once(
         git,
@@ -1857,6 +1875,12 @@ struct Place<'a> {
 /// - `git`: only for a check with `inputs = ["history"]` ([`History`]): `{"dir", "object_dir",
 ///   "alternates"?, "refs": {"base", "candidate", "revision"?}}`, so that
 ///   `GIT_DIR=<dir> git log <base>` reads the repository's history, and no write reaches it.
+/// - `rerun`: only on the post run of a red check on main's tip (G540): the ids of the units
+///   that failed in the red's newest failing record. An adapter runs those units as well as the
+///   ones `changed_paths` reach, and names each one it no longer has in its result's
+///   `plan.gone`, never dropping one silently. A result that reports a requested unit neither
+///   among its `checks` nor in `plan.gone` is `unknown`, whatever its other units say: a run that
+///   did not answer the failed units never clears the red.
 ///
 /// A check whose verdict reads `base`, `change` or `messages` declares `inputs = ["commit"]` or
 /// `["history"]`, so its evidence is keyed by subject commit and never stands for another
@@ -1881,6 +1905,9 @@ fn request(
         "timeout_s": entry.timeout_s,
         "inputs": candidate.inputs,
     });
+    if !candidate.rerun.is_empty() {
+        request["rerun"] = json!(candidate.rerun);
+    }
     // N-18: the tree holds only `changed_paths` (and the entry's `paths`), so an adapter knows
     // that a file absent from it may still be in the candidate.
     if entry.changed_only() {
@@ -2182,7 +2209,13 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
     let failed = units
         .iter()
         .any(|unit| unit.verdict == Verdict::ProductFailure);
-    let mut judged = judge_units(result, entry, units);
+    let mut judged = judge_units(result, entry, units, candidate.rerun);
+    judged.gone = candidate
+        .rerun
+        .iter()
+        .filter(|id| result.plan.gone.contains(id))
+        .cloned()
+        .collect();
     if failed {
         // A failing unit is the run's verdict. N-3: the rest of the result is judged all the
         // same, so a check with `baseline = "base"` whose every failure is pre-existing records
@@ -2197,9 +2230,15 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
     judged
 }
 
-/// [`judge`] past the failing units: the plan, the selection and every unit that did not
-/// fail. A failing unit is judged by the caller.
-fn judge_units(result: &CheckResult, entry: &CheckEntry, units: Vec<Unit>) -> Judged {
+/// [`judge`] past the failing units: the plan, the selection, every unit that did not fail,
+/// and whether the result answers each unit of the request's `rerun`. A failing unit is judged
+/// by the caller.
+fn judge_units(
+    result: &CheckResult,
+    entry: &CheckEntry,
+    units: Vec<Unit>,
+    rerun: &[String],
+) -> Judged {
     let with = |verdict: Verdict, why: Option<String>, units: Vec<Unit>| Judged {
         verdict,
         why,
@@ -2208,6 +2247,7 @@ fn judge_units(result: &CheckResult, entry: &CheckEntry, units: Vec<Unit>) -> Ju
         unavailable: None,
         excused: None,
         observed: None,
+        gone: Vec::new(),
     };
     // § 7: `declared_empty` is valid only with `selected` = 0 and `expected_minimum` = 0; any
     // other combination is `unknown`.
@@ -2271,6 +2311,25 @@ fn judge_units(result: &CheckResult, entry: &CheckEntry, units: Vec<Unit>) -> Ju
             units,
         );
     }
+    // G540 (a fleet finding, 2026-10-29: scripts-fast failed on 3 units, and every later post
+    // run, asked only about files no test reads, reached none of them): a red check's run that
+    // does not answer each unit it was asked to run again is no pass, so it never clears the red.
+    let missed: Vec<&str> = rerun
+        .iter()
+        .filter(|id| !units.iter().any(|unit| unit.id == **id) && !result.plan.gone.contains(id))
+        .map(String::as_str)
+        .collect();
+    if !missed.is_empty() {
+        return with(
+            Verdict::Unknown,
+            Some(format!(
+                "asked to run {} again, the result reports {} neither as a unit nor in plan.gone",
+                missed.join(", "),
+                if missed.len() == 1 { "it" } else { "them" }
+            )),
+            units,
+        );
+    }
     // § 7: a pass on an empty selection under an explicit zero minimum is recorded as
     // `declared_empty`, so it is reported as a coverage gap, never as tested code.
     let empty = declared.is_some() || collected == 0;
@@ -2282,6 +2341,7 @@ fn judge_units(result: &CheckResult, entry: &CheckEntry, units: Vec<Unit>) -> Ju
         unavailable: None,
         excused: None,
         observed: None,
+        gone: Vec::new(),
     }
 }
 
@@ -2768,6 +2828,7 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
                 policy_provenance: crate::policy::Provenance::Bay,
                 inputs: &[],
                 turn: None,
+                rerun: &[],
             };
             let limits = Limits {
                 budget: None,

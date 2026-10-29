@@ -99,6 +99,9 @@ pub struct Suspect {
     pub failed: Mark,
     /// The landings after `passed` up to and including `failed`, oldest first.
     pub landings: Vec<Mark>,
+    /// The newest landing whose answer is a `product_failure`: the one that decides the red.
+    /// Its failing record names the units a post run asks to run again (`crate::bisect`, G540).
+    pub newest_failed: Mark,
     /// The one landing the evidence leaves, when the pass sits right below the first failure.
     pub culprit: Option<Culprit>,
 }
@@ -795,6 +798,7 @@ impl Answers<'_> {
                     .rev()
                     .map(Mark::of)
                     .collect(),
+                newest_failed: Mark::of(&self.landings[at]),
                 culprit,
             },
             owner,

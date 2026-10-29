@@ -268,6 +268,8 @@ name no record names comes back in `detail.unseen` with a `detail.warning`: chec
    A slow check that reads the whole tree can run after merge instead of on every change:
    `stage = "post"` in its `[[check]]`, and `[runner] post = true` in `.bay/config.toml`. The runner then runs it
    once on main's newest tip, and with `bisect_post = true` a red result names the merge that broke it.
+   While it is red, its request names `rerun`: the units that failed last. The adapter runs them too, and
+   lists in `plan.gone` each one it no longer has; a run that answers neither is `unknown`, not green.
    With `[policy] evidence_reuse = "exact-inputs"`, `footprint = "observed"` on a `[[check]]` lets bay record what each run
    read and listed; a later candidate whose bytes there are the same reuses the result, with no read set declared.
    With `[runner] warm = true`, the runner also runs such checks once on main's newest tip, so a change runs only the

@@ -1072,6 +1072,7 @@ fn run_check(
             policy_provenance: crate::policy::Provenance::Bay,
             inputs: &[],
             turn: None,
+            rerun: &[],
         },
         PRODUCER,
         &limits,

@@ -56,7 +56,8 @@ pub fn run(repo: &Repo) -> Option<Value> {
 /// policy at main's newest tip's first parent runs once on that tip when this box serves its
 /// environment and holds no record of it there yet. One run answers every landing since the last
 /// run's tip: a pass, or a red the red judgement (`crate::red`) ranges and `[runner] bisect_post`
-/// narrows. `None` when off or nothing ran.
+/// narrows. A red check runs again on each new tip (G492), and its request names `rerun`: the
+/// units that failed in its newest failing record (G540). `None` when off or nothing ran.
 #[must_use]
 pub fn tips(repo: &Repo) -> Option<Value> {
     if !repo.config.post_tips() {
@@ -116,17 +117,12 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
     // causes were fixed in files off its paths, and every change on its paths waited on it): a
     // red check runs again on each new tip, first, even when nothing on its paths changed, so
     // a fix that landed anywhere can clear it.
-    let red: Vec<(String, String)> = crate::red::red(git, &tip, registry.as_ref())
-        .map(|reds| {
-            reds.into_iter()
-                .map(|red| (red.check, red.environment))
-                .collect()
-        })
-        .unwrap_or_default();
-    let is_red = |entry: &crate::policy::CheckEntry| {
-        red.iter()
-            .any(|(check, environment)| *check == entry.id && *environment == entry.environment)
+    let reds = crate::red::red(git, &tip, registry.as_ref()).unwrap_or_default();
+    let red_of = |entry: &crate::policy::CheckEntry| {
+        reds.iter()
+            .find(|red| red.check == entry.id && red.environment == entry.environment)
     };
+    let is_red = |entry: &crate::policy::CheckEntry| red_of(entry).is_some();
     let mut entries: Vec<&crate::policy::CheckEntry> = policy
         .checks
         .iter()
@@ -178,13 +174,14 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
         {
             continue;
         }
+        let (post, rerun) = post_request(git, registry.as_ref(), red_of(entry), &id, &tip)?;
         // One check's fault is that check's, said in its row; the post checks after it still run.
         let verdict = match run_at(
             repo,
             &keys,
             &writer,
-            (&id, ("post", json!({"tip": tip}))),
-            (&tip, Some(&since)),
+            (&id, ("post", post)),
+            (&tip, Some(&since), &rerun),
         ) {
             Ok(Ok(verdict)) => json!(verdict),
             Ok(Err(why)) | Err(why) => json!({"not_run": why}),
@@ -194,6 +191,66 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
         break;
     }
     Ok(reports)
+}
+
+/// The body of a post run of `id` on `tip` and the units it asks to run again: none, or, for a
+/// red check, the units that failed in the red's newest failing record ([`failed_units`]).
+/// The body names them too, so the record says what its run was asked.
+fn post_request(
+    git: &Git,
+    registry: Option<&Registry>,
+    red: Option<&Red>,
+    id: &CheckId,
+    tip: &str,
+) -> Result<(Value, Vec<String>), String> {
+    let mut body = json!({"tip": tip});
+    let rerun = match red {
+        Some(red) => failed_units(git, registry, red, id)?,
+        None => Vec::new(),
+    };
+    if !rerun.is_empty() {
+        body["rerun"] = json!(rerun);
+    }
+    Ok((body, rerun))
+}
+
+/// G540 (a fleet finding, 2026-10-29: scripts-fast failed on 3 units, and every later post run
+/// asked its adapter only about the files changed since, which no test read, so the red stood):
+/// the units that failed in `red`'s newest failing record of `id`, sorted, read from the records
+/// the red judgement counts at its newest failing landing. Empty when that record names no
+/// failing unit.
+fn failed_units(
+    git: &Git,
+    registry: Option<&Registry>,
+    red: &Red,
+    id: &CheckId,
+) -> Result<Vec<String>, String> {
+    let Some(suspect) = &red.suspect else {
+        return Ok(Vec::new());
+    };
+    let tree = tree_of(git, &suspect.newest_failed.landing)?;
+    let records = evidence::counted(git, evidence::records_for(git, &tree)?, registry)?;
+    let newest = records
+        .iter()
+        .filter(|record| {
+            record.kind == evidence::KIND_CHECK
+                && record.check == *id
+                && record.verdict == Verdict::ProductFailure
+        })
+        .max_by(|one, other| one.at.cmp(&other.at));
+    let mut units: Vec<String> = newest
+        .map(|record| {
+            record
+                .units
+                .iter()
+                .filter(|unit| unit.verdict == Verdict::ProductFailure)
+                .map(|unit| unit.id.clone())
+                .collect()
+        })
+        .unwrap_or_default();
+    units.sort();
+    units.dedup();
+    Ok(units)
 }
 
 /// How many landings back from `tip` this box last recorded each of `entries` (G433), over the
@@ -291,7 +348,7 @@ fn warm_runs(repo: &Repo) -> Result<Vec<Value>, String> {
             &keys,
             &writer,
             (&id, ("warm", json!({"tip": tip}))),
-            (&tip, None),
+            (&tip, None, &[]),
         )? {
             Ok(verdict) => json!(verdict),
             Err(why) => json!({"not_run": why}),
@@ -437,7 +494,7 @@ fn bisect(
             keys,
             writer,
             (&id, ("bisect", window.clone())),
-            (&mark.landing, None),
+            (&mark.landing, None, &[]),
         )? {
             Ok(verdict) => verdict,
             Err(why) => return Ok(not_run(red, &why, &tested)),
@@ -463,7 +520,7 @@ fn bisect(
                 keys,
                 writer,
                 (&id, ("bisect", window.clone())),
-                (&mark.landing, None),
+                (&mark.landing, None, &[]),
             )? {
                 Ok(verdict) => verdict,
                 Err(why) => return Ok(not_run(red, &why, &tested)),
@@ -561,7 +618,7 @@ fn run_at(
     keys: &Keys,
     writer: &Writer,
     (id, why): (&CheckId, (&str, Value)),
-    (commit, since): (&str, Option<&str>),
+    (commit, since, rerun): (&str, Option<&str>, &[String]),
 ) -> Result<Result<Verdict, String>, String> {
     if let Some(left) = waits_for_a_worker(repo, id) {
         return Ok(Err(format!(
@@ -640,6 +697,7 @@ fn run_at(
             policy_provenance: crate::policy::Provenance::Bay,
             inputs: &[],
             turn: None,
+            rerun,
         },
         &writer.name,
         &check::Limits {
