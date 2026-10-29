@@ -236,7 +236,11 @@ name no record names comes back in `detail.unseen` with a `detail.warning`: chec
    changes merge into `dev`, and `bay status` names each target's promotable commit.
    A key a newer bay brought is a config error on an older bay, naming the key: run `bay update` there.
 2. `.bay/policy.toml` lists the required checks. Each `[[check]]` needs `expected_minimum`. A
-   repository that wants no checks says `unchecked = true`. Paths that need a person's approval
+   repository that wants no checks says `unchecked = true`. A check with `when_paths` runs only
+   for a change to a path its globs match: `when_paths = ["**/AGENTS.md", "!kanban/**"]` is every
+   `AGENTS.md` outside `kanban/`. A glob that starts with `!` drops the paths it matches, read in
+   order as `.gitignore` reads it: the last glob that matches decides, so a later glob can take a
+   path back, and the list starts with a glob that takes paths. Paths that need a person's approval
    get a `[[check]]` with `kind = "approval"` and `when_paths`, and no command; each approver is
    enrolled with `bay enrol approver <name> <key.pub>` and approves with `bay approve <change>`.
    It records a signed approval record of the exact candidate.

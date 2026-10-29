@@ -3,8 +3,8 @@
 //!
 //! A post-publication check (`stage = "post"`, G91) judges a landing after it is on trunk. When
 //! the newest answer of such a check on trunk is a `product_failure`, trunk is **red** on that
-//! check's paths (its `when_paths`, or every path), and the landing that broke it owns it. It is
-//! derived from the records on each read, never stored:
+//! check's paths (its `when_paths`, read with their `!` exclusions, or every path), and the
+//! landing that broke it owns it. It is derived from the records on each read, never stored:
 //!
 //! - Over the newest `[red] window` first-parent commits (`.bay/config.toml` at trunk, default
 //!   [`DEFAULT_WINDOW`]), the newest commit with an answered record of the check decides. A
@@ -250,16 +250,15 @@ impl Red {
             && self.landing == other.landing
     }
 
-    /// Whether a change touching `changed` lands on this red.
+    /// Whether a change touching `changed` lands on this red: one of them is on the check's
+    /// paths, read as its `when_paths` are (G500: a path they exclude is off the red).
     #[must_use]
     pub fn covers(&self, changed: &[String]) -> bool {
         match &self.paths {
             None => !changed.is_empty(),
-            Some(globs) => changed.iter().any(|path| {
-                globs
-                    .iter()
-                    .any(|glob| crate::policy::glob_matches(glob, path))
-            }),
+            Some(globs) => changed
+                .iter()
+                .any(|path| crate::policy::globs_match(globs, path)),
         }
     }
 }
