@@ -446,12 +446,7 @@ impl Judge<'_> {
         let Some(own) = queue.of_change(change) else {
             return Ok(false);
         };
-        let release = format!("{}{}", crate::queue::DONE_PREFIX, own.seq);
-        let releases_own = self
-            .updates
-            .iter()
-            .any(|other| other.name == release && is_zero(&other.old));
-        if !releases_own || is_zero(trunk) {
+        if !self.releases(own.seq) || is_zero(trunk) {
             return Ok(false);
         }
         // Nothing to check, nothing to wait: a change that no pre-merge check covers.
@@ -481,6 +476,43 @@ impl Judge<'_> {
                 .as_ref()
                 .is_some_and(|owner| names.contains(&owner))
         }))
+    }
+
+    /// BACKLOG 119: a publication that is not the head's stands too when it releases its
+    /// change's own place in this push and every live place ahead of it is one main's red holds
+    /// on the trunk it moves (`crate::red::holds_place`): those wait in their places for main,
+    /// in arrival order, as the runners judge them (`crate::publish`).
+    fn passes_red(
+        &self,
+        queue: &crate::queue::Queue,
+        trunk: &str,
+        change: &str,
+    ) -> Result<bool, String> {
+        let Some(own) = queue.of_change(change) else {
+            return Ok(false);
+        };
+        let ahead = queue.ahead_of(own.seq);
+        if !self.releases(own.seq) || is_zero(trunk) || ahead.is_empty() {
+            return Ok(false);
+        }
+        let reds = crate::red::red(self.git, trunk, Some(self.registry))?;
+        if reds.is_empty() {
+            return Ok(false);
+        }
+        for entry in ahead {
+            if !crate::red::holds_place(self.git, &reds, trunk, entry)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    /// Whether this push creates the release of queue place `seq`.
+    fn releases(&self, seq: u64) -> bool {
+        let release = format!("{}{seq}", crate::queue::DONE_PREFIX);
+        self.updates
+            .iter()
+            .any(|other| other.name == release && is_zero(&other.old))
     }
 
     /// The record of `change` as this push leaves its chain, if the host holds one.
@@ -776,7 +808,10 @@ impl Judge<'_> {
                 None => String::new(),
             };
             let heads_it = releases_head && head.change == change;
-            if !heads_it && !self.repairs_red(&queue, &update.old, &change)? {
+            if !heads_it
+                && !self.repairs_red(&queue, &update.old, &change)?
+                && !self.passes_red(&queue, &update.old, &change)?
+            {
                 return Err(format!(
                     "QUEUED: {QUEUE_HELD_BY} {} (place {})",
                     head.op_id, head.seq

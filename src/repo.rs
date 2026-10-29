@@ -172,14 +172,29 @@ pub struct Repo {
 /// 20 s of network a visit only to find that nothing moved. While a pass shares its reads
 /// ([`Repo::share_reads`]), a visit reuses what the pass read within [`READ_REUSE`]; a visit
 /// whose operation may run reads again first, and an operation that moved anything clears them.
+///
+/// S1 (bay 0.6.0): the reads are the pass's thread's own. A runner places new changes on its
+/// heartbeat thread while the pass runs a check (`crate::presence::Beat::meanwhile`); that
+/// thread never reuses what the pass read, never fills the reads, and never takes the pass's
+/// mark that a read stood in for a fetch, so the pass never claims on a read it did not know
+/// was shared. What the placements write goes to this store's refs, which every read sees.
 #[derive(Default)]
 struct Reads {
     on: bool,
+    /// The thread that turned sharing on: the only one that reuses or fills the reads.
+    owner: Option<std::thread::ThreadId>,
     trunk: Option<std::time::Instant>,
     registry: Option<std::time::Instant>,
     queue: Option<std::time::Instant>,
     chains: std::collections::HashMap<String, (std::time::Instant, String)>,
     reused: bool,
+}
+
+impl Reads {
+    /// Whether the reads are shared, and with the calling thread (S1).
+    fn mine(&self) -> bool {
+        self.on && self.owner == Some(std::thread::current().id())
+    }
 }
 
 /// How long a shared read stands for a fetch (G438).
@@ -449,30 +464,42 @@ impl Repo {
         if let Ok(mut reads) = self.reads.lock() {
             *reads = Reads {
                 on,
+                owner: on.then(|| std::thread::current().id()),
                 ..Reads::default()
             };
         }
     }
 
-    /// G438: forgets what was read, so the next read fetches.
+    /// G438: forgets what was read, so the next read fetches. Only the thread that shares the
+    /// reads forgets them (S1).
     pub fn forget_reads(&self) {
-        self.share_reads(self.reads.lock().is_ok_and(|reads| reads.on));
+        if let Ok(mut reads) = self.reads.lock()
+            && reads.mine()
+        {
+            *reads = Reads {
+                on: true,
+                owner: reads.owner,
+                ..Reads::default()
+            };
+        }
     }
 
-    /// G438: whether a read since the last call stood in for a fetch.
+    /// G438: whether a read since the last call stood in for a fetch. Another thread's call
+    /// never takes the mark (S1).
     pub fn took_shared_read(&self) -> bool {
         self.reads
             .lock()
-            .is_ok_and(|mut reads| std::mem::take(&mut reads.reused))
+            .is_ok_and(|mut reads| reads.mine() && std::mem::take(&mut reads.reused))
     }
 
     /// G438: whether the shared read of `what` may stand for a fetch now (and the visit is
-    /// marked as using one); when not, the caller fetches and this stamps it as read now.
+    /// marked as using one); when not, the caller fetches and this stamps it as read now. On
+    /// any thread but the one that shares the reads, never (S1).
     pub fn reuses(&self, what: Shared) -> bool {
         let Ok(mut reads) = self.reads.lock() else {
             return false;
         };
-        if !reads.on {
+        if !reads.mine() {
             return false;
         }
         let stamp = match what {
@@ -516,7 +543,7 @@ impl Repo {
     /// The remote cannot be read.
     pub fn read_chain(&self, change: &str) -> Result<String, GitError> {
         if let Ok(mut reads) = self.reads.lock()
-            && reads.on
+            && reads.mine()
             && let Some((at, head)) = reads.chains.get(change).cloned()
             && at.elapsed() < READ_REUSE
         {
@@ -525,7 +552,7 @@ impl Repo {
         }
         let head = self.remote_chain(change)?;
         if let Ok(mut reads) = self.reads.lock()
-            && reads.on
+            && reads.mine()
         {
             reads
                 .chains
@@ -980,5 +1007,59 @@ mod tests {
             .unwrap_or_else(|error| panic!("{}", error.message()));
         assert_eq!(repo.trunk_tracking_ref(), "refs/remotes/origin/release");
         assert_eq!(repo.bootstrap.source, "git config bay.main");
+    }
+
+    /// S1: a runner places new changes on its heartbeat thread while the pass's thread runs a
+    /// check. That thread never reuses the pass's reads, never fills them, and never takes the
+    /// pass's mark that a read stood in for a fetch: else the pass would claim on a read it
+    /// did not know was shared.
+    #[test]
+    fn shared_reads_serve_only_the_thread_that_shares_them() {
+        use super::Shared;
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-q", "-b", "main"]);
+        write_config(&root, TRUNK);
+        git(&root, &["add", ".bay"]);
+        git(&root, &["commit", "-q", "-m", "trunk"]);
+        git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        let head = [
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ];
+        git(&root, &head);
+        let repo = Repo::open_with(&root, Fetch::Never)
+            .unwrap_or_else(|error| panic!("{}", error.message()));
+        repo.share_reads(true);
+        assert!(!repo.reuses(Shared::Queue), "the first read fetches");
+        assert!(repo.reuses(Shared::Queue), "the next one reuses it");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                assert!(
+                    !repo.reuses(Shared::Queue),
+                    "another thread reused the pass's read"
+                );
+                assert!(
+                    !repo.reuses(Shared::Trunk),
+                    "another thread filled the reads"
+                );
+                assert!(
+                    !repo.took_shared_read(),
+                    "another thread took the pass's mark"
+                );
+                repo.forget_reads();
+            });
+        });
+        assert!(repo.took_shared_read(), "the pass lost its mark");
+        assert!(
+            repo.reuses(Shared::Queue),
+            "another thread forgot the pass's reads"
+        );
+        assert!(
+            !repo.reuses(Shared::Trunk),
+            "another thread's read stood for the pass's"
+        );
     }
 }

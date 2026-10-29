@@ -452,6 +452,16 @@ fn deadlines(
         seen.after = Some(queue);
         return Ok(());
     }
+    // BACKLOG 119: a head main's red holds waits in its place for main, not for its own work, so
+    // its deadline starts again; red windows of 25 and 35 minutes were measured (2026-10-28).
+    if repo
+        .remote_record(&head.change)
+        .is_ok_and(|remote| waits_on_main(&remote.record, &head.op_id))
+    {
+        heads.insert(head.seq, Instant::now());
+        seen.after = Some(queue);
+        return Ok(());
+    }
     let signer = Keys::load(&repo.git).executor;
     crate::queue::release(repo, signer.as_ref(), head.seq, &head.op_id, "deadline")?;
     heads.remove(&head.seq);
@@ -487,6 +497,17 @@ fn finished(record: &ChangeRecord, head: &crate::queue::Entry) -> Option<String>
         || word(op.state).unwrap_or_default(),
         |outcome| outcome.to_lowercase(),
     ))
+}
+
+/// BACKLOG 119: whether operation `op_id` of `record` waits in its place on main's red: no
+/// runner holds it, and its outcome is `MAIN_RED` (`publish::wait_in_line`).
+fn waits_on_main(record: &ChangeRecord, op_id: &str) -> bool {
+    record.operations.iter().any(|op| {
+        op.op_id == op_id
+            && op.owner.is_none()
+            && matches!(op.state, OpState::Submitted | OpState::Admitted)
+            && op.outcome.as_deref() == Some(Reason::TrunkRed.code())
+    })
 }
 
 /// The newer live operation of `record` that `op_id` was superseded by, when there is one: its
@@ -581,6 +602,10 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 /// G67: before its first operation the pass publishes this executor's presence through
 /// `beat`, naming the operation it drives first and the live queue depth, at a fixed cost.
 ///
+/// S1: while an operation or the post work runs, the beat's thread places in line each change
+/// submitted since the pass read the chains ([`Arrivals`]); the pass's own visits come in the
+/// order above, and a change that waits on a red main keeps its place there (BACKLOG 119).
+///
 /// N-7: after the queue's work, the targets with `advance = true` are fast-forwarded to their
 /// newest promotable commit (`crate::target::advance`); each move goes to `advanced`.
 #[allow(clippy::too_many_lines)]
@@ -616,6 +641,7 @@ fn pass(
     };
     in_pass_order(&mut chains, &queue);
     let records: Vec<ChangeRecord> = chains.iter().map(|held| held.record.clone()).collect();
+    let mut arrivals = Arrivals::new(&records);
     sweep_ended(repo, &queue, &records);
     let holding = records
         .iter()
@@ -672,15 +698,24 @@ fn pass(
         for op_id in queued {
             if binary.is_some_and(Binary::changed) {
                 ran.extend(recovered.take());
+                ran.append(&mut arrivals.rows);
                 return Ok(ran);
             }
-            ran.push(run_op(repo, id, &op_id, depth, beat, notes));
+            ran.push(run_op(repo, id, &op_id, depth, beat, notes, &mut arrivals));
             forget_if_moved(repo, &ran);
             // F13 (2026-10-25, again 2026-10-26: a runner hung holding the head 19 minutes):
             // between operations, a head whose holder stopped writing is taken now, not at the
             // next pass's start an hour later.
             if let Some((head_id, head_op)) = abandoned_head(repo, &op_id) {
-                ran.push(run_op(repo, &head_id, &head_op, depth, beat, notes));
+                ran.push(run_op(
+                    repo,
+                    &head_id,
+                    &head_op,
+                    depth,
+                    beat,
+                    notes,
+                    &mut arrivals,
+                ));
                 forget_if_moved(repo, &ran);
                 taken.insert(head_op);
             }
@@ -705,7 +740,8 @@ fn pass(
     // waited out a lease. It beats once a heartbeat while that work runs.
     if !holds_the_head(repo) {
         let began = std::time::Instant::now();
-        let work = beat.meanwhile(repo, "post", depth, || {
+        let mut placing = || arrivals.step(repo, "post");
+        let work = beat.meanwhile(repo, "post", depth, &mut placing, || {
             if let Some(post) = crate::bisect::tips(repo) {
                 Some(json!({"post": post}))
             } else if let Some(warm) = crate::bisect::warm(repo) {
@@ -742,6 +778,7 @@ fn pass(
         }
     }
     advanced.extend(advance(repo));
+    ran.append(&mut arrivals.rows);
     Ok(ran)
 }
 
@@ -855,7 +892,8 @@ fn op_line(op_id: &str, result: &BayResult) -> String {
 
 /// Runs operation `op_id` of change `id` under this runner's beat, and returns its row of the
 /// pass. Its outcome is one journal line (stderr) and, when it merged, the early conflicts it
-/// makes for the changes behind it (G177).
+/// makes for the changes behind it (G177). While it runs, `arrivals` places what is submitted
+/// meanwhile (S1).
 fn run_op(
     repo: &Repo,
     id: &str,
@@ -863,13 +901,15 @@ fn run_op(
     depth: usize,
     beat: &mut crate::presence::Beat,
     notes: &mut Vec<Value>,
+    arrivals: &mut Arrivals,
 ) -> Value {
     // A pass carries the whole queue, so it can run long: its presence beats before each
     // operation and once a heartbeat during it, naming it, never only at the pass's start, so a
     // busy runner never reads as gone.
     let step = publish::Step::new("read");
     let began = std::time::Instant::now();
-    let result = beat.during(repo, op_id, depth, || {
+    let mut placing = || arrivals.step(repo, op_id);
+    let result = beat.during(repo, op_id, depth, &mut placing, || {
         publish::execute(repo, id, op_id, &step).unwrap_or_else(BayResult::failed)
     });
     // E21: what follows the operation (its receipt, the conflicts it tells the line of) is its
@@ -883,13 +923,41 @@ fn run_op(
     {
         notes.extend(early_conflicts(repo, &queue));
     }
+    eprintln!(
+        "bay runner: {}",
+        journal_line(repo, id, op_id, &result, &step, began)
+    );
+    row(id, op_id, &result)
+}
+
+/// The pass's row of `result`, the outcome of operation `op_id` of change `id`.
+fn row(id: &str, op_id: &str, result: &BayResult) -> Value {
+    json!({
+        "change": id,
+        "op_id": op_id,
+        "decision": result.decision,
+        "reason": result.reason,
+        "detail": result.detail,
+    })
+}
+
+/// The journal line of `result`, the outcome of operation `op_id` of change `id`, whose visit
+/// began at `began` and went through `step`'s steps.
+fn journal_line(
+    repo: &Repo,
+    id: &str,
+    op_id: &str,
+    result: &BayResult,
+    step: &publish::Step,
+    began: Instant,
+) -> String {
     // One line per operation on stderr (a service's journal), so a stalled queue can be read
     // without the refs: what each pass did with each change, and why.
     // A fleet finding (2026-10-27): batches landed every ten minutes on a check of under two,
     // and no record said where the rest went. Each line names how long its operation took.
     // Owner ruling 2026-10-27: a line names the change by its intent too, after the operation
     // id a reader's tools find first.
-    let line = op_line(op_id, &result);
+    let line = op_line(op_id, result);
     let line = match crate::change::Chain::new(&repo.git).read(id) {
         Ok((_, record)) if !record.intent.reference.trim().is_empty() => {
             let intent: String = record.intent.reference.chars().take(60).collect();
@@ -905,21 +973,162 @@ fn run_op(
         .map(|(name, secs)| format!("{name} {secs}s"))
         .collect();
     if steps.len() > 1 {
-        eprintln!(
-            "bay runner: {line} ({}s: {})",
+        format!(
+            "{line} ({}s: {})",
             began.elapsed().as_secs(),
             steps.join(", ")
-        );
+        )
     } else {
-        eprintln!("bay runner: {line} ({}s)", began.elapsed().as_secs());
+        format!("{line} ({}s)", began.elapsed().as_secs())
     }
-    json!({
-        "change": id,
-        "op_id": op_id,
-        "decision": result.decision,
-        "reason": result.reason,
-        "detail": result.detail,
-    })
+}
+
+/// S1 (bay 0.6.0; a fleet measurement, 2026-10-28): a runner placed a submitted change only
+/// when its pass reached it, and a pass that ran a head or a pre-check placed nothing for
+/// minutes. With four runners busy a new change waited 2.7 min p50 for its place (dehurfyw:
+/// request 21:32:21Z, queued 21:36:55Z), and batches held 2.6 changes of 24.
+///
+/// So while the pass's work runs, its heartbeat thread lists the remote's land requests once a
+/// heartbeat (`refs/bay/requests/*`, one listing) and visits each the pass has not seen, one at
+/// a time, by [`publish::place`]: the change gets its place in line, or its refusal or wait,
+/// written as a pass writes it. It never claims, checks or publishes, and it never visits the
+/// change whose operation the pass runs. A visit that finds the operation may run now (the
+/// head, or no live queue) leaves it to the next pass.
+struct Arrivals {
+    /// Each change the pass read, with its latest land request; `None` for a change that ended,
+    /// which no request runs again. A request visited since is recorded here too.
+    seen: HashMap<String, Option<String>>,
+    /// The new requests listed and not yet visited, oldest first: (change, request).
+    pending: std::collections::VecDeque<(String, String)>,
+    /// When the remote's requests were last listed.
+    listed: Instant,
+    /// One row per visit, for the pass's result.
+    rows: Vec<Value>,
+}
+
+impl Arrivals {
+    /// What the pass read: `records`, its chains. Nothing is listed for a heartbeat.
+    fn new(records: &[ChangeRecord]) -> Self {
+        let seen = records
+            .iter()
+            .map(|record| {
+                let latest = record
+                    .operations
+                    .iter()
+                    .rev()
+                    .find_map(|op| op.request_id.clone());
+                (record.id.clone(), latest.filter(|_| !change_ended(record)))
+            })
+            .collect();
+        Self {
+            seen,
+            pending: std::collections::VecDeque::new(),
+            listed: Instant::now(),
+            rows: Vec::new(),
+        }
+    }
+
+    /// One step beside the work on `holding`: once a heartbeat it lists the new requests, and
+    /// it visits at most one, so the work never waits on more than one visit when it ends.
+    fn step(&mut self, repo: &Repo, holding: &str) {
+        if self.pending.is_empty() {
+            if self.listed.elapsed() < repo.config.heartbeat() {
+                return;
+            }
+            self.listed = Instant::now();
+            self.pending = self.listing(repo);
+        }
+        let Some((change, request)) = self.pending.pop_front() else {
+            return;
+        };
+        self.seen.insert(change.clone(), Some(request.clone()));
+        if let Some(row) = place_arrival(repo, &change, &request, holding) {
+            self.rows.push(row);
+        }
+    }
+
+    /// The remote's land requests this pass has not seen, oldest first, their chains fetched
+    /// in one batch. A change that ended in the pass's reading is never one.
+    fn listing(&self, repo: &Repo) -> std::collections::VecDeque<(String, String)> {
+        let prefix = crate::names::REQUESTS;
+        let Ok(listed) = repo
+            .git
+            .run(&["ls-remote", repo.remote(), &format!("{prefix}*")])
+        else {
+            return std::collections::VecDeque::new();
+        };
+        let new: Vec<(String, String)> = listed
+            .lines()
+            .filter_map(|line| {
+                let (request, name) = line.split_once('\t')?;
+                let change = name.strip_prefix(prefix)?;
+                match self.seen.get(change) {
+                    Some(None) => None,
+                    Some(Some(known)) if known == request => None,
+                    _ => Some((change.to_owned(), request.to_owned())),
+                }
+            })
+            .collect();
+        if new.is_empty() {
+            return std::collections::VecDeque::new();
+        }
+        let changes: Vec<String> = new.iter().map(|(change, _)| change.clone()).collect();
+        for (change, why) in repo.remote_chains(&changes) {
+            eprintln!("bay runner: {change} could not be read from the remote: {why}");
+        }
+        let mut new: Vec<(u64, String, String)> = new
+            .into_iter()
+            .map(|(change, request)| {
+                let at = repo
+                    .git
+                    .run(&["log", "-1", "--format=%ct", &request])
+                    .ok()
+                    .and_then(|at| at.parse().ok())
+                    .unwrap_or(u64::MAX);
+                (at, change, request)
+            })
+            .collect();
+        new.sort();
+        new.into_iter()
+            .map(|(_, change, request)| (change, request))
+            .collect()
+    }
+}
+
+/// S1: places the operation of `change` that `request` asked for, unless it ended, already
+/// holds a place, is held by a runner, waits for a worker, is a lane's, or belongs to the
+/// change whose operation `holding` the pass runs. Its row, and one journal line.
+fn place_arrival(repo: &Repo, change: &str, request: &str, holding: &str) -> Option<Value> {
+    let (_, record) = Chain::new(&repo.git).read(change).ok()?;
+    if change_ended(&record)
+        || record.lane.is_some()
+        || record.operations.iter().any(|op| op.op_id == holding)
+    {
+        return None;
+    }
+    let op = record
+        .operations
+        .iter()
+        .find(|op| op.request_id.as_deref() == Some(request))?;
+    let waits = matches!(op.state, OpState::Submitted | OpState::Admitted)
+        && op.owner.is_none()
+        && op.unavailable.is_none();
+    if !waits || Queue::local(&repo.git).ok()?.of(&op.op_id).is_some() {
+        return None;
+    }
+    let op_id = op.op_id.clone();
+    let step = publish::Step::new("place");
+    let began = Instant::now();
+    let result = match publish::place(repo, change, &op_id, &step) {
+        Ok(Some(result)) => result,
+        Ok(None) => return None,
+        Err(why) => BayResult::failed(why),
+    };
+    let last = step.get();
+    let result = receipted(repo, change, last, result).with_op(op_id.clone());
+    let line = journal_line(repo, change, &op_id, &result, &step, began);
+    eprintln!("bay runner: {line}, placed while {holding} ran");
+    Some(row(change, &op_id, &result))
 }
 
 /// The queue head's (change, operation) when nobody holds it, or its holder stopped writing its
@@ -945,6 +1154,10 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
                 head.seq
             );
         }
+        return None;
+    }
+    // BACKLOG 119: a head main's red holds waits in its place; the pass visits it in its turn.
+    if waits_on_main(&record, &head.op_id) {
         return None;
     }
     // A head nobody holds (one that yielded because main moved, or gave its claim back) is
@@ -1116,13 +1329,15 @@ fn names_a_repair(record: &ChangeRecord) -> bool {
     record.fixes.is_some() || record.reverts.is_some() || record.supersedes.is_some()
 }
 
-/// How many operations of `ran` reached an outcome that gives up a queue place.
+/// How many operations of `ran` reached an outcome that gives up a queue place, or wait in a
+/// place the line passes because main's red holds them (BACKLOG 119).
 fn freed(ran: &[Value]) -> usize {
     ran.iter()
         .filter(|row| {
-            row["decision"]
-                .as_str()
-                .is_some_and(|decision| !matches!(decision, "queued" | "ok"))
+            row["reason"] == Reason::TrunkRed.code()
+                || row["decision"]
+                    .as_str()
+                    .is_some_and(|decision| !matches!(decision, "queued" | "ok"))
         })
         .count()
 }
