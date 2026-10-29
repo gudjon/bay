@@ -16,7 +16,8 @@
 //!   holds all of trunk and a landing in it requires the check, it is `pending`. Either is listed
 //!   as [`Pending`], apart from the red checks: unknown, not a failure, so it refuses no landing.
 //! - A red check names its `suspect` range ([`Suspect`]): the newest pass older than the failure,
-//!   the first failure after it, and the landings in between.
+//!   the first failure after it, and the landings in between, on the check's paths or not (a
+//!   cause can sit in a file the check does not list).
 //! - B5: when the window holds no pass, the range reads on past it, down to `[red] reach`
 //!   first-parent commits of main (default [`DEFAULT_REACH`], never less than the window), for
 //!   the newest pass. With none there, `last_passed` is `null` and `searched` says how many main
@@ -26,6 +27,9 @@
 //!   answers `tested` from the pass up to the newest failure, and it owns the red in place of
 //!   the newest failure. A post producer, or an executor with `[runner] bisect_post`
 //!   (`crate::bisect`), narrows the range by recording runs on its midpoints.
+//! - BACKLOG 121: without a culprit, the owner (the newest failure) and the first failure are
+//!   only where the check was seen failing, never a proven cause; each red row's `say` says
+//!   which ([`Red::say`]).
 //! - A `product_failure` is cleared by a later landing whose `Fixes:`, `Reverts:` or
 //!   `Supersedes:` names the owning change or the first failure of the suspect range (a landing
 //!   newer than the newest failure), or by a quarantine of the check at trunk.
@@ -175,6 +179,14 @@ impl Mark {
     fn to_json(&self) -> Value {
         json!({"landing": self.landing, "change": self.change})
     }
+
+    /// How a sentence names it: its change, else its commit, short.
+    fn named(&self) -> String {
+        match &self.change {
+            Some(change) => format!("change {change}"),
+            None => format!("merge {}", &self.landing[..self.landing.len().min(12)]),
+        }
+    }
 }
 
 impl Suspect {
@@ -236,7 +248,53 @@ impl Red {
         json!({"check": self.check, "environment": self.environment, "paths": self.paths,
             "landing": self.landing, "change": self.change,
             "suspect": self.suspect.as_ref().map(Suspect::to_json),
-            "culprit": self.culprit().map(Culprit::to_json)})
+            "culprit": self.culprit().map(Culprit::to_json),
+            "say": self.say()})
+    }
+
+    /// BACKLOG 121 (a fleet finding, 2026-10-28: a red row named a change the check never
+    /// judged, and readers took it as the cause): what the row's owner is, in one plain
+    /// sentence. A culprit is a proven cause: the check passed right below it and failed on it.
+    /// Without one, the owner and the first failure are only where the check was seen failing,
+    /// and the cause is any merge of the range, on the check's paths or not. `None` for a red a
+    /// cursor carries, which holds no range.
+    #[must_use]
+    pub fn say(&self) -> Option<String> {
+        let suspect = self.suspect.as_ref()?;
+        let check = &self.check;
+        if let Some(culprit) = &suspect.culprit {
+            return Some(format!(
+                "{check}: {} broke it; the check passed on the merge before it and failed on it.",
+                culprit.mark.named()
+            ));
+        }
+        let owner = Mark {
+            landing: self.landing.clone(),
+            change: self.change.clone(),
+        };
+        let seen = if suspect.failed == owner {
+            format!("seen failing at {}", owner.named())
+        } else {
+            format!(
+                "seen failing at {} first and at {} last",
+                suspect.failed.named(),
+                owner.named()
+            )
+        };
+        let cause = match &suspect.passed {
+            Some(passed) => format!(
+                "the cause is one of the {} merges after its last pass at {}, on its paths or not",
+                suspect.landings.len(),
+                passed.named()
+            ),
+            None => format!(
+                "no merge of the newest {} on main passed it, so bay cannot narrow the cause",
+                suspect.searched.unwrap_or_default()
+            ),
+        };
+        Some(format!(
+            "{check}: {seen}, which is where it failed, not a proven cause; {cause}."
+        ))
     }
 
     /// The landing the evidence pins as the one that broke the check, when it pins one.

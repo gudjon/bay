@@ -113,6 +113,11 @@ fn a_pass_one_commit_past_the_reach_is_not_found_and_the_row_says_how_far_it_rea
     assert_eq!(suspect["last_passed"], Value::Null, "{red}");
     assert_eq!(suspect["searched"], 4, "it read back the reach: {red}");
     assert_eq!(red[0]["culprit"], Value::Null, "{red}");
+    let say = red[0]["say"].as_str().unwrap_or_default();
+    assert!(
+        say.contains("newest 4"),
+        "the row says how far it read: {red}"
+    );
 
     // A pass at the reach's oldest commit is the range's good end.
     trunk.suite(&landings[1].1, "pass");

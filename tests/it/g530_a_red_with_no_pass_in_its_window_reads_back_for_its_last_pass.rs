@@ -182,4 +182,9 @@ fn a_red_reads_past_its_window_for_the_last_pass_and_a_bisect_names_the_culprit_
     assert_eq!(red[0]["merge"], landings[3].1.as_str(), "{red}");
     assert_eq!(red[0]["change"], landings[3].0.as_str(), "{red}");
     assert_eq!(red[0]["culprit"]["merge"], landings[3].1.as_str(), "{red}");
+    let say = red[0]["say"].as_str().unwrap_or_default();
+    assert!(
+        say.contains(&landings[3].0) && say.contains("broke"),
+        "the row names the culprit as the cause: {red}"
+    );
 }
