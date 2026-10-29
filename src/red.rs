@@ -142,6 +142,11 @@ pub struct Red {
     /// Judged on each read, never carried in a cursor.
     #[serde(skip)]
     pub fix: Option<Mark>,
+    /// G576: whether the newest failure changed the check itself, its policy entry or an
+    /// adapter file. A post run judges a landing with its first parent's check (G91), so no run
+    /// of that landing judges with the new one. Judged on each read, never carried in a cursor.
+    #[serde(skip)]
+    pub changed_check: bool,
 }
 
 /// NEW-6: the landings one of which broke a red post check, so an operator can bisect.
@@ -296,6 +301,7 @@ impl Red {
             "culprit": self.culprit().map(Culprit::to_json),
             "fixes": self.fixes(),
             "fix": self.fix.as_ref().map(Mark::to_json),
+            "changed_check": self.changed_check,
             "say": self.say()})
     }
 
@@ -316,11 +322,27 @@ impl Red {
                 fix.named()
             ));
         }
+        let said = self.seen(suspect);
+        if !self.changed_check {
+            return Some(said);
+        }
+        Some(format!(
+            "{said} Its newest failure, {}, changed the check itself, and a post run judges a \
+             merge with the check of the merge before it, so no run of it judges with the new \
+             check; land one change with --fixes {check}: its post run does.",
+            suspect.newest_failed.named()
+        ))
+    }
+
+    /// [`Red::say`] of a red no fix answers: where the check was seen failing, and what the
+    /// evidence says of the cause.
+    fn seen(&self, suspect: &Suspect) -> String {
+        let check = &self.check;
         if let Some(culprit) = &suspect.culprit {
-            return Some(format!(
+            return format!(
                 "{check}: {} broke it; the check passed on the merge before it and failed on it.",
                 culprit.mark.named()
-            ));
+            );
         }
         let owner = Mark {
             landing: self.landing.clone(),
@@ -346,9 +368,7 @@ impl Red {
                 suspect.searched.unwrap_or_default()
             ),
         };
-        Some(format!(
-            "{check}: {seen}, which is where it failed, not a proven cause; {cause}."
-        ))
+        format!("{check}: {seen}, which is where it failed, not a proven cause; {cause}.")
     }
 
     /// The landing the evidence pins as the one that broke the check, when it pins one.
@@ -839,6 +859,7 @@ fn decide<'a>(
         }
         // The culprit, when the evidence pins one, owns the red in place of the newest failure.
         let (suspect, owner) = answers.suspect(post, at)?;
+        let changed_check = changed_check(answers.git, &suspect.newest_failed.landing, post);
         let landings = &answers.line.landings;
         let red = Red {
             check: post.id.clone(),
@@ -848,6 +869,7 @@ fn decide<'a>(
             change: landings[owner].change.clone(),
             suspect: Some(suspect),
             fix: None,
+            changed_check,
         };
         // G568: only a landing newer than the newest failure answers it, and the check is
         // pending until a run at or after that landing answers, never green before.
@@ -878,6 +900,29 @@ fn decide<'a>(
         out.red.push(red);
     }
     Ok((out, decided, answers))
+}
+
+/// G576 (a fleet finding, 2026-10-29: a change fixed a records lint, its own post run failed
+/// on the old lint, and three seats read the red as the fix not working): whether `landing`
+/// changed check `post`, its definition digest (the policy entry and each adapter file's
+/// object) differing from its first parent's. `false` when either policy cannot be read: it
+/// only adds a sentence to the red, and never decides one.
+fn changed_check(git: &Git, landing: &str, post: &crate::policy::ManifestEntry) -> bool {
+    let digest = |commit: &str| {
+        let policy = crate::policy::load_at(git, commit).ok().flatten()?;
+        policy
+            .post
+            .into_iter()
+            .find(|entry| entry.id == post.id && entry.environment == post.environment)
+            .map(|entry| entry.definition_digest)
+    };
+    let Ok(parent) = git.run(&["rev-parse", "--verify", "--quiet", &format!("{landing}^1")]) else {
+        return false;
+    };
+    match (digest(landing), digest(parent.trim())) {
+        (Some(now), Some(then)) => now != then,
+        _ => false,
+    }
 }
 
 /// Whether a landing newer than `landings[owner]` fixes, undoes or supersedes its change.

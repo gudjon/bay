@@ -925,6 +925,7 @@ mod tests {
                 change: None,
                 suspect: None,
                 fix: None,
+                changed_check: false,
             }],
             judged: Some(crate::red::Judged {
                 trunk: "a".repeat(40),
