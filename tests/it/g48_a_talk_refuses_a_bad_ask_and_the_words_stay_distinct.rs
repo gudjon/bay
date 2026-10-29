@@ -1,7 +1,8 @@
 //! G48. A talk refuses a bad ask, and the words stay distinct (`DESIGN` § 11c; ruling R9 and
 //! BACKLOG 9b in `plans/wave2.md`).
 //!
-//! Built so far: a missing `what`, `who` or `follow_up` is refused; a `follow_up` not after
+//! Built so far: a missing `what` or `who` is refused (a missing kind or `follow_up` is filled
+//! in since 0.6.0, G460); a `follow_up` not after
 //! `sent` is refused; a bundled ask (two target fields, or a list in one) is refused by
 //! structure alone; a kind other than `delivery`, `discovery` or `reliability`, and a target
 //! field another kind owns, are refused; a body over `BAY_TALK_MAX_BYTES` is refused naming that
@@ -52,7 +53,6 @@ fn missing_fields_and_a_follow_up_not_after_sent_are_refused() {
     for (args, field) in [
         (with(&["agent-b"], &["--follow-up", &later]), "what"),
         (with(&[], &["--follow-up", &later]), "who"),
-        (with(&["agent-b", "Ship it"], &[]), "follow_up"),
     ] {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let result = refused(&case, &args);
@@ -61,23 +61,6 @@ fn missing_fields_and_a_follow_up_not_after_sent_are_refused() {
             "{field}: {result}"
         );
     }
-    let missing_kind = refused(
-        &case,
-        &[
-            "agent-b",
-            "Ship it",
-            "--change",
-            "abcd2345",
-            "--follow-up",
-            &later,
-        ],
-    );
-    assert!(
-        missing_kind["detail"]["why"]
-            .as_str()
-            .unwrap()
-            .contains("kind")
-    );
     for past in [from_now(0), "2020-01-01T00:00:00Z".to_owned()] {
         let args = with(&["agent-b", "Ship it"], &["--follow-up", &past]);
         let args: Vec<&str> = args.iter().map(String::as_str).collect();

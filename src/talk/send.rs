@@ -1,11 +1,19 @@
 //! `bay talk`: send one talk (ruling R9), or answer a discovery talk (ruling T1).
 //!
-//! The sender's bay runs every refusal before it commits anything, and `--dry-run` stops there.
+//! The simplest send is two words, `bay talk <who> "<what>"` (0.6.0, T1): a discovery talk whose
+//! decision is its `what`, owed a reply `[talk] follow_up_s` after it is sent (one hour when the
+//! policy names none). A target given alone names its kind ([`with_defaults`]).
+//!
+//! The sender's bay runs every refusal before it commits anything ([`plan`]), and `--dry-run`
+//! stops there. The same ask as an open talk from the sender's name to the same `who` is that
+//! talk, `already_sent` (T15, [`open_same`]); a closed talk does not hold it ([`past_closed`]).
+//! Under approvals a name no record here names is sent, and the result says so (H4, [`unseen`]).
 //! It fetches the recipient's talk refs first, so a retry, a body conflict, a closed talk and the
 //! open-talk cap are judged against what the host holds; the host hook judges the same rules
 //! again on the push. A talk committed here that the remote cannot take now stays here, and the
 //! result says `not_pushed`: it is not on the recipient. The same `bay talk` again pushes it.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -18,6 +26,7 @@ use super::{
 use crate::change::Actor;
 use crate::clock::rfc3339_of;
 use crate::git::{Git, GitError};
+use crate::policy::TalkPolicy;
 use crate::registry::{KeyClass, Registry};
 use crate::repo::Repo;
 use crate::result::{BayResult, Reason};
@@ -26,6 +35,10 @@ use crate::signing::{self, Keys};
 /// One ask, as the command line gives it. Every field is checked by bay, never by the parser, so
 /// a missing or repeated field is a `bay.result/1` refusal.
 #[derive(Clone, Debug, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each is one flag of the command line, set on its own"
+)]
 pub struct Ask {
     pub who: Option<String>,
     pub what: Option<String>,
@@ -51,6 +64,12 @@ pub struct Ask {
     pub dry_run: bool,
     /// A change id or a trunk commit whose lander is the recipient (G77), in place of `who`.
     pub to_change: Option<String>,
+    /// The recipients of one ask to many (T2), in place of `who`: one talk each, one round.
+    pub to: Vec<String>,
+    /// Every actor with a live session in this repository but the sender, as recipients (T2).
+    pub to_live: bool,
+    /// The round the talk is one of (T2): bay names it, never the command line.
+    pub round: Option<String>,
     /// A question talk's options, `[{label, description}]` (dossier 63).
     pub options: Option<Value>,
     /// Whether a question takes several of its options.
@@ -69,7 +88,7 @@ pub struct Answer {
 }
 
 /// Why a send stopped: a refusal, or a fault.
-enum Stop {
+pub(super) enum Stop {
     Refused(Refusal),
     Failed(String),
 }
@@ -86,7 +105,7 @@ impl From<String> for Stop {
     }
 }
 
-fn finish(outcome: Result<BayResult, Stop>) -> BayResult {
+pub(super) fn finish(outcome: Result<BayResult, Stop>) -> BayResult {
     match outcome {
         Ok(result) => result,
         Err(Stop::Refused(refusal)) => refusal.result(),
@@ -106,7 +125,7 @@ pub fn answer(dir: &Path, answer: &Answer) -> BayResult {
 
 /// The repository, the trust its talks are judged by, and the acting actor. Under
 /// `signing = "all"` the registry is fetched first; under `approvals` (G445) none is read.
-fn open(dir: &Path) -> Result<(Repo, Trust, Actor), Stop> {
+pub(super) fn open(dir: &Path) -> Result<(Repo, Trust, Actor), Stop> {
     let repo = Repo::open(dir)?;
     allowed(&repo, None)?;
     if crate::registry::signing_mode(&repo.git)? == crate::policy::Signing::All {
@@ -222,7 +241,7 @@ fn build(ask: &Ask, from: &Actor, sent: u64) -> Result<Value, Refusal> {
     let mut body = json!({
         "schema": TALK_SCHEMA,
         "from": {"name": from.name, "session": from.session},
-        "who": need("who", &ask.who, "the registry actor who owes the reply, the first argument")?,
+        "who": need("who", &ask.who, "the actor who owes the reply, the first argument")?,
         "what": need("what", &ask.what, "the action, the second argument")?,
         "kind": need("kind", &ask.kind, "--kind delivery, discovery or reliability")?,
         "follow_up": need("follow_up", &ask.follow_up, "--follow-up <time>, when the reply is owed")?,
@@ -258,6 +277,7 @@ fn build(ask: &Ask, from: &Actor, sent: u64) -> Result<Value, Refusal> {
         ("promises", &ask.promises),
         ("needs", &ask.needs),
         ("promise_evidence", &ask.promise_evidence),
+        ("round", &ask.round),
     ] {
         if let Some(value) = value {
             body[field] = json!(fold(value));
@@ -330,6 +350,9 @@ fn ask_of(body: &Value) -> Value {
 
 fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
     let (repo, trust, sender) = open(dir)?;
+    if !ask.to.is_empty() || ask.to_live {
+        return super::round::fan_out(dir, &repo, &trust, &sender, ask);
+    }
     let Some(to_change) = &ask.to_change else {
         return deliver(&repo, &trust, &sender, ask);
     };
@@ -351,55 +374,120 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
     Ok(result)
 }
 
-/// Sends `ask` from `sender`: every refusal first, then the commit and its push.
+/// The `[talk]` table of the policy on main as this clone holds main: the default table with no
+/// policy, or with one bay cannot read (where it would merge, it is `POLICY_INVALID`).
+pub(super) fn talk_policy(repo: &Repo) -> Result<TalkPolicy, Stop> {
+    let Some(main) = repo
+        .git
+        .ref_target(&repo.trunk_tracking_ref())
+        .map_err(|error| error.message())?
+    else {
+        return Ok(TalkPolicy::default());
+    };
+    match crate::policy::load_at(&repo.git, &main) {
+        Ok(policy) => Ok(policy.map(|policy| policy.talk).unwrap_or_default()),
+        Err(crate::policy::LoadError::Git(why)) => Err(why.into()),
+        Err(crate::policy::LoadError::Invalid(_)) => Ok(TalkPolicy::default()),
+    }
+}
+
+/// The two-word send (T1): `ask` with what it leaves out filled in. With no `--kind`, the kind
+/// whose target is given (`--change` or `--artifact` delivery, `--check` reliability), else
+/// discovery; a discovery talk with no target asks for the decision its `what` names; with no
+/// `--follow-up`, the reply is owed `follow_up_s` after `sent`. A field given stays as given.
+pub(super) fn with_defaults(ask: &Ask, sent: u64, follow_up_s: u64) -> Ask {
+    let targets = [
+        ("change", &ask.change),
+        ("artifact", &ask.artifact),
+        ("decision", &ask.decision),
+        ("check", &ask.check),
+    ];
+    let given = targets
+        .iter()
+        .find(|(_, values)| !values.is_empty())
+        .map(|(field, _)| *field);
+    let kind = ask.kind.clone().unwrap_or_else(|| {
+        given
+            .and_then(super::kind_of_target)
+            .unwrap_or("discovery")
+            .to_owned()
+    });
+    let decision = if kind == "discovery" && given.is_none() {
+        ask.what.iter().cloned().collect()
+    } else {
+        ask.decision.clone()
+    };
+    Ask {
+        kind: Some(kind),
+        decision,
+        follow_up: ask
+            .follow_up
+            .clone()
+            .or_else(|| Some(rfc3339_of(sent + follow_up_s))),
+        ..ask.clone()
+    }
+}
+
+/// Sends `ask` from `sender`: every refusal first ([`plan`]), then the commit and its push.
 fn deliver(repo: &Repo, trust: &Trust, sender: &Actor, ask: &Ask) -> Result<BayResult, Stop> {
     let sent = crate::live::unix_now();
+    let filled = with_defaults(ask, sent, talk_policy(repo)?.follow_up_s());
+    let plan = plan(repo, trust, sender, &filled, sent, ask.follow_up.is_some())?;
+    carry_out(repo, sender, plan, ask.dry_run)
+}
+
+/// A send judged by every refusal: the talk the ask already is, or a new talk.
+pub(super) enum Plan {
+    /// The open talk with the same ask (T15), or this very talk again: [`resend`] pushes it.
+    Held { body: Value, talk: Box<Talk> },
+    /// A new talk, signed by `key` (none under approvals), and the names no record here names.
+    New {
+        body: Value,
+        key: Option<PathBuf>,
+        unseen: Vec<String>,
+    },
+}
+
+/// Judges `ask` from `sender`, sent at `sent`, by every refusal, committing nothing.
+/// `follow_up_given`: the command line named the `follow_up`, so it is part of the body an
+/// open talk with the same ask must hold.
+pub(super) fn plan(
+    repo: &Repo,
+    trust: &Trust,
+    sender: &Actor,
+    ask: &Ask,
+    sent: u64,
+    follow_up_given: bool,
+) -> Result<Plan, Stop> {
     let mut body = build(ask, sender, sent)?;
     check_body(&body)?;
     allowed(repo, Some(&body))?;
     check_parties(trust, &body)?;
-    // G445: under approvals no key signs a talk; the sender is its actor name.
-    let (reviewer, key) = match trust {
-        Trust::Keys(registry) => {
-            let reviewer = super::sender_class(registry, &body) == Some(KeyClass::Reviewer);
-            let key = if reviewer {
-                // G149: a reviewer talks only about a landing it reviewed, under its reviewer key.
-                let _ = repo.fetch_trunk();
-                super::reviewed(&repo.git, registry, &repo.trunk_tracking_ref(), &body)?;
-                reviewer_key(&repo.git, registry, &sender.name)?
-            } else {
-                agent_key(&repo.git, registry, &sender.name)?
-            };
-            (reviewer, Some(key))
-        }
-        Trust::Names => (false, None),
-    };
+    let (reviewer, key) = signer(repo, trust, sender, &body)?;
     let who = body["who"].as_str().unwrap_or_default().to_owned();
     fetch_matching(repo, &format!("{TALK_PREFIX}{who}/*"));
     if reviewer {
         body = later_finding(repo, ask, sender, sent, body)?;
     }
-    let id = body["id"].as_str().unwrap_or_default().to_owned();
-    let name = talk_ref(&who, &id);
-    if let Some(tip) = repo
-        .git
-        .ref_target(&name)
-        .map_err(|error| error.message())?
-    {
-        return resend(
-            repo,
-            &body,
-            &Talk::read(&repo.git, &name, &tip)?,
-            ask.dry_run,
-        );
-    }
-    let supersedes = body["supersedes"].as_str();
-    if let Some(old) = supersedes {
-        may_supersede(repo, old, &sender.name, &name)?;
-    }
     let talks = talks_where(&repo.git, &format!("{TALK_PREFIX}{who}/"), |talk| {
         talk.from_name() == sender.name || talk.supersedes().is_some()
     })?;
+    if let Some(open) = open_same(&talks, &body, &sender.name) {
+        return held(open, &body, follow_up_given);
+    }
+    let body = past_closed(&talks, body)?;
+    let id = body["id"].as_str().unwrap_or_default().to_owned();
+    if let Some(talk) = talks.iter().find(|talk| talk.id == id) {
+        // The same id, replaced by a successor whose close is not written yet.
+        return Ok(Plan::Held {
+            body,
+            talk: Box::new(talk.clone()),
+        });
+    }
+    let supersedes = body["supersedes"].as_str();
+    if let Some(old) = supersedes {
+        may_supersede(repo, old, &sender.name, &talk_ref(&who, &id))?;
+    }
     if let Some((open, oldest)) = backlog(&talks, &[], &sender.name, supersedes) {
         return Err(Refusal::new(
             Reason::TalkRefused,
@@ -414,18 +502,202 @@ fn deliver(repo: &Repo, trust: &Trust, sender: &Actor, ask: &Ask) -> Result<BayR
         .with("max", json!(super::BAY_TALK_OPEN_MAX))
         .into());
     }
-    if ask.dry_run {
+    let unseen = unseen(repo, trust, &body)?;
+    Ok(Plan::New { body, key, unseen })
+}
+
+/// Whether `sender` talks as a reviewer, and the key that signs its talk: none under approvals
+/// (G445), where the sender is its actor name.
+fn signer(
+    repo: &Repo,
+    trust: &Trust,
+    sender: &Actor,
+    body: &Value,
+) -> Result<(bool, Option<PathBuf>), Stop> {
+    let Trust::Keys(registry) = trust else {
+        return Ok((false, None));
+    };
+    if super::sender_class(registry, body) == Some(KeyClass::Reviewer) {
+        // G149: a reviewer talks only about a landing it reviewed, under its reviewer key.
+        let _ = repo.fetch_trunk();
+        super::reviewed(&repo.git, registry, &repo.trunk_tracking_ref(), body)?;
+        return Ok((true, Some(reviewer_key(&repo.git, registry, &sender.name)?)));
+    }
+    Ok((false, Some(agent_key(&repo.git, registry, &sender.name)?)))
+}
+
+/// T15: the open talk `sender` holds among `talks` (to one `who`) that asks what `body` asks
+/// ([`super::same_ask`]), from any session and whatever its `follow_up`. A talk that another one
+/// replaced, or that `body` supersedes, holds no ask.
+fn open_same<'a>(talks: &'a [Talk], body: &Value, sender: &str) -> Option<&'a Talk> {
+    let replaced: Vec<&str> = talks
+        .iter()
+        .filter_map(Talk::supersedes)
+        .chain(body["supersedes"].as_str())
+        .collect();
+    talks
+        .iter()
+        .filter(|talk| talk.from_name() == sender && !talk.closed())
+        .filter(|talk| !replaced.contains(&talk.id.as_str()))
+        .filter(|talk| super::same_ask(&talk.body, body))
+        .min_by_key(|talk| (talk.sent(), talk.id.clone()))
+}
+
+/// The fields bay writes itself, or that differ between two sends of one ask: no field of the
+/// body an open talk with the same ask must hold.
+const NOT_ASKED: [&str; 5] = ["id", "sent", "from", "repeats", "round"];
+
+/// T15: `open` asks what `body` asks. The same body is that talk, `already_sent`; a field beside
+/// the ask that differs is refused, as a different body under one id is: a talk's body never
+/// changes, and a successor changes it. A `follow_up` the command line did not give is never
+/// compared: bay's default moves with the clock.
+fn held(open: &Talk, body: &Value, follow_up_given: bool) -> Result<Plan, Stop> {
+    let given = |body: &Value| {
+        let mut given = body.clone();
+        if let Some(map) = given.as_object_mut() {
+            for field in NOT_ASKED {
+                map.remove(field);
+            }
+            if !follow_up_given {
+                map.remove("follow_up");
+            }
+        }
+        given
+    };
+    if given(&open.body) != given(body) {
+        let id = &open.id;
+        return Err(Refusal::new(
+            Reason::TalkRefused,
+            format!(
+                "talk {id} to {} asks the same and is open, with a different body: a talk's body never changes; to change it, send it as a successor (--supersedes {id})",
+                open.who
+            ),
+        )
+        .with("talk", json!(id))
+        .into());
+    }
+    Ok(Plan::Held {
+        body: open.body.clone(),
+        talk: Box::new(open.clone()),
+    })
+}
+
+/// T15: a closed talk does not hold its ask. While `body`'s id names a closed talk among
+/// `talks`, the ask is asked again: the body names that talk in `repeats`, which gives it a new
+/// id; a third ask names the second, and so on.
+fn past_closed(talks: &[Talk], mut body: Value) -> Result<Value, Refusal> {
+    let mut repeated = false;
+    for _ in 0..=talks.len() {
+        let id = body["id"].as_str().unwrap_or_default().to_owned();
+        if !talks.iter().any(|talk| talk.id == id && talk.closed()) {
+            break;
+        }
+        body["repeats"] = json!(id);
+        body["id"] = json!(talk_id(&body).map_err(Refusal::invalid)?);
+        repeated = true;
+    }
+    if repeated {
+        check_body(&body)?;
+    }
+    Ok(body)
+}
+
+/// H4 (T3): the names among `who` and `decides` that no record here names, under approvals,
+/// where any actor name is sent. A name is seen when a talk to it is here (the remote's were
+/// fetched into the same names), when a change record this clone holds names it as its actor,
+/// or when it is the sender's. Under `all` the registry refuses a name it does not enrol.
+fn unseen(repo: &Repo, trust: &Trust, body: &Value) -> Result<Vec<String>, String> {
+    if matches!(trust, Trust::Keys(_)) {
+        return Ok(Vec::new());
+    }
+    let from = body["from"]["name"].as_str();
+    let mut actors: Option<BTreeSet<String>> = None;
+    let mut unseen: Vec<String> = Vec::new();
+    for name in ["who", "decides"]
+        .iter()
+        .filter_map(|field| body[*field].as_str())
+    {
+        if Some(name) == from || unseen.iter().any(|held| held == name) {
+            continue;
+        }
+        let talked = repo
+            .git
+            .run(&[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                &format!("{TALK_PREFIX}{name}/"),
+            ])
+            .map_err(|error| error.message())?;
+        if !talked.trim().is_empty() {
+            continue;
+        }
+        if actors.is_none() {
+            let chains = crate::change::Chain::new(&repo.git)
+                .read_all()
+                .map_err(|error| error.message())?;
+            actors = Some(
+                chains
+                    .into_iter()
+                    .map(|held| held.record.actor.name)
+                    .collect(),
+            );
+        }
+        if !actors.as_ref().is_some_and(|actors| actors.contains(name)) {
+            unseen.push(name.to_owned());
+        }
+    }
+    Ok(unseen)
+}
+
+/// Carries out a judged send: [`resend`] for the talk the ask already is; else the new talk's
+/// commit and push, or nothing on a dry run, with the names no record here names (H4).
+pub(super) fn carry_out(
+    repo: &Repo,
+    sender: &Actor,
+    plan: Plan,
+    dry_run: bool,
+) -> Result<BayResult, Stop> {
+    let (body, key, unseen) = match plan {
+        Plan::Held { body, talk } => return resend(repo, &body, &talk, dry_run),
+        Plan::New { body, key, unseen } => (body, key, unseen),
+    };
+    let mut result = commit_new(repo, sender, &body, key.as_deref(), dry_run)?;
+    if let (false, Some(detail)) = (unseen.is_empty(), result.detail.as_mut()) {
+        let names: Vec<String> = unseen.iter().map(|name| format!("{name:?}")).collect();
+        detail["warning"] = json!(format!(
+            "no record here names {}: no talk to it here or on the remote, and no change of its; the talk is sent all the same, so check the name",
+            names.join(" or ")
+        ));
+        detail["unseen"] = json!(unseen);
+    }
+    Ok(result)
+}
+
+/// The commit of a new talk `body` from `sender`, signed by `key`, and its push; a dry run
+/// commits nothing.
+fn commit_new(
+    repo: &Repo,
+    sender: &Actor,
+    body: &Value,
+    key: Option<&Path>,
+    dry_run: bool,
+) -> Result<BayResult, Stop> {
+    let id = body["id"].as_str().unwrap_or_default().to_owned();
+    let who = body["who"].as_str().unwrap_or_default().to_owned();
+    let name = talk_ref(&who, &id);
+    if dry_run {
         return Ok(BayResult::ok(
             json!({"dry_run": true, "talk": id, "ref": name, "body": body}),
         ));
     }
-    let commit = root_commit_as(&repo.git, &body, key.as_deref(), &sender.name)?;
+    let commit = root_commit_as(&repo.git, body, key, &sender.name)?;
     repo.git
         .run(&["update-ref", &name, &commit, ""])
         .map_err(|error| error.message())?;
     let detail = json!({"talk": id, "short": &id[..8], "ref": name, "who": who,
         "kind": body["kind"]});
-    let refspecs = with_predecessor(repo, &body, format!("{commit}:{name}"))?;
+    let refspecs = with_predecessor(repo, body, format!("{commit}:{name}"))?;
     match push(repo, &refspecs) {
         Pushed::Yes => Ok(sent_result(detail, "sent", None)),
         Pushed::Refused(reason, why) => {
@@ -509,21 +781,11 @@ fn sent_result(mut detail: Value, state: &str, not_pushed: Option<String>) -> Ba
     result
 }
 
-/// The same id again: the same ask is a no-op that pushes what is here; a different body is
-/// refused; a closed talk is refused (ruling T7).
+/// A talk not closed that `body` is again: the same body is a no-op that pushes what is here; a
+/// different body under one id is refused. A closed talk is never asked again here: a new talk
+/// repeats it ([`past_closed`]).
 fn resend(repo: &Repo, body: &Value, existing: &Talk, dry_run: bool) -> Result<BayResult, Stop> {
     let id = existing.id.clone();
-    // A closed talk is closed whatever else differs: the id is the ask (ruling T7).
-    if existing.closed() {
-        return Err(Refusal::new(
-            Reason::TalkRefused,
-            format!(
-                "talk {id} is closed; a repeat of it is refused: change follow_up for a new talk, or supersede it"
-            ),
-        )
-        .with("talk", json!(id))
-        .into());
-    }
     if ask_of(&existing.body) != ask_of(body) {
         return Err(Refusal::new(
             Reason::TalkRefused,
@@ -646,7 +908,8 @@ fn with_predecessor(repo: &Repo, body: &Value, refspec: String) -> Result<Vec<St
 /// Dossier 63: a person answers a talk that asks one with their approver key (as they approve),
 /// under the name the registry enrols it for; anyone else answers as an agent, by its agent key.
 /// G445: under approvals no agent key signs an answer, and `who` or `decides` answers by name; a
-/// person still answers with their approver key, as an approval is signed.
+/// person still answers with their approver key, as an approval is signed. T14: under `all` a
+/// person the talk names as `who` or `decides` answers with their approver key too.
 fn answerer(
     repo: &Repo,
     trust: &Trust,
@@ -654,9 +917,8 @@ fn answerer(
     me: Actor,
 ) -> Result<(Option<PathBuf>, Actor, bool), Stop> {
     let person = match trust {
-        Trust::Keys(registry) => super::asks_a_person(&talk.body)
-            .then(|| approver_key(&repo.git, registry))
-            .flatten(),
+        Trust::Keys(registry) => approver_key(&repo.git, registry)
+            .filter(|(_, name)| super::asks_a_person(&talk.body) || talk.party(name)),
         Trust::Names if super::asks_a_person(&talk.body) => {
             repo.fetch_registry();
             Registry::current(&repo.git)?.and_then(|registry| approver_key(&repo.git, &registry))

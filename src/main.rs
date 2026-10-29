@@ -160,8 +160,11 @@ enum Command {
         #[arg(long, value_name = "DAYS")]
         stale_days: Option<u64>,
     },
-    /// Send one talk to one agent: one action, one target, the time the reply is owed. Arrival is
-    /// the recipient's ack, written when its bay fetches
+    /// Ask another actor one thing: `bay talk <who> "<what>"` sends a discovery talk, its reply
+    /// owed by the policy's default time (`[talk] follow_up_s`, one hour). One action, one
+    /// target; the same ask while it is open is the same talk. `--to` more than once, or
+    /// `--to-live`, asks many as one round. Arrival is the recipient's ack, written when its bay
+    /// fetches
     Talk(Box<TalkArgs>),
     /// Admin: add one key to the key registry: append it to its class file, sign the new
     /// registry with this machine's registry key (`bay.registryKey`) and push it. The first
@@ -312,8 +315,10 @@ struct InstallArgs {
 
 #[derive(Args)]
 struct TalkArgs {
-    /// The agent who owes the reply (a person's name works too)
-    #[arg(value_name = "AGENT")]
+    /// Who owes the reply: a name of lower-case letters, digits and -. Under [policy] signing =
+    /// "approvals" any such name (a name no record names is sent with a warning); under "all"
+    /// an agent the registry enrols, or a person it enrols as an approver
+    #[arg(value_name = "WHO")]
     actor: Option<String>,
     /// Send to the agent that merged this change (a change id or its commit on main), read from
     /// bay's merge record; then the one argument is the action
@@ -321,7 +326,22 @@ struct TalkArgs {
     to_change: Option<String>,
     /// The action: the decision, the question or the change asked for
     what: Option<String>,
-    /// delivery (one change or artifact), discovery (one decision) or reliability (one check)
+    /// Ask each of these as one round, one talk each (give it more than once); then the one
+    /// argument is the action
+    #[arg(long = "to", value_name = "WHO", conflicts_with_all = ["to_change", "answer"])]
+    to: Vec<String>,
+    /// Ask every actor with a live session in this repository but you, as one round; then the
+    /// one argument is the action
+    #[arg(long, conflicts_with_all = ["to_change", "answer"])]
+    to_live: bool,
+    /// Show a round: one row per recipient, with its talk, its standing and its answer
+    #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "to", "to_live",
+        "to_change", "kind", "change", "artifact", "decision", "check", "follow_up", "decides",
+        "context", "evidence", "supersedes", "expires", "target", "forecast", "commitment",
+        "owns", "promises", "needs", "promise_evidence", "urgent", "dry_run", "answer"])]
+    round: Option<String>,
+    /// delivery (one change or artifact), discovery (one decision) or reliability (one check);
+    /// with none, the kind of the target given, else discovery
     #[arg(long, value_name = "KIND")]
     kind: Option<String>,
     /// Delivery: the change asked for
@@ -330,17 +350,19 @@ struct TalkArgs {
     /// Delivery: the artifact asked for
     #[arg(long, value_name = "PATH")]
     artifact: Vec<String>,
-    /// Discovery: the decision asked for
+    /// Discovery: the decision asked for (with none, the action names it)
     #[arg(long, value_name = "DECISION")]
     decision: Vec<String>,
     /// Reliability: the check asked for
     #[arg(long, value_name = "CHECK")]
     check: Vec<String>,
-    /// When the reply is owed, a UTC time after now (2026-10-19T12:00:00Z)
+    /// When the reply is owed, a UTC time after now (2026-10-19T12:00:00Z); with none, the
+    /// policy's default time after sending (`[talk] follow_up_s`, one hour)
     #[arg(long, value_name = "TIME")]
     follow_up: Option<String>,
-    /// The agent who decides if the two disagree (a person's name works too)
-    #[arg(long, value_name = "AGENT")]
+    /// Who decides if the two disagree: a name as WHO takes it (an agent, or under "all" an
+    /// approver)
+    #[arg(long, value_name = "WHO")]
     decides: Option<String>,
     /// The sender's reading of the fact
     #[arg(long)]
@@ -1001,8 +1023,11 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
     }
 }
 
-/// `bay talk`: an answer with `--answer`, else one ask.
+/// `bay talk`: an answer with `--answer`, a round's table with `--round`, else one ask.
 fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
+    if let Some(round) = &args.round {
+        return bay::talk::round(dir, round);
+    }
     if let Some(talk) = args.answer {
         return bay::talk::answer(
             dir,
@@ -1013,9 +1038,11 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
             },
         );
     }
-    // With --to-change the recipient is resolved, so a single argument is the action.
-    let (who, what) = match (&args.to_change, args.what) {
-        (Some(_), None) => (None, args.actor),
+    // With --to-change, --to or --to-live the recipients are named, so a single argument is
+    // the action.
+    let named = args.to_change.is_some() || !args.to.is_empty() || args.to_live;
+    let (who, what) = match (named, args.what) {
+        (true, None) => (None, args.actor),
         (_, what) => (args.actor, what),
     };
     bay::talk::talk(
@@ -1044,6 +1071,8 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
             urgent: args.urgent,
             dry_run: args.dry_run,
             to_change: args.to_change,
+            to: args.to,
+            to_live: args.to_live,
             ..bay::talk::Ask::default()
         },
     )

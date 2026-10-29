@@ -6,16 +6,26 @@
 //! later commit adds one file, `entries/<n>-<kind>.json` (`n` from `0001`), and keeps every earlier
 //! file byte for byte: an `ack`, a `backbrief`, an `answer` or a `close`. The id is the base32 of
 //! 80 bits of the sha256 of the canonical JSON of the sender actor (name and session), `who`,
-//! `kind`, the target, `what`, `follow_up` and `supersedes`, never `sent` (T7): a retry of one ask
-//! is the same id, and the same body under it is a no-op. `sent` is the root commit's time.
+//! `kind`, the target, `what`, `follow_up`, `supersedes` and `repeats`, never `sent` (T7): a retry
+//! of one ask is the same id, and the same body under it is a no-op. `sent` is the root commit's
+//! time.
+//!
+//! The same ask is one talk while it is open (0.6.0, T15): an ask from the sender's name to the
+//! same `who` with the same kind, `what` and target ([`same_ask`]) as an open talk is that talk,
+//! from any session and whatever `follow_up` the clock gave it. A closed talk does not hold its
+//! ask: asking it again is a new talk whose `repeats` names the closed one, so its id is new. A
+//! fan-out (`--to` given more than once, or `--to-live`) sends one talk per recipient, each
+//! naming one `round`, the digest of the ask and its recipients ([`round`]).
 //!
 //! A talk carries one `what` and exactly one target field for its kind, with one value; bay judges
 //! that by structure alone and never reads the prose (BACKLOG 9b). The sender's bay, the host
 //! hook and the recipient's accept judge one body by the same rules ([`check_body`]).
 //!
 //! Who writes what (T1, T10): only an agent key sends, as the registry actor it is enrolled for;
-//! only `who` acks, backbriefs and closes; only `who` or `decides` answers a discovery talk, and a
-//! second, different answer names the standing one in `supersedes` or is `TALK_REFUSED`;
+//! only `who` acks, backbriefs and closes; only `who` or `decides` answers a discovery talk (a
+//! person the registry enrols as an approver may be either, and answers with their approver key,
+//! T14), and a second, different answer names the standing one in `supersedes` or is
+//! `TALK_REFUSED`;
 //! only the sender (or `decides`) supersedes a talk, and the recipient's accept closes the
 //! superseded one as `superseded`, naming its successor. A delivery talk about a change closes as
 //! `answered` once a landing that names the change (`Fixes:`, `Reverts:` or `Supersedes:`) is on
@@ -43,6 +53,7 @@ mod lander;
 mod open;
 pub mod poll;
 pub mod replies;
+mod round;
 mod send;
 pub mod standing;
 pub mod wake;
@@ -50,6 +61,7 @@ pub mod wake;
 pub use accept::{end_questions, receive};
 pub use judge::{Push, judge};
 pub use open::{name_open_talks, open_on};
+pub use round::round;
 pub use send::{Answer, Ask, answer, talk};
 
 use std::fmt::Write as _;
@@ -75,6 +87,9 @@ pub const ENTRIES_DIR: &str = "entries";
 pub const BAY_TALK_MAX_BYTES: usize = 8192;
 /// The most open talks one sender holds to one recipient (ruling T10).
 pub const BAY_TALK_OPEN_MAX: usize = 20;
+/// How long a talk sent with no `--follow-up` is owed a reply when the policy names no
+/// `[talk] follow_up_s` (0.6.0, the two-word send): one hour.
+pub const BAY_TALK_FOLLOW_UP_S: u64 = 3600;
 /// Characters in a talk id: 80 bits of base32 (ruling T7).
 pub const TALK_ID_LEN: usize = 16;
 const ID_BYTES: usize = 10;
@@ -105,7 +120,7 @@ const RESULT_WORDS: [&str; 3] = ["target", "forecast", "commitment"];
 const PROMISE_FIELDS: [&str; 4] = ["owns", "promises", "needs", "promise_evidence"];
 /// The only status words (`DESIGN` § 11c).
 pub const STATUS_WORDS: [&str; 4] = ["ready", "blocked", "validated", "done"];
-const FIELDS: [&str; 28] = [
+const FIELDS: [&str; 30] = [
     "schema",
     "id",
     "from",
@@ -134,6 +149,8 @@ const FIELDS: [&str; 28] = [
     "options",
     "multi_select",
     "context_truncated",
+    "repeats",
+    "round",
 ];
 /// The prefix of a question talk's `decision` (dossier 63): `question:<tool_use_id>:<n>`, the
 /// n-th question of one question tool call. Structure bay judges, never the prose.
@@ -188,7 +205,7 @@ pub fn asks_a_person(body: &Value) -> bool {
 /// The most options a question carries, as the question tool takes them.
 const MAX_OPTIONS: usize = 4;
 /// The fields the id is the digest of (ruling T7): not `sent`, so a retry is the same id.
-const ID_FIELDS: [&str; 10] = [
+const ID_FIELDS: [&str; 11] = [
     "from",
     "who",
     "kind",
@@ -199,7 +216,30 @@ const ID_FIELDS: [&str; 10] = [
     "artifact",
     "decision",
     "check",
+    "repeats",
 ];
+/// The fields that make two asks one ask (T15): the kind, the action and the target. The
+/// sender's name and `who` are the talk list's; the session, `follow_up` and the other fields
+/// are not the ask.
+const ASK_FIELDS: [&str; 6] = ["kind", "what", "change", "artifact", "decision", "check"];
+
+/// Whether two bodies ask the same: the same kind, `what` and target ([`ASK_FIELDS`]).
+#[must_use]
+pub fn same_ask(one: &Value, other: &Value) -> bool {
+    ASK_FIELDS
+        .iter()
+        .all(|field| one.get(*field) == other.get(*field))
+}
+
+/// The kind whose target `field` is (`change` and `artifact` a delivery's, `decision` a
+/// discovery's, `check` a reliability's), if any.
+#[must_use]
+pub fn kind_of_target(field: &str) -> Option<&'static str> {
+    KINDS
+        .iter()
+        .find(|(_, owned)| owned.contains(&field))
+        .map(|(kind, _)| *kind)
+}
 /// Each entry kind and the fields it may carry. An ack carries no essay.
 const ENTRY_FIELDS: [(&str, &[&str]); 4] = [
     ("ack", &["ack", "wake"]),
@@ -556,12 +596,14 @@ pub fn check_body(body: &Value) -> Result<(), Refusal> {
     text_field(map, "context")?;
     text_field(map, "evidence")?;
     check_words(map)?;
-    if let Some(old) = text_field(map, "supersedes")?
-        && !is_talk_id(old)
-    {
-        return Err(Refusal::invalid(format!(
-            "`supersedes` {old:?} is not a talk id"
-        )));
+    for field in ["supersedes", "repeats", "round"] {
+        if let Some(id) = text_field(map, field)?
+            && !is_talk_id(id)
+        {
+            return Err(Refusal::invalid(format!(
+                "`{field}` {id:?} is not a talk id"
+            )));
+        }
     }
     if map
         .get("urgent")
@@ -647,8 +689,9 @@ fn check_question(map: &Map<String, Value>) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// `who`, `decides` and the sender are registry actors: names the registry's agent file
-/// enrols (`DESIGN` § 11c).
+/// `who`, `decides` and the sender are registry actors (`DESIGN` § 11c): `who` and `decides`
+/// an agent or a person the registry enrols as an approver (0.6.0, T14), who answers with their
+/// approver key as they approve; the sender an agent.
 ///
 /// # Errors
 ///
@@ -657,10 +700,12 @@ fn check_question(map: &Map<String, Value>) -> Result<(), Refusal> {
 pub fn check_actors(registry: &Registry, body: &Value) -> Result<(), Refusal> {
     for field in ["who", "decides"] {
         if let Some(name) = body[field].as_str()
-            && !registry.enrols(KeyClass::Agent, name)
+            && ![KeyClass::Agent, KeyClass::Approver]
+                .iter()
+                .any(|class| registry.enrols(*class, name))
         {
             return Err(Refusal::invalid(format!(
-                "`{field}` {name:?} is not a registry actor: {REGISTRY_REF} enrols no agent of that name"
+                "`{field}` {name:?} is not a registry actor: {REGISTRY_REF} enrols no agent and no approver of that name"
             )));
         }
     }
@@ -1018,6 +1063,12 @@ impl Talk {
     #[must_use]
     pub fn closed(&self) -> bool {
         self.has("close") || (self.body["kind"] == "discovery" && self.has("answer"))
+    }
+
+    /// Whether `actor` is the talk's `who` or its `decides`: a party who answers it.
+    #[must_use]
+    pub fn party(&self, actor: &str) -> bool {
+        self.who == actor || self.body["decides"].as_str() == Some(actor)
     }
 
     /// Whether `actor` may supersede this talk: its sender's name, or its `decides`.
@@ -1566,11 +1617,14 @@ mod tests {
         let mut context = first.clone();
         context["context"] = json!("more");
         assert_eq!(talk_id(&context).unwrap(), id, "context is not the ask");
+        context["round"] = json!("aaaaaaaaaaaaaaaa");
+        assert_eq!(talk_id(&context).unwrap(), id, "a round is not the ask");
         for (field, value) in [
             ("what", json!("Ship it now")),
             ("who", json!("c")),
             ("follow_up", json!("2026-10-19T14:00:00Z")),
             ("from", json!({"name": "a", "session": "t"})),
+            ("repeats", json!("aaaaaaaaaaaaaaaa")),
         ] {
             let mut other = first.clone();
             other[field] = value;

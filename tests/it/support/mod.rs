@@ -12,6 +12,7 @@ use assert_cmd::Command;
 use tempfile::TempDir;
 
 pub mod approval;
+pub mod plain_talk;
 pub mod queued;
 pub mod relay;
 pub mod talk;

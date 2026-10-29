@@ -7,7 +7,10 @@
 //! trailer typed on a commit (a trailer on a forge commit is a claim, ruling T10). A change id
 //! resolves to its landing ([`crate::undo::landed_commit`]); a commit resolves to the change its
 //! signed `Change-Id` names. A commit on trunk that is no bay publication is
-//! `OUTSIDE_MERGE`; a change or commit that is not on trunk is `CHANGE_NOT_MERGED`.
+//! `OUTSIDE_MERGE`; a change that exists, or a commit, that is not on trunk is
+//! `CHANGE_NOT_MERGED`, retried after a wait. A target that is neither a change id nor a commit
+//! this repository holds, or a change id no change has here or on the remote, never will be on
+//! trunk (T13): it is `TALK_REFUSED`, naming what is missing.
 
 use serde_json::{Value, json};
 
@@ -43,8 +46,15 @@ pub(crate) fn resolve(repo: &Repo, target: &str) -> Result<Result<Lander, Refusa
     };
     let not_landed =
         |why: String| Refusal::new(Reason::ChangeNotLanded, why).with("to_change", json!(target));
+    let names_nothing =
+        |why: String| Refusal::new(Reason::TalkRefused, why).with("to_change", json!(target));
     if is_change_id(target) {
         let Some(landing) = crate::undo::landed_commit(repo, target, &trunk)? else {
+            if !change_exists(repo, target)? {
+                return Ok(Err(names_nothing(format!(
+                    "no change {target} is here or on the remote: a talk addressed by change goes to the actor that merged it, and this one never will be on main"
+                ))));
+            }
             return Ok(Err(not_landed(format!(
                 "change {target} is not on main: a talk addressed by change goes to the actor that merged it"
             ))));
@@ -57,8 +67,8 @@ pub(crate) fn resolve(repo: &Repo, target: &str) -> Result<Result<Lander, Refusa
         "-q",
         &format!("{target}^{{commit}}"),
     ]) else {
-        return Ok(Err(not_landed(format!(
-            "{target:?} is neither a change id nor a commit this repository holds"
+        return Ok(Err(names_nothing(format!(
+            "{target:?} is neither a change id nor a commit this repository holds: give a change id or a commit on main"
         ))));
     };
     if !repo.git.is_ancestor(&commit, &trunk)? {
@@ -91,6 +101,29 @@ pub(crate) fn resolve(repo: &Repo, target: &str) -> Result<Result<Lander, Refusa
         .with("commit", json!(commit))));
     }
     lander_of(repo, change, commit).map(Ok)
+}
+
+/// Whether a change `change` exists: its record is here, or the remote holds it.
+fn change_exists(repo: &Repo, change: &str) -> Result<bool, String> {
+    let name = change_ref(change);
+    if repo
+        .git
+        .ref_target(&name)
+        .map_err(|error| error.message())?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    let listed = repo
+        .git
+        .run(&["ls-remote", repo.remote(), &name])
+        .map_err(|error| {
+            format!(
+                "whether change {change} exists could not be read from the remote: {}",
+                error.message()
+            )
+        })?;
+    Ok(!listed.trim().is_empty())
 }
 
 /// The actor of `change`'s record, which landed at `landing`.

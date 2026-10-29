@@ -18,7 +18,8 @@
 //! entry names: an ack, backbrief or close by `who` alone, one ack per talk; a backbrief names its
 //! outcome, first step and what is unclear, any `owes` is a registry actor, any `follow_up` is
 //! after `sent`, any `status` is a status word, and a blocked one names a reason code and a new
-//! `follow_up`; an answer by `who` or `decides` on a discovery talk, where a different value from
+//! `follow_up`; an answer by `who` or `decides` on a discovery talk (a person named so signs it
+//! with their approver key, T14), where a different value from
 //! the standing answer names that answer's commit in `supersedes` (`TALK_REFUSED`); a
 //! close as `superseded` by a talk under the same `who` that supersedes it, or as `answered` by
 //! the landing of a change whose `Fixes:`, `Reverts:` or `Supersedes:` names the delivery talk's
@@ -452,8 +453,10 @@ impl Chain {
         let actor = entry["actor"]["name"].as_str().unwrap_or_default();
         // Dossier 63 (ruling T1 as the owner changed it, 2026-10-25): an answer on a talk that
         // asks a person may be signed by a person, an approver or registry key enrolled for the
-        // name it gives, as an approval is.
-        let classes: &[KeyClass] = if kind == "answer" && super::asks_a_person(&self.talk.body) {
+        // name it gives, as an approval is. T14: so may the answer of a person the talk names as
+        // `who` or `decides`.
+        let by_a_person = super::asks_a_person(&self.talk.body) || self.talk.party(actor);
+        let classes: &[KeyClass] = if kind == "answer" && by_a_person {
             &[KeyClass::Agent, KeyClass::Approver, KeyClass::Registry]
         } else {
             &[KeyClass::Agent]

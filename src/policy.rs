@@ -78,6 +78,9 @@ struct PolicyFile {
 /// talk refs. The other keys narrow it, each only when it names something: `kinds` (talk kinds;
 /// any other value is `POLICY_INVALID`), `senders` and `recipients` (actor names), `max_round`
 /// (the most recipients of one fan-out) and `wake = false` (talks arrive, nothing is woken).
+/// `follow_up_s` is how long a talk sent with no `--follow-up` is owed a reply,
+/// [`crate::talk::BAY_TALK_FOLLOW_UP_S`] when unnamed; 0, a reply owed at once, is
+/// `POLICY_INVALID`.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TalkPolicy {
@@ -93,9 +96,18 @@ pub struct TalkPolicy {
     pub max_round: Option<u32>,
     #[serde(default)]
     pub wake: Option<bool>,
+    #[serde(default)]
+    pub follow_up_s: Option<u64>,
 }
 
 impl TalkPolicy {
+    /// How long a talk sent with no `--follow-up` is owed a reply, in seconds.
+    #[must_use]
+    pub fn follow_up_s(&self) -> u64 {
+        self.follow_up_s
+            .unwrap_or(crate::talk::BAY_TALK_FOLLOW_UP_S)
+    }
+
     /// How `bay status --all` names it: whether talk is on, the kinds it allows (every kind when
     /// the policy names none), and whether the policy states `enabled` at all.
     #[must_use]
@@ -1330,6 +1342,11 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
             "[talk] kinds names {kind:?}; a talk kind is one of {}",
             crate::talk::KIND_NAMES.join(", ")
         )));
+    }
+    if file.talk.follow_up_s == Some(0) {
+        return Err(invalid(
+            "[talk] follow_up_s is 0: a reply owed at once is owed before any talk arrives; name the seconds after sending it is owed".to_owned(),
+        ));
     }
     validate_inputs(git, commit, &file.input).map_err(invalid)?;
     let dimensions = crate::completion::site_dimensions(file.dimension).map_err(invalid)?;
