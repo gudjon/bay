@@ -1065,7 +1065,7 @@ impl Reason {
                 "Do nothing yet: bay reads main again. Never report it merged; `bay status <change>` shows the outcome."
             }
             Self::TrunkRed => {
-                "Wait for the owner's fix to the red paths, or fix it yourself with `bay start <intent> --fixes <change>`."
+                "Wait for a fix to the red paths, or fix it yourself with `bay start <intent> --fixes <change>`, the change `detail.fixes` names."
             }
             Self::ChangeAlreadyLanded => {
                 "Do not retry: the change already merged. For more edits, `bay start <intent>` opens the next change."

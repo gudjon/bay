@@ -4693,6 +4693,9 @@ fn red_gate(
         return Ok(None);
     }
     let owners: Vec<Option<String>> = blocking.iter().map(|red| red.change.clone()).collect();
+    // E36: the owner moves with each newer failure while no culprit is pinned; `fixes` is the
+    // one name a fix gives, stable while the red stands.
+    let fixes: Vec<Option<String>> = blocking.iter().map(|red| red.fixes().cloned()).collect();
     let red: Vec<serde_json::Value> = blocking.iter().map(|red| red.to_json()).collect();
     // The trust-agents ruling (2026-10-26): a change on a red main's paths waits, the line and
     // a fix behind it move, and it is checked again by itself once main is green; it is never
@@ -4712,11 +4715,12 @@ fn red_gate(
             .with_detail(json!({
                 "red": red,
                 "ways_out": [
-                    "merge a change that names the owner: bay start --fixes <owner>, or bay undo <owner>",
+                    "merge a change that names the red's fixes: bay start --fixes <fixes>, or bay undo <fixes>",
                     "a later run of the post check passes on main",
                     "quarantine the check in the policy",
                 ],
                 "owners": owners,
+                "fixes": fixes,
             })),
     ))
 }

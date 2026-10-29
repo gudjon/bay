@@ -141,7 +141,9 @@ session is being told of its refusals; `waiting_for` says what a queued change w
   the named paths, then go on.
 - `MAIN_RED` with `waiting_for: main`: main is broken on your paths. Your change keeps waiting in its place
   in line and is checked again once main is green, before the changes that came after it; do not merge it
-  again. A change that fixes it (`bay start <intent> --fixes <owner>`) goes ahead of the line.
+  again. A change that fixes it (`bay start <intent> --fixes <change>`, the change `detail.fixes` names)
+  goes ahead of the line. Main is then `pending_fix` in `detail.red_pending` until a run of the check on
+  the fix answers it.
 - A change that no check covers, such as a document no check reads, merges in the next push.
 - `bay status` describes your own changes and counts the others; `bay status <change>` reads one.
 - `bay status` with `detail.warnings` naming `no_live_runner`: work is queued and no runner has

@@ -30,14 +30,18 @@
 //! - BACKLOG 121: without a culprit, the owner (the newest failure) and the first failure are
 //!   only where the check was seen failing, never a proven cause; each red row's `say` says
 //!   which ([`Red::say`]).
-//! - A `product_failure` is cleared by a later landing whose `Fixes:`, `Reverts:` or
-//!   `Supersedes:` names the owning change or the first failure of the suspect range (a landing
-//!   newer than the newest failure), or by a quarantine of the check at trunk.
+//! - G568, E36 (fleet findings, 2026-10-29): a landing newer than the newest failure whose
+//!   `Fixes:`, `Reverts:` or `Supersedes:` names a merge the red names (the owner, a landing of
+//!   the suspect range, or one the check was seen failing on since; [`Red::answered_by`])
+//!   answers the red: the check is then [`PENDING_FIX`] until a run at or after that landing
+//!   answers it, never green before. A fix older than the newest failure landed before a run
+//!   that still failed, so it answers nothing. A quarantine of the check at trunk clears it.
+//!   Without a culprit the owner moves to each newer failure, so the red row names one stable
+//!   name for `--fixes` ([`Red::fixes`]: the first failure).
 //!
 //! While red, the executor refuses a candidate that touches those paths with `MAIN_RED`,
-//! naming the owner and the ways out; a change that names the owning change or the first
-//! failure in `--fixes`, an undo of it, or a superseding change is never refused, and it runs
-//! ahead of the line.
+//! naming the owner and the ways out; a change that names a merge the red names in `--fixes`,
+//! an undo of it, or a superseding change is never refused, and it runs ahead of the line.
 //!
 //! G195: `bay status --since` judges from what its cursor carries ([`Judged`]): how each check
 //! was decided, at which trunk, under which evidence tips and registry. It reads the answers of
@@ -76,6 +80,10 @@ pub const PENDING_BEYOND_WINDOW: &str = "pending_beyond_window";
 
 /// The [`Pending`] state of a check no landing answered yet, the window holding all of trunk.
 pub const PENDING: &str = "pending";
+
+/// G568: the [`Pending`] state of a red check a landing newer than its newest failure answers
+/// ([`Red::answered_by`]), until a run at or after that landing answers it.
+pub const PENDING_FIX: &str = "pending_fix";
 
 /// How many first-parent commits of `trunk` a red judgement and the unattributed scan read
 /// back: `[red] window` in the config committed at `trunk`.
@@ -122,6 +130,9 @@ pub struct Suspect {
     pub failed: Mark,
     /// The landings after `passed` up to and including `failed`, oldest first.
     pub landings: Vec<Mark>,
+    /// E36: the landings after `failed` up to and including `newest_failed`, oldest first,
+    /// where the check was seen failing or did not run; empty when `failed` is the newest.
+    pub failing: Vec<Mark>,
     /// The newest landing whose answer is a `product_failure`: the one that decides the red.
     /// Its failing record names the units a post run asks to run again (`crate::bisect`, G540).
     pub newest_failed: Mark,
@@ -199,13 +210,14 @@ impl Suspect {
             "last_passed": self.passed.as_ref().map(Mark::to_json),
             "first_failed": self.failed.to_json(),
             "landings": self.landings.iter().map(Mark::to_json).collect::<Vec<_>>(),
+            "failing": self.failing.iter().map(Mark::to_json).collect::<Vec<_>>(),
             "searched": self.searched,
         })
     }
 }
 
 /// NEW-6: a post check trunk is neither red nor green on: no landing in the window answers it.
-/// `state` is [`PENDING_BEYOND_WINDOW`] or [`PENDING`].
+/// `state` is [`PENDING_BEYOND_WINDOW`], [`PENDING`] or [`PENDING_FIX`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Pending {
     pub check: String,
@@ -216,13 +228,16 @@ pub struct Pending {
     /// The window judged, and its oldest landing.
     pub window: usize,
     pub oldest: Option<String>,
+    /// [`PENDING_FIX`]: the landing that answers the red, whose run, or a newer one, decides.
+    pub fix: Option<Mark>,
 }
 
 impl Pending {
     #[must_use]
     pub fn to_json(&self) -> Value {
         json!({"check": self.check, "environment": self.environment, "paths": self.paths,
-            "state": self.state, "window": self.window, "oldest": self.oldest})
+            "state": self.state, "window": self.window, "oldest": self.oldest,
+            "fix": self.fix.as_ref().map(Mark::to_json)})
     }
 }
 
@@ -252,6 +267,7 @@ impl Red {
             "landing": self.landing, "change": self.change,
             "suspect": self.suspect.as_ref().map(Suspect::to_json),
             "culprit": self.culprit().map(Culprit::to_json),
+            "fixes": self.fixes(),
             "say": self.say()})
     }
 
@@ -309,20 +325,35 @@ impl Red {
     }
 
     /// Whether a change that names `names` (its `Fixes:`, `Reverts:` and `Supersedes:`) answers
-    /// this red: they name the owning change, or the first failure of its suspect range. A
-    /// fleet finding (2026-10-28): with no culprit pinned the owner is the newest failure, the
-    /// landing the check last ran on, and three fixes naming the first failure, the change bay
-    /// itself names as the suspect, waited behind the red they were written to clear.
+    /// this red: they name the owning change, a landing of its suspect range, or one the check
+    /// was seen failing on since ([`Suspect::failing`]). Fleet findings: with no culprit pinned
+    /// the owner is the newest failure, the landing the check last ran on, so it moves with each
+    /// run; three fixes naming the first failure (2026-10-28), then one naming the owner of an
+    /// hour before (E36, 2026-10-29), waited behind the red they were written to clear.
     #[must_use]
     pub fn answered_by(&self, names: &[&String]) -> bool {
+        let range = self.suspect.iter().flat_map(|suspect| {
+            suspect
+                .landings
+                .iter()
+                .chain(&suspect.failing)
+                .filter_map(|mark| mark.change.as_ref())
+        });
         self.change
             .iter()
-            .chain(
-                self.suspect
-                    .as_ref()
-                    .and_then(|suspect| suspect.failed.change.as_ref()),
-            )
+            .chain(range)
             .any(|change| names.contains(&change))
+    }
+
+    /// E36: the one name a fix gives in `--fixes`, stable while the red stands: the first
+    /// failure (the culprit, when the evidence pins one), else the owning change. The owner
+    /// moves to each newer failure while no culprit is pinned.
+    #[must_use]
+    pub fn fixes(&self) -> Option<&String> {
+        self.suspect
+            .as_ref()
+            .and_then(|suspect| suspect.failed.change.as_ref())
+            .or(self.change.as_ref())
     }
 
     /// Whether this is the same red as `other`: the same check, owned by the same landing. Its
@@ -706,50 +737,51 @@ fn decide<'a>(
                     oldest: answers.line.landings[..answers.line.window]
                         .last()
                         .map(|landing| landing.commit.clone()),
+                    fix: None,
                 });
             }
             continue;
         };
-        if !failed || cleared(&answers.line.landings, at) {
+        if !failed {
             continue;
         }
         // The culprit, when the evidence pins one, owns the red in place of the newest failure.
         let (suspect, owner) = answers.suspect(post, at)?;
         let landings = &answers.line.landings;
-        if owner != at && cleared(landings, owner) {
-            continue;
-        }
-        // A landing newer than the newest failure that names the first failure clears it too
-        // (`Red::answered_by`).
-        if suspect.failed.change.as_ref().is_some_and(|change| {
-            landings[..at]
-                .iter()
-                .any(|later| later.names.contains(change))
-        }) {
-            continue;
-        }
-        let landing = &landings[owner];
-        out.red.push(Red {
+        let red = Red {
             check: post.id.clone(),
             environment: post.environment.clone(),
             paths: entry.when_paths.clone(),
-            landing: landing.commit.clone(),
-            change: landing.change.clone(),
+            landing: landings[owner].commit.clone(),
+            change: landings[owner].change.clone(),
             suspect: Some(suspect),
-        });
+        };
+        // G568: only a landing newer than the newest failure answers it, and the check is
+        // pending until a run at or after that landing answers, never green before.
+        let fix = landings[..at]
+            .iter()
+            .rev()
+            .find(|later| red.answered_by(&later.names.iter().collect::<Vec<_>>()));
+        if let Some(fix) = fix {
+            out.pending.push(Pending {
+                check: red.check,
+                environment: red.environment,
+                paths: red.paths,
+                state: PENDING_FIX,
+                window,
+                oldest: landings[..answers.line.window]
+                    .last()
+                    .map(|landing| landing.commit.clone()),
+                fix: Some(Mark::of(fix)),
+            });
+            continue;
+        }
+        out.red.push(red);
     }
     Ok((out, decided, answers))
 }
 
 /// Whether a landing newer than `landings[owner]` fixes, undoes or supersedes its change.
-fn cleared(landings: &[Landing], owner: usize) -> bool {
-    landings[owner].change.as_ref().is_some_and(|change| {
-        landings[..owner]
-            .iter()
-            .any(|later| later.names.contains(change))
-    })
-}
-
 /// N-20, B5: the landings a red judgement reads, newest first: the landing line of the window,
 /// then, once a red check's window holds no pass, the line past it down to the reach.
 struct Line {
@@ -937,6 +969,7 @@ impl<'a> Answers<'a> {
                 passed: passed.map(|older| Mark::of(&landings[older])),
                 failed: Mark::of(&landings[first]),
                 landings: landings[first..end].iter().rev().map(Mark::of).collect(),
+                failing: landings[at..first].iter().rev().map(Mark::of).collect(),
                 newest_failed: Mark::of(&landings[at]),
                 culprit,
                 searched: passed.is_none().then_some(self.line.depth),
