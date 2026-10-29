@@ -272,8 +272,8 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
             continue;
         }
         // BACKLOG 117: a check no worker answered here lately waits, and this pass runs the
-        // next one.
-        if waits_for_a_worker(repo, &id).is_some() {
+        // next one; a red check waits less (G573).
+        if waits_for_a_worker(repo, &id, red_of(entry).is_some()).is_some() {
             continue;
         }
         // G439 (a fleet finding, 2026-10-28): a post run on the tip was asked about the tip's
@@ -751,17 +751,30 @@ fn bisect(
 /// ends the wait.
 const UNAVAILABLE_WAIT: std::time::Duration = std::time::Duration::from_hours(1);
 
-/// [`UNAVAILABLE_WAIT`]; a test build honours `BAY_TEST_UNAVAILABLE_WAIT_S`, a release build
-/// never does.
-fn unavailable_wait() -> std::time::Duration {
+/// How long a check that holds changes waits instead: a red check, or one whose fix waits for its
+/// run (G573, a fleet finding, 2026-10-29: scripts-fast's fix waited for its run, one worker did
+/// not answer it, and ten changes on its paths waited the whole hour for the next try). Each
+/// other post check of its environment still gets the passes in between.
+const HOLDING_UNAVAILABLE_WAIT: std::time::Duration = std::time::Duration::from_mins(5);
+
+/// [`HOLDING_UNAVAILABLE_WAIT`] when the check `holds` changes, else [`UNAVAILABLE_WAIT`]; a test
+/// build honours `BAY_TEST_HOLDING_UNAVAILABLE_WAIT_S` and `BAY_TEST_UNAVAILABLE_WAIT_S`, a
+/// release build never does.
+fn unavailable_wait(holds: bool) -> std::time::Duration {
+    let (var, wait) = if holds {
+        (
+            "BAY_TEST_HOLDING_UNAVAILABLE_WAIT_S",
+            HOLDING_UNAVAILABLE_WAIT,
+        )
+    } else {
+        ("BAY_TEST_UNAVAILABLE_WAIT_S", UNAVAILABLE_WAIT)
+    };
     if option_env!("BAY_RELEASE_VERSION").is_none()
-        && let Some(secs) = std::env::var("BAY_TEST_UNAVAILABLE_WAIT_S")
-            .ok()
-            .and_then(|secs| secs.parse().ok())
+        && let Some(secs) = std::env::var(var).ok().and_then(|secs| secs.parse().ok())
     {
         return std::time::Duration::from_secs(secs);
     }
-    UNAVAILABLE_WAIT
+    wait
 }
 
 /// The file where this box notes when no worker answered each check: `<check>@<environment>`
@@ -806,11 +819,12 @@ fn note_unavailable(repo: &Repo, id: &CheckId, now: Option<u64>) {
     }
 }
 
-/// The seconds `id` still waits, when no worker answered it here within [`unavailable_wait`].
-fn waits_for_a_worker(repo: &Repo, id: &CheckId) -> Option<u64> {
+/// The seconds `id` still waits, when no worker answered it here within [`unavailable_wait`];
+/// shorter when the check `holds` changes.
+fn waits_for_a_worker(repo: &Repo, id: &CheckId, holds: bool) -> Option<u64> {
     let at = *unavailable_notes(repo).get(&unavailable_key(id))?;
     let left = at
-        .saturating_add(unavailable_wait().as_secs())
+        .saturating_add(unavailable_wait(holds).as_secs())
         .saturating_sub(crate::live::unix_now());
     (left > 0).then_some(left)
 }
@@ -822,13 +836,15 @@ fn run_at(
     (id, why): (&CheckId, (&str, Value)),
     (commit, since, rerun): (&str, Option<&str>, &[String]),
 ) -> Result<Result<Verdict, String>, String> {
-    if let Some(left) = waits_for_a_worker(repo, id) {
+    let (field, body) = why;
+    // A post run and a bisect step judge a red check (a post run of a green one passed the
+    // longer wait in `tips`); a warm run holds nothing.
+    if let Some(left) = waits_for_a_worker(repo, id, field != "warm") {
         return Ok(Err(format!(
             "no worker answered the check here lately; it is tried again in {left} s"
         )));
     }
     let git = &repo.git;
-    let (field, body) = why;
     // A warm run is a candidate of no change on the tip, judged as one on that tip: its base
     // is the tip itself. A post run and a bisect judge a landing under its first parent.
     let warm = field == "warm";

@@ -37,7 +37,8 @@
 //!   answers it, never green before. A fix older than the newest failure landed before a run
 //!   that still failed, so it answers nothing. A quarantine of the check at trunk clears it.
 //!   E35: while it is `pending_fix`, the check holds the changes on its paths as a red does
-//!   ([`holding`]): a fix may answer one failure of several.
+//!   ([`holding`]): a fix may answer one failure of several. G572: a repair of another red
+//!   passes it ([`blocking`]).
 //!   Without a culprit the owner moves to each newer failure, so the red row names one stable
 //!   name for `--fixes` ([`Red::fixes`]: the first failure).
 //!
@@ -527,6 +528,23 @@ pub fn repairs(
     Ok(holding(git, trunk, registry)?
         .iter()
         .any(|red| red.answered_by(names)))
+}
+
+/// The ones of `reds`, the holding checks of trunk ([`holding`]), that hold a change changing
+/// `changed` whose `Fixes:`, `Reverts:` and `Supersedes:` name `names`: each covers a path it
+/// changes, and it does not answer it ([`Red::answered_by`]). G572 (a fleet finding,
+/// 2026-10-29: a fix for records-refs waited behind scripts-fast, whose own fix was on main and
+/// waited only for its run, and that run waited for a worker): a repair, a change that answers
+/// one of `reds`, also passes a check that is [`PENDING_FIX`]. That check's fix is on main
+/// already; only its run decides, and the repair runs ahead of the line, so it never waits for
+/// it. A change that repairs nothing still waits (E35).
+#[must_use]
+pub fn blocking<'a>(reds: &'a [Red], changed: &[String], names: &[&String]) -> Vec<&'a Red> {
+    let repair = reds.iter().any(|red| red.answered_by(names));
+    reds.iter()
+        .filter(|red| red.covers(changed) && !red.answered_by(names))
+        .filter(|red| !(repair && red.fix.is_some()))
+        .collect()
 }
 
 /// BACKLOG 119: whether one of `reds`, the red checks of `trunk`, covers a path `revision`

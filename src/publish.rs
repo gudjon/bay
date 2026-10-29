@@ -4677,11 +4677,7 @@ fn red_gate(
         .map_err(|error| error.message())?;
     let changed = check::changed_paths(git, &base, revision)?;
     let names = ctx.record.repair_names();
-    let blocking: Vec<&crate::red::Red> = reds
-        .iter()
-        .filter(|red| red.covers(&changed))
-        .filter(|red| !red.answered_by(&names))
-        .collect();
+    let blocking = crate::red::blocking(&reds, &changed, &names);
     if blocking.is_empty() {
         return Ok(None);
     }
