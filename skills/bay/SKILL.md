@@ -107,8 +107,8 @@ What you do decides the speed for every agent:
   being checked and the batches checked ahead of it.
 - **Changes to `.bay/` go through bay** like any other change, in a change of their own; never by a pull request or
   a direct push.
-- **A fix for a red main goes first.** `bay start <intent> --fixes <change>` (or `bay undo <change>`) runs ahead of
-  the line.
+- **A fix for a red main goes first.** `bay start <intent> --fixes <check>` (the red check), `--fixes <change>`
+  (or `bay undo <change>`) runs ahead of the line.
 - **Give up dead work.** `bay abandon <change> --why <reason>`: a runner frees its place at its next pass.
 - **Name `--input` only when the work relies on that version**; such a change is checked on its own.
 
@@ -141,8 +141,8 @@ session is being told of its refusals; `waiting_for` says what a queued change w
   the named paths, then go on.
 - `MAIN_RED` with `waiting_for: main`: main is broken on your paths. Your change keeps waiting in its place
   in line and is checked again once main is green, before the changes that came after it; do not merge it
-  again. A change that fixes it (`bay start <intent> --fixes <change>`, the change `detail.fixes` names)
-  goes ahead of the line. Main is then `pending_fix` in `detail.red_pending` until a run of the check on
+  again. A change that fixes it goes ahead of the line: `bay start <intent> --fixes <check>`, the check
+  `detail.red[].check` names (the one name that never moves), or `--fixes` the change `detail.fixes` names. Main is then `pending_fix` in `detail.red_pending` until a run of the check on
   the fix answers it.
 - A change that no check covers, such as a document no check reads, merges in the next push.
 - `bay status` describes your own changes and counts the others; `bay status <change>` reads one.

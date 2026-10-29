@@ -239,7 +239,8 @@ pub struct ChangeRecord {
     /// The landed change this change undoes, for `bay undo` (§ 4): its `Reverts:` trailer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reverts: Option<String>,
-    /// The landed change this change fixes, for `start --fixes` (G161): its `Fixes:` trailer.
+    /// The landed change, or the post check, this change fixes, for `start --fixes` (G161): its
+    /// `Fixes:` trailer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fixes: Option<String>,
     /// Actors this change was adopted from, oldest first (§ 4).
@@ -285,6 +286,16 @@ pub struct StartedFrom {
 }
 
 impl ChangeRecord {
+    /// What this change names as repaired: its `Fixes:`, `Reverts:` and `Supersedes:` (a red
+    /// post check is answered by these, `crate::red::repairs`).
+    #[must_use]
+    pub fn repair_names(&self) -> Vec<&String> {
+        [&self.fixes, &self.reverts, &self.supersedes]
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
     /// Whether operation `op_id` is finished for good: terminal, or gone from a chain the
     /// retention cut closed (§ 5), so it is never run or counted again. A blocked operation
     /// may still be repaired, so it is not.

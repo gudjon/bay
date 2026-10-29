@@ -41,8 +41,9 @@ enum Command {
         /// change (after a merge, plain start already does)
         #[arg(long)]
         new: bool,
-        /// The merged change this one fixes; its merge carries a Fixes: trailer
-        #[arg(long, value_name = "CHANGE")]
+        /// The merged change this one fixes, or the post check of main's policy it fixes (a
+        /// red's one name that never moves); its merge carries a Fixes: trailer
+        #[arg(long, value_name = "CHANGE|CHECK")]
         fixes: Option<String>,
         /// A sandbox lane of the config: the change's checks run, and it never merges
         #[arg(long, value_name = "LANE")]

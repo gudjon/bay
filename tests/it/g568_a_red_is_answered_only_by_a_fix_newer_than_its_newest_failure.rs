@@ -8,10 +8,17 @@
 //! so it moves at each failing run; a fix written for the owner of an hour before waited behind
 //! the red it was written to clear (`MAIN_RED`), five times in 108 minutes.
 //!
+//! A fix may also name the check (`start --fixes <check>`), the one name that never moves: an
+//! intermittent check that passes once between failures starts a new red, and the names of the
+//! first red no longer answer it (ws-vr, 2026-10-29: three fixes for one cause, each name moved).
+//!
 //! Guards to mutate, in `src/red.rs`: `Red::answered_by` without `Suspect::failing` (the fix
-//! for the earlier owner waits), the `landings[..at]` bound of the fix search in `decide` (a
-//! fix older than the newest failure clears it), and the `PENDING_FIX` push (main reads green
-//! before a run answers the fix).
+//! for the earlier owner waits), its check-name match (the fix that names the check waits),
+//! the `landings[..at]` bound of the fix search in `decide` (a fix older than the newest failure
+//! clears it), and the `PENDING_FIX` push (main reads green before a run answers the fix). The
+//! runner and the host's hook judge a repair by one function, `red::repairs`; the host judged
+//! by the owner alone before, and refused the repair the runner ran from its own place. In
+//! `src/publish.rs` `queue_gate`, the join of a repair with no place: it lands a pass later.
 
 #![cfg(unix)]
 
@@ -20,7 +27,7 @@ use crate::support;
 use std::path::PathBuf;
 
 use serde_json::Value;
-use support::queued::{Check, Held, Trust, host_under};
+use support::queued::{Check, Held, OTHER_PRODUCER, Trust, finished, host_under};
 use support::{PRODUCER, check_files, passing_result, result_json};
 
 const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\nwhen_paths = [\"src/**\"]\n";
@@ -148,7 +155,11 @@ fn a_fix_for_an_earlier_owner_lands_after_the_owner_moves() {
     let one = suite.land_off_paths("one");
     suite.answer("product_failure");
     let red = suite.status()["detail"]["red"][0].clone();
-    assert_eq!(red["change"], one.as_str(), "the newest failure owns it: {red}");
+    assert_eq!(
+        red["change"],
+        one.as_str(),
+        "the newest failure owns it: {red}"
+    );
     assert_eq!(
         red["fixes"],
         broke.as_str(),
@@ -218,5 +229,105 @@ fn a_fix_the_check_fails_on_leaves_main_red() {
     suite.landed(&again);
     let status = suite.status();
     assert_eq!(status["detail"]["red"], serde_json::json!([]), "{status}");
-    assert_eq!(pending(&status)[0]["fix"]["change"], again.as_str(), "{status}");
+    assert_eq!(
+        pending(&status)[0]["fix"]["change"],
+        again.as_str(),
+        "{status}"
+    );
+}
+
+#[test]
+fn a_fix_that_names_the_check_runs_from_its_place_after_a_pass_moves_the_red() {
+    let suite = Suite::new();
+    suite.land_off_paths("base");
+    suite.answer("pass");
+    let broke = suite.held.queue("broke", "src");
+    suite.landed(&broke);
+    suite.answer("product_failure");
+    assert_eq!(suite.status()["detail"]["red"][0]["fixes"], broke.as_str());
+    // The check passes once between failures, so a new red starts at `two`: every name the
+    // first red gave has moved.
+    suite.land_off_paths("one");
+    suite.answer("pass");
+    let two = suite.land_off_paths("two");
+    suite.answer("product_failure");
+    let red = suite.status()["detail"]["red"][0].clone();
+    assert_eq!(red["check"], "suite", "{red}");
+    assert_eq!(red["fixes"], two.as_str(), "the red's name moved: {red}");
+
+    // A change on the red's paths waits at the head of the line for main to be green.
+    let waits = suite.held.queue("waits", "src");
+    let pass = suite.held.pass(&suite.exec);
+    let trunk = || suite.held.test_box.trunk_change_ids(&suite.held.remote);
+    assert!(
+        !trunk().contains(&waits),
+        "a change on a red main merged: {pass}"
+    );
+
+    // The fix that names the check takes a place behind it and runs from there in the same
+    // visit, and the host takes it.
+    let fix = suite.submit_fix("fix", "suite");
+    suite.landed(&fix);
+    let status = suite.status();
+    assert_eq!(status["detail"]["red"], serde_json::json!([]), "{status}");
+    let rows = pending(&status);
+    assert_eq!(rows[0]["state"], "pending_fix", "{status}");
+    assert_eq!(rows[0]["fix"]["change"], fix.as_str(), "{status}");
+}
+
+#[test]
+fn the_host_takes_a_fix_named_by_its_check_past_a_head_in_its_check() {
+    let suite = Suite::new();
+    suite.land_off_paths("base");
+    suite.answer("pass");
+    let broke = suite.held.queue("broke", "src");
+    suite.landed(&broke);
+    suite.answer("product_failure");
+    // The head is off the red's paths and in its check on one runner, so main's red holds no
+    // place ahead of the fix: only the repair rule lets the host take the fix past it.
+    let ahead = suite
+        .held
+        .queue_with("ahead", &["docs"], &[("docs/ahead.md", "x\n")]);
+    let runs = std::fs::read_to_string(&suite.held.runs).unwrap_or_default();
+    let n = u32::try_from(runs.lines().count()).unwrap() + 1;
+    suite.held.hold_run(n);
+    let runner = suite.held.spawn(&suite.exec);
+    suite.held.wait_held_run(n);
+    let fix = suite.submit_fix("fix", "suite");
+    let other = suite.held.executor("exec-b", OTHER_PRODUCER);
+    let pass = suite.held.pass(&other);
+    let trunk = suite.held.test_box.trunk_change_ids(&suite.held.remote);
+    suite.held.go_run(n);
+    let first = finished(runner);
+    assert!(
+        trunk.contains(&fix),
+        "the host refused the fix past a head in its check: {pass}"
+    );
+    assert!(!trunk.contains(&ahead), "{first}");
+}
+
+#[test]
+fn a_fix_names_a_post_check_of_mains_policy_or_nothing_is_created() {
+    let suite = Suite::new();
+    // An unknown name, and the policy's pre-merge check `tests`: a red is only a post check's.
+    for named in ["no-such-check", "tests"] {
+        let (code, refused) = result_json(
+            suite
+                .held
+                .test_box
+                .bay(&suite.held.repo)
+                .args(["start", "fix", "--paths", "src/", "--fixes", named]),
+        );
+        assert_eq!(code, 20, "{refused}");
+        let detail = refused["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("no post check by that name") && detail.contains("suite"),
+            "the refusal does not name main's post checks: {refused}"
+        );
+    }
+    let fixed = suite.held.test_box.bay_ok(
+        &suite.held.repo,
+        &["start", "fix", "--paths", "src/", "--fixes", "suite"],
+    );
+    assert_eq!(fixed["detail"]["fixes"], "suite", "{fixed}");
 }

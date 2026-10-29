@@ -329,9 +329,14 @@ impl Red {
     /// was seen failing on since ([`Suspect::failing`]). Fleet findings: with no culprit pinned
     /// the owner is the newest failure, the landing the check last ran on, so it moves with each
     /// run; three fixes naming the first failure (2026-10-28), then one naming the owner of an
-    /// hour before (E36, 2026-10-29), waited behind the red they were written to clear.
+    /// hour before (E36, 2026-10-29), waited behind the red they were written to clear. They
+    /// may also name the check itself (`start --fixes <check>`): the one name that never moves,
+    /// when a pass between failures starts a new red (an intermittent check, 2026-10-29).
     #[must_use]
     pub fn answered_by(&self, names: &[&String]) -> bool {
+        if names.contains(&&self.check) {
+            return true;
+        }
         let range = self.suspect.iter().flat_map(|suspect| {
             suspect
                 .landings
@@ -453,6 +458,24 @@ type Answered = std::collections::HashMap<String, Vec<Value>>;
 /// A git fault, or a committed config bay cannot read.
 pub fn red(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Vec<Red>, String> {
     Ok(judged(git, trunk, registry)?.red)
+}
+
+/// G244: whether a change that names `names` (its `Fixes:`, `Reverts:` and `Supersedes:`)
+/// repairs a red post check of `trunk` ([`Red::answered_by`]), so it runs and lands from its own
+/// place, ahead of the line. The runner (`crate::publish`) and the host's hook (`crate::hook`)
+/// judge by this one rule: a host that judged by fewer names refused the repair the runner ran.
+pub fn repairs(
+    git: &Git,
+    trunk: &str,
+    registry: Option<&Registry>,
+    names: &[&String],
+) -> Result<bool, String> {
+    if names.is_empty() {
+        return Ok(false);
+    }
+    Ok(red(git, trunk, registry)?
+        .iter()
+        .any(|red| red.answered_by(names)))
 }
 
 /// BACKLOG 119: whether one of `reds`, the red checks of `trunk`, covers a path `revision`

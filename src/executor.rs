@@ -1404,7 +1404,7 @@ fn within_reach(repo: &Repo, queue: &Queue) -> impl Fn(&crate::change::Operation
 
 /// Whether `record` names a change it fixes, reverts or supersedes.
 fn names_a_repair(record: &ChangeRecord) -> bool {
-    record.fixes.is_some() || record.reverts.is_some() || record.supersedes.is_some()
+    !record.repair_names().is_empty()
 }
 
 /// How many operations of `ran` reached an outcome that gives up a queue place, or wait in a

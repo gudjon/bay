@@ -3225,8 +3225,14 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     // which wait in arrival order.
     // G552: a change that needs no check runs from its own place too, unless main moved under
     // the head once already: then it keeps its place until that head leaves the head.
+    // A repair with no place yet takes one and runs from it in this visit, never a pass later.
+    let repairs = repairs_red(ctx, trunk)?;
+    if repairs && queue.of(op_id).is_none() {
+        crate::queue::join(ctx.repo, signer.as_ref(), op_id, &ctx.id)?;
+        queue = crate::queue::Queue::read(ctx.repo)?;
+    }
     if let Some(entry) = queue.of(op_id).cloned()
-        && (repairs_red(ctx, trunk)?
+        && (repairs
             || (needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
                 && !main_moved_under(ctx.repo, &head))
             || passes_red(ctx, &queue, entry.seq, trunk)?)
@@ -3331,25 +3337,17 @@ pub fn needs_no_check(git: &Git, trunk: &str, revision: &str) -> Result<bool, St
     }))
 }
 
-/// Whether this change names, by `Fixes:`, `Reverts:` or `Supersedes:`, the change that owns a
-/// red post check on `trunk` (G244).
+/// Whether this change names, by `Fixes:`, `Reverts:` or `Supersedes:`, what answers a red post
+/// check on `trunk` (G244, `crate::red::Red::answered_by`).
 fn repairs_red(ctx: &Ctx, trunk: &str) -> Result<bool, String> {
-    let names: Vec<&String> = [
-        &ctx.record.fixes,
-        &ctx.record.reverts,
-        &ctx.record.supersedes,
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let names = ctx.record.repair_names();
     if names.is_empty() {
         return Ok(false);
     }
     // The post records on the remote decide the red: fetched now, only for a change that names
     // a repair, so a runner never judges a repair on a stale reading.
     ctx.repo.fetch_evidence(&ctx.keys);
-    let reds = crate::red::red(&ctx.repo.git, trunk, ctx.registry.as_ref())?;
-    Ok(reds.iter().any(|red| red.answered_by(&names)))
+    crate::red::repairs(&ctx.repo.git, trunk, ctx.registry.as_ref(), &names)
 }
 
 /// Holds a place in the queue: reserves one if the operation has none, gives up ownership so
@@ -4676,14 +4674,7 @@ fn red_gate(
         .run(&["merge-base", trunk, revision])
         .map_err(|error| error.message())?;
     let changed = check::changed_paths(git, &base, revision)?;
-    let names: Vec<&String> = [
-        &ctx.record.fixes,
-        &ctx.record.reverts,
-        &ctx.record.supersedes,
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let names = ctx.record.repair_names();
     let blocking: Vec<&crate::red::Red> = reds
         .iter()
         .filter(|red| red.covers(&changed))
@@ -4715,7 +4706,7 @@ fn red_gate(
             .with_detail(json!({
                 "red": red,
                 "ways_out": [
-                    "merge a change that names the red's fixes: bay start --fixes <fixes>, or bay undo <fixes>",
+                    "merge a change that names the red's check or its fixes: bay start --fixes <check>, or bay undo <fixes>",
                     "a later run of the post check passes on main",
                     "quarantine the check in the policy",
                 ],

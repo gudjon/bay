@@ -37,7 +37,8 @@ pub struct StartRequest {
     pub resume: Option<String>,
     /// The landed change this one undoes (`bay undo`); it becomes the `Reverts:` trailer.
     pub reverts: Option<String>,
-    /// The landed change this one fixes (`start --fixes`, G161); it becomes the `Fixes:` trailer.
+    /// The landed change this one fixes, or a post check of the policy at its base (`start
+    /// --fixes`, G161); it becomes the `Fixes:` trailer.
     /// Unlike `--new`, it claims no generation of that change's intent.
     pub fixes: Option<String>,
     /// The sandbox lane of `.bay/config.toml` this change works in (`start --lane`, NEW-4): its
@@ -353,12 +354,22 @@ fn named_or_refused(
             crate::config::CONFIG_PATH
         ));
     }
-    // G161: a fix names a change on trunk, or nothing is created.
+    // G161: a fix names a change on trunk, or a post check of the policy at `base` (its red's
+    // one name that never moves, `crate::red::Red::answered_by`), or nothing is created.
     if let Some(fixed) = &request.fixes {
         if !is_change_id(fixed) {
-            return Err(format!("--fixes {fixed} is not a change id"));
-        }
-        if crate::undo::landed_commit(repo, fixed, base)?.is_none() {
+            let post = match crate::policy::load_at(&repo.git, base) {
+                Ok(Some(policy)) => policy.post,
+                _ => Vec::new(),
+            };
+            if !post.iter().any(|check| &check.id == fixed) {
+                let named: Vec<&str> = post.iter().map(|check| check.id.as_str()).collect();
+                return Err(format!(
+                    "--fixes {fixed} is not a change id, and main's policy has no post check by \
+                     that name (its post checks: {named:?})"
+                ));
+            }
+        } else if crate::undo::landed_commit(repo, fixed, base)?.is_none() {
             return Ok(Some(
                 BayResult::blocked(Reason::ChangeNotLanded)
                     .with_change(fixed.clone())

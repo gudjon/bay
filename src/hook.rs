@@ -435,8 +435,8 @@ impl Judge<'_> {
     /// A publication that is not the head's (§ 6, the trust-agents ruling 2026-10-26) stands
     /// only when it releases its change's own place in this push, and nothing ahead can be
     /// affected: its change needs no pre-merge check (`crate::publish::needs_no_check`), or it
-    /// names, by `Fixes:`, `Reverts:` or `Supersedes:`, the change that owns a red post check on
-    /// the trunk it moves (`crate::red`).
+    /// names, by `Fixes:`, `Reverts:` or `Supersedes:`, what answers a red post check on the
+    /// trunk it moves (`crate::red::repairs`, the runner's rule).
     fn repairs_red(
         &self,
         queue: &crate::queue::Queue,
@@ -463,19 +463,7 @@ impl Judge<'_> {
         let Some(record) = self.change_record(change)? else {
             return Ok(false);
         };
-        let names: Vec<&String> = [&record.fixes, &record.reverts, &record.supersedes]
-            .into_iter()
-            .flatten()
-            .collect();
-        if names.is_empty() {
-            return Ok(false);
-        }
-        let reds = crate::red::red(self.git, trunk, Some(self.registry))?;
-        Ok(reds.iter().any(|red| {
-            red.change
-                .as_ref()
-                .is_some_and(|owner| names.contains(&owner))
-        }))
+        crate::red::repairs(self.git, trunk, Some(self.registry), &record.repair_names())
     }
 
     /// BACKLOG 119: a publication that is not the head's stands too when it releases its
