@@ -51,7 +51,7 @@ use support::TestBox;
 ///   talks and a sub-agent merging 40 prose replies; now it is one round and one table.
 /// - 0.6.0, five flags (`talk --backbrief`, and its optional `--outcome`, `--first-step`,
 ///   `--unclear`, `--reason`, A6): a delivery or reliability talk had no reply command at all,
-///   so its recipient answered by oz say; now it is `bay talk --backbrief <id> <status>`, and
+///   so its recipient answered outside bay; now it is `bay talk --backbrief <id> <status>`, and
 ///   the four optional fields have defaults.
 /// - 0.6.1, one flag (`save --paths`, B3): a seat in its own worktree landed one folder by
 ///   starting a change, copying the edits into its view and merging; now it is one command.

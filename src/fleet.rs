@@ -44,13 +44,11 @@ pub const FLEET_EXECUTOR_PREFIX: &str = crate::names::FLEET_EXECUTOR;
 /// The most live summaries the map reads; the host refuses more (`crate::hook`).
 const FLEET_MAX_MACHINES: usize = 256;
 
-/// The talk uplift (owner ruling 2026-10-25): whether talk is on, as the policy at `trunk` says.
+/// The talk uplift (owner ruling 2026-10-25): whether talk is on, as the policy at `trunk` says;
+/// a broken policy is judged as `bay talk` judges it, by the last valid one on main (G564).
 fn talk_policy(git: &Git, trunk: &str) -> Value {
-    match crate::policy::load_at(git, trunk) {
-        Ok(Some(policy)) => policy.talk.to_json(),
-        Ok(None) => crate::policy::TalkPolicy::default().to_json(),
-        Err(why) => json!({"unread": String::from(why)}),
-    }
+    crate::policy::talk_at(git, trunk)
+        .map_or_else(|why| json!({"unread": why}), |talk| talk.to_json())
 }
 
 /// `bay status --all`: the fleet map from the local cache. A cache with no recorded fetch of

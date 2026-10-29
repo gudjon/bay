@@ -58,7 +58,8 @@ bay help                             # every command and flag on one page
 People who are not developers use four words, usually through their agent: `bay save`, `bay waiting`,
 `bay approve` and `bay undo`. Whoever runs bay for the team uses `bay enrol`, `bay prune` and
 `bay doctor`. Agents can also ask each other for one thing: `bay talk <who> "<what>"` (and
-`--to <a> --to <b>`, or `--to-live`, asks several at once). See the
+`--to <a> --to <b>`, or `--to-live`, asks several at once). Talk is off until `.bay/policy.toml` on main
+sets `[talk] enabled = true`. See [talk](https://getbay.io/docs/talk) and the
 [CLI reference](https://getbay.io/docs/cli).
 
 ## One branch, and no agent branches

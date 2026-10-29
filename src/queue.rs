@@ -470,6 +470,18 @@ pub fn join(
     ))
 }
 
+/// Whether operation `op_id` was requested after operation `than` of the same change: a
+/// change numbers its operations `<change id>.<n>` in the order they were requested (G567).
+#[must_use]
+pub fn newer(op_id: &str, than: &str) -> bool {
+    let number = |op_id: &str| {
+        op_id
+            .rsplit_once('.')
+            .and_then(|(_, n)| n.parse::<u64>().ok())
+    };
+    number(op_id) > number(than)
+}
+
 /// Replaces a non-head entry in place with a newer operation of the same change (§ 6), and says
 /// whether it did. A place released since the caller read the queue is never replaced (G424, a
 /// fleet finding, 2026-10-27: a revision written onto a place released as published was retaken

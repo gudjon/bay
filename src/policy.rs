@@ -483,8 +483,8 @@ pub struct CheckEntry {
     /// candidate's own diff against its base changes a path one of them matches, never by the
     /// paths the change declared. G500: a glob that starts with `!` excludes the paths it
     /// matches, read in order as `.gitignore` reads it: the last glob that matches a path
-    /// decides ([`globs_match`]), so `["**/AGENTS.md", "!kanban/**"]` is every `AGENTS.md`
-    /// outside `kanban/`, and a later include takes a path back. Judged at the base and in the
+    /// decides ([`globs_match`]), so `["**/AGENTS.md", "!notes/**"]` is every `AGENTS.md`
+    /// outside `notes/`, and a later include takes a path back. Judged at the base and in the
     /// definition digest, so a candidate cannot narrow it for itself; left out of the canonical
     /// entry when absent. An empty list, or one that starts with an exclusion, makes the policy
     /// invalid.
@@ -2697,16 +2697,16 @@ mod tests {
         use super::globs_match;
         let list =
             |globs: &[&str]| -> Vec<String> { globs.iter().map(|g| (*g).to_owned()).collect() };
-        let agents = list(&["**/AGENTS.md", "!kanban/**"]);
+        let agents = list(&["**/AGENTS.md", "!notes/**"]);
         assert!(globs_match(&agents, "AGENTS.md"));
         assert!(globs_match(&agents, "apps/AGENTS.md"));
         assert!(globs_match(&agents, "new/deep/AGENTS.md"));
-        assert!(!globs_match(&agents, "kanban/AGENTS.md"));
-        assert!(!globs_match(&agents, "kanban/team/AGENTS.md"));
+        assert!(!globs_match(&agents, "notes/AGENTS.md"));
+        assert!(!globs_match(&agents, "notes/team/AGENTS.md"));
         assert!(!globs_match(&agents, "apps/README.md"));
-        let back = list(&["**/AGENTS.md", "!kanban/**", "kanban/AGENTS.md"]);
-        assert!(globs_match(&back, "kanban/AGENTS.md"));
-        assert!(!globs_match(&back, "kanban/team/AGENTS.md"));
+        let back = list(&["**/AGENTS.md", "!notes/**", "notes/AGENTS.md"]);
+        assert!(globs_match(&back, "notes/AGENTS.md"));
+        assert!(!globs_match(&back, "notes/team/AGENTS.md"));
         // An exclusion acts only on what a glob before it took.
         let late = list(&["src/", "!src/gen/", "src/gen/keep.rs", "!src/gen/keep.rs"]);
         assert!(!globs_match(&late, "src/gen/keep.rs"));

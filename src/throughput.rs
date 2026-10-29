@@ -1397,7 +1397,7 @@ mod tests {
 
     /// G500: a footprint keeps the includes of a `when_paths` list, never its exclusions, so
     /// an exclusion never makes two footprints disjoint: they may overlap where the lists do
-    /// not (`**/AGENTS.md` but `kanban/`, against `kanban/`), never the reverse.
+    /// not (`**/AGENTS.md` but `notes/`, against `notes/`), never the reverse.
     #[test]
     fn a_footprint_keeps_only_the_includes_of_a_list_with_exclusions() {
         let dir = tempfile::tempdir().unwrap();
@@ -1416,8 +1416,8 @@ mod tests {
         };
         let text = format!(
             "revision = 1\n{}{}",
-            check("agents", r#"["**/AGENTS.md", "!kanban/**"]"#),
-            check("kanban", r#"["kanban/**"]"#)
+            check("agents", r#"["**/AGENTS.md", "!notes/**"]"#),
+            check("notes", r#"["notes/**"]"#)
         );
         std::fs::write(dir.path().join(".bay/policy.toml"), text).unwrap();
         run(&["add", "."]);
@@ -1426,9 +1426,9 @@ mod tests {
         let policy = crate::policy::load_at(&git, &base).unwrap().unwrap();
         let agents = Footprint::of(&policy, &["apps/AGENTS.md".to_owned()]);
         assert_eq!(agents, globs(&["**/AGENTS.md"]));
-        let kanban = Footprint::of(&policy, &["kanban/plan.md".to_owned()]);
-        assert_eq!(kanban, globs(&["kanban/**"]));
-        assert!(agents.overlaps(&kanban));
+        let notes = Footprint::of(&policy, &["notes/plan.md".to_owned()]);
+        assert_eq!(notes, globs(&["notes/**"]));
+        assert!(agents.overlaps(&notes));
     }
 
     /// A batch of `size` whose first failing member is `culprit` (none: all pass), searched:

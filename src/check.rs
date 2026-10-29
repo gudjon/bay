@@ -1391,7 +1391,7 @@ fn run_serial(
     Ok(None)
 }
 
-/// G561 (BACKLOG #129; a fleet finding, 2026-10-29: venue12's runner wrote nothing for the 27
+/// G561 (BACKLOG #129; a fleet finding, 2026-10-29: a runner wrote nothing for the 27
 /// minutes one post check ran, so its silence read the same as a stall): how often a check that
 /// still runs says so.
 const STILL_EVERY: Duration = Duration::from_secs(300);

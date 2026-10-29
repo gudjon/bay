@@ -4,11 +4,13 @@
 //! `hvvrfutj` and failed with "the change chain moved").
 //!
 //! bay names each chain by its record's id, so a ref of any other name is a copy: it never counts
-//! as a live change, and `bay abandon` of it fails naming the copy and how to remove it.
+//! as a live change, `bay status` lists no copy, and `bay status` or `bay abandon` of the copy
+//! fails naming it and how to remove it.
 //!
 //! Guards to mutate, in `src/change.rs`: the `record.id != id` refusal in `Chain::read` (the
 //! abandon writes to the other change), and the `record.id == id` arm in `Chain::read_all` (the
-//! copy takes the live place and the second start is refused `WIP_LIMIT`).
+//! copy takes the live place and the second start is refused `WIP_LIMIT`), and in `src/status.rs`
+//! the `ChainError::Copy` arm of `held_records` (the listing fails as a whole).
 
 use crate::support;
 
@@ -68,6 +70,24 @@ fn a_copy_takes_no_live_place_and_abandoning_it_names_the_copy() {
     assert_eq!(
         code, 0,
         "the copy of an abandoned change took the actor's one live place: {second}"
+    );
+
+    let (code, listing) = result_json(test_box.bay(&repo).env("BAY_ACTOR", "agent").arg("status"));
+    assert_eq!(code, 0, "a copy failed the whole listing: {listing}");
+    assert!(
+        !listing.to_string().contains(&format!("\"{copy}\"")),
+        "the listing names the copy as a change: {listing}"
+    );
+    let (code, read) = result_json(
+        test_box
+            .bay(&repo)
+            .env("BAY_ACTOR", "agent")
+            .args(["status", &copy]),
+    );
+    assert_ne!(code, 0, "{read}");
+    assert!(
+        read.to_string().contains("a copy bay never wrote"),
+        "a read of the copy alone names it: {read}"
     );
 
     let (code, refused) = result_json(

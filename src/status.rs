@@ -188,11 +188,11 @@ const fn ended(state: crate::change::ChangeState) -> bool {
 
 /// The records of `ids`, read in one batch of every chain (G200b), never one walk per change (a
 /// fleet finding, 2026-10-26: 2,408 state reads, a third of a five-minute status). One named
-/// change is read alone.
-fn held_records(chain: &Chain, ids: &[String]) -> Result<Vec<ChangeRecord>, String> {
+/// change is read alone. A listing (`named` false) leaves out a copy of another change's chain,
+/// which is no change (G563); a read of the copy alone names it.
+fn held_records(chain: &Chain, ids: &[String], named: bool) -> Result<Vec<ChangeRecord>, String> {
     let mut held: std::collections::BTreeMap<String, ChangeRecord> = if ids.len() == 1 {
-        let (_, record) = chain.read(&ids[0]).map_err(|error| error.message())?;
-        std::iter::once((ids[0].clone(), record)).collect()
+        std::collections::BTreeMap::new()
     } else {
         chain
             .read_all()
@@ -202,12 +202,13 @@ fn held_records(chain: &Chain, ids: &[String]) -> Result<Vec<ChangeRecord>, Stri
             .collect()
     };
     ids.iter()
-        .map(|id| match held.remove(id) {
-            Some(record) => Ok(record),
-            None => chain
-                .read(id)
-                .map(|(_, record)| record)
-                .map_err(|error| error.message()),
+        .filter_map(|id| match held.remove(id) {
+            Some(record) => Some(Ok(record)),
+            None => match chain.read(id) {
+                Ok((_, record)) => Some(Ok(record)),
+                Err(crate::change::ChainError::Copy { .. }) if !named => None,
+                Err(error) => Some(Err(error.message())),
+            },
         })
         .collect()
 }
@@ -237,9 +238,10 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     )?;
     // The runtime adapter is asked only for a change this read names: a listing of every
     // change stays bounded however many have landed.
+    let named = change.is_some() || repo.view_change(dir).is_some();
     let read = Read::Full {
         registry: crate::registry::Registry::current(&repo.git)?,
-        ask_runtime: ids.len() == 1 && (change.is_some() || repo.view_change(dir).is_some()),
+        ask_runtime: ids.len() == 1 && named,
     };
     let mut changes = Vec::new();
     // An agent reads this answer whole, so it has a budget (a fleet finding, 2026-10-26: a
@@ -248,7 +250,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     let me = crate::change::current_actor(&repo.common_dir)
         .ok()
         .map(|actor| actor.name);
-    let records = held_records(&chain, &ids)?;
+    let records = held_records(&chain, &ids, named)?;
     let queued: usize = records.iter().map(crate::presence::waiting).sum();
     let mut records = records;
     records.sort_by_key(|record| me.as_deref() != Some(record.actor.name.as_str()));

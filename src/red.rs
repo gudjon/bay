@@ -65,8 +65,8 @@ use crate::registry::Registry;
 pub const DEFAULT_WINDOW: usize = 50;
 
 /// How many first-parent main commits a red check whose window holds no pass reads back for its
-/// last pass unless `[red] reach` says (B5): five default windows, about half a day of
-/// oz-platform's main at 2026-10-28's 500 merges a day. Each commit past the window costs one
+/// last pass unless `[red] reach` says (B5): five default windows, about half a day of a main
+/// that takes 500 merges a day. Each commit past the window costs one
 /// read of its evidence notes, paid only while a red check has no pass in its window, and once
 /// per runner process (S4).
 pub const DEFAULT_REACH: usize = 250;

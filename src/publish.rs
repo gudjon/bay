@@ -1448,6 +1448,18 @@ fn execute_once(
     if let Some(result) = scanned(&mut ctx, &trunk, &revision)? {
         return Ok(existing(result));
     }
+    // G567 (a fleet finding, 2026-10-29: grjioybr.1 landed over grjioybr.2): a pass lists its
+    // operations when it begins and visits each one later, so it visits one that ended
+    // meanwhile. An operation that ended is no one's to place or run: a place in line would
+    // make it live again.
+    let op = ctx.op(op_id);
+    if op.state == OpState::Superseded {
+        return Ok(superseded(id, op_id, op.epoch, op.owner.as_ref()));
+    }
+    if op.state.is_terminal() {
+        let visited = BayResult::new(Decision::Ok).with_op(op_id);
+        return Ok(ended_elsewhere(repo, id, &visited, Some(op)));
+    }
     // G284: an operation waiting for a person's approval is asked again on every pass, as its
     // author's retry asks it: once the evidence on its candidate, or trunk, changed it is
     // re-armed and run below; unchanged, it keeps waiting, with nothing written and no event.
@@ -3173,6 +3185,17 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     if queue.of(op_id).is_none()
         && let Some(older) = queue.of_change(&ctx.id).cloned()
     {
+        // G567: a place that names a newer operation of the change is that one's. An older
+        // operation, read from a chain behind the queue, neither takes it nor joins behind it.
+        if crate::queue::newer(&older.op_id, op_id) {
+            let op = ctx.op(op_id);
+            return Ok(Gate::Wait(Box::new(superseded(
+                &ctx.id,
+                op_id,
+                op.epoch,
+                op.owner.as_ref(),
+            ))));
+        }
         // A newer revision takes its entry's place, the head's too (the trust-agents ruling,
         // 2026-10-26: a head revised to repair it was sent behind 120 changes). A head revised
         // again and again is still bounded by its deadline releases.

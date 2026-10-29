@@ -2,9 +2,9 @@
 //! drops the paths it matches.
 //!
 //! A glob could only include, so a policy that wanted "every `AGENTS.md` but those under
-//! `kanban/`" listed one `AGENTS.md` glob per top-level folder (49 in oz-platform's policy 38),
+//! `notes/`" listed one `AGENTS.md` glob per top-level folder (49 in one large repository's policy),
 //! and an `AGENTS.md` in a new top-level folder matched none and skipped its pre-merge lints.
-//! Now `when_paths = ["**/AGENTS.md", "!kanban/**"]` says it, read in order as `.gitignore`
+//! Now `when_paths = ["**/AGENTS.md", "!notes/**"]` says it, read in order as `.gitignore`
 //! reads it: the last glob that matches a path decides, so a later include takes a path back.
 //! A list that starts with an exclusion is `POLICY_INVALID` (an exclusion drops only what a
 //! glob before it takes, so a list of exclusions alone matches nothing), and so is a `!` in a
@@ -28,8 +28,8 @@ use std::path::{Path, PathBuf};
 
 use support::{TestBox, check_files, passing_result, result_json};
 
-/// Every `AGENTS.md` outside `kanban/`.
-const AGENTS: &str = "when_paths = [\"**/AGENTS.md\", \"!kanban/**\"]\n";
+/// Every `AGENTS.md` outside `notes/`.
+const AGENTS: &str = "when_paths = [\"**/AGENTS.md\", \"!notes/**\"]\n";
 
 /// One `[[check]]` entry on the shared adapter, with `extra` lines.
 fn entry(id: &str, extra: &str) -> String {
@@ -70,7 +70,7 @@ fn trunk(agents: &str) -> (TestBox, PathBuf, PathBuf) {
         &[
             ("src/a.rs", "fn a() {}\n"),
             ("apps/AGENTS.md", "apps\n"),
-            ("kanban/AGENTS.md", "kanban\n"),
+            ("notes/AGENTS.md", "notes\n"),
         ],
         &[
             ("scripts/bay-check".to_owned(), script),
@@ -105,8 +105,8 @@ fn not_required(landed: &serde_json::Value) -> Vec<String> {
 fn an_agents_md_under_an_excluded_folder_wakes_no_check_and_says_why() {
     let (test_box, repo, _remote) = trunk(AGENTS);
     // The file says `broken`, and it lands: the agents check did not run.
-    let (code, landed) = land_broken(&test_box, &repo, "kanban/AGENTS.md");
-    assert_eq!(code, 0, "the exclusion drops kanban/AGENTS.md: {landed}");
+    let (code, landed) = land_broken(&test_box, &repo, "notes/AGENTS.md");
+    assert_eq!(code, 0, "the exclusion drops notes/AGENTS.md: {landed}");
     assert!(
         not_required(&landed).contains(&"agents".to_owned()),
         "{landed}"
@@ -119,7 +119,7 @@ fn an_agents_md_under_an_excluded_folder_wakes_no_check_and_says_why() {
         .unwrap();
     let reason = row["reason"].as_str().unwrap();
     assert!(
-        reason.contains("when_paths") && reason.contains("!kanban/**"),
+        reason.contains("when_paths") && reason.contains("!notes/**"),
         "{reason}"
     );
 }
@@ -142,15 +142,15 @@ fn an_agents_md_in_a_new_top_level_folder_still_wakes_the_check() {
 #[test]
 fn a_later_include_takes_a_path_back() {
     let (test_box, repo, remote) =
-        trunk("when_paths = [\"**/AGENTS.md\", \"!kanban/**\", \"kanban/AGENTS.md\"]\n");
-    // The last glob that matches decides: `kanban/AGENTS.md` is taken back.
+        trunk("when_paths = [\"**/AGENTS.md\", \"!notes/**\", \"notes/AGENTS.md\"]\n");
+    // The last glob that matches decides: `notes/AGENTS.md` is taken back.
     let tip = test_box.git_bare(&remote, &["rev-parse", "main"]);
-    let (code, refused) = land_broken(&test_box, &repo, "kanban/AGENTS.md");
+    let (code, refused) = land_broken(&test_box, &repo, "notes/AGENTS.md");
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
     assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), tip);
     // A deeper one stays excluded.
-    let (code, landed) = land_broken(&test_box, &repo, "kanban/team/AGENTS.md");
+    let (code, landed) = land_broken(&test_box, &repo, "notes/team/AGENTS.md");
     assert_eq!(code, 0, "{landed}");
     assert!(
         not_required(&landed).contains(&"agents".to_owned()),
@@ -161,10 +161,10 @@ fn a_later_include_takes_a_path_back() {
 #[test]
 fn a_list_that_starts_with_an_exclusion_makes_the_policy_invalid() {
     for (bad, says) in [
-        ("when_paths = [\"!kanban/**\"]\n", "exclusion"),
-        ("when_paths = [\"!kanban/**\", \"!docs/**\"]\n", "exclusion"),
+        ("when_paths = [\"!notes/**\"]\n", "exclusion"),
+        ("when_paths = [\"!notes/**\", \"!docs/**\"]\n", "exclusion"),
         (
-            "when_paths = [\"!kanban/**\", \"**/AGENTS.md\"]\n",
+            "when_paths = [\"!notes/**\", \"**/AGENTS.md\"]\n",
             "exclusion",
         ),
         ("when_paths = [\"**/AGENTS.md\", \"!\"]\n", "when_paths"),
@@ -174,11 +174,11 @@ fn a_list_that_starts_with_an_exclusion_makes_the_policy_invalid() {
             "when_paths",
         ),
         (
-            "when_paths = [\"**/AGENTS.md\", \"!kanban/**\", \"!kanban/**\"]\n",
+            "when_paths = [\"**/AGENTS.md\", \"!notes/**\", \"!notes/**\"]\n",
             "twice",
         ),
         (
-            "when_paths = [\"**/AGENTS.md\"]\npaths = [\"apps/\", \"!kanban/\"]\n",
+            "when_paths = [\"**/AGENTS.md\"]\npaths = [\"apps/\", \"!notes/\"]\n",
             "exclusions",
         ),
     ] {
@@ -194,7 +194,7 @@ fn a_list_that_starts_with_an_exclusion_makes_the_policy_invalid() {
 #[test]
 fn an_exclusion_that_matches_nothing_is_allowed() {
     let (test_box, repo, _remote) = trunk("when_paths = [\"**/AGENTS.md\", \"!nowhere/**\"]\n");
-    let (code, refused) = land_broken(&test_box, &repo, "kanban/AGENTS.md");
+    let (code, refused) = land_broken(&test_box, &repo, "notes/AGENTS.md");
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "CHECK_FAILED", "{refused}");
 }

@@ -489,6 +489,12 @@ pub enum ChainError {
     },
     NotFound,
     BadRecord(String),
+    /// G563: the ref `refs/bay/changes/<id>` holds the record of change `of`, a copy bay never
+    /// wrote.
+    Copy {
+        id: String,
+        of: String,
+    },
 }
 
 impl From<GitError> for ChainError {
@@ -509,6 +515,12 @@ impl ChainError {
             ),
             Self::NotFound => "no such change".to_owned(),
             Self::BadRecord(why) => format!("bad change record: {why}"),
+            Self::Copy { id, of } => format!(
+                "{} holds the record of change {of}: a copy bay never wrote, so it is not a \
+                 change; `git push <remote> :{}` removes it",
+                change_ref(id),
+                change_ref(id)
+            ),
         }
     }
 }
@@ -666,13 +678,10 @@ impl<'a> Chain<'a> {
         let head = self.head(id)?.ok_or(ChainError::NotFound)?;
         let record = self.record_at(&head)?;
         if record.id != id {
-            return Err(ChainError::BadRecord(format!(
-                "{} holds the record of change {}: a copy bay never wrote, so it is not a change; \
-                 `git push <remote> :{}` removes it",
-                change_ref(id),
-                record.id,
-                change_ref(id)
-            )));
+            return Err(ChainError::Copy {
+                id: id.to_owned(),
+                of: record.id,
+            });
         }
         Ok((head, record))
     }

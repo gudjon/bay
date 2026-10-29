@@ -741,7 +741,7 @@ fn bisect(
 /// evidence on the landing's tree, pushed. `Ok(Err(why))` when it cannot run here.
 /// How long a check that no worker answered on this box waits before this box tries it again
 /// (BACKLOG 117, a fleet finding, 2026-10-28: the one post runner waited 383-400 s on each of
-/// eight venue6 tickets that never started, and wrote no record, so the same check came first
+/// eight worker tickets that never started, and wrote no record, so the same check came first
 /// in every pass and its other post checks were silent for two hours). A record of the check
 /// ends the wait.
 const UNAVAILABLE_WAIT: std::time::Duration = std::time::Duration::from_hours(1);

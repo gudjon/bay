@@ -1,4 +1,4 @@
-//! G530 (bay 0.6.1, B5; a fleet finding, 2026-10-28: three of oz-platform's post checks were red
+//! G530 (bay 0.6.1, B5; a fleet finding, 2026-10-28: three post checks of one repository were red
 //! with no pass in their 50-merge window, so bay named no range end, no culprit and no cause). A
 //! red post check whose `[red] window` holds no pass reads further back, up to `[red] reach`
 //! main commits, for its last pass. With the pass found, the suspect range and the culprit work

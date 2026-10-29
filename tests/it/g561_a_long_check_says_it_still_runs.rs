@@ -1,4 +1,4 @@
-//! G561 (BACKLOG #129; a fleet finding, 2026-10-29: venue12's runner wrote nothing for the 27
+//! G561 (BACKLOG #129; a fleet finding, 2026-10-29: a runner wrote nothing for the 27
 //! minutes one post check ran, so its silence read the same as a stall). A check that runs
 //! longer than the still interval says so in the runner's journal, once each interval, naming
 //! the check and the commit; a check that ends sooner writes nothing.
