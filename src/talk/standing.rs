@@ -132,6 +132,10 @@ pub struct Followed {
     pub closed: Option<String>,
     /// How many replies it holds: its backbriefs and answers.
     pub replies: usize,
+    /// G450 (T9): the latest answer's `value`, as recorded; null with none.
+    pub answer: Value,
+    /// G450: the latest backbrief's `status` and `evidence`; null with none.
+    pub reply: Value,
 }
 
 /// The talks `me` sent or must answer, oldest first, as `bay status --since` follows them: every open one,
@@ -168,10 +172,22 @@ fn follow(git: &Git, talk: &Talk, now: u64) -> Result<Followed, String> {
         .iter()
         .filter(|entry| matches!(entry.kind.as_str(), "backbrief" | "answer"))
         .count();
+    let (row, backbrief) = read_row(git, talk, now)?;
+    // G450: the reply's own words, for the actor that asked for this JSON. A notice never prints
+    // them (ruling R13): it shows `replies::shown_value` only.
+    let answer = latest(talk, &["answer"])
+        .and_then(|entry| super::replies::recorded_value(git, &entry.blob))
+        .map_or(Value::Null, Value::from);
+    let reply = backbrief.map_or(
+        Value::Null,
+        |backbrief| json!({"status": backbrief["status"], "evidence": backbrief["evidence"]}),
+    );
     Ok(Followed {
-        row: row(git, talk, now)?,
+        row,
         closed,
         replies,
+        answer,
+        reply,
     })
 }
 
@@ -215,6 +231,11 @@ fn arrival(git: &Git, talk: &Talk) -> Result<(Option<u64>, Value), String> {
 }
 
 fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
+    read_row(git, talk, now).map(|(row, _)| row)
+}
+
+/// The row of `talk`, and the latest backbrief it read.
+fn read_row(git: &Git, talk: &Talk, now: u64) -> Result<(Value, Option<Value>), String> {
     let (acked, wake) = arrival(git, talk)?;
     let backbrief = latest(talk, &["backbrief"])
         .map(|entry| read_entry(git, entry))
@@ -244,7 +265,7 @@ fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
         )
     };
     let age = |at: u64| now.saturating_sub(at);
-    Ok(json!({
+    let row = json!({
         "talk": talk.id,
         "kind": talk.body["kind"],
         "from": talk.from_name(),
@@ -262,7 +283,8 @@ fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
         "wake": wake,
         "expires": talk.body["expires"],
         "standing": held.as_str(),
-    }))
+    });
+    Ok((row, backbrief))
 }
 
 #[cfg(test)]
