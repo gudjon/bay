@@ -2067,10 +2067,10 @@ fn batch(
             // with its place kept, and the next pass forms the batch again on the moved trunk.
             // B4: so is a batch the host refused while trunk stood still (a transient refusal
             // such as GitHub's GH009); it counts one uncounted publish retry, then yields.
-            let now = if ctx.visit != Visit::Own {
-                ctx.repo.fetch_trunk().ok()
-            } else {
+            let now = if ctx.visit == Visit::Own {
                 None
+            } else {
+                ctx.repo.fetch_trunk().ok()
             };
             let fault = match &now {
                 Some(now) if now.as_str() != trunk => "main moved under the batch".to_owned(),
