@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.6.0
+
+- Talk is off unless main's policy says `[talk] enabled = true`; `kinds`, `senders`, `recipients` and `wake` narrow it.
+- `bay talk <who> "<what>"` asks in two words: a discovery talk, its reply owed by `[talk] follow_up_s` (one hour).
+- The same open ask is one talk (`already_sent`); `--to-change` naming nothing is refused; approvers may be `who`.
+- `--to` repeated or `--to-live` asks many as one round; `bay talk --round <id>` shows it; unseen names warn.
+- `bay talk --backbrief <id> <status>` replies to a delivery or reliability talk; its notice names the command.
+- `bay talk --answer <id> <value>` takes the value as an argument; `--value` stays; both together is refused.
+- Each talk result says what happened: a dry run sends nothing; a send names who owes the reply, and when.
+- `bay status --since` talk events carry the reply; a closed talk reads `closed`; a first read lists recent closes.
+- `bay talk --show <id>` reads one talk and every reply, in order; it writes nothing.
+- `bay help --json` names the talk contract; `bay status --all` lists open talks newest first, within 24 KiB.
+- `bay install` adds `bay hook talk-wait` as an `asyncRewake` Stop hook, so an idle seat wakes when talk arrives.
+- A 0.5.x box refuses a talk that carries `round` or `repeats`: update recipients before asking many at once.
+- A runner places a new change in line within seconds, even while it checks another change.
+- A change that waits for a red main keeps its place, is not claimed again, and lands first once green.
+- A batch never carries a change whose paths main's red holds.
+- A runner judges main's red reading only the landings whose post results changed since its last judgement.
+
 ## 0.5.44
 
 - A fix that names a red check's first failure runs ahead of the line, and its landing clears the red.
