@@ -68,10 +68,14 @@
 //! An entry's **footprint** is the union of the `when_paths` of the checks its candidate's
 //! diff requires; a required check with no `when_paths` makes it the whole tree ([`Footprint`]).
 //! Two footprints are disjoint only when bay can show it from their globs' literal prefixes;
-//! otherwise they overlap. A footprint only schedules work: no verdict rests on it.
+//! otherwise they overlap. G500: a footprint keeps only a list's includes, never its `!`
+//! exclusions, since two lists with exclusions cannot be compared exactly this way; it is then
+//! wider than the paths the list matches, and may overlap where they do not, never the
+//! reverse. A footprint only schedules work: no verdict rests on it.
 //!
 //! A check's **read set** is what its verdict may depend on: its `paths` (the only part of the
-//! tree its materialization holds) when it has them, else its `when_paths`. A check declared
+//! tree its materialization holds) when it has them, else its `when_paths`, read in order with
+//! their exclusions ([`crate::policy::globs_match`]). A check declared
 //! with `footprint = true` in the policy says its verdict depends on nothing but the read set's
 //! content, in the candidate's tree and in its base's. Its records then carry a stamp: digests
 //! of exactly the read set's entries in both trees. When a later candidate of the same
@@ -336,9 +340,9 @@ pub fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
 /// record adds `from`, the record it carries.
 pub const FOOTPRINT: &str = "footprint";
 
-/// A candidate's footprint (NEW-10): the union of the `when_paths` of the checks its diff
-/// requires, or the whole tree when one of them has no `when_paths`. It only schedules work:
-/// no verdict rests on it.
+/// A candidate's footprint (NEW-10): the union of the `when_paths` includes of the checks its
+/// diff requires, or the whole tree when one of them has no `when_paths`. It only schedules
+/// work: no verdict rests on it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Footprint {
     Whole,
@@ -358,7 +362,12 @@ impl Footprint {
                 .check(&id)
                 .and_then(|check| check.when_paths.as_ref())
             {
-                Some(paths) => globs.extend(paths.iter().cloned()),
+                // G500: the includes only. An exclusion narrows the list, and two lists with
+                // exclusions are not compared exactly: without them the footprint is wider, so
+                // it may overlap where the lists do not, never the reverse.
+                Some(paths) => {
+                    globs.extend(paths.iter().filter(|glob| !glob.starts_with('!')).cloned());
+                }
                 None => return Self::Whole,
             }
         }
@@ -451,9 +460,10 @@ pub fn stamp(git: &Git, entry: &CheckEntry, tree: &str, base_tree: &str) -> Opti
     Some(json!({"paths": read, "tree": ours, "base_tree": base}))
 }
 
-/// The digest of the entries of `tree` that `read` covers (`when_paths` globs, or `paths`
-/// files and directories): each one's mode, type, object id and path, in Git's order, so two
-/// trees with one digest hold the same bytes under the same names there.
+/// The digest of the entries of `tree` that `read` covers (`when_paths` globs read in order
+/// with their exclusions, or `paths` files and directories): each one's mode, type, object id
+/// and path, in Git's order, so two trees with one digest hold the same bytes under the same
+/// names there.
 ///
 /// # Errors
 ///
@@ -465,10 +475,8 @@ pub fn read_digest(git: &Git, tree: &str, read: &[String]) -> Result<String, Str
     let entries: Vec<&str> = listed
         .split('\0')
         .filter(|line| {
-            line.split_once('\t').is_some_and(|(_, path)| {
-                read.iter()
-                    .any(|glob| crate::policy::glob_matches(glob, path))
-            })
+            line.split_once('\t')
+                .is_some_and(|(_, path)| crate::policy::globs_match(read, path))
         })
         .collect();
     crate::canonical::digest(&json!(entries))
@@ -882,12 +890,7 @@ fn gated_changes(
             Ok(listed) => paths.extend(
                 listed
                     .split('\0')
-                    .filter(|path| {
-                        !path.is_empty()
-                            && globs
-                                .iter()
-                                .any(|glob| crate::policy::glob_matches(glob, path))
-                    })
+                    .filter(|path| !path.is_empty() && crate::policy::globs_match(&globs, path))
                     .map(str::to_owned),
             ),
             Err(_) => paths.extend(globs.iter().cloned()),
@@ -1378,6 +1381,42 @@ mod tests {
         assert!(Footprint::Whole.overlaps(&Footprint::Whole));
         assert!(!Footprint::Whole.overlaps(&globs(&[])));
         assert!(!globs(&[]).overlaps(&Footprint::Whole));
+    }
+
+    /// G500: a footprint keeps the includes of a `when_paths` list, never its exclusions, so
+    /// an exclusion never makes two footprints disjoint: they may overlap where the lists do
+    /// not (`**/AGENTS.md` but `kanban/`, against `kanban/`), never the reverse.
+    #[test]
+    fn a_footprint_keeps_only_the_includes_of_a_list_with_exclusions() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path());
+        let run = |args: &[&str]| git.run(args).unwrap();
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@t.invalid"]);
+        std::fs::create_dir_all(dir.path().join(".bay")).unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        std::fs::write(dir.path().join("scripts/bay-check"), "#!/bin/sh\n").unwrap();
+        let check = |id: &str, when: &str| {
+            format!(
+                "\n[[check]]\nid = \"{id}\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\nwhen_paths = {when}\n"
+            )
+        };
+        let text = format!(
+            "revision = 1\n{}{}",
+            check("agents", r#"["**/AGENTS.md", "!kanban/**"]"#),
+            check("kanban", r#"["kanban/**"]"#)
+        );
+        std::fs::write(dir.path().join(".bay/policy.toml"), text).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "base"]);
+        let base = run(&["rev-parse", "HEAD"]);
+        let policy = crate::policy::load_at(&git, &base).unwrap().unwrap();
+        let agents = Footprint::of(&policy, &["apps/AGENTS.md".to_owned()]);
+        assert_eq!(agents, globs(&["**/AGENTS.md"]));
+        let kanban = Footprint::of(&policy, &["kanban/plan.md".to_owned()]);
+        assert_eq!(kanban, globs(&["kanban/**"]));
+        assert!(agents.overlaps(&kanban));
     }
 
     /// A batch of `size` whose first failing member is `culprit` (none: all pass), searched:

@@ -439,9 +439,13 @@ pub struct CheckEntry {
     pub stage: Stage,
     /// Globs over the candidate's changed paths (G146): the check is required only when the
     /// candidate's own diff against its base changes a path one of them matches, never by the
-    /// paths the change declared. Judged at the base and in the definition digest, so a
-    /// candidate cannot narrow it for itself; left out of the canonical entry when absent. An
-    /// empty list makes the policy invalid.
+    /// paths the change declared. G500: a glob that starts with `!` excludes the paths it
+    /// matches, read in order as `.gitignore` reads it: the last glob that matches a path
+    /// decides ([`globs_match`]), so `["**/AGENTS.md", "!kanban/**"]` is every `AGENTS.md`
+    /// outside `kanban/`, and a later include takes a path back. Judged at the base and in the
+    /// definition digest, so a candidate cannot narrow it for itself; left out of the canonical
+    /// entry when absent. An empty list, or one that starts with an exclusion, makes the policy
+    /// invalid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when_paths: Option<Vec<String>>,
     /// The producers whose records answer this check (G163, owner ruling Q3): a record from any
@@ -649,14 +653,13 @@ impl CheckEntry {
     }
 
     /// Whether `changed`, the paths the candidate's diff against its base changes, wakes this
-    /// check (G146): always without `when_paths`, else when a glob matches one of them.
+    /// check (G146): always without `when_paths`, else when the list matches one of them
+    /// ([`globs_match`], G500: a path it excludes wakes nothing).
     #[must_use]
     pub fn wakes(&self, changed: &[String]) -> bool {
-        self.when_paths.as_ref().is_none_or(|globs| {
-            changed
-                .iter()
-                .any(|path| globs.iter().any(|glob| glob_matches(glob, path)))
-        })
+        self.when_paths
+            .as_ref()
+            .is_none_or(|globs| changed.iter().any(|path| globs_match(globs, path)))
     }
 
     /// The paths of `changed` this check's `when_paths` match, in their order; every one of
@@ -668,7 +671,7 @@ impl CheckEntry {
             .filter(|path| {
                 self.when_paths
                     .as_ref()
-                    .is_none_or(|globs| globs.iter().any(|glob| glob_matches(glob, path.as_str())))
+                    .is_none_or(|globs| globs_match(globs, path))
             })
             .cloned()
             .collect()
@@ -859,8 +862,8 @@ impl Policy {
     }
 
     /// Why check `entry` is not required of a candidate whose diff against its base changes
-    /// `changed` (G146), or `None` when the diff wakes it: it has `when_paths` and no changed
-    /// path matches one. A change to the policy file or an adapter path wakes every check: a
+    /// `changed` (G146), or `None` when the diff wakes it: it has `when_paths`, and the list
+    /// matches no changed path. A change to the policy file or an adapter path wakes every check: a
     /// policy change is checked twice, and a check that never ran would check nothing.
     #[must_use]
     pub fn unwoken(&self, entry: &CheckEntry, changed: &[String]) -> Option<NotRequired> {
@@ -1573,7 +1576,7 @@ fn validate_shape(file: &PolicyFile) -> Result<(), String> {
                 && entry
                     .when_paths
                     .as_ref()
-                    .is_some_and(|globs| globs.iter().any(|glob| glob_matches(glob, POLICY_PATH)))
+                    .is_some_and(|globs| globs_match(globs, POLICY_PATH))
         })
     {
         return Err(format!(
@@ -1750,6 +1753,14 @@ fn validate_materialization(entry: &CheckEntry) -> Result<(), String> {
                 entry.id
             ));
         }
+        // G500: a read set is matched as `when_paths` is, so a `!` here would drop from the
+        // footprint stamp a path the check still sees.
+        if path.starts_with('!') {
+            return Err(format!(
+                "check {} names the path {path:?}; paths takes no '!' exclusions (when_paths does)",
+                entry.id
+            ));
+        }
         if !seen.insert(path.as_str()) {
             return Err(format!("check {} names the path {path} twice", entry.id));
         }
@@ -1836,7 +1847,9 @@ fn validate_footprint(entry: &CheckEntry) -> Result<(), String> {
 
 /// The `when_paths` rules of one `[[check]]` (G146): when present, at least one glob, each a
 /// relative path pattern without `.`, `..` or empty parts (a trailing `/` names a directory),
-/// once. A list that could match nothing is a typo, never silent.
+/// once, after its `!` when it is an exclusion (G500). A list that could match nothing is a
+/// typo, never silent, and so is one that starts with an exclusion: an exclusion drops only
+/// what a glob before it takes, so a list of exclusions alone matches no path.
 fn validate_when_paths(entry: &CheckEntry) -> Result<(), String> {
     let Some(globs) = &entry.when_paths else {
         return Ok(());
@@ -1847,9 +1860,16 @@ fn validate_when_paths(entry: &CheckEntry) -> Result<(), String> {
             entry.id
         ));
     }
+    if let Some(first) = globs.first().filter(|glob| glob.starts_with('!')) {
+        return Err(format!(
+            "check {} starts when_paths with the exclusion {first:?}; an exclusion drops only paths a glob before it includes, so name an include first",
+            entry.id
+        ));
+    }
     let mut seen = std::collections::HashSet::new();
     for glob in globs {
-        let name = glob.strip_suffix('/').unwrap_or(glob);
+        let pattern = glob.strip_prefix('!').unwrap_or(glob);
+        let name = pattern.strip_suffix('/').unwrap_or(pattern);
         if !covers(name, name) || glob.contains('\\') {
             return Err(format!(
                 "check {} names the glob {glob:?} in when_paths; when_paths takes relative path globs, without '.', '..' or empty parts",
@@ -1991,9 +2011,23 @@ fn validate_retry(entry: &CheckEntry) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether `when_paths` glob `glob` matches changed path `path`: `*` matches within one path
-/// part, `?` one character other than `/`, a part `**` any number of parts, and a glob ending
-/// in `/` every path under that directory.
+/// Whether the `when_paths` list `globs` matches changed path `path` (G500), read in order as
+/// `.gitignore` reads it: the last glob that matches the path decides, an include taking it
+/// and a `!` exclusion dropping it, and a path no glob matches is not matched. Each glob is
+/// matched by [`glob_matches`], an exclusion without its `!`.
+#[must_use]
+pub fn globs_match(globs: &[String], path: &str) -> bool {
+    globs
+        .iter()
+        .fold(false, |matched, glob| match glob.strip_prefix('!') {
+            Some(excluded) => matched && !glob_matches(excluded, path),
+            None => matched || glob_matches(glob, path),
+        })
+}
+
+/// Whether one glob of a `when_paths` list matches changed path `path`: `*` matches within
+/// one path part, `?` one character other than `/`, a part `**` any number of parts, and a
+/// glob ending in `/` every path under that directory.
 #[must_use]
 pub fn glob_matches(glob: &str, path: &str) -> bool {
     let glob: Vec<&str> = match glob.strip_suffix('/') {
@@ -2600,6 +2634,30 @@ mod tests {
         assert!(!glob_matches("Cargo.toml", "sub/Cargo.toml"));
         assert!(glob_matches("src/?.rs", "src/a.rs"));
         assert!(!glob_matches("src/?.rs", "src/ab.rs"));
+    }
+
+    /// G500: a `when_paths` list is read in order, the last glob that matches a path deciding:
+    /// an exclusion drops what the globs before it take, and a later include takes it back.
+    #[test]
+    fn when_paths_exclusions_are_read_in_order() {
+        use super::globs_match;
+        let list =
+            |globs: &[&str]| -> Vec<String> { globs.iter().map(|g| (*g).to_owned()).collect() };
+        let agents = list(&["**/AGENTS.md", "!kanban/**"]);
+        assert!(globs_match(&agents, "AGENTS.md"));
+        assert!(globs_match(&agents, "apps/AGENTS.md"));
+        assert!(globs_match(&agents, "new/deep/AGENTS.md"));
+        assert!(!globs_match(&agents, "kanban/AGENTS.md"));
+        assert!(!globs_match(&agents, "kanban/team/AGENTS.md"));
+        assert!(!globs_match(&agents, "apps/README.md"));
+        let back = list(&["**/AGENTS.md", "!kanban/**", "kanban/AGENTS.md"]);
+        assert!(globs_match(&back, "kanban/AGENTS.md"));
+        assert!(!globs_match(&back, "kanban/team/AGENTS.md"));
+        // An exclusion acts only on what a glob before it took.
+        let late = list(&["src/", "!src/gen/", "src/gen/keep.rs", "!src/gen/keep.rs"]);
+        assert!(!globs_match(&late, "src/gen/keep.rs"));
+        assert!(globs_match(&late, "src/a.rs"));
+        assert!(!globs_match(&list(&["src/", "!docs/"]), "docs/a.md"));
     }
 
     /// A check that could see nothing, a path bay could never find in a tree, and a bound
