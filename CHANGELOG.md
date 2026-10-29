@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.45
+
+- A red post check is asked what changed since its last pass before the failure, so a suite that picks its tests by changed paths runs the failing tests again on a fix that landed off its paths.
+
 ## 0.5.44
 
 - A fix that names a red check's first failure runs ahead of the line, and its landing clears the red.
