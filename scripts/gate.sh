@@ -62,6 +62,10 @@ run() {
     esac
 }
 
+# The changelog rule needs no compile, so it fails first (two gates in a row once compiled and
+# ran the whole suite to fail on it). It records nothing: the test suite runs it too.
+echo "gate: changelog" >&2
+sh "$root/scripts/changelog-fits.sh"
 run fmt cargo fmt --check
 run clippy sh -c 'test -z "$(cargo clippy -q --all-targets 2>&1 | grep -E "^(warning|error)")"'
 # The Windows target keeps compiling. Where that target is not installed the check does not

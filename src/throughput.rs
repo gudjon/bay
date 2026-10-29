@@ -938,8 +938,9 @@ pub struct Member {
 
 /// The batch the head and the live entries `behind` it (nearest first) form on `trunk` under
 /// its `policy`: members in queue order while each folds onto the one before it, at most `max`,
-/// none of a lane, with named inputs or a culprit's note, and none past a policy change, a
-/// conflict or a merge with no effect. With `by_lane`, only while each one's footprint overlaps
+/// none of a lane, with named inputs or a culprit's note, none whose diff wakes a pre-merge
+/// check keyed by its commit (G560), and none past a policy change, a conflict or a merge with
+/// no effect. With `by_lane`, only while each one's footprint overlaps
 /// the head's. The head is always the first member when it folds onto trunk.
 ///
 /// # Errors
@@ -1000,6 +1001,17 @@ pub fn plan_batch(
                 break;
             }
         };
+        // G560 (a fleet finding, 2026-10-29: one pre-merge check keyed by its commit kept every
+        // batch off, whatever its when_paths): a member whose diff wakes such a check is passed
+        // over and left for its own turn, where it runs alone; a head that wakes one forms no
+        // batch.
+        if policy.commit_keyed_woken(&changed).is_some() {
+            if members.is_empty() {
+                stopped = "commit_keyed";
+                break;
+            }
+            continue;
+        }
         if by_lane {
             let footprint = Footprint::of(policy, &changed);
             match &lane {

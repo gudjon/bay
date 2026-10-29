@@ -98,6 +98,9 @@ pub struct TalkPolicy {
     pub wake: Option<bool>,
     #[serde(default)]
     pub follow_up_s: Option<u64>,
+    /// G564: why main's policy is `POLICY_INVALID`, when no earlier valid policy judges talk.
+    #[serde(skip)]
+    pub invalid: Option<String>,
 }
 
 impl TalkPolicy {
@@ -121,6 +124,7 @@ impl TalkPolicy {
             "enabled": self.on(),
             "stated": self.enabled.is_some(),
             "kinds": kinds,
+            "policy_invalid": self.invalid,
         })
     }
 
@@ -135,8 +139,13 @@ impl TalkPolicy {
     #[must_use]
     pub fn refusal(&self, body: &Value) -> Option<String> {
         if !self.on() {
-            return Some(format!(
-                "talk is off in this repository: the policy on main ({POLICY_PATH}) does not say `[talk] enabled = true`"
+            return Some(self.invalid.as_ref().map_or_else(
+                || format!(
+                    "talk is off in this repository: the policy on main ({POLICY_PATH}) does not say `[talk] enabled = true`"
+                ),
+                |why| format!(
+                    "talk is off in this repository: the policy on main ({POLICY_PATH}) is POLICY_INVALID, and no earlier policy on main is valid: {why}"
+                ),
             ));
         }
         [
@@ -170,8 +179,41 @@ pub fn talk_at(git: &Git, commit: &str) -> Result<TalkPolicy, String> {
     match load_at(git, commit) {
         Ok(policy) => Ok(policy.map(|policy| policy.talk).unwrap_or_default()),
         Err(LoadError::Git(why)) => Err(why),
-        Err(LoadError::Invalid(_)) => Ok(TalkPolicy::default()),
+        // G564 (BACKLOG #132; a fleet finding, 2026-10-29: a policy that broke a rule turned talk
+        // off, and the refusal said only that it did not say `enabled = true`): a broken policy
+        // judges talk as it judges a merge, by the last valid policy on main (B2); with none,
+        // talk is off and its refusal names the fault.
+        Err(LoadError::Invalid(why)) => Ok(last_valid_at(git, commit).map_or_else(
+            || TalkPolicy {
+                invalid: Some(why),
+                ..TalkPolicy::default()
+            },
+            |(_, policy)| policy.talk,
+        )),
     }
+}
+
+/// B2: the newest commit on `commit`'s first-parent line that changes `.bay/` and whose policy
+/// loads, and that policy; `None` when none of the last 50 such commits has a valid one.
+#[must_use]
+pub fn last_valid_at(git: &Git, commit: &str) -> Option<(String, Policy)> {
+    let listed = git
+        .run(&[
+            "rev-list",
+            "--first-parent",
+            "-n",
+            "50",
+            commit,
+            "--",
+            ".bay/",
+        ])
+        .ok()?;
+    listed
+        .lines()
+        .find_map(|commit| match load_at(git, commit) {
+            Ok(Some(policy)) => Some((commit.to_owned(), policy)),
+            _ => None,
+        })
 }
 
 /// The `[policy]` table: `signing = "all"` (the default) or `"approvals"` (N-21). Any other value
@@ -879,6 +921,18 @@ impl Policy {
                 serde_json::to_string(entry.when_paths.as_deref().unwrap_or_default())
                     .unwrap_or_default()
             ),
+        })
+    }
+
+    /// G560: the first pre-merge check keyed by its commit that `changed` wakes. Its record
+    /// answers one commit only, so a member whose diff wakes one never lands in a batch, whose
+    /// candidate commit that check never saw; a member that wakes none batches.
+    #[must_use]
+    pub fn commit_keyed_woken(&self, changed: &[String]) -> Option<&CheckEntry> {
+        self.checks.iter().find(|entry| {
+            entry.stage != Stage::Post
+                && entry.commit_keyed()
+                && self.unwoken(entry, changed).is_none()
         })
     }
 

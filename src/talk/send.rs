@@ -378,7 +378,7 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
 }
 
 /// The `[talk]` table of the policy on main as this clone holds main: the default table with no
-/// policy, or with one bay cannot read (where it would merge, it is `POLICY_INVALID`).
+/// policy; a policy bay cannot read judges by the last valid one ([`crate::policy::talk_at`]).
 pub(super) fn talk_policy(repo: &Repo) -> Result<TalkPolicy, Stop> {
     let Some(main) = repo
         .git
@@ -387,11 +387,7 @@ pub(super) fn talk_policy(repo: &Repo) -> Result<TalkPolicy, Stop> {
     else {
         return Ok(TalkPolicy::default());
     };
-    match crate::policy::load_at(&repo.git, &main) {
-        Ok(policy) => Ok(policy.map(|policy| policy.talk).unwrap_or_default()),
-        Err(crate::policy::LoadError::Git(why)) => Err(why.into()),
-        Err(crate::policy::LoadError::Invalid(_)) => Ok(TalkPolicy::default()),
-    }
+    crate::policy::talk_at(&repo.git, &main).map_err(Into::into)
 }
 
 /// The two-word send (T1): `ask` with what it leaves out filled in. With no `--kind`, the kind

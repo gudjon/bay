@@ -2183,12 +2183,32 @@ fn first_line(text: &str) -> String {
 /// A planned batch: the policy it is judged by, its members, and why it ended (R7).
 type Planned = (policy::Policy, Vec<throughput::Member>, &'static str);
 
+/// G420, G560: the journal line of a head that lands alone because its diff (`revision`
+/// folded onto `trunk`) wakes a pre-merge check keyed by its commit, naming the check.
+fn say_commit_keyed(
+    git: &Git,
+    policy: &policy::Policy,
+    (trunk, revision): (&str, &str),
+    op_id: &str,
+) -> Result<(), String> {
+    if let throughput::Fold::Applied { changed, .. } =
+        throughput::fold(git, policy, trunk, revision)?
+        && let Some(entry) = policy.commit_keyed_woken(&changed)
+    {
+        eprintln!(
+            "bay runner: {op_id} no batch: check {} is keyed by its commit",
+            entry.id
+        );
+    }
+    Ok(())
+}
+
 /// The batch the head `op_id` at place `at` would form on `trunk`, with the policy at
 /// `trunk`: `None` when batching is off, reuse cannot stand for a run (§ 7,
 /// [`Ctx::reuse_trusted`]), the head runs ahead of its turn (G554), is a repair, a culprit or
-/// names inputs, a check is keyed
-/// by commit (the tip's own commit was never checked), fewer members than `max(min, 2)` fold,
-/// or the lane's recent failure rate is above `max_failure_rate`.
+/// names inputs, its diff wakes a pre-merge check keyed by its commit (G560: the batch's
+/// candidate commit was never checked), fewer members than `max(min, 2)` fold, or the lane's
+/// recent failure rate is above `max_failure_rate`.
 fn batch_plan(
     ctx: &Ctx,
     op_id: &str,
@@ -2253,6 +2273,12 @@ fn batch_plan(
         batch_size(git, &queue, &policy, bounds.max),
         by_lane,
     )?;
+    // G420, G560: a head whose diff wakes a pre-merge check keyed by its commit lands alone,
+    // and the journal names the check.
+    if stopped == "commit_keyed" {
+        say_commit_keyed(git, &policy, (trunk, revision), op_id)?;
+        return Ok(None);
+    }
     if stopped == "end_of_line" && behind.len() < waiting.len() {
         stopped = "unreadable";
     }
@@ -2299,19 +2325,12 @@ fn batch_plan(
     Ok(Some((policy, members, stopped)))
 }
 
-/// Why no batch forms on `trunk` under `policy`, whatever the change: a pre-merge check keyed
-/// by its commit, an unchecked policy, or unsigned evidence the policy does not reuse. A post
-/// check judges main's tip after a landing, never a batch's candidate, so its keying never
-/// keeps a batch off (G420). The head and every speculating runner read this one rule, so they
-/// plan alike.
+/// Why no batch forms on `trunk` under `policy`, whatever the change: an unchecked policy, or
+/// unsigned evidence the policy does not reuse. A pre-merge check keyed by its commit keeps out
+/// only the members whose diff wakes it ([`throughput::plan_batch`], G560), and a post check
+/// judges main's tip after a landing, never a batch's candidate, so its keying keeps no member
+/// out (G420). The head and every speculating runner read this one rule, so they plan alike.
 fn no_batch(ctx: &Ctx, policy: &policy::Policy, trunk: &str) -> Option<String> {
-    if let Some(entry) = policy
-        .checks
-        .iter()
-        .find(|entry| entry.stage != policy::Stage::Post && entry.commit_keyed())
-    {
-        return Some(format!("check {} is keyed by its commit", entry.id));
-    }
     if policy.unchecked {
         return Some("the policy is unchecked".to_owned());
     }
@@ -5779,7 +5798,7 @@ fn check_candidate(
         // so the candidate is judged by the last valid policy on main's first-parent line, with
         // that commit's adapters, and every result says so. Only when main never had a valid
         // one is the candidate refused: a bad policy never passes its own candidate.
-        Err(policy::LoadError::Invalid(why)) => match last_valid_policy(git, trunk) {
+        Err(policy::LoadError::Invalid(why)) => match policy::last_valid_at(git, trunk) {
             Some((at, policy)) => {
                 *ctx.policy_used.borrow_mut() = Some(json!({
                     "commit": at,
@@ -5982,28 +6001,6 @@ fn policy_missing(ctx: &Ctx, op_id: &str, base: &str) -> (bool, &'static str, Op
 
 /// `POLICY_INVALID` (§ 2, § 7): the policy at `at`, the base's or the candidate's own (`which`),
 /// breaks a validity rule, so it judges nothing.
-/// B2: the newest commit on `trunk`'s first-parent line that changes `.bay/` and whose policy
-/// loads, and that policy; `None` when none of the last 50 such commits has a valid one.
-fn last_valid_policy(git: &Git, trunk: &str) -> Option<(String, policy::Policy)> {
-    let listed = git
-        .run(&[
-            "rev-list",
-            "--first-parent",
-            "-n",
-            "50",
-            trunk,
-            "--",
-            ".bay/",
-        ])
-        .ok()?;
-    listed
-        .lines()
-        .find_map(|commit| match policy::load_at(git, commit) {
-            Ok(Some(policy)) => Some((commit.to_owned(), policy)),
-            _ => None,
-        })
-}
-
 fn policy_invalid(
     ctx: &Ctx,
     op_id: &str,

@@ -1,16 +1,17 @@
 //! G420. A rule that keeps every batch off says so in the runner's journal (R7).
 //!
-//! A check keyed by its commit (`materialize = "changed"`, or a `commit` or `history` input)
-//! never batches: its record never answers another commit. Measured 2026-10-27, one such check
-//! kept a fleet's batches off for hours, and the journal said nothing, while a batch that ends
-//! names why. Now the head's batch decision names the check.
+//! A head whose diff wakes a check keyed by its commit (`materialize = "changed"`, or a
+//! `commit` or `history` input) never batches: its record never answers another commit (G560).
+//! Measured 2026-10-27, one such check kept a fleet's batches off for hours, and the journal
+//! said nothing, while a batch that ends names why. Now the head's batch decision names the
+//! check.
 //!
 //! A post check judges main's tip after a landing, never a batch's candidate, so one keyed by
 //! its commit keeps batches on.
 //!
-//! The guards to mutate, in `src/publish.rs`: the `eprintln!` of the `no batch` line in
-//! `batch_plan` (drop it and the journal is silent again), and the `Stage::Post` test in
-//! `no_batch` (drop it and a post check keeps every batch off).
+//! The guards to mutate: the `eprintln!` of the `no batch` line in `batch_plan` (drop it and
+//! the journal is silent again), and the `Stage::Post` test in `Policy::commit_keyed_woken`
+//! (drop it and a post check keeps every batch off).
 
 // Each case runs shell scripts (the check adapter, the relay), so these run on Unix only.
 #![cfg(unix)]

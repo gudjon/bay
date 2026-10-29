@@ -1,28 +1,61 @@
 //! `AGENTS.md`: getbay.io copies `CHANGELOG.md` at each release tag, so each line of a release
-//! is 20 words or fewer. The newest release's section is the one a tag copies; this holds it to
-//! that (two over-long lines in a row reached the site on 2026-10-27).
+//! is 20 words or fewer (two over-long lines in a row reached the site on 2026-10-27). The rule
+//! lives in `scripts/changelog-fits.sh`, which `scripts/gate.sh` runs before any compile; this
+//! runs the same script, on the real changelog and on two that break it.
 
-const MOST_WORDS: usize = 20;
+use std::path::Path;
+use std::process::Command;
+
+fn fits(changelog: &Path) -> (bool, String) {
+    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/changelog-fits.sh");
+    let out = Command::new("sh")
+        .arg(script)
+        .arg(changelog)
+        .output()
+        .unwrap();
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn written(name: &str, text: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
+    std::fs::write(&path, text).unwrap();
+    (dir, path)
+}
 
 #[test]
 fn every_line_of_the_newest_release_is_twenty_words_or_fewer() {
-    let changelog =
-        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/CHANGELOG.md")).unwrap();
-    let newest: Vec<&str> = changelog
-        .split("\n## ")
-        .nth(1)
-        .expect("a release section")
-        .lines()
-        .skip(1)
-        .filter(|line| line.starts_with("- "))
-        .collect();
-    assert!(!newest.is_empty(), "the newest release names no change");
-    for line in newest {
-        let words = line
-            .trim_start_matches("- ")
-            .replace('`', "")
-            .split_whitespace()
-            .count();
-        assert!(words <= MOST_WORDS, "{words} words: {line}");
-    }
+    let (ok, why) = fits(Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/CHANGELOG.md"
+    )));
+    assert!(ok, "{why}");
+}
+
+#[test]
+fn a_line_of_twenty_one_words_fails_and_an_older_release_is_not_read() {
+    let twenty: Vec<String> = (1..=20).map(|n| format!("w{n}")).collect();
+    let twenty = twenty.join(" ");
+    let (_dir, at_most) = written(
+        "CHANGELOG.md",
+        &format!("# Changelog\n\n## 9.9.9\n\n- `{twenty}`\n\n## 9.9.8\n\n- {twenty} x y\n"),
+    );
+    let (ok, why) = fits(&at_most);
+    assert!(ok, "twenty words, backticks not counted: {why}");
+    let (_dir, over) = written(
+        "CHANGELOG.md",
+        &format!("# Changelog\n\n## 9.9.9\n\n- {twenty} `x`\n"),
+    );
+    let (ok, why) = fits(&over);
+    assert!(!ok && why.contains("21 words"), "{why}");
+}
+
+#[test]
+fn a_newest_release_that_names_no_change_fails() {
+    let (_dir, empty) = written("CHANGELOG.md", "# Changelog\n\n## 9.9.9\n\nnothing\n");
+    let (ok, why) = fits(&empty);
+    assert!(!ok && why.contains("names no change"), "{why}");
 }

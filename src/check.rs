@@ -1391,6 +1391,52 @@ fn run_serial(
     Ok(None)
 }
 
+/// G561 (BACKLOG #129; a fleet finding, 2026-10-29: venue12's runner wrote nothing for the 27
+/// minutes one post check ran, so its silence read the same as a stall): how often a check that
+/// still runs says so.
+const STILL_EVERY: Duration = Duration::from_secs(300);
+
+/// [`STILL_EVERY`]; a test build honours `BAY_TEST_STILL_EVERY_S`, a release build never does.
+fn still_every() -> Duration {
+    if option_env!("BAY_RELEASE_VERSION").is_none()
+        && let Some(secs) = std::env::var("BAY_TEST_STILL_EVERY_S")
+            .ok()
+            .and_then(|secs| secs.parse().ok())
+    {
+        return Duration::from_secs(secs);
+    }
+    STILL_EVERY
+}
+
+/// The first ten digits of `commit`, as the runner's journal names a commit.
+fn short(commit: &str) -> &str {
+    commit.get(..10).unwrap_or(commit)
+}
+
+/// Runs `work` and, while it runs, writes `bay: <what> still running (<n>s)` to stderr once
+/// every [`still_every`], so a runner's journal names each check that runs longer than that,
+/// and a gap longer than that is a real stall (G561). Work that ends sooner writes nothing.
+fn saying_still<T>(what: &str, work: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (every, began) = (still_every(), Instant::now());
+    let done = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut next = every;
+            while !done.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(250).min(every));
+                if began.elapsed() >= next && !done.load(Ordering::SeqCst) {
+                    eprintln!("bay: {what} still running ({}s)", began.elapsed().as_secs());
+                    next += every;
+                }
+            }
+        });
+        let out = work();
+        done.store(true, Ordering::SeqCst);
+        out
+    })
+}
+
 /// One run of the check `entry`, the `index`th of `policy`, on `candidate`: its tree and adapter
 /// freshly materialized under `work_dir` and removed after, within what is left of the budget
 /// since `started`, with `about` in its request. Returns the judgement and when the check
@@ -1458,14 +1504,19 @@ fn run_once(
     let ran = Instant::now();
     let mut judged = match not_run {
         Some(judged) => judged,
-        None => within_budget(
-            hooks,
-            limits.heartbeat,
-            entry,
-            policy,
-            candidate,
-            &place,
-            remaining,
+        None => saying_still(
+            &format!("check {} on {}", entry.id, short(candidate.commit)),
+            || {
+                within_budget(
+                    hooks,
+                    limits.heartbeat,
+                    entry,
+                    policy,
+                    candidate,
+                    &place,
+                    remaining,
+                )
+            },
         ),
     };
     // What it read and listed, stamped, unless the run gave no verdict to reuse.
@@ -2377,7 +2428,9 @@ fn run_with_timeout(
 }
 
 /// Materializes what `entry` sees of the candidate (its `paths`, or the whole tree) into
-/// `tree_dir` and its adapter paths from the base into `adapter_dir`, read-only, both within
+/// `tree_dir` and its adapter paths from the base into `adapter_dir`, read-only, and, for a
+/// check that reads history, fetches the history of its `when_paths` into a partial clone
+/// (G566, [`crate::materialize::prefetch_history`]), all within
 /// the entry's `materialize_timeout_s` and what is left of the execution budget (`left`),
 /// renewing the lease (`beat`, every `heartbeat`) as it goes. Returns what is on record when
 /// the check does not run: `infra_failure` naming the bound when it is exceeded or naming a
@@ -2404,19 +2457,7 @@ fn prepare(
         return Ok(budget_out("before this check started"));
     }
     let seconds = entry.materialize_timeout_s.0;
-    let bound = materialize_bound(seconds);
-    let by_budget = left.is_some_and(|left| left < bound);
-    let now = Instant::now();
-    let within = match left {
-        Some(left) if by_budget => left,
-        _ => bound,
-    };
-    // A bound beyond what the clock can hold is never reached: the latest deadline it holds
-    // instead, never an overflow.
-    let deadline = now
-        .checked_add(within)
-        .or_else(|| now.checked_add(Duration::from_secs(u64::from(u32::MAX))))
-        .unwrap_or(now);
+    let (deadline, by_budget) = materialize_deadline(seconds, left);
     let mut last_beat = Instant::now();
     let mut tick = || {
         if heartbeat.is_some_and(|every| last_beat.elapsed() >= every) {
@@ -2450,6 +2491,19 @@ fn prepare(
             deadline,
             &mut tick,
         )
+    })
+    // G566: in a partial clone, the history the check reads is fetched before it runs.
+    .and_then(|()| {
+        if entry.reads_history() {
+            crate::materialize::prefetch_history(
+                git,
+                candidate.commit,
+                entry.when_paths.as_deref(),
+                deadline,
+            )
+        } else {
+            Ok(())
+        }
     });
     // BACKLOG 49 phase 2: the files the manifest keeps outside Git, by their bytes.
     let made = made.map(|()| {
@@ -2462,6 +2516,11 @@ fn prepare(
             deadline,
         )
     });
+    let made_of = if entry.reads_history() {
+        "the candidate, the plugin and the history the check reads"
+    } else {
+        "the candidate and the plugin"
+    };
     match made {
         Ok(Err(why)) => Ok(Some(Judged::without_units(
             Verdict::InfraFailure,
@@ -2471,13 +2530,13 @@ fn prepare(
             make_read_only(adapter_dir);
             Ok(None)
         }
-        Err(Unmade::TimedOut) if by_budget => Ok(budget_out(
-            "while materializing the candidate and the plugin; the check did not run",
-        )),
+        Err(Unmade::TimedOut) if by_budget => Ok(budget_out(&format!(
+            "while materializing {made_of}; the check did not run"
+        ))),
         Err(Unmade::TimedOut) => Ok(Some(Judged::without_units(
             Verdict::InfraFailure,
             Some(format!(
-                "materializing the candidate and the plugin exceeded the check's materialize_timeout_s ({seconds}s); the check did not run"
+                "materializing {made_of} exceeded the check's materialize_timeout_s ({seconds}s); the check did not run"
             )),
         ))),
         Err(Unmade::Refused(why)) => Ok(Some(Judged::without_units(
@@ -2491,6 +2550,25 @@ fn prepare(
             Some(format!("{}; the check did not run", low.message())),
         ))),
     }
+}
+
+/// When materializing gives up: `materialize_timeout_s` (`seconds`) from now, or what is left
+/// of the execution budget (`left`) when that is shorter, which the second value says.
+fn materialize_deadline(seconds: u64, left: Option<Duration>) -> (Instant, bool) {
+    let bound = materialize_bound(seconds);
+    let by_budget = left.is_some_and(|left| left < bound);
+    let now = Instant::now();
+    let within = match left {
+        Some(left) if by_budget => left,
+        _ => bound,
+    };
+    // A bound beyond what the clock can hold is never reached: the latest deadline it holds
+    // instead, never an overflow.
+    let deadline = now
+        .checked_add(within)
+        .or_else(|| now.checked_add(Duration::from_secs(u64::from(u32::MAX))))
+        .unwrap_or(now);
+    (deadline, by_budget)
 }
 
 /// `materialize_timeout_s` as a duration. Under test a second of it is a millisecond, so a

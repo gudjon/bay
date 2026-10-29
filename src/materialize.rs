@@ -387,32 +387,12 @@ fn prefetch(git: &Git, commit: &str, blobs: &[Entry], deadline: Instant) -> Resu
     if missing.is_empty() {
         return Ok(());
     }
-    for chunk in missing.chunks(FETCH_CHUNK) {
-        git.run_bytes_for(
-            &[
-                "-c",
-                "fetch.negotiationAlgorithm=noop",
-                "fetch",
-                "--no-tags",
-                "--no-write-fetch-head",
-                "--recurse-submodules=no",
-                "--filter=blob:none",
-                "--stdin",
-                &remote,
-            ],
-            &[NO_REPLACE],
-            Some(&lines(chunk.iter().map(String::as_str))),
-            remaining(deadline)?,
+    fetch_ids(git, &remote, &missing, deadline, |error| {
+        format!(
+            "{} blobs of the tree are absent from this partial clone, and fetching them from its promisor remote {remote} failed: {error}",
+            missing.len()
         )
-        .map_err(|error| match error {
-            GitError::Timeout { .. } => Unmade::TimedOut,
-            other => Unmade::Failed(format!(
-                "{} blobs of the tree are absent from this partial clone, and fetching them from its promisor remote {remote} failed: {}",
-                missing.len(),
-                other.message()
-            )),
-        })?;
-    }
+    })?;
     let fetched: BTreeSet<&str> = missing.iter().map(String::as_str).collect();
     let left = absent(git, commit, &fetched, no_lazy, deadline)?;
     if left.is_empty() {
@@ -423,6 +403,128 @@ fn prefetch(git: &Git, commit: &str, blobs: &[Entry], deadline: Instant) -> Resu
             left.len()
         )))
     }
+}
+
+/// Fetches `ids` from `remote` into the store, [`FETCH_CHUNK`] at a time, each fetch within
+/// `deadline`; `failed` words a fetch that fails.
+fn fetch_ids(
+    git: &Git,
+    remote: &str,
+    ids: &[String],
+    deadline: Instant,
+    failed: impl Fn(String) -> String,
+) -> Result<(), Unmade> {
+    for chunk in ids.chunks(FETCH_CHUNK) {
+        git.run_bytes_for(
+            &[
+                "-c",
+                "fetch.negotiationAlgorithm=noop",
+                "fetch",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--recurse-submodules=no",
+                "--filter=blob:none",
+                "--stdin",
+                remote,
+            ],
+            &[NO_REPLACE],
+            Some(&lines(chunk.iter().map(String::as_str))),
+            remaining(deadline)?,
+        )
+        .map_err(|error| match error {
+            GitError::Timeout { .. } => Unmade::TimedOut,
+            other => Unmade::Failed(failed(other.message())),
+        })?;
+    }
+    Ok(())
+}
+
+/// G566: fetches into a partial clone, before a check that reads history runs, every object
+/// of `commit`'s history under `globs` (the check's `when_paths`) that the store lacks. The
+/// check's history repository borrows the store's objects and has no promisor remote, so an
+/// object the store lacks is one the check cannot read. The exclusions of `globs` are left
+/// out, so the set fetched is never smaller than the one the globs match. A full clone, or a
+/// check without `when_paths`, is asked nothing.
+///
+/// # Errors
+///
+/// [`Unmade::TimedOut`] at `deadline`; [`Unmade::Failed`], naming how many objects are absent,
+/// when the history cannot be walked, or the fetch fails or leaves one absent.
+pub fn prefetch_history(
+    git: &Git,
+    commit: &str,
+    globs: Option<&[String]>,
+    deadline: Instant,
+) -> Result<(), Unmade> {
+    let pathspecs: Vec<String> = globs
+        .unwrap_or_default()
+        .iter()
+        .filter(|glob| !glob.starts_with('!'))
+        .map(|glob| history_pathspec(glob))
+        .collect();
+    if pathspecs.is_empty() {
+        return Ok(());
+    }
+    let Some(remote) = promisor_remote(git)? else {
+        return Ok(());
+    };
+    let missing = missing_history(git, commit, &pathspecs, deadline)?;
+    if missing.is_empty() {
+        return Ok(());
+    }
+    fetch_ids(git, &remote, &missing, deadline, |error| {
+        format!(
+            "{} objects of the history this check reads are absent from this partial clone, and fetching them from its promisor remote {remote} failed: {error}",
+            missing.len()
+        )
+    })?;
+    let left = missing_history(git, commit, &pathspecs, deadline)?;
+    if left.is_empty() {
+        Ok(())
+    } else {
+        Err(Unmade::Failed(format!(
+            "{} objects of the history this check reads are still absent from this partial clone after fetching them from its promisor remote {remote}",
+            left.len()
+        )))
+    }
+}
+
+/// One `when_paths` glob as a Git pathspec of the same paths: `:(glob)` reads `*`, `?` and a
+/// `**` part as [`crate::policy::glob_matches`] does; a `[`, which that reads as itself, is
+/// escaped; and a directory (a glob ending in `/`) takes every path under it.
+fn history_pathspec(glob: &str) -> String {
+    let glob = glob.replace('[', "\\[");
+    match glob.strip_suffix('/') {
+        Some(dir) => format!(":(glob){dir}/**"),
+        None => format!(":(glob){glob}"),
+    }
+}
+
+/// The objects of `commit`'s history under `pathspecs` the store lacks, found by a
+/// missing-object walk that never fetches (`--missing=print` turns lazy fetching off; so does
+/// `GIT_NO_LAZY_FETCH` from Git 2.45).
+fn missing_history(
+    git: &Git,
+    commit: &str,
+    pathspecs: &[String],
+    deadline: Instant,
+) -> Result<Vec<String>, Unmade> {
+    let mut args = vec!["rev-list", "--objects", "--missing=print", commit, "--"];
+    args.extend(pathspecs.iter().map(String::as_str));
+    let out = git
+        .run_bytes_for(
+            &args,
+            &[NO_REPLACE, ("GIT_NO_LAZY_FETCH", "1")],
+            None,
+            remaining(deadline)?,
+        )
+        .map_err(|error| from_git(&error))?;
+    let found: BTreeSet<String> = String::from_utf8_lossy(&out)
+        .lines()
+        .filter_map(|line| line.strip_prefix('?'))
+        .map(str::to_owned)
+        .collect();
+    Ok(found.into_iter().collect())
 }
 
 /// One id per line, for a Git call that reads ids on stdin.

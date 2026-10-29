@@ -657,10 +657,23 @@ impl<'a> Chain<'a> {
     ///
     /// # Errors
     ///
-    /// [`ChainError::NotFound`], a git fault, or a record that does not parse.
+    /// [`ChainError::NotFound`], a git fault, a record that does not parse, or a record of
+    /// another change: G563 (a fleet finding, 2026-10-29: `refs/bay/changes/hvvrfutj-r` held a
+    /// copy of `hvvrfutj`'s chain, so it took a live place, and `bay abandon hvvrfutj-r` wrote to
+    /// `hvvrfutj` and failed). bay names each chain by its record's id, so a ref of any other name
+    /// is a copy, never a change.
     pub fn read(&self, id: &str) -> Result<(String, ChangeRecord), ChainError> {
         let head = self.head(id)?.ok_or(ChainError::NotFound)?;
         let record = self.record_at(&head)?;
+        if record.id != id {
+            return Err(ChainError::BadRecord(format!(
+                "{} holds the record of change {}: a copy bay never wrote, so it is not a change; \
+                 `git push <remote> :{}` removes it",
+                change_ref(id),
+                record.id,
+                change_ref(id)
+            )));
+        }
         Ok((head, record))
     }
 
@@ -712,9 +725,10 @@ impl<'a> Chain<'a> {
                 let parsed = text
                     .and_then(|text| String::from_utf8(text).ok())
                     .and_then(|text| parse_record(&text).ok());
+                // G563: a copy of another change's chain is left out, as [`Chain::read`] refuses it.
                 let (head, record) = match parsed {
-                    Some(record) => (head, record),
-                    None => self.read(&id).ok()?,
+                    Some(record) if record.id == id => (head, record),
+                    _ => self.read(&id).ok()?,
                 };
                 Some(HeldChain {
                     id,
