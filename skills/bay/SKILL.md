@@ -193,6 +193,7 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 | See merges, events (`main_red`, `main_red_cleared`, `outside_merge`, `main_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_answered`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
+| Read a talk and every reply to it, in order: who wrote each, when, an answer's value, a backbrief's status | `bay talk --show <id>` |
 
 Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 

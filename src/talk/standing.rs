@@ -186,7 +186,7 @@ fn closed_within(git: &Git, talk: &Talk, now: u64, window: u64) -> Result<bool, 
 }
 
 /// `talk` as [`followed`] follows it, read at `now`.
-fn follow(git: &Git, talk: &Talk, now: u64) -> Result<Followed, String> {
+pub(super) fn follow(git: &Git, talk: &Talk, now: u64) -> Result<Followed, String> {
     let closed = if talk.closed() {
         Some(
             talk.closed_as(git)?

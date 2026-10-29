@@ -161,7 +161,7 @@ enum Command {
         stale_days: Option<u64>,
     },
     /// Send one talk to one agent: one action, one target, the time the reply is owed. Arrival is
-    /// the recipient's ack, written when its bay fetches
+    /// the recipient's ack, written when its bay fetches. --show <id> reads a talk and its replies
     Talk(Box<TalkArgs>),
     /// Admin: add one key to the key registry: append it to its class file, sign the new
     /// registry with this machine's registry key (`bay.registryKey`) and push it. The first
@@ -390,6 +390,12 @@ struct TalkArgs {
     /// With --answer: the decision value
     #[arg(long, requires = "answer")]
     value: Option<String>,
+    /// Read the talk with this id and every reply to it, in order; writes nothing
+    #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "to_change", "kind",
+        "change", "artifact", "decision", "check", "follow_up", "decides", "context", "evidence",
+        "supersedes", "expires", "target", "forecast", "commitment", "owns", "promises", "needs",
+        "promise_evidence", "urgent", "dry_run", "answer", "value"])]
+    show: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1003,6 +1009,9 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
 
 /// `bay talk`: an answer with `--answer`, else one ask.
 fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
+    if let Some(talk) = args.show {
+        return bay::talk::show(dir, &talk);
+    }
     if let Some(talk) = args.answer {
         return bay::talk::answer(
             dir,

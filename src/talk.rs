@@ -44,6 +44,7 @@ mod open;
 pub mod poll;
 pub mod replies;
 mod send;
+pub mod show;
 pub mod standing;
 pub mod wake;
 
@@ -51,6 +52,7 @@ pub use accept::{end_questions, receive};
 pub use judge::{Push, judge};
 pub use open::{name_open_talks, open_on};
 pub use send::{Answer, Ask, answer, talk};
+pub use show::show;
 
 use std::fmt::Write as _;
 use std::path::Path;
