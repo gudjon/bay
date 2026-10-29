@@ -7,11 +7,13 @@
 //! The sender's bay runs every refusal before it commits anything ([`plan`]), and `--dry-run`
 //! stops there. The same ask as an open talk from the sender's name to the same `who` is that
 //! talk, `already_sent` (T15, [`open_same`]); a closed talk does not hold it ([`past_closed`]).
+//! Under approvals a name no record here names is sent, and the result says so (H4, [`unseen`]).
 //! It fetches the recipient's talk refs first, so a retry, a body conflict, a closed talk and the
 //! open-talk cap are judged against what the host holds; the host hook judges the same rules
 //! again on the push. A talk committed here that the remote cannot take now stays here, and the
 //! result says `not_pushed`: it is not on the recipient. The same `bay talk` again pushes it.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -398,8 +400,12 @@ fn deliver(repo: &Repo, trust: &Trust, sender: &Actor, ask: &Ask) -> Result<BayR
 enum Plan {
     /// The open talk with the same ask (T15), or this very talk again: [`resend`] pushes it.
     Held { body: Value, talk: Box<Talk> },
-    /// A new talk, signed by `key` (none under approvals).
-    New { body: Value, key: Option<PathBuf> },
+    /// A new talk, signed by `key` (none under approvals), and the names no record here names.
+    New {
+        body: Value,
+        key: Option<PathBuf>,
+        unseen: Vec<String>,
+    },
 }
 
 /// Judges `ask` from `sender`, sent at `sent`, by every refusal, committing nothing.
@@ -455,7 +461,8 @@ fn plan(
         .with("max", json!(super::BAY_TALK_OPEN_MAX))
         .into());
     }
-    Ok(Plan::New { body, key })
+    let unseen = unseen(repo, trust, &body)?;
+    Ok(Plan::New { body, key, unseen })
 }
 
 /// Whether `sender` talks as a reviewer, and the key that signs its talk: none under approvals
@@ -554,14 +561,71 @@ fn past_closed(talks: &[Talk], mut body: Value) -> Result<Value, Refusal> {
     Ok(body)
 }
 
+/// H4 (T3): the names among `who` and `decides` that no record here names, under approvals,
+/// where any actor name is sent. A name is seen when a talk to it is here (the remote's were
+/// fetched into the same names), when a change record this clone holds names it as its actor,
+/// or when it is the sender's. Under `all` the registry refuses a name it does not enrol.
+fn unseen(repo: &Repo, trust: &Trust, body: &Value) -> Result<Vec<String>, String> {
+    if matches!(trust, Trust::Keys(_)) {
+        return Ok(Vec::new());
+    }
+    let from = body["from"]["name"].as_str();
+    let mut actors: Option<BTreeSet<String>> = None;
+    let mut unseen: Vec<String> = Vec::new();
+    for name in ["who", "decides"]
+        .iter()
+        .filter_map(|field| body[*field].as_str())
+    {
+        if Some(name) == from || unseen.iter().any(|held| held == name) {
+            continue;
+        }
+        let talked = repo
+            .git
+            .run(&[
+                "for-each-ref",
+                "--count=1",
+                "--format=%(refname)",
+                &format!("{TALK_PREFIX}{name}/"),
+            ])
+            .map_err(|error| error.message())?;
+        if !talked.trim().is_empty() {
+            continue;
+        }
+        if actors.is_none() {
+            let chains = crate::change::Chain::new(&repo.git)
+                .read_all()
+                .map_err(|error| error.message())?;
+            actors = Some(
+                chains
+                    .into_iter()
+                    .map(|held| held.record.actor.name)
+                    .collect(),
+            );
+        }
+        if !actors.as_ref().is_some_and(|actors| actors.contains(name)) {
+            unseen.push(name.to_owned());
+        }
+    }
+    Ok(unseen)
+}
+
 /// Carries out a judged send: [`resend`] for the talk the ask already is; else the new talk's
-/// commit and push, or nothing on a dry run.
+/// commit and push, or nothing on a dry run, with the names no record here names (H4).
 fn carry_out(repo: &Repo, sender: &Actor, plan: Plan, dry_run: bool) -> Result<BayResult, Stop> {
-    let (body, key) = match plan {
+    let (body, key, unseen) = match plan {
         Plan::Held { body, talk } => return resend(repo, &body, &talk, dry_run),
-        Plan::New { body, key } => (body, key),
+        Plan::New { body, key, unseen } => (body, key, unseen),
     };
-    commit_new(repo, sender, &body, key.as_deref(), dry_run)
+    let mut result = commit_new(repo, sender, &body, key.as_deref(), dry_run)?;
+    if let (false, Some(detail)) = (unseen.is_empty(), result.detail.as_mut()) {
+        let names: Vec<String> = unseen.iter().map(|name| format!("{name:?}")).collect();
+        detail["warning"] = json!(format!(
+            "no record here names {}: no talk to it here or on the remote, and no change of its; the talk is sent all the same, so check the name",
+            names.join(" or ")
+        ));
+        detail["unseen"] = json!(unseen);
+    }
+    Ok(result)
 }
 
 /// The commit of a new talk `body` from `sender`, signed by `key`, and its push; a dry run

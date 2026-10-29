@@ -315,8 +315,8 @@ struct InstallArgs {
 #[derive(Args)]
 struct TalkArgs {
     /// Who owes the reply: a name of lower-case letters, digits and -. Under [policy] signing =
-    /// "approvals" any such name; under "all" an agent the registry enrols, or a person it
-    /// enrols as an approver
+    /// "approvals" any such name (a name no record names is sent with a warning); under "all"
+    /// an agent the registry enrols, or a person it enrols as an approver
     #[arg(value_name = "WHO")]
     actor: Option<String>,
     /// Send to the agent that merged this change (a change id or its commit on main), read from

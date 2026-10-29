@@ -197,7 +197,8 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 
 Run `bay talk --help` for the fields of each kind. One talk asks for one thing. The same ask again while
 its talk is open is that talk (`state: already_sent`); once it is closed, asking again starts a new one.
-A name is lower-case letters, digits and `-`. Under `signing = "approvals"` any such name is sent. Under
+A name is lower-case letters, digits and `-`. Under `signing = "approvals"` any such name is sent, and a
+name no record names comes back in `detail.unseen` with a `detail.warning`: check it for a typo. Under
 `signing = "all"`, `who` and `--decides` are an enrolled agent or approver.
 
 - A talk read after its `--expires` is void: the notice prints `EXPIRED`, and it owes no reply.
