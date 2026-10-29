@@ -452,6 +452,16 @@ fn deadlines(
         seen.after = Some(queue);
         return Ok(());
     }
+    // BACKLOG 119: a head main's red holds waits in its place for main, not for its own work, so
+    // its deadline starts again; red windows of 25 and 35 minutes were measured (2026-10-28).
+    if repo
+        .remote_record(&head.change)
+        .is_ok_and(|remote| waits_on_main(&remote.record, &head.op_id))
+    {
+        heads.insert(head.seq, Instant::now());
+        seen.after = Some(queue);
+        return Ok(());
+    }
     let signer = Keys::load(&repo.git).executor;
     crate::queue::release(repo, signer.as_ref(), head.seq, &head.op_id, "deadline")?;
     heads.remove(&head.seq);
@@ -487,6 +497,17 @@ fn finished(record: &ChangeRecord, head: &crate::queue::Entry) -> Option<String>
         || word(op.state).unwrap_or_default(),
         |outcome| outcome.to_lowercase(),
     ))
+}
+
+/// BACKLOG 119: whether operation `op_id` of `record` waits in its place on main's red: no
+/// runner holds it, and its outcome is `MAIN_RED` (`publish::wait_in_line`).
+fn waits_on_main(record: &ChangeRecord, op_id: &str) -> bool {
+    record.operations.iter().any(|op| {
+        op.op_id == op_id
+            && op.owner.is_none()
+            && matches!(op.state, OpState::Submitted | OpState::Admitted)
+            && op.outcome.as_deref() == Some(Reason::TrunkRed.code())
+    })
 }
 
 /// The newer live operation of `record` that `op_id` was superseded by, when there is one: its
@@ -583,7 +604,7 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 ///
 /// S1: while an operation or the post work runs, the beat's thread places in line each change
 /// submitted since the pass read the chains ([`Arrivals`]); the pass's own visits come in the
-/// order above.
+/// order above, and a change that waits on a red main keeps its place there (BACKLOG 119).
 ///
 /// N-7: after the queue's work, the targets with `advance = true` are fast-forwarded to their
 /// newest promotable commit (`crate::target::advance`); each move goes to `advanced`.
@@ -1135,6 +1156,10 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
         }
         return None;
     }
+    // BACKLOG 119: a head main's red holds waits in its place; the pass visits it in its turn.
+    if waits_on_main(&record, &head.op_id) {
+        return None;
+    }
     // A head nobody holds (one that yielded because main moved, or gave its claim back) is
     // taken now, never left to a later pass (a fleet finding, 2026-10-26: a yielded head waited
     // twenty minutes while all three runners pre-checked changes behind it).
@@ -1304,13 +1329,15 @@ fn names_a_repair(record: &ChangeRecord) -> bool {
     record.fixes.is_some() || record.reverts.is_some() || record.supersedes.is_some()
 }
 
-/// How many operations of `ran` reached an outcome that gives up a queue place.
+/// How many operations of `ran` reached an outcome that gives up a queue place, or wait in a
+/// place the line passes because main's red holds them (BACKLOG 119).
 fn freed(ran: &[Value]) -> usize {
     ran.iter()
         .filter(|row| {
-            row["decision"]
-                .as_str()
-                .is_some_and(|decision| !matches!(decision, "queued" | "ok"))
+            row["reason"] == Reason::TrunkRed.code()
+                || row["decision"]
+                    .as_str()
+                    .is_some_and(|decision| !matches!(decision, "queued" | "ok"))
         })
         .count()
 }

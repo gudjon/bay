@@ -36,6 +36,10 @@
 //! bounded by the window instead: while a check is red, its suspect range reads back to its
 //! last pass; and while no landing answers a check in a window that holds all of trunk, the
 //! landings are read until one requires it.
+//!
+//! BACKLOG 119: a change the red holds waits in its place in line, and no runner claims it
+//! while the red stands. The line passes such places in arrival order ([`holds_place`]), and
+//! once main is green the change runs before every change submitted after it.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -302,6 +306,50 @@ type Last = Option<(String, Judgement, Option<Judged>)>;
 /// A git fault, or a committed config bay cannot read.
 pub fn red(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Vec<Red>, String> {
     Ok(judged(git, trunk, registry)?.red)
+}
+
+/// BACKLOG 119: whether one of `reds`, the red checks of `trunk`, covers a path `revision`
+/// changes against its merge base with `trunk`: that change cannot land while they stand.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn covers_change(git: &Git, reds: &[Red], trunk: &str, revision: &str) -> Result<bool, String> {
+    if reds.is_empty() {
+        return Ok(false);
+    }
+    let base = git
+        .run(&["merge-base", trunk, revision])
+        .map_err(|error| error.message())?;
+    let changed = crate::check::changed_paths(git, &base, revision)?;
+    Ok(reds.iter().any(|red| red.covers(&changed)))
+}
+
+/// BACKLOG 119: whether the queue place `entry` waits on `reds`, the red checks of `trunk`: its
+/// operation, as this store's chain holds it, changes a path one of them covers, or has ended
+/// and lands nothing. The line passes such places in arrival order, and they keep them
+/// (`crate::publish`, and the host's hook, `crate::hook`). A place whose chain or operation
+/// cannot be read is never passed.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn holds_place(
+    git: &Git,
+    reds: &[Red],
+    trunk: &str,
+    entry: &crate::queue::Entry,
+) -> Result<bool, String> {
+    let Ok((_, record)) = crate::change::Chain::new(git).read(&entry.change) else {
+        return Ok(false);
+    };
+    let Some(op) = record.operations.iter().find(|op| op.op_id == entry.op_id) else {
+        return Ok(false);
+    };
+    if op.state.is_terminal() || op.state == crate::change::OpState::Blocked {
+        return Ok(true);
+    }
+    covers_change(git, reds, trunk, &op.revision)
 }
 
 /// The red and the pending checks of `trunk`, as [`state`] judges them, judged once per main tip,
