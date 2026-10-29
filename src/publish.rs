@@ -6559,6 +6559,11 @@ fn wait_for_worker(
 /// released the place, which sent the change to the back of the queue (33 changes in one night).
 /// `None` when this box serves them, or when no other live runner does: the operation then
 /// waits for a worker as before (§ 7), so a queue never stalls on an environment no one serves.
+///
+/// G569 (a fleet finding, 2026-10-29: ueapozv7): a box with no check sandbox that has not
+/// chosen to run checks without one runs no check (ruling R14), so it serves no environment.
+/// Before, `bay merge --wait` on such a box claimed the operation, every check was
+/// `infra_failure`, and the operation stayed blocked with no place, which no runner takes.
 fn served_elsewhere(
     ctx: &Ctx,
     op_id: &str,
@@ -6574,20 +6579,36 @@ fn served_elsewhere(
         return Ok(None);
     };
     let changed = check::changed_paths(git, &base, revision)?;
-    let mut missing: Vec<String> = policy
+    let mut required: Vec<&str> = policy
         .checks
         .iter()
         .filter(|entry| !entry.is_approval() && policy.requires(entry, &changed))
-        .filter(|entry| !served.serves(&entry.environment))
-        .map(|entry| entry.environment.clone())
+        .map(|entry| entry.environment.as_str())
         .collect();
-    missing.sort();
-    missing.dedup();
+    required.sort_unstable();
+    required.dedup();
+    // The sandbox is probed only when this box would run a check here.
+    let unsandboxed = required
+        .iter()
+        .any(|environment| served.serves(environment))
+        .then(|| check::Sandbox::here().refusal)
+        .flatten();
+    let missing: Vec<String> = required
+        .into_iter()
+        .filter(|environment| unsandboxed.is_some() || !served.serves(environment))
+        .map(str::to_owned)
+        .collect();
     if missing.is_empty() {
         return Ok(None);
     }
-    let elsewhere = live_runner_serving(ctx, &missing);
-    Ok(elsewhere.then(|| unavailable(ctx, op_id, &missing, None)))
+    if !live_runner_serving(ctx, &missing) {
+        return Ok(None);
+    }
+    let mut waiting = unavailable(ctx, op_id, &missing, None);
+    if let (Some(why), Some(detail)) = (unsandboxed, waiting.detail.as_mut()) {
+        detail["sandbox"] = json!(why);
+    }
+    Ok(Some(waiting))
 }
 
 /// Whether another runner's presence on the remote is live and declares every one of
