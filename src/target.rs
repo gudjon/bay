@@ -341,13 +341,17 @@ fn failure(rule: &str, why: String, more: Value) -> Value {
     row
 }
 
-/// The check, soak and freeze rules `candidate` fails for `rule` at `now`.
+/// The check, soak and freeze rules `candidate` fails for `rule` at `now`. Unless `every`, a
+/// candidate that already fails the freeze or the soak is not judged on its checks: the caller
+/// needs only whether it is promotable, and its checks are the judgement's git reads, one set
+/// a candidate of the soak window.
 fn time_and_checks(
     git: &Git,
     rule: &Rule,
     candidate: &Candidate,
     registry: Option<&Registry>,
     now: u64,
+    every: bool,
 ) -> Result<Vec<Value>, String> {
     let name = &rule.target.name;
     let commit = &candidate.commit;
@@ -374,6 +378,9 @@ fn time_and_checks(
             ),
             json!({"soak_s": rule.soak_s, "remaining_s": rule.soak_s - age}),
         ));
+    }
+    if !every && !failed.is_empty() {
+        return Ok(failed);
     }
     let rows = checks(git, commit, &rule.requires, registry)?;
     failed.extend(check_failures(rule, commit, &rows));
@@ -445,7 +452,7 @@ pub fn judge(
     let Some(candidate) = candidates(git, &["-1", commit])?.into_iter().next() else {
         return Err(format!("{commit} is not a commit here"));
     };
-    failed.extend(time_and_checks(git, rule, &candidate, registry, now)?);
+    failed.extend(time_and_checks(git, rule, &candidate, registry, now, true)?);
     Ok(failed)
 }
 
@@ -682,7 +689,16 @@ impl Read<'_> {
         }
         let mut newest = None;
         for (behind, candidate) in line_candidates(self.git, from_tip, tip)?.iter().enumerate() {
-            let failed = time_and_checks(self.git, rule, candidate, self.registry, self.now)?;
+            // The newest candidate names every rule it fails; an older one only whether it
+            // fails one.
+            let failed = time_and_checks(
+                self.git,
+                rule,
+                candidate,
+                self.registry,
+                self.now,
+                newest.is_none(),
+            )?;
             if failed.is_empty() {
                 return Ok(json!({"commit": candidate.commit, "behind_from": behind}));
             }

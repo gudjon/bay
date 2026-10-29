@@ -37,7 +37,7 @@ const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage 
 struct Suite {
     held: Held,
     exec: PathBuf,
-    suite: PathBuf,
+    broad: PathBuf,
 }
 
 impl Suite {
@@ -67,15 +67,19 @@ impl Suite {
             &suite,
             &["config", "bay.producerKey", key.to_str().unwrap()],
         );
-        Self { held, exec, suite }
+        Self {
+            held,
+            exec,
+            broad: suite,
+        }
     }
 
     /// The suite answers `verdict` on main's tip.
     fn answer(&self, verdict: &str) {
         let test_box = &self.held.test_box;
-        test_box.git_ok(&self.suite, &["fetch", "-q", "origin"]);
+        test_box.git_ok(&self.broad, &["fetch", "-q", "origin"]);
         let tip = test_box.git_bare(&self.held.remote, &["rev-parse", "main"]);
-        let (code, written) = result_json(test_box.bay(&self.suite).args([
+        let (code, written) = result_json(test_box.bay(&self.broad).args([
             "evidence",
             "record",
             "--kind",

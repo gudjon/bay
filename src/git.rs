@@ -763,6 +763,42 @@ impl Git {
         Ok(read)
     }
 
+    /// The id of each object `names` names (an object id, `<commit>:<path>`, `<commit>^1`), in
+    /// their order, read by one `git cat-file --batch-check`: `None` for a name Git answers
+    /// `missing` (or `ambiguous`). No spawn when `names` is empty.
+    ///
+    /// # Errors
+    ///
+    /// A git fault, or a name that holds a newline.
+    pub fn object_ids(&self, names: &[String]) -> Result<Vec<Option<String>>, GitError> {
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
+        if names.iter().any(|name| name.contains('\n')) {
+            return Err(GitError::Failed {
+                args: "cat-file --batch-check".to_owned(),
+                stderr: "an object name holds a newline".to_owned(),
+            });
+        }
+        let mut input = names.join("\n");
+        input.push('\n');
+        let out = self.run_with(
+            &["cat-file", "--batch-check=%(objectname)"],
+            &[],
+            Some(input.as_bytes()),
+        )?;
+        let mut answers = out.lines();
+        Ok(names
+            .iter()
+            .map(|_| {
+                answers
+                    .next()
+                    .filter(|answer| crate::compact::is_object_id(answer))
+                    .map(str::to_owned)
+            })
+            .collect())
+    }
+
     /// # Errors
     ///
     /// See [`Git::run`].

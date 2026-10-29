@@ -1065,7 +1065,7 @@ impl Reason {
                 "Do nothing yet: bay reads main again. Never report it merged; `bay status <change>` shows the outcome."
             }
             Self::TrunkRed => {
-                "Wait for a fix to the red paths, or fix it yourself with `bay start <intent> --fixes <check>`, the check `detail.red[].check` names, or with the change `detail.fixes` names."
+                "Wait for a fix to the red paths, or fix it with `bay start <intent> --fixes <check>`, naming `detail.red[].check` or the change in `detail.fixes`."
             }
             Self::ChangeAlreadyLanded => {
                 "Do not retry: the change already merged. For more edits, `bay start <intent>` opens the next change."
@@ -1105,7 +1105,7 @@ impl Reason {
                 "Run `bay start <change>`, keep the work `detail.change` merged in `detail.paths`, then `bay merge` again; to undo it on purpose, use `bay undo`."
             }
             Self::RemoteNotFetched => {
-                "Run `bay status` first: it fetches main and the fleet's live records, which `bay status --all` only reads; then run `bay status --all` again. If `bay status` fails, `bay doctor` names what is wrong."
+                "Run `bay status`, which fetches main and the fleet's records, then `bay status --all` again; if `bay status` fails, `bay doctor` names why."
             }
             Self::ConfigMissing => {
                 "Tell the user bay is not set up here; commit `.bay/config.toml` to main only if they ask."

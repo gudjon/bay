@@ -500,31 +500,79 @@ fn history_pathspec(glob: &str) -> String {
     }
 }
 
-/// The objects of `commit`'s history under `pathspecs` the store lacks, found by a
-/// missing-object walk that never fetches (`--missing=print` turns lazy fetching off; so does
-/// `GIT_NO_LAZY_FETCH` from Git 2.45).
+/// The versions of `commit`'s history under `pathspecs` the store lacks. A history check reads
+/// each version of its paths: both sides of every change to them, over every parent
+/// (`--full-history -m`), which the change walk lists for a `:(glob)` pathspec as the check's
+/// own `git log` reads it. (A `rev-list --objects` walk with a wildcard directory part, as in
+/// `configs/*/venue.json`, lists only the trees of its literal prefix, and so no blob.) A
+/// blob-less store holds every tree, and `--no-renames` reads no blob, so the walk fetches
+/// nothing; the absent versions are those `cat-file --batch-check` calls missing with lazy
+/// fetching off (`GIT_NO_LAZY_FETCH`, from Git 2.45; below that it fetches each one itself).
 fn missing_history(
     git: &Git,
     commit: &str,
     pathspecs: &[String],
     deadline: Instant,
 ) -> Result<Vec<String>, Unmade> {
-    let mut args = vec!["rev-list", "--objects", "--missing=print", commit, "--"];
+    let envs = [NO_REPLACE, ("GIT_NO_LAZY_FETCH", "1")];
+    let mut args = vec![
+        "log",
+        "--raw",
+        "--no-abbrev",
+        "--no-renames",
+        "--full-history",
+        "-m",
+        "--root",
+        "--format=",
+        commit,
+        "--",
+    ];
     args.extend(pathspecs.iter().map(String::as_str));
-    let out = git
+    let changes = git
+        .run_bytes_for(&args, &envs, None, remaining(deadline)?)
+        .map_err(|error| from_git(&error))?;
+    let versions = versions_of(&String::from_utf8_lossy(&changes));
+    if versions.is_empty() {
+        return Ok(Vec::new());
+    }
+    let checked = git
         .run_bytes_for(
-            &args,
-            &[NO_REPLACE, ("GIT_NO_LAZY_FETCH", "1")],
-            None,
+            &["cat-file", "--batch-check=%(objectname)"],
+            &envs,
+            Some(&lines(versions.iter().map(String::as_str))),
             remaining(deadline)?,
         )
         .map_err(|error| from_git(&error))?;
-    let found: BTreeSet<String> = String::from_utf8_lossy(&out)
+    Ok(String::from_utf8_lossy(&checked)
         .lines()
-        .filter_map(|line| line.strip_prefix('?'))
+        .filter_map(|line| line.strip_suffix(" missing"))
         .map(str::to_owned)
-        .collect();
-    Ok(found.into_iter().collect())
+        .collect())
+}
+
+/// The blob ids on both sides of each `--raw` change line (`:<old mode> <new mode> <old id>
+/// <new id> <status>\t<path>`): never the zero id of a side that does not exist, nor a
+/// submodule's commit (mode `160000`), which no store of this repository holds.
+fn versions_of(raw: &str) -> BTreeSet<String> {
+    let mut versions = BTreeSet::new();
+    for line in raw.lines() {
+        let Some(change) = line.strip_prefix(':') else {
+            continue;
+        };
+        let words: Vec<&str> = change.split_whitespace().collect();
+        let [old_mode, new_mode, old_id, new_id, ..] = words[..] else {
+            continue;
+        };
+        for (mode, id) in [(old_mode, old_id), (new_mode, new_id)] {
+            if mode != "160000"
+                && crate::compact::is_object_id(id)
+                && id.bytes().any(|byte| byte != b'0')
+            {
+                versions.insert(id.to_owned());
+            }
+        }
+    }
+    versions
 }
 
 /// One id per line, for a Git call that reads ids on stdin.

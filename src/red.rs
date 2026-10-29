@@ -464,6 +464,10 @@ pub fn red(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Vec<Re
 /// repairs a red post check of `trunk` ([`Red::answered_by`]), so it runs and lands from its own
 /// place, ahead of the line. The runner (`crate::publish`) and the host's hook (`crate::hook`)
 /// judge by this one rule: a host that judged by fewer names refused the repair the runner ran.
+///
+/// # Errors
+///
+/// A git fault, or a committed config bay cannot read.
 pub fn repairs(
     git: &Git,
     trunk: &str,
@@ -830,7 +834,11 @@ struct Past<'a> {
     kept: Option<(&'a Answered, &'a HashSet<String>)>,
 }
 
-/// The post answers of the line's landings, each read once and only when asked.
+/// How many landings' answers [`Answers`] reads in one batch at most: the landing asked for
+/// and the unread ones older than it, which a walk to a pass asks for next.
+const READ_AHEAD: usize = 64;
+
+/// The post answers of the line's landings, each read once, in batches from the one asked.
 struct Answers<'a> {
     git: &'a Git,
     registry: Option<&'a Registry>,
@@ -917,13 +925,24 @@ impl<'a> Answers<'a> {
         post: &crate::policy::ManifestEntry,
     ) -> Result<Option<&Value>, String> {
         if self.rows[at].is_none() {
-            self.read += 1;
-            self.rows[at] = Some(crate::publish::post_answers(
-                self.git,
-                &self.line.landings[at].commit,
-                self.registry,
-                true,
-            )?);
+            // The unread landings from `at` on, older ones after it, read in one batch (a fleet
+            // finding, 2026-10-29: one read a landing was six git processes, 594 for a red
+            // window of 99, most of one `bay status --all`).
+            let run = self.rows[at..]
+                .iter()
+                .take(READ_AHEAD)
+                .take_while(|row| row.is_none())
+                .count();
+            let landings: Vec<(&str, &str)> = self.line.landings[at..at + run]
+                .iter()
+                .map(|landing| (landing.commit.as_str(), landing.tree.as_str()))
+                .collect();
+            let answers =
+                crate::publish::post_answers_many(self.git, &landings, self.registry, true)?;
+            self.read += run;
+            for (offset, rows) in answers.into_iter().enumerate() {
+                self.rows[at + offset] = Some(rows);
+            }
         }
         Ok(self.rows[at].as_ref().and_then(|rows| {
             rows.iter()

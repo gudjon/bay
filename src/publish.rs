@@ -8020,19 +8020,87 @@ pub fn post_answers(
         Err(policy::LoadError::Git(why)) => return Err(why),
     };
     let changed = check::changed_paths(git, &base, commit)?;
+    let records = evidence::records_for(git, &tree_of(git, commit)?)?;
+    answers_of(git, &policy, commit, &changed, records, registry, recorded)
+}
+
+/// [`post_answers`] of each landed `(commit, tree)`, in their order, read in a few batches for
+/// them all, never six git processes a landing (a fleet finding, 2026-10-29: a red window of
+/// 99 landings was 594 of them, most of one `bay status --all`): one `cat-file --batch-check`
+/// names their bases, [`policy::load_many`] loads the bases' policies, one `diff-tree --stdin`
+/// reads their diffs and [`evidence::records_for_many`] their notes.
+///
+/// # Errors
+///
+/// A git fault, or an unreadable note.
+pub fn post_answers_many(
+    git: &Git,
+    landings: &[(&str, &str)],
+    registry: Option<&crate::registry::Registry>,
+    recorded: bool,
+) -> Result<Vec<Vec<serde_json::Value>>, String> {
+    let names: Vec<String> = landings
+        .iter()
+        .map(|(commit, _)| format!("{commit}^1"))
+        .collect();
+    // A landing with no parent has no base, so no policy judged it.
+    let parents = git.object_ids(&names).map_err(|error| error.message())?;
+    let based: Vec<(usize, String)> = parents
+        .into_iter()
+        .enumerate()
+        .filter_map(|(at, base)| Some((at, base?)))
+        .collect();
+    let base_ids: Vec<String> = based.iter().map(|(_, base)| base.clone()).collect();
+    let mut judged = Vec::new();
+    for ((at, base), loaded) in based.iter().zip(policy::load_many(git, &base_ids)) {
+        match loaded {
+            Ok(Some(policy)) if !policy.post.is_empty() => judged.push((*at, base, policy)),
+            Ok(_) | Err(policy::LoadError::Invalid(_)) => {}
+            Err(policy::LoadError::Git(why)) => return Err(why),
+        }
+    }
+    let pairs: Vec<(&str, &str)> = judged
+        .iter()
+        .map(|(at, base, _)| (landings[*at].0, base.as_str()))
+        .collect();
+    let trees: Vec<&str> = judged.iter().map(|(at, _, _)| landings[*at].1).collect();
+    let changed = check::changed_paths_many(git, &pairs)?;
+    let records = evidence::records_for_many(git, &trees)?;
+    let mut out: Vec<Vec<serde_json::Value>> = landings.iter().map(|_| Vec::new()).collect();
+    for (((at, _, policy), changed), records) in judged.iter().zip(changed).zip(records) {
+        out[*at] = answers_of(
+            git,
+            policy,
+            landings[*at].0,
+            &changed,
+            records,
+            registry,
+            recorded,
+        )?;
+    }
+    Ok(out)
+}
+
+/// The post answers of landed `commit` ([`post_answers`]), from its base's `policy`, the paths
+/// its diff `changed` and the evidence `records` on its tree.
+fn answers_of(
+    git: &Git,
+    policy: &policy::Policy,
+    commit: &str,
+    changed: &[String],
+    records: Vec<evidence::EvidenceRecord>,
+    registry: Option<&crate::registry::Registry>,
+    recorded: bool,
+) -> Result<Vec<serde_json::Value>, String> {
     // G163: only records from the producers a check lists answer it.
-    let records = policy.answering(evidence::counted(
-        git,
-        evidence::records_for(git, &tree_of(git, commit)?)?,
-        registry,
-    )?);
+    let records = policy.answering(evidence::counted(git, records, registry)?);
     let mut out = Vec::new();
     for entry in &policy.post {
         let id = evidence::CheckId::new(&entry.id, &entry.environment);
         let mut row = json!({"check": entry.id, "environment": entry.environment});
         let skipped = policy
             .check(&id)
-            .and_then(|check| policy.unwoken(check, &changed));
+            .and_then(|check| policy.unwoken(check, changed));
         if recorded {
             // NEW-6: whether this landing requires the check, which no answer may yet say.
             row["required"] = json!(skipped.is_none());

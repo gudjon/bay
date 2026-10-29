@@ -5,7 +5,7 @@
 //! definition digest covers the canonical `[[check]]` entry and the Git object id, at the
 //! base, of every path in its `adapter` list.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -1275,59 +1275,157 @@ impl From<LoadError> for String {
 /// [`LoadError::Git`] on a git fault, or a policy file the tree names whose blob cannot be read
 /// (G104b): unreadable is never "no policy".
 pub fn load_at(git: &Git, commit: &str) -> Result<Option<Policy>, LoadError> {
-    // The policy at a commit never changes: loaded once per process (plan B2). Kept only when
-    // it loads, or is invalid by its text alone: a git fault may pass on a retry, no policy may
-    // be a commit not fetched yet, and an invalid judgement that ran git (an adapter path, an
-    // input) may rest on a failed or timed-out call.
+    remembered(git, commit, || {
+        let mut ran_git = false;
+        let loaded = read_at(git, commit, &mut ran_git);
+        (loaded, ran_git)
+    })
+    .0
+}
+
+/// [`load_at`] of each of `commits`, in their order. Commits whose policy file and adapter
+/// paths hold the same objects hold the same policy, so it loads once for all of them: one
+/// `cat-file --batch-check` names each commit's policy file, one more each adapter path its
+/// text names (a fleet finding, 2026-10-29: a red window of 99 landings loaded each base's
+/// policy apart, two git processes a landing). A commit with no policy file, or one whose text
+/// does not parse, loads alone, as [`load_at`] does.
+#[must_use]
+pub fn load_many(git: &Git, commits: &[String]) -> Vec<Result<Option<Policy>, LoadError>> {
+    let one_by_one = || commits.iter().map(|commit| load_at(git, commit)).collect();
+    if commits.len() < 2 {
+        return one_by_one();
+    }
+    let files: Vec<String> = commits
+        .iter()
+        .map(|commit| format!("{commit}:{POLICY_PATH}"))
+        .collect();
+    let Ok(blobs) = git.object_ids(&files) else {
+        return one_by_one();
+    };
+    let distinct: Vec<String> = blobs
+        .iter()
+        .flatten()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let Ok(texts) = git.objects(&distinct) else {
+        return one_by_one();
+    };
+    // Every adapter path each policy file names, checks' and inputs' alike: what else
+    // [`read_at`] reads at the commit.
+    let mut paths_of: HashMap<&str, Vec<String>> = HashMap::new();
+    for (blob, text) in distinct.iter().zip(texts) {
+        let file = text
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .and_then(|text| toml::from_str::<PolicyFile>(&text).ok());
+        if let Some(file) = file {
+            let checks = file.check.iter().flat_map(|entry| &entry.adapter);
+            let inputs = file.input.iter().flat_map(|entry| &entry.adapter);
+            let paths = checks
+                .chain(inputs)
+                .map(|path| path.trim_end_matches('/').to_owned())
+                .collect();
+            paths_of.insert(blob, paths);
+        }
+    }
+    let paths = |blob: &Option<String>| blob.as_deref().and_then(|blob| paths_of.get(blob));
+    let names: Vec<String> = commits
+        .iter()
+        .zip(&blobs)
+        .flat_map(|(commit, blob)| {
+            paths(blob)
+                .into_iter()
+                .flatten()
+                .map(move |path| format!("{commit}:{path}"))
+        })
+        .collect();
+    let Ok(ids) = git.object_ids(&names) else {
+        return one_by_one();
+    };
+    let mut ids = ids.into_iter();
+    let mut loaded: HashMap<(String, Vec<Option<String>>), Loaded> = HashMap::new();
+    commits
+        .iter()
+        .zip(&blobs)
+        .map(|(commit, blob)| {
+            let (Some(blob), Some(paths)) = (blob, paths(blob)) else {
+                return load_at(git, commit);
+            };
+            let key = (blob.clone(), ids.by_ref().take(paths.len()).collect());
+            if let Some(held) = loaded.get(&key) {
+                return remembered(git, commit, || held.clone()).0;
+            }
+            let held = remembered(git, commit, || {
+                let mut ran_git = false;
+                let loaded = read_at(git, commit, &mut ran_git);
+                (loaded, ran_git)
+            });
+            loaded.insert(key, held.clone());
+            held.0
+        })
+        .collect()
+}
+
+/// A policy as [`read_at`] read it, and whether that ran git past the policy text.
+type Loaded = (Result<Option<Policy>, LoadError>, bool);
+
+/// The policy at `commit`, as `load` reads it, once per process (plan B2). Kept only when it
+/// loads, or is invalid by its text alone: a git fault may pass on a retry, no policy may be a
+/// commit not fetched yet, and an invalid judgement that ran git (an adapter path, an input)
+/// may rest on a failed or timed-out call.
+fn remembered(git: &Git, commit: &str, load: impl FnOnce() -> Loaded) -> Loaded {
     crate::memo::at(
         "policy",
         git,
         commit,
-        |(loaded, ran_git): &(Result<Option<Policy>, LoadError>, bool)| match loaded {
+        |(loaded, ran_git): &Loaded| match loaded {
             Ok(policy) => policy.is_some(),
             Err(LoadError::Invalid(_)) => !ran_git,
             Err(LoadError::Git(_)) => false,
         },
-        || {
-            let mut ran_git = false;
-            let loaded = read_at(git, commit, &mut ran_git);
-            (loaded, ran_git)
-        },
+        load,
     )
-    .0
 }
 
-/// The blob or tree id of every adapter path of `entry` at `commit`, in one `cat-file
-/// --batch-check`, never one process per path (a fleet finding, 2026-10-26: 25 paths across 50
-/// landings were 1,250 git calls in one status). An absent path makes the policy invalid.
-fn adapter_ids(
+/// The blob or tree id of every adapter path of every check in `checks` at `commit`, in their
+/// order, `None` for a path absent there: one `cat-file --batch-check` for the whole policy,
+/// never one process per path or per check (fleet findings: 2026-10-26, 25 paths across 50
+/// landings were 1,250 git calls in one status; 2026-10-29, one call per check was 924).
+fn adapter_objects(
     git: &Git,
     commit: &str,
+    checks: &[CheckEntry],
+) -> Result<Vec<Vec<Option<String>>>, LoadError> {
+    let names: Vec<String> = checks
+        .iter()
+        .flat_map(|entry| &entry.adapter)
+        .map(|path| format!("{commit}:{}", path.trim_end_matches('/')))
+        .collect();
+    let mut ids = git
+        .object_ids(&names)
+        .map_err(|error| LoadError::Git(error.message()))?
+        .into_iter();
+    Ok(checks
+        .iter()
+        .map(|entry| entry.adapter.iter().map(|_| ids.next().flatten()).collect())
+        .collect())
+}
+
+/// The adapter ids of `entry`, from its row of [`adapter_objects`]. An absent path makes the
+/// policy invalid.
+fn adapter_ids(
+    objects: &[Option<String>],
     entry: &CheckEntry,
     invalid: &dyn Fn(String) -> LoadError,
 ) -> Result<BTreeMap<String, Value>, LoadError> {
-    let mut input = String::new();
-    for path in &entry.adapter {
-        input.push_str(commit);
-        input.push(':');
-        input.push_str(path.trim_end_matches('/'));
-        input.push('\n');
-    }
-    let out = git
-        .run_with(
-            &["cat-file", "--batch-check=%(objectname)"],
-            &[],
-            Some(input.as_bytes()),
-        )
-        .map_err(|error| LoadError::Git(error.message()))?;
-    let mut answers = out.lines();
     let mut ids = BTreeMap::new();
-    for path in &entry.adapter {
-        let oid = answers
-            .next()
-            .filter(|line| !line.ends_with(" missing") && !line.is_empty())
+    for (index, path) in entry.adapter.iter().enumerate() {
+        let oid = objects
+            .get(index)
+            .and_then(Option::as_ref)
             .ok_or_else(|| invalid(format!("adapter path {path} is absent")))?;
-        ids.insert(path.clone(), Value::String(oid.to_owned()));
+        ids.insert(path.clone(), Value::String(oid.clone()));
     }
     Ok(ids)
 }
@@ -1351,7 +1449,8 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
     let mut seen = std::collections::HashSet::new();
     let mut manifest = Vec::new();
     let mut post = Vec::new();
-    for entry in &file.check {
+    let mut objects: Option<Vec<Vec<Option<String>>>> = None;
+    for (index, entry) in file.check.iter().enumerate() {
         if !seen.insert((entry.id.clone(), entry.environment.clone())) {
             return Err(invalid(format!(
                 "two [[check]] entries for ({}, {})",
@@ -1376,7 +1475,11 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
             )));
         }
         *ran_git = true;
-        let adapter_ids = adapter_ids(git, commit, entry, &invalid)?;
+        if objects.is_none() {
+            objects = Some(adapter_objects(git, commit, &file.check)?);
+        }
+        let row = objects.as_ref().and_then(|rows| rows.get(index));
+        let adapter_ids = adapter_ids(row.map_or(&[][..], Vec::as_slice), entry, &invalid)?;
         // Ruling 8c: an open quarantine takes its check out of the frozen manifest. G91: a
         // post-publication check is never in it, so it never blocks a landing.
         if !quarantined(entry) {

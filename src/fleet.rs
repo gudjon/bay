@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, ChangeState};
+use crate::change::{Chain, ChangeRecord, ChangeState};
 use crate::clock::{now_rfc3339, unix_of};
 use crate::git::Git;
 use crate::live;
@@ -609,21 +609,15 @@ fn local(repo: &Repo, here: &str, fetched: &Fetched, lines: Option<&[Value]>, ma
     map.machines.insert(here.to_owned(), machine(rows.len()));
 }
 
-/// Every change record this cache holds, by id.
+/// Every change record this cache holds, by id, read in one batch of every chain (G200b), never
+/// one read per change (a fleet finding, 2026-10-29: 2,029 changes were 4,058 git processes of
+/// one `bay status --all`).
 fn local_records(git: &Git) -> Result<BTreeMap<String, ChangeRecord>, String> {
-    let chain = Chain::new(git);
-    let ids = git
-        .run(&["for-each-ref", "--format=%(refname)", CHANGES_PREFIX])
-        .map_err(|error| error.message())?;
-    Ok(ids
-        .lines()
-        .map(|name| name.trim_start_matches(CHANGES_PREFIX))
-        .filter_map(|id| {
-            chain
-                .read(id)
-                .ok()
-                .map(|(_, record)| (id.to_owned(), record))
-        })
+    Ok(Chain::new(git)
+        .read_all()
+        .map_err(|error| error.message())?
+        .into_iter()
+        .map(|held| (held.id, held.record))
         .collect())
 }
 

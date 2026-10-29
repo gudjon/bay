@@ -452,6 +452,17 @@ pub fn append(git: &Git, producer: &str, record: &EvidenceRecord) -> Result<(), 
 ///
 /// A git fault or an unreadable note.
 pub fn records_for(git: &Git, tree: &str) -> Result<Vec<EvidenceRecord>, String> {
+    Ok(records_for_many(git, &[tree])?.pop().unwrap_or_default())
+}
+
+/// [`records_for`] of each of `trees`, in their order: one `for-each-ref` and one
+/// `cat-file --batch` for them all, never two processes a tree (a fleet finding, 2026-10-29: a
+/// red window of 99 landings read the evidence refs 99 times).
+///
+/// # Errors
+///
+/// A git fault, or an unreadable note.
+pub fn records_for_many(git: &Git, trees: &[&str]) -> Result<Vec<Vec<EvidenceRecord>>, String> {
     let refs = git
         .run(&["for-each-ref", "--format=%(refname)", EVIDENCE_PREFIX])
         .map_err(|error| error.message())?;
@@ -459,82 +470,111 @@ pub fn records_for(git: &Git, tree: &str) -> Result<Vec<EvidenceRecord>, String>
         .lines()
         .map(|name| name.trim_start_matches(EVIDENCE_PREFIX))
         .collect();
-    let mut all = Vec::new();
-    for (producer, records) in producers.iter().zip(notes_on(git, &producers, tree)?) {
-        // A record counts only from its own producer's ref, under its own namespaced id, and
-        // only on the note of the tree it is about: a record copied onto another tree's note
-        // says nothing about that tree.
-        all.extend(without_conflicts(records).into_iter().filter(|record| {
-            // G86: a record of a schema major this bay does not know may mean something
-            // it cannot judge, so it never counts here; it stays on the note.
-            record.schema == EVIDENCE_SCHEMA
-                && record.producer.name == *producer
-                && record.id.starts_with(&format!("{producer}/"))
-                && record.subject.tree == tree
-        }));
-    }
-    Ok(all)
+    let notes = notes_on(git, &producers, trees)?;
+    Ok(trees
+        .iter()
+        .zip(notes)
+        .map(|(tree, notes)| {
+            let mut all = Vec::new();
+            for (producer, records) in producers.iter().zip(notes) {
+                // A record counts only from its own producer's ref, under its own namespaced id,
+                // and only on the note of the tree it is about: a record copied onto another
+                // tree's note says nothing about that tree.
+                all.extend(without_conflicts(records).into_iter().filter(|record| {
+                    // G86: a record of a schema major this bay does not know may mean something
+                    // it cannot judge, so it never counts here; it stays on the note.
+                    record.schema == EVIDENCE_SCHEMA
+                        && record.producer.name == *producer
+                        && record.id.starts_with(&format!("{producer}/"))
+                        && record.subject.tree == *tree
+                }));
+            }
+            all
+        })
+        .collect())
 }
 
-/// G196: the records each of `producers` holds on `tree`, in their order, as
+/// G196: the records each of `producers` holds on each of `trees`, in their order, as
 /// [`producer_records`] reads them one by one, read through one `git cat-file --batch`.
 ///
 /// Git finds a note at any fanout of its notes tree (`<tree>`, `ab/<rest>`, `ab/cd/<rest>`
 /// and so on; `git notes add` picks one by the number of notes), so each producer's note is
 /// asked at every fanout and found at the one its tree holds. A tree that is not a full object
-/// id, or a store `cat-file` cannot read, is read producer by producer as before.
+/// id is read producer by producer as before, and every tree is when `cat-file` cannot read
+/// the store.
 ///
 /// # Errors
 ///
 /// A git fault, or a note that is not a list of records.
-fn notes_on(git: &Git, producers: &[&str], tree: &str) -> Result<Vec<Vec<EvidenceRecord>>, String> {
-    let one_by_one = || -> Result<Vec<Vec<EvidenceRecord>>, String> {
+fn notes_on(
+    git: &Git,
+    producers: &[&str],
+    trees: &[&str],
+) -> Result<Vec<Vec<Vec<EvidenceRecord>>>, String> {
+    let one_by_one = |tree: &str| -> Result<Vec<Vec<EvidenceRecord>>, String> {
         producers
             .iter()
             .map(|producer| producer_records(git, producer, tree))
             .collect()
     };
     if producers.is_empty() {
-        return Ok(Vec::new());
+        return Ok(trees.iter().map(|_| Vec::new()).collect());
     }
-    if !crate::compact::is_object_id(tree) {
-        return one_by_one();
-    }
-    let paths = note_paths(tree);
     let mut input = String::new();
-    for producer in producers {
-        for path in &paths {
-            input.push_str(&notes_ref(producer));
-            input.push(':');
-            input.push_str(path);
-            input.push('\n');
+    for tree in trees
+        .iter()
+        .filter(|tree| crate::compact::is_object_id(tree))
+    {
+        for producer in producers {
+            for path in note_paths(tree) {
+                input.push_str(&notes_ref(producer));
+                input.push(':');
+                input.push_str(&path);
+                input.push('\n');
+            }
         }
     }
-    let out = match git.run_bytes(&["cat-file", "--batch"], &[], Some(input.as_bytes())) {
-        Ok(out) => out,
-        Err(GitError::Failed { .. }) => return one_by_one(),
-        Err(error) => return Err(error.message()),
+    let out = if input.is_empty() {
+        Vec::new()
+    } else {
+        match git.run_bytes(&["cat-file", "--batch"], &[], Some(input.as_bytes())) {
+            Ok(out) => out,
+            Err(GitError::Failed { .. }) => {
+                return trees.iter().map(|tree| one_by_one(tree)).collect();
+            }
+            Err(error) => return Err(error.message()),
+        }
     };
     let mut replies = out.as_slice();
-    producers
+    trees
         .iter()
-        .map(|producer| {
-            let notes = notes_ref(producer);
-            let mut found = None;
-            for _ in &paths {
-                if let Some(blob) = next_reply(&mut replies, &notes, tree)? {
-                    if found.is_some() {
-                        return Err(format!("{notes} on {tree}: more than one note"));
-                    }
-                    found = Some(blob);
-                }
+        .map(|tree| {
+            if !crate::compact::is_object_id(tree) {
+                return one_by_one(tree);
             }
-            let Some(blob) = found else {
-                return Ok(Vec::new());
-            };
-            let text = std::str::from_utf8(blob)
-                .map_err(|_| format!("{notes} on {tree}: the note is not utf-8"))?;
-            serde_json::from_str(text).map_err(|error| format!("{notes} on {tree}: {error}"))
+            let paths = note_paths(tree).len();
+            producers
+                .iter()
+                .map(|producer| {
+                    let notes = notes_ref(producer);
+                    let mut found = None;
+                    for _ in 0..paths {
+                        if let Some(blob) = next_reply(&mut replies, &notes, tree)? {
+                            if found.is_some() {
+                                return Err(format!("{notes} on {tree}: more than one note"));
+                            }
+                            found = Some(blob);
+                        }
+                    }
+                    let Some(blob) = found else {
+                        return Ok(Vec::new());
+                    };
+                    let text = std::str::from_utf8(blob)
+                        .map_err(|_| format!("{notes} on {tree}: the note is not utf-8"))?;
+                    serde_json::from_str(text)
+                        .map_err(|error| format!("{notes} on {tree}: {error}"))
+                })
+                .collect()
         })
         .collect()
 }

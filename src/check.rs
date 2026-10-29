@@ -330,6 +330,63 @@ pub fn changed_paths(git: &Git, base: &str, commit: &str) -> Result<Vec<String>,
     Ok(paths)
 }
 
+/// [`changed_paths`] of each `(commit, base)`, in their order, both full object ids, read by
+/// one `git diff-tree --stdin`, never one process a pair (a fleet finding, 2026-10-29: a red
+/// window of 99 landings was 99 of them).
+///
+/// # Errors
+///
+/// A git fault, a name that is not a full object id, or an answer this cannot read.
+pub fn changed_paths_many(git: &Git, pairs: &[(&str, &str)]) -> Result<Vec<Vec<String>>, String> {
+    if pairs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut input = String::new();
+    for (commit, base) in pairs {
+        if !crate::compact::is_object_id(commit) || !crate::compact::is_object_id(base) {
+            return Err(format!("{commit} {base}: not two full object ids"));
+        }
+        input.push_str(commit);
+        input.push(' ');
+        input.push_str(base);
+        input.push('\n');
+    }
+    let out = git
+        .run_bytes(
+            &[
+                "diff-tree",
+                "--stdin",
+                "--always",
+                "-r",
+                "-z",
+                "--name-only",
+                "--no-renames",
+            ],
+            &[],
+            Some(input.as_bytes()),
+        )
+        .map_err(|error| error.message())?;
+    let out = String::from_utf8(out)
+        .map_err(|_| "git diff-tree gave a path that is not utf-8".to_owned())?;
+    // Each pair's answer is its commit id, then the paths, each ended by a NUL; `--always`
+    // names a pair with no change too.
+    let mut words = out.split('\0').filter(|word| !word.is_empty()).peekable();
+    let mut all = Vec::with_capacity(pairs.len());
+    for (at, (commit, _)) in pairs.iter().enumerate() {
+        if words.next() != Some(*commit) {
+            return Err(format!("git diff-tree --stdin gave no answer for {commit}"));
+        }
+        let next = pairs.get(at + 1).map(|(next, _)| *next);
+        let mut paths = Vec::new();
+        while let Some(word) = words.next_if(|word| Some(*word) != next) {
+            paths.push(word.to_owned());
+        }
+        paths.sort_unstable();
+        all.push(paths);
+    }
+    Ok(all)
+}
+
 /// What bounds one run of the checks. No default: the sandbox is always chosen (ruling R14).
 pub struct Limits {
     /// The pre-publication execution budget.
