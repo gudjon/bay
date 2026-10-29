@@ -381,13 +381,13 @@ struct TalkArgs {
     /// Run every refusal and commit nothing
     #[arg(long)]
     dry_run: bool,
-    /// Answer the discovery talk with this id instead of sending one
-    #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "to_change", "kind", "change",
+    /// Answer the discovery talk with this id: `bay talk --answer <id> <value>`
+    #[arg(long, value_name = "ID", conflicts_with_all = ["what", "to_change", "kind", "change",
         "artifact", "decision", "check", "follow_up", "decides", "context", "evidence",
         "expires", "target", "forecast", "commitment", "owns", "promises", "needs",
         "promise_evidence", "urgent", "dry_run"])]
     answer: Option<String>,
-    /// With --answer: the decision value
+    /// With --answer: the decision value, in place of the argument
     #[arg(long, requires = "answer")]
     value: Option<String>,
 }
@@ -1001,13 +1001,15 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
     }
 }
 
-/// `bay talk`: an answer with `--answer`, else one ask.
+/// `bay talk`: an answer with `--answer`, else one ask. The argument after the answer's id
+/// is its value.
 fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
     if let Some(talk) = args.answer {
         return bay::talk::answer(
             dir,
             &bay::talk::Answer {
                 talk,
+                argument: args.actor,
                 value: args.value,
                 supersedes: args.supersedes,
             },

@@ -895,7 +895,7 @@ fn talk_line(actor: &str, talk: &Arrived) -> String {
             .as_ref()
             .map_or_else(String::new, |at| format!(", reply owed by {at}"));
         let answer = if talk.kind == Some("discovery") {
-            format!("; answer with `bay talk --answer {id} --value <answer>`")
+            format!("; answer with `bay talk --answer {id} <value>`")
         } else {
             String::new()
         };
@@ -1362,7 +1362,7 @@ mod tests {
             super::talk_line("alpha", &talk),
             "bay: talk t1 (discovery) from beta arrived for alpha, reply owed by \
              2026-10-28T19:00:00Z: read it with `git show refs/bay/talk/alpha/t1:talk.json`; \
-             answer with `bay talk --answer t1 --value <answer>`\n"
+             answer with `bay talk --answer t1 <value>`\n"
         );
         // G445: a talk judged by name, not by key, says its sender's name is a claim.
         let claimed = super::Arrived {
@@ -1418,9 +1418,9 @@ mod tests {
             expired: false,
         };
         let line = super::talk_line(&"b".repeat(32), &talk);
-        assert_eq!(line.chars().count(), 344, "{line}");
+        assert_eq!(line.chars().count(), 335, "{line}");
         assert!(
-            line.ends_with(&format!("`bay talk --answer {id} --value <answer>`\n")),
+            line.ends_with(&format!("`bay talk --answer {id} <value>`\n")),
             "{line}"
         );
     }

@@ -59,11 +59,14 @@ pub struct Ask {
     pub context_truncated: bool,
 }
 
-/// An answer to a discovery talk: its id, the decision value, and the standing answer's commit
-/// it supersedes, if any.
+/// An answer to a discovery talk: its id, the decision value (the argument, or `--value`), and
+/// the standing answer's commit it supersedes, if any.
 #[derive(Clone, Debug, Default)]
 pub struct Answer {
     pub talk: String,
+    /// The value as the argument: `bay talk --answer <id> <value>` (T5).
+    pub argument: Option<String>,
+    /// The value as `--value`.
     pub value: Option<String>,
     pub supersedes: Option<String>,
 }
@@ -650,18 +653,32 @@ fn answerer(
     Ok((key, me, false))
 }
 
-fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
-    let (repo, trust, me) = open(dir)?;
-    let value = fold(
-        request
-            .value
-            .as_deref()
-            .ok_or_else(|| Refusal::invalid("an answer needs `--value`, the decision"))?,
-    );
+/// T5: the answer's value, given once: as the argument or as `--value`.
+fn answer_value(request: &Answer) -> Result<String, Refusal> {
+    let value = match (&request.argument, &request.value) {
+        (Some(_), Some(_)) => {
+            return Err(Refusal::invalid(
+                "the answer's value is given twice, as the argument and as `--value`: give it once",
+            ));
+        }
+        (Some(value), None) | (None, Some(value)) => fold(value),
+        (None, None) => {
+            return Err(Refusal::invalid(format!(
+                "an answer needs its value, the decision: `bay talk --answer {} <value>`",
+                request.talk
+            )));
+        }
+    };
     plain("value", &value)?;
     if value.trim().is_empty() {
-        return Err(Refusal::invalid("the answer's `--value` is empty").into());
+        return Err(Refusal::invalid("the answer's value is empty"));
     }
+    Ok(value)
+}
+
+fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
+    let (repo, trust, me) = open(dir)?;
+    let value = answer_value(request)?;
     let id = request.talk.as_str();
     let talk = find(&repo, id)?
         .ok_or_else(|| Refusal::invalid(format!("no talk {id} is here or on the remote")))?;
