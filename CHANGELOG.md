@@ -2,7 +2,7 @@
 
 ## 0.5.45
 
-- A red post check is asked what changed since its last pass before the failure, so a suite that picks its tests by changed paths runs the failing tests again on a fix that landed off its paths.
+- A red post check is asked about every change since its last pass, so the failing tests run again.
 
 ## 0.5.44
 
