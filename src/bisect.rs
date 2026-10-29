@@ -202,6 +202,17 @@ fn serves_a_post_check(
     })
 }
 
+/// BACKLOG 113 (G444): whether this box serves the environment of at least one post check of
+/// the policy at `commit`. A box that serves none judges nothing for post work.
+pub(crate) fn serves_post_work(git: &Git, commit: &str) -> bool {
+    match crate::policy::load_at(git, commit) {
+        Ok(Some(policy)) => {
+            serves_a_post_check(&policy, &check::Served::read(git), &BTreeSet::new())
+        }
+        Ok(None) | Err(_) => false,
+    }
+}
+
 /// The runner's own post checks (`[runner] post`): after its queue's work, each post check of the
 /// policy at main's newest tip's first parent runs once on that tip when this box serves its
 /// environment and holds no record of it there yet. One run answers every landing since the last

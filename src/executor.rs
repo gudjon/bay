@@ -1512,6 +1512,21 @@ fn compaction(repo: &Repo, chain: &Chain) -> Option<Value> {
     }
 }
 
+/// 0.6.3: tells the change that owns each red post check of trunk, once (`crate::red_owner`).
+/// A box that serves none of the policy's post checks judges nothing for post work (G444), so it
+/// tells nothing.
+fn red_owners(repo: &Repo) -> Vec<Value> {
+    let tracking = format!("{}^{{commit}}", repo.trunk_tracking_ref());
+    let Ok(trunk) = repo.git.run(&["rev-parse", "--verify", "-q", &tracking]) else {
+        return Vec::new();
+    };
+    let trunk = trunk.trim();
+    if !crate::bisect::serves_post_work(&repo.git, trunk) {
+        return Vec::new();
+    }
+    crate::red_owner::tell(repo, trunk)
+}
+
 /// How many queue entries behind the head one probe tests (G177). The head merges for real
 /// when it runs; a longer queue is reached as its head moves on, since every landing probes
 /// again. A small constant bounds the probe's cost per pass, and the design names none.
@@ -1526,15 +1541,6 @@ const EARLY_PROBES: usize = 8;
 /// decides. A later probe that finds it clean clears the note. Every probe is best effort: a
 /// git fault skips its entry, and a note the remote did not take is written on a later pass.
 /// Returns what was noted, one object per chain written.
-/// 0.6.3: tells the change that owns each red post check of trunk, once (`crate::red_owner`).
-fn red_owners(repo: &Repo) -> Vec<Value> {
-    let tracking = format!("{}^{{commit}}", repo.trunk_tracking_ref());
-    let Ok(trunk) = repo.git.run(&["rev-parse", "--verify", "-q", &tracking]) else {
-        return Vec::new();
-    };
-    crate::red_owner::tell(repo, trunk.trim())
-}
-
 fn early_conflicts(repo: &Repo, queue: &Queue) -> Vec<Value> {
     let tracking = format!("{}^{{commit}}", repo.trunk_tracking_ref());
     let Ok(trunk) = repo.git.run(&["rev-parse", "--verify", "-q", &tracking]) else {

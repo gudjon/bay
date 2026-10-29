@@ -58,7 +58,9 @@ use support::TestBox;
 /// - 0.6.1, one flag (`start --adopt`, B4): a seat that took another seat's view over wrote in it
 ///   unnoticed, under the other seat's change; now the take-over is one named step that the
 ///   result records.
-const COMMANDS: usize = 28;
+/// - 0.6.3, one command (`queue`): a person or a third-party tool read the line from `bay
+///   status` and the queue refs by hand; now it is one `bay.queue/1` document.
+const COMMANDS: usize = 29;
 const FLAGS: usize = 90;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
