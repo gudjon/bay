@@ -17,6 +17,7 @@
 - A runner places a new change in line within seconds, even while it checks another change.
 - A change that waits for a red main keeps its place, is not claimed again, and lands first once green.
 - A batch never carries a change whose paths main's red holds.
+- A change that passes places main's red holds still takes a batch: none of the places it passes runs.
 - A runner judges main's red reading only the landings whose post results changed since its last judgement.
 
 ## 0.5.46

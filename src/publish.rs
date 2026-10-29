@@ -2218,7 +2218,9 @@ fn batch_plan(
     // while the head checked, and planned a batch of ten from the line behind it; the two
     // batches claimed the same members, one landed, and the other gave every member back): a
     // head that runs ahead of its turn, a repair or a change that needs no check, lands alone.
-    if queue.head().is_some_and(|head| head.seq != at) {
+    // BACKLOG 119: a head past places that main's red holds still batches, since none of them
+    // runs.
+    if queue.head().is_some_and(|head| head.seq != at) && !passes_red(ctx, &queue, at, trunk)? {
         eprintln!("bay runner: {op_id} no batch: it runs ahead of its turn");
         return Ok(None);
     }

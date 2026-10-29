@@ -15,7 +15,8 @@
 //! checked ahead of its turn); `passes_red` in `queue_gate` (the line stops behind it); in
 //! `src/executor.rs`, the `waits_on_main` skip in `abandoned_head` (it is visited after every
 //! operation) and in `deadlines` (its progress deadline releases it); `ends_before_red` in
-//! `batch` (a batch lands it on the red main); and `passes_red` in the host's hook
+//! `batch` (a batch lands it on the red main); `passes_red` in `batch_plan` (a change past the
+//! red's places lands alone); and `passes_red` in the host's hook
 //! (`src/hook.rs`: a signed host refuses the change that passes it). The `TrunkRed` arm of
 //! `given_up` in `execute_op` keeps the place of a head the red gate stops after its claim,
 //! which the gate before the claim leaves to a red that appears mid-visit.
@@ -285,6 +286,40 @@ fn a_batch_never_carries_a_change_the_red_holds() {
     assert!(
         place(&repo, &r3_op).is_some(),
         "the change the red holds lost its place"
+    );
+}
+
+#[test]
+fn a_change_past_the_places_the_red_holds_takes_a_batch() {
+    // G554 lands a head that runs ahead of its turn alone; a change past the places main's red
+    // holds runs ahead of them too, but none of them runs, so it still batches the line behind.
+    // The batch still ends before a change the red holds.
+    let (test_box, repo, remote) = trunk("batch = { max = 4 }\n");
+    red_main(&test_box, &repo);
+    let (r1, r1_op) = submit(&test_box, &repo, "src", "r1.rs", None);
+    let (d1, d1_op) = submit(&test_box, &repo, "docs", "d1.md", None);
+    let (d2, d2_op) = submit(&test_box, &repo, "docs", "d2.md", None);
+    let (r2, r2_op) = submit(&test_box, &repo, "src", "r2.rs", None);
+    join(&repo, &r1, &r1_op);
+    join(&repo, &d1, &d1_op);
+    join(&repo, &d2, &d2_op);
+    join(&repo, &r2, &r2_op);
+    let ran = pass(&test_box, &repo);
+    let landed = test_box.trunk_change_ids(&remote);
+    assert!(landed.contains(&d1) && landed.contains(&d2), "{ran}");
+    assert_eq!(
+        ran_for(&ran, &d1)["detail"]["batch"]["size"],
+        2,
+        "the change past the red's place batched the wrong members: {ran}"
+    );
+    assert!(!landed.contains(&r1), "{ran}");
+    assert!(
+        !landed.contains(&r2),
+        "a batch past the red's place landed a change on the red main's paths: {ran}"
+    );
+    assert!(
+        place(&repo, &r2_op).is_some(),
+        "the change the red holds behind the batch lost its place"
     );
 }
 
