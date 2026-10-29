@@ -1632,6 +1632,14 @@ fn talk_say(result: &BayResult) -> Option<String> {
             .filter(|text| crate::names::operator_name(text).is_ok())
     };
     let dry_run = detail.get("dry_run") == Some(&Value::Bool(true));
+    // `bay talk --show` and `--round <id>` read; they change nothing.
+    if result.state.as_deref() == Some("shown") {
+        return Some(if detail.get("round").is_some() {
+            "Here is the round: one row per recipient, with its talk, its standing and its answer; nothing was changed.".to_owned()
+        } else {
+            "Here is the talk and every reply to it, in order; nothing was changed.".to_owned()
+        });
+    }
     if detail.get("round").is_some() {
         let count = detail.get("talks").and_then(Value::as_array)?.len();
         return Some(match (dry_run, shown("round")) {
@@ -1753,6 +1761,20 @@ mod tests {
     use super::{BayResult, Decision, Freshness, Reason, SCHEMA, plain, unplain};
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_talk_read_says_it_changed_nothing_and_never_that_it_sent() {
+        let shown = |detail: serde_json::Value| {
+            let mut result = BayResult::ok(detail);
+            result.state = Some("shown".to_owned());
+            result.say()
+        };
+        let round = shown(json!({"round": "r1", "talks": [{"who": "a"}, {"who": "b"}]}));
+        assert!(round.starts_with("Here is the round"), "{round}");
+        assert!(!round.contains("Sent"), "{round}");
+        let talk = shown(json!({"talk": "abcdefghijklmnop", "entries": []}));
+        assert!(talk.starts_with("Here is the talk"), "{talk}");
+    }
 
     #[test]
     fn git_words_in_a_fault_are_never_put_plainly() {

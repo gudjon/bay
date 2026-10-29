@@ -98,6 +98,14 @@ fn one_ask_to_many_is_one_round_with_a_row_per_recipient() {
     let (code, table) = case.talk("agent", &["--round", &round]);
     assert_eq!(code, 0, "{table}");
     assert_eq!(table["detail"]["round"], round.as_str(), "{table}");
+    // A read says it changed nothing, never that it sent (`round.rs` sets `state: shown`).
+    assert_eq!(table["state"], "shown", "{table}");
+    assert!(
+        table["say"]
+            .as_str()
+            .is_some_and(|say| !say.contains("Sent")),
+        "{table}"
+    );
     let rows = items(&table);
     assert_eq!(who_of(&rows), ["agent-b", "agent-c"], "{table}");
     for row in &rows {

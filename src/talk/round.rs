@@ -218,6 +218,8 @@ fn table(dir: &Path, id: &str) -> Result<BayResult, Stop> {
         );
     }
     let mut result = BayResult::ok(json!({"round": id, "talks": rows}));
+    // A read: its sentence never says anything was sent (`result.rs` `talk_say`).
+    result.state = Some("shown".to_owned());
     result.human = Some(human(id, &rows));
     Ok(result)
 }
