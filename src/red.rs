@@ -295,9 +295,23 @@ struct Moved {
     trees: HashSet<String>,
 }
 
-/// The last judgement [`judged`] made in this process: its key (main tip, registry, evidence
-/// tips), what it found, and what decided it, for the next judgement to start from.
-type Last = Option<(String, Judgement, Option<Judged>)>;
+/// The last judgement [`judged`] made in this process, for the next judgement to start from.
+struct Last {
+    /// Main's tip, the registry and the evidence tips it judged.
+    key: String,
+    /// What it found.
+    judgement: Judgement,
+    /// What decided it.
+    judged: Option<Judged>,
+    /// S4: the post answers it read, by landing commit ([`Answered`]).
+    answers: Answered,
+}
+
+/// S4: the post answers a judgement read, by landing commit. A landing's answers change only
+/// when the notes of its tree move (they are a function of its commit, its tree's records and
+/// the registry), so the next judgement reads again only the landings whose notes moved, and
+/// those newer than the last one judged.
+type Answered = std::collections::HashMap<String, Vec<Value>>;
 
 /// The red checks of `trunk` (G244). A pending check is not among them: it refuses nothing.
 ///
@@ -367,7 +381,12 @@ pub fn judged(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Jud
     // p90 157 s, because on a busy line main or a note moves before almost every head): the next
     // judgement starts from the last one ([`judge`], G195), so it reads only what moved. The post
     // work shares it (BACKLOG 113), so a pass judges main once, for its heads and its post checks.
-    static LAST: std::sync::Mutex<Last> = std::sync::Mutex::new(None);
+    // S4 (a fleet measurement, 2026-10-28, bay 0.5.40-0.5.42: a merging head's `red` step took
+    // 69-185 s, median 76 s, on 8 of 14 merges, half of its time to main): from the last one, a
+    // judgement still read every landing back to a red check's last pass, and every landing again
+    // when the deciding one stopped deciding, each a read of every evidence ref. It reads only
+    // the landings whose answers can differ now ([`Answered`]).
+    static LAST: std::sync::Mutex<Option<Last>> = std::sync::Mutex::new(None);
     // The registry as the judgement counts it: its commit and, under `signing = "approvals"`,
     // its mode (N-21), so a mode switch at the same commit is never served the old judgement.
     let key = format!(
@@ -375,29 +394,35 @@ pub fn judged(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Jud
         registry.map(Registry::judged_key).unwrap_or_default(),
         evidence_tips(git)?
     );
-    let before = match LAST.lock() {
-        Ok(last) => match last.as_ref() {
-            Some((judged, judgement, _)) if *judged == key => return Ok(judgement.clone()),
-            Some((_, _, before)) => before.clone(),
-            None => None,
+    let (before, answers) = match LAST.lock() {
+        Ok(mut last) => match last.as_mut() {
+            Some(last) if last.key == key => return Ok(last.judgement.clone()),
+            Some(last) => (last.judged.clone(), std::mem::take(&mut last.answers)),
+            None => (None, Answered::new()),
         },
-        Err(_) => None,
+        Err(_) => (None, Answered::new()),
     };
-    let (judgement, judged) = judge(git, trunk, registry, before.as_ref())?;
+    let (judgement, judged, answers) = judge_from(git, trunk, registry, before.as_ref(), &answers)?;
     if let Ok(mut last) = LAST.lock() {
-        *last = Some((key, judgement.clone(), judged));
+        *last = Some(Last {
+            key,
+            judgement: judgement.clone(),
+            judged,
+            answers,
+        });
     }
     Ok(judgement)
 }
 
 /// A test build writes a line to the file `BAY_TEST_RED_TRACE` names for each judgement
-/// [`judge`] makes (G430): `<trunk> in full`, or `<trunk> from <trunk>` when it read only what
-/// moved since an earlier one (BACKLOG 97); a release build never reads the variable.
+/// [`judge`] makes (G430): `<trunk> read <n> in full`, or `<trunk> read <n> from <trunk>` when it
+/// started from an earlier one (BACKLOG 97); `<n>` is how many landings' answers it read (S4). A
+/// release build never reads the variable.
 const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
 
-/// The [`TEST_HOOKS`] trace line of one judgement of `trunk`, from `before` when it read only
-/// what moved since that one.
-fn trace(trunk: &str, before: Option<&Judged>) {
+/// The [`TEST_HOOKS`] trace line of one judgement of `trunk` that read the answers of `read`
+/// landings, from `before` when it started from that one.
+fn trace(trunk: &str, before: Option<&Judged>, read: usize) {
     if TEST_HOOKS && let Some(path) = std::env::var_os("BAY_TEST_RED_TRACE") {
         use std::io::Write as _;
         if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -406,8 +431,8 @@ fn trace(trunk: &str, before: Option<&Judged>) {
             .open(path)
         {
             let _ = match before {
-                Some(before) => writeln!(file, "{trunk} from {}", before.trunk),
-                None => writeln!(file, "{trunk} in full"),
+                Some(before) => writeln!(file, "{trunk} read {read} from {}", before.trunk),
+                None => writeln!(file, "{trunk} read {read} in full"),
             };
         }
     }
@@ -424,7 +449,17 @@ pub fn state(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Judg
     };
     let window = window(git, trunk)?;
     let (landings, full) = landings(git, trunk, window)?;
-    Ok(decide(git, &policy, &landings, (window, full), registry, None)?.0)
+    let unread = vec![None; landings.len()];
+    Ok(decide(
+        git,
+        &policy,
+        &landings,
+        (window, full),
+        registry,
+        None,
+        unread,
+    )?
+    .0)
 }
 
 /// The red and pending checks of `trunk`, as [`state`] judges them, and what decided them
@@ -443,8 +478,21 @@ pub fn judge(
     registry: Option<&Registry>,
     before: Option<&Judged>,
 ) -> Result<(Judgement, Option<Judged>), String> {
+    let (judgement, judged, _) = judge_from(git, trunk, registry, before, &Answered::new())?;
+    Ok((judgement, judged))
+}
+
+/// [`judge`], given `answers`, the post answers the judgement `before` read: those of a
+/// landing whose notes did not move since stand, unread (S4). With what this judgement read.
+fn judge_from(
+    git: &Git,
+    trunk: &str,
+    registry: Option<&Registry>,
+    before: Option<&Judged>,
+    answers: &Answered,
+) -> Result<(Judgement, Option<Judged>, Answered), String> {
     let Some(policy) = post_policy(git, trunk)? else {
-        return Ok((Judgement::default(), None));
+        return Ok((Judgement::default(), None, Answered::new()));
     };
     let window = window(git, trunk)?;
     // The tips before the answers: a record written in between reads as moved next time.
@@ -453,15 +501,33 @@ pub fn judge(
     let known = before.and_then(|before| {
         moved(git, before, &evidence, registry, &landings, window).map(|moved| (before, moved))
     });
-    trace(trunk, known.as_ref().map(|(before, _)| *before));
-    let (judgement, decided) = decide(
+    // S4: only under a judgement `moved` can compare with (the same registry, window and
+    // producers), and only for a landing it judged whose notes did not move.
+    let carried: Vec<Option<Vec<Value>>> = landings
+        .iter()
+        .enumerate()
+        .map(|(at, landing)| {
+            known
+                .as_ref()
+                .filter(|(_, moved)| at >= moved.new && !moved.trees.contains(&landing.tree))
+                .and_then(|_| answers.get(&landing.commit).cloned())
+        })
+        .collect();
+    let (judgement, decided, read) = decide(
         git,
         &policy,
         &landings,
         (window, full),
         registry,
         known.as_ref(),
+        carried,
     )?;
+    trace(trunk, known.as_ref().map(|(before, _)| *before), read.read);
+    let answers = landings
+        .iter()
+        .zip(read.rows)
+        .filter_map(|(landing, rows)| Some((landing.commit.clone(), rows?)))
+        .collect();
     Ok((
         judgement,
         Some(Judged {
@@ -471,6 +537,7 @@ pub fn judge(
             decided,
             window,
         }),
+        answers,
     ))
 }
 
@@ -486,7 +553,8 @@ fn post_policy(git: &Git, trunk: &str) -> Result<Option<crate::policy::Policy>, 
 /// The red and pending checks over `landings`, the landing line of the newest `window`
 /// first-parent commits of trunk (`full` when the window held that many), and how each
 /// check was decided. With `known`, a check `known` decided is judged from what moved; any
-/// other check is judged over the window.
+/// other check is judged over the window. `rows` holds each landing's answers where they are
+/// known already (S4); with the answers it holds after the judgement.
 fn decide(
     git: &Git,
     policy: &crate::policy::Policy,
@@ -494,13 +562,15 @@ fn decide(
     (window, full): (usize, bool),
     registry: Option<&Registry>,
     known: Option<&(&Judged, Moved)>,
-) -> Result<(Judgement, Vec<Decided>), String> {
+    rows: Vec<Option<Vec<Value>>>,
+) -> Result<(Judgement, Vec<Decided>, Read), String> {
     let mut answers = Answers {
         git,
         registry,
         landings,
         full,
-        rows: vec![None; landings.len()],
+        rows,
+        read: 0,
     };
     let mut out = Judgement::default();
     let mut decided = Vec::new();
@@ -572,7 +642,17 @@ fn decide(
             suspect: Some(suspect),
         });
     }
-    Ok((out, decided))
+    let read = Read {
+        rows: answers.rows,
+        read: answers.read,
+    };
+    Ok((out, decided, read))
+}
+
+/// S4: the answers a judgement holds, landing by landing, and how many landings it read.
+struct Read {
+    rows: Vec<Option<Vec<Value>>>,
+    read: usize,
 }
 
 /// The post answers of the window's landings, each read once and only when asked.
@@ -584,6 +664,8 @@ struct Answers<'a> {
     /// below it.
     full: bool,
     rows: Vec<Option<Vec<Value>>>,
+    /// How many landings' answers were read (S4).
+    read: usize,
 }
 
 impl Answers<'_> {
@@ -609,6 +691,7 @@ impl Answers<'_> {
         post: &crate::policy::ManifestEntry,
     ) -> Result<Option<&Value>, String> {
         if self.rows[at].is_none() {
+            self.read += 1;
             self.rows[at] = Some(crate::publish::post_answers(
                 self.git,
                 &self.landings[at].commit,
