@@ -1531,7 +1531,8 @@ impl BayResult {
                 ),
                 _ => "Saved. bay checks it and adds it to main next.".to_owned(),
             },
-            Decision::Ok => change_say(self)
+            Decision::Ok => queue_say(self)
+                .or_else(|| change_say(self))
                 .or_else(|| talk_say(self))
                 .unwrap_or_else(|| ok_say(self).to_owned()),
             Decision::Blocked => {
@@ -1584,6 +1585,37 @@ fn answered_say(detail: Option<&Value>) -> Option<&'static str> {
             "Waived; the change is added once its author saves it again, with that check named as not passed."
         }
     })
+}
+
+/// `bay queue`: how many changes wait, those no runner has placed too, and the longest wait.
+fn queue_say(result: &BayResult) -> Option<String> {
+    let detail = result.detail.as_ref()?;
+    if detail.get("schema")? != crate::line::SCHEMA {
+        return None;
+    }
+    let count = |key: &str| detail.get(key).and_then(Value::as_array).map_or(0, Vec::len);
+    let placed = count("places");
+    let total = placed + count("arriving");
+    if total == 0 {
+        return Some("Nothing waits to be added to main.".to_owned());
+    }
+    let (subject, longest, them) = if total == 1 {
+        ("One change waits".to_owned(), "it has", "it")
+    } else {
+        (format!("{total} changes wait"), "the longest has", "them")
+    };
+    // A change no runner has placed waits for a runner, not for main.
+    let object = if placed == 0 {
+        format!("for a runner to take {them}")
+    } else {
+        "to be added to main".to_owned()
+    };
+    Some(
+        match detail.get("oldest_wait_s").and_then(Value::as_u64) {
+            Some(secs) => format!("{subject} {object}; {longest} waited {}.", waited(secs)),
+            None => format!("{subject} {object}."),
+        },
+    )
 }
 
 /// The sentence of a status read of one change, from that change's own row (fleet findings,
@@ -1767,6 +1799,15 @@ fn ok_say(result: &BayResult) -> &'static str {
         "Nothing to save; no files were changed."
     } else {
         "Done; nothing else is needed."
+    }
+}
+
+/// A wait in whole minutes, or seconds under one minute, for a sentence.
+fn waited(seconds: u64) -> String {
+    match seconds {
+        0..60 => format!("{seconds} s"),
+        60..120 => "1 minute".to_owned(),
+        _ => format!("{} minutes", seconds / 60),
     }
 }
 

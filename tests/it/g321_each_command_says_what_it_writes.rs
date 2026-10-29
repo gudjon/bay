@@ -87,6 +87,7 @@ fn the_read_commands_change_nothing_of_yours() {
     for args in [
         &["status"][..],
         &["waiting"],
+        &["queue"],
         &["status", "--since"],
         &["doctor"],
         &["help"],

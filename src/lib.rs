@@ -43,6 +43,7 @@ pub mod inputs;
 pub mod install;
 pub mod lane;
 pub mod limits;
+pub mod line;
 pub mod lineage;
 pub mod live;
 pub mod locks;

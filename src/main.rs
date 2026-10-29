@@ -164,6 +164,11 @@ enum Command {
         #[arg(long, requires = "since")]
         merged: bool,
     },
+    /// The live line, head first: each place's change, intent, actor, paths, wait, operation
+    /// state and runner, as one `bay.queue/1` document in `detail`. Reads the live places and
+    /// their changes alone, never the line's history; writes only fetched copies of the
+    /// remote's refs
+    Queue,
     /// Delete the remote's branches merged by ancestor or patch, each under a lease of the tip
     /// judged, after archiving the tip on the remote and logging the push that restores it to
     /// bay/pruned-heads.log in the repository's common directory; then runs the config's
@@ -909,6 +914,7 @@ fn main() -> ExitCode {
         } => bay::service::install(&cli.dir, &bay::service::Request { print, force }),
         Command::Live { action } => live(&cli.dir, action),
         command @ Command::Status { .. } => status(&cli.dir, command),
+        Command::Queue => bay::line::queue(&cli.dir),
         // The one prune: the request `status --branches` makes, deleting (G302).
         Command::Prune { stale_days } => heads(&cli.dir, true, stale_days),
         Command::Talk(args) => talk(&cli.dir, *args),

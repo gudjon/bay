@@ -70,6 +70,70 @@ impl Listed {
             "entry.json"
         }
     }
+
+    /// The reservation's entry, from its `entry.json` (`None` when the commit holds none).
+    fn entry(&self, json: Option<Value>) -> Entry {
+        let entry = json.unwrap_or(Value::Null);
+        Entry {
+            seq: self.seq,
+            commit: self.commit.clone(),
+            op_id: entry["op_id"].as_str().unwrap_or_default().to_owned(),
+            change: entry["change"].as_str().unwrap_or_default().to_owned(),
+        }
+    }
+}
+
+/// Every queue ref this repository holds, by one `for-each-ref`.
+fn list(git: &Git) -> Result<Vec<Listed>, String> {
+    let refs = git
+        .run(&[
+            "for-each-ref",
+            "--format=%(objectname) %(committerdate:unix) %(refname)",
+            QUEUE_PREFIX,
+            DONE_PREFIX,
+        ])
+        .map_err(|error| error.message())?;
+    Ok(refs
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.splitn(3, ' ');
+            let commit = words.next()?.to_owned();
+            let committed: u64 = words.next()?.parse().unwrap_or(0);
+            let name = words.next()?;
+            let (release, seq) = match name.strip_prefix(QUEUE_PREFIX) {
+                Some(seq) => (false, seq),
+                None => (true, name.strip_prefix(DONE_PREFIX)?),
+            };
+            Some(Listed {
+                seq: seq.parse().ok()?,
+                commit,
+                committed,
+                release,
+            })
+        })
+        .collect())
+}
+
+/// Fetches the remote's queue refs, pruning the ones it removed. Best effort: offline, the
+/// local copy is what this machine can see.
+fn fetch(repo: &Repo) {
+    let _ = repo.git.run(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        "--prune",
+        repo.remote(),
+        &format!("+{QUEUE_PREFIX}*:{QUEUE_PREFIX}*"),
+        &format!("+{DONE_PREFIX}*:{DONE_PREFIX}*"),
+    ]);
+}
+
+/// One live place of the line, as `bay queue` shows it.
+#[derive(Clone, Debug)]
+pub struct Place {
+    pub entry: Entry,
+    /// When the change took the place: the reservation's committer time, in Unix seconds.
+    pub joined: u64,
 }
 
 impl Queue {
@@ -79,16 +143,49 @@ impl Queue {
     ///
     /// A git fault other than an unreachable remote (then the local copy is read).
     pub fn read(repo: &Repo) -> Result<Self, String> {
-        let _ = repo.git.run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            "--prune",
-            repo.remote(),
-            &format!("+{QUEUE_PREFIX}*:{QUEUE_PREFIX}*"),
-            &format!("+{DONE_PREFIX}*:{DONE_PREFIX}*"),
-        ]);
+        fetch(repo);
         Self::local(&repo.git)
+    }
+
+    /// The live line alone, head first: each reservation with no release, fetched from the
+    /// remote and read in one `cat-file --batch`, and no release read (`bay queue`). The whole
+    /// queue's read ([`Queue::local`]) takes every entry and release of the line's history
+    /// (4,288 objects on a store of 2,144 places) to show a line of a few.
+    ///
+    /// # Errors
+    ///
+    /// A git fault other than an unreachable remote (then the local copy is read).
+    pub fn live(repo: &Repo) -> Result<Vec<Place>, String> {
+        fetch(repo);
+        let listed = list(&repo.git)?;
+        let released: BTreeSet<u64> = listed
+            .iter()
+            .filter(|one| one.release)
+            .map(|one| one.seq)
+            .collect();
+        let live: Vec<&Listed> = listed
+            .iter()
+            .filter(|one| !one.release && !released.contains(&one.seq))
+            .collect();
+        let names: Vec<String> = live
+            .iter()
+            .map(|one| format!("{}:{}", one.commit, one.file()))
+            .collect();
+        let texts = repo.git.objects(&names).map_err(|error| error.message())?;
+        let mut places = Vec::new();
+        for (one, text) in live.into_iter().zip(texts) {
+            let json = match text {
+                Some(text) => serde_json::from_slice(&text).ok(),
+                None => entry_json(&repo.git, &one.commit, one.file())?,
+            };
+            places.push(Place {
+                entry: one.entry(json),
+                joined: one.committed,
+            });
+        }
+        // `for-each-ref` lists by name, so place 10 comes before place 9.
+        places.sort_by_key(|place| place.entry.seq);
+        Ok(places)
     }
 
     /// [`Queue::read`], or the queue refs this store holds when the pass read them within
@@ -115,33 +212,7 @@ impl Queue {
     /// A git fault.
     pub fn local(git: &Git) -> Result<Self, String> {
         let mut queue = Self::default();
-        let refs = git
-            .run(&[
-                "for-each-ref",
-                "--format=%(objectname) %(committerdate:unix) %(refname)",
-                QUEUE_PREFIX,
-                DONE_PREFIX,
-            ])
-            .map_err(|error| error.message())?;
-        let listed: Vec<Listed> = refs
-            .lines()
-            .filter_map(|line| {
-                let mut words = line.splitn(3, ' ');
-                let commit = words.next()?.to_owned();
-                let committed: u64 = words.next()?.parse().unwrap_or(0);
-                let name = words.next()?;
-                let (release, seq) = match name.strip_prefix(QUEUE_PREFIX) {
-                    Some(seq) => (false, seq),
-                    None => (true, name.strip_prefix(DONE_PREFIX)?),
-                };
-                Some(Listed {
-                    seq: seq.parse().ok()?,
-                    commit,
-                    committed,
-                    release,
-                })
-            })
-            .collect();
+        let listed = list(git)?;
         let names: Vec<String> = listed
             .iter()
             .map(|one| format!("{}:{}", one.commit, one.file()))
@@ -162,16 +233,7 @@ impl Queue {
                     .release_commits
                     .insert(one.seq, (one.commit.clone(), one.committed));
             } else {
-                let entry = json.unwrap_or(Value::Null);
-                queue.entries.insert(
-                    one.seq,
-                    Entry {
-                        seq: one.seq,
-                        commit: one.commit.clone(),
-                        op_id: entry["op_id"].as_str().unwrap_or_default().to_owned(),
-                        change: entry["change"].as_str().unwrap_or_default().to_owned(),
-                    },
-                );
+                queue.entries.insert(one.seq, one.entry(json));
             }
         }
         Ok(queue)

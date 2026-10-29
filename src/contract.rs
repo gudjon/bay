@@ -47,6 +47,8 @@ pub fn contract(mut cli: clap::Command) -> BayResult {
             }))
             .collect::<Vec<_>>(),
         "schema": schema(),
+        // The detail of `bay queue`, for a tool that reads the line.
+        "queue_schema": crate::line::schema(),
         // U5 (G454): the reader contract of a talk, from the tables bay judges talks by.
         "talk": crate::talk::show::contract(),
         "agents": agents(),
@@ -139,6 +141,11 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
         "waiting",
         &["only fetched copies of the remote's refs"],
         &["your files", "your branches", "main"],
+    ),
+    (
+        "queue",
+        &["only fetched copies of the remote's refs"],
+        &["your files", "your branches", "main", "the line"],
     ),
     (
         "approve",

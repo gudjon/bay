@@ -175,7 +175,7 @@ fn more_changes(more: &[String]) -> Value {
 }
 
 /// Whether a change in `state` has ended for good.
-const fn ended(state: crate::change::ChangeState) -> bool {
+pub(crate) const fn ended(state: crate::change::ChangeState) -> bool {
     use crate::change::ChangeState;
     matches!(
         state,
