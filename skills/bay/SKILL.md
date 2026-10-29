@@ -71,7 +71,8 @@ narrow your paths. `bay help` shows every command and flag on one page, with wha
 never writes (read it before you hesitate to run one), and `bay <command> --help`
 says more about one. `bay help --json` is the same list for programs, with every reason code and
 the JSON Schema of `bay.result/1`.
-It also lists each agent product's hook moments and what each can block.
+It also lists each agent product's hook moments and what each can block, and in `talk` how a talk is
+stored (`bay.talk/1`: its ref, its fields and each reply's fields), for a program that reads talks.
 
 ## Keep merges fast
 
@@ -188,15 +189,16 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 
 | When | Run |
 | --- | --- |
-| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the runners with their age (`runners`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --all` |
+| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`, newest first inside 24 KiB, `talks_more` counts the rest; each session's `owes_talks`), and the runners with their age (`runners`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --all` |
 | See every head: each branch on the remote, classed `main`, `target`, `lane`, `merged`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --branches [--stale-days <n>]` |
 | Delete only the remote branches `merged` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[plugin.prune]` plugin runs after each delete (`detail.pruned[].on_prune`) | `bay prune [--stale-days <n>]` |
-| See merges, events (`main_red`, `main_red_cleared`, `outside_merge`, `main_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |
+| See merges, events (`main_red`, `main_red_cleared`, `outside_merge`, `main_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_answered`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent (or a person) one thing; the reply is owed by the policy's default time | `bay talk <who> "<what>"` |
 | Ask for one change, artifact or check instead, or name the reply time | `bay talk <who> "<what>" --change <id>\|--artifact <path>\|--check <id> [--follow-up <time>]` |
 | Ask several at once, as one round (`--to-live`: every actor with a live session but you) | `bay talk --to <a> --to <b> "<what>"` |
 | See a round: one row per recipient, its standing and its answer | `bay talk --round <id>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
+| Read a talk and every reply to it, in order: who wrote each, when, an answer's value, a backbrief's status | `bay talk --show <id>` |
 
 Run `bay talk --help` for the fields of each kind. One talk asks for one thing. The same ask again while
 its talk is open is that talk (`state: already_sent`); once it is closed, asking again starts a new one.
@@ -205,6 +207,9 @@ name no record names comes back in `detail.unseen` with a `detail.warning`: chec
 `signing = "all"`, `who` and `--decides` are an enrolled agent or approver.
 
 - A talk read after its `--expires` is void: the notice prints `EXPIRED`, and it owes no reply.
+- A talk event in `bay status --since` carries the reply: `answer` (the answer's value) and `reply` (the
+  backbrief's `status` and `evidence`). A closed talk says `standing: "closed"` and owes nothing. With no
+  cursor, a talk that closed in the last week is listed once.
 - `bay merge` and `bay undo` list the open talks about that change in `detail.open_talks`. Read them;
   they never block the merge.
 - With a `[plugin.wake] command`, bay wakes your session once for a talk to you, and once when a runner

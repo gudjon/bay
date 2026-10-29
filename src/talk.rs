@@ -55,6 +55,7 @@ pub mod poll;
 pub mod replies;
 mod round;
 mod send;
+pub mod show;
 pub mod standing;
 pub mod wake;
 
@@ -63,6 +64,7 @@ pub use judge::{Push, judge};
 pub use open::{name_open_talks, open_on};
 pub use round::round;
 pub use send::{Answer, Ask, answer, talk};
+pub use show::show;
 
 use std::fmt::Write as _;
 use std::path::Path;

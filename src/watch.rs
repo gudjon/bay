@@ -47,9 +47,14 @@
 //! `talk_answered` when a talk gained a backbrief or an answer, `talk_lost` and `talk_stale`
 //! when it turns lost or stale, and `talk_closed` (with `state`: `answered`, `superseded` or
 //! `expired`) once for a talk it held that closed or expired. Each is the talk's `bay status` row
-//! with the event's `schema`, `id` and `kind`, the talk's own kind as `talk_kind`. Talks are the
-//! actor's, so a view lists them all. A talk that opens and closes between two watches is
-//! listed by neither: the cursor holds open talks only, so it stays small.
+//! with the event's `schema`, `id` and `kind`, the talk's own kind as `talk_kind`, and the reply
+//! (G450): `answer`, the latest answer's value as recorded, and `reply`, the latest backbrief's
+//! `status` and `evidence` (each null with none). That is data the actor asked for; a notice never
+//! prints it (ruling R13). A closed talk's row says `standing: "closed"` and owes nothing (G452).
+//! Talks are the actor's, so a view lists them all. A watch with no cursor lists, once, each talk
+//! that closed within the week replies are told in (G451). A talk that opens and closes between
+//! two watches from a cursor is listed by neither: the cursor holds open talks only, so it stays
+//! small.
 //!
 //! Promotion targets (NEW-5, [`crate::target`]) are derived the same way: the cursor's
 //! `targets` holds each target's tip, and a watch outside a view lists `target_moved` for a
@@ -625,8 +630,8 @@ fn talk_events(
     let held = since.map(|cursor| cursor.talks.clone()).unwrap_or_default();
     let me = crate::change::actor_name();
     let now = crate::talk::standing::reader_now();
-    let followed = match crate::talk::standing::followed(git, &me, now, |id| held.contains_key(id))
-    {
+    let cursor = since.map(|cursor| &cursor.talks);
+    let followed = match crate::talk::standing::followed(git, &me, now, cursor) {
         Ok(followed) => followed,
         Err(why) => return (Vec::new(), held, Some(why)),
     };
@@ -649,6 +654,9 @@ fn talk_events(
             event["schema"] = json!(crate::log::EVENT_SCHEMA);
             event["id"] = json!(format!("{kind}:{id}:{}", talk.replies));
             event["kind"] = json!(kind);
+            // G450 (T9): the reply itself, so the sender reads what was answered.
+            event["answer"] = talk.answer.clone();
+            event["reply"] = talk.reply.clone();
             event
         };
         if before.is_none() && talk.closed.is_none() && talk.row["who"] == me.as_str() {

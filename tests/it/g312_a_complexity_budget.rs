@@ -45,8 +45,10 @@ use support::TestBox;
 ///   it is one command, so no PR has to be merged around bay.
 /// - 0.5.8, one flag (`abandon --why`, a fleet finding 2026-10-26): an audit of abandoned work
 ///   asked each seat why it gave a change up; now the reason is in the signed request.
+/// - 0.6.0, one flag (`talk --show`, T6): a talk and its replies were read with `git show` and
+///   `git log -p` on its ref, which every notice had to spell out; now it is one bay command.
 const COMMANDS: usize = 28;
-const FLAGS: usize = 79;
+const FLAGS: usize = 80;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,

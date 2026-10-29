@@ -171,9 +171,16 @@ fn entries(git: &crate::git::Git, talks: &[Talk]) -> Vec<Reply> {
 
 /// The `value` of the answer entry `blob`, only when it is a short plain token.
 fn answer_value(git: &crate::git::Git, blob: &str) -> Option<String> {
+    shown_value(&recorded_value(git, blob)?)
+}
+
+/// The `value` of the answer entry `blob`, as recorded: data for a reader that asked for it
+/// (`bay status --since`, `bay talk --show`), never for a notice, which shows [`shown_value`].
+#[must_use]
+pub fn recorded_value(git: &crate::git::Git, blob: &str) -> Option<String> {
     let text = git.run(&["cat-file", "blob", blob]).ok()?;
     let value: serde_json::Value = serde_json::from_str(&text).ok()?;
-    shown_value(value["value"].as_str()?)
+    value["value"].as_str().map(str::to_owned)
 }
 
 /// `value` as a notice may print it: a short plain token in the name grammar, else nothing.

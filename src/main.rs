@@ -164,7 +164,7 @@ enum Command {
     /// owed by the policy's default time (`[talk] follow_up_s`, one hour). One action, one
     /// target; the same ask while it is open is the same talk. `--to` more than once, or
     /// `--to-live`, asks many as one round. Arrival is the recipient's ack, written when its bay
-    /// fetches
+    /// fetches. --show <id> reads a talk and its replies
     Talk(Box<TalkArgs>),
     /// Admin: add one key to the key registry: append it to its class file, sign the new
     /// registry with this machine's registry key (`bay.registryKey`) and push it. The first
@@ -338,7 +338,7 @@ struct TalkArgs {
     #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "to", "to_live",
         "to_change", "kind", "change", "artifact", "decision", "check", "follow_up", "decides",
         "context", "evidence", "supersedes", "expires", "target", "forecast", "commitment",
-        "owns", "promises", "needs", "promise_evidence", "urgent", "dry_run", "answer"])]
+        "owns", "promises", "needs", "promise_evidence", "urgent", "dry_run", "answer", "show"])]
     round: Option<String>,
     /// delivery (one change or artifact), discovery (one decision) or reliability (one check);
     /// with none, the kind of the target given, else discovery
@@ -412,6 +412,12 @@ struct TalkArgs {
     /// With --answer: the decision value
     #[arg(long, requires = "answer")]
     value: Option<String>,
+    /// Read the talk with this id and every reply to it, in order; writes nothing
+    #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "to_change", "kind",
+        "change", "artifact", "decision", "check", "follow_up", "decides", "context", "evidence",
+        "supersedes", "expires", "target", "forecast", "commitment", "owns", "promises", "needs",
+        "promise_evidence", "urgent", "dry_run", "answer", "value", "to", "to_live"])]
+    show: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1023,10 +1029,14 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
     }
 }
 
-/// `bay talk`: an answer with `--answer`, a round's table with `--round`, else one ask.
+/// `bay talk`: an answer with `--answer`, a round's table with `--round`, one talk and its
+/// replies with `--show`, else one ask.
 fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
     if let Some(round) = &args.round {
         return bay::talk::round(dir, round);
+    }
+    if let Some(talk) = args.show {
+        return bay::talk::show(dir, &talk);
     }
     if let Some(talk) = args.answer {
         return bay::talk::answer(

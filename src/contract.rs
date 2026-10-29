@@ -5,7 +5,8 @@
 //! reason code with what it still allows, when a retry can succeed, the agent's next step and
 //! whether it is transient, read from the table in `result.rs`; and the JSON Schema of
 //! `bay.result/1`, built from the same table; and each agent adapter's events, what each can
-//! block and what the hook does not judge (G306), from the tables `bay install` writes from.
+//! block and what the hook does not judge (G306), from the tables `bay install` writes from;
+//! and the reader contract of a talk (U5, G454), from the tables its judge uses.
 //! No list here is a second definition: each one is
 //! derived from the one the code uses.
 //! `schemas/bay.result.schema.json` is a copy of the schema that G252 holds equal to it.
@@ -46,6 +47,8 @@ pub fn contract(mut cli: clap::Command) -> BayResult {
             }))
             .collect::<Vec<_>>(),
         "schema": schema(),
+        // U5 (G454): the reader contract of a talk, from the tables bay judges talks by.
+        "talk": crate::talk::show::contract(),
         "agents": agents(),
     }))
 }
