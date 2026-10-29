@@ -1,5 +1,9 @@
 //! `bay talk`: send one talk (ruling R9), or answer a discovery talk (ruling T1).
 //!
+//! The simplest send is two words, `bay talk <who> "<what>"` (0.6.0, T1): a discovery talk whose
+//! decision is its `what`, owed a reply `[talk] follow_up_s` after it is sent (one hour when the
+//! policy names none). A target given alone names its kind ([`with_defaults`]).
+//!
 //! The sender's bay runs every refusal before it commits anything, and `--dry-run` stops there.
 //! It fetches the recipient's talk refs first, so a retry, a body conflict, a closed talk and the
 //! open-talk cap are judged against what the host holds; the host hook judges the same rules
@@ -18,6 +22,7 @@ use super::{
 use crate::change::Actor;
 use crate::clock::rfc3339_of;
 use crate::git::{Git, GitError};
+use crate::policy::TalkPolicy;
 use crate::registry::{KeyClass, Registry};
 use crate::repo::Repo;
 use crate::result::{BayResult, Reason};
@@ -196,7 +201,7 @@ fn build(ask: &Ask, from: &Actor, sent: u64) -> Result<Value, Refusal> {
     let mut body = json!({
         "schema": TALK_SCHEMA,
         "from": {"name": from.name, "session": from.session},
-        "who": need("who", &ask.who, "the registry actor who owes the reply, the first argument")?,
+        "who": need("who", &ask.who, "the actor who owes the reply, the first argument")?,
         "what": need("what", &ask.what, "the action, the second argument")?,
         "kind": need("kind", &ask.kind, "--kind delivery, discovery or reliability")?,
         "follow_up": need("follow_up", &ask.follow_up, "--follow-up <time>, when the reply is owed")?,
@@ -325,9 +330,64 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
     Ok(result)
 }
 
+/// The `[talk]` table of the policy on main as this clone holds main: the default table with no
+/// policy, or with one bay cannot read (where it would merge, it is `POLICY_INVALID`).
+fn talk_policy(repo: &Repo) -> Result<TalkPolicy, Stop> {
+    let Some(main) = repo
+        .git
+        .ref_target(&repo.trunk_tracking_ref())
+        .map_err(|error| error.message())?
+    else {
+        return Ok(TalkPolicy::default());
+    };
+    match crate::policy::load_at(&repo.git, &main) {
+        Ok(policy) => Ok(policy.map(|policy| policy.talk).unwrap_or_default()),
+        Err(crate::policy::LoadError::Git(why)) => Err(why.into()),
+        Err(crate::policy::LoadError::Invalid(_)) => Ok(TalkPolicy::default()),
+    }
+}
+
+/// The two-word send (T1): `ask` with what it leaves out filled in. With no `--kind`, the kind
+/// whose target is given (`--change` or `--artifact` delivery, `--check` reliability), else
+/// discovery; a discovery talk with no target asks for the decision its `what` names; with no
+/// `--follow-up`, the reply is owed `follow_up_s` after `sent`. A field given stays as given.
+fn with_defaults(ask: &Ask, sent: u64, follow_up_s: u64) -> Ask {
+    let targets = [
+        ("change", &ask.change),
+        ("artifact", &ask.artifact),
+        ("decision", &ask.decision),
+        ("check", &ask.check),
+    ];
+    let given = targets
+        .iter()
+        .find(|(_, values)| !values.is_empty())
+        .map(|(field, _)| *field);
+    let kind = ask.kind.clone().unwrap_or_else(|| {
+        given
+            .and_then(super::kind_of_target)
+            .unwrap_or("discovery")
+            .to_owned()
+    });
+    let decision = if kind == "discovery" && given.is_none() {
+        ask.what.iter().cloned().collect()
+    } else {
+        ask.decision.clone()
+    };
+    Ask {
+        kind: Some(kind),
+        decision,
+        follow_up: ask
+            .follow_up
+            .clone()
+            .or_else(|| Some(rfc3339_of(sent + follow_up_s))),
+        ..ask.clone()
+    }
+}
+
 /// Sends `ask` from `sender`: every refusal first, then the commit and its push.
 fn deliver(repo: &Repo, trust: &Trust, sender: &Actor, ask: &Ask) -> Result<BayResult, Stop> {
     let sent = crate::live::unix_now();
+    let ask = &with_defaults(ask, sent, talk_policy(repo)?.follow_up_s());
     let mut body = build(ask, sender, sent)?;
     check_body(&body)?;
     check_parties(trust, &body)?;

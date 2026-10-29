@@ -75,6 +75,9 @@ pub const ENTRIES_DIR: &str = "entries";
 pub const BAY_TALK_MAX_BYTES: usize = 8192;
 /// The most open talks one sender holds to one recipient (ruling T10).
 pub const BAY_TALK_OPEN_MAX: usize = 20;
+/// How long a talk sent with no `--follow-up` is owed a reply when the policy names no
+/// `[talk] follow_up_s` (0.6.0, the two-word send): one hour.
+pub const BAY_TALK_FOLLOW_UP_S: u64 = 3600;
 /// Characters in a talk id: 80 bits of base32 (ruling T7).
 pub const TALK_ID_LEN: usize = 16;
 const ID_BYTES: usize = 10;
@@ -200,6 +203,16 @@ const ID_FIELDS: [&str; 10] = [
     "decision",
     "check",
 ];
+
+/// The kind whose target `field` is (`change` and `artifact` a delivery's, `decision` a
+/// discovery's, `check` a reliability's), if any.
+#[must_use]
+pub fn kind_of_target(field: &str) -> Option<&'static str> {
+    KINDS
+        .iter()
+        .find(|(_, owned)| owned.contains(&field))
+        .map(|(kind, _)| *kind)
+}
 /// Each entry kind and the fields it may carry. An ack carries no essay.
 const ENTRY_FIELDS: [(&str, &[&str]); 4] = [
     ("ack", &["ack", "wake"]),

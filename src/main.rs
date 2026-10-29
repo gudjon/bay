@@ -160,8 +160,9 @@ enum Command {
         #[arg(long, value_name = "DAYS")]
         stale_days: Option<u64>,
     },
-    /// Send one talk to one agent: one action, one target, the time the reply is owed. Arrival is
-    /// the recipient's ack, written when its bay fetches
+    /// Ask another actor one thing: `bay talk <who> "<what>"` sends a discovery talk, its reply
+    /// owed by the policy's default time (`[talk] follow_up_s`, one hour). One action, one
+    /// target. Arrival is the recipient's ack, written when its bay fetches
     Talk(Box<TalkArgs>),
     /// Admin: add one key to the key registry: append it to its class file, sign the new
     /// registry with this machine's registry key (`bay.registryKey`) and push it. The first
@@ -321,7 +322,8 @@ struct TalkArgs {
     to_change: Option<String>,
     /// The action: the decision, the question or the change asked for
     what: Option<String>,
-    /// delivery (one change or artifact), discovery (one decision) or reliability (one check)
+    /// delivery (one change or artifact), discovery (one decision) or reliability (one check);
+    /// with none, the kind of the target given, else discovery
     #[arg(long, value_name = "KIND")]
     kind: Option<String>,
     /// Delivery: the change asked for
@@ -330,13 +332,14 @@ struct TalkArgs {
     /// Delivery: the artifact asked for
     #[arg(long, value_name = "PATH")]
     artifact: Vec<String>,
-    /// Discovery: the decision asked for
+    /// Discovery: the decision asked for (with none, the action names it)
     #[arg(long, value_name = "DECISION")]
     decision: Vec<String>,
     /// Reliability: the check asked for
     #[arg(long, value_name = "CHECK")]
     check: Vec<String>,
-    /// When the reply is owed, a UTC time after now (2026-10-19T12:00:00Z)
+    /// When the reply is owed, a UTC time after now (2026-10-19T12:00:00Z); with none, the
+    /// policy's default time after sending (`[talk] follow_up_s`, one hour)
     #[arg(long, value_name = "TIME")]
     follow_up: Option<String>,
     /// The agent who decides if the two disagree (a person's name works too)

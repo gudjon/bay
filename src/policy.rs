@@ -76,7 +76,9 @@ struct PolicyFile {
 /// The `[talk]` table (owner ruling 2026-10-25: talk is off unless the policy on main turns it
 /// on, from 0.6.0). This release reads every key 0.6.0 will, and changes no behaviour: talk
 /// works as before, so a repository can merge `enabled = true` ahead of the switch. `kinds`
-/// names talk kinds; any other value is `POLICY_INVALID`.
+/// names talk kinds; any other value is `POLICY_INVALID`. `follow_up_s` (0.6.0) is how long a
+/// talk sent with no `--follow-up` is owed a reply, [`crate::talk::BAY_TALK_FOLLOW_UP_S`] when
+/// unnamed; 0, a reply owed at once, is `POLICY_INVALID`.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TalkPolicy {
@@ -92,9 +94,18 @@ pub struct TalkPolicy {
     pub max_round: Option<u32>,
     #[serde(default)]
     pub wake: Option<bool>,
+    #[serde(default)]
+    pub follow_up_s: Option<u64>,
 }
 
 impl TalkPolicy {
+    /// How long a talk sent with no `--follow-up` is owed a reply, in seconds.
+    #[must_use]
+    pub fn follow_up_s(&self) -> u64 {
+        self.follow_up_s
+            .unwrap_or(crate::talk::BAY_TALK_FOLLOW_UP_S)
+    }
+
     /// How `bay status --all` names it: whether talk is on, the kinds it allows (every kind when
     /// the policy names none), and whether the policy states `enabled` at all.
     #[must_use]
@@ -1280,6 +1291,11 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
             "[talk] kinds names {kind:?}; a talk kind is one of {}",
             crate::talk::KIND_NAMES.join(", ")
         )));
+    }
+    if file.talk.follow_up_s == Some(0) {
+        return Err(invalid(
+            "[talk] follow_up_s is 0: a reply owed at once is owed before any talk arrives; name the seconds after sending it is owed".to_owned(),
+        ));
     }
     validate_inputs(git, commit, &file.input).map_err(invalid)?;
     let dimensions = crate::completion::site_dimensions(file.dimension).map_err(invalid)?;
