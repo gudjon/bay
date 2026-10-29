@@ -567,10 +567,21 @@ struct Ctx<'a> {
     /// again, never rebuilt, while trunk stands where it was merged onto
     /// ([`approved_candidate`]).
     approved: Option<String>,
-    /// F11: this run is a runner's pass over its queue (`execute`), so a head refused by a
-    /// moved trunk gives the pass back instead of rebuilding in place ([`yield_head`]). A
-    /// `merge --wait` runs its own operation to its outcome and never yields.
-    yields: bool,
+    /// Who makes this visit, which says how far it goes.
+    visit: Visit,
+}
+
+/// Who makes a visit of an operation ([`Ctx::visit`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Visit {
+    /// A `merge --wait`: it runs its own operation to its outcome and never yields.
+    Own,
+    /// F11: a runner's pass over its queue ([`execute`]): a head refused by a moved trunk gives
+    /// the pass back instead of rebuilding in place ([`yield_head`]).
+    Pass,
+    /// S1: a runner places the operation beside other work ([`place`]): the visit ends at the
+    /// queue gate, and never claims, checks or publishes.
+    Place,
 }
 
 impl<'a> Ctx<'a> {
@@ -600,7 +611,7 @@ impl<'a> Ctx<'a> {
             ahead_of_turn: false,
             pushed_landing: None,
             approved: None,
-            yields: false,
+            visit: Visit::Own,
         })
     }
 
@@ -1374,10 +1385,10 @@ pub fn execute(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<BayRes
     // G438: a visit runs on the pass's shared reads; one whose operation may run reads afresh
     // and starts again, so a head never claims or builds on what an earlier visit read.
     let _ = repo.took_shared_read();
-    match execute_once(repo, id, op_id, step) {
+    match execute_once(repo, id, op_id, step, Visit::Pass) {
         Err(why) if why == READ_AGAIN => {
             repo.forget_reads();
-            execute_once(repo, id, op_id, step)
+            execute_once(repo, id, op_id, step, Visit::Pass)
         }
         other => other,
     }
@@ -1386,9 +1397,34 @@ pub fn execute(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<BayRes
 /// G438: the sentinel by which a visit on shared reads asks [`execute`] to read afresh.
 const READ_AGAIN: &str = "this visit read shared state and may run its operation: read again";
 
-fn execute_once(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<BayResult, String> {
+/// S1 (bay 0.6.0): [`execute`]'s visit of operation `op_id` of change `id` as far as the queue
+/// gate, made by a runner while its own work runs (`crate::executor`): the operation gets its
+/// place in line, or its refusal or its wait, each written as a pass writes it. `None` when the
+/// operation may run now (it is the head, or no queue is live): only a pass's own visit claims,
+/// checks and publishes.
+///
+/// # Errors
+///
+/// A fault of bay's own; refusals are results.
+pub fn place(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<Option<BayResult>, String> {
+    match execute_once(repo, id, op_id, step, Visit::Place) {
+        Err(why) if why == LEFT_FOR_PASS => Ok(None),
+        other => other.map(Some),
+    }
+}
+
+/// S1: the sentinel by which a visit that only places says its operation may run now.
+const LEFT_FOR_PASS: &str = "this operation may run now; a pass runs it";
+
+fn execute_once(
+    repo: &Repo,
+    id: &str,
+    op_id: &str,
+    step: &Step,
+    visit: Visit,
+) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
-    ctx.yields = true;
+    ctx.visit = visit;
     if !ctx.record.operations.iter().any(|op| op.op_id == op_id) {
         if ctx.record.retention_cut {
             // § 9a: a retry of an op id whose record expired is ambiguous, never new work.
@@ -1688,7 +1724,10 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
         queue_gate(ctx, op_id, &trunk)?
     };
     let mut seq = match gate {
+        // S1: a visit beside other work ends at its place: no check ahead of its turn.
+        Gate::Wait(result) if ctx.visit == Visit::Place => return Ok(*result),
         Gate::Wait(result) => return Ok(ahead_of_turn(ctx, op_id, &trunk, *result)),
+        _ if ctx.visit == Visit::Place => return Err(LEFT_FOR_PASS.to_owned()),
         Gate::Head(seq) => Some(seq),
         Gate::Free => None,
     };
@@ -1742,33 +1781,38 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
         && holds_place(ctx, op_id)
         && !crate::queue::Queue::read(ctx.repo)?.released.contains(&at)
     {
-        let reason = match &outcome {
-            Ok(result) => result.reason.map_or_else(
-                || {
-                    if result.decision == Decision::Landed {
-                        "published".to_owned()
-                    } else if result.state.as_deref() == Some(NO_EFFECT) {
-                        NO_EFFECT.to_owned()
-                    } else {
-                        "failed".to_owned()
-                    }
-                },
-                |reason| {
-                    // § 6: a head that could not start its check is released as `unavailable`,
-                    // which counts toward no limit.
-                    if reason == Reason::CheckUnavailable {
-                        crate::queue::UNAVAILABLE.to_owned()
-                    } else {
-                        reason.code().to_lowercase()
-                    }
-                },
-            ),
-            Err(_) => "failed".to_owned(),
-        };
         let signer = ctx.executor_signer().ok().flatten();
+        let reason = release_reason(&outcome);
         let _ = crate::queue::release(ctx.repo, signer.as_ref(), at, op_id, &reason);
     }
     outcome
+}
+
+/// The reason a head's place is released with after `outcome`, its run's outcome.
+fn release_reason(outcome: &Result<BayResult, String>) -> String {
+    match outcome {
+        Ok(result) => result.reason.map_or_else(
+            || {
+                if result.decision == Decision::Landed {
+                    "published".to_owned()
+                } else if result.state.as_deref() == Some(NO_EFFECT) {
+                    NO_EFFECT.to_owned()
+                } else {
+                    "failed".to_owned()
+                }
+            },
+            |reason| {
+                // § 6: a head that could not start its check is released as `unavailable`,
+                // which counts toward no limit.
+                if reason == Reason::CheckUnavailable {
+                    crate::queue::UNAVAILABLE.to_owned()
+                } else {
+                    reason.code().to_lowercase()
+                }
+            },
+        ),
+        Err(_) => "failed".to_owned(),
+    }
 }
 
 /// Whether this process may give the head's place back after its run of `op_id`: the remote's
@@ -1990,7 +2034,7 @@ fn batch(
             // with its place kept, and the next pass forms the batch again on the moved trunk.
             // B4: so is a batch the host refused while trunk stood still (a transient refusal
             // such as GitHub's GH009); it counts one uncounted publish retry, then yields.
-            if ctx.yields
+            if ctx.visit != Visit::Own
                 && let Ok(now) = ctx.repo.fetch_trunk()
             {
                 if now.as_str() == trunk
@@ -2932,7 +2976,7 @@ fn after_trunk_moved(
     }
     ctx.op_mut(op_id).trunk_moved += 1;
     if let Some(at) = *seq
-        && ctx.yields
+        && ctx.visit != Visit::Own
     {
         return yield_head(ctx, op_id, revision, at, "main moved").map(Some);
     }

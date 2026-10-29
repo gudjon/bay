@@ -81,6 +81,7 @@ bay exists to make merging faster than doing it by hand: you submit once, and th
   it that merge cleanly with it, and check them as one batch. A batch's size follows how often recent checks failed.
 - **Checked ahead.** While one batch is checked, other runners check the next batches on the main the batch ahead
   will make. When a batch's turn comes and main is as predicted, it merges at once on that check.
+- **Placed at once.** A runner places a new change in line within seconds, even while it checks another.
 - **Skips, not stops.** A change that conflicts, may not join a batch, or already failed is passed over and keeps
   its place for its own turn.
 

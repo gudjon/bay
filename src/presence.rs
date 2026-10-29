@@ -90,25 +90,30 @@ impl Beat {
     /// Beats every heartbeat on a thread of its own while `work` runs, so a runner in one long
     /// check never reads as gone (the 0.5.1 acceptance finding): `self` beats first, as before
     /// an operation, and the thread's copy beats once a heartbeat after that until `work` ends.
+    /// `beside` runs on that thread too ([`Self::meanwhile`]).
     pub fn during<T>(
         &mut self,
         repo: &Repo,
         holding: &str,
         queue_depth: usize,
+        beside: &mut (dyn FnMut() + Send),
         work: impl FnOnce() -> T,
     ) -> T {
         self.publish(repo, Some(holding), queue_depth);
-        self.meanwhile(repo, holding, queue_depth, work)
+        self.meanwhile(repo, holding, queue_depth, beside, work)
     }
 
     /// Beats once a heartbeat on a thread of its own while `work` runs, never before it, so work
     /// that ends within a heartbeat writes nothing: a pass's post work, which mostly finds
-    /// nothing to run, never renames the operation the presence names (G423).
+    /// nothing to run, never renames the operation the presence names (G423). The same thread
+    /// calls `beside` after each beat, until `work` ends: S1, the runner places the changes
+    /// submitted meanwhile (`crate::executor`), never waiting for its work to end.
     pub fn meanwhile<T>(
         &mut self,
         repo: &Repo,
         holding: &str,
         queue_depth: usize,
+        beside: &mut (dyn FnMut() + Send),
         work: impl FnOnce() -> T,
     ) -> T {
         let mut ticker = Self {
@@ -123,6 +128,9 @@ impl Beat {
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(250));
                     ticker.publish(repo, Some(holding), queue_depth);
+                    if !done.load(std::sync::atomic::Ordering::SeqCst) {
+                        beside();
+                    }
                 }
             });
             let out = work();
