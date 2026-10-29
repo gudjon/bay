@@ -49,6 +49,17 @@ pub enum Standing {
 }
 
 impl Standing {
+    /// Every standing, as a row names it.
+    pub const ALL: [Self; 7] = [
+        Self::NotOnRecipient,
+        Self::Lost,
+        Self::Arrived,
+        Self::ReplyOwed,
+        Self::Stale,
+        Self::Expired,
+        Self::Closed,
+    ];
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

@@ -71,7 +71,8 @@ narrow your paths. `bay help` shows every command and flag on one page, with wha
 never writes (read it before you hesitate to run one), and `bay <command> --help`
 says more about one. `bay help --json` is the same list for programs, with every reason code and
 the JSON Schema of `bay.result/1`.
-It also lists each agent product's hook moments and what each can block.
+It also lists each agent product's hook moments and what each can block, and in `talk` how a talk is
+stored (`bay.talk/1`: its ref, its fields and each reply's fields), for a program that reads talks.
 
 ## Keep merges fast
 
@@ -187,7 +188,7 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 
 | When | Run |
 | --- | --- |
-| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the runners with their age (`runners`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --all` |
+| See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`, newest first inside 24 KiB, `talks_more` counts the rest; each session's `owes_talks`), and the runners with their age (`runners`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --all` |
 | See every head: each branch on the remote, classed `main`, `target`, `lane`, `merged`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --branches [--stale-days <n>]` |
 | Delete only the remote branches `merged` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[plugin.prune]` plugin runs after each delete (`detail.pruned[].on_prune`) | `bay prune [--stale-days <n>]` |
 | See merges, events (`main_red`, `main_red_cleared`, `outside_merge`, `main_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_answered`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |

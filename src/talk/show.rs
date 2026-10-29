@@ -8,15 +8,19 @@
 //! fields (an answer's `value`, a backbrief's `status` and `evidence`, a close's `state`). Its
 //! human text is the same, a line each. This is data the actor asked for, so it carries the
 //! talk's text; a notice never does (ruling R13).
+//!
+//! [`contract`] is the reader contract of a talk (U5, G454), `bay help --json`'s `talk`.
 
 use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-use super::standing::{follow, reader_now};
+use super::standing::{Standing, follow, reader_now};
 use super::{
-    ENTRY_COMMON, Refusal, TALK_PREFIX, Talk, batch, entry_name, is_talk_id, talks_matching,
+    BAY_TALK_MAX_BYTES, ENTRIES_DIR, ENTRY_COMMON, ENTRY_FIELDS, FIELDS, KINDS, Refusal,
+    STATUS_WORDS, TALK_FILE, TALK_PREFIX, TALK_SCHEMA, Talk, batch, entry_name, is_talk_id,
+    talks_matching,
 };
 use crate::repo::Repo;
 use crate::result::BayResult;
@@ -156,4 +160,32 @@ fn text(detail: &Value) -> String {
         }
     }
     out
+}
+
+/// U5 (G454): the reader contract of a talk, `bay help --json`'s `talk`: its schema, where it
+/// lives, its body's fields, each kind with its target fields, each entry with its fields, the
+/// status words and the standings, each read from the table bay judges talks by.
+#[must_use]
+pub fn contract() -> Value {
+    json!({
+        "schema": TALK_SCHEMA,
+        "ref": format!("{TALK_PREFIX}<who>/<id>"),
+        "chain": format!(
+            "one commit chain per talk: the root commit holds {TALK_FILE}, the body; each later commit adds one {ENTRIES_DIR}/<nnnn>-<entry>.json and keeps every earlier file"
+        ),
+        "max_bytes": BAY_TALK_MAX_BYTES,
+        "body": FIELDS,
+        "kinds": KINDS
+            .iter()
+            .map(|(kind, targets)| json!({"kind": kind, "targets": targets}))
+            .collect::<Vec<_>>(),
+        "entries": ENTRY_FIELDS
+            .iter()
+            .map(|(entry, own)| {
+                json!({"entry": entry, "fields": ENTRY_COMMON.iter().chain(own.iter()).collect::<Vec<_>>()})
+            })
+            .collect::<Vec<_>>(),
+        "status_words": STATUS_WORDS,
+        "standings": Standing::ALL.map(Standing::as_str),
+    })
 }

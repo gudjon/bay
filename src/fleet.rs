@@ -696,13 +696,19 @@ fn unheld(repo: &Repo, map: &Map, lines: &[Value]) -> Result<Vec<Value>, String>
     Ok(out)
 }
 
-/// G47b: every open talk this cache holds, as `bay status` lists them (who owes the reply, the
-/// ages, the standing, the change it is about). Each talk's sender is an actor heard at `sent`,
-/// and its recipient one heard at its ack or backbrief. Each session entry gets `owes_talks`, the
-/// open talks its actor owes the reply to, and `owed_talks`, those its actor sent that another
-/// actor owes: talks go to actors, so every session of one actor carries the same counts. An
-/// unreadable talk ref lists `{"unread": why}` and the counts are `null`, never `0`.
-fn talks(git: &Git, map: &mut Map) -> Value {
+/// The most bytes of talk rows the map lists (U5, G454): a reader takes the map whole, so its
+/// talks have a budget.
+pub const FLEET_TALKS_MAX_BYTES: usize = 24 * 1024;
+
+/// G47b: the open talks this cache holds, as `bay status` lists them (who owes the reply, the
+/// ages, the standing, the change it is about), newest first while their JSON fits
+/// [`FLEET_TALKS_MAX_BYTES`], and how many more there are (U5, G454). Each talk's sender is an
+/// actor heard at `sent`, and its recipient one heard at its ack or backbrief. Each session entry
+/// gets `owes_talks`, the open talks its actor owes the reply to, and `owed_talks`, those its
+/// actor sent that another actor owes, each counted over every open talk: talks go to actors,
+/// so every session of one actor carries the same counts. An unreadable talk ref lists
+/// `{"unread": why}`, and the counts are `null`, never `0`.
+fn talks(git: &Git, map: &mut Map) -> (Value, Value) {
     let rows = match crate::talk::standing::open_rows(git, crate::talk::standing::reader_now()) {
         Ok(rows) => rows,
         Err(why) => {
@@ -710,7 +716,7 @@ fn talks(git: &Git, map: &mut Map) -> Value {
                 entry["owes_talks"] = Value::Null;
                 entry["owed_talks"] = Value::Null;
             }
-            return json!({"unread": why});
+            return (json!({"unread": why}), Value::Null);
         }
     };
     for row in &rows {
@@ -736,7 +742,18 @@ fn talks(git: &Git, map: &mut Map) -> Value {
         entry["owes_talks"] = json!(to_answer);
         entry["owed_talks"] = json!(awaited);
     }
-    Value::from(rows)
+    // The rows are oldest first: the newest are listed, each with its comma, inside the budget.
+    let mut listed = Vec::new();
+    let mut bytes = 2;
+    for row in rows.iter().rev() {
+        bytes += row.to_string().len() + 1;
+        if bytes > FLEET_TALKS_MAX_BYTES {
+            break;
+        }
+        listed.push(row.clone());
+    }
+    let more = rows.len() - listed.len();
+    (Value::from(listed), json!(more))
 }
 
 /// NEW-5: the promotion targets as `bay status` reads them, from the target refs and evidence
@@ -759,7 +776,7 @@ fn target_rows(repo: &Repo, trunk: &str) -> Value {
 /// fresh session row, this machine's from its records, each with how many commits its view's
 /// base is behind trunk (`behind_commits`) and the session's age (`session_age_s`, G166); an entry per held change no session
 /// names ([`unheld`]); every machine and actor the cache knows, each with `age_s`, the actors of
-/// open talks among them; every open talk the cache holds ([`talks`], G47b); and
+/// open talks among them; the open talks the cache holds, inside a budget ([`talks`], G47b); and
 /// `default_actor_sessions`, the fresh sessions whose actor's name came from a default rather
 /// than `BAY_ACTOR` (G152). `red` lists the post checks trunk is red on, and `red_pending`
 /// those no landing in the window answers (NEW-6), as `bay status` does, and each entry's
@@ -825,7 +842,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         .count();
     let unheld = unheld(repo, &map, lines.as_deref().unwrap_or_default())?;
     map.sessions.extend(unheld);
-    let talks = talks(git, &mut map);
+    let (talks, talks_more) = talks(git, &mut map);
     // G67: an unreadable presence is named in its row; a read that fails says why, never `[]`.
     let executors = executor_rows(repo, fetched, crate::presence::reader_now())
         .map_or_else(|why| json!({"unread": why}), Value::from);
@@ -868,6 +885,7 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
             "actor": actor, "machines": on, "age_s": age,
         })).collect::<Vec<_>>(),
         "talks": talks,
+        "talks_more": talks_more,
         "talk": talk,
         "locks": crate::locks::held(repo, map.now),
         "red": red,
