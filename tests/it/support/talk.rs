@@ -286,3 +286,123 @@ pub fn commit_time(dir: &Path, rev: &str) -> u64 {
         .parse()
         .unwrap()
 }
+
+/// One plain Git remote under `[policy] signing = "approvals"` (G445), as a forge is: no bay hook
+/// judges a push, and no key registry exists anywhere, so each talk is named by `BAY_ACTOR` and
+/// signed by no key. `agent` runs on `a`, `agent-b` on `b`.
+pub struct Approvals {
+    pub test_box: TestBox,
+    pub remote: PathBuf,
+    pub a: PathBuf,
+    pub b: PathBuf,
+}
+
+/// [`Approvals`], seeded on `a` with an unchecked policy that turns talk on.
+#[must_use]
+pub fn approvals_talk() -> Approvals {
+    let test_box = TestBox::new();
+    let remote = test_box.bare_any("remote.git");
+    let a = test_box.repo_without_remote_any("a");
+    test_box.add_origin(&a, &remote);
+    let mut files = unchecked_files();
+    assert_eq!(files[0].0, ".bay/policy.toml");
+    files[0]
+        .1
+        .push_str("\n[policy]\nsigning = \"approvals\"\n\n[talk]\nenabled = true\n");
+    test_box.seed_with_check(&a, &[("src/a.rs", "fn a() {}\n")], &files);
+    let b = test_box.clone_of(&remote, "b");
+    Approvals {
+        test_box,
+        remote,
+        a,
+        b,
+    }
+}
+
+impl Approvals {
+    /// The clone each actor runs on.
+    #[must_use]
+    pub fn clone_of(&self, actor: &str) -> &Path {
+        match actor {
+            "agent" => &self.a,
+            "agent-b" => &self.b,
+            other => panic!("no clone for {other}"),
+        }
+    }
+
+    /// `bay <args>` as `actor` on its clone, in session `s-<actor>`: the exit code and result.
+    pub fn bay(&self, actor: &str, args: &[&str]) -> (i32, Value) {
+        result_json(
+            self.test_box
+                .bay(self.clone_of(actor))
+                .env("BAY_ACTOR", actor)
+                .env("BAY_SESSION", format!("s-{actor}"))
+                .args(args),
+        )
+    }
+
+    /// A talk from `from` to `who` (`kind` with its target `--<field> <value>`, plus `more`):
+    /// its id.
+    pub fn ask(&self, from: &str, who: &str, what: &str, target: &[&str], more: &[&str]) -> String {
+        let follow_up = from_now(3600);
+        let mut args = vec!["talk", who, what];
+        args.extend_from_slice(target);
+        args.extend_from_slice(&["--follow-up", &follow_up]);
+        args.extend_from_slice(more);
+        let (code, sent) = self.bay(from, &args);
+        assert_eq!(code, 0, "{sent}");
+        sent["detail"]["talk"].as_str().unwrap().to_owned()
+    }
+
+    /// `bay status --since [<cursor>]` as `actor` (with `env` set): the events about `talk`, and
+    /// the cursor it returned.
+    pub fn since(
+        &self,
+        actor: &str,
+        cursor: Option<&str>,
+        talk: &str,
+        env: &[(&str, &str)],
+    ) -> (Vec<Value>, String) {
+        let mut cmd = self.test_box.bay(self.clone_of(actor));
+        cmd.env("BAY_ACTOR", actor)
+            .env("BAY_SESSION", format!("s-{actor}"))
+            .args(["status", "--since"]);
+        if let Some(cursor) = cursor {
+            cmd.arg(cursor);
+        }
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
+        let (code, watched) = result_json(&mut cmd);
+        assert_eq!(code, 0, "{watched}");
+        let events = watched["detail"]["events"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{watched}"))
+            .iter()
+            .filter(|event| event["talk"] == talk)
+            .cloned()
+            .collect();
+        let cursor = watched["detail"]["cursor"].as_str().unwrap().to_owned();
+        (events, cursor)
+    }
+
+    /// Writes `fields` as `actor`'s entry of `kind` on talk `id` to `who`, as bay writes an entry
+    /// (unsigned, by name), on `actor`'s clone after a fetch of the talk, and pushes it.
+    pub fn entry(&self, actor: &str, who: &str, id: &str, kind: &str, fields: &Value) {
+        let dir = self.clone_of(actor);
+        let name = talk_ref(who, id);
+        self.test_box
+            .git_ok(dir, &["fetch", "-q", "origin", &format!("+{name}:{name}")]);
+        let git = bay::git::Git::new(dir);
+        let tip = git.run(&["rev-parse", &name]).unwrap();
+        let mut entry = serde_json::json!({"schema": "bay.talk/1", "entry": kind, "talk": id,
+            "actor": {"name": actor, "session": format!("s-{actor}")},
+            "at": bay::clock::now_rfc3339()});
+        for (key, value) in fields.as_object().unwrap() {
+            entry[key] = value.clone();
+        }
+        let commit = bay::talk::entry_commit_as(&git, &tip, &entry, None, actor).unwrap();
+        self.test_box
+            .git_ok(dir, &["push", "-q", "origin", &format!("{commit}:{name}")]);
+    }
+}

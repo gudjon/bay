@@ -10,8 +10,14 @@
 //! - `expired` (G52, ruling T3): read after its `expires`, judged by the ack's commit time, or not
 //!   read yet with `expires` passed, so any read is later. It owes nothing: `owes` is null, and
 //!   it is never `lost` or `stale`. The recipient's accept closes a talk read after `expires`.
+//! - `closed` (G452, T11): closed by a close entry or, a discovery talk, by its answer. It owes
+//!   nothing: `owes` is null. `bay status` lists open talks only; `bay status --since` and
+//!   `bay talk --show` read a closed talk's row.
 //!
-//! A closed talk is not listed. A backbrief that says `done` closes nothing: only evidence does.
+//! The arrival is the ack or, when none came first, a backbrief or an answer written by `who`
+//! (G452): the recipient read the talk to reply to it. An answer by `decides` says nothing of
+//! `who`. The reply is the latest backbrief or answer. A backbrief that says `done` closes
+//! nothing: only evidence does.
 //!
 //! Each row says `signed`: whether a key signed the talk's sender. Under `[policy] signing =
 //! "approvals"` (G445) it is `false`, and `from` is the name the sender claims.
@@ -36,6 +42,7 @@ pub enum Standing {
     ReplyOwed,
     Stale,
     Expired,
+    Closed,
 }
 
 impl Standing {
@@ -48,6 +55,7 @@ impl Standing {
             Self::ReplyOwed => "reply_owed",
             Self::Stale => "stale",
             Self::Expired => "expired",
+            Self::Closed => "closed",
         }
     }
 }
@@ -142,61 +150,90 @@ pub fn followed(
         (talk.from_name() == me || talk.who == me) && (!talk.closed() || held(&talk.id))
     })?;
     talks.sort_by_key(Talk::sent);
-    talks
+    talks.iter().map(|talk| follow(git, talk, now)).collect()
+}
+
+/// `talk` as [`followed`] follows it, read at `now`.
+fn follow(git: &Git, talk: &Talk, now: u64) -> Result<Followed, String> {
+    let closed = if talk.closed() {
+        Some(
+            talk.closed_as(git)?
+                .unwrap_or_else(|| "answered".to_owned()),
+        )
+    } else {
+        None
+    };
+    let replies = talk
+        .entries
         .iter()
-        .map(|talk| -> Result<Followed, String> {
-            let closed = if talk.closed() {
-                Some(
-                    talk.closed_as(git)?
-                        .unwrap_or_else(|| "answered".to_owned()),
-                )
-            } else {
-                None
-            };
-            let replies = talk
-                .entries
-                .iter()
-                .filter(|entry| matches!(entry.kind.as_str(), "backbrief" | "answer"))
-                .count();
-            Ok(Followed {
-                row: row(git, talk, now)?,
-                closed,
-                replies,
-            })
-        })
-        .collect()
+        .filter(|entry| matches!(entry.kind.as_str(), "backbrief" | "answer"))
+        .count();
+    Ok(Followed {
+        row: row(git, talk, now)?,
+        closed,
+        replies,
+    })
+}
+
+fn read_entry(git: &Git, entry: &Entry) -> Result<Value, String> {
+    let text = git
+        .run(&["cat-file", "blob", &entry.blob])
+        .map_err(|error| error.message())?;
+    serde_json::from_str(&text).map_err(|error| error.to_string())
+}
+
+fn at(value: &Value) -> Option<u64> {
+    value["at"].as_str().and_then(unix_of)
+}
+
+/// The latest entry of one of `kinds`.
+fn latest<'a>(talk: &'a Talk, kinds: &[&str]) -> Option<&'a Entry> {
+    talk.entries
+        .iter()
+        .rev()
+        .find(|entry| kinds.contains(&entry.kind.as_str()))
+}
+
+/// G452: when `talk` arrived, and the wake adapter's answer its ack recorded (G53). The arrival
+/// is the ack's time or, when a backbrief or an answer written by `who` came before any ack, that
+/// entry's time.
+fn arrival(git: &Git, talk: &Talk) -> Result<(Option<u64>, Value), String> {
+    let mut arrived = None;
+    for entry in &talk.entries {
+        if entry.kind == "ack" {
+            let ack = read_entry(git, entry)?;
+            return Ok((arrived.or_else(|| at(&ack)), ack["wake"].clone()));
+        }
+        if arrived.is_none() && matches!(entry.kind.as_str(), "backbrief" | "answer") {
+            let reply = read_entry(git, entry)?;
+            if reply["actor"]["name"] == talk.who.as_str() {
+                arrived = at(&reply);
+            }
+        }
+    }
+    Ok((arrived, Value::Null))
 }
 
 fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
-    let entry = |entry: &Entry| -> Result<Value, String> {
-        let text = git
-            .run(&["cat-file", "blob", &entry.blob])
-            .map_err(|error| error.message())?;
-        serde_json::from_str(&text).map_err(|error| error.to_string())
-    };
-    let at = |value: &Value| value["at"].as_str().and_then(unix_of);
-    let ack = match talk.entries.iter().find(|entry| entry.kind == "ack") {
-        Some(found) => Some(entry(found)?),
+    let (acked, wake) = arrival(git, talk)?;
+    let backbrief = latest(talk, &["backbrief"])
+        .map(|entry| read_entry(git, entry))
+        .transpose()?;
+    // G452: the reply is the latest backbrief or answer.
+    let replied = match latest(talk, &["backbrief", "answer"]) {
+        Some(found) if found.kind == "backbrief" => backbrief.as_ref().and_then(at),
+        Some(found) => at(&read_entry(git, found)?),
         None => None,
     };
-    let acked = ack.as_ref().and_then(at);
-    // G53: the wake adapter's answer, as the recipient's ack recorded it.
-    let wake = ack.as_ref().map_or(Value::Null, |ack| ack["wake"].clone());
-    let backbrief = match talk
-        .entries
-        .iter()
-        .rev()
-        .find(|entry| entry.kind == "backbrief")
-    {
-        Some(found) => Some(entry(found)?),
-        None => None,
-    };
-    let replied = backbrief.as_ref().and_then(at);
     let follow_up = talk.follow_up(git)?;
     let due = follow_up.as_deref().and_then(unix_of);
     let sent = talk.sent();
-    let held = standing(sent, acked, replied, due, talk.expires(), now);
-    let owes = if held == Standing::Expired {
+    let held = if talk.closed() {
+        Standing::Closed
+    } else {
+        standing(sent, acked, replied, due, talk.expires(), now)
+    };
+    let owes = if matches!(held, Standing::Expired | Standing::Closed) {
         Value::Null
     } else {
         json!(
