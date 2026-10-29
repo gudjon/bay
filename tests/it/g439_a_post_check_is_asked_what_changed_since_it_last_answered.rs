@@ -7,7 +7,7 @@
 //! what changed since the newest landing this box holds a record of the check on, and a tip
 //! whose range wakes none of the check's paths is not run.
 //!
-//! The guard to mutate: the `since` range and the `policy.unwoken` skip in `bisect::tip_runs`
+//! The guard to mutate: the `since` range and the `policy.unwoken` skip in `bisect::tips`
 //! (`src/bisect.rs`): ask about the last landing alone and the suite answers unknown on a tip
 //! whose last landing did not touch it.
 

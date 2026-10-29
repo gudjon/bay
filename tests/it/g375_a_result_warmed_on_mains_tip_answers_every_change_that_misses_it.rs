@@ -8,8 +8,7 @@
 //! runs only the checks it reaches, and the work done for one tip is done once, for the fleet.
 //!
 //! Guards to mutate (each makes a case here fail):
-//! - `src/executor.rs` `pass`: drop the `crate::bisect::warm` call (the docs change runs the
-//!   check itself).
+//! - `src/bisect.rs` `plan`: drop the `warm` stage (the docs change runs the check itself).
 //! - `src/publish.rs` `carry_over`: leave out the base tree (the warm record on main's tip is
 //!   never looked at, and the docs change runs the check).
 

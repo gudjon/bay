@@ -122,6 +122,9 @@ pub struct Suspect {
     pub failed: Mark,
     /// The landings after `passed` up to and including `failed`, oldest first.
     pub landings: Vec<Mark>,
+    /// The newest landing whose answer is a `product_failure`: the one that decides the red.
+    /// Its failing record names the units a post run asks to run again (`crate::bisect`, G540).
+    pub newest_failed: Mark,
     /// The one landing the evidence leaves, when the pass sits right below the first failure.
     pub culprit: Option<Culprit>,
     /// B5: with no pass found, how many first-parent commits of main were read back for one;
@@ -934,6 +937,7 @@ impl<'a> Answers<'a> {
                 passed: passed.map(|older| Mark::of(&landings[older])),
                 failed: Mark::of(&landings[first]),
                 landings: landings[first..end].iter().rev().map(Mark::of).collect(),
+                newest_failed: Mark::of(&landings[at]),
                 culprit,
                 searched: passed.is_none().then_some(self.line.depth),
             },

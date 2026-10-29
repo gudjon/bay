@@ -6197,6 +6197,7 @@ fn run_policy(
             policy_provenance,
             inputs,
             turn: Some(if ctx.ahead_of_turn { "ahead" } else { "head" }),
+            rerun: &[],
         },
         &producer,
         &check::Limits {
@@ -7366,6 +7367,8 @@ fn bay_message(
 
 /// Pushes the producer's notes ref and confirms the remote now holds exactly that commit.
 fn push_and_read_back_evidence(repo: &Repo, producer: &str) -> Result<(), String> {
+    // #123: no post piece writes the notes between the read of the local ref and the read back.
+    let _writing = evidence::writing();
     let notes = evidence::notes_ref(producer);
     let Some(local) = repo
         .git

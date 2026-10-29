@@ -27,10 +27,20 @@
 //! Beside that box-local file, each pass publishes the executor's presence to the remote
 //! (`crate::presence`, G67), so a box that runs no executor, or one that stopped, can be seen
 //! from every other box; `--once` names the write in `detail.presence`.
+//!
+//! #123: after its queue's work, a pass starts the runner's own post work (`crate::bisect`) as
+//! pieces, one environment each, each on its own thread ([`post`]): the post work of different
+//! environments runs side by side, and one environment runs one piece at a time. A pass never
+//! waits for a piece; it collects the verdict of each piece that ended, and the next pass, or
+//! the one after, plans the next. A runner whose binary changed starts no piece and WAITS for
+//! its running pieces to end before it moves to the new binary: it keeps driving operations
+//! meanwhile, and never hands a piece over or stops inside one. `--once` waits for every piece
+//! it started.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -43,6 +53,10 @@ use crate::receipts;
 use crate::repo::Repo;
 use crate::result::{BayResult, Decision, Reason};
 use crate::signing::Keys;
+
+mod post;
+
+use post::Post;
 
 #[must_use]
 pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
@@ -77,11 +91,15 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     let mut binary = Binary::now();
     // A looping executor moves to a new binary between operations; `--once` finishes its pass.
     let moves = !once && MOVES;
+    // #123: the post pieces still running, across passes; `--once` waits for its own.
+    let mut post = Post::new(once);
+    // The version a runner waits to move to while its post pieces run, said once.
+    let mut waits_for: Option<String> = None;
     loop {
         // Each pass reads the config at the trunk tip it fetched (ruling: config location),
         // so a config that landed since the last pass governs this one.
         let repo = match Repo::open_fetched(dir) {
-            Ok(repo) => repo,
+            Ok(repo) => Arc::new(repo),
             Err(error) => return error.into_result(),
         };
         // A fleet finding (2026-10-26): a runner is the one bay that runs for days, so it asks
@@ -100,39 +118,24 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         }
         let mut notes = Vec::new();
         let mut advanced = Vec::new();
-        let ran = match pass(
+        let mut ran = match pass(
             &repo,
             moves.then_some(&binary),
-            &mut notes,
-            &mut advanced,
+            (&mut notes, &mut advanced),
             seen,
             &mut beat,
+            &mut post,
         ) {
             Ok(ran) => ran,
             Err(message) => return BayResult::failed(message),
         };
         // Between passes, never inside an operation: the re-exec point.
-        if !once && (binary.changed() || binary.holding()) {
-            // A pin is a floor: a runner moves to its pin or a newer release, never to a build
-            // that was never released, and never when the pin cannot be read.
-            if let Some(next) = binary
-                .version()
-                .filter(|_| moves && binary.takes_arguments())
-            {
-                let Some(pin) = pinned_elsewhere(&next) else {
-                    return BayResult::ok(json!({"ran": ran, "reexec": {
-                        "from": crate::version::BAY,
-                        "to": next,
-                        "path": binary.path,
-                    }}));
-                };
-                if binary.hold() {
-                    eprintln!("bay runner: {}", binary.pinned(&next, &pin));
-                }
-            } else {
-                eprintln!("bay runner: {}", binary.stays());
-                binary.accept();
-            }
+        if !once
+            && (binary.changed() || binary.holding())
+            && let Some(moved) =
+                reexec_point(&mut binary, moves, (&mut post, &mut waits_for), &mut ran)
+        {
+            return moved;
         }
         if once {
             let mut detail = json!({"ran": ran});
@@ -608,15 +611,20 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 ///
 /// N-7: after the queue's work, the targets with `advance = true` are fast-forwarded to their
 /// newest promotable commit (`crate::target::advance`); each move goes to `advanced`.
+///
+/// #123: after the queue's work, [`post_pass`] collects the post pieces that ended and starts
+/// the next ones in `post`; once `binary` changed it starts none, and the pass stops between
+/// operations only when no piece runs.
 #[allow(clippy::too_many_lines)]
 fn pass(
-    repo: &Repo,
+    shared: &Arc<Repo>,
     binary: Option<&Binary>,
-    notes: &mut Vec<Value>,
-    advanced: &mut Vec<Value>,
+    (notes, advanced): (&mut Vec<Value>, &mut Vec<Value>),
     seen: Seen,
     beat: &mut crate::presence::Beat,
+    post: &mut Post,
 ) -> Result<Vec<Value>, String> {
+    let repo: &Repo = shared;
     // G438: this pass's visits share what it reads from the remote.
     repo.share_reads(true);
     // BACKLOG 113 (a review, 2026-10-28): a head's red gate judges main from this box's copy of
@@ -696,7 +704,7 @@ fn pass(
             break;
         }
         for op_id in queued {
-            if binary.is_some_and(Binary::changed) {
+            if binary.is_some_and(Binary::changed) && post.idle() {
                 ran.extend(recovered.take());
                 ran.append(&mut arrivals.rows);
                 return Ok(ran);
@@ -727,41 +735,8 @@ fn pass(
     );
     ran.extend(compaction(repo, &chain));
     ran.extend(recovered.take());
-    // After the queue's work, never ahead of it: the runner's own post checks on main's tip,
-    // then the culprit of a red one (G244d). A fleet finding (2026-10-27): once every post check
-    // ran, a pass ran all five one after another, minutes each, and the next pass, which
-    // publishes the head, waited behind them; nothing landed for 40 minutes. A pass does at most
-    // one piece of this work; the next pass, or another runner, does the next.
-    // A fleet finding (2026-10-27, 0.5.28): a pass also skipped this work once past its bound, and
-    // with a deep queue every pass reaches its bound, so no post check ran at all. One job a pass
-    // is the bound; the runner that holds the head does none (`holds_the_head`).
-    // G423 (a fleet finding, 2026-10-28): a post check runs for minutes, and its runner wrote no
-    // presence meanwhile, so the others read it as gone and took work only it serves, which then
-    // waited out a lease. It beats once a heartbeat while that work runs.
-    if !holds_the_head(repo) {
-        let began = std::time::Instant::now();
-        let mut placing = || arrivals.step(repo, "post");
-        let work = beat.meanwhile(repo, "post", depth, &mut placing, || {
-            if let Some(post) = crate::bisect::tips(repo) {
-                Some(json!({"post": post}))
-            } else if let Some(warm) = crate::bisect::warm(repo) {
-                Some(json!({"warm": warm}))
-            } else {
-                // G244d: after the queue's work, never ahead of it, the culprit of a red post
-                // check.
-                crate::bisect::run(repo).map(|bisect| json!({"bisect": bisect}))
-            }
-        });
-        // E21: post work writes its own journal line, as an operation does.
-        if let Some(done) = &work {
-            eprintln!(
-                "bay runner: {} ({}s)",
-                post_line(done),
-                began.elapsed().as_secs()
-            );
-        }
-        ran.extend(work);
-    }
+    let plans = !binary.is_some_and(Binary::changed);
+    ran.extend(post_pass(shared, post, plans, (beat, depth, &mut arrivals)));
     // A fleet finding (2026-10-27): a retention cut costs a fetch of its chain, and one that
     // does not happen leaves the chain due again; read inside the loop, hundreds of closed chains
     // kept a runner silent for minutes ahead of every change sorted after them, nothing admitted.
@@ -780,6 +755,109 @@ fn pass(
     advanced.extend(advance(repo));
     ran.append(&mut arrivals.rows);
     Ok(ran)
+}
+
+/// After the queue's work, never ahead of it: the runner's own post checks on main's tip, then
+/// the warm runs, then the culprit of a red post check (G244d), as pieces of one environment
+/// each (#123, `crate::bisect::plan`). The rows of each piece that ended since the last pass
+/// come first. With `plans`, unless this runner holds the head, it plans the next pieces, in
+/// the environments no running piece holds, and starts each on its own thread; `--once` then
+/// waits for them.
+///
+/// A fleet finding (2026-10-27): once every post check ran, a pass ran all five one after
+/// another, minutes each, and the next pass, which publishes the head, waited behind them;
+/// nothing landed for 40 minutes. A pass that holds the head does none (`holds_the_head`), and
+/// one environment runs one piece at a time. #123 (a fleet finding, 2026-10-29): one piece a
+/// pass, on the pass's own thread, made each environment's post checks wait for every other's,
+/// and every pass wait for the post check: now no pass waits for a piece.
+///
+/// G423 (a fleet finding, 2026-10-28): a post check runs for minutes, and its runner wrote no
+/// presence meanwhile, so the others read it as gone and took work only it serves, which then
+/// waited out a lease. It beats once a heartbeat while it plans and while `--once` waits; a
+/// looping runner's passes beat as they go on.
+fn post_pass(
+    repo: &Arc<Repo>,
+    post: &mut Post,
+    plans: bool,
+    (beat, depth, arrivals): (&mut crate::presence::Beat, usize, &mut Arrivals),
+) -> Vec<Value> {
+    let mut rows = post.collect();
+    if plans && !holds_the_head(repo) {
+        let busy = post.busy();
+        let began = Instant::now();
+        let mut placing = || arrivals.step(repo, "post");
+        let plan = beat.meanwhile(repo, "post", depth, &mut placing, || {
+            crate::bisect::plan(repo, &busy)
+        });
+        for (kind, row) in plan.rows {
+            // E21: post work writes its own journal line, as an operation does.
+            eprintln!(
+                "bay runner: {} ({}s)",
+                post_line(&post::kinded(kind, row.clone())),
+                began.elapsed().as_secs()
+            );
+            rows.push((kind, row));
+        }
+        for piece in plan.pieces {
+            rows.extend(post.start(repo, piece));
+        }
+    }
+    if post.waits && post.holds() {
+        let mut placing = || arrivals.step(repo, "post");
+        rows.extend(beat.meanwhile(repo, "post", depth, &mut placing, || post.finish()));
+    }
+    post::rows(rows)
+}
+
+/// The re-exec point of a runner whose binary changed, between passes and never inside an
+/// operation: the result that names the move, once the new binary is a release this runner may
+/// move to and no post piece runs. A pin is a floor: a runner moves to its pin or a newer
+/// release, never to a build that was never released, and never when the pin cannot be read.
+///
+/// #123: a running post piece is never handed over. The runner waits for it, driving
+/// operations meanwhile and starting no new piece, and says so once for each version.
+fn reexec_point(
+    binary: &mut Binary,
+    moves: bool,
+    (post, waits_for): (&mut Post, &mut Option<String>),
+    ran: &mut Vec<Value>,
+) -> Option<BayResult> {
+    let Some(next) = binary
+        .version()
+        .filter(|_| moves && binary.takes_arguments())
+    else {
+        eprintln!("bay runner: {}", binary.stays());
+        binary.accept();
+        return None;
+    };
+    match pinned_elsewhere(&next) {
+        None if !post.idle() => {
+            if waits_for.as_deref() != Some(next.as_str()) {
+                eprintln!(
+                    "bay runner: waits for {} post piece(s) to end before it moves to bay {next}",
+                    post.pending()
+                );
+                *waits_for = Some(next);
+            }
+            None
+        }
+        None => {
+            ran.extend(post::rows(post.collect()));
+            Some(BayResult::ok(
+                json!({"ran": std::mem::take(ran), "reexec": {
+                    "from": crate::version::BAY,
+                    "to": next,
+                    "path": binary.path,
+                }}),
+            ))
+        }
+        Some(pin) => {
+            if binary.hold() {
+                eprintln!("bay runner: {}", binary.pinned(&next, &pin));
+            }
+            None
+        }
+    }
 }
 
 /// Whether this runner holds the queue head's operation, still running or checked and not yet

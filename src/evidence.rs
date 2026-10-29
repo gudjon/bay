@@ -390,12 +390,27 @@ fn failed_on_absent_note(error: &GitError) -> bool {
     matches!(error, GitError::Failed { stderr, .. } if stderr.contains("fatal: bad object "))
 }
 
-/// Appends `record` to `producer`'s note on its subject tree.
+/// The one writer of this process's evidence notes at a time.
+static WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// #123: a runner writes evidence from more than one thread (an operation's checks, and each
+/// post piece, `crate::executor`), and [`append`] reads the note, adds a record and writes the
+/// note back. Two such writes at once keep only the later note, and a push read back against
+/// the local ref (`crate::publish`) reads another thread's write as a collision. Each write of
+/// the notes, and each push of them, holds this; none takes it twice.
+pub fn writing() -> std::sync::MutexGuard<'static, ()> {
+    WRITE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Appends `record` to `producer`'s note on its subject tree, under [`writing`].
 ///
 /// # Errors
 ///
 /// A git fault, or an existing record with the same id and different content.
 pub fn append(git: &Git, producer: &str, record: &EvidenceRecord) -> Result<(), String> {
+    let _writing = writing();
     let tree = &record.subject.tree;
     let mut records = producer_records(git, producer, tree)?;
     if let Some(existing) = records.iter().find(|existing| existing.id == record.id) {
