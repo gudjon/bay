@@ -170,7 +170,7 @@ fn a_talk_read_after_it_expires_prints_expired_and_owes_no_backbrief() {
         in_time_line.starts_with(&format!(
             "bay: talk {in_time} (delivery) from agent arrived for agent-b, reply owed by "
         )) && in_time_line.ends_with(&format!(
-            ": read it with `git show refs/bay/talk/agent-b/{in_time}:talk.json`"
+            ": read it with `git show refs/bay/talk/agent-b/{in_time}:talk.json`; reply with `bay talk --backbrief {in_time} <status>`"
         )),
         "{told}"
     );

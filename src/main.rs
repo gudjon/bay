@@ -165,6 +165,10 @@ enum Command {
     /// target; the same ask while it is open is the same talk. `--to` more than once, or
     /// `--to-live`, asks many as one round. Arrival is the recipient's ack, written when its bay
     /// fetches. --show <id> reads a talk and its replies
+    ///
+    /// The recipient replies with one command per kind: a discovery talk with
+    /// `bay talk --answer <id> <value>`; a delivery or reliability talk with
+    /// `bay talk --backbrief <id> <status>`, the status ready, blocked, validated or done.
     Talk(Box<TalkArgs>),
     /// Admin: add one key to the key registry: append it to its class file, sign the new
     /// registry with this machine's registry key (`bay.registryKey`) and push it. The first
@@ -357,7 +361,8 @@ struct TalkArgs {
     #[arg(long, value_name = "CHECK")]
     check: Vec<String>,
     /// When the reply is owed, a UTC time after now (2026-10-19T12:00:00Z); with none, the
-    /// policy's default time after sending (`[talk] follow_up_s`, one hour)
+    /// policy's default time after sending (`[talk] follow_up_s`, one hour); with --backbrief,
+    /// when the next one is
     #[arg(long, value_name = "TIME")]
     follow_up: Option<String>,
     /// Who decides if the two disagree: a name as WHO takes it (an agent, or under "all" an
@@ -367,7 +372,8 @@ struct TalkArgs {
     /// The sender's reading of the fact
     #[arg(long)]
     context: Option<String>,
-    /// A pointer to evidence already in Git: a commit, a path or a change id
+    /// A pointer to evidence already in Git: a commit, a path or a change id (with --backbrief:
+    /// what shows the status)
     #[arg(long)]
     evidence: Option<String>,
     /// The talk this one replaces (with --answer: the standing answer's commit)
@@ -403,21 +409,41 @@ struct TalkArgs {
     /// Run every refusal and commit nothing
     #[arg(long)]
     dry_run: bool,
-    /// Answer the discovery talk with this id instead of sending one
-    #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "to_change", "kind", "change",
+    /// Answer the discovery talk with this id: `bay talk --answer <id> <value>`
+    #[arg(long, value_name = "ID", conflicts_with_all = ["what", "to_change", "kind", "change",
         "artifact", "decision", "check", "follow_up", "decides", "context", "evidence",
         "expires", "target", "forecast", "commitment", "owns", "promises", "needs",
-        "promise_evidence", "urgent", "dry_run"])]
+        "promise_evidence", "urgent", "dry_run", "backbrief"])]
     answer: Option<String>,
-    /// With --answer: the decision value
+    /// With --answer: the decision value, in place of the argument
     #[arg(long, requires = "answer")]
     value: Option<String>,
     /// Read the talk with this id and every reply to it, in order; writes nothing
     #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "to_change", "kind",
         "change", "artifact", "decision", "check", "follow_up", "decides", "context", "evidence",
         "supersedes", "expires", "target", "forecast", "commitment", "owns", "promises", "needs",
-        "promise_evidence", "urgent", "dry_run", "answer", "value", "to", "to_live"])]
+        "promise_evidence", "urgent", "dry_run", "answer", "value", "to", "to_live", "backbrief"])]
     show: Option<String>,
+    /// Reply to the delivery or reliability talk with this id: `bay talk --backbrief <id>
+    /// <status>`, the status one of ready, blocked, validated or done
+    #[arg(long, value_name = "ID", conflicts_with_all = ["what", "to_change", "kind", "change",
+        "artifact", "decision", "check", "decides", "context", "supersedes", "expires",
+        "target", "forecast", "commitment", "owns", "promises", "needs", "promise_evidence",
+        "urgent", "dry_run", "answer", "to", "to_live", "round"])]
+    backbrief: Option<String>,
+    /// With --backbrief: the outcome as you read the ask (default: the talk's own action)
+    #[arg(long, requires = "backbrief")]
+    outcome: Option<String>,
+    /// With --backbrief: your first step (default: the status)
+    #[arg(long, requires = "backbrief")]
+    first_step: Option<String>,
+    /// With --backbrief: what is still unclear (default: nothing)
+    #[arg(long, requires = "backbrief")]
+    unclear: Option<String>,
+    /// With --backbrief blocked: the reason code it waits on (`CHECK_FAILED`); blocked also
+    /// needs a new --follow-up
+    #[arg(long, value_name = "CODE", requires = "backbrief")]
+    reason: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -1029,8 +1055,9 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
     }
 }
 
-/// `bay talk`: an answer with `--answer`, a round's table with `--round`, one talk and its
-/// replies with `--show`, else one ask.
+/// `bay talk`: an answer with `--answer`, a backbrief with `--backbrief`, a round's table with
+/// `--round`, one talk and its replies with `--show`, else one ask. The argument after a reply's
+/// id is its value or its status.
 fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
     if let Some(round) = &args.round {
         return bay::talk::round(dir, round);
@@ -1043,8 +1070,24 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
             dir,
             &bay::talk::Answer {
                 talk,
+                argument: args.actor,
                 value: args.value,
                 supersedes: args.supersedes,
+            },
+        );
+    }
+    if let Some(talk) = args.backbrief {
+        return bay::talk::backbrief(
+            dir,
+            &bay::talk::Backbrief {
+                talk,
+                status: args.actor,
+                outcome: args.outcome,
+                first_step: args.first_step,
+                unclear: args.unclear,
+                evidence: args.evidence,
+                follow_up: args.follow_up,
+                reason: args.reason,
             },
         );
     }

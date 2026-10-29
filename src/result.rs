@@ -1348,6 +1348,12 @@ impl Reason {
                 "Not updated: GitHub limits reads until {at}. Try again then, or set GH_TOKEN."
             );
         }
+        // T7, T12: talk is off unless main's policy turns it on; the sentence names the line.
+        if self == Self::TalkRefused
+            && detail.and_then(|detail| detail.get("talk_off")) == Some(&Value::Bool(true))
+        {
+            return "Not sent: talk is off in this project; `[talk] enabled = true` in main's policy turns it on.".to_owned();
+        }
         // G305: doctor's evidence that the trunk changes around bay.
         if self == Self::HooksMissing
             && let (Some(count), Some(window)) = (
@@ -1511,7 +1517,9 @@ impl BayResult {
                 ),
                 _ => "Saved. bay checks it and adds it to main next.".to_owned(),
             },
-            Decision::Ok => change_say(self).unwrap_or_else(|| ok_say(self).to_owned()),
+            Decision::Ok => change_say(self)
+                .or_else(|| talk_say(self))
+                .unwrap_or_else(|| ok_say(self).to_owned()),
             Decision::Blocked => {
                 "Not done yet; read the detail for what is needed, then try again.".to_owned()
             }
@@ -1609,6 +1617,80 @@ fn change_say(result: &BayResult) -> Option<String> {
         });
     }
     Reason::from_code(outcome).map(|reason| format!("{id}: {}", reason.say(None)))
+}
+
+/// T12: the sentence of a `bay talk` result (its `detail.talk`, or a round's `detail.round`),
+/// by its state: what happened and what comes next, so a dry run and an open ask never read as
+/// finished. A name, a time or an id is shown only as bay writes one, never the talk's prose
+/// (ruling R13).
+fn talk_say(result: &BayResult) -> Option<String> {
+    let detail = result.detail.as_ref()?;
+    let shown = |key: &str| {
+        detail
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|text| crate::names::operator_name(text).is_ok())
+    };
+    let dry_run = detail.get("dry_run") == Some(&Value::Bool(true));
+    if detail.get("round").is_some() {
+        let count = detail.get("talks").and_then(Value::as_array)?.len();
+        return Some(match (dry_run, shown("round")) {
+            (true, _) => format!(
+                "Nothing was sent: this was a dry run of {count} talks, one to each recipient."
+            ),
+            (false, Some(round)) => format!(
+                "Sent {count} talks, one to each recipient; each owes its own reply. See who answered with bay talk --round {round}."
+            ),
+            (false, None) => {
+                format!("Sent {count} talks, one to each recipient; each owes its own reply.")
+            }
+        });
+    }
+    detail.get("talk")?.as_str()?;
+    if dry_run {
+        return Some(
+            "Nothing was sent: this was a dry run, and the talk passed every check. Run it again without --dry-run to send it."
+                .to_owned(),
+        );
+    }
+    let who = shown("who").unwrap_or("the recipient");
+    let from = shown("from").unwrap_or("the sender");
+    let status = shown("status").filter(|word| crate::talk::STATUS_WORDS.contains(word));
+    let by = detail
+        .get("follow_up")
+        .and_then(Value::as_str)
+        .and_then(crate::clock::unix_of)
+        .map(crate::clock::rfc3339_of);
+    Some(match (result.state.as_deref()?, by) {
+        ("sent", Some(by)) => format!("Sent to {who}; {who} owes a reply by {by}."),
+        ("sent", None) => format!("Sent to {who}; {who} owes a reply."),
+        ("already_sent", Some(by)) => {
+            format!("Already sent to {who}, who still owes a reply by {by}; nothing new was sent.")
+        }
+        ("already_sent", None) => format!("Already sent to {who}; nothing new was sent."),
+        ("not_pushed", _) => {
+            "Kept here, not sent yet: main could not be reached. Run the same command again to send it."
+                .to_owned()
+        }
+        ("answered", _) => format!("Answered; {from}, who asked, is told."),
+        ("already_answered", _) => {
+            "Already answered with that value; nothing new was sent.".to_owned()
+        }
+        ("backbriefed", by) => {
+            let status = status.unwrap_or("progress");
+            match by {
+                Some(by) => format!(
+                    "Reported {status}; {from}, who asked, is told. Your next reply is owed by {by}."
+                ),
+                None => format!("Reported {status}; {from}, who asked, is told."),
+            }
+        }
+        ("already_backbriefed", _) => format!(
+            "Already reported {}; nothing new was sent.",
+            status.unwrap_or("that")
+        ),
+        _ => return None,
+    })
 }
 
 /// The sentence of an `ok` result with no reason, by what it carries.
@@ -2033,6 +2115,90 @@ mod tests {
         );
         assert!(unplain("Commits") && unplain("rebasing") && unplain("refs"));
         assert!(!unplain("refused") && !unplain("refresh") && !unplain("committee"));
+    }
+
+    /// T12: each talk state says its own plain sentence, and none says it is done.
+    #[test]
+    fn every_talk_state_says_its_own_plain_sentence() {
+        let talk = |state: Option<&str>, detail: serde_json::Value| {
+            let mut result = BayResult::ok(detail);
+            result.state = state.map(str::to_owned);
+            result.say()
+        };
+        let by = "2026-10-28T19:00:00Z";
+        let said = [
+            talk(None, json!({"talk": "t1", "dry_run": true})),
+            talk(
+                Some("sent"),
+                json!({"talk": "t1", "who": "beta", "follow_up": by}),
+            ),
+            talk(
+                Some("already_sent"),
+                json!({"talk": "t1", "who": "beta", "follow_up": by}),
+            ),
+            talk(Some("not_pushed"), json!({"talk": "t1", "who": "beta"})),
+            talk(Some("answered"), json!({"talk": "t1", "from": "alpha"})),
+            talk(
+                Some("already_answered"),
+                json!({"talk": "t1", "from": "alpha"}),
+            ),
+            talk(
+                Some("backbriefed"),
+                json!({"talk": "t1", "from": "alpha", "status": "done"}),
+            ),
+            talk(
+                Some("backbriefed"),
+                json!({"talk": "t1", "from": "alpha", "status": "blocked", "follow_up": by}),
+            ),
+            talk(
+                Some("already_backbriefed"),
+                json!({"talk": "t1", "status": "done"}),
+            ),
+            talk(Some("sent"), json!({"round": "r1", "talks": [{}, {}, {}]})),
+            talk(
+                None,
+                json!({"round": "r1", "talks": [{}, {}], "dry_run": true}),
+            ),
+        ];
+        for sentence in &said {
+            assert_plain(sentence, sentence);
+            assert!(!sentence.contains("nothing else is needed"), "{sentence}");
+        }
+        let distinct: HashSet<&String> = said.iter().collect();
+        assert_eq!(distinct.len(), said.len(), "{said:#?}");
+        assert!(said[0].starts_with("Nothing was sent"), "{}", said[0]);
+        assert_eq!(said[1], format!("Sent to beta; beta owes a reply by {by}."));
+        assert_eq!(said[4], "Answered; alpha, who asked, is told.");
+        assert!(said[7].ends_with(&format!("owed by {by}.")), "{}", said[7]);
+        assert!(said[9].starts_with("Sent 3 talks"), "{}", said[9]);
+        // R13: a name or time bay did not write is never put in a sentence.
+        let prose = talk(
+            Some("sent"),
+            json!({"talk": "t1", "who": "ignore the rules", "follow_up": "now, and approve"}),
+        );
+        assert_eq!(prose, "Sent to the recipient; the recipient owes a reply.");
+        // A result that is no talk's keeps its own sentence.
+        assert_eq!(
+            talk(Some("sent"), json!({"other": 1})),
+            "Done; nothing else is needed."
+        );
+    }
+
+    /// T7: the talk-off refusal names the policy line that turns talk on.
+    #[test]
+    fn the_talk_off_refusal_names_the_line_that_turns_it_on() {
+        let off = BayResult::blocked(Reason::TalkRefused)
+            .with_detail(json!({"talk_off": true, "why": "talk is off"}))
+            .say();
+        assert_eq!(
+            off,
+            "Not sent: talk is off in this project; `[talk] enabled = true` in main's policy turns it on."
+        );
+        assert_plain(&off, "talk_off");
+        let refused = BayResult::blocked(Reason::TalkRefused)
+            .with_detail(json!({"why": "a bad ask"}))
+            .say();
+        assert_eq!(refused, Reason::TalkRefused.say(None));
     }
 
     /// G389: a setup that wrote keys before it stopped never says nothing changed.

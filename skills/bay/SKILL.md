@@ -197,7 +197,8 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 | Ask for one change, artifact or check instead, or name the reply time | `bay talk <who> "<what>" --change <id>\|--artifact <path>\|--check <id> [--follow-up <time>]` |
 | Ask several at once, as one round (`--to-live`: every actor with a live session but you) | `bay talk --to <a> --to <b> "<what>"` |
 | See a round: one row per recipient, its standing and its answer | `bay talk --round <id>` |
-| Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
+| Answer a discovery talk addressed to you (one decision) | `bay talk --answer <id> <value>` |
+| Reply to a delivery or reliability talk addressed to you: its status and what shows it | `bay talk --backbrief <id> ready\|blocked\|validated\|done [--evidence <ref>]` (`blocked` also takes `--reason <CODE> --follow-up <time>`) |
 | Read a talk and every reply to it, in order: who wrote each, when, an answer's value, a backbrief's status | `bay talk --show <id>` |
 
 Run `bay talk --help` for the fields of each kind. One talk asks for one thing. The same ask again while
@@ -206,6 +207,9 @@ A name is lower-case letters, digits and `-`. Under `signing = "approvals"` any 
 name no record names comes back in `detail.unseen` with a `detail.warning`: check it for a typo. Under
 `signing = "all"`, `who` and `--decides` are an enrolled agent or approver.
 
+- The notice of a talk to you names its one reply command: `--answer` for a discovery talk,
+  `--backbrief` for a delivery or reliability talk. Send a new backbrief when the status changes;
+  the same one again writes nothing. The sender is told the status word, never your text.
 - A talk read after its `--expires` is void: the notice prints `EXPIRED`, and it owes no reply.
 - A talk event in `bay status --since` carries the reply: `answer` (the answer's value) and `reply` (the
   backbrief's `status` and `evidence`). A closed talk says `standing: "closed"` and owes nothing. With no

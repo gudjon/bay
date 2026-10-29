@@ -869,8 +869,9 @@ fn shown_time(text: &str) -> Option<String> {
 }
 
 /// The one line for a talk to `actor`: its id, kind and sender, when the reply is owed, where
-/// to read it and, for a discovery talk, the command that answers it; `EXPIRED` first when it
-/// was read after its `expires` (G52). Every part is a name, a time or bay's own id: the talk's
+/// to read it and the one command that replies to its kind (`--answer` for a discovery talk,
+/// `--backbrief` for a delivery or reliability talk, A6); `EXPIRED` first when it was read after
+/// its `expires` (G52). Every part is a name, a time or bay's own id: the talk's
 /// prose stays in its record (ruling R13), read as data with `git show`.
 fn talk_line(actor: &str, talk: &Arrived) -> String {
     let from = match (&talk.from, talk.claimed) {
@@ -894,12 +895,12 @@ fn talk_line(actor: &str, talk: &Arrived) -> String {
             .follow_up
             .as_ref()
             .map_or_else(String::new, |at| format!(", reply owed by {at}"));
-        let answer = if talk.kind == Some("discovery") {
-            format!("; answer with `bay talk --answer {id} --value <answer>`")
-        } else {
-            String::new()
+        let reply = match talk.kind {
+            Some("discovery") => format!("; answer with `bay talk --answer {id} <value>`"),
+            Some(_) => format!("; reply with `bay talk --backbrief {id} <status>`"),
+            None => String::new(),
         };
-        format!("bay: talk {id} ({kind}){from} arrived for {actor}{owed}: {read}{answer}")
+        format!("bay: talk {id} ({kind}){from} arrived for {actor}{owed}: {read}{reply}")
     };
     let mut out: String = line
         .chars()
@@ -1327,7 +1328,7 @@ mod tests {
         assert_eq!(delivery.talks, ["t1"]);
         assert_eq!(
             delivery.text,
-            "bay: talk t1 (delivery) arrived for a: read it with `git show refs/bay/talk/a/t1:talk.json`\n"
+            "bay: talk t1 (delivery) arrived for a: read it with `git show refs/bay/talk/a/t1:talk.json`; reply with `bay talk --backbrief t1 <status>`\n"
         );
         assert_eq!(cursor.talks, ["t1", "t2"]);
         let mut again = super::Delivery::default();
@@ -1362,7 +1363,7 @@ mod tests {
             super::talk_line("alpha", &talk),
             "bay: talk t1 (discovery) from beta arrived for alpha, reply owed by \
              2026-10-28T19:00:00Z: read it with `git show refs/bay/talk/alpha/t1:talk.json`; \
-             answer with `bay talk --answer t1 --value <answer>`\n"
+             answer with `bay talk --answer t1 <value>`\n"
         );
         // G445: a talk judged by name, not by key, says its sender's name is a claim.
         let claimed = super::Arrived {
@@ -1381,15 +1382,30 @@ mod tests {
             "{}",
             super::talk_line("alpha", &claimed)
         );
-        // A delivery or reliability talk takes no answer, so its line names none.
-        let delivery = super::Arrived {
-            kind: Some("delivery"),
-            ..talk
-        };
-        assert_eq!(
-            super::talk_line("alpha", &delivery),
-            "bay: talk t1 (delivery) from beta arrived for alpha, reply owed by \
-             2026-10-28T19:00:00Z: read it with `git show refs/bay/talk/alpha/t1:talk.json`\n"
+        // A6: a delivery or reliability talk takes no answer; its line names the backbrief.
+        for kind in ["delivery", "reliability"] {
+            let other = super::Arrived {
+                kind: Some(kind),
+                id: talk.id.clone(),
+                from: talk.from.clone(),
+                follow_up: talk.follow_up.clone(),
+                ..talk
+            };
+            assert_eq!(
+                super::talk_line("alpha", &other),
+                format!(
+                    "bay: talk t1 ({kind}) from beta arrived for alpha, reply owed by \
+                     2026-10-28T19:00:00Z: read it with `git show refs/bay/talk/alpha/t1:talk.json`; \
+                     reply with `bay talk --backbrief t1 <status>`\n"
+                )
+            );
+        }
+        // A kind bay does not know names no command.
+        let unknown = super::Arrived { kind: None, ..talk };
+        assert!(
+            super::talk_line("alpha", &unknown).ends_with("talk.json`\n"),
+            "{}",
+            super::talk_line("alpha", &unknown)
         );
     }
 
@@ -1418,9 +1434,20 @@ mod tests {
             expired: false,
         };
         let line = super::talk_line(&"b".repeat(32), &talk);
-        assert_eq!(line.chars().count(), 344, "{line}");
+        assert_eq!(line.chars().count(), 335, "{line}");
         assert!(
-            line.ends_with(&format!("`bay talk --answer {id} --value <answer>`\n")),
+            line.ends_with(&format!("`bay talk --answer {id} <value>`\n")),
+            "{line}"
+        );
+        // A6: the backbrief command is longer, and still whole.
+        let delivery = super::Arrived {
+            kind: Some("delivery"),
+            ..talk
+        };
+        let line = super::talk_line(&"b".repeat(32), &delivery);
+        assert!(line.chars().count() < super::TALK_LINE, "{line}");
+        assert!(
+            line.ends_with(&format!("`bay talk --backbrief {id} <status>`\n")),
             "{line}"
         );
     }

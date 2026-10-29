@@ -36,6 +36,10 @@
 //! backbrief (G52, ruling T3). `land` and `undo` name the open talks on their change (G56,
 //! [`open_on`]).
 //!
+//! The recipient replies with one command per kind: `bay talk --answer <id> <value>` answers a
+//! discovery talk ([`answer`]), and `bay talk --backbrief <id> <status>` reports on a delivery or
+//! reliability talk ([`backbrief`]): ready, blocked, validated or done.
+//!
 //! Under `[policy] signing = "approvals"` (N-21, G445) no key signs a talk, as no key signs a
 //! merge: the talk, its ack and every entry are written unsigned, by their actor's name
 //! (`BAY_ACTOR`), and the rules of who writes what are judged by that name ([`Trust::Names`]).
@@ -48,6 +52,7 @@
 //! ack. The sender sees the ack after its own fetch.
 
 mod accept;
+mod backbrief;
 mod judge;
 mod lander;
 mod open;
@@ -60,6 +65,7 @@ pub mod standing;
 pub mod wake;
 
 pub use accept::{end_questions, receive};
+pub use backbrief::{Backbrief, backbrief};
 pub use judge::{Push, judge};
 pub use open::{name_open_talks, open_on};
 pub use round::round;

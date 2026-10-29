@@ -78,11 +78,14 @@ pub struct Ask {
     pub context_truncated: bool,
 }
 
-/// An answer to a discovery talk: its id, the decision value, and the standing answer's commit
-/// it supersedes, if any.
+/// An answer to a discovery talk: its id, the decision value (the argument, or `--value`), and
+/// the standing answer's commit it supersedes, if any.
 #[derive(Clone, Debug, Default)]
 pub struct Answer {
     pub talk: String,
+    /// The value as the argument: `bay talk --answer <id> <value>` (T5).
+    pub argument: Option<String>,
+    /// The value as `--value`.
     pub value: Option<String>,
     pub supersedes: Option<String>,
 }
@@ -696,7 +699,7 @@ fn commit_new(
         .run(&["update-ref", &name, &commit, ""])
         .map_err(|error| error.message())?;
     let detail = json!({"talk": id, "short": &id[..8], "ref": name, "who": who,
-        "kind": body["kind"]});
+        "kind": body["kind"], "follow_up": body["follow_up"]});
     let refspecs = with_predecessor(repo, body, format!("{commit}:{name}"))?;
     match push(repo, &refspecs) {
         Pushed::Yes => Ok(sent_result(detail, "sent", None)),
@@ -769,7 +772,7 @@ fn later_finding(
     Ok(body)
 }
 
-fn sent_result(mut detail: Value, state: &str, not_pushed: Option<String>) -> BayResult {
+pub(super) fn sent_result(mut detail: Value, state: &str, not_pushed: Option<String>) -> BayResult {
     detail["pushed"] = json!(not_pushed.is_none());
     if let Some(why) = not_pushed {
         detail["why"] = json!(format!(
@@ -797,7 +800,7 @@ fn resend(repo: &Repo, body: &Value, existing: &Talk, dry_run: bool) -> Result<B
         .into());
     }
     let detail = json!({"talk": id, "short": &id[..8], "ref": existing.name, "who": existing.who,
-        "kind": existing.body["kind"]});
+        "kind": existing.body["kind"], "follow_up": existing.body["follow_up"]});
     if dry_run {
         let mut detail = detail;
         detail["dry_run"] = json!(true);
@@ -836,7 +839,7 @@ fn resend(repo: &Repo, body: &Value, existing: &Talk, dry_run: bool) -> Result<B
 }
 
 /// The talk `id`, from any recipient's refs, here or fetched from the remote.
-fn find(repo: &Repo, id: &str) -> Result<Option<Talk>, Stop> {
+pub(super) fn find(repo: &Repo, id: &str) -> Result<Option<Talk>, Stop> {
     if !is_talk_id(id) {
         return Err(Refusal::invalid(format!("{id:?} is not a talk id")).into());
     }
@@ -939,18 +942,32 @@ fn answerer(
     Ok((key, me, false))
 }
 
-fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
-    let (repo, trust, me) = open(dir)?;
-    let value = fold(
-        request
-            .value
-            .as_deref()
-            .ok_or_else(|| Refusal::invalid("an answer needs `--value`, the decision"))?,
-    );
+/// T5: the answer's value, given once: as the argument or as `--value`.
+fn answer_value(request: &Answer) -> Result<String, Refusal> {
+    let value = match (&request.argument, &request.value) {
+        (Some(_), Some(_)) => {
+            return Err(Refusal::invalid(
+                "the answer's value is given twice, as the argument and as `--value`: give it once",
+            ));
+        }
+        (Some(value), None) | (None, Some(value)) => fold(value),
+        (None, None) => {
+            return Err(Refusal::invalid(format!(
+                "an answer needs its value, the decision: `bay talk --answer {} <value>`",
+                request.talk
+            )));
+        }
+    };
     plain("value", &value)?;
     if value.trim().is_empty() {
-        return Err(Refusal::invalid("the answer's `--value` is empty").into());
+        return Err(Refusal::invalid("the answer's value is empty"));
     }
+    Ok(value)
+}
+
+fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
+    let (repo, trust, me) = open(dir)?;
+    let value = answer_value(request)?;
     let id = request.talk.as_str();
     let talk = find(&repo, id)?
         .ok_or_else(|| Refusal::invalid(format!("no talk {id} is here or on the remote")))?;
@@ -970,15 +987,13 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
         ))
         .into());
     }
-    let detail = json!({"talk": id, "ref": talk.name});
+    let detail = json!({"talk": id, "ref": talk.name, "from": talk.from_name()});
     let standing = talk.standing_answer(&repo.git)?;
     if let Some((commit, prior)) = &standing {
         if prior["value"].as_str() == Some(value.as_str()) {
             let mut detail = detail;
             detail["answer"] = json!(commit);
-            let mut result = BayResult::ok(detail);
-            result.state = Some("already_answered".to_owned());
-            return Ok(result);
+            return repeated(&repo, &talk, detail, "already_answered");
         }
         if request.supersedes.as_deref() != Some(commit.as_str()) {
             return Err(conflict(id, commit, prior).into());
@@ -1015,6 +1030,32 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
             .into())
         }
         Pushed::NotNow(why) => Ok(sent_result(detail, "not_pushed", Some(why))),
+    }
+}
+
+/// The same reply again (an answer or a backbrief this talk holds): it pushes what is here, as a
+/// resend does, so a reply kept here (`not_pushed`) goes with the same command; `state` once the
+/// remote holds it.
+pub(super) fn repeated(
+    repo: &Repo,
+    talk: &Talk,
+    detail: Value,
+    state: &str,
+) -> Result<BayResult, Stop> {
+    match push(repo, &[format!("{}:{}", talk.tip, talk.name)]) {
+        Pushed::NotNow(why) => Ok(sent_result(detail, "not_pushed", Some(why))),
+        Pushed::Refused(reason, why)
+            if !why.contains("fetch first") && !why.contains("non-fast-forward") =>
+        {
+            Err(Refusal::new(
+                reason.unwrap_or(Reason::TalkRefused),
+                format!("the host refused the reply: {why}"),
+            )
+            .with("talk", json!(talk.id))
+            .into())
+        }
+        // The remote holds it, or more of the chain.
+        _ => Ok(sent_result(detail, state, None)),
     }
 }
 

@@ -116,7 +116,8 @@ fn a_talk_that_arrives_is_one_notice_and_never_again() {
         told,
         format!(
             "bay: talk {id} (delivery) from agent arrived for agent-b, reply owed by \
-             {follow_up}: read it with `git show refs/bay/talk/agent-b/{id}:talk.json`\n"
+             {follow_up}: read it with `git show refs/bay/talk/agent-b/{id}:talk.json`; \
+             reply with `bay talk --backbrief {id} <status>`\n"
         )
     );
     assert!(
