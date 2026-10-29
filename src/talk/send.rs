@@ -400,7 +400,7 @@ fn deliver(repo: &Repo, trust: &Trust, sender: &Actor, ask: &Ask) -> Result<BayR
         .run(&["update-ref", &name, &commit, ""])
         .map_err(|error| error.message())?;
     let detail = json!({"talk": id, "short": &id[..8], "ref": name, "who": who,
-        "kind": body["kind"]});
+        "kind": body["kind"], "follow_up": body["follow_up"]});
     let refspecs = with_predecessor(repo, &body, format!("{commit}:{name}"))?;
     match push(repo, &refspecs) {
         Pushed::Yes => Ok(sent_result(detail, "sent", None)),
@@ -511,7 +511,7 @@ fn resend(repo: &Repo, body: &Value, existing: &Talk, dry_run: bool) -> Result<B
         .into());
     }
     let detail = json!({"talk": id, "short": &id[..8], "ref": existing.name, "who": existing.who,
-        "kind": existing.body["kind"]});
+        "kind": existing.body["kind"], "follow_up": existing.body["follow_up"]});
     if dry_run {
         let mut detail = detail;
         detail["dry_run"] = json!(true);
@@ -698,15 +698,13 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
         ))
         .into());
     }
-    let detail = json!({"talk": id, "ref": talk.name});
+    let detail = json!({"talk": id, "ref": talk.name, "from": talk.from_name()});
     let standing = talk.standing_answer(&repo.git)?;
     if let Some((commit, prior)) = &standing {
         if prior["value"].as_str() == Some(value.as_str()) {
             let mut detail = detail;
             detail["answer"] = json!(commit);
-            let mut result = BayResult::ok(detail);
-            result.state = Some("already_answered".to_owned());
-            return Ok(result);
+            return repeated(&repo, &talk, detail, "already_answered");
         }
         if request.supersedes.as_deref() != Some(commit.as_str()) {
             return Err(conflict(id, commit, prior).into());
@@ -743,6 +741,32 @@ fn give_answer(dir: &Path, request: &Answer) -> Result<BayResult, Stop> {
             .into())
         }
         Pushed::NotNow(why) => Ok(sent_result(detail, "not_pushed", Some(why))),
+    }
+}
+
+/// The same reply again (an answer or a backbrief this talk holds): it pushes what is here, as a
+/// resend does, so a reply kept here (`not_pushed`) goes with the same command; `state` once the
+/// remote holds it.
+pub(super) fn repeated(
+    repo: &Repo,
+    talk: &Talk,
+    detail: Value,
+    state: &str,
+) -> Result<BayResult, Stop> {
+    match push(repo, &[format!("{}:{}", talk.tip, talk.name)]) {
+        Pushed::NotNow(why) => Ok(sent_result(detail, "not_pushed", Some(why))),
+        Pushed::Refused(reason, why)
+            if !why.contains("fetch first") && !why.contains("non-fast-forward") =>
+        {
+            Err(Refusal::new(
+                reason.unwrap_or(Reason::TalkRefused),
+                format!("the host refused the reply: {why}"),
+            )
+            .with("talk", json!(talk.id))
+            .into())
+        }
+        // The remote holds it, or more of the chain.
+        _ => Ok(sent_result(detail, state, None)),
     }
 }
 

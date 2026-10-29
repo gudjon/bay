@@ -10,7 +10,8 @@
 //! again is `already_backbriefed` and writes nothing; a different one is the next entry (a
 //! backbrief reports progress, so a talk takes several). The notice of a delivery or reliability
 //! talk names the command, as it names `--answer` for a discovery talk, and the sender hears the
-//! status word, never the prose (ruling R13).
+//! status word, never the prose (ruling R13). A backbrief kept here for want of the remote
+//! (`not_pushed`) goes with the same command again, as a resend does.
 //!
 //! Under `signing = "all"` the host's judge takes each backbrief written (the bay host here);
 //! under `approvals` it is written by name, unsigned (a plain remote).
@@ -21,7 +22,8 @@
 //! `give`, the same-backbrief `already_backbriefed` return. Under `all` the host's judge refuses
 //! the same writes, so the approvals case is the one each of those mutants fails. In
 //! `src/notice.rs` `talk_line`: the `--backbrief` command for a delivery or reliability talk. In
-//! `src/talk/replies.rs` `entries`: the status word of a backbrief.
+//! `src/talk/replies.rs` `entries`: the status word of a backbrief. In `src/talk/send.rs`
+//! `repeated`: the push of a reply kept here (the same command again never sends it).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -264,6 +266,60 @@ fn blocked_rules(case: &TalkCase, id: &str, replied: &str) {
     assert_eq!(entry["status"], "blocked", "{entry}");
     assert_eq!(entry["reason"], "CHECK_FAILED", "{entry}");
     assert_eq!(entry["follow_up"], later.as_str(), "{entry}");
+}
+
+#[test]
+fn a_backbrief_kept_here_goes_with_the_same_command() {
+    let case = talk_on();
+    let follow_up = from_now(3600);
+    let (code, sent) = case.talk(
+        "agent",
+        &[
+            "agent-b",
+            "Tag the release",
+            "--kind",
+            "delivery",
+            "--change",
+            "abcd2345",
+            "--follow-up",
+            &follow_up,
+        ],
+    );
+    assert_eq!(code, 0, "{sent}");
+    let id = sent["detail"]["talk"].as_str().unwrap().to_owned();
+    let name = talk_ref("agent-b", &id);
+    let (code, status) = case.status("agent-b");
+    assert_eq!(code, 0, "{status}");
+    let acked = case.host_tip(&name).unwrap();
+
+    // The remote cannot be reached: the backbrief is kept here, and the sentence says so.
+    let gone = case.test_box.path().join("gone.git");
+    let host = case.host.to_str().unwrap().to_owned();
+    case.test_box.git_ok(
+        &case.b,
+        &["remote", "set-url", "origin", gone.to_str().unwrap()],
+    );
+    let (code, kept) = case.talk("agent-b", &["--backbrief", &id, "done"]);
+    assert_eq!(code, 0, "{kept}");
+    assert_eq!(kept["state"], "not_pushed", "{kept}");
+    assert!(
+        kept["say"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("Kept here"),
+        "{kept}"
+    );
+    assert_eq!(case.host_tip(&name).as_deref(), Some(acked.as_str()));
+
+    // The same command again, once the remote is back, sends it.
+    case.test_box
+        .git_ok(&case.b, &["remote", "set-url", "origin", &host]);
+    let (code, again) = case.talk("agent-b", &["--backbrief", &id, "done"]);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again["state"], "already_backbriefed", "{again}");
+    assert_eq!(again["detail"]["pushed"], true, "{again}");
+    let entry = host_entry(&case, &name, "entries/0002-backbrief.json");
+    assert_eq!(entry["status"], "done", "{entry}");
 }
 
 /// A plain remote under `signing = "approvals"`, seeded on `a`; clones `b` and `c`.

@@ -11,7 +11,8 @@
 //! and nothing is unclear unless `--unclear` says what is.
 //!
 //! A backbrief reports progress, so a talk takes several: the same one as the latest is
-//! `already_backbriefed` and writes nothing, and any other is the next entry. A discovery talk is
+//! `already_backbriefed` and writes nothing (it pushes what is here, as a resend does), and any
+//! other is the next entry. A discovery talk is
 //! answered with `--answer`; while it is open it takes a backbrief too (blocked, to move its
 //! `follow_up`), as the judge allows.
 
@@ -19,7 +20,7 @@ use std::path::Path;
 
 use serde_json::{Map, Value, json};
 
-use super::send::{Pushed, Stop, agent_key, find, finish, open, push, sent_result};
+use super::send::{Pushed, Stop, agent_key, find, finish, open, push, repeated, sent_result};
 use super::{
     BAY_TALK_MAX_BYTES, Known, Refusal, STATUS_WORDS, TALK_SCHEMA, Talk, Trust, entry_commit_as,
     fold, plain,
@@ -76,9 +77,7 @@ fn give(dir: &Path, request: &Backbrief) -> Result<BayResult, Stop> {
             .iter()
             .all(|field| latest.get(*field) == fields.get(*field))
     }) {
-        let mut result = BayResult::ok(detail);
-        result.state = Some("already_backbriefed".to_owned());
-        return Ok(result);
+        return repeated(&repo, &talk, detail, "already_backbriefed");
     }
     blocked(talk.follow_up_known(&repo.git, &known)?.as_deref(), &fields)?;
     let key = match &trust {
