@@ -160,9 +160,9 @@ enum Command {
         #[arg(long, value_name = "DAYS")]
         stale_days: Option<u64>,
     },
-    /// Ask another actor one thing: `bay talk <who> "<what>"` sends a discovery talk, its reply
-    /// owed by the policy's default time (`[talk] follow_up_s`, one hour). One action, one
-    /// target; the same ask while it is open is the same talk. `--to` more than once, or
+    /// Ask another agent one thing: `bay talk <agent> "<what>"` sends a discovery talk, its
+    /// reply owed by the policy's default time (`[talk] follow_up_s`, one hour). It is one talk to
+    /// one agent: one action, one target; the same ask while it is open is the same talk. `--to` more than once, or
     /// `--to-live`, asks many as one round. Arrival is the recipient's ack, written when its bay
     /// fetches. --show <id> reads a talk and its replies
     ///
@@ -319,10 +319,11 @@ struct InstallArgs {
 
 #[derive(Args)]
 struct TalkArgs {
-    /// Who owes the reply: a name of lower-case letters, digits and -. Under [policy] signing =
-    /// "approvals" any such name (a name no record names is sent with a warning); under "all"
-    /// an agent the registry enrols, or a person it enrols as an approver
-    #[arg(value_name = "WHO")]
+    /// The agent who owes the reply (a person's name works too): lower-case letters, digits
+    /// and -. Under [policy] signing = "approvals" any such name (a name no record names is sent
+    /// with a warning); under "all" an agent the registry enrols, or a person it enrols as an
+    /// approver
+    #[arg(value_name = "AGENT")]
     actor: Option<String>,
     /// Send to the agent that merged this change (a change id or its commit on main), read from
     /// bay's merge record; then the one argument is the action
@@ -332,9 +333,9 @@ struct TalkArgs {
     what: Option<String>,
     /// Ask each of these as one round, one talk each (give it more than once); then the one
     /// argument is the action
-    #[arg(long = "to", value_name = "WHO", conflicts_with_all = ["to_change", "answer"])]
+    #[arg(long = "to", value_name = "AGENT", conflicts_with_all = ["to_change", "answer"])]
     to: Vec<String>,
-    /// Ask every actor with a live session in this repository but you, as one round; then the
+    /// Ask every agent with a live session in this repository but you, as one round; then the
     /// one argument is the action
     #[arg(long, conflicts_with_all = ["to_change", "answer"])]
     to_live: bool,
@@ -365,9 +366,9 @@ struct TalkArgs {
     /// when the next one is
     #[arg(long, value_name = "TIME")]
     follow_up: Option<String>,
-    /// Who decides if the two disagree: a name as WHO takes it (an agent, or under "all" an
-    /// approver)
-    #[arg(long, value_name = "WHO")]
+    /// The agent who decides if the two disagree (a person's name works too): a name as AGENT
+    /// takes it (under "all" an enrolled agent or approver)
+    #[arg(long, value_name = "AGENT")]
     decides: Option<String>,
     /// The sender's reading of the fact
     #[arg(long)]

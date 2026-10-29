@@ -47,8 +47,14 @@ use support::TestBox;
 ///   asked each seat why it gave a change up; now the reason is in the signed request.
 /// - 0.6.0, one flag (`talk --show`, T6): a talk and its replies were read with `git show` and
 ///   `git log -p` on its ref, which every notice had to spell out; now it is one bay command.
+/// - 0.6.0, three flags (`talk --to`, `--to-live`, `--round`, U4): a census of 40 seats was 40
+///   talks and a sub-agent merging 40 prose replies; now it is one round and one table.
+/// - 0.6.0, five flags (`talk --backbrief`, and its optional `--outcome`, `--first-step`,
+///   `--unclear`, `--reason`, A6): a delivery or reliability talk had no reply command at all,
+///   so its recipient answered by oz say; now it is `bay talk --backbrief <id> <status>`, and
+///   the four optional fields have defaults.
 const COMMANDS: usize = 28;
-const FLAGS: usize = 80;
+const FLAGS: usize = 88;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,
