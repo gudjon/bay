@@ -2,16 +2,16 @@
 //! check's request names the units that failed in its newest failing record (`rerun`), and a run
 //! that does not answer each of them is never green.
 //!
-//! A red check runs again on each new tip (G492), but its request named only the paths changed
-//! since this box last ran it (G439). The fix landed off its paths, so an adapter that picks its
-//! tests by changed paths reached no test, emitted no unit and answered `unknown`, and the red
+//! A red check runs again on each new tip (G492), and its request names the paths changed since
+//! its newest pass (G495). The fix landed off its paths, so an adapter that picks its tests by
+//! changed paths reached none of the failed units unless that range chose them, and the red
 //! stood. Now the request names `rerun`: the adapter runs those units too, and names in
 //! `plan.gone` each one it no longer has. A run that reports a requested unit in neither is
 //! `unknown`, never a pass that clears the red.
 //!
 //! Guards to mutate: in `src/bisect.rs` `tips`, the red check's `rerun` (an empty one: the
-//! fix reaches no test, and the deaf run's pass clears the red); `failed_units` keeping only the
-//! failed units (every unit: the fix runs t2 as well); in `src/check.rs` `judge_units`, the
+//! fix answers no requested unit, and the deaf run's pass clears the red); `failed_units` keeping
+//! only the failed units (every unit: `rerun` names t2 as well); in `src/check.rs` `judge_units`, the
 //! unanswered-rerun refusal (the deaf run's pass clears the red), and `plan.gone` counting as an
 //! answer (the fix that deletes t3 stays `unknown`).
 
@@ -175,8 +175,9 @@ fn a_red_post_check_asks_its_adapter_to_run_its_failed_units_again() {
         "a run that answered no failed unit clears nothing"
     );
 
-    // The fix lands off suite's paths: t1 passes now, and t3 is deleted. The adapter runs
-    // exactly the requested units: t1, and t3, which it names gone. Main is green.
+    // The fix lands off suite's paths: t1 passes now, and t3 is deleted. Suite's range since
+    // its last pass still holds `one`'s src/ change (G495), so the adapter runs t1 and t2 for
+    // it, and the requested t1, and t3, which it names gone. Main is green.
     submit("fix", &["units", "conf"], &|view| {
         std::fs::write(view.join("units/t1"), "pass\n").unwrap();
         std::fs::remove_file(view.join("units/t3")).unwrap();
@@ -193,8 +194,8 @@ fn a_red_post_check_asks_its_adapter_to_run_its_failed_units_again() {
     );
     assert_eq!(
         unit_ids(&fixed[0]),
-        ["t1"],
-        "only the requested units ran: {}",
+        ["t1", "t2"],
+        "the range's units and the requested ones ran: {}",
         fixed[0]
     );
     assert_eq!(
