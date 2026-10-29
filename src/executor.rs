@@ -139,8 +139,14 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         }
         if once {
             let mut detail = json!({"ran": ran});
+            let (told, notes): (Vec<Value>, Vec<Value>) = notes
+                .into_iter()
+                .partition(|note| note.get("red_owner").is_some());
             if !notes.is_empty() {
                 detail["early_conflicts"] = json!(notes);
+            }
+            if !told.is_empty() {
+                detail["red_owners"] = json!(told);
             }
             if !advanced.is_empty() {
                 detail["advanced"] = json!(advanced);
@@ -672,6 +678,7 @@ fn pass(
     };
     crate::log::push(repo, &Keys::load(&repo.git).executor_name);
     notes.extend(early_conflicts(repo, &queue));
+    notes.extend(red_owners(repo));
     let due = publish::retention_due(repo, &chains);
     let reach = within_reach(repo, &queue);
     let began = std::time::Instant::now();
@@ -1516,6 +1523,15 @@ const EARLY_PROBES: usize = 8;
 /// decides. A later probe that finds it clean clears the note. Every probe is best effort: a
 /// git fault skips its entry, and a note the remote did not take is written on a later pass.
 /// Returns what was noted, one object per chain written.
+/// 0.6.3: tells the change that owns each red post check of trunk, once (`crate::red_owner`).
+fn red_owners(repo: &Repo) -> Vec<Value> {
+    let tracking = format!("{}^{{commit}}", repo.trunk_tracking_ref());
+    let Ok(trunk) = repo.git.run(&["rev-parse", "--verify", "-q", &tracking]) else {
+        return Vec::new();
+    };
+    crate::red_owner::tell(repo, trunk.trim())
+}
+
 fn early_conflicts(repo: &Repo, queue: &Queue) -> Vec<Value> {
     let tracking = format!("{}^{{commit}}", repo.trunk_tracking_ref());
     let Ok(trunk) = repo.git.run(&["rev-parse", "--verify", "-q", &tracking]) else {

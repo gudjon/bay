@@ -20,6 +20,8 @@
 //! runner and the host's hook judge a repair by one function, `red::repairs`; the host judged
 //! by the owner alone before, and refused the repair the runner ran from its own place. In
 //! `src/publish.rs` `queue_gate`, the join of a repair with no place: it lands a pass later.
+//! In `src/result.rs`, `main_say` out of the `Decision::Ok` sentences (status says nothing is
+//! needed while main is red or a fix's run has not answered).
 
 #![cfg(unix)]
 
@@ -178,6 +180,16 @@ fn a_fix_for_an_earlier_owner_lands_after_the_owner_moves() {
     let red = suite.status()["detail"]["red"][0].clone();
     assert_eq!(red["change"], two.as_str(), "the owner moved: {red}");
     assert_eq!(red["fixes"], broke.as_str(), "the name to fix stays: {red}");
+    // 0.6.3: a status read that describes no one change says main is broken, never that
+    // nothing is needed.
+    let observer = suite.held.test_box.clone_of(&suite.held.remote, "observer");
+    let said = || -> String {
+        let status = suite.held.test_box.bay_ok(&observer, &["status"]);
+        assert!(status["change"].is_null(), "{status}");
+        status["say"].as_str().unwrap().to_owned()
+    };
+    let say = said();
+    assert!(say.starts_with("Main is broken on suite;"), "{say}");
     let fix = suite.submit_fix("fix", &one);
     suite.landed(&fix);
 
@@ -188,12 +200,16 @@ fn a_fix_for_an_earlier_owner_lands_after_the_owner_moves() {
     assert_eq!(rows.len(), 1, "{status}");
     assert_eq!(rows[0]["state"], "pending_fix", "{status}");
     assert_eq!(rows[0]["fix"]["change"], fix.as_str(), "{status}");
+    let say = said();
+    assert!(say.starts_with("A fix for suite is on main"), "{say}");
 
     // The suite passes on the fix: main is green.
     suite.answer("pass");
     let status = suite.status();
     assert_eq!(status["detail"]["red"], serde_json::json!([]), "{status}");
     assert!(pending(&status).is_empty(), "{status}");
+    let say = said();
+    assert!(!say.contains("suite"), "{say}");
 }
 
 #[test]

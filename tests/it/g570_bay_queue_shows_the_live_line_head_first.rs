@@ -55,7 +55,10 @@ fn bay_queue_names_each_waiting_change_in_line_order_and_none_once_merged() {
     assert!(arriving[0]["waited_s"].is_u64(), "{line}");
     assert_eq!(detail["unread"], serde_json::json!([]), "{line}");
     let say = line["say"].as_str().unwrap();
-    assert!(say.starts_with("One change waits for a runner to take it"), "{say}");
+    assert!(
+        say.starts_with("One change waits for a runner to take it"),
+        "{say}"
+    );
 
     // GIVEN three changes in line WHEN another clone reads the line THEN it names each one,
     // head first, and still names the one no runner placed.
@@ -91,39 +94,15 @@ fn bay_queue_names_each_waiting_change_in_line_order_and_none_once_merged() {
     assert_eq!(arriving[0]["change"], early.as_str(), "{line}");
     assert_eq!(detail["unread"], serde_json::json!([]), "{line}");
     let say = line["say"].as_str().unwrap();
-    assert!(say.starts_with("4 changes wait to be added to main"), "{say}");
+    assert!(
+        say.starts_with("4 changes wait to be added to main"),
+        "{say}"
+    );
 
     // The schema `bay help --json` exports requires every field the document, a place and an
     // arriving row carry.
-    let help = held.test_box.bay_ok(&observer, &["help"]);
-    let schema = &help["detail"]["queue_schema"];
-    assert_eq!(schema["title"], "bay.queue/1", "{schema}");
-    let required = |at: &Value| -> Vec<String> {
-        let mut keys: Vec<String> = at["required"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|key| key.as_str().unwrap().to_owned())
-            .collect();
-        keys.sort();
-        keys
-    };
-    let fields = |at: &Value| -> Vec<String> {
-        let mut keys: Vec<String> = at.as_object().unwrap().keys().cloned().collect();
-        keys.sort();
-        keys
-    };
-    assert_eq!(fields(detail), required(schema), "{line}");
-    assert_eq!(
-        fields(&places[0]),
-        required(&schema["properties"]["places"]["items"]),
-        "{line}"
-    );
-    assert_eq!(
-        fields(&arriving[0]),
-        required(&schema["properties"]["arriving"]["items"]),
-        "{line}"
-    );
+    let exported = held.test_box.bay_ok(&observer, &["help"]);
+    assert_schema_requires_each_field(&exported["detail"]["queue_schema"], &line);
 
     // WHEN a runner places the arriving change and merges all four THEN the line is empty,
     // though their places stay in the queue's history.
@@ -145,4 +124,37 @@ fn bay_queue_names_each_waiting_change_in_line_order_and_none_once_merged() {
         &["for-each-ref", "--format=%(refname)", "refs/bay/queue/"],
     );
     assert!(history.lines().count() >= 4, "{history}");
+}
+
+/// The `bay.queue/1` schema in `schema` requires exactly the fields `line`'s document, its first
+/// place and its first arriving row carry.
+fn assert_schema_requires_each_field(schema: &Value, line: &Value) {
+    assert_eq!(schema["title"], "bay.queue/1", "{schema}");
+    let required = |at: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = at["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|key| key.as_str().unwrap().to_owned())
+            .collect();
+        keys.sort();
+        keys
+    };
+    let fields = |at: &Value| -> Vec<String> {
+        let mut keys: Vec<String> = at.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys
+    };
+    let detail = &line["detail"];
+    assert_eq!(fields(detail), required(schema), "{line}");
+    assert_eq!(
+        fields(&detail["places"][0]),
+        required(&schema["properties"]["places"]["items"]),
+        "{line}"
+    );
+    assert_eq!(
+        fields(&detail["arriving"][0]),
+        required(&schema["properties"]["arriving"]["items"]),
+        "{line}"
+    );
 }

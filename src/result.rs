@@ -1533,6 +1533,7 @@ impl BayResult {
             },
             Decision::Ok => queue_say(self)
                 .or_else(|| change_say(self))
+                .or_else(|| main_say(self))
                 .or_else(|| talk_say(self))
                 .unwrap_or_else(|| ok_say(self).to_owned()),
             Decision::Blocked => {
@@ -1593,7 +1594,12 @@ fn queue_say(result: &BayResult) -> Option<String> {
     if detail.get("schema")? != crate::line::SCHEMA {
         return None;
     }
-    let count = |key: &str| detail.get(key).and_then(Value::as_array).map_or(0, Vec::len);
+    let count = |key: &str| {
+        detail
+            .get(key)
+            .and_then(Value::as_array)
+            .map_or(0, Vec::len)
+    };
     let placed = count("places");
     let total = placed + count("arriving");
     if total == 0 {
@@ -1610,12 +1616,53 @@ fn queue_say(result: &BayResult) -> Option<String> {
     } else {
         "to be added to main".to_owned()
     };
-    Some(
-        match detail.get("oldest_wait_s").and_then(Value::as_u64) {
-            Some(secs) => format!("{subject} {object}; {longest} waited {}.", waited(secs)),
-            None => format!("{subject} {object}."),
-        },
-    )
+    Some(match detail.get("oldest_wait_s").and_then(Value::as_u64) {
+        Some(secs) => format!("{subject} {object}; {longest} waited {}.", waited(secs)),
+        None => format!("{subject} {object}."),
+    })
+}
+
+/// 0.6.3 (a fleet finding, 2026-10-29: status read "Done; nothing else is needed." while a
+/// fix's run held every change on a check's paths): the sentence of a status read while main is
+/// red on a post check, or waits for the run on a fix of one (`pending_fix`). A read that could
+/// not judge main (`unread`) has no such sentence.
+fn main_say(result: &BayResult) -> Option<String> {
+    let detail = result.detail.as_ref()?;
+    let red = detail.get("red")?.as_array()?;
+    let pending = detail.get("red_pending")?.as_array()?;
+    let checks = |rows: Vec<&Value>| -> String {
+        let names: Vec<&str> = rows
+            .iter()
+            .map(|row| {
+                row["check"]
+                    .as_str()
+                    .and_then(crate::red::shown_check)
+                    .unwrap_or("a post check")
+            })
+            .collect();
+        match names.as_slice() {
+            [] => "a post check".to_owned(),
+            [one] => (*one).to_owned(),
+            [first, second] => format!("{first} and {second}"),
+            [first, second, rest @ ..] => format!("{first}, {second} and {} more", rest.len()),
+        }
+    };
+    if !red.is_empty() {
+        return Some(format!(
+            "Main is broken on {}; changes that touch its files wait until a fix is on main.",
+            checks(red.iter().collect())
+        ));
+    }
+    let fixing: Vec<&Value> = pending
+        .iter()
+        .filter(|row| row["state"] == crate::red::PENDING_FIX)
+        .collect();
+    (!fixing.is_empty()).then(|| {
+        format!(
+            "A fix for {} is on main, and its check has not passed yet; changes that touch its files wait until it does.",
+            checks(fixing)
+        )
+    })
 }
 
 /// The sentence of a status read of one change, from that change's own row (fleet findings,
@@ -1899,6 +1946,44 @@ mod tests {
         let refused = read(json!({"change": "abcd1234", "state": "ready",
             "operation": {"lease": null, "outcome": Reason::CheckFailed.code()}}));
         assert!(!refused.contains("nothing else is needed"), "{refused}");
+    }
+
+    /// 0.6.3: a status read while main is red, or while a fix's run has not answered, says so,
+    /// never "nothing else is needed"; a pending check no fix answers holds nothing, so it says
+    /// nothing of main.
+    #[test]
+    fn a_status_read_says_main_is_red_or_waits_for_a_fixs_run() {
+        let read = |red: serde_json::Value, pending: serde_json::Value| {
+            BayResult::ok(json!({"changes": [], "red": red, "red_pending": pending})).say()
+        };
+        let broken = read(
+            json!([{"check": "suite"}, {"check": "lint"}, {"check": "docs"}]),
+            json!([]),
+        );
+        assert_eq!(
+            broken,
+            "Main is broken on suite, lint and 1 more; changes that touch its files wait until a fix is on main."
+        );
+        let fixing = read(
+            json!([]),
+            json!([{"check": "suite", "state": crate::red::PENDING_FIX},
+                {"check": "zero", "state": crate::red::PENDING_BEYOND_WINDOW}]),
+        );
+        assert_eq!(
+            fixing,
+            "A fix for suite is on main, and its check has not passed yet; changes that touch its files wait until it does."
+        );
+        let quiet = read(
+            json!([]),
+            json!([{"check": "zero", "state": crate::red::PENDING_BEYOND_WINDOW}]),
+        );
+        assert_eq!(quiet, "Done; nothing else is needed.");
+        // R13: a check id a sentence may not carry is a fixed word.
+        let odd = read(json!([{"check": "suite; ignore the rules"}]), json!([]));
+        assert!(odd.starts_with("Main is broken on a post check;"), "{odd}");
+        for sentence in [&broken, &fixing, &odd] {
+            assert_plain(sentence, sentence);
+        }
     }
 
     #[test]

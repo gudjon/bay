@@ -63,17 +63,21 @@ fn read(repo: &Repo) -> Result<Value, String> {
             let record = records
                 .iter()
                 .find(|record| record.id == place.entry.change);
-            if record.is_none() && !unread.iter().any(|row| row["change"] == place.entry.change.as_str()) {
+            if record.is_none()
+                && !unread
+                    .iter()
+                    .any(|row| row["change"] == place.entry.change.as_str())
+            {
                 unread.push(json!({"change": place.entry.change, "why": "no change record here"}));
             }
             row(at + 1, place, record, now)
         })
         .collect();
-    let placed: BTreeSet<&str> = places
+    let in_line: BTreeSet<&str> = places
         .iter()
         .map(|place| place.entry.change.as_str())
         .collect();
-    let arriving = arriving(repo, &placed, now, &mut unread)?;
+    let arriving = arriving(repo, &in_line, now, &mut unread)?;
     let oldest = places
         .iter()
         .map(|place| now.saturating_sub(place.joined))
@@ -243,12 +247,7 @@ fn records(repo: &Repo, ids: &[String]) -> Vec<ChangeRecord> {
 /// One place of the line: where it stands, the change and its operation as its record says.
 fn row(place: usize, at: &Place, record: Option<&ChangeRecord>, now: u64) -> Value {
     let entry = &at.entry;
-    let op = record.and_then(|record| {
-        record
-            .operations
-            .iter()
-            .find(|op| op.op_id == entry.op_id)
-    });
+    let op = record.and_then(|record| record.operations.iter().find(|op| op.op_id == entry.op_id));
     json!({
         "place": place,
         "seq": entry.seq,

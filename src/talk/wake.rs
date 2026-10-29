@@ -18,6 +18,9 @@
 //! names `cause: "outcome"` ([`outcome_request`]) where a talk's names `cause: "talk"`, and every
 //! field a talk's request had before stays as it was, so a connector that reads talks still works.
 //!
+//! 0.6.3: the executor asks it once more for the owner of a red post check of main
+//! (`crate::red_owner`), with `cause: "red"` ([`red_request`]).
+//!
 //! `bay plugin test wake` (`crate::adapter`) runs these same parts against a connector.
 
 use std::process::{Command, ExitStatus};
@@ -81,6 +84,24 @@ pub struct Outcome<'a> {
 pub fn wake_outcome(repo: &Repo, outcome: &Outcome) -> Value {
     let machine = crate::live::machine(&repo.git).unwrap_or_default();
     asked(repo, &outcome_request(outcome, &machine), true)
+}
+
+/// 0.6.3 (`crate::red_owner`): the change that owns a red post check of main, whose session is
+/// woken once to fix it. `event` is the `red_owner` event's id, and `line` the sentence it tells.
+pub struct RedOwner<'a> {
+    pub change: &'a str,
+    pub check: &'a str,
+    pub event: &'a str,
+    pub actor: &'a Actor,
+    pub line: &'a str,
+}
+
+/// Asks the wake adapter, once, to wake the session that owns a red ([`red_request`]), and
+/// returns the `red_owner` event's `wake` field, as [`wake_outcome`] returns an outcome's.
+#[must_use]
+pub fn wake_red(repo: &Repo, red: &RedOwner) -> Value {
+    let machine = crate::live::machine(&repo.git).unwrap_or_default();
+    asked(repo, &red_request(red, &machine), true)
 }
 
 /// Whether a `[plugin.wake] command` is configured. Without one nothing is asked.
@@ -156,6 +177,25 @@ pub fn outcome_request(outcome: &Outcome, machine: &str) -> Value {
         "actor": {"name": outcome.actor.name, "session": outcome.actor.session},
         "machine": machine,
         "urgent": false,
+        "line": line,
+    })
+}
+
+/// The `bay.wake/1` request for the owner of a red, asked from `machine` (0.6.3): `cause:
+/// "red"`, the change, the check and the event, with the `actor`, `machine`, `urgent` and `line`
+/// fields a talk's request has. A red holds every change on its paths, so it is urgent; `line`
+/// is cut to 200 characters.
+#[must_use]
+pub fn red_request(red: &RedOwner, machine: &str) -> Value {
+    let line: String = red.line.chars().take(200).collect();
+    json!({
+        "schema": "bay.wake/1", "op": "wake", "cause": "red",
+        "change": red.change,
+        "check": red.check,
+        "event": red.event,
+        "actor": {"name": red.actor.name, "session": red.actor.session},
+        "machine": machine,
+        "urgent": true,
         "line": line,
     })
 }

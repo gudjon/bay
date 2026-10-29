@@ -88,6 +88,21 @@ pub const PENDING: &str = "pending";
 /// ([`Red::answered_by`]), until a run at or after that landing answers it.
 pub const PENDING_FIX: &str = "pending_fix";
 
+/// The longest check id a sentence names ([`shown_check`]).
+const MAX_SHOWN_CHECK: usize = 64;
+
+/// R13: the check id a sentence for a person may name: at most [`MAX_SHOWN_CHECK`] characters
+/// of `[A-Za-z0-9._:/-]`, else `None`, and the sentence says "a post check" instead.
+#[must_use]
+pub fn shown_check(check: &str) -> Option<&str> {
+    (!check.is_empty()
+        && check.len() <= MAX_SHOWN_CHECK
+        && check
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte)))
+    .then_some(check)
+}
+
 /// How many first-parent commits of `trunk` a red judgement and the unattributed scan read
 /// back: `[red] window` in the config committed at `trunk`.
 ///
