@@ -19,6 +19,17 @@
 - A batch never carries a change whose paths main's red holds.
 - A runner judges main's red reading only the landings whose post results changed since its last judgement.
 
+## 0.5.46
+
+- A head reads main again once it wins its claim, so a long wait leaves no stale plan.
+- Once main moves under a head, a change that needs no check waits for that head to land.
+- A change released after a fault says why: main moved under the batch, or what the host said.
+- A head ahead of its turn (a repair, or a change that needs no check) lands alone.
+
+## 0.5.45
+
+- A red post check is asked about every change since its last pass, so the failing tests run again.
+
 ## 0.5.44
 
 - A fix that names a red check's first failure runs ahead of the line, and its landing clears the red.

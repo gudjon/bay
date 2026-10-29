@@ -608,6 +608,18 @@ impl Repo {
         fetched
     }
 
+    /// [`Repo::fetch_trunk`], never the opening fetch's result: the remote's trunk now (G551).
+    ///
+    /// # Errors
+    ///
+    /// The fetch fails or the remote has no trunk.
+    pub fn refetch_trunk(&self) -> Result<String, GitError> {
+        if let Ok(mut slot) = self.prefetched.lock() {
+            slot.take();
+        }
+        self.fetch_trunk()
+    }
+
     /// The trunk a result reflects: the tracking ref's tip, and when this command fetched it,
     /// or that it read the local cache without a fetch (G80, `INTERFACES` § 1). `None` before
     /// the first fetch, when there is no tracking ref.

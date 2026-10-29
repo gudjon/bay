@@ -116,17 +116,13 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
     // causes were fixed in files off its paths, and every change on its paths waited on it): a
     // red check runs again on each new tip, first, even when nothing on its paths changed, so
     // a fix that landed anywhere can clear it.
-    let red: Vec<(String, String)> = crate::red::red(git, &tip, registry.as_ref())
-        .map(|reds| {
-            reds.into_iter()
-                .map(|red| (red.check, red.environment))
-                .collect()
-        })
-        .unwrap_or_default();
-    let is_red = |entry: &crate::policy::CheckEntry| {
+    let red: Vec<crate::red::Red> =
+        crate::red::red(git, &tip, registry.as_ref()).unwrap_or_default();
+    let red_of = |entry: &crate::policy::CheckEntry| {
         red.iter()
-            .any(|(check, environment)| *check == entry.id && *environment == entry.environment)
+            .find(|red| red.check == entry.id && red.environment == entry.environment)
     };
+    let is_red = |entry: &crate::policy::CheckEntry| red_of(entry).is_some();
     let mut entries: Vec<&crate::policy::CheckEntry> = policy
         .checks
         .iter()
@@ -165,12 +161,29 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
         // nothing ("collected 0 of 1") unless that one landing touched them. It is asked what
         // changed since this box last answered it, and not run when nothing in that range
         // wakes it.
-        let since = ran
-            .get(&(entry.id.clone(), entry.environment.clone()))
-            .map_or_else(
-                || span_start(git, &tip),
-                |ago| rev(git, &format!("{tip}~{ago}")),
-            )?;
+        //
+        // G495 (a fleet finding, 2026-10-29: after its red, edge-py-fast answered "collected 0 of 1"
+        // on four tips in a row, so it could never pass again): a red check's last record is the
+        // previous tip, often a run that collected nothing, so the range was one landing and an
+        // adapter that picks its tests by changed paths ran none of the failing ones. A red check
+        // is asked what changed since its newest pass before the failure, a range that holds the
+        // paths that chose the failing tests; with no pass in the window, the whole span.
+        let since = match red_of(entry) {
+            Some(red) => red
+                .suspect
+                .as_ref()
+                .and_then(|suspect| suspect.passed.as_ref())
+                .map_or_else(
+                    || span_start(git, &tip),
+                    |passed| Ok(passed.landing.clone()),
+                )?,
+            None => ran
+                .get(&(entry.id.clone(), entry.environment.clone()))
+                .map_or_else(
+                    || span_start(git, &tip),
+                    |ago| rev(git, &format!("{tip}~{ago}")),
+                )?,
+        };
         if !is_red(entry)
             && policy
                 .unwoken(entry, &check::changed_paths(git, &since, &tip)?)
