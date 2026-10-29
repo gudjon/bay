@@ -9,7 +9,7 @@
 //! `plan.gone` each one it no longer has. A run that reports a requested unit in neither is
 //! `unknown`, never a pass that clears the red.
 //!
-//! Guards to mutate: in `src/bisect.rs` `tip_runs`, the red check's `rerun` (an empty one: the
+//! Guards to mutate: in `src/bisect.rs` `tips`, the red check's `rerun` (an empty one: the
 //! fix reaches no test, and the deaf run's pass clears the red); `failed_units` keeping only the
 //! failed units (every unit: the fix runs t2 as well); in `src/check.rs` `judge_units`, the
 //! unanswered-rerun refusal (the deaf run's pass clears the red), and `plan.gone` counting as an

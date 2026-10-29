@@ -1,8 +1,8 @@
 //! G444. A box that serves none of the policy's post checks judges nothing for post work, and
 //! still refuses a change on a red main.
 //!
-//! After its queue's work, every runner ran the post work (`crate::bisect::tips` and the culprit
-//! finding `crate::bisect::run`): each judged main's red over the whole window, and only then
+//! After its queue's work, every runner ran the post work (`crate::bisect::plan`: the post checks
+//! on main's tip and the culprit finding): each judged main's red over the whole window, and only then
 //! skipped every post check whose environment the box does not serve. On a fleet where one runner
 //! serves the post checks, the three that serve none spent 140-166 s of every pass there
 //! (2026-10-28, BACKLOG 113), and a newly submitted change waited for that pass to end. Now a box
@@ -12,8 +12,8 @@
 //! judges main from the box's own copy of them. So the pass now reads them once before any visit,
 //! and a red another runner recorded since this box's last pass refuses a change on its paths.
 //!
-//! The guards to mutate: the `serves_a_post_check` returns in `bisect::tip_runs` and
-//! `bisect::all` (`src/bisect.rs`; the first case judges), and the pass's `fetch_evidence` before
+//! The guards to mutate: the `serves_a_post_check` returns in `bisect::tips` and
+//! `bisect::culprits` (`src/bisect.rs`; the first case judges), and the pass's `fetch_evidence` before
 //! its visits in `executor::pass` (`src/executor.rs`; the second case lands on a red main).
 
 // Each case runs shell scripts (the adapter), so these run on Unix only.

@@ -385,7 +385,8 @@ pub struct Executor {
     pub bisect_post: Option<bool>,
     /// The runner's own post checks (`crate::bisect::tips`): after its queue's work, each post
     /// check runs once on main's newest tip that has no record of it, on a box that serves its
-    /// environment, so many landings cost one run and a red one is bisected. Default off.
+    /// environment, so many landings cost one run and a red one is bisected. The post checks of
+    /// different environments run side by side, one at a time in each (#123). Default off.
     pub post: Option<bool>,
     /// Items 1 and 2 (`crate::bisect::warm`): after its queue's work, the runner runs each pre
     /// check with `footprint = "observed"` once on main's newest tip, so later candidates reuse

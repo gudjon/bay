@@ -6,8 +6,9 @@
 //! serve the change's environment took it, found no worker, and the change waited out a
 //! lease. Now a runner beats as it does inside an operation while its post work runs.
 //!
-//! The guard to mutate: the `beat.meanwhile` around the post work in `pass` (`src/executor.rs`);
-//! call the work directly and the presence stands still while the check runs.
+//! The guard to mutate: the `beat.meanwhile` around `post.finish()` in `post_pass`
+//! (`src/executor.rs`); wait for the pieces directly and the presence stands still while the
+//! check runs.
 
 // Each case runs shell scripts (the check adapter, the relay), so these run on Unix only.
 #![cfg(unix)]

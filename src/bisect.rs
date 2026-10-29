@@ -23,6 +23,14 @@
 //! - At most ⌈log2(n)⌉ + 1 runs for a range of n landings.
 //!
 //! Nothing is stored but the evidence: the culprit is judged from the records on each read.
+//!
+//! #123: the runner's post work is planned here ([`plan`]) and run elsewhere (`crate::executor`)
+//! as [`Piece`]s, one environment each: a post check on main's tip, the warm runs, or the
+//! bisects of red post checks. A pass plans at most one piece for each environment this box
+//! serves and no running piece holds, so the post work of different environments runs side by
+//! side, and the work of one environment runs one piece at a time.
+
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Value, json};
 
@@ -34,22 +42,163 @@ use crate::registry::Registry;
 use crate::repo::Repo;
 use crate::signing::{Keys, Signer};
 
-/// The [`run`] outcome when the range narrowed to one landing that failed twice.
+/// A bisect's outcome when the range narrowed to one landing that failed twice.
 pub const CULPRIT: &str = "culprit";
 
-/// What this executor pass did for each red post check over more than one landing, or `None`
-/// when `[runner] bisect_post` is off or no such check is red. A fault is reported, never
-/// fatal to the pass: the queue does not wait on culprit finding.
+/// The post work one pass plans ([`plan`]).
+pub struct Plan {
+    /// What needs no run, by kind (`post`, `warm` or `bisect`): a stage's fault as
+    /// `{"error": why}`, or the bisects that cannot run here.
+    pub rows: Vec<(&'static str, Value)>,
+    /// The pieces to run, at most one for each environment.
+    pub pieces: Vec<Piece>,
+}
+
+/// One piece of post work, in one environment, run on its own thread ([`Piece::run`]).
+pub struct Piece {
+    /// The environment the piece runs checks of.
+    pub environment: String,
+    /// `post`, `warm` or `bisect`: the kind of its rows.
+    pub kind: &'static str,
+    job: Job,
+    keys: Keys,
+    writer: Writer,
+}
+
+/// One post check on main's tip, asked what changed since `since`, and its `rerun` units.
+struct TipRun {
+    id: CheckId,
+    tip: String,
+    since: String,
+    post: Value,
+    rerun: Vec<String>,
+}
+
+enum Job {
+    /// A post check on main's tip.
+    Tip(Box<TipRun>),
+    /// Each of `ids`, an observed pre check, as a candidate of no change on `tip`.
+    Warm { tip: String, ids: Vec<CheckId> },
+    /// The bisect of each red post check.
+    Bisect(Vec<Red>),
+}
+
+impl Piece {
+    /// Runs the piece: an array of what each of its runs did, or `{"error": why}` for a fault
+    /// that ends it. A fault is reported, never fatal to the runner.
+    #[must_use]
+    pub fn run(self, repo: &Repo) -> Value {
+        let Self {
+            environment,
+            job,
+            keys,
+            writer,
+            ..
+        } = self;
+        let mut reports = Vec::new();
+        match job {
+            Job::Tip(run) => {
+                let TipRun {
+                    id,
+                    tip,
+                    since,
+                    post,
+                    rerun,
+                } = *run;
+                // One check's fault is that check's, said in its row.
+                let verdict = match run_at(
+                    repo,
+                    &keys,
+                    &writer,
+                    (&id, ("post", post)),
+                    (&tip, Some(&since), &rerun),
+                ) {
+                    Ok(Ok(verdict)) => json!(verdict),
+                    Ok(Err(why)) | Err(why) => json!({"not_run": why}),
+                };
+                reports.push(json!({"check": id.id, "environment": environment, "tip": tip, "verdict": verdict}));
+            }
+            Job::Warm { tip, ids } => {
+                for id in ids {
+                    let verdict = match run_at(
+                        repo,
+                        &keys,
+                        &writer,
+                        (&id, ("warm", json!({"tip": tip}))),
+                        (&tip, None, &[]),
+                    ) {
+                        Ok(Ok(verdict)) => json!(verdict),
+                        Ok(Err(why)) => json!({"not_run": why}),
+                        Err(why) => return json!({"error": why}),
+                    };
+                    reports.push(json!({"check": id.id, "environment": id.environment, "tip": tip, "verdict": verdict}));
+                }
+            }
+            Job::Bisect(reds) => {
+                for red in &reds {
+                    let Some(suspect) = &red.suspect else {
+                        continue;
+                    };
+                    match bisect(repo, &keys, &writer, red, suspect) {
+                        Ok(report) => reports.push(report),
+                        Err(why) => return json!({"error": why}),
+                    }
+                }
+            }
+        }
+        Value::Array(reports)
+    }
+}
+
+/// What one stage plans: its rows that need no run, and its pieces.
+type Planned = (Vec<Value>, Vec<Piece>);
+
+/// One stage of the post work, given the environments it may not plan a piece in.
+type Stage = fn(&Repo, &BTreeSet<String>) -> Result<Planned, String>;
+
+/// #123: the post work this pass starts, after its queue's work, in the environments none of
+/// `busy` (the environments of the pieces still running) names. Its stages, in order: the
+/// runner's own post checks on main's tip ([`tips`]), the warm runs ([`warm`]), and the culprit
+/// of a red post check ([`culprits`]); a stage plans no piece in an environment an earlier one
+/// took. A stage's fault is its row, and the stages after it wait for the next pass.
 #[must_use]
-pub fn run(repo: &Repo) -> Option<Value> {
-    if !repo.config.bisect_post() {
-        return None;
+pub fn plan(repo: &Repo, busy: &BTreeSet<String>) -> Plan {
+    let stages: [(&'static str, Stage); 3] = [("post", tips), ("warm", warm), ("bisect", culprits)];
+    let mut plan = Plan {
+        rows: Vec::new(),
+        pieces: Vec::new(),
+    };
+    for (kind, stage) in stages {
+        let mut taken = busy.clone();
+        taken.extend(plan.pieces.iter().map(|piece| piece.environment.clone()));
+        match stage(repo, &taken) {
+            Ok((rows, pieces)) => {
+                if !rows.is_empty() {
+                    plan.rows.push((kind, Value::Array(rows)));
+                }
+                plan.pieces.extend(pieces);
+            }
+            Err(why) => {
+                plan.rows.push((kind, json!({"error": why})));
+                break;
+            }
+        }
     }
-    match all(repo) {
-        Ok(reports) if reports.is_empty() => None,
-        Ok(reports) => Some(Value::Array(reports)),
-        Err(why) => Some(json!({"error": why})),
-    }
+    plan
+}
+
+/// Whether this box serves the environment of at least one of `policy`'s post checks that none
+/// of `taken` names.
+fn serves_a_post_check(
+    policy: &crate::policy::Policy,
+    served: &check::Served,
+    taken: &BTreeSet<String>,
+) -> bool {
+    policy.checks.iter().any(|entry| {
+        entry.stage == crate::policy::Stage::Post
+            && served.serves(&entry.environment)
+            && !taken.contains(&entry.environment)
+    })
 }
 
 /// The runner's own post checks (`[runner] post`): after its queue's work, each post check of the
@@ -57,43 +206,27 @@ pub fn run(repo: &Repo) -> Option<Value> {
 /// environment and holds no record of it there yet. One run answers every landing since the last
 /// run's tip: a pass, or a red the red judgement (`crate::red`) ranges and `[runner] bisect_post`
 /// narrows. A red check runs again on each new tip (G492), and its request names `rerun`: the
-/// units that failed in its newest failing record (G540). `None` when off or nothing ran.
-#[must_use]
-pub fn tips(repo: &Repo) -> Option<Value> {
+/// units that failed in its newest failing record (G540). One piece for each environment none of
+/// `taken` names: its first check in the order [`in_turn`] gives.
+fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
     if !repo.config.post_tips() {
-        return None;
+        return Ok((Vec::new(), Vec::new()));
     }
-    match tip_runs(repo) {
-        Ok(reports) if reports.is_empty() => None,
-        Ok(reports) => Some(Value::Array(reports)),
-        Err(why) => Some(json!({"error": why})),
-    }
-}
-
-/// Whether this box serves the environment of at least one of `policy`'s post checks.
-fn serves_a_post_check(policy: &crate::policy::Policy, served: &check::Served) -> bool {
-    policy
-        .checks
-        .iter()
-        .any(|entry| entry.stage == crate::policy::Stage::Post && served.serves(&entry.environment))
-}
-
-fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
     let git = &repo.git;
     let tip = repo.fetch_trunk().map_err(|error| error.message())?;
     let Ok(base) = rev(git, &format!("{tip}^1")) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let Some(policy) = crate::policy::load_at(git, &base).map_err(String::from)? else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     };
     let served = check::Served::read(git);
     // BACKLOG 113 (a fleet finding, 2026-10-28: runners that serve no post check's environment
     // spent 140-166 s of every pass here, fetching evidence and judging main in full, and a new
     // change waited for that pass to end before any runner visited it): a box that can run none
-    // of the policy's post checks reads nothing for them.
-    if !serves_a_post_check(&policy, &served) {
-        return Ok(Vec::new());
+    // of the policy's post checks, or whose every such environment runs a piece, reads nothing.
+    if !serves_a_post_check(&policy, &served, taken) {
+        return Ok((Vec::new(), Vec::new()));
     }
     let keys = Keys::load(git);
     repo.fetch_registry();
@@ -101,18 +234,6 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
     let registry = Registry::current(git)?;
     let tree = tree_of(git, &tip)?;
     let writer = Writer::of(git, &keys, registry.as_ref())?;
-    // A fleet finding (2026-10-27, 0.5.29): with one post check a pass and main moving every few
-    // minutes, each new tip began again at the policy's first post check, and the later ones never
-    // ran. The checks no landing in the red window answers (`crate::red`'s pending) go first.
-    let pending: Vec<(String, String)> = crate::red::judged(git, &tip, registry.as_ref())
-        .map(|judged| {
-            judged
-                .pending
-                .into_iter()
-                .map(|pending| (pending.check, pending.environment))
-                .collect()
-        })
-        .unwrap_or_default();
     // A fleet finding (2026-10-28: scripts-fast stayed red for three hours after both of its
     // causes were fixed in files off its paths, and every change on its paths waited on it): a
     // red check runs again on each new tip, first, even when nothing on its paths changed, so
@@ -122,31 +243,24 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
         reds.iter()
             .find(|red| red.check == entry.id && red.environment == entry.environment)
     };
-    let is_red = |entry: &crate::policy::CheckEntry| red_of(entry).is_some();
-    let mut entries: Vec<&crate::policy::CheckEntry> = policy
+    let entries: Vec<&crate::policy::CheckEntry> = policy
         .checks
         .iter()
         .filter(|entry| {
-            entry.stage == crate::policy::Stage::Post && served.serves(&entry.environment)
+            entry.stage == crate::policy::Stage::Post
+                && served.serves(&entry.environment)
+                && !taken.contains(&entry.environment)
         })
         .collect();
-    // G433 (a fleet finding, 2026-10-28): a check that only ever answers `unknown` stays pending,
-    // so it went first on every tip, and a check in the policy's tail (edge-py-fast, fifth on its
-    // box) ran on no tip for eight hours. The check this box ran longest ago goes first; ties
-    // keep the rule above.
-    let ran = last_runs(git, &writer, &tip, &entries);
-    entries.sort_by_key(|entry| {
-        let pending = pending
-            .iter()
-            .any(|(check, environment)| *check == entry.id && *environment == entry.environment);
-        let ago = ran
-            .get(&(entry.id.clone(), entry.environment.clone()))
-            .copied()
-            .unwrap_or(usize::MAX);
-        (!is_red(entry), std::cmp::Reverse(ago), !pending)
-    });
-    let mut reports = Vec::new();
+    let (entries, ran) = in_turn(git, (registry.as_ref(), &writer), &tip, entries, &reds);
+    let mut pieces: Vec<Piece> = Vec::new();
     for entry in entries {
+        if pieces
+            .iter()
+            .any(|piece| piece.environment == entry.environment)
+        {
+            continue;
+        }
         let id = CheckId::new(&entry.id, &entry.environment);
         if writer.records(git, &tree, &id)? > 0 {
             continue;
@@ -167,7 +281,7 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
                 || span_start(git, &tip),
                 |ago| rev(git, &format!("{tip}~{ago}")),
             )?;
-        if !is_red(entry)
+        if red_of(entry).is_none()
             && policy
                 .unwoken(entry, &check::changed_paths(git, &since, &tip)?)
                 .is_some()
@@ -175,22 +289,68 @@ fn tip_runs(repo: &Repo) -> Result<Vec<Value>, String> {
             continue;
         }
         let (post, rerun) = post_request(git, registry.as_ref(), red_of(entry), &id, &tip)?;
-        // One check's fault is that check's, said in its row; the post checks after it still run.
-        let verdict = match run_at(
-            repo,
-            &keys,
-            &writer,
-            (&id, ("post", post)),
-            (&tip, Some(&since), &rerun),
-        ) {
-            Ok(Ok(verdict)) => json!(verdict),
-            Ok(Err(why)) | Err(why) => json!({"not_run": why}),
-        };
-        reports.push(json!({"check": entry.id, "environment": entry.environment, "tip": tip, "verdict": verdict}));
-        // One post check a pass: the next pass runs the next (see `executor::pass`).
-        break;
+        // One post check an environment a pass: the next pass plans the next (#123).
+        pieces.push(Piece {
+            environment: entry.environment.clone(),
+            kind: "post",
+            job: Job::Tip(Box::new(TipRun {
+                id,
+                tip: tip.clone(),
+                since,
+                post,
+                rerun,
+            })),
+            keys: keys.clone(),
+            writer: writer.clone(),
+        });
     }
-    Ok(reports)
+    Ok((Vec::new(), pieces))
+}
+
+/// `entries` in the order their post runs come in, and how many landings back this box last
+/// recorded each ([`last_runs`]): a red check first (G492), then the one this box ran longest
+/// ago (G433), then the ones no landing in the red window answers (`crate::red`'s pending).
+fn in_turn<'a>(
+    git: &Git,
+    (registry, writer): (Option<&Registry>, &Writer),
+    tip: &str,
+    mut entries: Vec<&'a crate::policy::CheckEntry>,
+    reds: &[Red],
+) -> (
+    Vec<&'a crate::policy::CheckEntry>,
+    std::collections::HashMap<(String, String), usize>,
+) {
+    // A fleet finding (2026-10-27, 0.5.29): with one post check a pass and main moving every few
+    // minutes, each new tip began again at the policy's first post check, and the later ones never
+    // ran. The checks no landing in the red window answers (`crate::red`'s pending) go first.
+    let pending: Vec<(String, String)> = crate::red::judged(git, tip, registry)
+        .map(|judged| {
+            judged
+                .pending
+                .into_iter()
+                .map(|pending| (pending.check, pending.environment))
+                .collect()
+        })
+        .unwrap_or_default();
+    // G433 (a fleet finding, 2026-10-28): a check that only ever answers `unknown` stays pending,
+    // so it went first on every tip, and a check in the policy's tail (edge-py-fast, fifth on its
+    // box) ran on no tip for eight hours. The check this box ran longest ago goes first; ties
+    // keep the rule above.
+    let ran = last_runs(git, writer, tip, &entries);
+    entries.sort_by_key(|entry| {
+        let is_red = reds
+            .iter()
+            .any(|red| red.check == entry.id && red.environment == entry.environment);
+        let pending = pending
+            .iter()
+            .any(|(check, environment)| *check == entry.id && *environment == entry.environment);
+        let ago = ran
+            .get(&(entry.id.clone(), entry.environment.clone()))
+            .copied()
+            .unwrap_or(usize::MAX);
+        (!is_red, std::cmp::Reverse(ago), !pending)
+    });
+    (entries, ran)
 }
 
 /// The body of a post run of `id` on `tip` and the units it asks to run again: none, or, for a
@@ -306,56 +466,54 @@ fn span_start(git: &Git, tip: &str) -> Result<String, String> {
 /// once on that tip as a candidate of no change (the tip, on the tip, under its own policy),
 /// on a box that serves its environment, when this box holds no record of it there yet. A
 /// later candidate on that tip carries the record for every check whose observed reads its
-/// change does not touch, so a change runs only the checks it reaches. `None` when off or
-/// nothing ran.
-#[must_use]
-pub fn warm(repo: &Repo) -> Option<Value> {
+/// change does not touch, so a change runs only the checks it reaches. One piece for each
+/// environment none of `taken` names, with every such check of it.
+fn warm(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
     if !repo.config.warm() {
-        return None;
+        return Ok((Vec::new(), Vec::new()));
     }
-    match warm_runs(repo) {
-        Ok(reports) if reports.is_empty() => None,
-        Ok(reports) => Some(Value::Array(reports)),
-        Err(why) => Some(json!({"error": why})),
-    }
-}
-
-fn warm_runs(repo: &Repo) -> Result<Vec<Value>, String> {
     let git = &repo.git;
+    let tip = repo.fetch_trunk().map_err(|error| error.message())?;
+    let Some(policy) = crate::policy::load_at(git, &tip).map_err(String::from)? else {
+        return Ok((Vec::new(), Vec::new()));
+    };
+    let served = check::Served::read(git);
+    let warmed = |entry: &&crate::policy::CheckEntry| {
+        entry.stage == crate::policy::Stage::Pre
+            && entry.footprint == crate::policy::FootprintMode::Observed
+            && served.serves(&entry.environment)
+            && !taken.contains(&entry.environment)
+    };
+    if !policy.checks.iter().any(|entry| warmed(&entry)) {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let keys = Keys::load(git);
     repo.fetch_registry();
     repo.fetch_evidence(&keys);
     let registry = Registry::current(git)?;
-    let tip = repo.fetch_trunk().map_err(|error| error.message())?;
-    let Some(policy) = crate::policy::load_at(git, &tip).map_err(String::from)? else {
-        return Ok(Vec::new());
-    };
-    let served = check::Served::read(git);
     let tree = tree_of(git, &tip)?;
     let writer = Writer::of(git, &keys, registry.as_ref())?;
-    let mut reports = Vec::new();
-    for entry in policy.checks.iter().filter(|entry| {
-        entry.stage == crate::policy::Stage::Pre
-            && entry.footprint == crate::policy::FootprintMode::Observed
-            && served.serves(&entry.environment)
-    }) {
+    let mut ids: BTreeMap<String, Vec<CheckId>> = BTreeMap::new();
+    for entry in policy.checks.iter().filter(warmed) {
         let id = CheckId::new(&entry.id, &entry.environment);
-        if writer.records(git, &tree, &id)? > 0 {
-            continue;
+        if writer.records(git, &tree, &id)? == 0 {
+            ids.entry(entry.environment.clone()).or_default().push(id);
         }
-        let verdict = match run_at(
-            repo,
-            &keys,
-            &writer,
-            (&id, ("warm", json!({"tip": tip}))),
-            (&tip, None, &[]),
-        )? {
-            Ok(verdict) => json!(verdict),
-            Err(why) => json!({"not_run": why}),
-        };
-        reports.push(json!({"check": entry.id, "environment": entry.environment, "tip": tip, "verdict": verdict}));
     }
-    Ok(reports)
+    let pieces = ids
+        .into_iter()
+        .map(|(environment, ids)| Piece {
+            environment,
+            kind: "warm",
+            job: Job::Warm {
+                tip: tip.clone(),
+                ids,
+            },
+            keys: keys.clone(),
+            writer: writer.clone(),
+        })
+        .collect();
+    Ok((Vec::new(), pieces))
 }
 
 /// The largest number of check runs one bisect of `landings` landings makes: ⌈log2(n)⌉ probes
@@ -371,28 +529,36 @@ fn probes(landings: usize) -> usize {
     usize::try_from(below.bit_width()).unwrap_or(usize::MAX)
 }
 
-fn all(repo: &Repo) -> Result<Vec<Value>, String> {
+/// G244d (`[runner] bisect_post`): after the queue's work, never ahead of it, the culprit of
+/// each red post check over more than one landing. One piece for each environment this box
+/// serves that none of `taken` names, with every such red check of it; a check that cannot be
+/// bisected here is its row.
+fn culprits(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
+    if !repo.config.bisect_post() {
+        return Ok((Vec::new(), Vec::new()));
+    }
     let git = &repo.git;
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
     let served = check::Served::read(git);
     // BACKLOG 113: a box that can run none of the policy's post checks finds no culprit, so it
     // judges nothing for them.
     let post_work = match crate::policy::load_at(git, &trunk) {
-        Ok(Some(policy)) => serves_a_post_check(&policy, &served),
+        Ok(Some(policy)) => serves_a_post_check(&policy, &served, taken),
         // An invalid policy has no post check to bisect, as the red judgement reads it.
         Ok(None) | Err(crate::policy::LoadError::Invalid(_)) => false,
         Err(crate::policy::LoadError::Git(why)) => return Err(why),
     };
     if !post_work {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let keys = Keys::load(git);
     repo.fetch_registry();
     repo.fetch_evidence(&keys);
     let registry = Registry::current(git)?;
     let judgement = crate::red::judged(git, &trunk, registry.as_ref())?;
-    let mut reports = Vec::new();
-    for red in &judgement.red {
+    let mut rows = Vec::new();
+    let mut reds: BTreeMap<String, Vec<Red>> = BTreeMap::new();
+    for red in judgement.red {
         let Some(suspect) = red
             .suspect
             .as_ref()
@@ -401,28 +567,36 @@ fn all(repo: &Repo) -> Result<Vec<Value>, String> {
             continue;
         };
         if suspect.passed.is_none() {
-            reports.push(not_run(
-                red,
+            rows.push(not_run(
+                &red,
                 "no merge in the window passes the check, so the range has no good end",
                 &[],
             ));
-            continue;
-        }
-        if !served.serves(&red.environment) {
-            reports.push(not_run(
-                red,
+        } else if !served.serves(&red.environment) {
+            rows.push(not_run(
+                &red,
                 "this box does not serve the check's environment",
                 &[],
             ));
-            continue;
+        } else if !taken.contains(&red.environment) {
+            reds.entry(red.environment.clone()).or_default().push(red);
         }
-        let writer = Writer::of(&repo.git, &keys, registry.as_ref())?;
-        reports.push(bisect(repo, &keys, &writer, red, suspect)?);
     }
-    Ok(reports)
+    let mut pieces = Vec::new();
+    for (environment, reds) in reds {
+        pieces.push(Piece {
+            environment,
+            kind: "bisect",
+            job: Job::Bisect(reds),
+            keys: keys.clone(),
+            writer: Writer::of(git, &keys, registry.as_ref())?,
+        });
+    }
+    Ok((rows, pieces))
 }
 
 /// The producer this box records as, and its signer when the repository has a registry.
+#[derive(Clone)]
 struct Writer {
     name: String,
     signer: Option<Signer>,
@@ -585,7 +759,12 @@ fn unavailable_notes(repo: &Repo) -> std::collections::BTreeMap<String, u64> {
 }
 
 /// Records that no worker answered `id` at `now`, or, with `None`, that it has a record again.
+/// One piece at a time reads and writes the file (#123), so no piece drops another's note.
 fn note_unavailable(repo: &Repo, id: &CheckId, now: Option<u64>) {
+    static NOTING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _noting = NOTING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut notes = unavailable_notes(repo);
     let key = unavailable_key(id);
     let changed = match now {
@@ -654,18 +833,24 @@ fn run_at(
     // A fleet finding (2026-10-27): the id named no check, so the second post check on a tip
     // took the first one's evidence id, its record was refused as a second record under one id,
     // and every later post check of that tip never ran: four of five were silent for 22 hours.
-    let check: String = id
-        .id
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let candidate_id = format!("{field}-{check}-{short}-{run}");
+    // #123: two checks of one id in two environments run side by side on one tip, so the id,
+    // and the scratch it names, names the environment too.
+    let word = |text: &str| -> String {
+        text.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    let candidate_id = format!(
+        "{field}-{}-{}-{short}-{run}",
+        word(&id.id),
+        word(&id.environment)
+    );
     let scratch = check::scratch_root(&repo.common_dir)?.join(&candidate_id);
     let _cleanup = crate::run::Scratch(scratch.clone());
     let mut keep = |record: &mut EvidenceRecord| -> Result<(), String> {
@@ -737,6 +922,7 @@ fn answered(
     };
     note_unavailable(repo, id, None);
     let notes = evidence::notes_ref(&writer.name);
+    let _writing = evidence::writing();
     repo.git
         .run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
         .map_err(|error| {

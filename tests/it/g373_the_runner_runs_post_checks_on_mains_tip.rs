@@ -6,9 +6,9 @@
 //! the check's environment. So many landings cost one run of a whole-tree check, a red tip is
 //! named, and `[runner] bisect_post` narrows it to its culprit, with no outside post producer.
 //!
-//! Guard to mutate: `src/executor.rs` `pass`: drop the `crate::bisect::tips` call (no post check
-//! runs, and main is never found red). G433: the check the box ran longest ago goes first; order
-//! by pending alone in `bisect::tip_runs` and a check that never answers runs on every tip.
+//! Guard to mutate: `src/bisect.rs` `plan`: drop the `tips` stage (no post check runs, and main
+//! is never found red). G433: the check the box ran longest ago goes first; order by pending
+//! alone in `bisect::in_turn` and a check that never answers runs on every tip.
 
 // Each case runs shell scripts (adapters), so these run on Unix only.
 #![cfg(unix)]
