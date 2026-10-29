@@ -126,10 +126,14 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
     (
         "save",
         &[
-            "a change of the main checkout's edits, merged into main",
-            "the main checkout, moved to the new main",
+            "a change of the main checkout's edits, merged into main; with --paths, of only the \
+             edits under those paths, from any checkout",
+            "the main checkout, moved to the new main (never with --paths)",
         ],
-        &["any branch of yours"],
+        &[
+            "any branch of yours",
+            "with --paths, the checkout's HEAD or any of its files",
+        ],
     ),
     (
         "waiting",

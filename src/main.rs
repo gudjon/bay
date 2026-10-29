@@ -74,13 +74,20 @@ enum Command {
         why: Option<String>,
     },
     /// Merge the edits made in the main checkout as one change: start, merge --wait, then move
-    /// the checkout to the new tip of main. Never in a view (use merge there)
+    /// the checkout to the new tip of main. With --paths, only the edits under those paths, from
+    /// any checkout (a linked worktree too), and the checkout stays as it was. Never in a view
+    /// (use merge there)
     Save {
         /// What this work is, in a few words (or a card id)
         intent: String,
         /// The first draft's commit message, kept in the change's chain (main keeps bay's own)
         #[arg(long)]
         message: Option<String>,
+        /// Save only the edits under these paths (from the repository's root), from the checkout
+        /// bay runs in, main or linked: the change declares them, and the checkout's HEAD and
+        /// files stay as they were. A path with no edit is refused
+        #[arg(long, num_args = 1..)]
+        paths: Vec<String>,
     },
     /// The changes waiting for an approval this machine's approver (`bay.approverName`) can give,
     /// each with its candidate, paths and diff; with no approver set, every one, with who can
@@ -729,8 +736,20 @@ fn abandon(dir: &std::path::Path, change: Option<&str>, why: Option<&str>) -> Ba
 }
 
 /// `bay save`: the request its arguments make.
-fn save(dir: &std::path::Path, intent: String, message: Option<String>) -> BayResult {
-    bay::save::save(dir, &bay::save::SaveRequest { intent, message })
+fn save(
+    dir: &std::path::Path,
+    intent: String,
+    message: Option<String>,
+    paths: Vec<String>,
+) -> BayResult {
+    bay::save::save(
+        dir,
+        &bay::save::SaveRequest {
+            intent,
+            message,
+            paths,
+        },
+    )
 }
 
 /// `bay enrol`: the key its arguments name.
@@ -832,7 +851,11 @@ fn main() -> ExitCode {
     }
     let result = match cli.command {
         start @ Command::Start { .. } => start_change(&cli.dir, start),
-        Command::Save { intent, message } => save(&cli.dir, intent, message),
+        Command::Save {
+            intent,
+            message,
+            paths,
+        } => save(&cli.dir, intent, message, paths),
         Command::Waiting => bay::approve::waiting(&cli.dir),
         approve @ (Command::Approve { .. } | Command::Reject { .. }) => {
             approve_change(&cli.dir, approve)

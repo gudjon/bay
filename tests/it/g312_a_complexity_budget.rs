@@ -47,8 +47,10 @@ use support::TestBox;
 ///   asked each seat why it gave a change up; now the reason is in the signed request.
 /// - 0.6.0, one flag (`talk --show`, T6): a talk and its replies were read with `git show` and
 ///   `git log -p` on its ref, which every notice had to spell out; now it is one bay command.
+/// - 0.6.1, one flag (`save --paths`, B3): a seat in its own worktree landed one folder by
+///   starting a change, copying the edits into its view and merging; now it is one command.
 const COMMANDS: usize = 28;
-const FLAGS: usize = 80;
+const FLAGS: usize = 81;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,
