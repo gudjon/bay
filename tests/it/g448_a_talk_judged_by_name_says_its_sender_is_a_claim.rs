@@ -33,6 +33,7 @@ fn approvals() -> (TestBox, PathBuf, PathBuf) {
     let mut files = unchecked_files();
     files[0].1.push_str(APPROVALS_ONLY);
     test_box.seed_with_check(&a, &[("src/a.rs", "fn a() {}\n")], &files);
+    support::talk::talk_on(&test_box, &a);
     let b = test_box.clone_of(&remote, "b");
     (test_box, a, b)
 }

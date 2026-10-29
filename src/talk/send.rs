@@ -108,6 +108,7 @@ pub fn answer(dir: &Path, answer: &Answer) -> BayResult {
 /// `signing = "all"` the registry is fetched first; under `approvals` (G445) none is read.
 fn open(dir: &Path) -> Result<(Repo, Trust, Actor), Stop> {
     let repo = Repo::open(dir)?;
+    allowed(&repo, None)?;
     if crate::registry::signing_mode(&repo.git)? == crate::policy::Signing::All {
         repo.fetch_registry();
     }
@@ -119,6 +120,31 @@ fn open(dir: &Path) -> Result<(Repo, Trust, Actor), Stop> {
     })?;
     let actor = crate::change::current_actor(&repo.common_dir)?;
     Ok((repo, trust, actor))
+}
+
+/// Whether the `[talk]` table on main allows talk here, and, given `body`, that talk (owner
+/// ruling 2026-10-25). A refusal is read again after a fetch of main, so a repository that just
+/// turned talk on is never refused for want of a fetch. Off is `detail.talk_off`.
+fn allowed(repo: &Repo, body: Option<&Value>) -> Result<(), Refusal> {
+    let refusal = || -> Result<Option<(bool, String)>, Refusal> {
+        let table = crate::registry::talk_policy(&repo.git).map_err(Refusal::invalid)?;
+        let why = match body {
+            Some(body) => table.refusal(body),
+            None if table.on() => None,
+            None => table.refusal(&Value::Null),
+        };
+        Ok(why.map(|why| (!table.on(), why)))
+    };
+    if refusal()?.is_none() {
+        return Ok(());
+    }
+    let _ = repo.fetch_trunk();
+    match refusal()? {
+        None => Ok(()),
+        Some((off, why)) => {
+            Err(Refusal::new(Reason::TalkRefused, why).with("talk_off", json!(off)))
+        }
+    }
 }
 
 /// This machine's agent key, when the registry enrols it for `name`: the only key a talk or an
@@ -330,6 +356,7 @@ fn deliver(repo: &Repo, trust: &Trust, sender: &Actor, ask: &Ask) -> Result<BayR
     let sent = crate::live::unix_now();
     let mut body = build(ask, sender, sent)?;
     check_body(&body)?;
+    allowed(repo, Some(&body))?;
     check_parties(trust, &body)?;
     // G445: under approvals no key signs a talk; the sender is its actor name.
     let (reviewer, key) = match trust {

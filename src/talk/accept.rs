@@ -22,8 +22,10 @@
 //!
 //! The outcome, `detail.talk_accept`, has one shape on every path: `state` (`accepted`,
 //! `skipped` with `why`, `not_fetched`, `not_due` with `why` (a fetching command inside the
-//! poll interval, G445), or `error` with `why`: never an empty inbox in disguise),
-//! and the lists `acked`, `closed`, `refused` (a talk that fails accept) and `failed` (a talk
+//! poll interval, G445), `off` with `why` (the policy on main does not turn talk on: nothing is
+//! fetched or written), or `error` with `why`: never an empty inbox in disguise), and the lists
+//! `acked`, `closed`, `refused` (a talk that fails accept, or one the `[talk]` table does not
+//! allow) and `failed` (a talk
 //! whose entry could not be written here), and `pushed`. One talk that fails never stops the
 //! others.
 
@@ -190,6 +192,14 @@ fn accept(repo: &Repo, trust: &Trust) -> Result<Outcome, String> {
     {
         return Ok(Outcome::new("skipped").why(refusal.why));
     }
+    // The owner ruling (2026-10-25): with talk off on main, an accept fetches and writes nothing.
+    let table = crate::registry::talk_policy(&repo.git)?;
+    if !table.on() {
+        return Ok(Outcome::new("off").why(format!(
+            "talk is off: the policy on main ({}) does not say `[talk] enabled = true`",
+            crate::policy::POLICY_PATH
+        )));
+    }
     let prefix = format!("{TALK_PREFIX}{}/", me.name);
     fetch_sent(repo, &prefix, &me.name)?;
     let Some((remote, registry_tip)) = remote_tips(repo, &prefix) else {
@@ -212,11 +222,21 @@ fn accept(repo: &Repo, trust: &Trust) -> Result<Outcome, String> {
         if talk.has("ack") {
             continue;
         }
+        // A talk the `[talk]` table does not allow (its kind, sender or recipient) is not acked.
+        if let Some(why) = table.refusal(&talk.body) {
+            outcome.refused.push(json!({"talk": talk.id, "why": why}));
+            continue;
+        }
         match verify(repo, &trust, talk, &me.name, &talks) {
             Ok(()) => {
                 // G58, G53: the wake adapter is asked once, at accept, and its answer is on the
-                // ack, so the sender sees whether its talk woke the recipient.
-                let wake = super::wake::wake(repo, talk, &me);
+                // ack, so the sender sees whether its talk woke the recipient. Under `[talk] wake
+                // = false` talks arrive and nothing is woken.
+                let wake = if table.wakes() {
+                    super::wake::wake(repo, talk, &me)
+                } else {
+                    json!({"result": "not_attempted", "reason": "TALK_WAKE_OFF"})
+                };
                 let ack = json!({"schema": TALK_SCHEMA, "entry": "ack", "talk": talk.id,
                     "ack": true, "actor": {"name": me.name, "session": me.session},
                     "at": now_rfc3339(), "wake": wake});

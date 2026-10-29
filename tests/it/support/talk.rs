@@ -55,6 +55,23 @@ pub fn hosted_talk_landing() -> TalkCase {
     })
 }
 
+/// Turns talk on at `repo`'s trunk, as 0.6.0 needs it (talk is off unless the policy on main
+/// says `[talk] enabled = true`): the table is added to the policy trunk holds, or to an
+/// unchecked one when it holds none. A policy that states `[talk]` is left as it is.
+pub fn talk_on(test_box: &TestBox, repo: &Path) {
+    let path = repo.join(".bay/policy.toml");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| crate::support::UNCHECKED_POLICY.to_owned());
+    if text.contains("[talk]") {
+        return;
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, format!("{text}\n[talk]\nenabled = true\n")).unwrap();
+    test_box.git_ok(repo, &["add", ".bay/policy.toml"]);
+    test_box.git_ok(repo, &["commit", "-q", "-m", "talk on"]);
+    test_box.git_ok(repo, &["push", "-q", "origin", "HEAD:main"]);
+}
+
 /// The talk host, with `seed` writing trunk on `a` before the registry exists.
 pub fn hosted_talk_seeded(seed: impl FnOnce(&TestBox, &Path)) -> TalkCase {
     let test_box = TestBox::new();
@@ -63,6 +80,7 @@ pub fn hosted_talk_seeded(seed: impl FnOnce(&TestBox, &Path)) -> TalkCase {
     let a = test_box.repo_without_remote_any("a");
     test_box.add_origin(&a, &host);
     seed(&test_box, &a);
+    talk_on(&test_box, &a);
     let keys = test_box.keys();
     let b_key = fresh_key(&test_box, "agent-b");
     let c_key = fresh_key(&test_box, "agent-c");

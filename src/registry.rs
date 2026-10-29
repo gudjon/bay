@@ -764,6 +764,19 @@ pub fn signing_mode(git: &Git) -> Result<Signing, String> {
     })
 }
 
+/// The `[talk]` table at the accepted base (owner ruling 2026-10-25): with no base there is no
+/// policy, so talk is off.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn talk_policy(git: &Git) -> Result<crate::policy::TalkPolicy, String> {
+    accepted_base(git)?.map_or_else(
+        || Ok(crate::policy::TalkPolicy::default()),
+        |base| crate::policy::talk_at(git, &base),
+    )
+}
+
 /// Whether trunk commit `commit` landed with every write signed (N-21): the policy at its first
 /// parent, the base it was judged at, does not say `signing = "approvals"`. A parent or policy
 /// that cannot be read is signed, so unknown never weakens a check. Asked only where a registry

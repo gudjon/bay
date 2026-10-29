@@ -756,6 +756,11 @@ fn talk_wait(dir: &Path) -> Outcome {
     let Ok(repo) = crate::repo::Repo::open(dir) else {
         return Outcome::default();
     };
+    // I1: the product starts this entry at every stop and runs each start apart, with no
+    // de-duplication. One wait per actor and clone polls; a second start ends at once.
+    let Some(_held) = one_wait(&repo) else {
+        return Outcome::default();
+    };
     let (exit, outcome) = crate::talk::poll::wait(&repo, MAX_WAIT_S);
     let stderr = if exit == 2 {
         let talks: Vec<String> = outcome["accepted"]["acked"]
@@ -779,6 +784,24 @@ fn talk_wait(dir: &Path) -> Outcome {
         stdout: outcome.to_string(),
         stderr,
     }
+}
+
+/// The lock that makes this process the one `talk-wait` of its actor in this clone
+/// (`<common dir>/bay/talk-wait-<actor>.lock`), held while it lives; `None` while another holds
+/// it, or when the actor or the lock cannot be read.
+fn one_wait(repo: &crate::repo::Repo) -> Option<std::fs::File> {
+    let me = crate::change::current_actor(&repo.common_dir).ok()?;
+    crate::names::operator_name(&me.name).ok()?;
+    let dir = repo.common_dir.join("bay");
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join(format!("talk-wait-{}.lock", me.name)))
+        .ok()?;
+    file.try_lock().ok()?;
+    Some(file)
 }
 
 /// The shell deny list's judgement of `event` (G39): exit 2 with the reason, recorded by the

@@ -41,6 +41,7 @@ fn reviewed() -> Reviewed {
     let a = test_box.repo_without_remote_any("a");
     test_box.add_origin(&a, &host);
     test_box.seed_with_check(&a, &[("src/a.rs", "fn a() {}\n")], &unchecked_files());
+    support::talk::talk_on(&test_box, &a);
     let keys = test_box.keys();
     let reviewer_key = fresh_key(&test_box, "reviewer");
     test_box.enroll_files(

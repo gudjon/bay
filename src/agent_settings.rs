@@ -29,6 +29,9 @@ pub const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("Stop", "turn.end"),
     ("SubagentStart", "subagent.start"),
     ("SubagentStop", "subagent.end"),
+    // I1 (0.6.0): at each stop an idle seat waits for talk in the background (`asyncRewake`),
+    // and a talk that arrives wakes it. Inert while talk is off on main.
+    ("Stop", "talk-wait"),
     // A teammate session's idle (probed, round 2): recorded as idle.
     ("TeammateIdle", "session.wait"),
     ("SessionEnd", "session.end"),
@@ -197,6 +200,9 @@ pub struct EntryShape {
     pub timeout_s: Option<u64>,
     /// The group's `matcher`; `None` runs the entry for every call of the event.
     pub matcher: Option<&'static str>,
+    /// `asyncRewake`: the entry runs in the background, and its exit 2 wakes the agent with its
+    /// stderr, idle or not.
+    pub rewakes: bool,
 }
 
 /// An entry that only records: it never stops the agent and sets nothing of its own.
@@ -205,11 +211,23 @@ const RECORDS: EntryShape = EntryShape {
     on_failure: None,
     timeout_s: None,
     matcher: None,
+    rewakes: false,
 };
+
+/// The `timeout` of the `talk-wait` entry: above the hour `bay hook talk-wait` waits, so bay
+/// ends the wait itself.
+const TALK_WAIT_TIMEOUT_S: u64 = 3700;
 
 /// The shape of bay's entry for the Claude event `event`.
 #[must_use]
 pub fn entry_shape(event: &str, bay_event: &str) -> EntryShape {
+    if bay_event == "talk-wait" {
+        return EntryShape {
+            timeout_s: Some(TALK_WAIT_TIMEOUT_S),
+            rewakes: true,
+            ..RECORDS
+        };
+    }
     if bay_event == "tool.ask" {
         // Dossier 63: it records the question and never stops the agent; with no answer the
         // product's own dialog opens.
@@ -231,6 +249,7 @@ pub fn entry_shape(event: &str, bay_event: &str) -> EntryShape {
             on_failure: Some("block"),
             timeout_s: Some(PRE_TOOL_TIMEOUT_S),
             matcher: Some(PRE_TOOL_MATCHER),
+            rewakes: false,
         },
         // Ruling R7: a stop over uncheckpointed edits is refused once (exit 2).
         "Stop" => EntryShape {
@@ -249,6 +268,9 @@ fn bay_group(event: &str, bay_event: &str) -> Value {
     }
     if let Some(timeout_s) = shape.timeout_s {
         hook["timeout"] = json!(timeout_s);
+    }
+    if shape.rewakes {
+        hook["asyncRewake"] = json!(true);
     }
     let mut group = Map::new();
     if let Some(matcher) = shape.matcher {
@@ -291,6 +313,7 @@ pub fn codex_entry_shape(event: &str, _bay_event: &str) -> EntryShape {
         on_failure: Some(CODEX_ON_FAILURE),
         timeout_s: (event == "PreToolUse").then_some(PRE_TOOL_TIMEOUT_S),
         matcher: None,
+        rewakes: false,
     }
 }
 

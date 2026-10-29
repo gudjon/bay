@@ -2,14 +2,14 @@
 //! it ON for our setups"; v12-landingbay found that an older bay refuses the key). A policy may
 //! state `[talk]` before the switch.
 //!
-//! This release reads `[talk]` (`enabled`, `kinds`, `senders`, `recipients`, `max_round`,
-//! `wake`) and changes nothing: talk works as before. So a repository can merge `enabled = true`
-//! ahead of the release that turns talk off where it is missing. `bay status --all` names it as
-//! `talk: {enabled, stated, kinds}`, so an outside reader takes bay's judgment, not the policy's
-//! text. A kind bay does not know is `POLICY_INVALID`, as an unknown key is.
+//! bay read `[talk]` (`enabled`, `kinds`, `senders`, `recipients`, `max_round`, `wake`) before
+//! 0.6.0 used it, so a repository could merge `enabled = true` ahead of 0.6.0, which turns talk
+//! off where it is missing (G491). `bay status --all` names it as `talk: {enabled, stated,
+//! kinds}`, so an outside reader takes bay's judgment, not the policy's text. A kind bay does not know is
+//! `POLICY_INVALID`, as an unknown key is.
 //!
-//! Guard to mutate: `src/policy.rs` `PolicyFile`: drop the `talk` field (the policy that states
-//! it is refused as `POLICY_INVALID`).
+//! Guards to mutate: `src/policy.rs` `PolicyFile`: drop the `talk` field (the policy that states
+//! it is refused as `POLICY_INVALID`); `TalkPolicy::on` true when `enabled` is unstated.
 
 use crate::support;
 
@@ -51,12 +51,12 @@ fn a_stated_talk_table_merges_and_status_names_it() {
 }
 
 #[test]
-fn an_unstated_talk_is_on_as_before_and_names_every_kind() {
+fn an_unstated_talk_is_off_and_names_every_kind() {
     let (test_box, repo) = with_policy("");
     test_box.bay_ok(&repo, &["status"]);
     let fleet = test_box.bay_ok(&repo, &["status", "--all"]);
     let talk = &fleet["detail"]["talk"];
-    assert_eq!(talk["enabled"], true, "{fleet}");
+    assert_eq!(talk["enabled"], false, "{fleet}");
     assert_eq!(talk["stated"], false, "{fleet}");
     assert_eq!(talk["kinds"].as_array().map(Vec::len), Some(3), "{fleet}");
 }
