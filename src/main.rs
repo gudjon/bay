@@ -54,7 +54,8 @@ enum Command {
         #[arg(long, value_name = "CHANGE")]
         after: Vec<String>,
         /// Take the named change and its view over from their actor: you become its actor,
-        /// and the result names the one before (after the takeover window while it works)
+        /// and the result names the one before (a change it still holds: once the takeover
+        /// window passes with no work from it)
         #[arg(long, conflicts_with_all = ["paths", "inputs", "new", "fixes", "lane", "from", "after"])]
         adopt: bool,
     },
