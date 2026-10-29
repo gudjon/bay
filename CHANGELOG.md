@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.2
+
+- A red clears only when a check run passes after the fix; a fix's name alone no longer clears it.
+- A fix answers a red only when it is newer than the red's newest failure.
+- A fix may name the red's check, or any merge the red names; the runner and the host judge alike.
+- While a fix waits for its run (`pending_fix`), changes on the check's paths wait too.
+- That run is asked for the check's failed units again, over the paths changed since its last pass.
+- A repair runs in the runner visit that places it.
+- A box with no check sandbox leaves its operation to a live runner.
+- `bay status` reads change records and post answers in batches, with far fewer git processes.
+- A history check fetches every version of the files under a wildcard directory.
+- `bay status --all` with no fetch record says to run `bay status` first.
+- The adopt text says work in the takeover window stays with the change's actor.
+- Every next step is 25 words or fewer.
+
 ## 0.6.1
 
 - A superseded operation never takes its successor's place in line, and never runs.
