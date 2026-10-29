@@ -190,13 +190,16 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 | See every machine and session on the repository, who works on red paths (`on_red`), the open talks (`talks`; each session's `owes_talks`), and the runners with their age (`runners`; `stale`); each machine's last `bay doctor` verdict (`doctor`; `null` if it never ran) and the fleet's count (`ready`: green, red, never ran, lowest bay version) | `bay status --all` |
 | See every head: each branch on the remote, classed `main`, `target`, `lane`, `merged`, `stale` or `unique`, and in `detail.stranded` the local branches no remote holds and worktrees whose folder is gone; deletes nothing | `bay status --branches [--stale-days <n>]` |
 | Delete only the remote branches `merged` by `ancestor` or `patch`, each archived first and restorable from `.git/bay/pruned-heads.log`; a `[plugin.prune]` plugin runs after each delete (`detail.pruned[].on_prune`) | `bay prune [--stale-days <n>]` |
-| See merges, events (`main_red`, `main_red_cleared`, `outside_merge`, `main_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |
+| See merges, events (`main_red`, `main_red_cleared`, `outside_merge`, `main_not_linear`, `target_moved`, `target_unpromotable`, `talk_arrived`, `talk_answered`, `talk_closed`, `wake`) and invalidations since you last looked | `bay status --since <cursor>` (pass the returned cursor next time) |
 | Ask another agent for one change, decision or check, with a reply time | `bay talk <agent> "<what>" --kind delivery\|discovery\|reliability --follow-up <time>` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
 
 Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
 
 - A talk read after its `--expires` is void: the notice prints `EXPIRED`, and it owes no reply.
+- A talk event in `bay status --since` carries the reply: `answer` (the answer's value) and `reply` (the
+  backbrief's `status` and `evidence`). A closed talk says `standing: "closed"` and owes nothing. With no
+  cursor, a talk that closed in the last week is listed once.
 - `bay merge` and `bay undo` list the open talks about that change in `detail.open_talks`. Read them;
   they never block the merge.
 - With a `[plugin.wake] command`, bay wakes your session once for a talk to you, and once when a runner

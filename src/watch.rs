@@ -51,8 +51,10 @@
 //! (G450): `answer`, the latest answer's value as recorded, and `reply`, the latest backbrief's
 //! `status` and `evidence` (each null with none). That is data the actor asked for; a notice never
 //! prints it (ruling R13). A closed talk's row says `standing: "closed"` and owes nothing (G452).
-//! Talks are the actor's, so a view lists them all. A talk that opens and closes between two
-//! watches is listed by neither: the cursor holds open talks only, so it stays small.
+//! Talks are the actor's, so a view lists them all. A watch with no cursor lists, once, each talk
+//! that closed within the week replies are told in (G451). A talk that opens and closes between
+//! two watches from a cursor is listed by neither: the cursor holds open talks only, so it stays
+//! small.
 //!
 //! Promotion targets (NEW-5, [`crate::target`]) are derived the same way: the cursor's
 //! `targets` holds each target's tip, and a watch outside a view lists `target_moved` for a
@@ -628,8 +630,8 @@ fn talk_events(
     let held = since.map(|cursor| cursor.talks.clone()).unwrap_or_default();
     let me = crate::change::actor_name();
     let now = crate::talk::standing::reader_now();
-    let followed = match crate::talk::standing::followed(git, &me, now, |id| held.contains_key(id))
-    {
+    let cursor = since.map(|cursor| &cursor.talks);
+    let followed = match crate::talk::standing::followed(git, &me, now, cursor) {
         Ok(followed) => followed,
         Err(why) => return (Vec::new(), held, Some(why)),
     };

@@ -22,8 +22,11 @@
 //! Each row says `signed`: whether a key signed the talk's sender. Under `[policy] signing =
 //! "approvals"` (G445) it is `false`, and `from` is the name the sender claims.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
+use super::replies::RECENT_S;
 use super::{Entry, TALK_PREFIX, Talk, read_after_expiry, talks_where};
 use crate::clock::unix_of;
 use crate::git::Git;
@@ -138,8 +141,11 @@ pub struct Followed {
     pub reply: Value,
 }
 
-/// The talks `me` sent or must answer, oldest first, as `bay status --since` follows them: every open one,
-/// and each closed one `held` keeps (those its cursor held open), so a close is seen once.
+/// The talks `me` sent or must answer, oldest first, as `bay status --since` follows them: every
+/// open one, and each closed one the cursor's talks `held` held open, so a close is seen once.
+/// With no cursor (`held` is `None`, a first read, G451) each one that closed within the window
+/// replies are told in ([`RECENT_S`]) is followed too, so an answer that came before the first
+/// read is seen there.
 ///
 /// # Errors
 ///
@@ -148,13 +154,35 @@ pub fn followed(
     git: &Git,
     me: &str,
     now: u64,
-    held: impl Fn(&str) -> bool,
+    held: Option<&BTreeMap<String, String>>,
 ) -> Result<Vec<Followed>, String> {
-    let mut talks = talks_where(git, TALK_PREFIX, |talk| {
-        (talk.from_name() == me || talk.who == me) && (!talk.closed() || held(&talk.id))
+    let mine = talks_where(git, TALK_PREFIX, |talk| {
+        (talk.from_name() == me || talk.who == me)
+            && (!talk.closed() || held.is_none_or(|held| held.contains_key(&talk.id)))
     })?;
+    let mut talks = Vec::with_capacity(mine.len());
+    for talk in mine {
+        if held.is_none() && talk.closed() && !closed_within(git, &talk, now, RECENT_S)? {
+            continue;
+        }
+        talks.push(talk);
+    }
     talks.sort_by_key(Talk::sent);
     talks.iter().map(|talk| follow(git, talk, now)).collect()
+}
+
+/// Whether `talk` closed within `window` seconds of `now`: by the `at` of its first close entry
+/// or, a discovery talk, of its first answer.
+fn closed_within(git: &Git, talk: &Talk, now: u64, window: u64) -> Result<bool, String> {
+    let discovery = talk.body["kind"] == "discovery";
+    let Some(closing) = talk
+        .entries
+        .iter()
+        .find(|entry| entry.kind == "close" || (discovery && entry.kind == "answer"))
+    else {
+        return Ok(false);
+    };
+    Ok(at(&read_entry(git, closing)?).is_some_and(|at| now.saturating_sub(at) <= window))
 }
 
 /// `talk` as [`followed`] follows it, read at `now`.
