@@ -12,6 +12,13 @@
 //! check reads the first version as absent and fails); and `missing_history` there lists the
 //! versions by the change walk (with a `rev-list --objects` walk, a wildcard directory part
 //! names no blob, and the second test reads its first version as absent).
+//!
+//! A fleet finding, 2026-10-29: a post run (and a bisect step) runs its check on any landing, so
+//! `bay::bisect` `alone` sets the check's `when_paths` aside, and the prefetch, which read
+//! `when_paths`, fetched nothing: the post check `zero-edits` read an older `venue.json` as a bad
+//! object. The guard to mutate: in `src/policy.rs`, `CheckEntry::history_globs` returns only
+//! `when_paths` (drop `.or(self.history_paths.as_deref())`), and the third test's post check
+//! reads its first version as absent.
 
 use crate::support;
 
@@ -44,21 +51,84 @@ fn a_wildcard_directory_part_reads_an_older_version_too() {
     reads_the_first_version("cfg/*/v.json", "cfg/eight/v.json");
 }
 
+#[test]
+fn a_post_history_check_reads_an_older_version_too() {
+    let (test_box, cache, holds_first) =
+        landed_in_a_blobless_clone("cfg/*/v.json", "cfg/eight/v.json", Stage::Post);
+    assert!(
+        !holds_first(&test_box),
+        "the pre check, which reads no history, fetched the first version"
+    );
+    let ran = test_box.bay_ok(&cache, &["runner", "run", "--once"]);
+    let text = ran.to_string();
+    assert!(
+        text.contains("\"check\":\"history\"") && text.contains("\"verdict\":\"pass\""),
+        "the post check did not pass: {ran}"
+    );
+    assert!(
+        holds_first(&test_box),
+        "the first version was never fetched for the post check: {ran}"
+    );
+}
+
+/// Where the history check runs: before the merge, or on main after it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    Pre,
+    Post,
+}
+
 /// A blob-less clone runs a history check whose `when_paths` names `path` by `glob`, and the
 /// check reads the first version of `path`, which the clone never held.
 fn reads_the_first_version(glob: &str, path: &str) {
+    let (test_box, _, holds_first) = landed_in_a_blobless_clone(glob, path, Stage::Pre);
+    assert!(
+        holds_first(&test_box),
+        "the first version of {path} was never fetched"
+    );
+}
+
+/// Whether the clone holds the first version of the path, without fetching it.
+type HoldsFirst = Box<dyn Fn(&TestBox) -> bool>;
+
+/// A blob-less clone of a trunk with two versions of `path` lands a change on `src/` through
+/// a history check (`stage`) whose `when_paths` names `path` by `glob`: the box, the clone,
+/// and whether the clone holds the first version of `path`.
+fn landed_in_a_blobless_clone(
+    glob: &str,
+    path: &str,
+    stage: Stage,
+) -> (TestBox, PathBuf, HoldsFirst) {
     let test_box = TestBox::new();
     let seed = test_box.repo_any("seed");
     let remote = test_box.path().join("seed-remote.git");
     test_box.git_bare(&remote, &["config", "uploadpack.allowFilter", "true"]);
     let script = READ_EVERY_VERSION.replace("cfg/v.json", path);
-    let mut files = check_files(&script, &passing_result(1), 1, 60);
+    let history = format!("inputs = [\"history\"]\nwhen_paths = [\"{glob}\", \"src/\"]\n");
+    let mut files = match stage {
+        Stage::Pre => check_files(&script, &passing_result(1), 1, 60),
+        // The pre check `tests` reads no history, so the script reads only when given `git`.
+        Stage::Post => check_files(
+            &format!("if printf '%s' \"$req\" | grep -q '\"git\":{{'; then\n{script}\nfi"),
+            &passing_result(1),
+            1,
+            60,
+        ),
+    };
     for (name, text) in &mut files {
         if name == ".bay/policy.toml" {
-            text.push_str("inputs = [\"history\"]\nwhen_paths = [\"");
-            text.push_str(glob);
-            text.push_str("\", \"src/\"]\n");
+            if stage == Stage::Post {
+                text.push_str("\n[[check]]\nid = \"history\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\n");
+            }
+            text.push_str(&history);
         }
+    }
+    if stage == Stage::Post {
+        // The runner runs main's post checks itself.
+        files.push((
+            ".bay/config.toml".to_owned(),
+            "[runner]\npost = true\nbisect_post = false\n".to_owned(),
+        ));
     }
     test_box.seed_with_check(
         &seed,
@@ -80,29 +150,30 @@ fn reads_the_first_version(glob: &str, path: &str) {
             cache.to_str().unwrap(),
         ],
     );
-    let holds = |object: &str| {
-        test_box
-            .git(&cache)
-            .env("GIT_NO_LAZY_FETCH", "1")
-            .args(["cat-file", "-e", object])
-            .output()
-            .unwrap()
-            .status
-            .success()
+    let holds = {
+        let cache = cache.clone();
+        move |test_box: &TestBox, object: &str| {
+            test_box
+                .git(&cache)
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .args(["cat-file", "-e", object])
+                .output()
+                .unwrap()
+                .status
+                .success()
+        }
     };
     let started = test_box.bay_ok(&cache, &["start", "CARD-1", "--paths", "src/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/new.rs"), "fn new() {}\n").unwrap();
     assert!(
-        !holds(&first),
+        !holds(&test_box, &first),
         "the clone already holds the first version of {path}"
     );
 
     let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(landed["decision"], "merged", "{landed}");
-    assert!(
-        holds(&first),
-        "the first version of {path} was never fetched"
-    );
+    let holds_first: HoldsFirst = Box::new(move |test_box| holds(test_box, &first));
+    (test_box, cache, holds_first)
 }

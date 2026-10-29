@@ -490,6 +490,11 @@ pub struct CheckEntry {
     /// invalid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when_paths: Option<Vec<String>>,
+    /// G566: the `when_paths` a post run or a bisect step set aside to run the check on any
+    /// landing (`crate::bisect` `alone`), whose history the check still reads
+    /// ([`CheckEntry::history_globs`]). Never read from a policy, never in the definition digest.
+    #[serde(skip)]
+    pub history_paths: Option<Vec<String>>,
     /// The producers whose records answer this check (G163, owner ruling Q3): a record from any
     /// other producer is reported `unlisted_producer` and does not count for it. Absent, any
     /// producer answers. Judged at the base and in the definition digest, so a candidate that
@@ -686,6 +691,13 @@ impl CheckEntry {
     #[must_use]
     pub fn reads_history(&self) -> bool {
         self.inputs.iter().any(|input| input == INPUT_HISTORY)
+    }
+
+    /// G566: the globs whose history a check that reads history fetches into a partial clone
+    /// before it runs: its `when_paths`, or those a post run set aside.
+    #[must_use]
+    pub fn history_globs(&self) -> Option<&[String]> {
+        self.when_paths.as_deref().or(self.history_paths.as_deref())
     }
 
     /// Whether a person answers the check rather than a run (G245).

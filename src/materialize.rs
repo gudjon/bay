@@ -440,7 +440,8 @@ fn fetch_ids(
 }
 
 /// G566: fetches into a partial clone, before a check that reads history runs, every object
-/// of `commit`'s history under `globs` (the check's `when_paths`) that the store lacks. The
+/// of `commit`'s history under `globs` (its `when_paths`, kept by a post run:
+/// [`crate::policy::CheckEntry::history_globs`]) that the store lacks. The
 /// check's history repository borrows the store's objects and has no promisor remote, so an
 /// object the store lacks is one the check cannot read. The exclusions of `globs` are left
 /// out, so the set fetched is never smaller than the one the globs match. A full clone, or a

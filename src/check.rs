@@ -2555,7 +2555,7 @@ fn prepare(
             crate::materialize::prefetch_history(
                 git,
                 candidate.commit,
-                entry.when_paths.as_deref(),
+                entry.history_globs(),
                 deadline,
             )
         } else {

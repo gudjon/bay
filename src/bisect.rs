@@ -1001,7 +1001,7 @@ fn alone(
         return Ok(Err(format!("the check {} is quarantined at {base}", id.id)));
     };
     let mut entry = entry.clone();
-    entry.when_paths = None;
+    entry.history_paths = entry.when_paths.take();
     let mut only = policy;
     only.checks = vec![entry];
     only.manifest = vec![manifest];
