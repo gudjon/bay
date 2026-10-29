@@ -73,10 +73,11 @@ struct PolicyFile {
     talk: TalkPolicy,
 }
 
-/// The `[talk]` table (owner ruling 2026-10-25: talk is off unless the policy on main turns it
-/// on, from 0.6.0). This release reads every key 0.6.0 will, and changes no behaviour: talk
-/// works as before, so a repository can merge `enabled = true` ahead of the switch. `kinds`
-/// names talk kinds; any other value is `POLICY_INVALID`.
+/// The `[talk]` table (owner ruling 2026-10-25): talk is off unless the policy on main says
+/// `enabled = true`. Off, `bay talk` refuses, an accept writes nothing and a bay host refuses
+/// talk refs. The other keys narrow it, each only when it names something: `kinds` (talk kinds;
+/// any other value is `POLICY_INVALID`), `senders` and `recipients` (actor names), `max_round`
+/// (the most recipients of one fan-out) and `wake = false` (talks arrive, nothing is woken).
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TalkPolicy {
@@ -105,10 +106,59 @@ impl TalkPolicy {
             self.kinds.iter().map(String::as_str).collect()
         };
         serde_json::json!({
-            "enabled": self.enabled.unwrap_or(true),
+            "enabled": self.on(),
             "stated": self.enabled.is_some(),
             "kinds": kinds,
         })
+    }
+
+    /// Whether talk is on: only `enabled = true` turns it on.
+    #[must_use]
+    pub fn on(&self) -> bool {
+        self.enabled == Some(true)
+    }
+
+    /// Why this table refuses a talk with `body`, if it does: talk is off, or the table names
+    /// kinds, senders or recipients and not the body's.
+    #[must_use]
+    pub fn refusal(&self, body: &Value) -> Option<String> {
+        if !self.on() {
+            return Some(format!(
+                "talk is off in this repository: the policy on main ({POLICY_PATH}) does not say `[talk] enabled = true`"
+            ));
+        }
+        [
+            ("kinds", &self.kinds, &body["kind"]),
+            ("senders", &self.senders, &body["from"]["name"]),
+            ("recipients", &self.recipients, &body["who"]),
+        ]
+        .into_iter()
+        .find(|(_, names, value)| {
+            !names.is_empty() && !names.iter().any(|name| value.as_str() == Some(name))
+        })
+        .map(|(key, names, value)| {
+            format!("the policy on main allows only `[talk] {key} = {names:?}`, not {value}")
+        })
+    }
+
+    /// Whether a talk that arrives may wake its recipient: not under `wake = false`.
+    #[must_use]
+    pub fn wakes(&self) -> bool {
+        self.wake != Some(false)
+    }
+}
+
+/// The `[talk]` table of the policy at `commit`. No policy, or one that does not parse, is
+/// talk off: unknown never turns talk on.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn talk_at(git: &Git, commit: &str) -> Result<TalkPolicy, String> {
+    match load_at(git, commit) {
+        Ok(policy) => Ok(policy.map(|policy| policy.talk).unwrap_or_default()),
+        Err(LoadError::Git(why)) => Err(why),
+        Err(LoadError::Invalid(_)) => Ok(TalkPolicy::default()),
     }
 }
 

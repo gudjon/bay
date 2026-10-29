@@ -1564,6 +1564,25 @@ impl Judge<'_> {
 
     /// A talk chain (`crate::talk::judge`).
     fn talk(&self, update: &Update, talk: &str) -> Result<(), String> {
+        // The owner ruling (2026-10-25): a host whose main does not turn talk on takes no talk
+        // ref. The sender and the recipient judge the table's other keys.
+        if !is_zero(&update.new) {
+            let trunk = format!("refs/heads/{}", crate::host::served_branch(self.git));
+            let table = match self
+                .git
+                .ref_target(&trunk)
+                .map_err(|error| error.message())?
+            {
+                Some(tip) => policy::talk_at(self.git, &tip)?,
+                None => policy::TalkPolicy::default(),
+            };
+            if !table.on() {
+                return Err(format!(
+                    "talk is off on this host: the policy on main ({}) does not say `[talk] enabled = true`",
+                    policy::POLICY_PATH
+                ));
+            }
+        }
         let (who, id) = talk
             .split_once('/')
             .ok_or_else(|| format!("a talk ref is {}<who>/<id>", crate::names::TALK))?;

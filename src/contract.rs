@@ -108,6 +108,7 @@ fn adapter_events(
                 "on_failure": shape.on_failure.unwrap_or(crate::agent_settings::DEFAULT_ON_FAILURE),
                 "timeout_s": shape.timeout_s,
                 "matcher": shape.matcher,
+                "rewakes": shape.rewakes,
             })
         })
         .collect()

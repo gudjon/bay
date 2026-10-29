@@ -99,9 +99,14 @@ pub fn command(repo: &Repo, now: u64) -> Option<Value> {
 }
 
 /// `bay talk wait`: polls this actor's talks on the schedule of [`interval`] for at most
-/// `max_s` seconds. Returns 2 (the wake) with the accepted talks when one arrives, else 0.
+/// `max_s` seconds. Returns 2 (the wake) with the accepted talks when one arrives, else 0; 0 at
+/// once while the policy on main turns talk off, so a wait wired for every session costs
+/// nothing where talk is off.
 #[must_use]
 pub fn wait(repo: &Repo, max_s: u64) -> (u8, Value) {
+    if !crate::registry::talk_policy(&repo.git).is_ok_and(|table| table.on()) {
+        return (0, json!({"woken": false, "polls": 0, "off": true}));
+    }
     let mut empty = 0u32;
     let mut slept = 0u64;
     loop {
