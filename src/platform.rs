@@ -5,7 +5,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 
 /// This user's home directory: `HOME`, and on Windows, where `HOME` is usually unset,
 /// `USERPROFILE`. `None` when neither is set, so a caller names what it cannot find.
@@ -104,6 +104,15 @@ pub fn detach_windows(cmd: &mut Command) {
     }
     #[cfg(not(windows))]
     let _ = cmd;
+}
+
+/// Waits for `child` on a thread of its own, so a long-running parent keeps no exited child
+/// (G575, a fleet finding, 2026-10-29: a runner held 32 zombies, one for each hourly
+/// `bay update` it started). A short-lived parent exits first and leaves the child to init.
+pub fn reap(mut child: Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
 
 /// A search path from `dirs`, joined with this platform's separator: `;` on Windows, where a
@@ -228,7 +237,7 @@ fn git_sh() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Launch, launch_of, resolve, sh_candidates};
+    use super::{Launch, launch_of, reap, resolve, sh_candidates};
     use std::ffi::OsStr;
 
     fn dirs() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -379,5 +388,23 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
         std::fs::write(&script, "#!/usr/bin/env python3\n").unwrap();
         assert!(super::script(&script).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_reaped_child_leaves_no_zombie() {
+        // G575: an exited child bay never waits for stays in the process table.
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let entry = std::path::PathBuf::from(format!("/proc/{}", child.id()));
+        reap(child);
+        let started = std::time::Instant::now();
+        while entry.exists() && started.elapsed() < std::time::Duration::from_secs(10) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            !entry.exists(),
+            "{} is still in the process table",
+            entry.display()
+        );
     }
 }

@@ -1090,7 +1090,9 @@ pub fn auto() {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     crate::platform::detach(&mut cmd);
-    let _ = cmd.spawn();
+    if let Ok(child) = cmd.spawn() {
+        crate::platform::reap(child);
+    }
 }
 
 /// Doctor's `bay` row: the installed version, the box's pin, and the newest release from the

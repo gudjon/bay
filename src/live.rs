@@ -556,7 +556,9 @@ pub fn after_event(dir: &Path, input: &str) {
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     crate::platform::detach(&mut cmd);
-    let _ = cmd.spawn();
+    if let Ok(child) = cmd.spawn() {
+        crate::platform::reap(child);
+    }
 }
 
 /// Whether `summary` holds a fresh row of `change` by `actor`: a row naming both whose own time

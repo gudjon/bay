@@ -391,7 +391,7 @@ fn start_checkpoint(cwd: &Path, id: &str) -> bool {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     crate::platform::detach(&mut cmd);
-    cmd.spawn().is_ok()
+    cmd.spawn().map(crate::platform::reap).is_ok()
 }
 
 /// The session's claims in its trees (`DESIGN` § 11c, G101; `crate::claims`) and its locks

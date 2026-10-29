@@ -316,8 +316,10 @@ fn observe_land(
         .stderr(std::process::Stdio::null());
     // On Windows the run is a detached process, so it outlives a caller that closes its console.
     crate::platform::detach_windows(&mut run);
-    run.spawn()
-        .map_err(|error| format!("the run could not be started: {error}"))?;
+    crate::platform::reap(
+        run.spawn()
+            .map_err(|error| format!("the run could not be started: {error}"))?,
+    );
     let started = Instant::now();
     let chain = Chain::new(&repo.git);
     while started.elapsed() < timeout {
