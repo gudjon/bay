@@ -78,7 +78,7 @@ pub fn host_under(check: &Check, trust: Trust) -> Held {
     let runs = test_box.path().join("runs");
     let waiting = test_box.path().join("held");
     let go = test_box.path().join("go");
-    let waits = if check.hold_first {
+    let first = if check.hold_first {
         format!(
             "if [ \"$n\" -eq 1 ]; then : > '{}'; until [ -e '{}' ]; do sleep 0.05; done; fi",
             waiting.display(),
@@ -87,6 +87,11 @@ pub fn host_under(check: &Check, trust: Trust) -> Held {
     } else {
         ":".to_owned()
     };
+    // Any run the test marks (`Held::hold_run`) waits too, until the test lets it go.
+    let waits = format!(
+        "{first}; if [ -e '{dir}/hold-'\"$n\" ]; then : > '{dir}/held-'\"$n\"; until [ -e '{dir}/go-'\"$n\" ]; do sleep 0.05; done; fi",
+        dir = test_box.path().display()
+    );
     // The test side of the check (G62): it logs the run, may hold it, and answers its number.
     let relayed = test_box.relay(&format!(
         "exec 3>&1 >/dev/null\n\
@@ -246,6 +251,29 @@ impl Held {
     /// Lets the first run go.
     pub fn go(&self) {
         std::fs::write(&self.go, "").unwrap();
+    }
+
+    /// Makes run `n` wait, once it starts, until [`Held::go_run`] lets it go.
+    pub fn hold_run(&self, n: u32) {
+        std::fs::write(self.test_box.path().join(format!("hold-{n}")), "").unwrap();
+    }
+
+    /// Waits until run `n` holds.
+    pub fn wait_held_run(&self, n: u32) {
+        let held = self.test_box.path().join(format!("held-{n}"));
+        let start = Instant::now();
+        while !held.exists() {
+            assert!(
+                start.elapsed() < Duration::from_secs(120),
+                "run {n} never started"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Lets run `n` go.
+    pub fn go_run(&self, n: u32) {
+        std::fs::write(self.test_box.path().join(format!("go-{n}")), "").unwrap();
     }
 
     /// The tree of `rev` on the host.

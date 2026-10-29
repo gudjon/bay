@@ -147,3 +147,37 @@ fn a_yielded_head_runs_again_within_the_same_pass() {
         "a head nobody held waited for the next pass: {passes:?}"
     );
 }
+
+/// G553 (a fleet finding, 2026-10-29: twelve changes were released "after a fault" two to seven
+/// times each in 90 minutes, and their records did not say why). A batch member given back when
+/// main moved under the batch says so in its change's record.
+///
+/// Guard to mutate, in `src/publish.rs`: the `cause` in `release_after_fault`'s message.
+#[test]
+fn a_batch_member_given_back_says_why() {
+    let (test_box, remote, ids, _passes) = moving_main(true);
+    let released: Vec<String> = ids
+        .iter()
+        .flat_map(|id| {
+            test_box
+                .git_bare(
+                    &remote,
+                    &["log", "--format=%s", &format!("refs/bay/changes/{id}")],
+                )
+                .lines()
+                .filter(|line| line.contains("after a fault"))
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        !released.is_empty(),
+        "no member was given back, so this case tests nothing"
+    );
+    assert!(
+        released
+            .iter()
+            .all(|line| line.ends_with("after a fault: main moved under the batch")),
+        "{released:?}"
+    );
+}

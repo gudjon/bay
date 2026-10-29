@@ -1649,6 +1649,21 @@ pub fn recover_events(repo: &Repo, records: &[ChangeRecord]) -> Result<usize, St
     Ok(written)
 }
 
+/// G551 (a fleet finding, 2026-10-29: a head took over a silent holder's claim after a full
+/// lease, planned its batch on the main it read before the wait, and its push was refused for a
+/// landing made during the wait): the claim can wait out a lease, so main is read again once it
+/// is won. A main that is no descendant of `trunk` keeps `trunk`; its push is refused, and the
+/// next pass reads main again.
+fn trunk_after_claim(ctx: &mut Ctx, trunk: String) -> String {
+    match ctx.repo.refetch_trunk() {
+        Ok(now) if now != trunk && ctx.repo.git.is_ancestor(&trunk, &now).unwrap_or(false) => {
+            ctx.record.observed_remote.clone_from(&now);
+            now
+        }
+        _ => trunk,
+    }
+}
+
 /// Steps 2–7 for one operation, rebuilding when trunk moves.
 fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, String> {
     let revision = ctx.op(op_id).revision.clone();
@@ -1702,13 +1717,14 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     if let Some(report) = claim(ctx, op_id, &revision, &trunk)? {
         return Ok(report);
     }
+    let trunk = trunk_after_claim(ctx, trunk);
     // G173: whatever the outcome, the operation's anchor goes with it.
     let repo = ctx.repo;
     // A claim this process gives up before any attempt is given back, never left `running`.
     let _anchored = match Anchored::new(&repo.git, op_id) {
         Ok(anchored) => anchored,
         Err(why) => {
-            release_after_fault(ctx, op_id, &revision);
+            release_after_fault(ctx, op_id, &revision, &host_said(&why));
             return Err(why);
         }
     };
@@ -1720,8 +1736,8 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
             detail["policy_used"] = used;
         }
     }
-    if outcome.is_err() {
-        release_after_fault(ctx, op_id, &revision);
+    if let Err(why) = &outcome {
+        release_after_fault(ctx, op_id, &revision, &host_said(why));
     }
     // The head always releases: an outcome other than its own publication (which released in
     // the publishing push) passes the head on. Not an operation given up on `REGISTRY_CHANGED`:
@@ -1792,7 +1808,10 @@ fn holds_place(ctx: &mut Ctx, op_id: &str) -> bool {
 /// back on the remote chain, so the operation never stays `running` under an owner that has
 /// stopped. The next executor takes it at once, with no lease to wait out. Best effort: when
 /// the chain moved to another epoch, or the remote cannot be reached, that state stands.
-fn release_after_fault(ctx: &mut Ctx, op_id: &str, revision: &str) {
+/// G553 (a fleet finding, 2026-10-29: twelve changes were released "after a fault" two to
+/// seven times each in 90 minutes, and their records did not say why): the release names its
+/// `cause`.
+fn release_after_fault(ctx: &mut Ctx, op_id: &str, revision: &str, cause: &str) {
     let mine = ctx.my_epoch;
     if mine == 0 || ctx.refetch().is_err() {
         return;
@@ -1813,7 +1832,7 @@ fn release_after_fault(ctx: &mut Ctx, op_id: &str, revision: &str) {
             OpState::Submitted
         };
     }
-    let message = format!("released {op_id} epoch {mine} after a fault");
+    let message = format!("released {op_id} epoch {mine} after a fault: {cause}");
     if ctx.save_cas(revision, None, &message).unwrap_or(false) {
         ctx.push_chain();
     }
@@ -1966,7 +1985,7 @@ fn batch(
         if let Ok(Some(other)) = joined(ctx, member, trunk) {
             others.push(other);
         } else {
-            give_back(&mut others, landing);
+            give_back(&mut others, landing, "a member could not join the batch");
             return Ok(None);
         }
     }
@@ -1985,14 +2004,21 @@ fn batch(
             Ok(Some(result))
         }
         Err(why) => {
-            give_back(&mut others, landing);
             // F11: a batch refused because trunk moved is no fault. The runner's head yields
             // with its place kept, and the next pass forms the batch again on the moved trunk.
             // B4: so is a batch the host refused while trunk stood still (a transient refusal
             // such as GitHub's GH009); it counts one uncounted publish retry, then yields.
-            if ctx.yields
-                && let Ok(now) = ctx.repo.fetch_trunk()
-            {
+            let now = if ctx.yields {
+                ctx.repo.fetch_trunk().ok()
+            } else {
+                None
+            };
+            let fault = match &now {
+                Some(now) if now.as_str() != trunk => "main moved under the batch".to_owned(),
+                _ => format!("the batch did not land ({})", host_said(&why)),
+            };
+            give_back(&mut others, landing, &fault);
+            if let Some(now) = now {
                 if now.as_str() == trunk
                     && !judged_by_bay(&why)
                     && let Some(blocked) = uncounted_retry(
@@ -2007,6 +2033,8 @@ fn batch(
                 let cause = if now.as_str() == trunk {
                     "the host refused its batch's push"
                 } else {
+                    // G552: counted as a single push's refusal is.
+                    ctx.op_mut(op_id).trunk_moved += 1;
                     "main moved"
                 };
                 return yield_head(ctx, op_id, revision, at, cause).map(Some);
@@ -2014,7 +2042,11 @@ fn batch(
             Err(why)
         }
         other => {
-            give_back(&mut others, landing);
+            give_back(
+                &mut others,
+                landing,
+                "a member left the batch before its push",
+            );
             other
         }
     }
@@ -2068,7 +2100,8 @@ type Planned = (policy::Policy, Vec<throughput::Member>, &'static str);
 
 /// The batch the head `op_id` at place `at` would form on `trunk`, with the policy at
 /// `trunk`: `None` when batching is off, reuse cannot stand for a run (§ 7,
-/// [`Ctx::reuse_trusted`]), the head is a repair, a culprit or names inputs, a check is keyed
+/// [`Ctx::reuse_trusted`]), the head runs ahead of its turn (G554), is a repair, a culprit or
+/// names inputs, a check is keyed
 /// by commit (the tip's own commit was never checked), fewer members than `max(min, 2)` fold,
 /// or the lane's recent failure rate is above `max_failure_rate`.
 fn batch_plan(
@@ -2100,6 +2133,14 @@ fn batch_plan(
         return Ok(None);
     }
     let queue = crate::queue::Queue::local(git)?;
+    // G554 (a fleet finding, 2026-10-29: a change that needed no check ran from its own place
+    // while the head checked, and planned a batch of ten from the line behind it; the two
+    // batches claimed the same members, one landed, and the other gave every member back): a
+    // head that runs ahead of its turn, a repair or a change that needs no check, lands alone.
+    if queue.head().is_some_and(|head| head.seq != at) {
+        eprintln!("bay runner: {op_id} no batch: it runs ahead of its turn");
+        return Ok(None);
+    }
     let head = throughput::Queued {
         seq: at,
         change: ctx.id.clone(),
@@ -2298,9 +2339,9 @@ fn joined<'a>(
 
 /// The claims of a batch's other members (`others`, for `members` after the head) go back, so
 /// each runs as its own head with no lease to wait out (§ 9a).
-fn give_back(others: &mut [Ctx], members: &[throughput::Member]) {
+fn give_back(others: &mut [Ctx], members: &[throughput::Member], cause: &str) {
     for (other, member) in others.iter_mut().zip(&members[1..]) {
-        release_after_fault(other, &member.op_id, &member.revision);
+        release_after_fault(other, &member.op_id, &member.revision, cause);
     }
 }
 
@@ -3052,14 +3093,42 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     // `Reverts:`, `Supersedes:`) runs as a head from its own place, ahead of the line it
     // unblocks. Main's state chooses it, never a priority; once main is green, the line is in
     // arrival order again.
+    // G552: a change that needs no check runs from its own place too, unless main moved under
+    // the head once already: then it keeps its place until that head leaves the head.
     if let Some(entry) = queue.of(op_id).cloned()
         && (repairs_red(ctx, trunk)?
-            || needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?)
+            || (needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
+                && !main_moved_under(ctx.repo, &head)))
     {
         return Ok(Gate::Head(entry.seq));
     }
     let revision = ctx.op(op_id).revision.clone();
     enqueue(ctx, op_id, &revision, Reason::Queued).map(|result| Gate::Wait(Box::new(result)))
+}
+
+/// G552 (a fleet finding, 2026-10-29: one head yielded "main moved" pass after pass while
+/// changes that need no check landed past it, each one under its batch's check): whether a
+/// publishing push of the queue's `head` was refused because main moved, read from its change
+/// chain as this box last fetched it. A change that needs no check then waits its turn, so one
+/// move costs the head one check, never one per change behind it. A head that waits on a repair
+/// (`Blocked`) holds nothing.
+fn main_moved_under(repo: &Repo, head: &crate::queue::Entry) -> bool {
+    Chain::new(&repo.git)
+        .read(&head.change)
+        .ok()
+        .and_then(|(_, record)| {
+            record
+                .operations
+                .into_iter()
+                .find(|op| op.op_id == head.op_id)
+        })
+        .is_some_and(|op| {
+            op.trunk_moved > 0
+                && matches!(
+                    op.state,
+                    OpState::Admitted | OpState::Running | OpState::Checked
+                )
+        })
 }
 
 /// Nothing to check, nothing to wait (owner, 2026-10-26: a document must reach main at once):
