@@ -239,7 +239,12 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
     // causes were fixed in files off its paths, and every change on its paths waited on it): a
     // red check runs again on each new tip, first, even when nothing on its paths changed, so
     // a fix that landed anywhere can clear it.
-    let reds = crate::red::red(git, &tip, registry.as_ref()).unwrap_or_default();
+    //
+    // E39 (a fleet finding, 2026-10-29: after a fix named edge-py-fast's owner, its next post runs
+    // asked about one landing alone and named no failed unit, so five known failing units went
+    // unrun): a check whose fix waits for its run (`pending_fix`) is asked what a red check is
+    // asked, so the run that answers the fix runs the failing units.
+    let reds = crate::red::holding(git, &tip, registry.as_ref()).unwrap_or_default();
     let red_of = |entry: &crate::policy::CheckEntry| {
         reds.iter()
             .find(|red| red.check == entry.id && red.environment == entry.environment)

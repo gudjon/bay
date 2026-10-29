@@ -9,7 +9,11 @@
 //! `plan.gone` each one it no longer has. A run that reports a requested unit in neither is
 //! `unknown`, never a pass that clears the red.
 //!
-//! Guards to mutate: in `src/bisect.rs` `tips`, the red check's `rerun` (an empty one: the
+//! E39 (a fleet finding, 2026-10-29): a check whose fix waits for its run (`pending_fix`) is asked
+//! the same, so the run that answers a `Fixes:` landing runs the failed units.
+//!
+//! Guards to mutate: in `src/bisect.rs` `tips`, `crate::red::holding` (`crate::red::red`: the
+//! check whose fix waits is not run on the fix, and stays `pending_fix`); the red check's `rerun` (an empty one: the
 //! fix answers no requested unit, and the deaf run's pass clears the red); `failed_units` keeping
 //! only the failed units (every unit: `rerun` names t2 as well); in `src/check.rs` `judge_units`, the
 //! unanswered-rerun refusal (the deaf run's pass clears the red), and `plan.gone` counting as an
@@ -99,9 +103,8 @@ fn unit_ids(record: &Value) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn a_red_post_check_asks_its_adapter_to_run_its_failed_units_again() {
-    let test_box = TestBox::new();
+/// `suite`'s repository and its remote: units t1 and t3 fail, and t2 passes.
+fn seeded(test_box: &TestBox) -> (PathBuf, PathBuf) {
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
     let files = vec![
@@ -123,20 +126,40 @@ fn a_red_post_check_asks_its_adapter_to_run_its_failed_units_again() {
         ],
         &files,
     );
-    let submit = |name: &str, paths: &[&str], edit: &dyn Fn(&Path)| -> String {
-        let mut args = vec!["start", name, "--paths"];
-        args.extend(paths);
-        let started = test_box.bay_ok(&repo, &args);
-        let id = started["change"].as_str().unwrap().to_owned();
-        let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
-        edit(&view);
-        let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
-        assert_eq!(code, 0, "{merged}");
-        assert!(
-            test_box.trunk_change_ids(&remote).contains(&id),
-            "{name} lands: {merged}"
-        );
-        id
+    (repo, remote)
+}
+
+/// Runs `bay start` with `start`, edits the view, and waits until the change lands.
+fn land(
+    test_box: &TestBox,
+    (repo, remote): (&Path, &Path),
+    start: &[&str],
+    edit: &dyn Fn(&Path),
+) -> String {
+    let mut args = vec!["start"];
+    args.extend(start);
+    let started = test_box.bay_ok(repo, &args);
+    let id = started["change"].as_str().unwrap().to_owned();
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    edit(&view);
+    let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{merged}");
+    assert!(
+        test_box.trunk_change_ids(remote).contains(&id),
+        "{} lands: {merged}",
+        start[0]
+    );
+    id
+}
+
+#[test]
+fn a_red_post_check_asks_its_adapter_to_run_its_failed_units_again() {
+    let test_box = TestBox::new();
+    let (repo, remote) = seeded(&test_box);
+    let submit = |name: &str, paths: &[&str], edit: &dyn Fn(&Path)| {
+        let mut start = vec![name, "--paths"];
+        start.extend(paths);
+        land(&test_box, (&repo, &remote), &start, edit)
     };
     let tip = || {
         test_box
@@ -209,5 +232,66 @@ fn a_red_post_check_asks_its_adapter_to_run_its_failed_units_again() {
         red(),
         json!([]),
         "the fix off the red's paths clears it: {ran}"
+    );
+}
+
+#[test]
+fn a_check_whose_fix_waits_for_its_run_asks_for_its_failed_units_again() {
+    let test_box = TestBox::new();
+    let (repo, remote) = seeded(&test_box);
+    let status = || test_box.bay_ok(&repo, &["status"]);
+    let one = land(
+        &test_box,
+        (&repo, &remote),
+        &["one", "--paths", "src"],
+        &|view| {
+            std::fs::write(view.join("src/one.rs"), "x\n").unwrap();
+        },
+    );
+    let ran = test_box.bay_ok(&repo, &["runner", "run", "--once"]);
+    assert_eq!(
+        status()["detail"]["red"][0]["check"],
+        "suite",
+        "suite is red: {ran}"
+    );
+
+    // The fix names `one` and lands off suite's paths, so suite waits for a run on it. That run
+    // is asked for t1 and t3, and for the paths since suite's last pass, which hold `one`'s src/.
+    land(
+        &test_box,
+        (&repo, &remote),
+        &["fix", "--paths", "units", "--fixes", &one],
+        &|view| {
+            std::fs::write(view.join("units/t1"), "pass\n").unwrap();
+            std::fs::write(view.join("units/t3"), "pass\n").unwrap();
+        },
+    );
+    let waits = status();
+    assert_eq!(
+        waits["detail"]["red_pending"][0]["state"], "pending_fix",
+        "{waits}"
+    );
+    let ran = test_box.bay_ok(&repo, &["runner", "run", "--once"]);
+    let tip = test_box
+        .git_bare(&remote, &["rev-parse", "main"])
+        .trim()
+        .to_owned();
+    let fixed = suite_records(&test_box, &remote, &tip);
+    assert_eq!(fixed.len(), 1, "suite ran on the fix: {ran}");
+    assert_eq!(
+        fixed[0]["post"]["rerun"],
+        json!(["t1", "t3"]),
+        "{}",
+        fixed[0]
+    );
+    assert_eq!(unit_ids(&fixed[0]), ["t1", "t2", "t3"], "{}", fixed[0]);
+    assert_eq!(fixed[0]["verdict"], "pass", "{}", fixed[0]);
+    let green = status();
+    assert_eq!(green["detail"]["red"], json!([]), "{green}");
+    assert!(
+        !green["detail"]["red_pending"]
+            .to_string()
+            .contains("pending_fix"),
+        "the pass on the fix ends the wait: {green}"
     );
 }
