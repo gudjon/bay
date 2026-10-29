@@ -167,7 +167,8 @@ pub fn followed(
         .collect()
 }
 
-fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
+/// One talk's row, as `bay status` lists it, and the round table reads it (T2).
+pub(crate) fn row(git: &Git, talk: &Talk, now: u64) -> Result<Value, String> {
     let entry = |entry: &Entry| -> Result<Value, String> {
         let text = git
             .run(&["cat-file", "blob", &entry.blob])

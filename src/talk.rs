@@ -13,7 +13,9 @@
 //! The same ask is one talk while it is open (0.6.0, T15): an ask from the sender's name to the
 //! same `who` with the same kind, `what` and target ([`same_ask`]) as an open talk is that talk,
 //! from any session and whatever `follow_up` the clock gave it. A closed talk does not hold its
-//! ask: asking it again is a new talk whose `repeats` names the closed one, so its id is new.
+//! ask: asking it again is a new talk whose `repeats` names the closed one, so its id is new. A
+//! fan-out (`--to` given more than once, or `--to-live`) sends one talk per recipient, each
+//! naming one `round`, the digest of the ask and its recipients ([`round`]).
 //!
 //! A talk carries one `what` and exactly one target field for its kind, with one value; bay judges
 //! that by structure alone and never reads the prose (BACKLOG 9b). The sender's bay, the host
@@ -51,6 +53,7 @@ mod lander;
 mod open;
 pub mod poll;
 pub mod replies;
+mod round;
 mod send;
 pub mod standing;
 pub mod wake;
@@ -58,6 +61,7 @@ pub mod wake;
 pub use accept::{end_questions, receive};
 pub use judge::{Push, judge};
 pub use open::{name_open_talks, open_on};
+pub use round::round;
 pub use send::{Answer, Ask, answer, talk};
 
 use std::fmt::Write as _;
@@ -116,7 +120,7 @@ const RESULT_WORDS: [&str; 3] = ["target", "forecast", "commitment"];
 const PROMISE_FIELDS: [&str; 4] = ["owns", "promises", "needs", "promise_evidence"];
 /// The only status words (`DESIGN` § 11c).
 pub const STATUS_WORDS: [&str; 4] = ["ready", "blocked", "validated", "done"];
-const FIELDS: [&str; 29] = [
+const FIELDS: [&str; 30] = [
     "schema",
     "id",
     "from",
@@ -146,6 +150,7 @@ const FIELDS: [&str; 29] = [
     "multi_select",
     "context_truncated",
     "repeats",
+    "round",
 ];
 /// The prefix of a question talk's `decision` (dossier 63): `question:<tool_use_id>:<n>`, the
 /// n-th question of one question tool call. Structure bay judges, never the prose.
@@ -591,7 +596,7 @@ pub fn check_body(body: &Value) -> Result<(), Refusal> {
     text_field(map, "context")?;
     text_field(map, "evidence")?;
     check_words(map)?;
-    for field in ["supersedes", "repeats"] {
+    for field in ["supersedes", "repeats", "round"] {
         if let Some(id) = text_field(map, field)?
             && !is_talk_id(id)
         {
@@ -1612,6 +1617,8 @@ mod tests {
         let mut context = first.clone();
         context["context"] = json!("more");
         assert_eq!(talk_id(&context).unwrap(), id, "context is not the ask");
+        context["round"] = json!("aaaaaaaaaaaaaaaa");
+        assert_eq!(talk_id(&context).unwrap(), id, "a round is not the ask");
         for (field, value) in [
             ("what", json!("Ship it now")),
             ("who", json!("c")),

@@ -162,8 +162,9 @@ enum Command {
     },
     /// Ask another actor one thing: `bay talk <who> "<what>"` sends a discovery talk, its reply
     /// owed by the policy's default time (`[talk] follow_up_s`, one hour). One action, one
-    /// target; the same ask while it is open is the same talk. Arrival is the recipient's ack,
-    /// written when its bay fetches
+    /// target; the same ask while it is open is the same talk. `--to` more than once, or
+    /// `--to-live`, asks many as one round. Arrival is the recipient's ack, written when its bay
+    /// fetches
     Talk(Box<TalkArgs>),
     /// Admin: add one key to the key registry: append it to its class file, sign the new
     /// registry with this machine's registry key (`bay.registryKey`) and push it. The first
@@ -325,6 +326,20 @@ struct TalkArgs {
     to_change: Option<String>,
     /// The action: the decision, the question or the change asked for
     what: Option<String>,
+    /// Ask each of these as one round, one talk each (give it more than once); then the one
+    /// argument is the action
+    #[arg(long = "to", value_name = "WHO", conflicts_with_all = ["to_change", "answer"])]
+    to: Vec<String>,
+    /// Ask every actor with a live session in this repository but you, as one round; then the
+    /// one argument is the action
+    #[arg(long, conflicts_with_all = ["to_change", "answer"])]
+    to_live: bool,
+    /// Show a round: one row per recipient, with its talk, its standing and its answer
+    #[arg(long, value_name = "ID", conflicts_with_all = ["actor", "what", "to", "to_live",
+        "to_change", "kind", "change", "artifact", "decision", "check", "follow_up", "decides",
+        "context", "evidence", "supersedes", "expires", "target", "forecast", "commitment",
+        "owns", "promises", "needs", "promise_evidence", "urgent", "dry_run", "answer"])]
+    round: Option<String>,
     /// delivery (one change or artifact), discovery (one decision) or reliability (one check);
     /// with none, the kind of the target given, else discovery
     #[arg(long, value_name = "KIND")]
@@ -1008,8 +1023,11 @@ fn evidence(dir: &std::path::Path, action: EvidenceAction) -> BayResult {
     }
 }
 
-/// `bay talk`: an answer with `--answer`, else one ask.
+/// `bay talk`: an answer with `--answer`, a round's table with `--round`, else one ask.
 fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
+    if let Some(round) = &args.round {
+        return bay::talk::round(dir, round);
+    }
     if let Some(talk) = args.answer {
         return bay::talk::answer(
             dir,
@@ -1020,9 +1038,11 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
             },
         );
     }
-    // With --to-change the recipient is resolved, so a single argument is the action.
-    let (who, what) = match (&args.to_change, args.what) {
-        (Some(_), None) => (None, args.actor),
+    // With --to-change, --to or --to-live the recipients are named, so a single argument is
+    // the action.
+    let named = args.to_change.is_some() || !args.to.is_empty() || args.to_live;
+    let (who, what) = match (named, args.what) {
+        (true, None) => (None, args.actor),
         (_, what) => (args.actor, what),
     };
     bay::talk::talk(
@@ -1051,6 +1071,8 @@ fn talk(dir: &std::path::Path, args: TalkArgs) -> BayResult {
             urgent: args.urgent,
             dry_run: args.dry_run,
             to_change: args.to_change,
+            to: args.to,
+            to_live: args.to_live,
             ..bay::talk::Ask::default()
         },
     )

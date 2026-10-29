@@ -35,6 +35,10 @@ use crate::signing::{self, Keys};
 /// One ask, as the command line gives it. Every field is checked by bay, never by the parser, so
 /// a missing or repeated field is a `bay.result/1` refusal.
 #[derive(Clone, Debug, Default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each is one flag of the command line, set on its own"
+)]
 pub struct Ask {
     pub who: Option<String>,
     pub what: Option<String>,
@@ -60,6 +64,12 @@ pub struct Ask {
     pub dry_run: bool,
     /// A change id or a trunk commit whose lander is the recipient (G77), in place of `who`.
     pub to_change: Option<String>,
+    /// The recipients of one ask to many (T2), in place of `who`: one talk each, one round.
+    pub to: Vec<String>,
+    /// Every actor with a live session in this repository but the sender, as recipients (T2).
+    pub to_live: bool,
+    /// The round the talk is one of (T2): bay names it, never the command line.
+    pub round: Option<String>,
     /// A question talk's options, `[{label, description}]` (dossier 63).
     pub options: Option<Value>,
     /// Whether a question takes several of its options.
@@ -78,7 +88,7 @@ pub struct Answer {
 }
 
 /// Why a send stopped: a refusal, or a fault.
-enum Stop {
+pub(super) enum Stop {
     Refused(Refusal),
     Failed(String),
 }
@@ -95,7 +105,7 @@ impl From<String> for Stop {
     }
 }
 
-fn finish(outcome: Result<BayResult, Stop>) -> BayResult {
+pub(super) fn finish(outcome: Result<BayResult, Stop>) -> BayResult {
     match outcome {
         Ok(result) => result,
         Err(Stop::Refused(refusal)) => refusal.result(),
@@ -115,7 +125,7 @@ pub fn answer(dir: &Path, answer: &Answer) -> BayResult {
 
 /// The repository, the trust its talks are judged by, and the acting actor. Under
 /// `signing = "all"` the registry is fetched first; under `approvals` (G445) none is read.
-fn open(dir: &Path) -> Result<(Repo, Trust, Actor), Stop> {
+pub(super) fn open(dir: &Path) -> Result<(Repo, Trust, Actor), Stop> {
     let repo = Repo::open(dir)?;
     if crate::registry::signing_mode(&repo.git)? == crate::policy::Signing::All {
         repo.fetch_registry();
@@ -241,6 +251,7 @@ fn build(ask: &Ask, from: &Actor, sent: u64) -> Result<Value, Refusal> {
         ("promises", &ask.promises),
         ("needs", &ask.needs),
         ("promise_evidence", &ask.promise_evidence),
+        ("round", &ask.round),
     ] {
         if let Some(value) = value {
             body[field] = json!(fold(value));
@@ -313,6 +324,9 @@ fn ask_of(body: &Value) -> Value {
 
 fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
     let (repo, trust, sender) = open(dir)?;
+    if !ask.to.is_empty() || ask.to_live {
+        return super::round::fan_out(dir, &repo, &trust, &sender, ask);
+    }
     let Some(to_change) = &ask.to_change else {
         return deliver(&repo, &trust, &sender, ask);
     };
@@ -336,7 +350,7 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
 
 /// The `[talk]` table of the policy on main as this clone holds main: the default table with no
 /// policy, or with one bay cannot read (where it would merge, it is `POLICY_INVALID`).
-fn talk_policy(repo: &Repo) -> Result<TalkPolicy, Stop> {
+pub(super) fn talk_policy(repo: &Repo) -> Result<TalkPolicy, Stop> {
     let Some(main) = repo
         .git
         .ref_target(&repo.trunk_tracking_ref())
@@ -355,7 +369,7 @@ fn talk_policy(repo: &Repo) -> Result<TalkPolicy, Stop> {
 /// whose target is given (`--change` or `--artifact` delivery, `--check` reliability), else
 /// discovery; a discovery talk with no target asks for the decision its `what` names; with no
 /// `--follow-up`, the reply is owed `follow_up_s` after `sent`. A field given stays as given.
-fn with_defaults(ask: &Ask, sent: u64, follow_up_s: u64) -> Ask {
+pub(super) fn with_defaults(ask: &Ask, sent: u64, follow_up_s: u64) -> Ask {
     let targets = [
         ("change", &ask.change),
         ("artifact", &ask.artifact),
@@ -397,7 +411,7 @@ fn deliver(repo: &Repo, trust: &Trust, sender: &Actor, ask: &Ask) -> Result<BayR
 }
 
 /// A send judged by every refusal: the talk the ask already is, or a new talk.
-enum Plan {
+pub(super) enum Plan {
     /// The open talk with the same ask (T15), or this very talk again: [`resend`] pushes it.
     Held { body: Value, talk: Box<Talk> },
     /// A new talk, signed by `key` (none under approvals), and the names no record here names.
@@ -411,7 +425,7 @@ enum Plan {
 /// Judges `ask` from `sender`, sent at `sent`, by every refusal, committing nothing.
 /// `follow_up_given`: the command line named the `follow_up`, so it is part of the body an
 /// open talk with the same ask must hold.
-fn plan(
+pub(super) fn plan(
     repo: &Repo,
     trust: &Trust,
     sender: &Actor,
@@ -504,7 +518,7 @@ fn open_same<'a>(talks: &'a [Talk], body: &Value, sender: &str) -> Option<&'a Ta
 
 /// The fields bay writes itself, or that differ between two sends of one ask: no field of the
 /// body an open talk with the same ask must hold.
-const NOT_ASKED: [&str; 4] = ["id", "sent", "from", "repeats"];
+const NOT_ASKED: [&str; 5] = ["id", "sent", "from", "repeats", "round"];
 
 /// T15: `open` asks what `body` asks. The same body is that talk, `already_sent`; a field beside
 /// the ask that differs is refused, as a different body under one id is: a talk's body never
@@ -611,7 +625,12 @@ fn unseen(repo: &Repo, trust: &Trust, body: &Value) -> Result<Vec<String>, Strin
 
 /// Carries out a judged send: [`resend`] for the talk the ask already is; else the new talk's
 /// commit and push, or nothing on a dry run, with the names no record here names (H4).
-fn carry_out(repo: &Repo, sender: &Actor, plan: Plan, dry_run: bool) -> Result<BayResult, Stop> {
+pub(super) fn carry_out(
+    repo: &Repo,
+    sender: &Actor,
+    plan: Plan,
+    dry_run: bool,
+) -> Result<BayResult, Stop> {
     let (body, key, unseen) = match plan {
         Plan::Held { body, talk } => return resend(repo, &body, &talk, dry_run),
         Plan::New { body, key, unseen } => (body, key, unseen),
