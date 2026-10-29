@@ -49,19 +49,22 @@ pub struct StartRequest {
     /// The changes this one lands only after (`start --after`, repeatable, G273). Each must be a
     /// change the remote holds, other than this one; none need have landed yet.
     pub after: Vec<String>,
-    /// The main checkout's edits this change takes in (`bay save`, G279): merged onto the base
+    /// A checkout's edits this change takes in (`bay save`, G279, G510): merged onto the base
     /// as the change's first draft.
     pub saved: Option<Saved>,
 }
 
-/// The edits made in the main checkout that `bay save` takes in (G279).
+/// The edits made in a checkout that `bay save` takes in (G279): the main checkout's, or with
+/// `--paths` those under the paths in the checkout it runs in (G510).
 #[derive(Clone)]
 pub struct Saved {
-    /// A commit of the edits on the main checkout's `HEAD`, which is on trunk's history, so its
+    /// A commit of the edits on the checkout's `HEAD`, which is on trunk's history, so its
     /// merge onto the base has that `HEAD` as its merge base.
     pub commit: String,
     /// The first draft's commit message (`bay save --message`).
     pub message: String,
+    /// How a refusal names the checkout: `the main checkout`, or the worktree and its path.
+    pub checkout: String,
 }
 
 /// How long a start whose claim push met a held remote ref lock waits before it re-reads.
@@ -431,7 +434,7 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
     let limit = crate::policy::max_live_changes_at(&repo.git, &base)?;
     // G268: the outside branch is resolved, judged against the declared paths and merged onto
     // the base before any claim is written, so a refusal creates nothing. G279: so are the
-    // main checkout's edits a save takes in.
+    // checkout's edits a save takes in.
     let taken_in = match (&request.from, &request.saved) {
         (None, None) => None,
         (Some(reference), _) => match take_in(repo, reference, &base, &request.paths)? {
@@ -708,7 +711,7 @@ fn compacted_claims(
 }
 
 /// An outside branch a start takes in (`start --from`, G268): what the record keeps of it, and
-/// the draft on the base that holds its net change. The main checkout's edits a save takes in
+/// the draft on the base that holds its net change. A checkout's edits a save takes in
 /// (G279) keep no `from`.
 struct TakenIn {
     from: Option<StartedFrom>,
@@ -832,12 +835,12 @@ fn take_in(
     }
 }
 
-/// Takes in the main checkout's edits (`bay save`, G279): `saved.commit` holds them on the
+/// Takes in a checkout's edits (`bay save`, G279): `saved.commit` holds them on the
 /// checkout's `HEAD`, which is on trunk's history, so the three-way merge onto `base`
 /// (`merge_onto`, the merge a candidate is built with) has that `HEAD` as its merge base. The
 /// merge, committed on `base` with the save's message, is the change's first draft. A conflict
 /// with newer trunk is the `MERGE_CONFLICT` refusal; nothing is written but objects no ref
-/// names, and the main checkout is never touched.
+/// names, and the checkout is never touched.
 fn take_saved(
     repo: &Repo,
     saved: &Saved,
@@ -848,8 +851,11 @@ fn take_saved(
             .with_detail(json!({
                 "conflicts": conflicts,
                 "trunk": base,
-                "next": "main changed the same lines since the main checkout's HEAD: bring \
-                    those files up to main, redo the edits there, then save again",
+                "next": format!(
+                    "main changed the same lines since {}'s HEAD: bring those files up to main, \
+                     redo the edits there, then save again",
+                    saved.checkout
+                ),
             })))),
         Merge::Clean(tree) => {
             let draft = commit_on(&repo.git, &tree, base, &saved.message)

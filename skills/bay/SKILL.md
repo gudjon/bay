@@ -39,6 +39,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Take in a branch made outside bay (a bot's or a person's) and merge it in one step | `bay merge --from <branch>` (its intent is the branch's name). To take it in first: `bay start <intent> --from <branch>` (the remote's tip when the remote has the branch; it declares the files the branch changes, or give `--paths` covering them; then `bay merge`). After a rebase: `bay start <change> --from <branch or sha>` replaces its draft, no new branch name. Main's commit keeps the branch's author and messages |
 | Merge a change only after another change merged | `bay start <intent> --paths <paths> --after <change>` (repeatable; submit it now, it merges once each one merged) |
 | Save edits made in the main checkout (non-developers) | `bay save <intent>` |
+| Save only the edits under some paths, from any checkout (your own worktree too) | `bay save <intent> --paths <path>...` (the change declares those paths; your checkout's HEAD and files stay as they are; a path with no edit is refused) |
 | See the changes waiting for this machine's approver: candidate, paths, diff summary | `bay waiting` (`detail.waiting`) |
 | Approve one, or say no, when the approver asks you to | `bay approve <change> [--why <text>]`, `bay reject <change> [--why <text>]` |
 | Waive one failed check marked `waivable`, when the approver asks you to | `bay approve <change> --waive <check> --why <text>` (that candidate only; never a pass) |

@@ -53,8 +53,10 @@ use support::TestBox;
 ///   `--unclear`, `--reason`, A6): a delivery or reliability talk had no reply command at all,
 ///   so its recipient answered by oz say; now it is `bay talk --backbrief <id> <status>`, and
 ///   the four optional fields have defaults.
+/// - 0.6.1, one flag (`save --paths`, B3): a seat in its own worktree landed one folder by
+///   starting a change, copying the edits into its view and merging; now it is one command.
 const COMMANDS: usize = 28;
-const FLAGS: usize = 88;
+const FLAGS: usize = 89;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,

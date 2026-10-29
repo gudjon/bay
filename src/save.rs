@@ -14,6 +14,22 @@
 //! `--message` is the first draft's commit message, kept in the change's chain. It is never the
 //! intent's revision, which would name another intent, and the trunk commit keeps bay's own
 //! message and trailers.
+//!
+//! `--paths <path>...` (B3, G510) saves only the edits under those paths, named from the
+//! repository's root as `bay start --paths` names them (`.` is the whole tree), from the checkout
+//! bay runs in: the main checkout or a linked worktree, such as a seat's own. The change declares
+//! exactly those paths, and its draft holds only the edits under them; an edit outside them is
+//! never saved. A path with no edit under it is refused before anything is made, never skipped.
+//! The checkout never moves: its `HEAD`, branch, index and every file stay as they were, the
+//! saved files too, which now hold what main holds, so the same paths saved again with no new
+//! edit save nothing.
+//!
+//! Without `--paths` a save is of the main checkout only (G279, `main_checkout_only`): it takes
+//! every edit there, by the main work tree's own paths, and on `landed` fast-forwards the main
+//! checkout's own branch, index and files. From a linked worktree that would land the main
+//! checkout's edits, not the worktree's, and move a branch and files of a checkout the caller
+//! does not stand in. With `--paths` the edits are read from the checkout bay runs in, and no
+//! ref, index or file of any checkout is written, so that rule has nothing to protect there.
 
 use std::path::{Path, PathBuf};
 
@@ -33,10 +49,54 @@ pub struct SaveRequest {
     pub intent: String,
     /// The first draft's commit message; `bay save <intent>` when not given.
     pub message: Option<String>,
+    /// `--paths` (B3): save only the edits under these paths, from the checkout bay runs in,
+    /// which stays as it was. Empty: every edit of the main checkout, which moves to the landing.
+    pub paths: Vec<String>,
 }
 
-/// The states of a main checkout that is in the middle of another operation, by the file Git
-/// keeps in its git directory while it lasts.
+/// The checkout a save takes its edits from: the main checkout, or with `--paths` the checkout
+/// bay runs in, main or linked.
+struct Checkout {
+    root: PathBuf,
+    git: Git,
+    /// Its own git directory, where Git keeps the operation it is in the middle of.
+    git_dir: PathBuf,
+    /// How a refusal names it.
+    name: String,
+}
+
+impl Checkout {
+    fn of(repo: &Repo, dir: &Path, request: &SaveRequest) -> Result<Self, String> {
+        let main = "the main checkout".to_owned();
+        if request.paths.is_empty() {
+            main_checkout_only(repo, dir)?;
+            return Ok(Self {
+                root: repo.work_root.clone(),
+                git: Git::new(&repo.work_root),
+                git_dir: repo.common_dir.clone(),
+                name: main,
+            });
+        }
+        let here = Git::new(dir);
+        let read = |args: &[&str]| here.run(args).map_err(|error| error.message());
+        let root = PathBuf::from(read(&["rev-parse", "--show-toplevel"])?);
+        let git_dir = PathBuf::from(read(&["rev-parse", "--absolute-git-dir"])?);
+        let is_main = root.canonicalize().ok() == repo.work_root.canonicalize().ok();
+        Ok(Self {
+            git: Git::new(&root),
+            name: if is_main {
+                main
+            } else {
+                format!("the worktree {}", root.display())
+            },
+            root,
+            git_dir,
+        })
+    }
+}
+
+/// The states of a checkout that is in the middle of another operation, by the file Git keeps
+/// in its git directory while it lasts.
 const IN_PROGRESS: [(&str, &str); 5] = [
     ("MERGE_HEAD", "a merge"),
     ("rebase-merge", "a rebase"),
@@ -58,42 +118,13 @@ pub fn save(dir: &Path, request: &SaveRequest) -> BayResult {
 }
 
 fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, String> {
-    if request.intent.trim().is_empty() {
-        return Err(
-            "bay save needs to know what this work is; say it in a few words (or a card id)"
-                .to_owned(),
-        );
-    }
-    // G279: a view's edits land by `bay merge`; a save is of the main checkout only.
-    if let Some(change) = repo.view_change(dir) {
-        return Err(format!(
-            "bay save runs in the repository's main checkout, and this is the view of change \
-             {change}: use bay merge here"
-        ));
-    }
-    main_checkout_only(repo, dir)?;
-    let checkout = Git::new(&repo.work_root);
-    if let Some(what) = in_progress(repo) {
-        return Err(format!(
-            "the main checkout is in the middle of {what}: finish it or abort it, then save again"
-        ));
-    }
-    let head = checkout
-        .run(&["rev-parse", "--verify", "-q", "HEAD^{commit}"])
-        .map_err(|_| "the main checkout has no commit at HEAD to save onto".to_owned())?;
-    let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
-    if !repo.git.is_ancestor(&head, &trunk)? {
-        return Err(format!(
-            "the main checkout's HEAD {head} is not on the history of main {} ({trunk}): \
-             bay save merges only edits made on main's history",
-            repo.trunk()
-        ));
-    }
-    let changed = changes(&checkout)?;
-    if let Some(refused) = take_locks(repo, &changed, None) {
+    let (checkout, head, trunk) = where_it_stands(dir, repo, request)?;
+    let name = &checkout.name;
+    let changed = under_paths(changes(&checkout.git, name)?, &request.paths)?;
+    if let Some(refused) = take_locks(repo, &checkout.root, &changed, None) {
         return Ok(refused);
     }
-    let (saved, offloaded, undo) = offload(repo, &trunk, &changed)?;
+    let (saved, offloaded, undo) = offload(repo, &checkout.root, &trunk, &changed)?;
     // Every way this save ends short of a merge, a refusal or an error, leaves the folder as it
     // found it (the manifest and the exclude list): `undo` puts them back when dropped unkept.
     if saved.is_empty() {
@@ -103,7 +134,7 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
             "why": "nothing to save",
         })));
     }
-    let tree = snapshot_tree(repo, &checkout, &head, &saved)?;
+    let tree = snapshot_tree(repo, &checkout.git, &head, &saved)?;
     if tree == tree_of(&repo.git, &head)? {
         return Ok(BayResult::ok(json!({
             "saved": Vec::<String>::new(),
@@ -117,14 +148,20 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         .filter(|message| !message.trim().is_empty())
         .unwrap_or_else(|| format!("bay save {}", request.intent));
     let snapshot = commit_on(&repo.git, &tree, &head, &message).map_err(|error| error.message())?;
+    // B3: a checkout that stays where it was may hold edits main already merged.
+    if !request.paths.is_empty()
+        && let Some(done) = on_main_already(repo, &trunk, &snapshot, &saved, &head)?
+    {
+        return Ok(done);
+    }
 
-    let started = start_saved(dir, request, &saved, &snapshot, &message);
+    let started = start_saved(dir, request, &saved, &snapshot, (&message, name));
     if started.decision != Decision::Ok {
-        return Ok(untouched(started, &saved));
+        return Ok(untouched(started, &saved, name));
     }
     let id = started.change.clone().ok_or("start returned no change")?;
-    if let Some(refused) = take_locks(repo, &changed, Some(&id)) {
-        return Ok(untouched(refused, &saved));
+    if let Some(refused) = take_locks(repo, &checkout.root, &changed, Some(&id)) {
+        return Ok(untouched(refused, &saved, name));
     }
     let detail = started.detail.clone().unwrap_or_default();
     let view = detail["view"]
@@ -132,16 +169,16 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         .map(PathBuf::from)
         .ok_or_else(|| format!("start of {id} returned no view"))?;
     // An intent whose change is still open (an earlier save that was refused) is adopted:
-    // its draft becomes the main checkout's edits on the current trunk.
+    // its draft becomes the checkout's edits on the current trunk.
     if detail.get("adopted").is_some()
         && let Some(refused) = replace_draft(dir, repo, &id, &view, &saved, &snapshot)?
     {
-        return Ok(untouched(refused, &saved));
+        return Ok(untouched(refused, &saved, name));
     }
 
     let landed = publish::land(&view, Some(&id), true, None, None);
     if landed.decision != Decision::Landed {
-        return Ok(untouched(landed, &saved));
+        return Ok(untouched(landed, &saved, name));
     }
     if let Some(undo) = &undo {
         undo.keep();
@@ -151,7 +188,17 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         .as_ref()
         .and_then(|detail| detail["commit"].as_str())
         .map(str::to_owned);
-    let moved = checkout_to_merge(repo, &checkout, (&head, &tree), &saved, commit.as_deref());
+    let moved = if request.paths.is_empty() {
+        checkout_to_merge(
+            repo,
+            &checkout.git,
+            (&head, &tree),
+            &saved,
+            commit.as_deref(),
+        )
+    } else {
+        stays(&head)
+    };
     let mut result = landed;
     let detail = with_fields(
         result.detail.take(),
@@ -164,6 +211,48 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         ],
     );
     Ok(result.with_detail(detail))
+}
+
+/// Where the save stands: its checkout, refused in a view and, without `--paths`, anywhere but
+/// the main checkout (G279); the checkout's `HEAD`, on main's history; and main's tip.
+fn where_it_stands(
+    dir: &Path,
+    repo: &Repo,
+    request: &SaveRequest,
+) -> Result<(Checkout, String, String), String> {
+    if request.intent.trim().is_empty() {
+        return Err(
+            "bay save needs to know what this work is; say it in a few words (or a card id)"
+                .to_owned(),
+        );
+    }
+    // G279: a view's edits land by `bay merge`; a save is of a checkout, never of a view.
+    if let Some(change) = repo.view_change(dir) {
+        return Err(format!(
+            "bay save runs in the repository's main checkout, and this is the view of change \
+             {change}: use bay merge here"
+        ));
+    }
+    let checkout = Checkout::of(repo, dir, request)?;
+    let name = &checkout.name;
+    if let Some(what) = in_progress(&checkout.git_dir) {
+        return Err(format!(
+            "{name} is in the middle of {what}: finish it or abort it, then save again"
+        ));
+    }
+    let head = checkout
+        .git
+        .run(&["rev-parse", "--verify", "-q", "HEAD^{commit}"])
+        .map_err(|_| format!("{name} has no commit at HEAD to save onto"))?;
+    let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
+    if !repo.git.is_ancestor(&head, &trunk)? {
+        return Err(format!(
+            "{name}'s HEAD {head} is not on the history of main {} ({trunk}): bay save merges \
+             only edits made on main's history",
+            repo.trunk()
+        ));
+    }
+    Ok((checkout, head, trunk))
 }
 
 /// The main checkout moved to the merge `commit` ([`bring_checkout`]), with the files of the
@@ -195,17 +284,19 @@ fn checkout_to_merge(
 /// change exists, so the lock commit names it (the merge guard counts no other). The session is
 /// the caller's (`BAY_SESSION`, which the agent hook gives its session's commands), so an
 /// agent's own lock is its save's.
-fn take_locks(repo: &Repo, changed: &[Entry], change: Option<&str>) -> Option<BayResult> {
-    let targets: Vec<PathBuf> = changed
-        .iter()
-        .map(|entry| repo.work_root.join(&entry.path))
-        .collect();
+fn take_locks(
+    repo: &Repo,
+    root: &Path,
+    changed: &[Entry],
+    change: Option<&str>,
+) -> Option<BayResult> {
+    let targets: Vec<PathBuf> = changed.iter().map(|entry| root.join(&entry.path)).collect();
     let session = std::env::var("BAY_SESSION")
         .ok()
         .or_else(|| crate::agent_pid::session_of_caller(&repo.common_dir))
         .filter(|session| crate::session::SessionId::parse(session).is_some());
     crate::locks::take_for(
-        &repo.work_root,
+        root,
         &targets,
         session.as_deref(),
         change,
@@ -220,8 +311,8 @@ fn take_locks(repo: &Repo, changed: &[Entry], change: Option<&str>) -> Option<Ba
 /// takes its place among the saved paths (`crate::assets`). A file Git already tracks is never
 /// offloaded: moving the checkout to a merge without it would delete it, so it is judged by the
 /// limit as before. Returns the paths to save, the offloaded ones, and how to put the folder
-/// back when the save is then refused.
-fn offload(repo: &Repo, trunk: &str, changed: &[Entry]) -> Result<Offloads, String> {
+/// back when the save is then refused. `root` is the checkout the edits are in.
+fn offload(repo: &Repo, root: &Path, trunk: &str, changed: &[Entry]) -> Result<Offloads, String> {
     let all: Vec<String> = changed.iter().map(|entry| entry.path.clone()).collect();
     let Some((plugin, rule)) = crate::assets::configured(repo, trunk)? else {
         return Ok((all, Vec::new(), None));
@@ -233,7 +324,7 @@ fn offload(repo: &Repo, trunk: &str, changed: &[Entry]) -> Result<Offloads, Stri
         .collect();
     let done = crate::assets::offload(
         &plugin,
-        &repo.work_root,
+        root,
         &new,
         &rule,
         &crate::assets::exclude_file(repo),
@@ -256,8 +347,10 @@ fn offload(repo: &Repo, trunk: &str, changed: &[Entry]) -> Result<Offloads, Stri
 /// What [`offload`] returns: the paths to save, the offloaded ones, and the undo.
 type Offloads = (Vec<String>, Vec<String>, Option<crate::assets::Undo>);
 
-/// G279: the directory bay runs in is the main checkout itself (or a folder in it), never a
-/// linked worktree of the repository.
+/// G279: without `--paths`, the directory bay runs in is the main checkout itself (or a folder
+/// in it), never a linked worktree of the repository: that save reads the main work tree's edits
+/// and moves the main checkout's branch and files, so from elsewhere it would land edits the
+/// caller does not stand in and move a checkout it is not in.
 fn main_checkout_only(repo: &Repo, dir: &Path) -> Result<(), String> {
     let toplevel = Git::new(dir)
         .run(&["rev-parse", "--show-toplevel"])
@@ -266,22 +359,90 @@ fn main_checkout_only(repo: &Repo, dir: &Path) -> Result<(), String> {
     let main = repo.work_root.canonicalize().ok();
     if here.is_none() || here != main {
         return Err(format!(
-            "bay save runs in the repository's main checkout ({}), not in {toplevel}",
+            "bay save runs in the repository's main checkout ({}), not in {toplevel}; to save \
+             the edits under some paths from here, name them: bay save <intent> --paths <path>...",
             repo.work_root.display()
         ));
     }
     Ok(())
 }
 
-/// The operation the main checkout is in the middle of: a merge, rebase, cherry-pick or revert.
-fn in_progress(repo: &Repo) -> Option<&'static str> {
+/// The operation a checkout is in the middle of: a merge, rebase, cherry-pick or revert, read
+/// in its own git directory `git_dir` (a linked worktree keeps its own).
+fn in_progress(git_dir: &Path) -> Option<&'static str> {
     IN_PROGRESS
         .iter()
-        .find(|(file, _)| repo.common_dir.join(file).exists())
+        .find(|(file, _)| git_dir.join(file).exists())
         .map(|(_, what)| *what)
 }
 
-/// One changed path of the main checkout: tracked (modified, deleted, staged) or untracked.
+/// `--paths` (B3): the entries of `changed` under `paths`, as a change declaring `paths` covers
+/// them (`.` or `/` is the whole tree). Every path must hold an edit: one with none is refused,
+/// never skipped, so a mistyped path never saves less than was meant. No paths: all of them.
+fn under_paths(changed: Vec<Entry>, paths: &[String]) -> Result<Vec<Entry>, String> {
+    if paths.is_empty() {
+        return Ok(changed);
+    }
+    let whole = start::declared_paths(paths.to_vec()).is_empty();
+    let covers = |path: &str, entry: &Entry| whole || inputs::within(path, &entry.path);
+    let unedited: Vec<&str> = paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| !changed.iter().any(|entry| covers(path, entry)))
+        .collect();
+    if !unedited.is_empty() {
+        return Err(format!(
+            "--paths {}: no edit under {} in this checkout, so nothing of it would be saved; \
+             name only paths that hold edits",
+            unedited.join(" "),
+            if unedited.len() == 1 { "it" } else { "them" }
+        ));
+    }
+    Ok(changed
+        .into_iter()
+        .filter(|entry| paths.iter().any(|path| covers(path, entry)))
+        .collect())
+}
+
+/// `--paths` (B3): the answer when main already holds the saved edits (`snapshot` on `head`
+/// merged onto `trunk` changes nothing), as after a save of the same paths, since the checkout
+/// stays where it was. `None` otherwise, a conflict too, which the start names.
+fn on_main_already(
+    repo: &Repo,
+    trunk: &str,
+    snapshot: &str,
+    saved: &[String],
+    head: &str,
+) -> Result<Option<BayResult>, String> {
+    let Merge::Clean(tree) = merge_onto(&repo.git, trunk, snapshot).map_err(|e| e.message())?
+    else {
+        return Ok(None);
+    };
+    if tree != tree_of(&repo.git, trunk)? {
+        return Ok(None);
+    }
+    let mut done = BayResult::ok(json!({
+        "saved": Vec::<String>::new(),
+        "head": head,
+        "unchanged": saved,
+        "why": "nothing to save: main already holds the edits under these paths",
+    }));
+    done.state = Some(publish::NO_EFFECT.to_owned());
+    Ok(Some(done))
+}
+
+/// `--paths` (B3): the checkout stays as it was, whatever the landing: its `HEAD`, branch,
+/// index and files, so no branch any worktree stands on moves.
+fn stays(head: &str) -> Value {
+    json!({
+        "moved": false,
+        "head": head,
+        "why": "with --paths the checkout stays as it was: HEAD and every file are unchanged, \
+                and main now holds the saved edits",
+    })
+}
+
+/// One changed path of the checkout: tracked (modified, deleted, staged) or untracked.
 struct Entry {
     path: String,
     tracked: bool,
@@ -289,8 +450,9 @@ struct Entry {
 
 /// The working tree's changes against `HEAD`, from `git status --porcelain=v2 -z` with every
 /// untracked file listed and no rename pairing: each path once, sorted. An ignored file is not
-/// listed, so it is never saved. A conflicted path or a submodule is refused.
-fn changes(checkout: &Git) -> Result<Vec<Entry>, String> {
+/// listed, so it is never saved. A conflicted path or a submodule is refused; `name` names the
+/// checkout.
+fn changes(checkout: &Git, name: &str) -> Result<Vec<Entry>, String> {
     let out = checkout
         .run_bytes(
             &[
@@ -341,8 +503,7 @@ fn changes(checkout: &Git) -> Result<Vec<Entry>, String> {
             Some(("u", rest)) => {
                 let path = rest.splitn(10, ' ').nth(9).unwrap_or(rest);
                 return Err(format!(
-                    "{path} has an unresolved conflict in the main checkout: resolve it, then \
-                     save again"
+                    "{path} has an unresolved conflict in {name}: resolve it, then save again"
                 ));
             }
             Some(("?", path)) => {
@@ -372,7 +533,7 @@ fn no_submodule(sub: &str, path: &str) -> Result<(), String> {
 }
 
 /// The tree of `head` with the working tree's `paths` as they are now, written through an
-/// index of bay's own, so the main checkout's index is never staged in. Each path is added as
+/// index of bay's own, so the checkout's index is never staged in. Each path is added as
 /// `git add --all` would add it (its filters and modes), or removed when it is gone.
 fn snapshot_tree(
     repo: &Repo,
@@ -427,13 +588,13 @@ fn start_saved(
     request: &SaveRequest,
     saved: &[String],
     snapshot: &str,
-    message: &str,
+    (message, checkout): (&str, &str),
 ) -> BayResult {
     let start_request = |new: bool| StartRequest {
         intent: Some(request.intent.clone()),
         new,
         intent_revision: "1".to_owned(),
-        paths: saved.to_vec(),
+        paths: declared(request, saved),
         inputs: Vec::new(),
         resume: None,
         reverts: None,
@@ -444,6 +605,7 @@ fn start_saved(
         saved: Some(Saved {
             commit: snapshot.to_owned(),
             message: message.to_owned(),
+            checkout: checkout.to_owned(),
         }),
     };
     let started = start::start(dir, &start_request(false));
@@ -451,6 +613,24 @@ fn start_saved(
         return start::start(dir, &start_request(true));
     }
     started
+}
+
+/// The paths the save's change declares: the saved files, or with `--paths` those paths, as
+/// `bay start --paths` declares them, and the assets manifest when a file under them went to the
+/// store (`offload`), so the change covers the manifest line that names it.
+fn declared(request: &SaveRequest, saved: &[String]) -> Vec<String> {
+    if request.paths.is_empty() {
+        return saved.to_vec();
+    }
+    let mut declared = start::declared_paths(request.paths.clone());
+    let manifest = crate::assets::MANIFEST;
+    if !declared.is_empty()
+        && saved.iter().any(|path| path == manifest)
+        && !declared.iter().any(|path| inputs::within(path, manifest))
+    {
+        declared.push(manifest.to_owned());
+    }
+    declared
 }
 
 /// An adopted change (the intent's change is still open, after a refused save) takes the main
@@ -526,15 +706,17 @@ fn replace_draft(
     }
 }
 
-/// A refused save: the main checkout's files are left exactly as they were, and the result
+/// A refused save: the checkout's files are left exactly as they were, and the result
 /// says so, with the saved files and, when a change was opened, how to repair it. Approval
 /// pending is a queued change, and the detail says so plainly.
-fn untouched(mut result: BayResult, saved: &[String]) -> BayResult {
+fn untouched(mut result: BayResult, saved: &[String], checkout: &str) -> BayResult {
     let mut fields = vec![
         ("saved", json!(saved)),
         (
             "edits",
-            json!("left as they were in the main checkout: nothing was moved or removed"),
+            json!(format!(
+                "left as they were in {checkout}: nothing was moved or removed"
+            )),
         ),
     ];
     if let Some(id) = result.change.clone() {
@@ -644,7 +826,7 @@ fn may_move(
             "HEAD {head} is not an ancestor of the merge {commit}: HEAD and the files stay"
         )));
     }
-    let entries = changes(checkout)?;
+    let entries = changes(checkout, "the main checkout")?;
     let others: Vec<&str> = entries
         .iter()
         .filter(|entry| entry.tracked && !saved.contains(&entry.path))

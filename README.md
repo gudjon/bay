@@ -45,6 +45,7 @@ next task. Your repository stays an ordinary Git repository, on the host you alr
 bay start CARD-123 --paths src/api   # open a change: a view with only the paths it needs
 # … the agent edits in that view …
 bay merge                            # submit once and return; a runner checks and merges it
+bay save "fix docs" --paths docs/    # from any checkout: merge only the edits under docs/
 bay status                           # what each change is doing, what passed, and why it waits
 bay status --since                   # what changed that affects my work
 bay start c7k2m4qa                   # pick a change up again, on the newest main
@@ -240,7 +241,7 @@ bay's merges. See [Security and privacy](https://getbay.io/docs/security#what-ba
 | `bay update` | a newer `bay` program, verified first | anything in a project |
 | `bay status`, `bay waiting`, `bay help` | only fetched copies of the remote's refs, and bay's own cache under `.git/bay/` | your files, your branches, main |
 | `bay doctor` | the above, and this machine's readiness on its presence record on the remote, so `bay status --all` shows it | your files, your branches, main, any settings or hook entries |
-| `bay start`, `bay merge`, `bay save`, `bay approve`, `bay undo` | the change's record on the remote, its view (a separate folder), and evidence | your checkout's files, except `bay save`, which updates the main checkout to the new main |
+| `bay start`, `bay merge`, `bay save`, `bay approve`, `bay undo` | the change's record on the remote, its view (a separate folder), and evidence | your checkout's files, except `bay save`, which updates the main checkout to the new main (`bay save --paths` never does) |
 
 `bay help` says the same for every command. A hook entry that bay installs first checks that `bay` is on
 the machine; where it is not, the agent's action goes ahead. [Roll bay out](https://getbay.io/docs/rollout)
