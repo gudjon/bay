@@ -101,7 +101,8 @@
         "BRANCH_DIVERGED",
         "DEPENDENCY_PENDING",
         "DEPENDENCY_ABANDONED",
-        "CHANGE_TOO_LARGE"
+        "CHANGE_TOO_LARGE",
+        "VIEW_NOT_YOURS"
       ]
     },
     "say": {

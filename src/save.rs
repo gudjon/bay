@@ -57,6 +57,18 @@ pub fn save(dir: &Path, request: &SaveRequest) -> BayResult {
     result
 }
 
+/// G279: a view's edits land by `bay merge`, so a save is of the main checkout only. G520: in
+/// another actor's view, the refusal names that actor first.
+fn refused_in_a_view(repo: &Repo, dir: &Path) -> Option<Result<BayResult, String>> {
+    let change = repo.view_change(dir)?;
+    Some(crate::view::not_yours(repo, &change).ok_or_else(|| {
+        format!(
+            "bay save runs in the repository's main checkout, and this is the view of change \
+             {change}: use bay merge here"
+        )
+    }))
+}
+
 fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, String> {
     if request.intent.trim().is_empty() {
         return Err(
@@ -64,12 +76,8 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
                 .to_owned(),
         );
     }
-    // G279: a view's edits land by `bay merge`; a save is of the main checkout only.
-    if let Some(change) = repo.view_change(dir) {
-        return Err(format!(
-            "bay save runs in the repository's main checkout, and this is the view of change \
-             {change}: use bay merge here"
-        ));
+    if let Some(refused) = refused_in_a_view(repo, dir) {
+        return refused;
     }
     main_checkout_only(repo, dir)?;
     let checkout = Git::new(&repo.work_root);
@@ -445,6 +453,7 @@ fn start_saved(
             commit: snapshot.to_owned(),
             message: message.to_owned(),
         }),
+        adopt: false,
     };
     let started = start::start(dir, &start_request(false));
     if started.reason == Some(Reason::ChangeAlreadyLanded) {
@@ -497,6 +506,7 @@ fn replace_draft(
             from: None,
             after: Vec::new(),
             saved: None,
+            adopt: false,
         },
     );
     if resumed.decision != Decision::Ok {

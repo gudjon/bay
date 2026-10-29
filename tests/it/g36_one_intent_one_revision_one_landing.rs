@@ -241,7 +241,9 @@ fn two_changes_holding_one_generation_land_once() {
         &repo,
         &["push", "-q", "origin", &format!("refs/bay/changes/{twin}")],
     );
-    let twin_view = test_box.bay_ok(&repo, &["start", &twin]);
+    // Its actor picks it up (G520: a change is picked up by its actor, or taken over).
+    let (code, twin_view) = start_as(&test_box, &repo, "agent-a", &[&twin]);
+    assert_eq!(code, 0, "{twin_view}");
 
     let (code, _) = edit_and_land(&test_box, "agent-a", &first, "first");
     assert_eq!(code, 0);

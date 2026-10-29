@@ -48,6 +48,7 @@ bay merge                            # submit once and return; a runner checks a
 bay status                           # what each change is doing, what passed, and why it waits
 bay status --since                   # what changed that affects my work
 bay start c7k2m4qa                   # pick a change up again, on the newest main
+bay start c7k2m4qa --adopt           # take a change and its view over from their actor
 bay abandon                          # give the change up; another agent may adopt it
 bay undo c7k2m4qa                    # a new change that takes one merge back; history stays
 bay help                             # every command and flag on one page
@@ -205,7 +206,9 @@ Each promise has a failure test that must pass before bay calls it done.
 
 ## How it works
 
-1. **`bay start`** opens a change: bay's record of it, and a sparse view of the declared paths.
+1. **`bay start`** opens a change: bay's record of it, and a sparse view of the declared paths. The
+   view is its actor's: another actor's merge, save or commit there is refused (`VIEW_NOT_YOURS`) until
+   it takes the change over with `bay start <change> --adopt`.
 2. **`bay merge`** records a request to merge and returns. The agent may leave.
 3. A **runner** combines the change with main without touching any working tree. It runs the checks
    that `.bay/policy.toml` names on that exact candidate, and records each result as evidence in Git notes.
@@ -224,7 +227,7 @@ bay guards three things, and each holds only under its own condition:
 | What bay guards | When it holds |
 |---|---|
 | **Its own merges:** what bay merges into main is exactly the candidate it checked. | Always, unless you turn on batching or footprint reuse (see above). |
-| **An agent's Git commands:** the hook refuses a push to main or a target, a force push, `git reset --hard` and the like. | Only with the hook: `[agent] product = "claude"` (or `"codex"`, which only senses) in `.bay/config.toml` on main, and bay's hook entries in the project's `.claude/settings.json`. One clone runs `bay install` and merges that file; every clone gets the hooks from main. |
+| **An agent's Git commands:** the hook refuses a push to main or a target, a force push, `git reset --hard` and the like, and an edit or a `git commit` in another actor's view. | Only with the hook: `[agent] product = "claude"` (or `"codex"`, which only senses) in `.bay/config.toml` on main, and bay's hook entries in the project's `.claude/settings.json`. One clone runs `bay install` and merges that file; every clone gets the hooks from main. |
 | **Everything that reaches main,** such as a merge in a forge's web page or a script's push. | Only on a main from `bay host` with a key registry in the default signing mode, or on a forge main that only the runner's identity may push. Otherwise a bay-hosted main stays append-only, and anyone who can push may add commits. |
 
 bay sees what went around it. `bay status` names each such commit under `detail.unattributed`. Without

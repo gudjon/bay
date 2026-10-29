@@ -34,6 +34,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Wait for the outcome here | `bay merge --wait` (`--wait=<seconds>`: watch that long, then return; the run goes on) |
 | Submit a change from outside its view | `bay merge <change>` |
 | Pick a change up again: bring in newer main and see what moved | `bay start <change>`. When it remade an unfinished view, `detail.unsaved_kept` names where its unsaved files were kept: copy them back, then `bay merge` |
+| Take another actor's change and its view over, when that actor gave it up or is gone | `bay start <change> --adopt` (you become its actor; `detail.adopted_from` and `detail.view_adopted_from` name the one before; while that actor still works, after the takeover window) |
 | Fix a change that already merged | `bay start <intent> --fixes <change>` (the merge names it in a `Fixes:` trailer) |
 | Try work that must never merge, in a sandbox lane the config declares | `bay start <intent> --paths <paths> --lane <lane>` (`bay merge` runs its checks; it never merges) |
 | Take in a branch made outside bay (a bot's or a person's) and merge it in one step | `bay merge --from <branch>` (its intent is the branch's name). To take it in first: `bay start <intent> --from <branch>` (the remote's tip when the remote has the branch; it declares the files the branch changes, or give `--paths` covering them; then `bay merge`). After a rebase: `bay start <change> --from <branch or sha>` replaces its draft, no new branch name. Main's commit keeps the branch's author and messages |
@@ -54,6 +55,10 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 
 After a merge, a plain `bay start <intent>` opens the next change. `bay start <change>` picks up an
 existing change.
+A view is its actor's: the actor that made it (`BAY_ACTOR`, else the user name). In another actor's
+view, `bay merge`, `bay save`, `bay start <change>` and the hook's check of an edit or a `git commit`
+are refused `VIEW_NOT_YOURS`, which names that actor. Work in a view of your own, or take that one over
+first with `bay start <change> --adopt`.
 `<intent>` says what the work is, in a few words (or a card id). `--paths` lists every path the change reads and writes:
 the view holds only those (`--paths .` is the whole tree). Before `bay merge`, commit your work in the view
 with a message saying what you did, and an `Open: <item>` line at its end for anything left undone or
@@ -168,6 +173,7 @@ A few reasons need more than their next step:
 | `CHECK_FLAKY` | A merge may name one flaky in `coverage_gaps`: report it, never as passed. |
 | `WIP_LIMIT` | From `bay start`: you hold the most live changes (`detail.live_changes`). From `bay merge`: the review queue is full (`detail.review`: `waiting`, `max`, `oldest`); do `detail.next`. |
 | `POLICY_INVALID` | While main's newest policy breaks a rule, bay judges each change by the last valid policy on main and names it in `detail.policy_used`: report that. A fix to the policy then merges like any change, and must still raise main's `revision`. Your own change's broken policy, or a `.bay/config.toml` that does not load, is refused: repair it. While main's config does not load, bay uses the last valid one and names it in `detail.config_used`. Only when main never had a valid policy is every merge blocked, its repair too. That repair merges when signed by the registry key: tell the user; on the machine that holds it, `git config bay.agentKey <registry key>` for that one `bay merge`, then set it back. Never do this unasked. On a main from `bay host` this path is not yet proven: tell the user so. Under `signing = "approvals"`, a fix to only the policy and its check scripts runs its own scripts and waits for an approver's yes instead. |
+| `VIEW_NOT_YOURS` | `detail.view_actor` made the view, `detail.actor` is you (`detail.actor_source`: from `BAY_ACTOR`, or the user name). Take the change over only when that actor gave it up or is gone: ask it first (`bay talk`). Sessions with no `BAY_ACTOR` on one account are one actor. |
 | `APPROVAL_PENDING` | Tell the user who can approve (`detail.approval.checks[].approvers`). An approval holds while its paths are unchanged (`checks[].set_aside` names the ones that changed). Never approve for them. |
 
 ## When the person is not a developer
@@ -318,7 +324,8 @@ name no record names comes back in `detail.unseen` with a `detail.warning`: chec
 
 - **Its own merges, always:** what merges through bay is exactly what was checked.
 - **An agent's Git commands, only with the hook:** `[agent] product = "claude"` in `.bay/config.toml`, then
-  `bay install`. The hook then refuses a push to main, a force push, `reset --hard` and the like. Without it,
+  `bay install`. The hook then refuses a push to main, a force push, `reset --hard` and the like, and an edit
+  or a `git commit` in another actor's view. Without it,
   `bay doctor`'s `hooks` row reads `off` and an agent can push main around bay.
 - **Everything that reaches main, only on a bay-hosted main** (`bay host`). On a forge such as GitHub, a merge
   made in its web page or API, and a script's push, never pass a local hook; protect main there so that only the
@@ -373,6 +380,8 @@ When the user asks to set bay up for a small team, do each step for them. Tell t
   or a push of `--all` or `--mirror`. bay's hook refuses them, also inside `bash -c`.
 - Never merge, cherry-pick, check out or restore from a lane's refs (`[[lane]]` in the config) in a
   view that is not of that lane. bay's hook refuses those commands, and `bay merge` refuses lane commits.
+- Never edit or commit in another actor's view. Take it over with `bay start <change> --adopt` first.
+  bay's hook, `bay merge` and `bay save` refuse it.
 - Never approve on your own, or ask for an approver's key. Only the person approves: run
   `bay approve` only when they ask, on their machine, where their key signs it.
 - Never grant a key, widen the policy, quarantine a check, or set `allow_flaky` to get a change through.

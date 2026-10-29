@@ -231,6 +231,10 @@ reasons! {
     // limit of the policy at the base (`crate::limits`), refused at submit and at candidate
     // build, before any check runs.
     ChangeTooLarge => "CHANGE_TOO_LARGE", ["read", "repair"], "after_fix", false;
+    // G520 (B4, a fleet finding 2026-10-28); not yet in INTERFACES § 2: a write in a view whose
+    // journal records another actor than the writer (`crate::view::not_yours`): `bay merge`,
+    // `bay save`, `bay start <change>`, and the agent hook's edit or `git commit`.
+    ViewNotYours => "VIEW_NOT_YOURS", ["read"], "never", false;
 }
 
 impl Reason {
@@ -1182,6 +1186,9 @@ impl Reason {
             Self::ChangeTooLarge => {
                 "Keep large files elsewhere or split the change, then `bay merge` again. Never raise the limits to get it through."
             }
+            Self::ViewNotYours => {
+                "Work in a view of your own; to take this one over from its actor, run `bay start <change> --adopt`."
+            }
         }
     }
 
@@ -1205,6 +1212,7 @@ impl Reason {
             | Self::PathsUndeclared
             | Self::BranchDiverged
             | Self::ChangeTooLarge
+            | Self::ViewNotYours
             | Self::WipLimit
             | Self::ToolBelowFloor
             | Self::ToolAbsent
@@ -1445,6 +1453,12 @@ impl Reason {
             Self::ChangeTooLarge => format!(
                 "Nothing was saved: this change is too big{}. Keep large files elsewhere, such as a shared drive.",
                 named(too_large(detail))
+            ),
+            // G520: whose folder it is, by the name bay knows them by.
+            Self::ViewNotYours => format!(
+                "Not done: this folder holds {} work. Use a folder of your own, or take this one over first.",
+                text_at(detail, &["/view_actor"])
+                    .map_or_else(|| "someone else's".to_owned(), |owner| format!("{}'s", plain(owner)))
             ),
             // G310: a full review queue is named apart from the actor's own live changes.
             Self::WipLimit if detail.is_some_and(|detail| detail.get("review").is_some()) => {
@@ -1910,7 +1924,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 62);
+        assert_eq!(Reason::ALL.len(), 63);
     }
 
     #[test]

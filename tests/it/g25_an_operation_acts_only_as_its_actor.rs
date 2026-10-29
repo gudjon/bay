@@ -27,17 +27,14 @@ fn a_request_signed_by_another_actors_key_is_refused() {
     test_box.use_keys(&repo, &keys);
     let (_, view) = test_box.start_and_edit(&repo);
 
-    // Another enrolled agent tries to land this actor's change with its own key.
+    // Another enrolled agent tries to land this actor's change with its own key. It names the
+    // change's actor, as a session must to work in that actor's view (G520: under its own name,
+    // `agent-b`, the view refuses it first).
     test_box.git_ok(
         &repo,
         &["config", "bay.agentKey", keys.rogue.to_str().unwrap()],
     );
-    let (code, refused) = result_json(
-        test_box
-            .bay(&view)
-            .env("BAY_ACTOR", "agent-b")
-            .args(["merge", "--wait"]),
-    );
+    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 20, "{refused}");
     assert!(
         refused["detail"]
