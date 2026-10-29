@@ -997,6 +997,10 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
             .with_change(id)
             .with_detail(json!({"event": "adopted", "adopted_by": ctx.record.actor})));
     }
+    // G520: a view is its actor's; another actor's merge freezes nothing of it.
+    if let Some(refusal) = view::not_yours(repo, id) {
+        return Ok(refusal);
+    }
     if let Some(refusal) = actor_unproven(repo, id, &trunk)? {
         return Ok(refusal);
     }

@@ -113,6 +113,7 @@ fn undo_in(
         from: None,
         after: Vec::new(),
         saved: None,
+        adopt: false,
     };
     let started = start::start(dir, &request);
     if started.decision != Decision::Ok {

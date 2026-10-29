@@ -25,7 +25,8 @@ struct Cli {
 enum Command {
     /// Open a change: a fresh main, a sparse view of the declared paths, the change record;
     /// or, named by its id, pick up an existing change: checkpoint its draft, bring in newer main
-    /// (the way to fix a refused or conflicting change; then `bay merge` keeps its place)
+    /// (the way to fix a refused or conflicting change; then `bay merge` keeps its place). A view
+    /// is its actor's: another actor's change is taken over with --adopt
     Start {
         /// What this work is, in a few words (or a card id), or an existing change's id to pick
         /// it up
@@ -52,6 +53,10 @@ enum Command {
         /// A change this one merges only after (repeatable): it merges once that change merged
         #[arg(long, value_name = "CHANGE")]
         after: Vec<String>,
+        /// Take the named change and its view over from their actor: you become its actor,
+        /// and the result names the one before (after the takeover window while it works)
+        #[arg(long, conflicts_with_all = ["paths", "inputs", "new", "fixes", "lane", "from", "after"])]
+        adopt: bool,
     },
     /// Freeze the draft, build the candidate, check it, merge it into main. Submit once: a
     /// runner merges it in its turn, and a new revision of a queued change keeps its place
@@ -798,6 +803,7 @@ fn merge_from(
             from: Some(branch.to_owned()),
             after: Vec::new(),
             saved: None,
+            adopt: false,
         },
     );
     let Some(view) = started
@@ -822,6 +828,7 @@ fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
         lane,
         from,
         after,
+        adopt,
     } = command
     else {
         unreachable!("start_change takes a start command");
@@ -841,6 +848,7 @@ fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
             from,
             after,
             saved: None,
+            adopt,
         },
     )
 }

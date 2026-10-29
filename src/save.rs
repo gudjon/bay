@@ -117,7 +117,23 @@ pub fn save(dir: &Path, request: &SaveRequest) -> BayResult {
     result
 }
 
+/// G279: a view's edits land by `bay merge`, so a save is of the main checkout only. G520: in
+/// another actor's view, the refusal names that actor first.
+fn refused_in_a_view(repo: &Repo, dir: &Path) -> Option<Result<BayResult, String>> {
+    let change = repo.view_change(dir)?;
+    Some(crate::view::not_yours(repo, &change).ok_or_else(|| {
+        format!(
+            "bay save runs in the repository's main checkout, and this is the view of change \
+             {change}: use bay merge here"
+        )
+    }))
+}
+
 fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, String> {
+    intent_named(request)?;
+    if let Some(refused) = refused_in_a_view(repo, dir) {
+        return refused;
+    }
     let (checkout, head, trunk) = where_it_stands(dir, repo, request)?;
     let name = &checkout.name;
     let changed = under_paths(changes(&checkout.git, name)?, &request.paths)?;
@@ -213,26 +229,25 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
     Ok(result.with_detail(detail))
 }
 
-/// Where the save stands: its checkout, refused in a view and, without `--paths`, anywhere but
-/// the main checkout (G279); the checkout's `HEAD`, on main's history; and main's tip.
-fn where_it_stands(
-    dir: &Path,
-    repo: &Repo,
-    request: &SaveRequest,
-) -> Result<(Checkout, String, String), String> {
+/// A save says what the work is, before any other check.
+fn intent_named(request: &SaveRequest) -> Result<(), String> {
     if request.intent.trim().is_empty() {
         return Err(
             "bay save needs to know what this work is; say it in a few words (or a card id)"
                 .to_owned(),
         );
     }
-    // G279: a view's edits land by `bay merge`; a save is of a checkout, never of a view.
-    if let Some(change) = repo.view_change(dir) {
-        return Err(format!(
-            "bay save runs in the repository's main checkout, and this is the view of change \
-             {change}: use bay merge here"
-        ));
-    }
+    Ok(())
+}
+
+/// Where the save stands: its checkout, refused without `--paths` anywhere but the main checkout
+/// (G279; a view is refused before, by [`refused_in_a_view`]); the checkout's `HEAD`, on main's
+/// history; and main's tip.
+fn where_it_stands(
+    dir: &Path,
+    repo: &Repo,
+    request: &SaveRequest,
+) -> Result<(Checkout, String, String), String> {
     let checkout = Checkout::of(repo, dir, request)?;
     let name = &checkout.name;
     if let Some(what) = in_progress(&checkout.git_dir) {
@@ -607,6 +622,7 @@ fn start_saved(
             message: message.to_owned(),
             checkout: checkout.to_owned(),
         }),
+        adopt: false,
     };
     let started = start::start(dir, &start_request(false));
     if started.reason == Some(Reason::ChangeAlreadyLanded) {
@@ -677,6 +693,7 @@ fn replace_draft(
             from: None,
             after: Vec::new(),
             saved: None,
+            adopt: false,
         },
     );
     if resumed.decision != Decision::Ok {

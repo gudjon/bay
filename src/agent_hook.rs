@@ -4,7 +4,8 @@
 //! One entry, [`dispatch`], maps a hook's stdin to bay's events and runs what bay does there:
 //! the session work record of every probed event in a repository but pre-tool
 //! (`session::record`), the compact state at `session.start`, at `tool.before` the claims of other
-//! sessions in the same tree (`crate::claims`, G101), the shell deny list (G39) and the
+//! sessions in the same tree (`crate::claims`, G101), an edit or a `git commit` in another
+//! actor's view (`crate::view::actor_at`, G520), the shell deny list (G39) and the
 //! stale-write judgement of an edit tool against the coordination cache (`crate::coord`, G8,
 //! G23), the stop refusal at `stop` (ruling R7), and at `step.end` and
 //! `turn.start` the notices of the session's change (`crate::notice`, R6). Each product
@@ -13,9 +14,10 @@
 //! An event with no recorded payload has no behaviour (ruling R16), and a field the recordings
 //! do not show is never read. The product is the `[agent] product` of the config at trunk
 //! ([`Product::configured`]), never a `bay hook` argument. A hook never blocks the session
-//! except by the deny exit, a held path's deny, the stale-write refusal, the
-//! one stop refusal and a `tool.before` payload it cannot read (`HOOK_INPUT_INVALID`, ruling R-H1,
-//! G59), so every other outcome exits 0: the events that only record allow an unreadable one.
+//! except by the deny exit, a held path's deny, another actor's view, the stale-write refusal,
+//! the one stop refusal and a `tool.before` payload it cannot read (`HOOK_INPUT_INVALID`, ruling
+//! R-H1, G59), so every other outcome exits 0: the events that only record allow an unreadable
+//! one.
 //! Both products deny by exit 2 with the reason on stderr; Codex also runs the tool when its
 //! hook crashes, hangs or exits otherwise (probed on 0.153.2), so there the deny is advisory and
 //! the guard is `land` and the trunk hook.
@@ -720,14 +722,17 @@ fn end_questions(payload: &Payload) {
     let _ = std::fs::remove_file(dir.join(QUESTIONS_FILE));
 }
 
-/// `tool.before`: a payload bay cannot read is denied (G59); else the claims of other sessions
-/// (G101), the locks of an edit tool's lockable paths (G336), then the stale-write judgement of
-/// an edit tool or the shell deny list (G39).
+/// `tool.before`: a payload bay cannot read is denied (G59); else a write in another actor's view
+/// (G520), the claims of other sessions (G101), the locks of an edit tool's lockable paths
+/// (G336), then the stale-write judgement of an edit tool or the shell deny list (G39).
 fn pre_tool(product: Product, input: &str, dir: &Path) -> Outcome {
     let (value, call) = match pre_tool_call(product, input) {
         Ok(read) => read,
         Err(why) => return invalid_payload(product, input, dir, why, false),
     };
+    if let Err(denied) = pre_tool_view(product, input, dir, &value, &call) {
+        return denied;
+    }
     let unknown = match pre_tool_claim(product, input, dir, &value, &call) {
         Ok(unknown) => unknown,
         Err(denied) => return denied,
@@ -1046,6 +1051,62 @@ fn pre_tool_claim(
             reason.code(),
             held.path,
             held.holder,
+        ),
+    })
+}
+
+/// G520: `tool.before` on an edit tool, or on a shell command that makes a Git commit
+/// (`crate::deny::commit_dirs`): denied when a target (the commit's directory) is in a view that
+/// records another actor than this session's (`crate::view::actor_at`, no Git), so a second
+/// writer never puts work under the view's change. The deny exits 2 with one line naming the
+/// view's actor and the take-over; its row in the session's work record is a G60 verdict. A view
+/// an older bay made records no actor, and refuses no one.
+fn pre_tool_view(
+    product: Product,
+    input: &str,
+    dir: &Path,
+    value: &Value,
+    call: &Call,
+) -> Result<(), Outcome> {
+    let cwd = crate::session::hook_cwd(value, dir);
+    let targets: Vec<PathBuf> = match call {
+        Call::Edit(targets) => targets.iter().map(|target| cwd.join(target)).collect(),
+        Call::Shell(command) => crate::deny::commit_dirs(command, &cwd),
+        Call::Other => Vec::new(),
+    };
+    let me = crate::change::actor_name();
+    let Some((path, change, owner)) = targets.iter().find_map(|target| {
+        let path = crate::coord::resolve(target)?;
+        let (change, owner) = crate::view::actor_at(&path)?;
+        (owner != me).then_some((path, change, owner))
+    }) else {
+        return Ok(());
+    };
+    let reason = Reason::ViewNotYours;
+    record_pre_tool(
+        product,
+        input,
+        dir,
+        serde_json::json!({
+            "state": format!("blocked({})", reason.code()),
+            "refused": {
+                "reason": reason.code(),
+                "change": change,
+                "view_actor": owner,
+                "actor": me,
+            },
+            "verdict": deny_verdict(reason),
+        }),
+    );
+    Err(Outcome {
+        exit: 2,
+        stdout: String::new(),
+        stderr: format!(
+            "bay: refused {}: {} is in the view of change {change}, which is {owner}'s, and \
+             this session's actor is {me}; work in a view of your own, or take this one over \
+             with `bay start {change} --adopt`\n",
+            reason.code(),
+            path.display(),
         ),
     })
 }

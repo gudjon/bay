@@ -18,6 +18,10 @@
 //! would complete a short one. Other ways to copy bytes (`git show <ref>:<path>`, a patch, an
 //! editor) are not judged here; a merge or cherry-pick that made it into the view's history is
 //! refused at land (`LANE_LEAK`), and content copied by hand cannot be detected.
+//!
+//! G520: [`commit_dirs`] reads, with the same tokenizer, the directories a shell command makes a
+//! Git commit in, so the agent hook refuses one in another actor's view (`VIEW_NOT_YOURS`). For
+//! that one judgement a literal `cd <dir>` earlier in the line is followed.
 
 /// One denial: the deny-list shape the command matched, the shell wrapper it was found in, and
 /// the line the agent is told. `shape` and `wrapped` come from fixed lists, never from the
@@ -144,6 +148,62 @@ fn words_in(command: &str, depth: usize, all: &mut Vec<String>) {
         }
         all.extend(words);
     }
+}
+
+/// G520: the directories a shell `command` run in `cwd` makes a Git commit in, for the agent
+/// hook's judgement of the view's actor: each `git commit` of a simple command (also behind
+/// `env`, `sudo` and the like, and in a shell's `-c` script), in the directory a literal
+/// `cd <dir>` earlier in the same line moved to, then through each of its `-C <dir>`. Nothing is
+/// expanded, so `cd "$dir"` or `cd ~` is not followed.
+#[must_use]
+pub fn commit_dirs(command: &str, cwd: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    commit_dirs_in(command, cwd, 0, &mut dirs);
+    dirs
+}
+
+fn commit_dirs_in(
+    command: &str,
+    cwd: &std::path::Path,
+    depth: usize,
+    out: &mut Vec<std::path::PathBuf>,
+) {
+    let mut here = cwd.to_path_buf();
+    for words in simple_commands(command) {
+        if let [cd, dir] = words.as_slice()
+            && cd == "cd"
+            && !dir.starts_with(['-', '~'])
+            && !dir.contains(['$', '`'])
+        {
+            here = here.join(dir);
+            continue;
+        }
+        out.extend(commit_dir(&words, &here));
+        if depth < MAX_DEPTH {
+            for (_, script) in shell_scripts(&words) {
+                commit_dirs_in(script, &here, depth + 1, out);
+            }
+        }
+    }
+}
+
+/// The directory the `git commit` among `words` runs in, from `here` and its `-C` options.
+fn commit_dir(words: &[String], here: &std::path::Path) -> Option<std::path::PathBuf> {
+    let git = words.iter().position(|word| is_git(word))?;
+    let mut dir = here.to_path_buf();
+    let mut rest = words[git + 1..].iter();
+    while let Some(word) = rest.next() {
+        match word.as_str() {
+            "-C" => dir = dir.join(rest.next()?),
+            "-c" => {
+                rest.next();
+            }
+            "commit" => return Some(dir),
+            option if option.starts_with('-') => {}
+            _ => return None,
+        }
+    }
+    None
 }
 
 /// The `-c` scripts of the shells among `words`, each with its wrapper's name: `bash -c '…'`,
@@ -655,6 +715,25 @@ fn is_short_cluster_with(arg: &str, flag: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{denied, denied_targets};
+
+    /// G520: where a shell command commits: after a literal `cd`, through `-C`, inside `bash
+    /// -c`; an expansion is never followed, and a command that does not commit names nothing.
+    #[test]
+    fn a_commit_is_found_where_it_runs() {
+        let cwd = std::path::Path::new("/w");
+        let dirs = |command: &str| super::commit_dirs(command, cwd);
+        let at = |path: &str| vec![std::path::PathBuf::from(path)];
+        assert_eq!(dirs("git commit -m x"), at("/w"));
+        assert_eq!(dirs("cd v && git add -A && git commit -m x"), at("/w/v"));
+        assert_eq!(dirs("cd /v; git -C src commit"), at("/v/src"));
+        assert_eq!(dirs("git -c a=b -C /v commit"), at("/v"));
+        assert_eq!(dirs("sudo env A=1 git commit"), at("/w"));
+        assert_eq!(dirs("bash -c 'cd /v; git commit'"), at("/v"));
+        assert_eq!(dirs("cd \"$V\" && git commit"), at("/w"));
+        let none: Vec<std::path::PathBuf> = Vec::new();
+        assert_eq!(dirs("git status && git log"), none);
+        assert_eq!(dirs("git show commit"), none);
+    }
 
     /// G322 (owed by the hooks research, claim 12): every spelling of a force push is refused,
     /// on any branch, not only `-f` alone.

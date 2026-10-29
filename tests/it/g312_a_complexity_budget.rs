@@ -55,8 +55,11 @@ use support::TestBox;
 ///   the four optional fields have defaults.
 /// - 0.6.1, one flag (`save --paths`, B3): a seat in its own worktree landed one folder by
 ///   starting a change, copying the edits into its view and merging; now it is one command.
+/// - 0.6.1, one flag (`start --adopt`, B4): a seat that took another seat's view over wrote in it
+///   unnoticed, under the other seat's change; now the take-over is one named step that the
+///   result records.
 const COMMANDS: usize = 28;
-const FLAGS: usize = 89;
+const FLAGS: usize = 90;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,
@@ -68,7 +71,9 @@ const FLAGS: usize = 89;
 /// - 0.5.4, one reason (`BRANCH_DIVERGED`, the 0.5.3 acceptance finding): a `--from` branch
 ///   rebased here came back as a bare failure with no next step; now it is a refusal that names
 ///   both commits and says which `--from` takes which.
-const REASONS: usize = 62;
+/// - 0.6.1, one reason (`VIEW_NOT_YOURS`, B4): a second seat committed in another seat's view and
+///   the work went to merge under the other seat's change, found only later; it is refused first.
+const REASONS: usize = 63;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.

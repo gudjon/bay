@@ -127,7 +127,13 @@ fn a_landing_on_the_declared_paths_is_told_once_and_not_on_other_paths() {
     // B starts on the same paths and lands.
     let (b, b_view) = start(&test_box, &repo, "agent-b", "PATHS-B", &["api/"]);
     std::fs::write(b_view.join("api/b.rs"), "fn b() {}\n").unwrap();
-    let (code, landed) = result_json(test_box.bay(&b_view).args(["merge", "--wait"]));
+    // B merges its own view as itself (G520: a view is its actor's).
+    let (code, landed) = result_json(
+        test_box
+            .bay(&b_view)
+            .env("BAY_ACTOR", "agent-b")
+            .args(["merge", "--wait"]),
+    );
     assert_eq!(code, 0, "{landed}");
     assert_eq!(landed["decision"], "merged", "{landed}");
     // A fetching command brings the landing here.

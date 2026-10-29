@@ -223,7 +223,9 @@ fn a_queued_change_hears_of_its_early_conflict_once() {
     let id = started["change"].as_str().unwrap().to_owned();
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/b.rs"), "fn b() {}\n").unwrap();
-    let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
+    // The view's actor merges it (G520).
+    let (code, submitted) =
+        result_json(test_box.bay(&view).env("BAY_ACTOR", "agent-a").arg("merge"));
     assert_eq!(code, 0, "{submitted}");
 
     hook(

@@ -8,6 +8,13 @@
 //! G212: in that cache a view fetches only the blobs of its declared paths (and the hook-settings
 //! file bay adds): only its checkout may fetch, after the sparse set is written. Every other
 //! read of a view's Git runs without lazy fetch (G104b).
+//!
+//! G520 (B4): a view is its actor's. The journal records the actor that made it, or took it over
+//! (`bay start <change> --adopt`, or the adoption of `bay start <intent>`), and any other actor's
+//! write there is refused `VIEW_NOT_YOURS`: `bay merge`, `bay save` and `bay start <change>`
+//! ([`not_yours`]), and the agent hook's edit or `git commit` ([`actor_at`]). The actor is the
+//! name bay attributes work to (`crate::change::actor_name`). A view an older bay made records
+//! none, and refuses no one.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +24,7 @@ use serde_json::json;
 use crate::clock::now_rfc3339;
 use crate::git::{Git, GitError};
 use crate::repo::Repo;
+use crate::result::{BayResult, Reason};
 use crate::version::{GIT_BACKFILL_PATHSPEC, Version};
 
 /// The view journal (§ 10): `creating → ready → checkpointed → published → releasable`.
@@ -46,6 +54,10 @@ struct JournalFile {
     /// When the view was first created, kept across state changes.
     #[serde(default)]
     created_unix: u64,
+    /// G520: the actor the view is for, kept across state changes; absent in a view an older
+    /// bay made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    actor: Option<String>,
 }
 
 fn unix_now() -> u64 {
@@ -122,12 +134,92 @@ pub fn journal(repo: &Repo, id: &str) -> Option<Journal> {
         .map(|file| file.state)
 }
 
-/// Records a journal state, atomically.
+/// Records a journal state, atomically. The view keeps its actor.
 ///
 /// # Errors
 ///
 /// The journal cannot be written.
 pub fn set_journal(repo: &Repo, id: &str, state: Journal) -> Result<(), String> {
+    write_journal(repo, id, state, None)
+}
+
+/// G520: the actor the view of change `id` is for, from its journal; `None` when the view has
+/// no journal, or one an older bay wrote.
+#[must_use]
+pub fn actor(repo: &Repo, id: &str) -> Option<String> {
+    read_journal(repo, id).and_then(|file| file.actor)
+}
+
+/// G520: the refusal `VIEW_NOT_YOURS` of a write in the view of change `id` by this command's
+/// actor, when the view is another actor's; `None` when it is this actor's, or records none (a
+/// view an older bay made). Its detail names both actors, and the take-over.
+#[must_use]
+pub fn not_yours(repo: &Repo, id: &str) -> Option<BayResult> {
+    refused_for(repo, id, &actor(repo, id)?)
+}
+
+/// G520: [`not_yours`] of the view of change `id` as `owner`'s, whether or not it records
+/// that: `bay start <change>` refuses to make a view of another actor's change.
+#[must_use]
+pub fn refused_for(repo: &Repo, id: &str, owner: &str) -> Option<BayResult> {
+    let me = crate::change::actor_name();
+    if owner == me {
+        return None;
+    }
+    Some(
+        BayResult::blocked(Reason::ViewNotYours)
+            .with_change(id)
+            .with_detail(json!({
+                "view": repo.view_path(id).display().to_string(),
+                "view_actor": owner,
+                "actor": me,
+                "actor_source": crate::change::actor_source(),
+                "recovery": format!("work in a view of your own, or take this one over from {owner} with bay start {id} --adopt"),
+            })),
+    )
+}
+
+/// G520: the change and the actor of the view that holds the resolved `path` (the view's top
+/// level, or a path in it), from the journal beside the view: a few file-system calls and no
+/// Git, so the agent hook pays almost nothing per edit. `None` when no view holds it, or its
+/// journal records no actor.
+#[must_use]
+pub fn actor_at(path: &Path) -> Option<(String, String)> {
+    let top = path
+        .ancestors()
+        .find(|dir| dir.join(".git").symlink_metadata().is_ok())?;
+    let views = top.parent()?;
+    if views.file_name()? != "views" || views.parent()?.file_name()? != "bay" {
+        return None;
+    }
+    let id = top.file_name()?.to_str()?;
+    let text = std::fs::read_to_string(views.join(format!("{id}.journal"))).ok()?;
+    let file: JournalFile = serde_json::from_str(&text).ok()?;
+    if file.change != id {
+        return None;
+    }
+    Some((id.to_owned(), file.actor?))
+}
+
+/// G520 (`--adopt`): the view of change `id` is `actor`'s from now on. Returns the actor it was
+/// for when that was another one; a view with no journal is left as it is.
+///
+/// # Errors
+///
+/// The journal cannot be written.
+pub fn take_over(repo: &Repo, id: &str, actor: &str) -> Result<Option<String>, String> {
+    let Some(file) = read_journal(repo, id) else {
+        return Ok(None);
+    };
+    if file.actor.as_deref() == Some(actor) {
+        return Ok(None);
+    }
+    write_journal(repo, id, file.state, Some(actor))?;
+    Ok(file.actor)
+}
+
+/// Writes the journal of change `id` with `state`, and `actor`, else the actor it holds.
+fn write_journal(repo: &Repo, id: &str, state: Journal, actor: Option<&str>) -> Result<(), String> {
     // A temporary file of this writer's own: two processes recording the same journal at once
     // (two `bay status` runs) each rename a whole file, and the later rename wins.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -138,12 +230,18 @@ pub fn set_journal(repo: &Repo, id: &str, state: Journal) -> Result<(), String> 
         std::process::id(),
         NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
-    let created_unix = read_journal(repo, id).map_or_else(unix_now, |file| file.created_unix);
+    let before = read_journal(repo, id);
+    let created_unix = before
+        .as_ref()
+        .map_or_else(unix_now, |file| file.created_unix);
     let file = JournalFile {
         change: id.to_owned(),
         state,
         at: now_rfc3339(),
         created_unix,
+        actor: actor
+            .map(str::to_owned)
+            .or_else(|| before.and_then(|file| file.actor)),
     };
     let text = serde_json::to_string(&file).map_err(|error| error.to_string())?;
     std::fs::write(&tmp, text).map_err(|error| format!("{}: {error}", tmp.display()))?;
@@ -340,7 +438,8 @@ pub fn sparse_pattern(path: &str) -> String {
     format!("/{trimmed}")
 }
 
-/// Creates the view of change `id` at `commit`, sparse over `paths` when any are declared.
+/// Creates the view of change `id` at `commit`, sparse over `paths` when any are declared, for
+/// this command's actor (G520).
 ///
 /// # Errors
 ///
@@ -353,7 +452,8 @@ pub fn create(repo: &Repo, id: &str, commit: &str, paths: &[String]) -> Result<P
         args: "view journal".to_owned(),
         stderr: why,
     };
-    set_journal(repo, id, Journal::Creating).map_err(journal_error)?;
+    let actor = crate::change::actor_name();
+    write_journal(repo, id, Journal::Creating, Some(&actor)).map_err(journal_error)?;
     repo.git.run(&[
         "worktree",
         "add",

@@ -52,6 +52,9 @@ pub struct StartRequest {
     /// A checkout's edits this change takes in (`bay save`, G279, G510): merged onto the base
     /// as the change's first draft.
     pub saved: Option<Saved>,
+    /// Take the named change and its view over from their actor (`start <CHANGE> --adopt`,
+    /// G520): the one way a view becomes another actor's.
+    pub adopt: bool,
 }
 
 /// The edits made in a checkout that `bay save` takes in (G279): the main checkout's, or with
@@ -106,12 +109,18 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         .clone()
         .or_else(|| names_change(&repo, request));
     let result = match &resumed {
+        Some(id) if request.adopt => adopt(&repo, id, request),
         Some(id) => resume(&repo, id, request.from.as_deref()),
+        None if request.adopt => Err(format!(
+            "--adopt takes the id of a change to take over, and {} names no change here or on \
+             the remote",
+            request.intent.as_deref().unwrap_or_default()
+        )),
         None => open(&repo, request),
     };
     let mut result = result.unwrap_or_else(BayResult::failed);
     // NEW-8: a change opened or adopted hears of the live changes that declare its files.
-    if resumed.is_none() {
+    if resumed.is_none() || request.adopt {
         list_overlaps(&repo, &mut result);
     }
     // G175: the opt-in warm-up of the view's history, once the view is made.
@@ -415,17 +424,8 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         .ok_or("bay start needs an intent, or a change id")?;
     let base = repo.fetch_trunk().map_err(|error| error.message())?;
     let me = current_actor(&repo.common_dir)?;
-    let source = actor_source();
-    // G152: a policy at the base that requires a named actor refuses a name from a default,
-    // before any claim is written.
-    if source.is_default() && crate::policy::requires_actor_at(&repo.git, &base)? {
-        return Ok(BayResult::blocked(Reason::ActorUnnamed).with_detail(json!({
-            "actor": me.name,
-            "actor_source": source,
-            "policy": crate::policy::POLICY_PATH,
-            "base": base,
-            "recovery": "set BAY_ACTOR to this session's own actor name and start again",
-        })));
+    if let Some(refused) = actor_unnamed(repo, &me, &base)? {
+        return Ok(refused);
     }
     if let Some(refused) = named_or_refused(repo, request, &base)? {
         return Ok(refused);
@@ -513,6 +513,24 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         }
     }
     Err(format!("the claim on {intent} kept moving; try again"))
+}
+
+/// G152: a policy at `base` that requires a named actor refuses a name from a default, before
+/// any claim or adoption is written.
+fn actor_unnamed(repo: &Repo, me: &Actor, base: &str) -> Result<Option<BayResult>, String> {
+    let source = actor_source();
+    if !source.is_default() || !crate::policy::requires_actor_at(&repo.git, base)? {
+        return Ok(None);
+    }
+    Ok(Some(BayResult::blocked(Reason::ActorUnnamed).with_detail(
+        json!({
+            "actor": me.name,
+            "actor_source": source,
+            "policy": crate::policy::POLICY_PATH,
+            "base": base,
+            "recovery": "set BAY_ACTOR to this session's own actor name and start again",
+        }),
+    )))
 }
 
 /// `wip_limit` for adopting a change `owner` holds: adopting one's own change adds none.
@@ -1252,7 +1270,11 @@ fn adopt_or_refuse(
     }
     add_dependencies(repo, request, me, change, (&mut chain, &head), &mut record)?;
     let path = repo.view_path(change);
-    if !view::exists(&path) {
+    // G520: an adoption takes this machine's view over too, and names the actor it was for.
+    let mut view_adopted_from = None;
+    if view::exists(&path) {
+        view_adopted_from = view::take_over(repo, change, &me.name)?;
+    } else {
         let draft = newest_draft(&chain, change)?;
         view::create(
             repo,
@@ -1264,8 +1286,9 @@ fn adopt_or_refuse(
     }
     let mut detail = json!({
         "view": path.display().to_string(),
-        "adopted": previous != *me,
+        "adopted": previous != *me || view_adopted_from.is_some(),
         "adopted_from": previous,
+        "view_adopted_from": view_adopted_from,
         "actor": record.actor,
         "actor_source": record.actor_source,
         "paths": request.paths,
@@ -1463,6 +1486,35 @@ fn already_on_main(repo: &Repo, id: &str, record: &ChangeRecord) -> Option<BayRe
     })
 }
 
+/// G520: `bay start <CHANGE> --adopt`, the one explicit take-over of a change and its view. It
+/// adopts the change as `bay start <intent>` adopts its intent's live change ([`adopt_or_refuse`]:
+/// at once from the same actor or a change given up, else after the takeover window while its
+/// actor works), records the new actor, and names the one before: `adopted_from` for the change,
+/// `view_adopted_from` for this machine's view. A change on main, or one a newer generation of
+/// its intent replaced, is never adopted.
+fn adopt(repo: &Repo, id: &str, request: &StartRequest) -> Result<BayResult, String> {
+    let chain = Chain::new(&repo.git);
+    if chain.head(id).map_err(|error| error.message())?.is_none() {
+        repo.fetch_refs(&[change_ref(id)])
+            .map_err(|error| error.message())?;
+    }
+    let _ = repo.remote_chain(id);
+    let (_, record) = chain.read(id).map_err(|error| error.message())?;
+    if let Some(refused) = already_on_main(repo, id, &record) {
+        return Ok(refused);
+    }
+    if let Some(newer) = newer_generation(repo, &record)? {
+        return Ok(superseded_by_newer(id, &record, &newer));
+    }
+    let base = repo.fetch_trunk().map_err(|error| error.message())?;
+    let me = current_actor(&repo.common_dir)?;
+    if let Some(refused) = actor_unnamed(repo, &me, &base)? {
+        return Ok(refused);
+    }
+    let limit = crate::policy::max_live_changes_at(&repo.git, &base)?;
+    adopt_or_refuse(repo, request, &me, id, &base, limit, 1)
+}
+
 /// Picks up change `id`; with `from`, a branch made outside bay (`start <CHANGE> --from`), its
 /// net change on the newest trunk replaces the change's draft, after the view's own edits are
 /// checkpointed, so a rebased branch lands under its change and never needs a new name.
@@ -1490,6 +1542,16 @@ fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String
     // its intent (plain `start` adopts only the newest claim's change).
     if let Some(newer) = newer_generation(repo, &record)? {
         return Ok(superseded_by_newer(id, &record, &newer));
+    }
+    // G520: the view's actor picks it up; with no view here, the change's actor, for whom it is
+    // made. Anyone else takes it over first (`--adopt`), before anything is written.
+    let refused = if view::exists(&repo.view_path(id)) {
+        view::not_yours(repo, id)
+    } else {
+        view::refused_for(repo, id, &record.actor.name)
+    };
+    if let Some(refused) = refused {
+        return Ok(refused);
     }
     chain.sign_with(agent_signer(repo, &record.actor.name)?);
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;

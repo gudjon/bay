@@ -159,7 +159,8 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
         "start",
         &[
             "the change's record and claim on the remote",
-            "its view: a separate folder under .git/bay/views",
+            "its view: a separate folder under .git/bay/views, recorded as its actor's",
+            "with --adopt: you as the actor of the change and of its view",
         ],
         &["your checkout's files", "main"],
     ),
