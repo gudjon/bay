@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.1
+
+- A superseded operation never takes its successor's place in line, and never runs.
+- A `when_paths` glob that starts with `!` excludes the paths it matches.
+- An approval asks only for the paths its `when_paths` list keeps; a red post check holds only those.
+- `bay save --paths` saves only the edits under those paths, from any checkout, and leaves it as it was.
+- A view refuses another actor's write; `bay start <change> --adopt` takes the change over.
+- A red post check with no pass in its window reads back up to `[red] reach` commits for one.
+- With no pass in that reach, the red row says how far it read; each runner reads it once.
+- A red row says whether its owner is a proven culprit or only where the check was seen failing.
+- A red post check asks its adapter to run its failed units again.
+- Post checks of different environments run side by side; a runner moves to a new binary once they end.
+- A check keyed by its commit keeps out of a batch only the members whose diff wakes it.
+- A check that runs long says so in the runner's journal, once each interval.
+- A copy of another change's chain is never a live change; `bay status` leaves it out of its lists.
+- A broken policy on main judges talk by the last valid one; with none, the refusal names the fault.
+- A history check reads every version of its paths in a partial clone.
+- The README says talk is off until main's policy sets `[talk] enabled = true`.
+- The release gate checks the changelog word rule before it compiles anything.
+
 ## 0.6.0
 
 - Talk is off unless main's policy says `[talk] enabled = true`; `kinds`, `senders`, `recipients` and `wake` narrow it.
