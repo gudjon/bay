@@ -798,7 +798,8 @@ fn with_predecessor(repo: &Repo, body: &Value, refspec: String) -> Result<Vec<St
 /// Dossier 63: a person answers a talk that asks one with their approver key (as they approve),
 /// under the name the registry enrols it for; anyone else answers as an agent, by its agent key.
 /// G445: under approvals no agent key signs an answer, and `who` or `decides` answers by name; a
-/// person still answers with their approver key, as an approval is signed.
+/// person still answers with their approver key, as an approval is signed. T14: under `all` a
+/// person the talk names as `who` or `decides` answers with their approver key too.
 fn answerer(
     repo: &Repo,
     trust: &Trust,
@@ -806,9 +807,8 @@ fn answerer(
     me: Actor,
 ) -> Result<(Option<PathBuf>, Actor, bool), Stop> {
     let person = match trust {
-        Trust::Keys(registry) => super::asks_a_person(&talk.body)
-            .then(|| approver_key(&repo.git, registry))
-            .flatten(),
+        Trust::Keys(registry) => approver_key(&repo.git, registry)
+            .filter(|(_, name)| super::asks_a_person(&talk.body) || talk.party(name)),
         Trust::Names if super::asks_a_person(&talk.body) => {
             repo.fetch_registry();
             Registry::current(&repo.git)?.and_then(|registry| approver_key(&repo.git, &registry))

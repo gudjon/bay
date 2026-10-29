@@ -314,8 +314,10 @@ struct InstallArgs {
 
 #[derive(Args)]
 struct TalkArgs {
-    /// The agent who owes the reply (a person's name works too)
-    #[arg(value_name = "AGENT")]
+    /// Who owes the reply: a name of lower-case letters, digits and -. Under [policy] signing =
+    /// "approvals" any such name; under "all" an agent the registry enrols, or a person it
+    /// enrols as an approver
+    #[arg(value_name = "WHO")]
     actor: Option<String>,
     /// Send to the agent that merged this change (a change id or its commit on main), read from
     /// bay's merge record; then the one argument is the action
@@ -343,8 +345,9 @@ struct TalkArgs {
     /// policy's default time after sending (`[talk] follow_up_s`, one hour)
     #[arg(long, value_name = "TIME")]
     follow_up: Option<String>,
-    /// The agent who decides if the two disagree (a person's name works too)
-    #[arg(long, value_name = "AGENT")]
+    /// Who decides if the two disagree: a name as WHO takes it (an agent, or under "all" an
+    /// approver)
+    #[arg(long, value_name = "WHO")]
     decides: Option<String>,
     /// The sender's reading of the fact
     #[arg(long)]

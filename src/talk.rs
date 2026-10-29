@@ -20,8 +20,10 @@
 //! hook and the recipient's accept judge one body by the same rules ([`check_body`]).
 //!
 //! Who writes what (T1, T10): only an agent key sends, as the registry actor it is enrolled for;
-//! only `who` acks, backbriefs and closes; only `who` or `decides` answers a discovery talk, and a
-//! second, different answer names the standing one in `supersedes` or is `TALK_REFUSED`;
+//! only `who` acks, backbriefs and closes; only `who` or `decides` answers a discovery talk (a
+//! person the registry enrols as an approver may be either, and answers with their approver key,
+//! T14), and a second, different answer names the standing one in `supersedes` or is
+//! `TALK_REFUSED`;
 //! only the sender (or `decides`) supersedes a talk, and the recipient's accept closes the
 //! superseded one as `superseded`, naming its successor. A delivery talk about a change closes as
 //! `answered` once a landing that names the change (`Fixes:`, `Reverts:` or `Supersedes:`) is on
@@ -682,8 +684,9 @@ fn check_question(map: &Map<String, Value>) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// `who`, `decides` and the sender are registry actors: names the registry's agent file
-/// enrols (`DESIGN` § 11c).
+/// `who`, `decides` and the sender are registry actors (`DESIGN` § 11c): `who` and `decides`
+/// an agent or a person the registry enrols as an approver (0.6.0, T14), who answers with their
+/// approver key as they approve; the sender an agent.
 ///
 /// # Errors
 ///
@@ -692,10 +695,12 @@ fn check_question(map: &Map<String, Value>) -> Result<(), Refusal> {
 pub fn check_actors(registry: &Registry, body: &Value) -> Result<(), Refusal> {
     for field in ["who", "decides"] {
         if let Some(name) = body[field].as_str()
-            && !registry.enrols(KeyClass::Agent, name)
+            && ![KeyClass::Agent, KeyClass::Approver]
+                .iter()
+                .any(|class| registry.enrols(*class, name))
         {
             return Err(Refusal::invalid(format!(
-                "`{field}` {name:?} is not a registry actor: {REGISTRY_REF} enrols no agent of that name"
+                "`{field}` {name:?} is not a registry actor: {REGISTRY_REF} enrols no agent and no approver of that name"
             )));
         }
     }
@@ -1053,6 +1058,12 @@ impl Talk {
     #[must_use]
     pub fn closed(&self) -> bool {
         self.has("close") || (self.body["kind"] == "discovery" && self.has("answer"))
+    }
+
+    /// Whether `actor` is the talk's `who` or its `decides`: a party who answers it.
+    #[must_use]
+    pub fn party(&self, actor: &str) -> bool {
+        self.who == actor || self.body["decides"].as_str() == Some(actor)
     }
 
     /// Whether `actor` may supersede this talk: its sender's name, or its `decides`.
