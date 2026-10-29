@@ -1105,7 +1105,7 @@ impl Reason {
                 "Run `bay start <change>`, keep the work `detail.change` merged in `detail.paths`, then `bay merge` again; to undo it on purpose, use `bay undo`."
             }
             Self::RemoteNotFetched => {
-                "Check the network and the remote, then run the command again; `bay doctor` names what is wrong."
+                "Run `bay status` first: it fetches main and the fleet's live records, which `bay status --all` only reads; then run `bay status --all` again. If `bay status` fails, `bay doctor` names what is wrong."
             }
             Self::ConfigMissing => {
                 "Tell the user bay is not set up here; commit `.bay/config.toml` to main only if they ask."
@@ -1285,7 +1285,7 @@ impl Reason {
                 "Nothing was added: this change would undo work that reached main after it began. Bring in main, keep that work, then try again."
             }
             Self::RemoteNotFetched => {
-                "Nothing was done: bay could not get the latest main. Check the network, then try again."
+                "Nothing was shown: this machine has not yet read what the other machines last said. Run bay status first, then this again."
             }
             Self::ConfigMissing => {
                 "Nothing was done: bay is not set up in this project yet. Ask whoever runs it, or set it up."

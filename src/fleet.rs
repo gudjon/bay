@@ -95,7 +95,7 @@ fn run(dir: &Path) -> Result<BayResult, String> {
                 "remote": remote,
                 "remote_configured": url.is_some(),
                 "fetched": false,
-                "note": "the local cache has no fetch of the configured remote, so it is not the fleet",
+                "note": "the local cache has no fetch of the configured remote, so it is not the fleet; `bay status` fetches it",
             })),
         );
     };
