@@ -803,7 +803,8 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
     let red_unread = judged
         .as_ref()
         .and_then(|judged| judged.as_ref().err().cloned());
-    let crate::red::Judgement { red, pending } = judged.and_then(Result::ok).unwrap_or_default();
+    let crate::red::Judgement { red, pending, .. } =
+        judged.and_then(Result::ok).unwrap_or_default();
     let mut map = Map {
         now: live::unix_now(),
         window: repo.config.takeover().as_secs(),

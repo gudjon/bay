@@ -924,6 +924,7 @@ mod tests {
                 landing: "c".repeat(40),
                 change: None,
                 suspect: None,
+                fix: None,
             }],
             judged: Some(crate::red::Judged {
                 trunk: "a".repeat(40),

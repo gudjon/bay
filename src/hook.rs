@@ -483,7 +483,7 @@ impl Judge<'_> {
         if !self.releases(own.seq) || is_zero(trunk) || ahead.is_empty() {
             return Ok(false);
         }
-        let reds = crate::red::red(self.git, trunk, Some(self.registry))?;
+        let reds = crate::red::holding(self.git, trunk, Some(self.registry))?;
         if reds.is_empty() {
             return Ok(false);
         }

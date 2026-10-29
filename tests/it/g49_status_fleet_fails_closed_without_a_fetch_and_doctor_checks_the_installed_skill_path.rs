@@ -260,6 +260,28 @@ fn status_fleet_fails_closed_after_a_push_or_a_trunk_fetch() {
     assert_eq!(result["reason"], "REMOTE_NOT_FETCHED");
 }
 
+/// A fleet finding (2026-10-29, a local bare remote): the refusal said "check the network",
+/// though nothing was wrong with it. It names the one step that writes the record, a plain
+/// `bay status`, and after that step `--all` reads the fleet.
+#[test]
+fn status_fleet_names_bay_status_as_the_fetch_and_reads_after_it() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.seed_trunk(&repo, &[("README", "trunk\n")]);
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
+    assert_eq!(code, 10, "{result}");
+    assert_eq!(result["reason"], "REMOTE_NOT_FETCHED");
+    for text in [&result["say"], &result["next_step"]] {
+        let text = text.as_str().unwrap_or_default();
+        assert!(text.contains("bay status"), "{result}");
+        assert!(!text.contains("network"), "{result}");
+    }
+    test_box.bay_ok(&repo, &["status"]);
+    let (code, result) = result_json(test_box.bay(&repo).args(["status", "--all"]));
+    assert_eq!(code, 0, "after a plain bay status: {result}");
+    assert_ne!(result["reason"], "REMOTE_NOT_FETCHED", "{result}");
+}
+
 /// The record a fetch of the remote's `refs/bay/live/*` writes (`bay status` writes it; this
 /// test stands in for that fetch). A record of another URL is a fetch of another remote, so
 /// the cache is still not the fleet. A record of this remote passes the guard: the map of a

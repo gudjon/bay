@@ -36,12 +36,15 @@
 //!   answers the red: the check is then [`PENDING_FIX`] until a run at or after that landing
 //!   answers it, never green before. A fix older than the newest failure landed before a run
 //!   that still failed, so it answers nothing. A quarantine of the check at trunk clears it.
+//!   E35: while it is `pending_fix`, the check holds the changes on its paths as a red does
+//!   ([`holding`]): a fix may answer one failure of several.
 //!   Without a culprit the owner moves to each newer failure, so the red row names one stable
 //!   name for `--fixes` ([`Red::fixes`]: the first failure).
 //!
-//! While red, the executor refuses a candidate that touches those paths with `MAIN_RED`,
-//! naming the owner and the ways out; a change that names a merge the red names in `--fixes`,
-//! an undo of it, or a superseding change is never refused, and it runs ahead of the line.
+//! While red or `pending_fix`, the executor refuses a candidate that touches those paths with
+//! `MAIN_RED`, naming the owner and the ways out; a change that names a merge the red names in
+//! `--fixes`, an undo of it, or a superseding change is never refused, and it runs ahead of the
+//! line.
 //!
 //! G195: `bay status --since` judges from what its cursor carries ([`Judged`]): how each check
 //! was decided, at which trunk, under which evidence tips and registry. It reads the answers of
@@ -118,6 +121,11 @@ pub struct Red {
     /// cursor: `None` there.
     #[serde(skip)]
     pub suspect: Option<Suspect>,
+    /// E35: the landing that answers this red, whose run, or a newer one, decides: the check is
+    /// [`PENDING_FIX`], and it holds the changes on its paths as a red does ([`holding`]).
+    /// Judged on each read, never carried in a cursor.
+    #[serde(skip)]
+    pub fix: Option<Mark>,
 }
 
 /// NEW-6: the landings one of which broke a red post check, so an operator can bisect.
@@ -247,6 +255,9 @@ impl Pending {
 pub struct Judgement {
     pub red: Vec<Red>,
     pub pending: Vec<Pending>,
+    /// E35: the red checks a fix answers whose run has not passed yet ([`PENDING_FIX`], each
+    /// also in `pending`, with its fix in [`Red::fix`]). They hold the changes on their paths.
+    pub fixing: Vec<Red>,
 }
 
 impl Judgement {
@@ -268,6 +279,7 @@ impl Red {
             "suspect": self.suspect.as_ref().map(Suspect::to_json),
             "culprit": self.culprit().map(Culprit::to_json),
             "fixes": self.fixes(),
+            "fix": self.fix.as_ref().map(Mark::to_json),
             "say": self.say()})
     }
 
@@ -281,6 +293,13 @@ impl Red {
     pub fn say(&self) -> Option<String> {
         let suspect = self.suspect.as_ref()?;
         let check = &self.check;
+        if let Some(fix) = &self.fix {
+            return Some(format!(
+                "{check}: {} fixes it, and its run has not passed yet; until one passes, changes \
+                 on the check's paths wait.",
+                fix.named()
+            ));
+        }
         if let Some(culprit) = &suspect.culprit {
             return Some(format!(
                 "{check}: {} broke it; the check passed on the merge before it and failed on it.",
@@ -460,6 +479,19 @@ pub fn red(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Vec<Re
     Ok(judged(git, trunk, registry)?.red)
 }
 
+/// E35 (a fleet finding, 2026-10-29): the checks of `trunk` that hold the changes on their
+/// paths: the red ones, and those a fix answers whose run has not passed yet ([`PENDING_FIX`]).
+/// Before, a fix's landing let every change on the check's paths land unchecked until the next
+/// run, though the fix answered one failure of seven. A change that names the red still runs.
+///
+/// # Errors
+///
+/// A git fault, or a committed config bay cannot read.
+pub fn holding(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Vec<Red>, String> {
+    let judgement = judged(git, trunk, registry)?;
+    Ok(judgement.red.into_iter().chain(judgement.fixing).collect())
+}
+
 /// G244: whether a change that names `names` (its `Fixes:`, `Reverts:` and `Supersedes:`)
 /// repairs a red post check of `trunk` ([`Red::answered_by`]), so it runs and lands from its own
 /// place, ahead of the line. The runner (`crate::publish`) and the host's hook (`crate::hook`)
@@ -477,7 +509,7 @@ pub fn repairs(
     if names.is_empty() {
         return Ok(false);
     }
-    Ok(red(git, trunk, registry)?
+    Ok(holding(git, trunk, registry)?
         .iter()
         .any(|red| red.answered_by(names)))
 }
@@ -782,6 +814,7 @@ fn decide<'a>(
             landing: landings[owner].commit.clone(),
             change: landings[owner].change.clone(),
             suspect: Some(suspect),
+            fix: None,
         };
         // G568: only a landing newer than the newest failure answers it, and the check is
         // pending until a run at or after that landing answers, never green before.
@@ -790,16 +823,22 @@ fn decide<'a>(
             .rev()
             .find(|later| red.answered_by(&later.names.iter().collect::<Vec<_>>()));
         if let Some(fix) = fix {
+            let fix = Mark::of(fix);
             out.pending.push(Pending {
-                check: red.check,
-                environment: red.environment,
-                paths: red.paths,
+                check: red.check.clone(),
+                environment: red.environment.clone(),
+                paths: red.paths.clone(),
                 state: PENDING_FIX,
                 window,
                 oldest: landings[..answers.line.window]
                     .last()
                     .map(|landing| landing.commit.clone()),
-                fix: Some(Mark::of(fix)),
+                fix: Some(fix.clone()),
+            });
+            // E35: until that run passes, it holds the changes on its paths.
+            out.fixing.push(Red {
+                fix: Some(fix),
+                ..red
             });
             continue;
         }

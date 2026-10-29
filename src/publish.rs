@@ -2136,7 +2136,7 @@ fn ends_before_red(
     trunk: &str,
 ) -> Result<bool, String> {
     let git = &ctx.repo.git;
-    let reds = crate::red::red(git, trunk, ctx.registry.as_ref())?;
+    let reds = crate::red::holding(git, trunk, ctx.registry.as_ref())?;
     if reds.is_empty() {
         return Ok(false);
     }
@@ -3269,7 +3269,7 @@ fn passes_red(
         return Ok(false);
     }
     let git = &ctx.repo.git;
-    let reds = crate::red::red(git, trunk, ctx.registry.as_ref())?;
+    let reds = crate::red::holding(git, trunk, ctx.registry.as_ref())?;
     if reds.is_empty() {
         return Ok(false);
     }
@@ -4656,8 +4656,10 @@ fn lane_leak(ctx: &Ctx, trunk: &str, revision: &str) -> Result<Option<BayResult>
 /// that made it red (by `--fixes`, an undo, or a supersede): `MAIN_RED`, naming the owner and
 /// the ways out. The operation is blocked on trunk's state, never failed: it waits in its
 /// place in line ([`wait_in_line`], BACKLOG 119), asked before any claim ([`unless_red`]). A
-/// check no landing in the window answers (NEW-6, [`crate::red::Pending`]) is unknown, not red:
-/// it refuses nothing here, and `bay status` lists it as `red_pending`, never as clear.
+/// check a fix answers holds its paths the same way until a run passes (E35,
+/// [`crate::red::holding`]). A check no landing in the window answers (NEW-6,
+/// [`crate::red::Pending`]) is unknown, not red: it refuses nothing here, and `bay status`
+/// lists it as `red_pending`, never as clear.
 fn red_gate(
     ctx: &mut Ctx,
     op_id: &str,
@@ -4666,7 +4668,7 @@ fn red_gate(
 ) -> Result<Option<BayResult>, String> {
     ctx.step.set("red");
     let git = &ctx.repo.git;
-    let reds = crate::red::red(git, trunk, ctx.registry.as_ref())?;
+    let reds = crate::red::holding(git, trunk, ctx.registry.as_ref())?;
     if reds.is_empty() {
         return Ok(None);
     }
