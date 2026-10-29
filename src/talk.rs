@@ -6,8 +6,14 @@
 //! later commit adds one file, `entries/<n>-<kind>.json` (`n` from `0001`), and keeps every earlier
 //! file byte for byte: an `ack`, a `backbrief`, an `answer` or a `close`. The id is the base32 of
 //! 80 bits of the sha256 of the canonical JSON of the sender actor (name and session), `who`,
-//! `kind`, the target, `what`, `follow_up` and `supersedes`, never `sent` (T7): a retry of one ask
-//! is the same id, and the same body under it is a no-op. `sent` is the root commit's time.
+//! `kind`, the target, `what`, `follow_up`, `supersedes` and `repeats`, never `sent` (T7): a retry
+//! of one ask is the same id, and the same body under it is a no-op. `sent` is the root commit's
+//! time.
+//!
+//! The same ask is one talk while it is open (0.6.0, T15): an ask from the sender's name to the
+//! same `who` with the same kind, `what` and target ([`same_ask`]) as an open talk is that talk,
+//! from any session and whatever `follow_up` the clock gave it. A closed talk does not hold its
+//! ask: asking it again is a new talk whose `repeats` names the closed one, so its id is new.
 //!
 //! A talk carries one `what` and exactly one target field for its kind, with one value; bay judges
 //! that by structure alone and never reads the prose (BACKLOG 9b). The sender's bay, the host
@@ -108,7 +114,7 @@ const RESULT_WORDS: [&str; 3] = ["target", "forecast", "commitment"];
 const PROMISE_FIELDS: [&str; 4] = ["owns", "promises", "needs", "promise_evidence"];
 /// The only status words (`DESIGN` § 11c).
 pub const STATUS_WORDS: [&str; 4] = ["ready", "blocked", "validated", "done"];
-const FIELDS: [&str; 28] = [
+const FIELDS: [&str; 29] = [
     "schema",
     "id",
     "from",
@@ -137,6 +143,7 @@ const FIELDS: [&str; 28] = [
     "options",
     "multi_select",
     "context_truncated",
+    "repeats",
 ];
 /// The prefix of a question talk's `decision` (dossier 63): `question:<tool_use_id>:<n>`, the
 /// n-th question of one question tool call. Structure bay judges, never the prose.
@@ -191,7 +198,7 @@ pub fn asks_a_person(body: &Value) -> bool {
 /// The most options a question carries, as the question tool takes them.
 const MAX_OPTIONS: usize = 4;
 /// The fields the id is the digest of (ruling T7): not `sent`, so a retry is the same id.
-const ID_FIELDS: [&str; 10] = [
+const ID_FIELDS: [&str; 11] = [
     "from",
     "who",
     "kind",
@@ -202,7 +209,20 @@ const ID_FIELDS: [&str; 10] = [
     "artifact",
     "decision",
     "check",
+    "repeats",
 ];
+/// The fields that make two asks one ask (T15): the kind, the action and the target. The
+/// sender's name and `who` are the talk list's; the session, `follow_up` and the other fields
+/// are not the ask.
+const ASK_FIELDS: [&str; 6] = ["kind", "what", "change", "artifact", "decision", "check"];
+
+/// Whether two bodies ask the same: the same kind, `what` and target ([`ASK_FIELDS`]).
+#[must_use]
+pub fn same_ask(one: &Value, other: &Value) -> bool {
+    ASK_FIELDS
+        .iter()
+        .all(|field| one.get(*field) == other.get(*field))
+}
 
 /// The kind whose target `field` is (`change` and `artifact` a delivery's, `decision` a
 /// discovery's, `check` a reliability's), if any.
@@ -569,12 +589,14 @@ pub fn check_body(body: &Value) -> Result<(), Refusal> {
     text_field(map, "context")?;
     text_field(map, "evidence")?;
     check_words(map)?;
-    if let Some(old) = text_field(map, "supersedes")?
-        && !is_talk_id(old)
-    {
-        return Err(Refusal::invalid(format!(
-            "`supersedes` {old:?} is not a talk id"
-        )));
+    for field in ["supersedes", "repeats"] {
+        if let Some(id) = text_field(map, field)?
+            && !is_talk_id(id)
+        {
+            return Err(Refusal::invalid(format!(
+                "`{field}` {id:?} is not a talk id"
+            )));
+        }
     }
     if map
         .get("urgent")
@@ -1584,6 +1606,7 @@ mod tests {
             ("who", json!("c")),
             ("follow_up", json!("2026-10-19T14:00:00Z")),
             ("from", json!({"name": "a", "session": "t"})),
+            ("repeats", json!("aaaaaaaaaaaaaaaa")),
         ] {
             let mut other = first.clone();
             other[field] = value;

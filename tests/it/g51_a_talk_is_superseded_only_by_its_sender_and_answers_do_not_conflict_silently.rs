@@ -8,7 +8,8 @@
 //! (`TALK_REFUSED`), by the answering bay and by the host; one that names it stands. A
 //! talk takes one successor and a closed one none; a successor pushes a predecessor the host
 //! does not hold yet in the same push, and the host judges it against that push. The
-//! recipient's `SessionStart` notice naming the replaced talk comes with the hook notices.
+//! recipient's `SessionStart` notice naming the replaced talk comes with the hook notices. A
+//! closed talk does not hold its ask: asked again, it is a new talk (G461).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -150,12 +151,14 @@ fn only_the_sender_supersedes_and_the_recipient_closes_the_old_talk() {
     assert_eq!(close["by"], new.as_str(), "{close}");
     assert_eq!(close["actor"]["name"], "agent-b", "{close}");
 
-    // Closed means closed: the same ask again is `TALK_REFUSED`, naming the id.
+    // G461: a closed talk does not hold its ask: the same ask again is a new talk, which names
+    // the closed one in `repeats`, and the host takes it.
     let (code, repeat) = discovery(&case, "agent", "Pick the wire format: json or cbor", &[]);
-    assert_eq!(code, 10, "{repeat}");
-    assert_eq!(repeat["reason"], "TALK_REFUSED", "{repeat}");
-    assert_eq!(repeat["detail"]["talk"], old.as_str(), "{repeat}");
-    // A repeat that differs only outside the ask is still that closed talk.
+    assert_eq!(code, 0, "{repeat}");
+    assert_eq!(repeat["state"], "sent", "{repeat}");
+    let again = repeat["detail"]["talk"].as_str().unwrap().to_owned();
+    assert_ne!(again, old, "{repeat}");
+    // While that one is open it holds the ask: a different body for it is refused, naming it.
     let (code, repeat) = discovery(
         &case,
         "agent",
@@ -164,6 +167,7 @@ fn only_the_sender_supersedes_and_the_recipient_closes_the_old_talk() {
     );
     assert_eq!(code, 10, "{repeat}");
     assert_eq!(repeat["reason"], "TALK_REFUSED", "{repeat}");
+    assert_eq!(repeat["detail"]["talk"], again.as_str(), "{repeat}");
     // A closed talk takes no successor either.
     let (code, late) = discovery(&case, "agent", "Pick msgpack", &["--supersedes", &old]);
     assert_eq!(code, 10, "{late}");

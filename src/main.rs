@@ -162,7 +162,8 @@ enum Command {
     },
     /// Ask another actor one thing: `bay talk <who> "<what>"` sends a discovery talk, its reply
     /// owed by the policy's default time (`[talk] follow_up_s`, one hour). One action, one
-    /// target. Arrival is the recipient's ack, written when its bay fetches
+    /// target; the same ask while it is open is the same talk. Arrival is the recipient's ack,
+    /// written when its bay fetches
     Talk(Box<TalkArgs>),
     /// Admin: add one key to the key registry: append it to its class file, sign the new
     /// registry with this machine's registry key (`bay.registryKey`) and push it. The first

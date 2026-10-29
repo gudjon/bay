@@ -195,7 +195,8 @@ Many people who edit with you have never used Git. Keep bay invisible to them:
 | Ask for one change, artifact or check instead, or name the reply time | `bay talk <who> "<what>" --change <id>\|--artifact <path>\|--check <id> [--follow-up <time>]` |
 | Answer a talk addressed to you | `bay talk --answer <id> --value <v>` |
 
-Run `bay talk --help` for the fields of each kind. One talk asks for one thing.
+Run `bay talk --help` for the fields of each kind. One talk asks for one thing. The same ask again while
+its talk is open is that talk (`state: already_sent`); once it is closed, asking again starts a new one.
 
 - A talk read after its `--expires` is void: the notice prints `EXPIRED`, and it owes no reply.
 - `bay merge` and `bay undo` list the open talks about that change in `detail.open_talks`. Read them;
