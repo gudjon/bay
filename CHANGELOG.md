@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.13
+
+- A judgement of main's red that takes a minute or more is named in the runner's journal.
+
 ## 0.6.12
 
 - `bay runner drain` stops a runner between operations once its post pieces end.
@@ -15,7 +19,7 @@
 
 ## 0.6.10
 
-- A red post check that never passed is owned by the merge that added it to the policy.
+- The merge that added a red post check to the policy owns it, when the check never passed.
 - Its `--fixes` name is that merge, and `suspect.check_added` names it; the walk stops there.
 
 ## 0.6.9
