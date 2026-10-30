@@ -1361,14 +1361,22 @@ fn word_of_change(record: &ChangeRecord) -> String {
 /// the queue (while it waited for a worker, main's hold or a dependency, or after a refused
 /// publishing push), or never yet placed, goes first of all (fleet findings, 2026-10-26: such a
 /// change came last, after every pre-check, and rejoined an hour or more later); joining the
-/// line takes no check.
+/// line takes no check. G585 (a fleet finding, 2026-10-30: a red main's repair, placed behind
+/// twenty changes, waited 14 minutes while each pass ran out its bound first): a change that
+/// names one it fixes, reverts or supersedes goes before all of them.
 fn in_pass_order(chains: &mut [crate::change::HeldChain], queue: &Queue) {
     let place = |id: &str| queue.of_change(id).map_or(u64::MAX, |entry| entry.seq);
     let rejoins = |held: &crate::change::HeldChain| {
         queue.of_change(&held.id).is_none() && held.record.operations.iter().any(runs)
     };
     chains.sort_by_key(|held| {
-        let at = if rejoins(held) { 0 } else { place(&held.id) };
+        let at = if names_a_repair(&held.record) {
+            (0, 0)
+        } else if rejoins(held) {
+            (1, 0)
+        } else {
+            (2, place(&held.id))
+        };
         (at, held.committed)
     });
 }
