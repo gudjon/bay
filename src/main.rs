@@ -31,7 +31,8 @@ enum Command {
         /// What this work is, in a few words (or a card id), or an existing change's id to pick
         /// it up
         intent: String,
-        /// The paths this change reads and writes (its declared inputs)
+        /// The paths this change reads and writes (its declared inputs); picking up a change, the
+        /// paths it declares too, kept in its view, while it keeps its place in line
         #[arg(long, num_args = 1..)]
         paths: Vec<String>,
         /// A named input this change depends on, `<kind>:<name>` (repeatable)

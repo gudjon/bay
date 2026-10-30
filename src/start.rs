@@ -111,7 +111,7 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         .or_else(|| names_change(&repo, request));
     let result = match &resumed {
         Some(id) if request.adopt => adopt(&repo, id, request),
-        Some(id) => resume(&repo, id, request.from.as_deref()),
+        Some(id) => resume(&repo, id, request.from.as_deref(), &request.paths),
         None if request.adopt => Err(format!(
             "--adopt takes the id of a change to take over, and {} names no change here or on \
              the remote",
@@ -1528,9 +1528,15 @@ fn adopt(repo: &Repo, id: &str, request: &StartRequest) -> Result<BayResult, Str
 
 /// Picks up change `id`; with `from`, a branch made outside bay (`start <CHANGE> --from`), its
 /// net change on the newest trunk replaces the change's draft, after the view's own edits are
-/// checkpointed, so a rebased branch lands under its change and never needs a new name.
+/// checkpointed, so a rebased branch lands under its change and never needs a new name. With
+/// `paths`, the change also declares each one it does not cover yet, and its view holds them.
 #[allow(clippy::too_many_lines)]
-fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String> {
+fn resume(
+    repo: &Repo,
+    id: &str,
+    from: Option<&str>,
+    paths: &[String],
+) -> Result<BayResult, String> {
     if !is_change_id(id) {
         return Err(format!("{id} is not a change id"));
     }
@@ -1572,6 +1578,15 @@ fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String
         .first()
         .cloned()
         .ok_or("the change has no draft")?;
+    // BACKLOG 143 (a fleet finding, 2026-10-30: `start <change> --paths` kept the change's old
+    // paths, so the only way to widen a change was a new change at the back of the line): the
+    // change declares the paths it does not cover yet and keeps its place.
+    let paths_added = declare_paths(&mut record, paths);
+    if !paths_added.is_empty() {
+        head = chain
+            .append(&head, &record, &latest, "declare paths")
+            .map_err(|error| error.message())?;
+    }
 
     let view_path = repo.view_path(id);
     let mut draft = latest.clone();
@@ -1591,6 +1606,8 @@ fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String
             draft = frozen;
             checkpointed = true;
         }
+        view::keep_declared(repo, id, &inputs::paths(&record.declared_inputs))
+            .map_err(|error| error.message())?;
     } else {
         view::create(repo, id, &latest, &inputs::paths(&record.declared_inputs))
             .map_err(|error| error.message())?;
@@ -1654,8 +1671,32 @@ fn resume(repo: &Repo, id: &str, from: Option<&str>) -> Result<BayResult, String
         "pushed": pushed,
         "landed": landed,
         "unsaved_kept": unsaved_kept.map(|path| path.display().to_string()),
+        "paths_added": paths_added,
     }))
     .with_change(id))
+}
+
+/// Declares on `record` each of `paths` that it does not cover yet, and returns them. A change
+/// that declares no path holds the whole tree, so it covers every one.
+fn declare_paths(record: &mut ChangeRecord, paths: &[String]) -> Vec<String> {
+    let declared = inputs::paths(&record.declared_inputs);
+    if declared.is_empty() {
+        return Vec::new();
+    }
+    let mut added: Vec<String> = Vec::new();
+    for path in paths {
+        if !declared
+            .iter()
+            .chain(&added)
+            .any(|outer| inputs::within(outer, path))
+        {
+            added.push(path.clone());
+        }
+    }
+    record
+        .declared_inputs
+        .extend(added.iter().cloned().map(DeclaredInput::Path));
+    added
 }
 
 /// The checkpoint of `record`'s view: what it observed, and its files frozen as a draft on its

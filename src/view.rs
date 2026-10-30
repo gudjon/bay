@@ -509,6 +509,49 @@ fn hook_settings(repo: &Repo, commit: &str) -> Option<&'static str> {
         .map(|_| file)
 }
 
+/// Adds to the sparse view of change `id` each of the `declared` paths its sparse set lacks, and
+/// writes their files and the declared files the manifest keeps outside Git at the view's commit
+/// (BACKLOG 143): a change that declares more paths holds them in the view it has, and a pick-up
+/// after a refused one adds them still. A full view already holds every path.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn keep_declared(repo: &Repo, id: &str, declared: &[String]) -> Result<(), GitError> {
+    if declared.is_empty() {
+        return Ok(());
+    }
+    let path = repo.view_path(id);
+    // As at the view's creation (G212): the only calls that fetch, and only the added files.
+    let view = Git::new(&path).fetching().writing_tree();
+    let list = view.run(&["sparse-checkout", "list"])?;
+    let missing: Vec<&String> = declared
+        .iter()
+        .filter(|declared| {
+            let pattern = sparse_pattern(declared);
+            !list.lines().any(|line| line.trim() == pattern)
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["sparse-checkout".to_owned(), "add".to_owned()];
+    args.extend(missing.iter().map(|declared| sparse_pattern(declared)));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    view.run(&args)?;
+    let head = view.run(&["rev-parse", "HEAD"])?;
+    let covered = |file: &str| {
+        missing
+            .iter()
+            .any(|added| crate::inputs::within(added, file))
+    };
+    crate::assets::fill_tree(repo, &path, &head, &covered).map_err(|why| GitError::Failed {
+        args: "assets".to_owned(),
+        stderr: why,
+    })?;
+    Ok(())
+}
+
 /// Puts the hook-settings file back into the sparse view of change `id` when its pattern is
 /// missing and the view's commit holds the file: `--resume` keeps it in the view, whether the
 /// view predates it or its sparse set was changed by hand. A full view already holds it.
