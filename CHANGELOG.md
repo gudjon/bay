@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.7
+
+- A batch passes over a place this runner cannot read, and its journal line names it.
+- The line checked ahead passes over such a place too, instead of ending there.
+
 ## 0.6.6
 
 - A post check may retry its failed units (`retry_on_failure`); a pass then is flaky and turns no red.
