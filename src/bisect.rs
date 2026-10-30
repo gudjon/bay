@@ -248,8 +248,9 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
     let writer = Writer::of(git, &keys, registry.as_ref())?;
     // A fleet finding (2026-10-28: scripts-fast stayed red for three hours after both of its
     // causes were fixed in files off its paths, and every change on its paths waited on it): a
-    // red check runs again on each new tip, first, even when nothing on its paths changed, so
-    // a fix that landed anywhere can clear it.
+    // red check runs again on each new tip, first (after a check starved for half the red
+    // window, G582), even when nothing on its paths changed, so a fix that landed anywhere can
+    // clear it.
     //
     // E39 (a fleet finding, 2026-10-29: after a fix named edge-py-fast's owner, its next post runs
     // asked about one landing alone and named no failed unit, so five known failing units went
@@ -342,8 +343,9 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
 }
 
 /// `entries` in the order their post runs come in, and how many landings back this box last
-/// recorded each ([`last_runs`]): a red check first (G492), then the one this box ran longest
-/// ago (G433), then the ones no landing in the red window answers (`crate::red`'s pending).
+/// recorded each ([`last_runs`]): a check this box has not answered for half the red window
+/// first (G582), then a red check (G492), then the one this box ran longest ago (G433), then the
+/// ones no landing in the red window answers (`crate::red`'s pending).
 fn in_turn<'a>(
     git: &Git,
     (registry, writer): (Option<&Registry>, &Writer),
@@ -371,6 +373,14 @@ fn in_turn<'a>(
     // box) ran on no tip for eight hours. The check this box ran longest ago goes first; ties
     // keep the rule above.
     let ran = last_runs(git, writer, tip, &entries);
+    // G582 (a fleet finding, 2026-10-30: with one runner for its environment and red edge-py-fast
+    // runs of ~30 min, scripts-fast ran on no tip for 49 landings and passed the red window, so a
+    // failure there could no longer be ranged): a red check goes first on each new tip, and one
+    // piece an environment a pass, so the other checks of its environment starved. A check this
+    // box has not answered for half the window goes before a red one, while a run still ranges
+    // its gap. Only an order: a window bay cannot read counts as the default.
+    let starved_at =
+        (crate::red::window(git, tip).unwrap_or(crate::red::DEFAULT_WINDOW) / 2).max(1);
     entries.sort_by_key(|entry| {
         let is_red = reds
             .iter()
@@ -382,7 +392,8 @@ fn in_turn<'a>(
             .get(&(entry.id.clone(), entry.environment.clone()))
             .copied()
             .unwrap_or(usize::MAX);
-        (!is_red, std::cmp::Reverse(ago), !pending)
+        let starved = !is_red && ago >= starved_at;
+        (!starved, !is_red, std::cmp::Reverse(ago), !pending)
     });
     (entries, ran)
 }
