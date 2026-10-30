@@ -417,23 +417,18 @@ impl Red {
             .any(|change| names.contains(&change))
     }
 
-    /// E68: whether `names` name this red alone: its check, its owning change, its fix name
-    /// ([`Red::fixes`]) or a landing it was seen failing on. A landing of the suspect range is
-    /// not one of them: the range of another red can hold it too.
+    /// E68: whether `names` name this red alone: its check, its owning change or its fix name
+    /// ([`Red::fixes`]). A landing of the suspect range is not one of them, nor one it was seen
+    /// failing on since: the range of another red can hold it too, and its first failure or
+    /// owner can be one (a fleet finding, 2026-10-30: the fix of one red, naming that red's
+    /// first failure, was named the fix of a second red that had only failed on it as well).
     fn named_by(&self, names: &[&String]) -> bool {
-        if names.contains(&&self.check) {
-            return true;
-        }
-        let failing = self
-            .suspect
-            .iter()
-            .flat_map(|suspect| &suspect.failing)
-            .filter_map(|mark| mark.change.as_ref());
-        self.change
-            .iter()
-            .chain(self.fixes())
-            .chain(failing)
-            .any(|change| names.contains(&change))
+        names.contains(&&self.check)
+            || self
+                .change
+                .iter()
+                .chain(self.fixes())
+                .any(|change| names.contains(&change))
     }
 
     /// E36: the one name a fix gives in `--fixes`, stable while the red stands: the landing
@@ -1061,8 +1056,8 @@ fn changed_check(git: &Git, landing: &str, post: &crate::policy::ManifestEntry) 
 /// E68 (a fleet finding, 2026-10-30: the fix of one red was named the fix of two more, since
 /// their suspect ranges held the merge its `Fixes:` named): the fix of `red` among `later`, the
 /// landings newer than its newest failure, the oldest first. A landing that names the red alone
-/// ([`Red::named_by`]) is its fix; else one that names a landing of its suspect range, when it
-/// changed a file on the red's paths or changed the check. Admission is [`Red::answered_by`]
+/// ([`Red::named_by`]) is its fix; else one that names a landing of its suspect range or one it
+/// was seen failing on since, when it changed a file on the red's paths or changed the check. Admission is [`Red::answered_by`]
 /// still: a change it lets through lands, named the fix or not.
 fn fix_of<'l>(
     git: &Git,

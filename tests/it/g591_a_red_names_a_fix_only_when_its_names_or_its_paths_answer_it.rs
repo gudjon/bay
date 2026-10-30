@@ -1,14 +1,19 @@
 //! G591 (E68, a fleet finding, 2026-10-30: the fix of one red was named the fix of two more,
 //! because their suspect ranges held the merge its `Fixes:` named). A red names a landing its
-//! fix only when the landing names the red alone (its check, its owning change, its fix name or
-//! a landing it was seen failing on), or names a landing of its suspect range and changed a
-//! file on the red's paths or the check. Admission stays as it was: a change that names any
-//! merge of the range still lands.
+//! fix only when the landing names the red alone (its check, its owning change or its fix
+//! name), or names a landing of its suspect range or one it was seen failing on since, and
+//! changed a file on the red's paths or the check. Admission stays as it was: a change that
+//! names any merge of the range still lands.
+//!
+//! G594 (E68 again, 2026-10-30: the fix of one red, naming that red's first failure, was named
+//! the fix of a second red that had failed on that merge as well). A merge a red was only seen
+//! failing on does not name the red alone: another red's first failure or owner can be one.
 //!
 //! Guards to mutate, in `src/red.rs`: `fix_of` without its path term (a range name off the
 //! red's paths makes `suite` wait for a fix that is not its own), `on_paths` always false (the
-//! range name on `tools/` is not `tool`'s fix), and `fix_of` without `Red::named_by` (the change
-//! that names the check `suite` and changes no file on its paths is not its fix).
+//! range name on `tools/` is not `tool`'s fix), `fix_of` without `Red::named_by` (the change
+//! that names the check `suite` and changes no file on its paths is not its fix), and
+//! `Red::named_by` naming the merges a red was seen failing on (`suite`'s fix is `tool`'s).
 
 #![cfg(unix)]
 
@@ -179,5 +184,60 @@ fn a_red_names_a_fix_only_when_its_names_or_its_paths_answer_it() {
             ("tool".to_owned(), json!(three))
         ],
         "{status}"
+    );
+}
+
+#[test]
+fn a_fix_that_names_one_reds_first_failure_is_not_the_fix_of_a_red_that_failed_on_it_too() {
+    let line = Line::new();
+    line.lands("zero", &["src/zero.rs", "tools/zero.sh"], None);
+    let ran = line.run_post();
+    assert_eq!(line.status()["red"], json!([]), "both pass on zero: {ran}");
+
+    // `one` breaks `tool`, and `two` breaks `suite`; `three` names the check `tool` to land on
+    // its paths, and `tool` fails on it again. `two` is `suite`'s first failure and the name
+    // to fix it, and a merge `tool` was seen failing on.
+    let one = line.lands("one", &["tools/broken"], None);
+    let ran = line.run_post();
+    assert_eq!(
+        fixes(&line.status()["red"]),
+        vec![("tool".to_owned(), Value::Null)],
+        "{ran}"
+    );
+    let two = line.lands("two", &["src/broken"], None);
+    line.run_post();
+    let three = line.lands("three", &["tools/three.sh"], Some("tool"));
+    let ran = line.run_post();
+    let status = line.status();
+    let reds: Vec<&Value> = status["red"].as_array().unwrap().iter().collect();
+    let red = |check: &str| {
+        *reds
+            .iter()
+            .find(|red| red["check"] == check)
+            .unwrap_or_else(|| panic!("{check} red: {ran} {status}"))
+    };
+    assert_eq!(red("suite")["fixes"], two.as_str(), "{status}");
+    assert_eq!(red("tool")["fixes"], one.as_str(), "{status}");
+    let seen: Vec<&Value> = red("tool")["suspect"]["failing"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|mark| &mark["change"])
+        .collect();
+    assert_eq!(seen, vec![&json!(two), &json!(three)], "{status}");
+
+    // `four` names `two` and fixes only the code: it is `suite`'s fix, and `tool` stays red
+    // with no fix.
+    let four = line.lands("four", &["src/fixed"], Some(&two));
+    let status = line.status();
+    assert_eq!(
+        fixes(&status["red"]),
+        vec![("tool".to_owned(), Value::Null)],
+        "tool still red, with no fix: {status}"
+    );
+    assert_eq!(
+        fixes(&status["red_pending"]),
+        vec![("suite".to_owned(), json!(four))],
+        "suite waits for the run on its fix: {status}"
     );
 }
