@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.10
+
+- A red post check that never passed is owned by the merge that added it to the policy.
+- Its `--fixes` name is that merge, and `suspect.check_added` names it; the walk stops there.
+
 ## 0.6.9
 
 - A batch cut at a member that cannot join lands the members before it, after one more check.
