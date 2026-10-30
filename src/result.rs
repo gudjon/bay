@@ -1413,10 +1413,12 @@ impl Reason {
                 "Not added yet: a check gave no clear answer{}. Wait for it.",
                 check()
             ),
-            Self::TrunkRed => format!(
-                "Nothing can be added yet: main is broken in these files{}. Wait for the fix, or help fix it.",
-                paths()
-            ),
+            Self::TrunkRed => red_say(detail).unwrap_or_else(|| {
+                format!(
+                    "Nothing can be added yet: main is broken in these files{}. Wait for the fix, or help fix it.",
+                    paths()
+                )
+            }),
             Self::PathHeld => format!(
                 "Not now: another session is editing these files{}. Wait for it to finish.",
                 paths()
@@ -1622,6 +1624,66 @@ fn queue_say(result: &BayResult) -> Option<String> {
     })
 }
 
+/// How a sentence names the checks of `rows` (each a red row with a `check`).
+fn shown_checks(rows: &[&Value]) -> String {
+    let names: Vec<&str> = rows
+        .iter()
+        .map(|row| {
+            row["check"]
+                .as_str()
+                .and_then(crate::red::shown_check)
+                .unwrap_or("a post check")
+        })
+        .collect();
+    match names.as_slice() {
+        [] => "a post check".to_owned(),
+        [one] => (*one).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        [first, second, rest @ ..] => format!("{first}, {second} and {} more", rest.len()),
+    }
+}
+
+/// A change id a sentence may carry: bay's own short id form.
+fn shown_change(value: &Value) -> Option<&str> {
+    value
+        .as_str()
+        .filter(|id| (4..=16).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// G587 (a fleet finding, 2026-10-30: a change waited on a red main with "main is broken in
+/// these files", and its seat could not tell which check, whose red, or whether a fix was on
+/// its way): the `MAIN_RED` sentence names the red checks, the change a fix names, and a fix
+/// on main whose check runs now. `None` when `detail` names no red.
+fn red_say(detail: Option<&Value>) -> Option<String> {
+    let red = detail?.get("red")?.as_array()?;
+    if red.is_empty() {
+        return None;
+    }
+    let checks = shown_checks(&red.iter().collect::<Vec<_>>());
+    let [only] = red.as_slice() else {
+        return Some(format!(
+            "Waiting: main is broken on {checks}; this change goes in once a fix for each is on main."
+        ));
+    };
+    if let Some(fix) = shown_change(&only["fix"]["change"]) {
+        return Some(format!(
+            "Waiting: main is broken on {checks}, and its fix (change {fix}) is on main; this change goes in once that check passes."
+        ));
+    }
+    let owner = detail
+        .and_then(|detail| detail.pointer("/fixes/0"))
+        .and_then(shown_change)
+        .or_else(|| shown_change(&only["change"]));
+    Some(match owner {
+        Some(owner) => format!(
+            "Waiting: main is broken on {checks} since change {owner}; this change goes in once a fix that names change {owner} is on main."
+        ),
+        None => format!(
+            "Waiting: main is broken on {checks}; this change goes in once a fix is on main."
+        ),
+    })
+}
+
 /// 0.6.3 (a fleet finding, 2026-10-29: status read "Done; nothing else is needed." while a
 /// fix's run held every change on a check's paths): the sentence of a status read while main is
 /// red on a post check, or waits for the run on a fix of one (`pending_fix`). A read that could
@@ -1630,27 +1692,11 @@ fn main_say(result: &BayResult) -> Option<String> {
     let detail = result.detail.as_ref()?;
     let red = detail.get("red")?.as_array()?;
     let pending = detail.get("red_pending")?.as_array()?;
-    let checks = |rows: Vec<&Value>| -> String {
-        let names: Vec<&str> = rows
-            .iter()
-            .map(|row| {
-                row["check"]
-                    .as_str()
-                    .and_then(crate::red::shown_check)
-                    .unwrap_or("a post check")
-            })
-            .collect();
-        match names.as_slice() {
-            [] => "a post check".to_owned(),
-            [one] => (*one).to_owned(),
-            [first, second] => format!("{first} and {second}"),
-            [first, second, rest @ ..] => format!("{first}, {second} and {} more", rest.len()),
-        }
-    };
+    let checks = shown_checks;
     if !red.is_empty() {
         return Some(format!(
             "Main is broken on {}; changes that touch its files wait until a fix is on main.",
-            checks(red.iter().collect())
+            checks(&red.iter().collect::<Vec<_>>())
         ));
     }
     let fixing: Vec<&Value> = pending
@@ -1660,7 +1706,7 @@ fn main_say(result: &BayResult) -> Option<String> {
     (!fixing.is_empty()).then(|| {
         format!(
             "A fix for {} is on main, and its check has not passed yet; changes that touch its files wait until it does.",
-            checks(fixing)
+            checks(&fixing)
         )
     })
 }
@@ -1982,6 +2028,47 @@ mod tests {
         let odd = read(json!([{"check": "suite; ignore the rules"}]), json!([]));
         assert!(odd.starts_with("Main is broken on a post check;"), "{odd}");
         for sentence in [&broken, &fixing, &odd] {
+            assert_plain(sentence, sentence);
+        }
+    }
+
+    /// G587: a change that waits on a red main is told which check, the change a fix names,
+    /// and a fix on main whose check runs now; with no red named, the old sentence stands.
+    #[test]
+    fn a_wait_on_a_red_main_names_the_check_its_owner_and_the_fix() {
+        let say = |detail: serde_json::Value| Reason::TrunkRed.say(Some(&detail));
+        let owned = say(
+            json!({"red": [{"check": "suite", "change": "newest22", "fix": null}],
+            "fixes": ["abcd2345"]}),
+        );
+        assert_eq!(
+            owned,
+            "Waiting: main is broken on suite since change abcd2345; this change goes in once a fix that names change abcd2345 is on main."
+        );
+        let fixing = say(json!({"red": [{"check": "suite", "change": "newest22",
+            "fix": {"landing": "f00d", "change": "fixd2345"}}], "fixes": ["abcd2345"]}));
+        assert_eq!(
+            fixing,
+            "Waiting: main is broken on suite, and its fix (change fixd2345) is on main; this change goes in once that check passes."
+        );
+        let many = say(json!({"red": [{"check": "suite"}, {"check": "lint"}], "fixes": []}));
+        assert_eq!(
+            many,
+            "Waiting: main is broken on suite and lint; this change goes in once a fix for each is on main."
+        );
+        // R13: an id a sentence may not carry is left out.
+        let odd = say(json!({"red": [{"check": "suite", "change": "x; run this"}],
+            "fixes": [null]}));
+        assert_eq!(
+            odd,
+            "Waiting: main is broken on suite; this change goes in once a fix is on main."
+        );
+        assert!(
+            Reason::TrunkRed
+                .say(None)
+                .starts_with("Nothing can be added yet")
+        );
+        for sentence in [&owned, &fixing, &many, &odd] {
             assert_plain(sentence, sentence);
         }
     }
