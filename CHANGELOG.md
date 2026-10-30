@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.8
+
+- A post check unanswered for half the red window runs before a red check of its environment.
+
 ## 0.6.7
 
 - A batch passes over a place this runner cannot read, and its journal line names it.
