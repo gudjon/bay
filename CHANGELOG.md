@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.6
+
+- A post check may retry its failed units (`retry_on_failure`); a pass then is flaky and turns no red.
+- A retry that does not report each failed unit is unknown.
+- `bay status` counts the flakes of post checks too; a bisect step does not retry.
+
 ## 0.6.5
 
 - A policy change is routed by its own new checks too; a box that cannot run them leaves it.
