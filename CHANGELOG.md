@@ -1,12 +1,17 @@
 # Changelog
 
+## 0.6.15
+
+- A red's fix names its check, its owner or its `--fixes` name, not a merge it failed on later.
+- A change naming such a merge is the red's fix only when it changes the red's paths or check.
+
 ## 0.6.14
 
 - An evidence read in a blob-less clone lists note paths in one git call, not one call per name.
 
 ## 0.6.13
 
-- A judgement of main's red that takes a minute or more is named in the runner's journal.
+- A runner's journal names each judgement of main's red that takes a minute or more.
 
 ## 0.6.12
 
