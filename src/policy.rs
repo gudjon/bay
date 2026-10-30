@@ -2428,7 +2428,10 @@ mod tests {
         assert!(super::validate_retry(&retry).is_ok());
         let flaky: CheckEntry = toml::from_str(&format!("{text}allow_flaky = true\n")).unwrap();
         let why = super::validate_retry(&flaky).unwrap_err();
-        assert!(why.contains("allow_flaky applies only to a pre-merge check"), "{why}");
+        assert!(
+            why.contains("allow_flaky applies only to a pre-merge check"),
+            "{why}"
+        );
         let over: CheckEntry = toml::from_str(&format!(
             "{text}retry_on_failure = {}\n",
             super::MAX_RETRY_ON_FAILURE + 1
