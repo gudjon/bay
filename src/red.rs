@@ -396,7 +396,8 @@ impl Red {
     /// run; three fixes naming the first failure (2026-10-28), then one naming the owner of an
     /// hour before (E36, 2026-10-29), waited behind the red they were written to clear. They
     /// may also name the check itself (`start --fixes <check>`): the one name that never moves,
-    /// when a pass between failures starts a new red (an intermittent check, 2026-10-29).
+    /// when a pass between failures starts a new red (an intermittent check, 2026-10-29). It
+    /// lets a change through; the landing a red names its fix is `fix_of`'s (E68).
     #[must_use]
     pub fn answered_by(&self, names: &[&String]) -> bool {
         if names.contains(&&self.check) {
@@ -412,6 +413,25 @@ impl Red {
         self.change
             .iter()
             .chain(range)
+            .any(|change| names.contains(&change))
+    }
+
+    /// E68: whether `names` name this red alone: its check, its owning change, its fix name
+    /// ([`Red::fixes`]) or a landing it was seen failing on. A landing of the suspect range is
+    /// not one of them: the range of another red can hold it too.
+    fn named_by(&self, names: &[&String]) -> bool {
+        if names.contains(&&self.check) {
+            return true;
+        }
+        let failing = self
+            .suspect
+            .iter()
+            .flat_map(|suspect| &suspect.failing)
+            .filter_map(|mark| mark.change.as_ref());
+        self.change
+            .iter()
+            .chain(self.fixes())
+            .chain(failing)
             .any(|change| names.contains(&change))
     }
 
@@ -887,10 +907,7 @@ fn decide<'a>(
         };
         // G568: only a landing newer than the newest failure answers it, and the check is
         // pending until a run at or after that landing answers, never green before.
-        let fix = landings[..at]
-            .iter()
-            .rev()
-            .find(|later| red.answered_by(&later.names.iter().collect::<Vec<_>>()));
+        let fix = fix_of(answers.git, &red, &landings[..at], post);
         if let Some(fix) = fix {
             let fix = Mark::of(fix);
             out.pending.push(Pending {
@@ -937,6 +954,47 @@ fn changed_check(git: &Git, landing: &str, post: &crate::policy::ManifestEntry) 
         (Some(now), Some(then)) => now != then,
         _ => false,
     }
+}
+
+/// E68 (a fleet finding, 2026-10-30: the fix of one red was named the fix of two more, since
+/// their suspect ranges held the merge its `Fixes:` named): the fix of `red` among `later`, the
+/// landings newer than its newest failure, the oldest first. A landing that names the red alone
+/// ([`Red::named_by`]) is its fix; else one that names a landing of its suspect range, when it
+/// changed a file on the red's paths or changed the check. Admission is [`Red::answered_by`]
+/// still: a change it lets through lands, named the fix or not.
+fn fix_of<'l>(
+    git: &Git,
+    red: &Red,
+    later: &'l [Landing],
+    post: &crate::policy::ManifestEntry,
+) -> Option<&'l Landing> {
+    fn names(landing: &Landing) -> Vec<&String> {
+        landing.names.iter().collect()
+    }
+    later
+        .iter()
+        .rev()
+        .find(|landing| red.named_by(&names(landing)))
+        .or_else(|| {
+            later.iter().rev().find(|landing| {
+                red.answered_by(&names(landing))
+                    && (on_paths(git, red, &landing.commit)
+                        || changed_check(git, &landing.commit, post))
+            })
+        })
+}
+
+/// E68: whether `landing` changed a file on `red`'s paths against its first parent; a check
+/// with no `when_paths` is on every path. `false` when Git cannot compare the two.
+fn on_paths(git: &Git, red: &Red, landing: &str) -> bool {
+    let Ok(paths) = crate::check::changed_paths(git, &format!("{landing}^1"), landing) else {
+        return false;
+    };
+    paths.iter().any(|path| {
+        red.paths
+            .as_ref()
+            .is_none_or(|globs| crate::policy::globs_match(globs, path))
+    })
 }
 
 /// N-20, B5: the landings a red judgement reads, newest first: the landing line of the window,
