@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.9
+
+- A batch cut at a member that cannot join lands the members before it, after one more check.
+- Its journal line names that member and why; `detail.batch.stopped` is `not_joined`.
+
 ## 0.6.8
 
 - A post check unanswered for half the red window runs before a red check of its environment.
