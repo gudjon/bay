@@ -2008,6 +2008,28 @@ fn run_attempts(
     }
 }
 
+/// Names a landed batch in its landing's `detail.batch`: its checks, why it ended and its
+/// members. G588: `at`, the change that ended it, only while the plan's reason stands.
+fn name_batch(
+    detail: &mut serde_json::Value,
+    checks: &[serde_json::Value],
+    stopped: &str,
+    at: Option<&str>,
+    landing: &[throughput::Member],
+) {
+    detail["batch"]["checks"] = json!(checks);
+    detail["batch"]["stopped"] = json!(stopped);
+    if let Some(at) = at {
+        detail["batch"]["stopped_at"] = json!(at);
+    }
+    detail["batch"]["members"] = json!(
+        landing
+            .iter()
+            .map(|member| json!({"change": member.change, "op_id": member.op_id}))
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Batching with bisection (`crate::throughput`): the head `op_id`, at queue place `at`, and
 /// the live entries behind it that fold onto it, checked once as one tree on `trunk`. On a pass
 /// they land together; on a failure the bisection finds the largest passing prefix, which lands
@@ -2025,10 +2047,12 @@ fn batch(
     let repo = ctx.repo;
     // E21: each part of a head's work names its own step, so a line says where the time went.
     ctx.step.set("batch");
-    let Some((policy, mut members, mut stopped)) = batch_plan(ctx, op_id, revision, trunk, at)?
+    let Some((policy, mut members, mut stopped, stopped_at)) =
+        batch_plan(ctx, op_id, revision, trunk, at)?
     else {
         return Ok(None);
     };
+    let planned = stopped;
     // N-8: a held trunk publishes no batch, whose members need not all be fixes; the head
     // runs its ordinary path, judged by the hold alone.
     if crate::hold::held(repo, trunk).is_some() {
@@ -2072,14 +2096,8 @@ fn batch(
     match land_batch(ctx, &mut others, landing, trunk, &id) {
         Ok(Some(mut result)) => {
             if let Some(detail) = result.detail.as_mut() {
-                detail["batch"]["checks"] = json!(checks);
-                detail["batch"]["stopped"] = json!(stopped);
-                detail["batch"]["members"] = json!(
-                    landing
-                        .iter()
-                        .map(|member| json!({"change": member.change, "op_id": member.op_id}))
-                        .collect::<Vec<_>>()
-                );
+                let at = stopped_at.as_deref().filter(|_| stopped == planned);
+                name_batch(detail, &checks, stopped, at, landing);
             }
             Ok(Some(result))
         }
@@ -2197,8 +2215,14 @@ fn first_line(text: &str) -> String {
         .collect()
 }
 
-/// A planned batch: the policy it is judged by, its members, and why it ended (R7).
-type Planned = (policy::Policy, Vec<throughput::Member>, &'static str);
+/// A planned batch: the policy it is judged by, its members, why it ended (R7), and the change
+/// it ended at (G588).
+type Planned = (
+    policy::Policy,
+    Vec<throughput::Member>,
+    &'static str,
+    Option<String>,
+);
 
 /// G420, G560: the journal line of a head that lands alone because its diff (`revision`
 /// folded onto `trunk`) wakes a pre-merge check keyed by its commit, naming the check.
@@ -2278,7 +2302,7 @@ fn batch_plan(
     let waiting = queue.behind(at);
     let (behind, unread) = throughput::read_line(git, waiting.iter().copied());
     let by_lane = repo.config.footprint_lanes();
-    let (mut members, mut stopped) = throughput::plan_batch(
+    let (mut members, mut stopped, mut stopped_at) = throughput::plan_batch(
         git,
         &policy,
         trunk,
@@ -2307,6 +2331,7 @@ fn batch_plan(
         }
         if within < members.len() {
             stopped = "size_limits";
+            stopped_at = Some(members[within].change.clone());
         }
         members.truncate(within);
     }
@@ -2318,14 +2343,18 @@ fn batch_plan(
         let changes: Vec<&str> = unread.iter().map(|entry| entry.change.as_str()).collect();
         format!("; passed over, not read here: {}", changes.join(", "))
     };
-    let said = |how: &str, stopped: &str| {
+    // G588: and the change the batch ended at, when one entry ended it.
+    let at_change = stopped_at
+        .as_deref()
+        .map_or_else(String::new, |change| format!(" at change {change}"));
+    let said = |how: &str, stopped: &str, at: &str| {
         eprintln!(
-            "bay runner: {op_id} batch of {} {how}, stopped: {stopped}{passed_over}",
+            "bay runner: {op_id} batch of {} {how}, stopped: {stopped}{at}{passed_over}",
             members.len()
         );
     };
     if members.len() < bounds.min.max(2) {
-        said("not formed", stopped);
+        said("not formed", stopped, &at_change);
         return Ok(None);
     }
     // NEW-10: the lane is the places whose footprint overlaps the head's.
@@ -2336,11 +2365,11 @@ fn batch_plan(
         None
     };
     if lane_failure_rate(git, &queue, &policy, lane.as_ref()) > bounds.max_failure_rate {
-        said("not formed", "failure_rate");
+        said("not formed", "failure_rate", "");
         return Ok(None);
     }
-    said("planned", stopped);
-    Ok(Some((policy, members, stopped)))
+    said("planned", stopped, &at_change);
+    Ok(Some((policy, members, stopped, stopped_at)))
 }
 
 /// Why no batch forms on `trunk` under `policy`, whatever the change: an unchecked policy, or
@@ -3702,7 +3731,7 @@ fn speculate_batch(
             at += 1;
             continue;
         }
-        let (members, stopped) = throughput::plan_batch(
+        let (members, stopped, _) = throughput::plan_batch(
             git,
             &at_trunk,
             &base,

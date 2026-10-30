@@ -964,7 +964,8 @@ pub struct Member {
 /// none of a lane, with named inputs or a culprit's note, none whose diff wakes a pre-merge
 /// check keyed by its commit (G560), and none past a policy change, a conflict or a merge with
 /// no effect. With `by_lane`, only while each one's footprint overlaps
-/// the head's. The head is always the first member when it folds onto trunk.
+/// the head's. The head is always the first member when it folds onto trunk. With the members
+/// comes why the batch ended, and the change it ended at when one entry ended it (G588).
 ///
 /// # Errors
 ///
@@ -977,12 +978,15 @@ pub fn plan_batch(
     behind: &[Queued],
     max: usize,
     by_lane: bool,
-) -> Result<(Vec<Member>, &'static str), String> {
+) -> Result<(Vec<Member>, &'static str, Option<String>), String> {
     let mut members: Vec<Member> = Vec::new();
     let mut lane: Option<Footprint> = None;
     // R7 (2026-10-27): why the batch ended, recorded with it, so a measured window can say
     // which rule kept batches small.
     let mut stopped = "end_of_line";
+    // G588 (a fleet finding, 2026-10-30: "stopped: policy" named no entry, and the seats could
+    // not tell which change ended the batches): the change an entry's rule ended the batch at.
+    let mut stopped_at: Option<String> = None;
     for queued in std::iter::once(head).chain(behind) {
         if members.len() >= max {
             stopped = "max";
@@ -1017,10 +1021,12 @@ pub fn plan_batch(
             Fold::Skipped(_) if !members.is_empty() => continue,
             Fold::Skipped(why) => {
                 stopped = why;
+                stopped_at = Some(queued.change.clone());
                 break;
             }
             Fold::Stop => {
                 stopped = "policy";
+                stopped_at = Some(queued.change.clone());
                 break;
             }
         };
@@ -1031,6 +1037,7 @@ pub fn plan_batch(
         if policy.commit_keyed_woken(&changed).is_some() {
             if members.is_empty() {
                 stopped = "commit_keyed";
+                stopped_at = Some(queued.change.clone());
                 break;
             }
             continue;
@@ -1042,6 +1049,7 @@ pub fn plan_batch(
                 Some(first) if first.overlaps(&footprint) => {}
                 Some(_) => {
                     stopped = "footprint";
+                    stopped_at = Some(queued.change.clone());
                     break;
                 }
             }
@@ -1055,7 +1063,7 @@ pub fn plan_batch(
             tree,
         });
     }
-    Ok((members, stopped))
+    Ok((members, stopped, stopped_at))
 }
 
 /// The search for a batch's largest passing prefix on one trunk tip: the whole batch first,
@@ -1340,9 +1348,39 @@ mod tests {
         let mut alone = queued(2, &revisions[1], Vec::new());
         alone.batchable = false;
         let behind = [alone, queued(3, &revisions[2], Vec::new())];
-        let (members, _) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        let (members, ..) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
         let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
         assert_eq!(seqs, [1, 3]);
+    }
+
+    /// G588: a batch that ends at an entry names the change it ended at; one that ends at the
+    /// end of the line names none.
+    #[test]
+    fn a_batch_names_the_change_it_ended_at() {
+        let (dir, git, trunk, revisions) = three_on_a_base();
+        let run = |args: &[&str]| git.run(args).unwrap();
+        run(&["checkout", "-q", "--detach", &trunk]);
+        std::fs::write(
+            dir.path().join(".bay/policy.toml"),
+            "revision = 2\nunchecked = true\n",
+        )
+        .unwrap();
+        run(&["commit", "-q", "-am", "policy"]);
+        let policy_change = run(&["rev-parse", "HEAD"]);
+        let policy = crate::policy::load_at(&git, &trunk).unwrap().unwrap();
+        let head = queued(1, &revisions[0], Vec::new());
+        let behind = [
+            queued(2, &revisions[1], Vec::new()),
+            queued(3, &policy_change, Vec::new()),
+            queued(4, &revisions[2], Vec::new()),
+        ];
+        let (members, stopped, at) =
+            plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!((stopped, at.as_deref()), ("policy", Some("change3")));
+        let (_, stopped, at) =
+            plan_batch(&git, &policy, &trunk, &head, &behind[..1], 8, false).unwrap();
+        assert_eq!((stopped, at), ("end_of_line", None));
     }
 
     /// Measured on 0.5.18 (2026-10-27): both batches of the first hour ended at a conflicting
@@ -1364,7 +1402,7 @@ mod tests {
             queued(2, &edits[1], Vec::new()),
             queued(3, &revisions[0], Vec::new()),
         ];
-        let (members, _) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        let (members, ..) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
         let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
         assert_eq!(seqs, [1, 3]);
     }
@@ -1387,7 +1425,7 @@ mod tests {
             queued(2, &revisions[1], vec![red_on]),
             queued(3, &revisions[2], Vec::new()),
         ];
-        let (members, _) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        let (members, ..) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
         let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
         assert_eq!(seqs, [1, 3]);
         let base = predict(&git, &policy, &trunk, &[head, behind[0].clone()])
