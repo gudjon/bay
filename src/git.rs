@@ -538,15 +538,12 @@ impl Git {
         timeout: std::time::Duration,
     ) -> Option<Result<(), String>> {
         let remote = self.promisor_remote()?;
-        // A name is resolved through trees, which a blob-less store holds: no blob is read.
         let mut ids = String::new();
         let mut resolved = Vec::new();
-        for name in names {
-            if let Ok(oid) = self.run(&["rev-parse", "--verify", "-q", name]) {
-                ids.push_str(&oid);
-                ids.push('\n');
-                resolved.push(name.as_str());
-            }
+        for (name, oid) in self.resolve_names(names) {
+            ids.push_str(&oid);
+            ids.push('\n');
+            resolved.push(name);
         }
         if ids.is_empty() {
             return None;
@@ -574,6 +571,67 @@ impl Git {
                 error.message()
             )
         }))
+    }
+
+    /// Each of `names` that resolves, with its object id, in the order given. A name is resolved
+    /// through trees, which a blob-less store holds: no blob is read. G593 (a fleet finding,
+    /// 2026-10-30: a runner's red judgement took 682 s with its thread on a CPU for 12 s; its
+    /// evidence read asked for each note at every depth of the notes tree, and each name absent
+    /// from the tree cost a `rev-parse` of its own, about 27,000 of them): the `<rev>:<path>`
+    /// names of one rev are resolved by one `ls-tree` a chunk. A listing that fails resolves its
+    /// names one at a time, as any other name is.
+    fn resolve_names<'a>(&self, names: &'a [String]) -> Vec<(&'a str, String)> {
+        let mut by_rev: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        let mut alone: Vec<String> = Vec::new();
+        for name in names {
+            match tree_path(name) {
+                Some((rev, path)) => by_rev.entry(rev).or_default().push(path),
+                None => alone.push(name.clone()),
+            }
+        }
+        let mut found: BTreeMap<String, String> = BTreeMap::new();
+        for (rev, paths) in by_rev {
+            for chunk in path_chunks(&paths) {
+                match self.listed(rev, chunk) {
+                    Some(listed) => found.extend(
+                        listed
+                            .into_iter()
+                            .map(|(path, oid)| (format!("{rev}:{path}"), oid)),
+                    ),
+                    None => alone.extend(chunk.iter().map(|path| format!("{rev}:{path}"))),
+                }
+            }
+        }
+        for name in alone {
+            if let Ok(oid) = self.run(&["rev-parse", "--verify", "-q", &name]) {
+                found.insert(name, oid);
+            }
+        }
+        names
+            .iter()
+            .filter_map(|name| Some((name.as_str(), found.get(name)?.clone())))
+            .collect()
+    }
+
+    /// The entries of `rev`'s tree at `paths`, each path with its object id: one `ls-tree`, with
+    /// literal pathspecs. It names each tree it opens on the way (`-t`), or a path that is a tree
+    /// above another path asked for goes unlisted. `None` when the listing fails.
+    fn listed(&self, rev: &str, paths: &[&str]) -> Option<Vec<(String, String)>> {
+        let mut args = vec!["ls-tree", "-z", "-t", "--full-tree", rev, "--"];
+        args.extend_from_slice(paths);
+        let out = self
+            .run_bytes(&args, &[("GIT_LITERAL_PATHSPECS", "1")], None)
+            .ok()?;
+        Some(
+            out.split(|&byte| byte == 0)
+                .filter_map(|entry| {
+                    let entry = std::str::from_utf8(entry).ok()?;
+                    let (meta, path) = entry.split_once('\t')?;
+                    let oid = meta.split(' ').nth(2)?;
+                    Some((path.to_owned(), oid.to_owned()))
+                })
+                .collect(),
+        )
     }
 
     /// The remote a partial clone fetches its absent objects from, from this handle's config
@@ -1081,6 +1139,43 @@ fn named_absent(args: &[&str], output: &Output) -> Vec<String> {
 /// The names `cat-file --batch` (`contents`) or `--batch-check` answered `<name> missing`. A
 /// `--batch` answer is a `<oid> <type> <size>` line, the contents and a newline; one this
 /// cannot read ends the scan.
+/// The bytes of paths one `ls-tree` of [`Git::resolve_names`] is given: well under any
+/// platform's command-line limit.
+const LISTED_PATH_BYTES: usize = 8 * 1024;
+
+/// `name` as the rev and path of a `<rev>:<path>` name that one `ls-tree` of the rev lists:
+/// a rev that is a ref or an object id, never read as an option, and a path of plain
+/// components. `None` for any other name, which is resolved on its own.
+fn tree_path(name: &str) -> Option<(&str, &str)> {
+    let (rev, path) = name.split_once(':')?;
+    let plain_rev = !rev.is_empty()
+        && !rev.starts_with('-')
+        && rev
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/_.-".contains(&byte));
+    let plain_path = path
+        .split('/')
+        .all(|part| !part.is_empty() && part != "." && part != "..");
+    (plain_rev && plain_path).then_some((rev, path))
+}
+
+/// `paths` in runs of at most [`LISTED_PATH_BYTES`] bytes, each run at least one path.
+fn path_chunks<'a, 'b>(paths: &'b [&'a str]) -> Vec<&'b [&'a str]> {
+    let mut chunks = Vec::new();
+    let (mut start, mut bytes) = (0, 0);
+    for (at, path) in paths.iter().enumerate() {
+        if at > start && bytes + path.len() > LISTED_PATH_BYTES {
+            chunks.push(&paths[start..at]);
+            (start, bytes) = (at, 0);
+        }
+        bytes += path.len() + 1;
+    }
+    if start < paths.len() {
+        chunks.push(&paths[start..]);
+    }
+    chunks
+}
+
 fn batch_missing(out: &[u8], contents: bool) -> Vec<String> {
     let mut names = Vec::new();
     let mut rest = out;
@@ -1395,7 +1490,10 @@ fn wait_until(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{Git, GitError, batch_missing, bound_for, run_bounded_for};
+    use super::{
+        Git, GitError, LISTED_PATH_BYTES, batch_missing, bound_for, path_chunks, run_bounded_for,
+        tree_path,
+    };
     use crate::result::{GIT_CALL_TIMEOUT, GIT_NETWORK_TIMEOUT};
     use std::process::Command;
     use std::time::{Duration, Instant};
@@ -1564,6 +1662,75 @@ mod tests {
         assert_eq!(batch_missing(out.as_bytes(), true), ["gone", "HEAD:x"]);
         let checked = format!("{} blob 3\nHEAD:y missing\n", "2".repeat(40));
         assert_eq!(batch_missing(checked.as_bytes(), false), ["HEAD:y"]);
+    }
+
+    /// G593: `<rev>:<path>` names resolve through one listing of their rev, in the order given,
+    /// a path the tree lacks resolves to nothing, and any other name resolves on its own.
+    #[test]
+    fn names_resolve_a_listing_at_a_time_and_others_alone() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = Git::new(dir.path());
+        git.run(&["init", "-q"]).unwrap();
+        std::fs::create_dir_all(dir.path().join("ab/cd")).unwrap();
+        std::fs::write(dir.path().join("ab/cd/ef"), "one\n").unwrap();
+        std::fs::write(dir.path().join("top"), "two\n").unwrap();
+        git.run(&["add", "."]).unwrap();
+        git.run(&[
+            "-c",
+            "user.name=bay",
+            "-c",
+            "user.email=bay@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "tree",
+        ])
+        .unwrap();
+        let oid = |name: &str| git.run(&["rev-parse", name]).unwrap();
+        let (deep, top, head) = (oid("HEAD:ab/cd/ef"), oid("HEAD:top"), oid("HEAD"));
+        let names: Vec<String> = [
+            "HEAD:ab/cdef",
+            "HEAD:ab/cd/ef",
+            "HEAD~0:top",
+            "HEAD:abcd/ef",
+            "HEAD",
+            "nowhere:top",
+            "HEAD:ab/cd",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let cd = oid("HEAD:ab/cd");
+        assert_eq!(
+            git.resolve_names(&names),
+            [
+                ("HEAD:ab/cd/ef", deep),
+                ("HEAD~0:top", top),
+                ("HEAD", head),
+                ("HEAD:ab/cd", cd),
+            ]
+        );
+        assert_eq!(
+            tree_path("refs/notes/x:ab/cd"),
+            Some(("refs/notes/x", "ab/cd"))
+        );
+        for name in [
+            "HEAD~0:top",
+            ":top",
+            "-x:top",
+            "HEAD:",
+            "HEAD:a/",
+            "HEAD:./a",
+            "HEAD",
+        ] {
+            assert_eq!(tree_path(name), None, "{name}");
+        }
+        let long = "a".repeat(LISTED_PATH_BYTES);
+        let paths = ["b", long.as_str(), "c", "d"];
+        let chunks = path_chunks(&paths);
+        assert_eq!(chunks.concat(), paths);
+        assert_eq!(chunks, [&paths[..1], &paths[1..2], &paths[2..]]);
     }
 
     /// G135: a call that hangs is killed at its bound and reported as a timeout, never waited
