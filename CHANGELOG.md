@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.4
+
+- While main moved under a running repair, a change that skips the line waits for the repair.
+- `bay start <change> --paths` declares the paths the change does not cover yet; it keeps its place.
+
 ## 0.6.3
 
 - `bay queue` prints the live line head first as one `bay.queue/1` document, with changes no runner placed yet.
