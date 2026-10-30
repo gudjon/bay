@@ -63,6 +63,14 @@ organisation needs goes in its own `.bay/config.toml` and `.bay/policy.toml`, in
 public contract, or in its own docs. A feature that only makes sense for one organisation does not go
 into bay. Defaults are plain Git ones: `main`, any host.
 
+Before a change made for one repository's problem, ask whether a repository with other check names,
+another test layout and another load would get the same wrong answer. If not, the fix goes in that
+repository's `.bay/` (its policy, its config or its adapter), not here. bay reads what a repository
+declares, such as an adapter field or a policy key. It never parses one repository's naming convention.
+A number that depends on load comes from the repository's own config (a check's `timeout_s`, say), or
+it is a key with a neutral default. Comments, tests and commit messages describe the failure, not the
+repository that showed it.
+
 ## Files with one owner
 
 - **The bay skill**, `skills/bay/SKILL.md`, is the one copy for every agent and organisation. `bay install`
