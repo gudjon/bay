@@ -94,10 +94,10 @@ research, goes in a sandbox lane (`[[lane]]`). See [Promotion](https://getbay.io
 
 Every command prints one `bay.result/1` JSON document on stdout. Its `say` is one plain sentence: what
 happened, and what to do next. At a terminal, a person sees that sentence; `--json` or a pipe gets the
-document. There is never a prompt to answer. This is `bay merge` in bay 0.3.1:
+document. There is never a prompt to answer. This is `bay merge` in bay 0.6.14:
 
 ```json
-{"schema":"bay.result/1","op_id":"c7k2m4qa.1","decision":"queued","state":"submitted","say":"Saved. bay checks it and adds it to main next.","change":"c7k2m4qa","waiting_for":"runner","elapsed_s":1,"evidence":[],"freshness":{"main":"2222be8…","fetched_at":"2026-10-22T20:21:53Z"}}
+{"schema":"bay.result/1","op_id":"yq3o22fx.1","decision":"queued","state":"submitted","say":"Saved. bay checks it and adds it to main next.","change":"yq3o22fx","waiting_for":"runner","elapsed_s":0,"evidence":[],"freshness":{"main":"50cc53984ec78920b0e79947b9678a76c542fd72","fetched_at":"2026-10-30T21:16:03Z"}}
 ```
 
 `queued` means the merge has not happened yet; only `merged` means it has. A refusal names a stable
