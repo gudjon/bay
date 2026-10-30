@@ -2390,6 +2390,21 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
     judged
 }
 
+/// The units of `rerun` that `units` does not report, nor `gone` names outside a `retry` (a
+/// retry runs on the tree that failed them, so none of them is gone there).
+fn missed_reruns<'a>(
+    rerun: &'a [String],
+    units: &[Unit],
+    gone: &[String],
+    retry: bool,
+) -> Vec<&'a str> {
+    rerun
+        .iter()
+        .filter(|id| !units.iter().any(|unit| unit.id == **id) && (retry || !gone.contains(id)))
+        .map(String::as_str)
+        .collect()
+}
+
 /// [`judge`] past the failing units: the plan, the selection, every unit that did not fail,
 /// and whether the result answers each unit of the request's `rerun`. A failing unit is judged
 /// by the caller. A `retry` (0.6.6) is asked for `rerun` alone, so `rerun`'s length is its
@@ -2410,15 +2425,13 @@ fn judge_units(
         observed: None,
         gone: Vec::new(),
     };
-    let minimum = if retry {
-        u64::try_from(rerun.len()).unwrap_or(u64::MAX)
+    let (minimum, floor) = if retry {
+        (
+            u64::try_from(rerun.len()).unwrap_or(u64::MAX),
+            "the retry's rerun count",
+        )
     } else {
-        entry.minimum()
-    };
-    let floor = if retry {
-        "the retry's rerun count"
-    } else {
-        "the policy's expected_minimum"
+        (entry.minimum(), "the policy's expected_minimum")
     };
     // § 7: `declared_empty` is valid only with `selected` = 0 and `expected_minimum` = 0; any
     // other combination is `unknown`.
@@ -2481,13 +2494,7 @@ fn judge_units(
     // G540 (a fleet finding, 2026-10-29: scripts-fast failed on 3 units, and every later post
     // run, asked only about files no test reads, reached none of them): a red check's run that
     // does not answer each unit it was asked to run again is no pass, so it never clears the red.
-    let missed: Vec<&str> = rerun
-        .iter()
-        .filter(|id| {
-            !units.iter().any(|unit| unit.id == **id) && (retry || !result.plan.gone.contains(id))
-        })
-        .map(String::as_str)
-        .collect();
+    let missed = missed_reruns(rerun, &units, &result.plan.gone, retry);
     if !missed.is_empty() {
         return with(
             Verdict::Unknown,
