@@ -3228,6 +3228,8 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     // which wait in arrival order.
     // G552: a change that needs no check runs from its own place too, unless main moved under
     // the head once already: then it keeps its place until that head leaves the head.
+    // BACKLOG 139: neither it nor a change past the red's places runs from its own place while
+    // main moved under a running repair: it keeps its place until that repair leaves the line.
     // A repair with no place yet takes one and runs from it in this visit, never a pass later.
     let repairs = repairs_red(ctx, trunk)?;
     if repairs && queue.of(op_id).is_none() {
@@ -3236,9 +3238,10 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     }
     if let Some(entry) = queue.of(op_id).cloned()
         && (repairs
-            || (needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
+            || (((needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
                 && !main_moved_under(ctx.repo, &head))
-            || passes_red(ctx, &queue, entry.seq, trunk)?)
+                || passes_red(ctx, &queue, entry.seq, trunk)?)
+                && !repair_moved_under(ctx, &queue, trunk, op_id)?))
     {
         return unless_red(ctx, op_id, trunk, Gate::Head(entry.seq));
     }
@@ -3291,22 +3294,54 @@ fn passes_red(
 /// move costs the head one check, never one per change behind it. A head that waits on a repair
 /// (`Blocked`) holds nothing.
 fn main_moved_under(repo: &Repo, head: &crate::queue::Entry) -> bool {
-    Chain::new(&repo.git)
-        .read(&head.change)
-        .ok()
-        .and_then(|(_, record)| {
-            record
-                .operations
-                .into_iter()
-                .find(|op| op.op_id == head.op_id)
-        })
-        .is_some_and(|op| {
-            op.trunk_moved > 0
+    moved_under(repo, head).is_some()
+}
+
+/// The change record of queue place `entry`, as this box last fetched its chain, when a
+/// publishing push of its operation was refused because main moved and the operation still runs.
+fn moved_under(repo: &Repo, entry: &crate::queue::Entry) -> Option<ChangeRecord> {
+    let (_, record) = Chain::new(&repo.git).read(&entry.change).ok()?;
+    record
+        .operations
+        .iter()
+        .any(|op| {
+            op.op_id == entry.op_id
+                && op.trunk_moved > 0
                 && matches!(
                     op.state,
                     OpState::Admitted | OpState::Running | OpState::Checked
                 )
         })
+        .then_some(record)
+}
+
+/// BACKLOG 139 (a fleet finding, 2026-10-30: the repair 3t7jrfsw of a red post check was refused
+/// "main moved" on four tries, while documents and changes past the red's places landed under
+/// it; the head, waiting on the red, held none of them): whether main moved under a running
+/// repair of a red post check on `trunk` at a live place other than `op_id`'s. A change that
+/// needs no check, or passes the red's places, then waits its turn, as G552 makes it wait for the
+/// head ([`main_moved_under`]), so one move costs the repair one check.
+fn repair_moved_under(
+    ctx: &Ctx,
+    queue: &crate::queue::Queue,
+    trunk: &str,
+    op_id: &str,
+) -> Result<bool, String> {
+    let git = &ctx.repo.git;
+    if crate::red::holding(git, trunk, ctx.registry.as_ref())?.is_empty() {
+        return Ok(false);
+    }
+    for entry in queue.ahead_of(u64::MAX) {
+        if entry.op_id == op_id {
+            continue;
+        }
+        if let Some(record) = moved_under(ctx.repo, entry)
+            && crate::red::repairs(git, trunk, ctx.registry.as_ref(), &record.repair_names())?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Nothing to check, nothing to wait (owner, 2026-10-26: a document must reach main at once):
