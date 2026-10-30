@@ -2274,10 +2274,7 @@ fn batch_plan(
         fails_on: Vec::new(),
     };
     let waiting = queue.behind(at);
-    let behind: Vec<throughput::Queued> = waiting
-        .iter()
-        .map_while(|entry| throughput::Queued::read(git, entry))
-        .collect();
+    let (behind, unread) = throughput::read_line(git, waiting.iter().copied());
     let by_lane = repo.config.footprint_lanes();
     let (mut members, mut stopped) = throughput::plan_batch(
         git,
@@ -2293,9 +2290,6 @@ fn batch_plan(
     if stopped == "commit_keyed" {
         say_commit_keyed(git, &policy, (trunk, revision), op_id)?;
         return Ok(None);
-    }
-    if stopped == "end_of_line" && behind.len() < waiting.len() {
-        stopped = "unreadable";
     }
     // Owner ruling 2026-10-21: a member over the size limits never lands in a batch; the batch
     // ends before it, and it is refused at its own candidate build.
@@ -2314,10 +2308,17 @@ fn batch_plan(
         }
         members.truncate(within);
     }
-    // R7: one journal line per batch decision, naming why the batch ended.
+    // R7: one journal line per batch decision, naming why the batch ended; G581: and each place
+    // passed over because its operation does not read here.
+    let passed_over = if unread.is_empty() {
+        String::new()
+    } else {
+        let changes: Vec<&str> = unread.iter().map(|entry| entry.change.as_str()).collect();
+        format!("; passed over, not read here: {}", changes.join(", "))
+    };
     let said = |how: &str, stopped: &str| {
         eprintln!(
-            "bay runner: {op_id} batch of {} {how}, stopped: {stopped}",
+            "bay runner: {op_id} batch of {} {how}, stopped: {stopped}{passed_over}",
             members.len()
         );
     };
@@ -3601,12 +3602,15 @@ fn speculate_batch(
     if lane_failure_rate(git, &queue, &at_trunk, None) > bounds.max_failure_rate {
         return Ok(None);
     }
-    let line: Vec<throughput::Queued> = queue
-        .entries
-        .values()
-        .filter(|entry| !queue.released.contains(&entry.seq))
-        .map_while(|entry| throughput::Queued::read(git, entry))
-        .collect();
+    // G581: a place whose operation does not read here is passed over, never the end of the
+    // line checked ahead; the batch decision names it.
+    let (line, _) = throughput::read_line(
+        git,
+        queue
+            .entries
+            .values()
+            .filter(|entry| !queue.released.contains(&entry.seq)),
+    );
     let mut base = trunk.to_owned();
     let mut covered = 0;
     let mut at = 0;
