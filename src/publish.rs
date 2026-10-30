@@ -2046,7 +2046,8 @@ fn batch(
     }
     ctx.step.set("check");
     let id = throughput::batch_id(op_id, trunk)?;
-    let Some((search, checks)) = bisect_batch(ctx, op_id, trunk, &policy, &members, &id)? else {
+    let Some((search, mut checks)) = bisect_batch(ctx, op_id, trunk, &policy, &members, &id)?
+    else {
         return Ok(None);
     };
     if let Some(culprit) = search.culprit().filter(|culprit| *culprit >= 2) {
@@ -2056,17 +2057,18 @@ fn batch(
     if search.passed() < 2 {
         return Ok(None);
     }
-    let landing = &members[..search.passed()];
-    ctx.step.set("join");
     let mut others = Vec::new();
-    for member in &landing[1..] {
-        if let Ok(Some(other)) = joined(ctx, member, trunk) {
-            others.push(other);
-        } else {
-            give_back(&mut others, landing, "a member could not join the batch");
-            return Ok(None);
-        }
-    }
+    let Some(size) = join_or_cut(
+        ctx,
+        (op_id, trunk, &policy, &id),
+        &members[..search.passed()],
+        &mut others,
+        (&mut checks, &mut stopped),
+    )?
+    else {
+        return Ok(None);
+    };
+    let landing = &members[..size];
     match land_batch(ctx, &mut others, landing, trunk, &id) {
         Ok(Some(mut result)) => {
             if let Some(detail) = result.detail.as_mut() {
@@ -2435,28 +2437,107 @@ fn bisect_batch(
     Ok(Some((search, checks)))
 }
 
+/// E59 (a fleet finding, 2026-10-30): the members of the checked prefix `landing` behind the
+/// head join it in turn (claimed into `others`). A member that cannot join, such as one whose
+/// owner sent a new revision while the batch was checked, used to end the batch: every claim
+/// went back and the head ran alone, so the check and each join before it were lost. Now the
+/// batch is cut to the members before it, which keep their claims; that prefix is checked
+/// again as its own tree, and the members past the prefix that passes go back. The journal names the member and why. The member that could not join keeps its
+/// place for its own turn. Returns the members that land, or `None` when fewer than two do
+/// (every claim given back).
+fn join_or_cut<'a>(
+    ctx: &mut Ctx<'a>,
+    (op_id, trunk, policy, id): (&str, &str, &policy::Policy, &str),
+    landing: &[throughput::Member],
+    others: &mut Vec<Ctx<'a>>,
+    (checks, stopped): (&mut Vec<serde_json::Value>, &mut &'static str),
+) -> Result<Option<usize>, String> {
+    ctx.step.set("join");
+    let mut cut = None;
+    for (at, member) in landing.iter().enumerate().skip(1) {
+        match joined(ctx, member, trunk) {
+            Ok(Ok(other)) => others.push(other),
+            Ok(Err(why)) => {
+                cut = Some((at, why));
+                break;
+            }
+            Err(error) => {
+                cut = Some((at, format!("it could not be read: {error}")));
+                break;
+            }
+        }
+    }
+    let Some((size, why)) = cut else {
+        return Ok(Some(landing.len()));
+    };
+    eprintln!(
+        "bay runner: {op_id} batch of {} cut to {size}: {} could not join ({why})",
+        landing.len(),
+        landing[size].change
+    );
+    *stopped = "not_joined";
+    if size < 2 {
+        give_back(others, landing, "a member could not join the batch");
+        return Ok(None);
+    }
+    ctx.step.set("check");
+    let again = match bisect_batch(ctx, op_id, trunk, policy, &landing[..size], id) {
+        Ok(Some((search, more))) => {
+            checks.extend(more);
+            search.passed()
+        }
+        Ok(None) => 0,
+        Err(error) => {
+            give_back(others, landing, "the cut batch could not be checked");
+            return Err(error);
+        }
+    };
+    ctx.step.set("join");
+    if again < 2 {
+        give_back(others, landing, "the cut batch did not pass its check");
+        return Ok(None);
+    }
+    let mut past = others.split_off(again - 1);
+    give_back(
+        &mut past,
+        &landing[again - 1..],
+        "the cut batch did not pass its check",
+    );
+    Ok(Some(again))
+}
+
 /// A batch member other than the head, loaded, verified and claimed by this executor (§ 9a),
-/// or `None` when it cannot join: its request no longer verifies, or it is not this
-/// executor's to run.
+/// or, when it cannot join, why: its request no longer verifies, it is a repair or waits for
+/// a change not on trunk, or it is not this executor's to run.
 fn joined<'a>(
     ctx: &Ctx<'a>,
     member: &throughput::Member,
     trunk: &str,
-) -> Result<Option<Ctx<'a>>, String> {
+) -> Result<Result<Ctx<'a>, String>, String> {
     let mut other = Ctx::load(ctx.repo, ctx.step, &member.change)?;
     other.registry.clone_from(&ctx.registry);
     let signer = other.executor_signer()?;
     other.chain.sign_with(signer);
+    if verify_request(&mut other, &member.op_id)?.is_some() {
+        return Ok(Err("its request does not verify".to_owned()));
+    }
     // A repair is judged by its own policy alone, never in a batch (§ 7). G273: a member that
     // lands after a change not yet on trunk never joins one.
-    if verify_request(&mut other, &member.op_id)?.is_some()
-        || other.repair.is_some()
-        || dependency_waiting(&other, &member.op_id, trunk)?.is_some()
-        || claim(&mut other, &member.op_id, &member.revision, trunk)?.is_some()
-    {
-        return Ok(None);
+    if other.repair.is_some() {
+        return Ok(Err("a repair runs alone".to_owned()));
     }
-    Ok(Some(other))
+    if dependency_waiting(&other, &member.op_id, trunk)?.is_some() {
+        return Ok(Err("it lands after a change not on main".to_owned()));
+    }
+    if let Some(refused) = claim(&mut other, &member.op_id, &member.revision, trunk)? {
+        return Ok(Err(match refused.state.as_deref() {
+            Some("superseded") => "its operation was superseded".to_owned(),
+            Some("running") => "another runner holds it".to_owned(),
+            Some(state) => format!("it is {state}"),
+            None => "it was not claimed here".to_owned(),
+        }));
+    }
+    Ok(Ok(other))
 }
 
 /// The claims of a batch's other members (`others`, for `members` after the head) go back, so
