@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.12
+
+- `bay runner drain` stops a runner between operations once its post pieces end.
+- A red's fix is a change that names its check, its owner, or a change it failed on.
+- A change that names a suspect merge is a red's fix only when it changes the red's paths or check.
+
 ## 0.6.11
 
 - A fix for a red main runs first in a pass, ahead of changes submitted before it.
