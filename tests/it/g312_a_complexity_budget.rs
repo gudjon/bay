@@ -60,8 +60,11 @@ use support::TestBox;
 ///   result records.
 /// - 0.6.3, one command (`queue`): a person or a third-party tool read the line from `bay
 ///   status` and the queue refs by hand; now it is one `bay.queue/1` document.
-const COMMANDS: usize = 29;
-const FLAGS: usize = 90;
+/// - 0.6.12, one command and one flag (`runner drain`, `--cancel`, G589): a restart to bring a
+///   runner new settings ended it by signal inside the check it ran; now one command asks it to
+///   stop between operations, and `--cancel` takes the ask back.
+const COMMANDS: usize = 30;
+const FLAGS: usize = 91;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,
