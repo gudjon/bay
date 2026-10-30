@@ -41,6 +41,11 @@
 //!   passes it ([`blocking`]).
 //!   Without a culprit the owner moves to each newer failure, so the red row names one stable
 //!   name for `--fixes` ([`Red::fixes`]: the first failure).
+//! - G584 (a fleet finding, 2026-10-30: a check that never passed read back to the reach, 545 s
+//!   a judgement, and named the newest failure): the walk to a pass stops at the landing whose
+//!   base policy lists other post checks and not this one, the landing that added the check
+//!   ([`Suspect::added`]). With no pass after it, that landing owns the red, and `--fixes` names
+//!   it: the check never passed, so the cause is the check, its setup, or a merge since.
 //!
 //! While red or `pending_fix`, the executor refuses a candidate that touches those paths with
 //! `MAIN_RED`, naming the owner and the ways out; a change that names a merge the red names in
@@ -168,8 +173,11 @@ pub struct Suspect {
     /// The one landing the evidence leaves, when the pass sits right below the first failure.
     pub culprit: Option<Culprit>,
     /// B5: with no pass found, how many first-parent commits of main were read back for one;
-    /// `None` when `passed` names it.
+    /// `None` when `passed` or `added` names where the walk stopped.
     pub searched: Option<usize>,
+    /// G584: with no pass found, the landing that added the check: its base policy lists other
+    /// post checks and not this one. It owns the red, and the range ends at it.
+    pub added: Option<Mark>,
 }
 
 /// The landing that broke a red post check, as its evidence pins it: the newest pass is its
@@ -224,7 +232,7 @@ impl Mark {
     }
 
     /// How a sentence names it: its change, else its commit, short.
-    fn named(&self) -> String {
+    pub(crate) fn named(&self) -> String {
         match &self.change {
             Some(change) => format!("change {change}"),
             None => format!("merge {}", &self.landing[..self.landing.len().min(12)]),
@@ -241,6 +249,7 @@ impl Suspect {
             "landings": self.landings.iter().map(Mark::to_json).collect::<Vec<_>>(),
             "failing": self.failing.iter().map(Mark::to_json).collect::<Vec<_>>(),
             "searched": self.searched,
+            "check_added": self.added.as_ref().map(Mark::to_json),
         })
     }
 }
@@ -344,26 +353,27 @@ impl Red {
                 culprit.mark.named()
             );
         }
-        let owner = Mark {
-            landing: self.landing.clone(),
-            change: self.change.clone(),
-        };
-        let seen = if suspect.failed == owner {
-            format!("seen failing at {}", owner.named())
+        let seen = if suspect.failed == suspect.newest_failed {
+            format!("seen failing at {}", suspect.failed.named())
         } else {
             format!(
                 "seen failing at {} first and at {} last",
                 suspect.failed.named(),
-                owner.named()
+                suspect.newest_failed.named()
             )
         };
-        let cause = match &suspect.passed {
-            Some(passed) => format!(
+        let cause = match (&suspect.passed, &suspect.added) {
+            (Some(passed), _) => format!(
                 "the cause is one of the {} merges after its last pass at {}, on its paths or not",
                 suspect.landings.len(),
                 passed.named()
             ),
-            None => format!(
+            (None, Some(added)) => format!(
+                "it has not passed since {} added it to the policy, so that merge owns the red: \
+                 the cause is the check itself, its setup, or a merge since, on its paths or not",
+                added.named()
+            ),
+            (None, None) => format!(
                 "no merge of the newest {} on main passed it, so bay cannot narrow the cause",
                 suspect.searched.unwrap_or_default()
             ),
@@ -405,14 +415,18 @@ impl Red {
             .any(|change| names.contains(&change))
     }
 
-    /// E36: the one name a fix gives in `--fixes`, stable while the red stands: the first
-    /// failure (the culprit, when the evidence pins one), else the owning change. The owner
-    /// moves to each newer failure while no culprit is pinned.
+    /// E36: the one name a fix gives in `--fixes`, stable while the red stands: the landing
+    /// that added a check that never passed (G584), else the first failure (the culprit, when
+    /// the evidence pins one), else the owning change. The owner moves to each newer failure
+    /// while neither pins it.
     #[must_use]
     pub fn fixes(&self) -> Option<&String> {
         self.suspect
             .as_ref()
-            .and_then(|suspect| suspect.failed.change.as_ref())
+            .and_then(|suspect| {
+                let added = suspect.added.as_ref().and_then(|mark| mark.change.as_ref());
+                added.or(suspect.failed.change.as_ref())
+            })
             .or(self.change.as_ref())
     }
 
@@ -925,7 +939,6 @@ fn changed_check(git: &Git, landing: &str, post: &crate::policy::ManifestEntry) 
     }
 }
 
-/// Whether a landing newer than `landings[owner]` fixes, undoes or supersedes its change.
 /// N-20, B5: the landings a red judgement reads, newest first: the landing line of the window,
 /// then, once a red check's window holds no pass, the line past it down to the reach.
 struct Line {
@@ -1067,6 +1080,13 @@ impl<'a> Answers<'a> {
         }))
     }
 
+    /// G584: whether landing `at`'s base policy lists other post checks and not `post`, so the
+    /// landing added it. A base with no post checks, or no valid policy, says nothing.
+    fn unlisted(&mut self, at: usize, post: &crate::policy::ManifestEntry) -> Result<bool, String> {
+        let listed = self.row(at, post)?.is_some();
+        Ok(!listed && self.rows[at].as_ref().is_some_and(|rows| !rows.is_empty()))
+    }
+
     /// Whether landing `at`'s diff requires `post` (its `when_paths`, judged at its base).
     fn requires(&mut self, at: usize, post: &crate::policy::ManifestEntry) -> Result<bool, String> {
         Ok(self
@@ -1094,8 +1114,10 @@ impl<'a> Answers<'a> {
 
     /// NEW-6: the suspect range of `post`, red from landing `at`: older landings are read back
     /// to the newest pass, past the window down to the reach when it holds none (B5), and the
-    /// oldest failure after it is the first failure. With it, the landing that owns the red:
-    /// the culprit when the pass sits right below the first failure, else `at`.
+    /// oldest failure after it is the first failure. G584: the walk stops at the landing that
+    /// added the check, which ends the range. With it, the landing that owns the red: the
+    /// culprit when the pass sits right below the first failure, else the landing that added
+    /// the check, else `at`.
     fn suspect(
         &mut self,
         post: &crate::policy::ManifestEntry,
@@ -1103,8 +1125,13 @@ impl<'a> Answers<'a> {
     ) -> Result<(Suspect, usize), String> {
         let mut first = at;
         let mut passed = None;
+        let mut added = None;
         let mut older = at + 1;
         while older < self.line.landings.len() || self.past()? {
+            if self.unlisted(older, post)? {
+                added = Some(older);
+                break;
+            }
             match self.decides(older, post)? {
                 Some(true) => first = older,
                 Some(false) => {
@@ -1115,13 +1142,19 @@ impl<'a> Answers<'a> {
             }
             older += 1;
         }
-        let end = passed.unwrap_or(self.line.landings.len());
+        let end = passed
+            .or(added.map(|added| added + 1))
+            .unwrap_or(self.line.landings.len());
         // Landings are newest first: the pass right below the first failure is at `first + 1`.
         let culprit = match passed {
             Some(older) if older == first + 1 => Some(self.culprit(post, first, at, older)?),
             _ => None,
         };
-        let owner = if culprit.is_some() { first } else { at };
+        let owner = match (&culprit, added) {
+            (Some(_), _) => first,
+            (None, Some(added)) => added,
+            (None, None) => at,
+        };
         let landings = &self.line.landings;
         Ok((
             Suspect {
@@ -1131,7 +1164,8 @@ impl<'a> Answers<'a> {
                 failing: landings[at..first].iter().rev().map(Mark::of).collect(),
                 newest_failed: Mark::of(&landings[at]),
                 culprit,
-                searched: passed.is_none().then_some(self.line.depth),
+                searched: (passed.is_none() && added.is_none()).then_some(self.line.depth),
+                added: added.map(|added| Mark::of(&landings[added])),
             },
             owner,
         ))

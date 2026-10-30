@@ -612,10 +612,17 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
             continue;
         };
         if suspect.passed.is_none() {
-            let why = format!(
-                "no merge of the newest {} on main passes the check, so the range has no good end",
-                suspect.searched.unwrap_or_default()
-            );
+            let why = match &suspect.added {
+                Some(added) => format!(
+                    "the check has not passed since {} added it, so the range has no good end",
+                    added.named()
+                ),
+                None => format!(
+                    "no merge of the newest {} on main passes the check, so the range has no \
+                     good end",
+                    suspect.searched.unwrap_or_default()
+                ),
+            };
             rows.push(not_run(&red, &why, &[]));
         } else if !served.serves(&red.environment) {
             rows.push(not_run(
