@@ -132,6 +132,7 @@ fn run_with(
         inputs: &[],
         turn: None,
         rerun: &[],
+        retry: 0,
     };
     let limits = Limits {
         budget,

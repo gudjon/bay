@@ -22,6 +22,7 @@ use crate::materialize::{Unmade, materialize};
 use crate::policy::{CheckEntry, Policy};
 
 /// What is being checked.
+#[derive(Clone, Copy)]
 pub struct Candidate<'a> {
     pub commit: &'a str,
     pub tree: &'a str,
@@ -52,8 +53,12 @@ pub struct Candidate<'a> {
     pub turn: Option<&'static str>,
     /// G540: a red post check's run on main's tip names the units that failed in the red's
     /// newest failing record, sorted: the request's `rerun`. Empty for every other run, and the
-    /// request then has no `rerun`.
+    /// request then has no `rerun`. A retry's `rerun` is the units its previous run failed.
     pub rerun: &'a [String],
+    /// 0.6.6: 0 for a check's first run; for a rerun after a `product_failure` that named its
+    /// failed units, the rerun's number (1 for the first): the request's `retry`. The adapter
+    /// may then run `rerun` alone ([`retry_of`]).
+    pub retry: u32,
 }
 
 /// The change behind a candidate, as its check request names it (`INTERFACES` § 3).
@@ -1163,12 +1168,14 @@ fn run_in_slot(shared: Shared, (index, entry): (usize, &CheckEntry)) -> Result<S
         seen: if shared.shows { Some(look) } else { None },
     };
     let (mut runs, mut unavailable) = (Vec::new(), None);
+    let mut failed: Vec<String> = Vec::new();
     // Flake-aware retry, as [`run_serial`]: every rerun stays in this check's own slot.
     for run in 0..=entry.retry_on_failure {
+        let asked = retry_of(shared.candidate, &failed, run);
         let (mut judged, ran) = run_once(
             shared.git,
             shared.policy,
-            shared.candidate,
+            &asked,
             shared.limits,
             &mut hooks,
             (index, entry),
@@ -1188,6 +1195,7 @@ fn run_in_slot(shared: Shared, (index, entry): (usize, &CheckEntry)) -> Result<S
             &shared.limits.sandbox,
         );
         let verdict = record.verdict;
+        failed = failed_ids(&record);
         runs.push(record);
         if verdict != Verdict::ProductFailure {
             break;
@@ -1390,12 +1398,15 @@ fn run_serial(
     } = shared;
     // Flake-aware retry: a `product_failure` runs again on the identical tree, freshly
     // materialized, up to `retry_on_failure` times, and stops at the first other answer.
-    // Every run is its own record, so a failure and a later pass combine to `flaky`.
+    // Every run is its own record, so a failure and a later pass combine to `flaky`. A rerun
+    // asks again for the units the run before failed ([`retry_of`]).
+    let mut failed: Vec<String> = Vec::new();
     for run in 0..=entry.retry_on_failure {
+        let asked = retry_of(candidate, &failed, run);
         let (mut judged, ran) = run_once(
             git,
             policy,
-            candidate,
+            &asked,
             limits,
             hooks,
             (index, entry),
@@ -1440,12 +1451,43 @@ fn run_serial(
             record.unknown.insert(BASELINE.to_owned(), compared);
         }
         let verdict = record.verdict;
+        failed = failed_ids(&record);
         keep_record(shared, (index, entry), record, hooks, records)?;
         if verdict != Verdict::ProductFailure {
             break;
         }
     }
     Ok(None)
+}
+
+/// 0.6.6 (a fleet finding, 2026-10-30: edge-py-fast, designer-fast and studio-fast each turned
+/// main red on one flaky unit overnight, and each red held its paths for one full run, 9 to 12
+/// minutes): the candidate a check's `run`th run asks. A rerun after a failure that named its
+/// `failed` units asks again for those units alone, with `retry` its number, so a flake costs
+/// the units that failed, not the whole check. A first run, or a rerun after a failure that
+/// named no unit, asks what the candidate asks.
+fn retry_of<'a>(candidate: &Candidate<'a>, failed: &'a [String], run: u32) -> Candidate<'a> {
+    if run == 0 || failed.is_empty() {
+        return *candidate;
+    }
+    Candidate {
+        rerun: failed,
+        retry: run,
+        ..*candidate
+    }
+}
+
+/// The ids of the units `record` failed, sorted and once each: what its check's next rerun asks.
+fn failed_ids(record: &EvidenceRecord) -> Vec<String> {
+    let mut ids: Vec<String> = record
+        .units
+        .iter()
+        .filter(|unit| unit.verdict == Verdict::ProductFailure)
+        .map(|unit| unit.id.clone())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 /// G561 (BACKLOG #129; a fleet finding, 2026-10-29: a runner wrote nothing for the 27
@@ -1757,6 +1799,7 @@ fn base_answer(
         inputs: candidate.inputs,
         turn: None,
         rerun: &[],
+        retry: 0,
     };
     let (mut judged, ran) = run_once(
         git,
@@ -1989,6 +2032,12 @@ struct Place<'a> {
 ///   `plan.gone`, never dropping one silently. A result that reports a requested unit neither
 ///   among its `checks` nor in `plan.gone` is `unknown`, whatever its other units say: a run that
 ///   did not answer the failed units never clears the red.
+/// - `retry`: only on a rerun after a `product_failure` that named its failed units (0.6.6,
+///   `retry_on_failure`): the rerun's number, 1 for the first, with `rerun` the units the run
+///   before failed. The tree is the one that failed, so an adapter may run `rerun` alone; one
+///   that does not know `retry` runs its usual selection as well, which is slower and as right.
+///   The result reports each `rerun` unit as a unit: on the same tree `plan.gone` answers none of
+///   them, and the policy's `expected_minimum` reads as the length of `rerun`.
 ///
 /// A check whose verdict reads `base`, `change` or `messages` declares `inputs = ["commit"]` or
 /// `["history"]`, so its evidence is keyed by subject commit and never stands for another
@@ -2015,6 +2064,9 @@ fn request(
     });
     if !candidate.rerun.is_empty() {
         request["rerun"] = json!(candidate.rerun);
+    }
+    if candidate.retry > 0 {
+        request["retry"] = json!(candidate.retry);
     }
     // N-18: the tree holds only `changed_paths` (and the entry's `paths`), so an adapter knows
     // that a file absent from it may still be in the candidate.
@@ -2317,7 +2369,7 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
     let failed = units
         .iter()
         .any(|unit| unit.verdict == Verdict::ProductFailure);
-    let mut judged = judge_units(result, entry, units, candidate.rerun);
+    let mut judged = judge_units(result, entry, units, (candidate.rerun, candidate.retry > 0));
     judged.gone = candidate
         .rerun
         .iter()
@@ -2340,12 +2392,13 @@ fn judge(result: &CheckResult, entry: &CheckEntry, candidate: &Candidate) -> Jud
 
 /// [`judge`] past the failing units: the plan, the selection, every unit that did not fail,
 /// and whether the result answers each unit of the request's `rerun`. A failing unit is judged
-/// by the caller.
+/// by the caller. A `retry` (0.6.6) is asked for `rerun` alone, so `rerun`'s length is its
+/// minimum and `plan.gone` answers none of it: the tree is the one that failed them.
 fn judge_units(
     result: &CheckResult,
     entry: &CheckEntry,
     units: Vec<Unit>,
-    rerun: &[String],
+    (rerun, retry): (&[String], bool),
 ) -> Judged {
     let with = |verdict: Verdict, why: Option<String>, units: Vec<Unit>| Judged {
         verdict,
@@ -2357,18 +2410,27 @@ fn judge_units(
         observed: None,
         gone: Vec::new(),
     };
+    let minimum = if retry {
+        u64::try_from(rerun.len()).unwrap_or(u64::MAX)
+    } else {
+        entry.minimum()
+    };
+    let floor = if retry {
+        "the retry's rerun count"
+    } else {
+        "the policy's expected_minimum"
+    };
     // § 7: `declared_empty` is valid only with `selected` = 0 and `expected_minimum` = 0; any
     // other combination is `unknown`.
     let declared = result.plan.selection.as_deref();
     if let Some(selection) = declared
-        && (selection != DECLARED_EMPTY || result.plan.selected > 0 || entry.minimum() > 0)
+        && (selection != DECLARED_EMPTY || result.plan.selected > 0 || minimum > 0)
     {
         return with(
             Verdict::Unknown,
             Some(format!(
-                "selection {selection} with {} selected under the policy's expected_minimum {}; {DECLARED_EMPTY} needs both at zero",
+                "selection {selection} with {} selected under {floor} {minimum}; {DECLARED_EMPTY} needs both at zero",
                 result.plan.selected,
-                entry.minimum()
             )),
             units,
         );
@@ -2386,13 +2448,10 @@ fn judge_units(
             units,
         );
     }
-    if collected < entry.minimum() {
+    if collected < minimum {
         return with(
             Verdict::Unknown,
-            Some(format!(
-                "collected {collected} of the policy's expected_minimum {}",
-                entry.minimum()
-            )),
+            Some(format!("collected {collected} of {floor} {minimum}")),
             units,
         );
     }
@@ -2424,7 +2483,9 @@ fn judge_units(
     // does not answer each unit it was asked to run again is no pass, so it never clears the red.
     let missed: Vec<&str> = rerun
         .iter()
-        .filter(|id| !units.iter().any(|unit| unit.id == **id) && !result.plan.gone.contains(id))
+        .filter(|id| {
+            !units.iter().any(|unit| unit.id == **id) && (retry || !result.plan.gone.contains(id))
+        })
         .map(String::as_str)
         .collect();
     if !missed.is_empty() {
@@ -2964,6 +3025,7 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
                 inputs: &[],
                 turn: None,
                 rerun: &[],
+                retry: 0,
             };
             let limits = Limits {
                 budget: None,

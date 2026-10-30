@@ -6272,6 +6272,7 @@ fn run_policy(
             inputs,
             turn: Some(if ctx.ahead_of_turn { "ahead" } else { "head" }),
             rerun: &[],
+            retry: 0,
         },
         &producer,
         &check::Limits {

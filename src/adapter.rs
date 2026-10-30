@@ -1073,6 +1073,7 @@ fn run_check(
             inputs: &[],
             turn: None,
             rerun: &[],
+            retry: 0,
         },
         PRODUCER,
         &limits,

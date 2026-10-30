@@ -114,7 +114,7 @@ impl Piece {
                     (&id, ("post", post)),
                     (&tip, Some(&since), &rerun),
                 ) {
-                    Ok(Ok(verdict)) => json!(verdict),
+                    Ok(Ok(answer)) => answer.word(),
                     Ok(Err(why)) | Err(why) => json!({"not_run": why}),
                 };
                 reports.push(json!({"check": id.id, "environment": environment, "tip": tip, "verdict": verdict}));
@@ -128,7 +128,7 @@ impl Piece {
                         (&id, ("warm", json!({"tip": tip}))),
                         (&tip, None, &[]),
                     ) {
-                        Ok(Ok(verdict)) => json!(verdict),
+                        Ok(Ok(answer)) => answer.word(),
                         Ok(Err(why)) => json!({"not_run": why}),
                         Err(why) => return json!({"error": why}),
                     };
@@ -704,7 +704,7 @@ fn bisect(
             (&id, ("bisect", window.clone())),
             (&mark.landing, None, &[]),
         )? {
-            Ok(verdict) => verdict,
+            Ok(answer) => answer.verdict,
             Err(why) => return Ok(not_run(red, &why, &tested)),
         };
         tested.push(tested_json(&mark, verdict));
@@ -730,7 +730,7 @@ fn bisect(
                 (&id, ("bisect", window.clone())),
                 (&mark.landing, None, &[]),
             )? {
-                Ok(verdict) => verdict,
+                Ok(answer) => answer.verdict,
                 Err(why) => return Ok(not_run(red, &why, &tested)),
             };
             tested.push(tested_json(&mark, verdict));
@@ -846,7 +846,7 @@ fn run_at(
     writer: &Writer,
     (id, why): (&CheckId, (&str, Value)),
     (commit, since, rerun): (&str, Option<&str>, &[String]),
-) -> Result<Result<Verdict, String>, String> {
+) -> Result<Result<Answer, String>, String> {
     let (field, body) = why;
     // A post run and a bisect step judge a red check (a post run of a green one passed the
     // longer wait in `tips`); a warm run holds nothing.
@@ -871,10 +871,17 @@ fn run_at(
     } else {
         crate::policy::Stage::Post
     };
-    let only = match alone(git, writer, id, &base, stage)? {
+    let mut only = match alone(git, writer, id, &base, stage)? {
         Ok(only) => only,
         Err(why) => return Ok(Err(why)),
     };
+    // A bisect step asks whether one landing fails, once: its own rerun at the suspect rules
+    // out a flake ([`bisect`]), so a post check's retries (0.6.6) are for its run on the tip.
+    if field == "bisect" {
+        for entry in &mut only.checks {
+            entry.retry_on_failure = 0;
+        }
+    }
     // A post run on the tip names what changed since `since` (G439); a bisect step names its
     // landing's own change, which is what it judges.
     let changed = check::changed_paths(git, since.unwrap_or(&base), commit)?;
@@ -933,6 +940,7 @@ fn run_at(
             inputs: &[],
             turn: None,
             rerun,
+            retry: 0,
         },
         &writer.name,
         &check::Limits {
@@ -962,12 +970,12 @@ fn answered(
     writer: &Writer,
     id: &CheckId,
     ran: check::Ran,
-) -> Result<Result<Verdict, String>, String> {
+) -> Result<Result<Answer, String>, String> {
     if let Some((_, reason)) = ran.unavailable {
         note_unavailable(repo, id, Some(crate::live::unix_now()));
         return Ok(Err(format!("no worker answers the check: {reason}")));
     }
-    let Some(verdict) = ran.records.first().map(|record| record.verdict) else {
+    let Some(answer) = Answer::of(&ran.records) else {
         return Ok(Err("the check wrote no record".to_owned()));
     };
     note_unavailable(repo, id, None);
@@ -981,7 +989,47 @@ fn answered(
                 error.message()
             )
         })?;
-    Ok(Ok(verdict))
+    Ok(Ok(answer))
+}
+
+/// What one run of a check answered on its tree, its reruns with it, as evidence combines a
+/// tree's records: a `product_failure` with a later `pass` is `flaky` (0.6.6: a post check's
+/// retry that passed), a `product_failure` alone a failure, a `pass` alone a pass, and a run
+/// that neither passed nor failed its last record's verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Answer {
+    verdict: Verdict,
+    flaky: bool,
+}
+
+impl Answer {
+    fn of(records: &[EvidenceRecord]) -> Option<Self> {
+        let last = records.last()?.verdict;
+        let failed = records
+            .iter()
+            .any(|record| record.verdict == Verdict::ProductFailure);
+        let passed = records.iter().any(|record| record.verdict == Verdict::Pass);
+        let verdict = if failed {
+            Verdict::ProductFailure
+        } else if passed {
+            Verdict::Pass
+        } else {
+            last
+        };
+        Some(Self {
+            verdict,
+            flaky: failed && passed,
+        })
+    }
+
+    /// The word a post work row says: the verdict, or `flaky`.
+    fn word(self) -> Value {
+        if self.flaky {
+            json!("flaky")
+        } else {
+            json!(self.verdict)
+        }
+    }
 }
 
 /// The policy at `base` with check `id` alone, a required post check whatever the landing's

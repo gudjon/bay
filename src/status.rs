@@ -440,11 +440,13 @@ fn quarantines(repo: &Repo, trunk: &str) -> Value {
     open_quarantines(&repo.git, trunk).map_or_else(|why| json!({"unread": why}), Value::from)
 }
 
-/// Per required check of the policy at trunk, how many of the newest first-parent landings
-/// (the `[red] window`) carry runs of it that combine to `flaky`, read from the evidence
-/// already in this clone: a check that flakes is seen before anyone quarantines it. Each row
-/// names `landings`, how many were read, and the check's `retry_on_failure` and
-/// `allow_flaky`. A policy, config or registry bay cannot read lists none and says why.
+/// Per required check of the policy at trunk, pre-merge and post (0.6.6: a post check's retry
+/// that passes turns no main red, so its flakes are counted here), how many of the newest
+/// first-parent landings (the `[red] window`) carry runs of it that combine to `flaky`, read
+/// from the evidence already in this clone: a check that flakes is seen before anyone
+/// quarantines it. Each row names `landings`, how many were read, and the check's
+/// `retry_on_failure` and `allow_flaky`. A policy, config or registry bay cannot read lists
+/// none and says why.
 fn flake_rows(repo: &Repo, trunk: &str, read: &Read) -> Value {
     // An unreadable registry never reads as none: evidence would then count unsigned.
     let current;
@@ -477,7 +479,9 @@ fn flakes(
         Ok(None) | Err(crate::policy::LoadError::Invalid(_)) => return Ok(Vec::new()),
         Err(crate::policy::LoadError::Git(why)) => return Err(why),
     };
-    if policy.manifest.is_empty() {
+    let required: Vec<&crate::policy::ManifestEntry> =
+        policy.manifest.iter().chain(&policy.post).collect();
+    if required.is_empty() {
         return Ok(Vec::new());
     }
     let window = crate::red::window(git, trunk)?.to_string();
@@ -491,7 +495,7 @@ fn flakes(
             trunk,
         ])
         .map_err(|error| error.message())?;
-    let mut counts = vec![0_u64; policy.manifest.len()];
+    let mut counts = vec![0_u64; required.len()];
     let mut read = 0_u64;
     for (commit, tree) in landings.lines().filter_map(|line| line.split_once(' ')) {
         read += 1;
@@ -500,7 +504,7 @@ fn flakes(
             evidence::records_for(git, tree)?,
             registry,
         )?);
-        for (entry, count) in policy.manifest.iter().zip(counts.iter_mut()) {
+        for (entry, count) in required.iter().zip(counts.iter_mut()) {
             let id = evidence::CheckId::new(&entry.id, &entry.environment);
             let subject = policy.commit_keyed(&id).then_some(commit);
             // Each landing was judged under the manifest of its own base: any one of them
@@ -519,8 +523,7 @@ fn flakes(
             }
         }
     }
-    Ok(policy
-        .manifest
+    Ok(required
         .iter()
         .zip(counts)
         .map(|(entry, flaky)| {

@@ -2154,8 +2154,10 @@ fn validate_producers(entry: &CheckEntry) -> Result<(), String> {
 }
 
 /// The flake keys of one `[[check]]`: `retry_on_failure` at most [`MAX_RETRY_ON_FAILURE`], and
-/// neither key on a post-publication check, which bay never runs or judges for a landing: a
-/// key there would change nothing, and a typo is never silent.
+/// no `allow_flaky` on a post-publication check, which bay never judges for a landing: the key
+/// there would change nothing, and a typo is never silent. A post check may retry (0.6.6): a
+/// post run on main's tip that fails runs its failed units again, and a pass then is `flaky`,
+/// which turns no main red.
 fn validate_retry(entry: &CheckEntry) -> Result<(), String> {
     if entry.retry_on_failure > MAX_RETRY_ON_FAILURE {
         return Err(format!(
@@ -2163,9 +2165,9 @@ fn validate_retry(entry: &CheckEntry) -> Result<(), String> {
             entry.id, entry.retry_on_failure
         ));
     }
-    if entry.stage == Stage::Post && (entry.retry_on_failure > 0 || entry.allow_flaky) {
+    if entry.stage == Stage::Post && entry.allow_flaky {
         return Err(format!(
-            "check {} runs after the merge; retry_on_failure and allow_flaky apply only to a pre-merge check",
+            "check {} runs after the merge; allow_flaky applies only to a pre-merge check",
             entry.id
         ));
     }
@@ -2415,6 +2417,24 @@ mod tests {
             manifest_entry(&plain, &ids).unwrap().definition_digest,
             manifest_entry(&set, &ids).unwrap().definition_digest
         );
+    }
+
+    /// 0.6.6: a post check may retry its failed units; `allow_flaky` stays a pre-merge key, and
+    /// the cap holds on both stages.
+    #[test]
+    fn a_post_check_may_retry_but_never_allows_a_flake() {
+        let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\nstage = \"post\"\n";
+        let retry: CheckEntry = toml::from_str(&format!("{text}retry_on_failure = 1\n")).unwrap();
+        assert!(super::validate_retry(&retry).is_ok());
+        let flaky: CheckEntry = toml::from_str(&format!("{text}allow_flaky = true\n")).unwrap();
+        let why = super::validate_retry(&flaky).unwrap_err();
+        assert!(why.contains("allow_flaky applies only to a pre-merge check"), "{why}");
+        let over: CheckEntry = toml::from_str(&format!(
+            "{text}retry_on_failure = {}\n",
+            super::MAX_RETRY_ON_FAILURE + 1
+        ))
+        .unwrap();
+        assert!(super::validate_retry(&over).is_err());
     }
 
     /// N-9: `waivable = true` enters the definition digest; absent, it is left out of the
