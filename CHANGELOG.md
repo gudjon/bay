@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.11
+
+- A fix for a red main runs first in a pass, ahead of changes submitted before it.
+- `bay status` warns `single_machine_environment` when only one machine's runners serve a check environment.
+- A wait on a red main names its check, the change to fix and any fix already on main.
+- `detail.batch.stopped_at` names the change a batch ended at, when one entry ended it.
+
 ## 0.6.10
 
 - A red post check that never passed is owned by the merge that added it to the policy.
