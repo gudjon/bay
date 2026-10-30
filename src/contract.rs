@@ -236,6 +236,8 @@ pub const WRITES: &[(&str, &[&str], &[&str])] = &[
         &[
             "run: the merges of queued changes into main, with their evidence and its log",
             "install: a service file that keeps it running",
+            "drain: one file in the clone's .git/bay that asks its runner to stop between \
+             operations; the runner removes it when it stops",
         ],
         &["your checkout's files"],
     ),

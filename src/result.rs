@@ -1860,6 +1860,20 @@ fn ok_say(result: &BayResult) -> &'static str {
     }) {
         return "bay works here, but it does not guard this project yet: changes can reach main without its checks. Turn on its safety settings to guard it.";
     }
+    // G589: `bay runner drain` asked the runner here to stop, or took the ask back; then the
+    // runner's own result once it stopped.
+    if let Some(detail) = detail.filter(|detail| detail.get("drain").is_some()) {
+        return match (detail["drain"].is_null(), detail["cancelled"] == true) {
+            (false, _) => {
+                "The runner here stops between jobs once its post checks end; its service then starts it again with the service's settings."
+            }
+            (true, true) => "The runner here is no longer asked to stop.",
+            (true, false) => "No stop was asked of the runner here.",
+        };
+    }
+    if detail.is_some_and(|detail| detail.get("drained").is_some()) {
+        return "The runner stopped as asked; its service starts it again.";
+    }
     // G304: an approval or a waiver is given, and the change is not on main yet;
     // the sentence says who adds it (`lands_by`, written by `bay approve`).
     if let Some(sentence) = answered_say(detail) {

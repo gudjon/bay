@@ -54,8 +54,12 @@ use crate::repo::Repo;
 use crate::result::{BayResult, Decision, Reason};
 use crate::signing::Keys;
 
+mod drain;
 mod post;
 
+pub use drain::drain;
+
+use drain::Drain;
 use post::Post;
 
 #[must_use]
@@ -95,6 +99,8 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     let mut post = Post::new(once);
     // The version a runner waits to move to while its post pieces run, said once.
     let mut waits_for: Option<String> = None;
+    // G589: a stop `bay runner drain` asks of this clone's runner, between operations.
+    let mut drain = Drain::of(dir);
     loop {
         // Each pass reads the config at the trunk tip it fetched (ruling: config location),
         // so a config that landed since the last pass governs this one.
@@ -120,7 +126,7 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         let mut advanced = Vec::new();
         let mut ran = match pass(
             &repo,
-            moves.then_some(&binary),
+            (moves.then_some(&binary), (!once).then_some(&drain)),
             (&mut notes, &mut advanced),
             seen,
             &mut beat,
@@ -129,8 +135,14 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             Ok(ran) => ran,
             Err(message) => return BayResult::failed(message),
         };
-        // Between passes, never inside an operation: the re-exec point.
-        if !once
+        // Between passes, never inside an operation: the re-exec point. G589: a drain asked of
+        // this runner comes first: it stops there once its post pieces end, and its service
+        // starts the installed binary, a new one too.
+        if !once && drain.asked() {
+            if let Some(drained) = drain.point(&mut post, &mut ran) {
+                return drained;
+            }
+        } else if !once
             && (binary.changed() || binary.holding())
             && let Some(moved) =
                 reexec_point(&mut binary, moves, (&mut post, &mut waits_for), &mut ran)
@@ -600,7 +612,7 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 
 /// One pass: every operation that is neither terminal nor blocked runs to an outcome, and
 /// one blocked `APPROVAL_PENDING` is asked again (G284, [`publish::awaits_approval`]). With a
-/// `binary` to watch, it stops between operations once that binary changed. Before the
+/// runner to watch, it stops between operations once the runner is leaving ([`leaving`]). Before the
 /// first operation, and after each landing, the entries behind the queue's head are probed
 /// for a conflict with trunk (G177); what each probe noted goes to `notes`.
 ///
@@ -619,12 +631,12 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 /// newest promotable commit (`crate::target::advance`); each move goes to `advanced`.
 ///
 /// #123: after the queue's work, [`post_pass`] collects the post pieces that ended and starts
-/// the next ones in `post`; once `binary` changed it starts none, and the pass stops between
-/// operations only when no piece runs.
+/// the next ones in `post`; once the runner is leaving it starts none, and the pass stops
+/// between operations only when no piece runs.
 #[allow(clippy::too_many_lines)]
 fn pass(
     shared: &Arc<Repo>,
-    binary: Option<&Binary>,
+    watch: (Option<&Binary>, Option<&Drain>),
     (notes, advanced): (&mut Vec<Value>, &mut Vec<Value>),
     seen: Seen,
     beat: &mut crate::presence::Beat,
@@ -711,7 +723,7 @@ fn pass(
             break;
         }
         for op_id in queued {
-            if binary.is_some_and(Binary::changed) && post.idle() {
+            if leaving(watch) && post.idle() {
                 ran.extend(recovered.take());
                 ran.append(&mut arrivals.rows);
                 return Ok(ran);
@@ -742,7 +754,7 @@ fn pass(
     );
     ran.extend(compaction(repo, &chain));
     ran.extend(recovered.take());
-    let plans = !binary.is_some_and(Binary::changed);
+    let plans = !leaving(watch);
     ran.extend(post_pass(shared, post, plans, (beat, depth, &mut arrivals)));
     // A fleet finding (2026-10-27): a retention cut costs a fetch of its chain, and one that
     // does not happen leaves the chain due again; read inside the loop, hundreds of closed chains
@@ -814,6 +826,12 @@ fn post_pass(
         rows.extend(beat.meanwhile(repo, "post", depth, &mut placing, || post.finish()));
     }
     post::rows(rows)
+}
+
+/// Whether a looping runner is leaving: its binary changed, or a drain is asked (G589). A
+/// leaving runner starts no post piece, and stops between operations once none runs.
+fn leaving((binary, drain): (Option<&Binary>, Option<&Drain>)) -> bool {
+    binary.is_some_and(Binary::changed) || drain.is_some_and(Drain::asked)
 }
 
 /// The re-exec point of a runner whose binary changed, between passes and never inside an

@@ -635,6 +635,13 @@ enum RunnerAction {
         #[arg(long)]
         force: bool,
     },
+    /// Ask this clone's runner to stop between operations, once its post work ends, so its
+    /// service starts it again with the service's settings
+    Drain {
+        /// Take back a stop asked before
+        #[arg(long)]
+        cancel: bool,
+    },
 }
 
 /// The `CONFIG_MISSING` refusal of a command that needs the trunk or policy, so needs the
@@ -913,6 +920,9 @@ fn main() -> ExitCode {
         Command::Runner {
             action: RunnerAction::Install { print, force },
         } => bay::service::install(&cli.dir, &bay::service::Request { print, force }),
+        Command::Runner {
+            action: RunnerAction::Drain { cancel },
+        } => bay::executor::drain(&cli.dir, cancel),
         Command::Live { action } => live(&cli.dir, action),
         command @ Command::Status { .. } => status(&cli.dir, command),
         Command::Queue => bay::line::queue(&cli.dir),
