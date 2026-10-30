@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.14
+
+- An evidence read in a blob-less clone lists note paths in one git call, not one call per name.
+
 ## 0.6.13
 
 - A judgement of main's red that takes a minute or more is named in the runner's journal.
