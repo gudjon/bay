@@ -6,7 +6,8 @@
 //! operation, runs nothing and stops renewing its lease, so an executor whose box serves it
 //! claims the operation at once, with a higher epoch, and lands it once (G425: a waiting
 //! operation holds no lease against a box that serves it). A wait recorded under an older
-//! policy keeps only the environments the policy at trunk still requires (G431). While it waits,
+//! policy keeps only the environments the policy at trunk still requires (G431). A change that
+//! raises the policy is routed by its own new checks too (G579). While it waits,
 //! `bay status` says it waits for a worker and names the environment. Doctor's `environments`
 //! row names what the box serves and whether that was declared. A box that declares nothing
 //! serves every environment, as before the declaration existed, so an upgrade stops no executor
@@ -360,4 +361,107 @@ fn a_wait_for_an_environment_the_policy_no_longer_needs_is_over() {
         "a wait for env-b outlived the policy that asked for it: {second}"
     );
     assert_eq!(line_count(&runs), 1, "one check ran, on E1");
+}
+
+/// A trunk whose one check runs in `env-a`, and a change that raises the policy and adds a
+/// check in `env-b`, submitted for an executor. Returns (change id, remote, runs).
+fn policy_change_submitted(test_box: &TestBox) -> (String, PathBuf, PathBuf) {
+    let repo = test_box.repo_any("repo");
+    let remote = test_box.path().join("repo-remote.git");
+    let runs = test_box.path().join("runs");
+    let files: Vec<(String, String)> = check_files(
+        &test_box.relay(&format!("echo \"$tree\" >> '{}'", runs.display())),
+        &passing_result(1),
+        1,
+        60,
+    )
+    .into_iter()
+    .map(|(path, text)| (path, text.replace("\"local\"", "\"env-a\"")))
+    .collect();
+    let policy = files
+        .iter()
+        .find(|(path, _)| path == ".bay/policy.toml")
+        .map(|(_, text)| text.clone())
+        .unwrap();
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    let started = test_box.bay_ok(&repo, &["start", "CARD-G579", "--paths", ".bay/"]);
+    let id = started["change"].as_str().unwrap().to_owned();
+    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+    let check = &policy[policy.find("[[check]]").unwrap()..];
+    let own = format!(
+        "{}\n{}",
+        policy.replace("revision = 1", "revision = 2"),
+        check
+            .replace("\"tests\"", "\"more\"")
+            .replace("\"env-a\"", "\"env-b\"")
+    );
+    std::fs::write(view.join(".bay/policy.toml"), own).unwrap();
+    let (code, result) = result_json(test_box.bay(&view).arg("merge"));
+    assert_eq!(code, 0, "{result}");
+    (id, remote, runs)
+}
+
+/// G579 (a fleet finding, 2026-10-30): a change to the policy is checked by its own new
+/// policy too, so the environments its own checks run in route it. A box that serves only what
+/// the policy at trunk needs leaves it to a live box that serves them all, and runs nothing.
+/// Before, every box claimed it, ran the base's check, found no worker for the new one and sent
+/// the change to the back.
+#[test]
+fn a_change_to_the_policy_is_routed_by_its_own_checks_too() {
+    let test_box = TestBox::new();
+    let (id, remote, runs) = policy_change_submitted(&test_box);
+    let e1 = executor(&test_box, &remote, "exec-a", "env-a");
+    let e2 = executor(&test_box, &remote, "exec-b", "env-a");
+    test_box.git_ok(&e2, &["config", "--add", "bay.checkEnvironment", "env-b"]);
+    // E2's presence is fresh: it made a pass that stopped before its claim.
+    let _ = test_box
+        .bay_process(&e2)
+        .args(["--json", "runner", "run", "--once"])
+        .env("BAY_TEST_PAUSE_AT", "before-claim")
+        .env("BAY_TEST_PAUSE_FILE", test_box.path().join("never"))
+        .env("BAY_TEST_PAUSE_TIMEOUT_S", "2")
+        .output();
+    let passed = test_box.bay_ok(&e1, &["runner", "run", "--once"]);
+    let log = test_box.git_bare(
+        &remote,
+        &["log", "--format=%s", &format!("refs/bay/changes/{id}")],
+    );
+    assert!(
+        !log.contains("by exec-a"),
+        "the box that cannot serve env-b claimed the policy change: {log}\n{passed}"
+    );
+    assert_eq!(line_count(&runs), 0, "E1 ran no check");
+    for _ in 0..3 {
+        test_box.bay_ok(&e2, &["runner", "run", "--once"]);
+        if test_box.trunk_change_ids(&remote).contains(&id) {
+            break;
+        }
+    }
+    assert_eq!(test_box.trunk_change_ids(&remote), vec![id], "E2 landed it");
+}
+
+/// G579: with no live box that serves its own new check, a box that recorded the wait for it
+/// passes the policy change over, and claims and checks it no more.
+#[test]
+fn a_wait_for_a_policy_changes_own_check_holds() {
+    let test_box = TestBox::new();
+    let (id, remote, runs) = policy_change_submitted(&test_box);
+    let e1 = executor(&test_box, &remote, "exec-a", "env-a");
+    let first = test_box.bay_ok(&e1, &["runner", "run", "--once"]);
+    assert_eq!(
+        first["detail"]["ran"][0]["reason"], "CHECK_UNAVAILABLE",
+        "{first}"
+    );
+    let ran = line_count(&runs);
+    let second = test_box.bay_ok(&e1, &["runner", "run", "--once"]);
+    assert_eq!(
+        line_count(&runs),
+        ran,
+        "E1 checked the change again: {second}"
+    );
+    let log = test_box.git_bare(
+        &remote,
+        &["log", "--format=%s", &format!("refs/bay/changes/{id}")],
+    );
+    assert_eq!(log.matches("by exec-a").count(), 1, "{log}");
 }

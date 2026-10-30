@@ -6625,7 +6625,7 @@ fn served_elsewhere(
     trunk: &str,
 ) -> Result<Option<BayResult>, String> {
     let git = &ctx.repo.git;
-    let Ok(Some(policy)) = policy::load_at(git, trunk) else {
+    let Some(policies) = judging_policies(git, revision, trunk) else {
         return Ok(None);
     };
     let served = check::Served::read(git);
@@ -6633,10 +6633,14 @@ fn served_elsewhere(
         return Ok(None);
     };
     let changed = check::changed_paths(git, &base, revision)?;
-    let mut required: Vec<&str> = policy
-        .checks
+    let mut required: Vec<&str> = policies
         .iter()
-        .filter(|entry| !entry.is_approval() && policy.requires(entry, &changed))
+        .flat_map(|policy| {
+            policy
+                .checks
+                .iter()
+                .filter(|entry| !entry.is_approval() && policy.requires(entry, &changed))
+        })
         .map(|entry| entry.environment.as_str())
         .collect();
     required.sort_unstable();
@@ -6749,21 +6753,42 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Opti
     ))
 }
 
-/// The environments the policy at `trunk` runs checks in for `revision`'s change (G431);
+/// The environments the policies that judge `revision`'s change run checks in (G431, G579);
 /// `None` when that cannot be read.
 fn required_environments(ctx: &Ctx, revision: &str, trunk: &str) -> Option<Vec<String>> {
     let git = &ctx.repo.git;
-    let policy = policy::load_at(git, trunk).ok()??;
+    let policies = judging_policies(git, revision, trunk)?;
     let base = git.run(&["merge-base", trunk, revision]).ok()?;
     let changed = check::changed_paths(git, &base, revision).ok()?;
     Some(
-        policy
-            .checks
+        policies
             .iter()
-            .filter(|entry| policy.runs(entry, &changed))
+            .flat_map(|policy| {
+                policy
+                    .checks
+                    .iter()
+                    .filter(|entry| policy.runs(entry, &changed))
+            })
             .map(|entry| entry.environment.clone())
             .collect(),
     )
+}
+
+/// The policies a candidate of `revision` is checked by: the policy at `trunk`, and the
+/// change's own policy when it raises the revision, since a change to the policy is checked
+/// by both (§ 7). `None` when the policy at trunk cannot be read.
+///
+/// G579 (a fleet finding, 2026-10-30: 6cpulzc2): a change that added a check in an
+/// environment one box served was routed by the policy at trunk alone. Every box claimed it,
+/// ran the base's checks, found no worker for its own new check and sent it to the back; one
+/// operation was claimed 41 times.
+fn judging_policies(git: &Git, revision: &str, trunk: &str) -> Option<Vec<policy::Policy>> {
+    let at_trunk = policy::load_at(git, trunk).ok()??;
+    let own = policy::load_at(git, revision)
+        .ok()
+        .flatten()
+        .filter(|own| own.revision > at_trunk.revision);
+    Some(std::iter::once(at_trunk).chain(own).collect())
 }
 
 /// The verdict of `policy` over every counted record on the tree (`all`): `None` for a pass,
