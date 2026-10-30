@@ -93,12 +93,15 @@ fn first_line(out: impl std::io::Read + Send + 'static) -> String {
 }
 
 /// Seeds `repo` with the check, the policy and a runner that runs post checks: `slow` adds a
-/// line to `started` and waits for `go`.
+/// line to `started` and waits for `go`. A killed runner leaves its check running, so the wait
+/// also ends once the test's folder is gone, or after its 150 s timeout: a failed test leaves
+/// no process behind.
 fn seed(test_box: &TestBox, repo: &Path, started: &Path, go: &Path) {
     let hold = test_box.relay(&format!(
-        "echo x >> '{}'; until [ -e '{}' ]; do sleep 0.05; done",
-        started.display(),
-        go.display()
+        "echo x >> '{started}'; i=0; until [ -e '{go}' ] || [ ! -e '{started}' ] || [ $i -ge 3000 ]; \
+         do sleep 0.05; i=$((i+1)); done",
+        started = started.display(),
+        go = go.display()
     ));
     let files = vec![
         ("scripts/bay-check".to_owned(), adapter(&hold)),
