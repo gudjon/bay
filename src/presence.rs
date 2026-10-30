@@ -519,6 +519,100 @@ pub fn unserved_environments(repo: &Repo, queued: usize, trunk: &str) -> Option<
     }))
 }
 
+/// The warnings `bay status` gives about the runners while `queued` operations wait: no live
+/// runner, an environment no live runner serves, and one only one machine serves.
+pub fn runner_warnings(repo: &Repo, queued: usize, trunk: &str) -> Vec<Value> {
+    no_live_executor(repo, queued)
+        .into_iter()
+        .chain(unserved_environments(repo, queued, trunk))
+        .chain(single_machine_environments(repo, queued, trunk))
+        .collect()
+}
+
+/// G586 (a fleet finding, 2026-10-30: three environments were served by one box's runner, and
+/// each stop of that box stopped their checks, with nothing said). A `single_machine_environment`
+/// warning when operations are queued, live runners answer from two or more machines, and the
+/// runners that serve an environment a check of the policy at `trunk` runs in are all on one
+/// machine. A live runner that declares nothing serves every environment; an environment no live
+/// runner serves is [`unserved_environments`]'s.
+#[must_use]
+pub fn single_machine_environments(repo: &Repo, queued: usize, trunk: &str) -> Option<Value> {
+    if queued == 0 {
+        return None;
+    }
+    let rows = crate::fleet::executors(repo).ok()??;
+    let live: Vec<(&str, &str, &Value)> = rows
+        .iter()
+        .filter(|row| row["readable"] == true && row["stale"] == false)
+        .filter_map(|row| {
+            Some((
+                row["executor"].as_str()?,
+                row["machine"].as_str()?,
+                &row["environments"],
+            ))
+        })
+        .collect();
+    let mut machines: Vec<&str> = live.iter().map(|(_, machine, _)| *machine).collect();
+    machines.sort_unstable();
+    machines.dedup();
+    if machines.len() < 2 {
+        return None;
+    }
+    let serves = |environments: &Value, environment: &str| {
+        environments["source"] == "default"
+            || environments["declared"]
+                .as_array()
+                .is_some_and(|declared| declared.iter().any(|served| served == environment))
+    };
+    let policy = crate::policy::load_at(&repo.git, trunk).ok()??;
+    let mut checks: Vec<(&str, &str)> = policy
+        .checks
+        .iter()
+        // G245: an approval runs on no runner; a person's record answers it.
+        .filter(|entry| !entry.is_approval())
+        .map(|entry| (entry.environment.as_str(), entry.id.as_str()))
+        .collect();
+    checks.sort_unstable();
+    let mut single = Vec::new();
+    for (at, (environment, _)) in checks.iter().enumerate() {
+        if at > 0 && checks[at - 1].0 == *environment {
+            continue;
+        }
+        let serving: Vec<(&str, &str)> = live
+            .iter()
+            .filter(|(_, _, environments)| serves(environments, environment))
+            .map(|(executor, machine, _)| (*executor, *machine))
+            .collect();
+        let Some((_, machine)) = serving.first() else {
+            continue;
+        };
+        if serving.iter().any(|(_, other)| other != machine) {
+            continue;
+        }
+        let ids: Vec<&str> = checks
+            .iter()
+            .filter(|(other, _)| other == environment)
+            .map(|(_, check)| *check)
+            .collect();
+        let runners: Vec<&str> = serving.iter().map(|(executor, _)| *executor).collect();
+        single.push(json!({
+            "environment": environment,
+            "machine": machine,
+            "runners": runners,
+            "checks": ids,
+        }));
+    }
+    if single.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "code": "single_machine_environment",
+        "environments": single,
+        "machines": machines,
+        "note": "only one machine serves these environments, so their checks wait while it is busy or stopped: add each with git config --add bay.checkEnvironment <environment> in a runner's clone on another machine, then restart that runner",
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::age;

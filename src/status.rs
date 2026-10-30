@@ -311,12 +311,7 @@ fn run(dir: &Path, change: Option<&str>) -> Result<BayResult, String> {
     if let (Some(detail), Some(hold)) = (result.detail.as_mut(), crate::hold::held(&repo, &trunk)) {
         detail["hold"] = hold.to_json();
     }
-    let mut warnings: Vec<Value> = crate::presence::no_live_executor(&repo, queued)
-        .into_iter()
-        .chain(crate::presence::unserved_environments(
-            &repo, queued, &trunk,
-        ))
-        .collect();
+    let mut warnings = crate::presence::runner_warnings(&repo, queued, &trunk);
     // N-20: each outside merge in the red window that pushed bay landings off the line.
     warnings.extend(not_linear(&repo.git, &trunk));
     // R11: delivery that fails is never silent.
