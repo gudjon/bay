@@ -67,6 +67,7 @@
 //! once main is green the change runs before every change submitted after it.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -693,6 +694,89 @@ pub fn judged(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Jud
     Ok(judgement)
 }
 
+/// G592 (a fleet finding, 2026-10-30: two heads' `red` steps took 2209 s and 2213 s side by
+/// side, where the step's p50 is 3 s, and no record said whether the judgement took the time,
+/// or what it read): what one judgement cost, for a runner's journal ([`last_cost`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cost {
+    /// Its whole seconds.
+    pub seconds: u64,
+    /// How many landings' answers it read (S4), past the window too.
+    pub read: usize,
+    /// Whether it started from no earlier judgement.
+    pub full: bool,
+    /// Whether it read past the window (B5).
+    pub past: bool,
+    /// How many other judgements this process ran when it began or ended, the more of the two.
+    pub beside: usize,
+    /// The whole seconds its thread ran on a CPU, and waited for one, as Linux counts them
+    /// (`/proc/thread-self/schedstat`); `None` where that cannot be read. A git process it
+    /// started counts in neither.
+    pub sched: Option<(u64, u64)>,
+}
+
+impl Cost {
+    /// The journal's words for it.
+    #[must_use]
+    pub fn said(&self) -> String {
+        let from = if self.full {
+            "in full"
+        } else {
+            "from the last judgement"
+        };
+        let past = if self.past {
+            ", past the window too"
+        } else {
+            ""
+        };
+        let sched = self.sched.map_or_else(String::new, |(ran, waited)| {
+            format!("; its thread ran {ran}s and waited {waited}s for a CPU")
+        });
+        format!(
+            "red judgement took {}s: it read {} landings {from}{past}; {} other judgements ran beside it{sched}",
+            self.seconds, self.read, self.beside
+        )
+    }
+}
+
+thread_local! {
+    /// The cost of the last judgement this thread made, until [`last_cost`] takes it.
+    static COST: std::cell::Cell<Option<Cost>> = const { std::cell::Cell::new(None) };
+}
+
+/// How many judgements this process runs now (G592).
+static JUDGING: AtomicUsize = AtomicUsize::new(0);
+
+/// One judgement counted in [`JUDGING`] while it lives.
+struct Judging;
+
+impl Judging {
+    /// The count raised, and how many other judgements ran when it was.
+    fn begin() -> (Self, usize) {
+        (Self, JUDGING.fetch_add(1, Ordering::SeqCst))
+    }
+}
+
+impl Drop for Judging {
+    fn drop(&mut self) {
+        JUDGING.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// What the last judgement this thread made cost, once: it says `None` again until the thread
+/// judges again. A judgement [`judged`] serves from its cache costs nothing and sets none.
+#[must_use]
+pub fn last_cost() -> Option<Cost> {
+    COST.with(std::cell::Cell::take)
+}
+
+/// This thread's nanoseconds on a CPU and waiting for one so far, where Linux counts them.
+fn schedstat() -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string("/proc/thread-self/schedstat").ok()?;
+    let mut fields = text.split_whitespace().map(str::parse::<u64>);
+    Some((fields.next()?.ok()?, fields.next()?.ok()?))
+}
+
 /// A test build writes a line to the file `BAY_TEST_RED_TRACE` names for each judgement
 /// [`judge`] makes (G430): `<trunk> read <n> in full`, or `<trunk> read <n> from <trunk>` when it
 /// started from an earlier one (BACKLOG 97); `<n>` is how many landings' answers it read (S4). A
@@ -771,6 +855,9 @@ fn judge_from(
     let Some(policy) = post_policy(git, trunk)? else {
         return Ok((Judgement::default(), None, Answered::new()));
     };
+    let began = std::time::Instant::now();
+    let sched = schedstat();
+    let (_judging, others) = Judging::begin();
     let (window, reach) = bounds(git, trunk)?;
     // The tips before the answers: a record written in between reads as moved next time.
     let evidence = evidence_tips(git)?;
@@ -805,6 +892,21 @@ fn judge_from(
         Answers::new(git, registry, line, carried, past),
     )?;
     trace(trunk, known.as_ref().map(|(before, _)| *before), read.read);
+    let sched = sched
+        .zip(schedstat())
+        .map(|((ran, waited), (ran_now, waited_now))| {
+            let seconds = |from: u64, to: u64| to.saturating_sub(from) / 1_000_000_000;
+            (seconds(ran, ran_now), seconds(waited, waited_now))
+        });
+    let cost = Cost {
+        seconds: began.elapsed().as_secs(),
+        read: read.read,
+        full: known.is_none(),
+        past: read.past.read,
+        beside: others.max(JUDGING.load(Ordering::SeqCst).saturating_sub(1)),
+        sched,
+    };
+    COST.with(|last| last.set(Some(cost)));
     let answers = read
         .line
         .landings

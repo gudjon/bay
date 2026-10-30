@@ -2159,7 +2159,9 @@ fn ends_before_red(
     trunk: &str,
 ) -> Result<bool, String> {
     let git = &ctx.repo.git;
-    let reds = crate::red::holding(git, trunk, ctx.registry.as_ref())?;
+    let reds = journaled(ctx, || {
+        crate::red::holding(git, trunk, ctx.registry.as_ref())
+    })?;
     if reds.is_empty() {
         return Ok(false);
     }
@@ -3386,7 +3388,9 @@ fn passes_red(
         return Ok(false);
     }
     let git = &ctx.repo.git;
-    let reds = crate::red::holding(git, trunk, ctx.registry.as_ref())?;
+    let reds = journaled(ctx, || {
+        crate::red::holding(git, trunk, ctx.registry.as_ref())
+    })?;
     if reds.is_empty() {
         return Ok(false);
     }
@@ -3439,7 +3443,11 @@ fn repair_moved_under(
     op_id: &str,
 ) -> Result<bool, String> {
     let git = &ctx.repo.git;
-    if crate::red::holding(git, trunk, ctx.registry.as_ref())?.is_empty() {
+    if journaled(ctx, || {
+        crate::red::holding(git, trunk, ctx.registry.as_ref())
+    })?
+    .is_empty()
+    {
         return Ok(false);
     }
     for entry in queue.ahead_of(u64::MAX) {
@@ -3496,7 +3504,30 @@ fn repairs_red(ctx: &Ctx, trunk: &str) -> Result<bool, String> {
     // The post records on the remote decide the red: fetched now, only for a change that names
     // a repair, so a runner never judges a repair on a stale reading.
     ctx.repo.fetch_evidence(&ctx.keys);
-    crate::red::repairs(&ctx.repo.git, trunk, ctx.registry.as_ref(), &names)
+    journaled(ctx, || {
+        crate::red::repairs(&ctx.repo.git, trunk, ctx.registry.as_ref(), &names)
+    })
+}
+
+/// How long a judgement of main's red takes before a runner's journal names it (G592).
+const SLOW_RED_S: u64 = 60;
+
+/// `judge`, a judgement of main's red, and the journal line of the judgement it made when that
+/// took [`SLOW_RED_S`] or more (G592): what it read, beside how many others, and how long its
+/// thread waited for a CPU. Read beside the operation's own line, it says whether the judgement
+/// took the `red` step's time. A test build reads the bound from `BAY_TEST_SLOW_RED_S`.
+fn journaled<T>(ctx: &Ctx, judge: impl FnOnce() -> T) -> T {
+    let _ = crate::red::last_cost();
+    let out = judge();
+    let slow = std::env::var("BAY_TEST_SLOW_RED_S")
+        .ok()
+        .filter(|_| TEST_HOOKS)
+        .and_then(|seconds| seconds.parse().ok())
+        .unwrap_or(SLOW_RED_S);
+    if let Some(cost) = crate::red::last_cost().filter(|cost| cost.seconds >= slow) {
+        eprintln!("bay runner: {} {}", ctx.id, cost.said());
+    }
+    out
 }
 
 /// Holds a place in the queue: reserves one if the operation has none, gives up ownership so
@@ -4843,7 +4874,9 @@ fn red_gate(
 ) -> Result<Option<BayResult>, String> {
     ctx.step.set("red");
     let git = &ctx.repo.git;
-    let reds = crate::red::holding(git, trunk, ctx.registry.as_ref())?;
+    let reds = journaled(ctx, || {
+        crate::red::holding(git, trunk, ctx.registry.as_ref())
+    })?;
     if reds.is_empty() {
         return Ok(None);
     }
