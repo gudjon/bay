@@ -74,6 +74,9 @@ fn a_repair_submitted_last_runs_first_in_a_pass() {
     let landing = pass(&test_box, "60");
     assert_eq!(ran(&landing), vec![landed.clone()], "{landing}");
     let first = submit(&test_box, &repo, "src/c.rs", None, &["merge"]).0;
+    // A change not yet in line is ordered by its committer time, in whole seconds: a second
+    // apart, the line's order is the order of submission.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
     submit(&test_box, &repo, "src/d.rs", None, &["merge"]);
     let repair = submit(&test_box, &repo, "src/e.rs", Some(&landed), &["merge"]).0;
 
