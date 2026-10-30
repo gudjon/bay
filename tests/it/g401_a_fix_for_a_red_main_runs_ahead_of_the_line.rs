@@ -10,8 +10,6 @@
 
 use crate::support;
 
-use std::time::Duration;
-
 use support::queued::{Check, OTHER_PRODUCER, Trust, finished, host_under};
 use support::{PRODUCER, check_files, passing_result, result_json};
 
@@ -30,8 +28,7 @@ fn a_change_that_fixes_the_red_publishes_while_the_head_still_runs() {
             policy: Some(&policy),
             seed: &[("src/a.rs", "fn a() {}\n"), ("docs/a.md", "a\n")],
             hold_first: false,
-            // A candidate holding docs/slow.md takes a while, so its head is busy when the fix comes.
-            fails: "{ [ -f docs/slow.md ] && sleep 20; false; }",
+            fails: "false",
         },
         // Unsigned, so the post record any clone writes counts, as an unsigned host takes it.
         Trust::Unsigned,
@@ -81,9 +78,18 @@ fn a_change_that_fixes_the_red_publishes_while_the_head_still_runs() {
         status["detail"]["red_pending"]
     );
 
-    // The line: a slow head, another change, and the fix at the back.
+    // The line: a head and another change. The head's check is held, so one runner is busy
+    // with it when the fix comes; a sleep instead made the order of the two runners chance.
     let slow = held.queue_with("slow", &["docs"], &[("docs/slow.md", "slow\n")]);
     let _other = held.queue_with("other", &["docs"], &[("docs/other.md", "other\n")]);
+    let runs = std::fs::read_to_string(held.test_box.path().join("runs"))
+        .map_or(0, |text| text.lines().count());
+    let head_run = u32::try_from(runs).unwrap() + 1;
+    held.hold_run(head_run);
+    let runner_a = held.spawn(&a);
+    held.wait_held_run(head_run);
+
+    // The fix joins the back of the line while the head runs.
     let started = held.test_box.bay_ok(
         &held.repo,
         &["start", "fix", "--paths", "src/", "--fixes", &broke],
@@ -97,8 +103,6 @@ fn a_change_that_fixes_the_red_publishes_while_the_head_still_runs() {
     let opened = bay::repo::Repo::open(&held.repo).unwrap();
     bay::queue::join(&opened, None, &op, &fix).unwrap();
 
-    let runner_a = held.spawn(&a);
-    std::thread::sleep(Duration::from_secs(3));
     let pass = held.pass(&b);
     let merged = held.test_box.trunk_change_ids(&held.remote);
     assert!(
@@ -109,5 +113,6 @@ fn a_change_that_fixes_the_red_publishes_while_the_head_still_runs() {
         !merged.contains(&slow),
         "the head was still running: {merged:?}"
     );
+    held.go_run(head_run);
     let _ = finished(runner_a);
 }
