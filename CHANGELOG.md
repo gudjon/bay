@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.5
+
+- A policy change is routed by its own new checks too; a box that cannot run them leaves it.
+
 ## 0.6.4
 
 - While main moved under a running repair, a change that skips the line waits for the repair.
