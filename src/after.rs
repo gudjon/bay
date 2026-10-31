@@ -10,11 +10,17 @@
 //!
 //! Unknown is never landed: a change whose chain the remote does not answer for is pending, with
 //! the fault named.
+//!
+//! BACKLOG 157 (a fleet finding, 2026-10-30: an operation waited on a change that had no merge
+//! request, and 39% of one runner's journal lines were that wait, which said only that it waits):
+//! a named change with no operation under way is not submitted. The wait names it and its actor,
+//! who must `bay merge` it, and the chain head it was read at, which only a request, a landing or
+//! an end moves (`crate::executor` visits the wait again then).
 
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 
-use crate::change::{Chain, ChangeState};
+use crate::change::{Chain, ChangeRecord, ChangeState, OpState};
 use crate::repo::Repo;
 
 /// The fixed trailer a dependent's trunk commit names each of its dependencies in.
@@ -31,6 +37,13 @@ pub enum Standing {
     Landed(String),
     /// Not on trunk yet: its record's state, or why it could not be read.
     Pending(String),
+    /// Not on trunk, and not submitted: no operation of it is under way, so it lands only once
+    /// its actor runs `bay merge` for it. Its record's state, its actor, and its chain head.
+    Unsubmitted {
+        state: String,
+        actor: String,
+        head: String,
+    },
     /// Ended without landing, in this state.
     Ended(String),
     /// Ended `no_effect`: its work was already on trunk, so a change after it may land.
@@ -52,6 +65,13 @@ impl Dependency {
                 json!({"change": self.change, "state": "landed", "commit": commit})
             }
             Standing::Pending(state) => json!({"change": self.change, "state": state}),
+            Standing::Unsubmitted { state, actor, head } => json!({
+                "change": self.change,
+                "state": state,
+                "submitted": false,
+                "actor": actor,
+                "head": head,
+            }),
             Standing::Ended(state) => {
                 json!({"change": self.change, "state": state, "landed": false})
             }
@@ -114,8 +134,14 @@ fn unlanded(repo: &Repo, change: &str) -> Standing {
                 Standing::Met
             } else if ended_unlanded(record.state) {
                 Standing::Ended(state)
-            } else {
+            } else if submitted(&record) {
                 Standing::Pending(state)
+            } else {
+                Standing::Unsubmitted {
+                    state,
+                    actor: record.actor.name,
+                    head,
+                }
             }
         }
         Err(error) => Standing::Pending(format!(
@@ -123,6 +149,48 @@ fn unlanded(repo: &Repo, change: &str) -> Standing {
             error.message()
         )),
     }
+}
+
+/// Whether `record` has landed or has an operation that has not ended without landing: one under
+/// way, blocked, or published. A change whose every operation failed or was superseded, or that
+/// has none, waits for its actor's `bay merge`.
+fn submitted(record: &ChangeRecord) -> bool {
+    record.state == ChangeState::Landed
+        || record
+            .operations
+            .iter()
+            .any(|op| !matches!(op.state, OpState::Failed | OpState::Superseded))
+}
+
+/// A dependency a `DEPENDENCY_PENDING` result names as not submitted ([`Standing::Unsubmitted`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unsubmitted {
+    pub change: String,
+    pub actor: String,
+    pub head: String,
+}
+
+/// The dependencies `detail`, a `DEPENDENCY_PENDING` result's, names as not submitted, in the
+/// order the change named them.
+#[must_use]
+pub fn unsubmitted(detail: Option<&Value>) -> Vec<Unsubmitted> {
+    let Some(pending) = detail
+        .and_then(|detail| detail.get("pending"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    pending
+        .iter()
+        .filter(|dependency| dependency["submitted"] == Value::Bool(false))
+        .filter_map(|dependency| {
+            Some(Unsubmitted {
+                change: dependency["change"].as_str()?.to_owned(),
+                actor: dependency["actor"].as_str()?.to_owned(),
+                head: dependency["head"].as_str()?.to_owned(),
+            })
+        })
+        .collect()
 }
 
 /// `state` as the change record spells it.

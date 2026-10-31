@@ -101,6 +101,8 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     let mut waits_for: Option<String> = None;
     // G589: a stop `bay runner drain` asks of this clone's runner, between operations.
     let mut drain = Drain::of(dir);
+    // BACKLOG 157: the waits on a change nobody submitted, visited again once it moves.
+    let mut parked = Parked::default();
     loop {
         // Each pass reads the config at the trunk tip it fetched (ruling: config location),
         // so a config that landed since the last pass governs this one.
@@ -130,7 +132,7 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             (&mut notes, &mut advanced),
             seen,
             &mut beat,
-            &mut post,
+            (&mut post, &mut parked),
         ) {
             Ok(ran) => ran,
             Err(message) => return BayResult::failed(message),
@@ -640,7 +642,7 @@ fn pass(
     (notes, advanced): (&mut Vec<Value>, &mut Vec<Value>),
     seen: Seen,
     beat: &mut crate::presence::Beat,
-    post: &mut Post,
+    (post, parked): (&mut Post, &mut Parked),
 ) -> Result<Vec<Value>, String> {
     let repo: &Repo = shared;
     // G438: this pass's visits share what it reads from the remote.
@@ -651,16 +653,20 @@ fn pass(
     repo.fetch_evidence(&Keys::load(&repo.git));
     let _ = receipts::sync(repo);
     sweep_check_scratch(repo);
+    sweep_tmp_packs(repo);
     // G289, G294: never forced; a chain ahead of the remote keeps its work, one apart from it
     // is set aside.
     // G434 (a fleet finding, 2026-10-28): fourteen submitted changes no pass could read went
     // unnamed for hours, the fetch's error dropped. Each is named in the journal with Git's words.
+    let mut unread = HashSet::new();
     for (change, why) in repo.fetch_chains().map_err(|error| error.message())? {
         let why = why.lines().map(str::trim).collect::<Vec<_>>().join("; ");
         eprintln!("bay runner: {change} could not be read from the remote: {why}");
+        unread.insert(change);
     }
     let chain = Chain::new(&repo.git);
     let mut chains = chain.read_all().map_err(|error| error.message())?;
+    parked.keep(&chains, &unread);
     let queue = match seen.after {
         Some(queue) => queue,
         None => Queue::read(repo)?,
@@ -708,6 +714,7 @@ fn pass(
             // A fleet finding (2026-10-27): an abandoned change's older operation was still
             // queued and run hours later. No operation of an ended change runs.
             .filter(|_| !change_ended(record))
+            .filter(|op| !parked.holds(&op.op_id))
             .filter(|op| runs(op) && (names_a_repair(record) || reach(op, freed(&ran))))
             .filter(|op| !taken.contains(&op.op_id))
             .map(|op| op.op_id.clone())
@@ -729,6 +736,7 @@ fn pass(
                 return Ok(ran);
             }
             ran.push(run_op(repo, id, &op_id, depth, beat, notes, &mut arrivals));
+            parked.note(repo, &ran[ran.len() - 1]);
             forget_if_moved(repo, &ran);
             // F13 (2026-10-25, again 2026-10-26: a runner hung holding the head 19 minutes):
             // between operations, a head whose holder stopped writing is taken now, not at the
@@ -743,6 +751,7 @@ fn pass(
                     notes,
                     &mut arrivals,
                 ));
+                parked.note(repo, &ran[ran.len() - 1]);
                 forget_if_moved(repo, &ran);
                 taken.insert(head_op);
             }
@@ -945,6 +954,86 @@ fn sweep_check_scratch(repo: &Repo) {
     }
 }
 
+/// How long a half-written pack may stand untouched before a pass removes it.
+const STALE_TMP_PACK: Duration = Duration::from_hours(24);
+
+/// BACKLOG 150 (a fleet finding, 2026-10-30: 244 such files, 591 MB, in one runner's clone):
+/// removes each `objects/pack/tmp_*` file of this repository that nothing has touched for
+/// [`STALE_TMP_PACK`]. Git's index-pack writes a fetched or pushed pack there first and renames
+/// it when it ends; on a failed fetch, or one stopped at its time bound by any signal, it leaves
+/// the file (measured: SIGTERM or SIGKILL, to the child or its group, each left one), and only
+/// `git prune` removes it, after two weeks. A pack a fetch writes now is newer, and is kept.
+fn sweep_tmp_packs(repo: &Repo) {
+    let Ok(entries) = std::fs::read_dir(repo.common_dir.join("objects").join("pack")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age >= STALE_TMP_PACK);
+        if stale
+            && entry.file_name().to_string_lossy().starts_with("tmp_")
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// BACKLOG 157 (a fleet finding, 2026-10-30: 39% of one runner's journal lines): an operation
+/// that waits on a change nobody submitted was visited every pass, each visit a read of the
+/// remote, though only that change moving can free it. The waits a runner saw, across its
+/// passes, by operation id: its change's chain head and that of each change it waits on, at the
+/// visit. A pass visits it again only once one of them moved. Held in the runner's memory only:
+/// after a restart each is visited once.
+#[derive(Default)]
+struct Parked(HashMap<String, Vec<(String, String)>>);
+
+impl Parked {
+    /// Keeps only the waits whose every chain holds, in `chains`, the head it held at the visit,
+    /// none of them one in `unread`, which this pass could not read from the remote.
+    fn keep(&mut self, chains: &[HeldChain], unread: &HashSet<String>) {
+        let heads: HashMap<&str, &str> = chains
+            .iter()
+            .map(|held| (held.id.as_str(), held.head.as_str()))
+            .collect();
+        self.0.retain(|_, read| {
+            read.iter().all(|(change, head)| {
+                !unread.contains(change) && heads.get(change.as_str()) == Some(&head.as_str())
+            })
+        });
+    }
+
+    /// Whether `op_id` waits, and nothing it waits on moved.
+    fn holds(&self, op_id: &str) -> bool {
+        self.0.contains_key(op_id)
+    }
+
+    /// Notes `row`, a visit's: a wait on changes not submitted is parked with the heads it read,
+    /// and any other outcome ends what was parked for its operation.
+    fn note(&mut self, repo: &Repo, row: &Value) {
+        let (Some(change), Some(op_id)) = (row["change"].as_str(), row["op_id"].as_str()) else {
+            return;
+        };
+        let waits = if row["reason"].as_str() == Some(Reason::DependencyPending.code()) {
+            crate::after::unsubmitted(row.get("detail"))
+        } else {
+            Vec::new()
+        };
+        let own = Chain::new(&repo.git).head(change).ok().flatten();
+        let Some(own) = own.filter(|_| !waits.is_empty()) else {
+            self.0.remove(op_id);
+            return;
+        };
+        let mut read = vec![(change.to_owned(), own)];
+        read.extend(waits.into_iter().map(|wait| (wait.change, wait.head)));
+        self.0.insert(op_id.to_owned(), read);
+    }
+}
+
 /// How long a pass starts operations before it ends and the next reads every chain again.
 const PASS_BOUND: Duration = Duration::from_secs(300);
 
@@ -963,6 +1052,7 @@ fn pass_bound() -> Duration {
 /// The one journal line of a pass's outcome for `op_id`: the decision, the reason code when
 /// there is one, and what it waits for.
 fn op_line(op_id: &str, result: &BayResult) -> String {
+    use std::fmt::Write as _;
     let decision = serde_json::to_value(result.decision)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
@@ -989,6 +1079,16 @@ fn op_line(op_id: &str, result: &BayResult) -> String {
         let why: String = why.split_whitespace().collect::<Vec<_>>().join(" ");
         line.push_str(": ");
         line.extend(why.chars().take(400));
+    }
+    // BACKLOG 157: a wait on a change that was never submitted names it and who must send it.
+    if result.reason == Some(Reason::DependencyPending) {
+        for dependency in crate::after::unsubmitted(result.detail.as_ref()) {
+            let _ = write!(
+                line,
+                "; {} is not submitted: its actor {} must run bay merge for it",
+                dependency.change, dependency.actor
+            );
+        }
     }
     line
 }
@@ -1644,10 +1744,11 @@ fn probe(repo: &Repo, trunk: &str, revision: &str) -> Result<Option<EarlyConflic
 
 #[cfg(test)]
 mod tests {
-    use super::{in_pass_order, op_line};
+    use super::{Parked, in_pass_order, op_line};
     use crate::change::{ChangeRecord, HeldChain};
     use crate::queue::{Entry, Queue};
-    use crate::result::BayResult;
+    use crate::result::{BayResult, Decision, Reason};
+    use std::collections::HashSet;
 
     fn held(id: &str, state: &str, committed: u64) -> HeldChain {
         let record: ChangeRecord = serde_json::from_value(serde_json::json!({
@@ -1785,5 +1886,52 @@ mod tests {
             op_line("abcd1234.1", &failed),
             "abcd1234.1 failed: git push: the remote refused the ref"
         );
+    }
+
+    /// BACKLOG 157: a wait on a change nobody submitted names it and its actor on its line.
+    #[test]
+    fn a_wait_on_an_unsubmitted_change_names_it_and_its_actor() {
+        let waiting = BayResult::refused(Decision::Queued, Reason::DependencyPending).with_detail(
+            serde_json::json!({"pending": [
+                {"change": "c1", "state": "ready", "submitted": false, "actor": "ann", "head": "h"},
+                {"change": "c2", "state": "ready"},
+            ]}),
+        );
+        assert_eq!(
+            op_line("abcd1234.1", &waiting),
+            "abcd1234.1 queued DEPENDENCY_PENDING; c1 is not submitted: its actor ann must run bay merge for it"
+        );
+    }
+
+    /// BACKLOG 157: a parked wait stays parked only while every chain it read holds its head.
+    #[test]
+    fn a_parked_wait_is_visited_again_once_a_chain_it_read_moved() {
+        let chains = |dependency: &str| {
+            let mut own = held("w", "submitted", 0);
+            own.head = "w1".to_owned();
+            let mut on = held("d", "failed", 0);
+            on.head = dependency.to_owned();
+            vec![own, on]
+        };
+        let parked = || {
+            let mut parked = Parked::default();
+            parked.0.insert(
+                "w.1".to_owned(),
+                vec![("w".into(), "w1".into()), ("d".into(), "d1".into())],
+            );
+            parked
+        };
+        let mut still = parked();
+        still.keep(&chains("d1"), &HashSet::new());
+        assert!(still.holds("w.1"));
+        let mut moved = parked();
+        moved.keep(&chains("d2"), &HashSet::new());
+        assert!(!moved.holds("w.1"), "a dependency moved");
+        let mut unread = parked();
+        unread.keep(&chains("d1"), &HashSet::from(["d".to_owned()]));
+        assert!(!unread.holds("w.1"), "a dependency could not be read");
+        let mut gone = parked();
+        gone.keep(&chains("d1")[1..], &HashSet::new());
+        assert!(!gone.holds("w.1"), "its own chain is gone");
     }
 }

@@ -1178,7 +1178,7 @@ impl Reason {
                 "Run `bay start` again with `--from <commit>`: `detail.local` takes this repository's branch, `detail.remote` the remote's. Or push yours first."
             }
             Self::DependencyPending => {
-                "Wait: the change merges after each change it names with `--after` merges; `bay status <change>` shows them."
+                "Wait: it merges once each change it names with `--after` merges. A `detail.pending` entry with `submitted: false` needs its actor to run `bay merge`."
             }
             Self::DependencyAbandoned => {
                 "Run `bay abandon`, then `bay start <intent> --new` without that `--after`; or restart the dropped change."
@@ -1375,6 +1375,16 @@ impl Reason {
         {
             return format!(
                 "bay does not guard this project yet: {count} of the last {window} changes reached main without its checks. Turn on its safety settings, then run bay install."
+            );
+        }
+        // BACKLOG 157: a change it lands after that was never submitted is named, with who sends it.
+        if self == Self::DependencyPending
+            && let Some(first) = crate::after::unsubmitted(detail).first()
+        {
+            return format!(
+                "Saved. It waits for {}, which is not submitted yet: {} must run bay merge for it.",
+                plain(&first.change),
+                plain(&first.actor)
             );
         }
         if let Some(fixed) = self.fixed_say() {
@@ -2350,6 +2360,23 @@ mod tests {
             "Nothing was changed: could not read the main saved version."
         );
         assert_plain(&fault.say(), "failed");
+    }
+
+    /// BACKLOG 157: a wait on a change nobody submitted names it, and who must send it.
+    #[test]
+    fn a_wait_names_a_dependency_nobody_submitted_and_its_actor() {
+        let waiting = BayResult::refused(Decision::Queued, Reason::DependencyPending).with_detail(
+            json!({"pending": [
+                {"change": "c7k2m4", "state": "ready", "submitted": false, "actor": "ann", "head": "h"},
+            ]}),
+        );
+        assert_eq!(
+            waiting.say(),
+            "Saved. It waits for c7k2m4, which is not submitted yet: ann must run bay merge for it."
+        );
+        let submitted = BayResult::refused(Decision::Queued, Reason::DependencyPending)
+            .with_detail(json!({"pending": [{"change": "c7k2m4", "state": "ready"}]}));
+        assert_eq!(submitted.say(), Reason::DependencyPending.say(None));
     }
 
     #[test]

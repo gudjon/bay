@@ -5185,9 +5185,11 @@ fn config_gate(
 
 /// G273: the result of `op_id` while a change it lands after is not on trunk at `trunk`, read
 /// with no write: `DEPENDENCY_ABANDONED` (blocked) when one ended without landing, else
-/// `DEPENDENCY_PENDING` (queued) when one has not landed yet, else `None`.
+/// `DEPENDENCY_PENDING` (queued) when one has not landed yet, naming each that is not submitted
+/// and its actor, else `None`.
 fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayResult>, String> {
     use crate::after::Standing;
+    use std::fmt::Write as _;
     let standing = crate::after::standing(ctx.repo, &ctx.record.after, trunk)?;
     let after: Vec<serde_json::Value> = standing
         .iter()
@@ -5218,7 +5220,12 @@ fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayR
     }
     let pending: Vec<&crate::after::Dependency> = standing
         .iter()
-        .filter(|dependency| matches!(dependency.standing, Standing::Pending(_)))
+        .filter(|dependency| {
+            matches!(
+                dependency.standing,
+                Standing::Pending(_) | Standing::Unsubmitted { .. }
+            )
+        })
         .collect();
     if pending.is_empty() {
         return Ok(None);
@@ -5227,16 +5234,27 @@ fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayR
         .iter()
         .map(|dependency| dependency.change.as_str())
         .collect();
+    let mut why = format!(
+        "this change merges only after {}, not yet merged into main",
+        names.join(", ")
+    );
+    // BACKLOG 157: a change no request was made for never merges by waiting; who sends it is named.
+    for dependency in &pending {
+        if let Standing::Unsubmitted { actor, .. } = &dependency.standing {
+            let _ = write!(
+                why,
+                "; {} is not submitted: its actor {actor} must run bay merge for it",
+                dependency.change
+            );
+        }
+    }
     let mut result = BayResult::refused(Decision::Queued, Reason::DependencyPending)
         .with_change(ctx.id.clone())
         .with_op(op_id)
         .with_detail(json!({
             "pending": pending.iter().copied().map(crate::after::Dependency::to_json).collect::<Vec<_>>(),
             "after": after,
-            "why": format!(
-                "this change merges only after {}, not yet merged into main",
-                names.join(", ")
-            ),
+            "why": why,
             "trunk": trunk,
             "ways_out": [
                 "wait: the operation stays queued and merges once every change it names has merged (bay merge --wait again, or a runner pass)",
