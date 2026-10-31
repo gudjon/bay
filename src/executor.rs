@@ -1565,20 +1565,21 @@ fn runs(op: &crate::change::Operation) -> bool {
 /// `result`, the outcome a pass reached at `step` for change `id`, with its receipt
 /// ([`publish::with_receipt`]). G284: a wait for approval that nothing changed was told when it
 /// began, so a pass that finds it unchanged writes no receipt of its own; G574: so is a check
-/// that gave no clear answer.
+/// that gave no clear answer; G600: so is an operation another runner blocked.
 fn receipted(repo: &Repo, id: &str, step: &str, result: BayResult) -> BayResult {
-    let unchanged = matches!(
-        result.reason,
-        Some(Reason::ApprovalPending | Reason::CheckUnknown)
-    ) && result
-        .detail
-        .as_ref()
-        .is_some_and(|detail| detail["unchanged"] == true);
-    if unchanged {
+    if unchanged(&result) {
         result.with_change(id)
     } else {
         publish::with_receipt(repo, id, step, result)
     }
+}
+
+/// Whether a visit found its operation as it was and wrote nothing ([`receipted`]).
+fn unchanged(result: &BayResult) -> bool {
+    result
+        .detail
+        .as_ref()
+        .is_some_and(|detail| detail["unchanged"] == true)
 }
 
 /// N-7: the pass's moves of the targets with `advance = true`, read against the trunk, the
@@ -1774,6 +1775,17 @@ mod tests {
             committed,
             record,
         }
+    }
+
+    /// G600: a visit of an operation another runner blocked writes no receipt, whatever its
+    /// reason; a visit that blocked it here does.
+    #[test]
+    fn an_unchanged_visit_of_any_blocked_operation_writes_no_receipt() {
+        let visit = |detail| BayResult::blocked(Reason::CheckFailed).with_detail(detail);
+        assert!(super::unchanged(&visit(
+            serde_json::json!({"unchanged": true})
+        )));
+        assert!(!super::unchanged(&visit(serde_json::json!({"checks": []}))));
     }
 
     /// E21: post work writes a journal line naming each check, its tip and its verdict.

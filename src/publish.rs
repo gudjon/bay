@@ -288,6 +288,22 @@ fn ended_elsewhere(
         .with_detail(json!({"state": state, "outcome": outcome, "landed": false}))
 }
 
+/// G600: a visit of an operation another process blocked writes nothing and runs nothing: it
+/// answers with the operation's own outcome, `unchanged`, as its author's unchanged retry does
+/// ([`retry_blocked`]).
+fn blocked_elsewhere(id: &str, op: &Operation) -> BayResult {
+    let mut result = match op.outcome.as_deref().and_then(Reason::from_code) {
+        Some(reason) => BayResult::blocked(reason),
+        // A lane change whose checks ran (`crate::lane::CHECKED`).
+        None => BayResult::new(Decision::Ok),
+    };
+    result.state = Some("blocked".to_owned());
+    result
+        .with_change(id)
+        .with_op(&op.op_id)
+        .with_detail(json!({"unchanged": true, "condition": op.blocked_on, "owner": op.owner}))
+}
+
 /// `land --wait` with an observation timeout (§ 9a): the run happens in a detached process,
 /// and the caller watches the change chain for at most `timeout`. When the timeout expires the
 /// caller returns `queued`/`running` and the run continues on its own.
@@ -3978,6 +3994,13 @@ fn claim(
         };
         if op.state.is_terminal() {
             return Ok(Some(superseded(&id, op_id, op.epoch, op.owner.as_ref())));
+        }
+        // G600 (a fleet finding, 2026-10-31: four runners claimed and checked a failed operation
+        // again on one main, one after another): a pass visits an operation it listed while
+        // another runner ran it, and that runner blocked it meanwhile. A blocked operation is
+        // claimed only once its re-arm reached the remote ([`retry_blocked`]).
+        if op.state == OpState::Blocked {
+            return Ok(Some(blocked_elsewhere(&id, op)));
         }
         let read = op.epoch;
         op.epoch += 1;
