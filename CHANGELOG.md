@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.18
+
+- A runner does not claim an operation another runner blocked, until its re-arm reaches the remote.
+- A runner visit that leaves a blocked operation unchanged writes no receipt to its change.
+
 ## 0.6.17
 
 - `bay queue` counts no landed or abandoned change as unread after the retention cut drops its operations.
