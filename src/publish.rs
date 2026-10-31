@@ -8571,6 +8571,9 @@ fn landed_keeps(ctx: &Ctx) -> Result<Option<Kept>, String> {
 
 /// An abandoned change keeps what its abandoning state commit links (the latest draft, which an
 /// adopter re-roots from, and the abandon request) and the latest land request, if any (§ 10a).
+/// G599: the latest land request is the newest one its record names, which the chain links.
+/// A runner reads no requests ref, so the cut of a change merged from another clone and then
+/// abandoned left it out, the host refused the cut, and every pass tried it again.
 fn abandoned_keeps(ctx: &Ctx) -> Result<Option<Kept>, String> {
     let git = &ctx.repo.git;
     let parents = git
@@ -8581,9 +8584,12 @@ fn abandoned_keeps(ctx: &Ctx) -> Result<Option<Kept>, String> {
         .skip(2)
         .map(str::to_owned)
         .collect();
-    if let Some(request) = git
-        .ref_target(&format!("{}{}", crate::names::REQUESTS, ctx.id))
-        .map_err(|error| error.message())?
+    if let Some(request) = ctx
+        .record
+        .operations
+        .iter()
+        .rev()
+        .find_map(|op| op.request_id.clone().filter(|request| !request.is_empty()))
         && !links.contains(&request)
     {
         links.push(request);

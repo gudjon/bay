@@ -9,6 +9,10 @@
 //! Guards to mutate, in `src/red.rs`: `Answers::unlisted` always `false` (the walk runs past
 //! the landing to the reach, and the newest failure owns the red); `Answers::suspect` with the
 //! owner never the landing that added the check; `Red::fixes` without it.
+//!
+//! G598: a full window off the check's paths owes nothing when the walk past it comes to the
+//! landing that added the check before any landing requires it. Guard to mutate, in
+//! `src/red.rs`: `Answers::clear_past` without the `unlisted` arm (it is `pending_beyond_window`).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -206,4 +210,34 @@ fn a_pass_after_the_merge_that_added_the_check_is_the_good_end() {
         json!([mark(&landings[1]), mark(&landings[2])]),
         "{row}"
     );
+}
+
+/// The states of `suite`'s `red_pending` rows.
+fn suite_pending(trunk: &Trunk) -> Value {
+    let status = trunk.test_box.bay_ok(&trunk.repo, &["status"])["detail"].clone();
+    status["red_pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["check"] == "suite")
+        .map(|row| row["state"].clone())
+        .collect()
+}
+
+#[test]
+fn a_full_window_off_its_paths_owes_nothing_back_to_the_merge_that_added_the_check() {
+    let trunk = trunk("[red]\nwindow = 2\n");
+    let _ = trunk.add_suite();
+
+    // GIVEN the landing that added the check past a full window of landings off its paths
+    // WHEN status judges THEN no landing since it required the check: nothing is pending.
+    for n in 1..=2 {
+        let _ = trunk.land(&format!("docs/d{n}.md"), "d\n");
+    }
+    assert_eq!(trunk.red(), Vec::<Value>::new());
+    assert_eq!(suite_pending(&trunk), json!([]));
+
+    // GIVEN a landing on its paths in the window, not yet answered THEN it is pending.
+    let _ = trunk.land_src("b");
+    assert_eq!(suite_pending(&trunk), json!(["pending_beyond_window"]));
 }

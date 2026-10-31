@@ -776,8 +776,13 @@ fn pass(
         if began.elapsed() >= bound {
             break;
         }
-        if let Ok(Some(head)) = publish::retain(repo, &record.id) {
-            ran.push(json!({"change": record.id, "retention_cut": head}));
+        // G599: a cut the host refused is named, never dropped; it is tried again each pass.
+        match publish::retain(repo, &record.id) {
+            Ok(Some(head)) => ran.push(json!({"change": record.id, "retention_cut": head})),
+            Ok(None) => {}
+            Err(error) => {
+                ran.push(json!({"change": record.id, "retention_cut": null, "error": error}));
+            }
         }
     }
     advanced.extend(advance(repo));

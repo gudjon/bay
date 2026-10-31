@@ -5,6 +5,16 @@
 //! `detail.red_pending` of `bay status`, the fleet map and `bay status --since`: never green, though it
 //! refuses no landing. A red check names its suspect range: the last landing it passed on, the
 //! first it failed on, and the landings in between, so an operator can bisect.
+//!
+//! G598 (a fleet finding, 2026-10-31: a check on one config file read `pending_beyond_window`
+//! for hours once 50 landings missed its paths): when no landing of a full window requires the
+//! check, the line past the window, down to `[red] reach`, decides it. Its newest answer there
+//! passed, so nothing is pending; a landing there that requires it unanswered, or a reach that
+//! holds no answer, leaves it `pending_beyond_window`.
+//!
+//! Guard to mutate: `src/red.rs`, `Answers::unanswered`: drop `|| !self.clear_past(post)?`
+//! (a window off the check's paths is pending again), and `Answers::clear_past`: drop the
+//! `requires` arm (an unanswered landing past the window is passed over).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -62,6 +72,7 @@ impl Trunk {
             .bay_ok(&self.repo, &["start", path, "--paths", dir]);
         let id = started["change"].as_str().unwrap().to_owned();
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+        std::fs::create_dir_all(view.join(dir)).unwrap();
         std::fs::write(view.join(path), format!("{path}\n")).unwrap();
         let (code, landed) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{landed}");
@@ -159,4 +170,56 @@ fn a_red_post_check_names_the_landings_between_its_last_pass_and_first_failure()
         json!([mark(&landings[2]), mark(&landings[3])]),
         "{status}"
     );
+}
+
+/// The states of `red_pending` in `bay status`.
+fn pending_states(trunk: &Trunk) -> Value {
+    let status = trunk.status();
+    assert_eq!(status["red"], json!([]), "{status}");
+    status["red_pending"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["state"].clone())
+        .collect()
+}
+
+#[test]
+fn a_full_window_off_the_checks_paths_is_judged_by_the_answer_past_it() {
+    let trunk = trunk("[red]\nwindow = 3\n");
+    let (_, first) = trunk.land("src/l1.rs");
+    trunk.suite(&first, "pass");
+    let off = |from: usize| {
+        for n in from..from + 3 {
+            let _ = trunk.land(&format!("docs/d{n}.md"));
+        }
+    };
+
+    // GIVEN a pass, then a full window of landings off the check's paths WHEN status judges
+    // THEN the pass past the window decides it: nothing is pending.
+    off(1);
+    assert_eq!(pending_states(&trunk), json!([]));
+
+    // GIVEN a landing on its paths in the window, not yet answered THEN it is pending.
+    let (_, second) = trunk.land("src/l2.rs");
+    assert_eq!(pending_states(&trunk), json!(["pending_beyond_window"]));
+
+    // GIVEN that landing past a full window off its paths THEN it is still owed a run.
+    off(4);
+    assert_eq!(pending_states(&trunk), json!(["pending_beyond_window"]));
+
+    // WHEN a run answers it THEN nothing is pending.
+    trunk.suite(&second, "pass");
+    assert_eq!(pending_states(&trunk), json!([]));
+}
+
+#[test]
+fn a_reach_that_holds_no_answer_leaves_the_check_pending() {
+    let trunk = trunk("[red]\nwindow = 3\nreach = 3\n");
+    let (_, first) = trunk.land("src/l1.rs");
+    trunk.suite(&first, "pass");
+    for n in 1..=3 {
+        let _ = trunk.land(&format!("docs/d{n}.md"));
+    }
+    assert_eq!(pending_states(&trunk), json!(["pending_beyond_window"]));
 }

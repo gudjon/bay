@@ -15,6 +15,9 @@
 //!   its answer, if any, is older than the window: it is `pending_beyond_window`. When the window
 //!   holds all of trunk and a landing in it requires the check, it is `pending`. Either is listed
 //!   as [`Pending`], apart from the red checks: unknown, not a failure, so it refuses no landing.
+//!   G598: when no landing of a full window requires the check, the line past it, down to the
+//!   reach, decides: nothing is owed when its newest answer there passed, or when no landing
+//!   since the one that added the check required it.
 //! - A red check names its `suspect` range ([`Suspect`]): the newest pass older than the failure,
 //!   the first failure after it, and the landings in between, on the check's paths or not (a
 //!   cause can sit in a file the check does not list).
@@ -1250,21 +1253,45 @@ impl<'a> Answers<'a> {
     }
 
     /// NEW-6: the [`Pending`] state of `post`, which no landing of the window decides, or
-    /// `None` when nothing is owed: the window holds all of trunk and no landing requires it.
-    /// A full window may stand on an older answer it cannot see, so it is never green.
+    /// `None` when nothing is owed: no landing of the window requires it, and the window holds
+    /// all of trunk or the landings past it leave nothing owed ([`Self::clear_past`]).
+    /// A full window may stand on an older answer it cannot see, so it is never green alone.
     fn unanswered(
         &mut self,
         post: &crate::policy::ManifestEntry,
     ) -> Result<Option<&'static str>, String> {
-        if self.line.full {
-            return Ok(Some(PENDING_BEYOND_WINDOW));
-        }
+        let mut owed = false;
         for at in 0..self.line.window {
             if self.requires(at, post)? {
-                return Ok(Some(PENDING));
+                owed = true;
+                break;
             }
         }
+        if !self.line.full {
+            return Ok(owed.then_some(PENDING));
+        }
+        if owed || !self.clear_past(post)? {
+            return Ok(Some(PENDING_BEYOND_WINDOW));
+        }
         Ok(None)
+    }
+
+    /// G598: whether the landings past a full window, none of which requires `post`, leave
+    /// nothing owed. Read newest first, down to the reach (B5): the first landing that answers
+    /// it passed it, or the walk comes to the landing that added the check (G584) before any
+    /// landing requires it. A landing that requires it unanswered, a failure, or the reach
+    /// with neither owe it.
+    fn clear_past(&mut self, post: &crate::policy::ManifestEntry) -> Result<bool, String> {
+        self.past()?;
+        for at in self.line.window..self.line.landings.len() {
+            match self.decides(at, post)? {
+                Some(failed) => return Ok(!failed),
+                None if self.requires(at, post)? => return Ok(false),
+                None if self.unlisted(at, post)? => return Ok(true),
+                None => {}
+            }
+        }
+        Ok(false)
     }
 
     /// NEW-6: the suspect range of `post`, red from landing `at`: older landings are read back

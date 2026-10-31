@@ -18,7 +18,9 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use crate::change::{Chain, ChangeRecord, OpState, Operation, RECORD_FILE, change_ref};
+use crate::change::{
+    Chain, ChangeRecord, ChangeState, OpState, Operation, RECORD_FILE, change_ref,
+};
 use crate::names::REQUESTS;
 use crate::queue::{Place, Queue};
 use crate::repo::Repo;
@@ -147,6 +149,9 @@ fn arriving(
         match waits(record, request) {
             Some(true) => waiting.extend(op_of(record, request).map(|op| (record, op))),
             Some(false) => {}
+            // G597: the retention cut of an ended change keeps no operations, while the
+            // request ref it answered stays on the remote.
+            None if record.retention_cut && crate::status::ended(record.state) => {}
             None => unread.push(json!({
                 "change": change,
                 "why": "its merge request is not in its record here",
@@ -194,8 +199,14 @@ fn op_of<'a>(record: &'a ChangeRecord, request: &str) -> Option<&'a Operation> {
 }
 
 /// Whether `record` still waits for a runner on `request`: `None` when the record does not
-/// carry that request.
+/// carry that request. G597: a landed change waits for nothing, also once the retention cut
+/// dropped the operation its request ref still names, so this clone's record spares the fetch
+/// of its chain. An abandoned change may be adopted and asked again, so only the remote's record
+/// says that one waits for nothing.
 fn waits(record: &ChangeRecord, request: &str) -> Option<bool> {
+    if record.state == ChangeState::Landed {
+        return Some(false);
+    }
     let op = op_of(record, request)?;
     Some(!crate::status::ended(record.state) && op.state == OpState::Submitted)
 }
