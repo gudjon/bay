@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.16
+
+- A runner removes the half-written `objects/pack/tmp_*` files its own clone has held for a day.
+- A wait on a change nobody submitted names that change and its actor, who must `bay merge` it.
+- A runner visits such a wait again only once a chain it read moves.
+
 ## 0.6.15
 
 - A red's fix names its check, its owner or its `--fixes` name, not a merge it failed on later.
