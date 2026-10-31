@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.17
+
+- `bay queue` counts no landed or abandoned change as unread after the retention cut drops its operations.
+- A post check no landing of a full window requires is judged by its newest answer past the window.
+- It stays `pending_beyond_window` while a landing there needs a run, or the reach holds neither answer nor the check's start.
+- A retention cut of an abandoned change keeps the land request its record names, so the host takes it.
+
 ## 0.6.16
 
 - A runner removes the half-written `objects/pack/tmp_*` files its own clone has held for a day.
