@@ -49,13 +49,20 @@ fn merge_tree(git: &Git, base: Option<&str>, ours: &str, theirs: &str) -> Result
     // exit 1 with a tree id; anything else is a fault and builds no candidate.
     let is_tree = !tree.is_empty() && tree.bytes().all(|byte| byte.is_ascii_hexdigit());
     match code {
-        0 if is_tree => Ok(Merge::Clean(tree)),
+        0 if is_tree => settle_revision(git, base.as_deref(), ours, theirs, Vec::new(), tree),
         1 if is_tree => {
             let paths: Vec<String> = lines
                 .take_while(|line| !line.is_empty())
                 .map(str::to_owned)
                 .collect();
-            manifest_resolved(git, base.as_deref(), ours, theirs, paths, tree)
+            match manifest_resolved(git, base.as_deref(), ours, theirs, paths, tree)? {
+                Merge::Clean(tree) => {
+                    settle_revision(git, base.as_deref(), ours, theirs, Vec::new(), tree)
+                }
+                Merge::Conflict(paths, tree) => {
+                    settle_revision(git, base.as_deref(), ours, theirs, paths, tree)
+                }
+            }
         }
         _ => Err(GitError::Failed {
             args: args.join(" "),
@@ -90,22 +97,40 @@ fn manifest_resolved(
     let Some(merged) = crate::assets::merge3(&text(&base)?, &text(ours)?, &text(theirs)?) else {
         return Ok(Merge::Conflict(paths, tree));
     };
+    let tree = with_file(git, &tree, crate::assets::MANIFEST, &merged)?;
+    paths.retain(|path| path != crate::assets::MANIFEST);
+    Ok(if paths.is_empty() {
+        Merge::Clean(tree)
+    } else {
+        Merge::Conflict(paths, tree)
+    })
+}
+
+/// A temporary file's path no other merge in this process or another uses.
+fn scratch_file(name: &str) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("bay-merge-{}-{next}.{name}", std::process::id()))
+}
+
+/// `tree` with `path` holding `text`.
+fn with_file(git: &Git, tree: &str, path: &str, text: &str) -> Result<String, GitError> {
     let blob = git.run_with(
         &["hash-object", "-w", "--stdin"],
         &[],
-        Some(merged.as_bytes()),
+        Some(text.as_bytes()),
     )?;
-    let index = std::env::temp_dir().join(format!("bay-manifest-{}.index", std::process::id()));
+    let index = scratch_file("index");
     let index_text = index.display().to_string();
     let envs = [("GIT_INDEX_FILE", index_text.as_str())];
     let resolved = git
-        .run_with(&["read-tree", &tree], &envs, None)
+        .run_with(&["read-tree", tree], &envs, None)
         .and_then(|_| {
             git.run_with(
                 &[
                     "update-index",
                     "--cacheinfo",
-                    &format!("100644,{blob},{}", crate::assets::MANIFEST),
+                    &format!("100644,{blob},{path}"),
                 ],
                 &envs,
                 None,
@@ -113,11 +138,134 @@ fn manifest_resolved(
         })
         .and_then(|_| git.run_with(&["write-tree"], &envs, None));
     let _ = std::fs::remove_file(&index);
-    let tree = resolved?;
-    paths.retain(|path| path != crate::assets::MANIFEST);
-    Ok(if paths.is_empty() {
-        Merge::Clean(tree)
-    } else {
-        Merge::Conflict(paths, tree)
+    resolved
+}
+
+/// The top-level `revision = <n>` of a policy's text: its line's index and its number.
+fn stated_revision(text: &str) -> Option<(usize, u64)> {
+    let mut lines = text.lines().enumerate();
+    lines.find_map(|(index, line)| {
+        let (key, value) = line.split_once('=')?;
+        let number = value.split('#').next()?.trim().parse().ok()?;
+        (key.trim() == "revision").then_some((index, number))
     })
+}
+
+/// `text` with its `revision` line stating `revision`, whatever follows it on the line.
+fn with_revision(text: &str, at: usize, revision: u64) -> String {
+    let mut out = String::new();
+    for (index, line) in text.lines().enumerate() {
+        if index == at {
+            let comment = line.split_once('#').map(|(_, comment)| comment);
+            out.push_str("revision = ");
+            out.push_str(&revision.to_string());
+            if let Some(comment) = comment {
+                out.push_str(" #");
+                out.push_str(comment);
+            }
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// G668 (a fleet finding, 2026-11-06: a policy edited 58 times in a week, and two unrelated edits
+/// collided on `revision`, twice in one hour; two that raise it to one number merge cleanly and
+/// then fail "must raise"). `revision` only says the policy changed, so when main and a change
+/// both raised it, that is no disagreement: the rest of the file merges as ever, and the result
+/// states the next number. A change that did not raise it is left to its refusal, and a conflict
+/// in the rest of the file stays one.
+fn settle_revision(
+    git: &Git,
+    base: Option<&str>,
+    ours: &str,
+    theirs: &str,
+    mut paths: Vec<String>,
+    tree: String,
+) -> Result<Merge, GitError> {
+    let unchanged = |paths: Vec<String>, tree: String| {
+        if paths.is_empty() {
+            Merge::Clean(tree)
+        } else {
+            Merge::Conflict(paths, tree)
+        }
+    };
+    let path = crate::policy::POLICY_PATH;
+    // One read for the common case, a change that leaves the policy alone.
+    let blob = |commit: &str| format!("{commit}:{path}");
+    let (ours_blob, theirs_blob) = (blob(ours), blob(theirs));
+    let (_, blobs, _) = git.run_status_with(&["rev-parse", &ours_blob, &theirs_blob], &[])?;
+    let blobs: Vec<&str> = blobs.lines().collect();
+    if blobs.len() != 2 || blobs[0] == blobs[1] {
+        return Ok(unchanged(paths, tree));
+    }
+    let base = match base {
+        Some(base) => base.trim_start_matches("--merge-base=").to_owned(),
+        None => git.run(&["merge-base", ours, theirs])?,
+    };
+    let text = |commit: &str| git.file_at(commit, path);
+    let (Some(base_text), Some(ours_text), Some(theirs_text)) =
+        (text(&base)?, text(ours)?, text(theirs)?)
+    else {
+        return Ok(unchanged(paths, tree));
+    };
+    let (Some(at_base), Some(at_ours), Some(at_theirs)) = (
+        stated_revision(&base_text),
+        stated_revision(&ours_text),
+        stated_revision(&theirs_text),
+    ) else {
+        return Ok(unchanged(paths, tree));
+    };
+    let start = at_base.1;
+    if at_ours.1 <= start || at_theirs.1 <= start {
+        return Ok(unchanged(paths, tree));
+    }
+    // The three texts, stating one number, so that only the rest of the file can disagree.
+    let files = [
+        (
+            scratch_file("ours"),
+            with_revision(&ours_text, at_ours.0, start),
+        ),
+        (
+            scratch_file("base"),
+            with_revision(&base_text, at_base.0, start),
+        ),
+        (
+            scratch_file("theirs"),
+            with_revision(&theirs_text, at_theirs.0, start),
+        ),
+    ];
+    let written = files
+        .iter()
+        .try_for_each(|(file, body)| std::fs::write(file, body))
+        .map_err(GitError::Spawn);
+    let paths_text = files.each_ref().map(|(file, _)| file.display().to_string());
+    let outcome = written.and_then(|()| {
+        git.run_status_with(
+            &[
+                "merge-file",
+                "-p",
+                &paths_text[0],
+                &paths_text[1],
+                &paths_text[2],
+            ],
+            &[],
+        )
+    });
+    for (file, _) in &files {
+        let _ = std::fs::remove_file(file);
+    }
+    let (code, merged, _) = outcome?;
+    if code != 0 {
+        return Ok(unchanged(paths, tree));
+    }
+    let next = at_theirs.1.max(at_ours.1 + 1);
+    let Some((at, _)) = stated_revision(&merged) else {
+        return Ok(unchanged(paths, tree));
+    };
+    let tree = with_file(git, &tree, path, &with_revision(&merged, at, next))?;
+    paths.retain(|conflicted| conflicted != path);
+    Ok(unchanged(paths, tree))
 }

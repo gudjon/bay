@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.33
+
+- Two unrelated edits to the policy no longer collide on `revision`; bay merges them and writes the next number.
+
 ## 0.6.32
 
 - `bay status` read past its deadline says it is from the last fetch, and never "Done".
