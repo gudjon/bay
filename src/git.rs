@@ -1064,7 +1064,7 @@ impl Git {
 }
 
 /// Test hooks are compiled in unless `scripts/release.sh` built this binary.
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// The file `BAY_TEST_GIT_TRACE` names, read once per process; `None` in a release build.
 fn trace_file() -> Option<&'static Path> {

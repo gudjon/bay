@@ -919,7 +919,7 @@ const HOLDING_UNAVAILABLE_WAIT: std::time::Duration = std::time::Duration::from_
 /// does.
 fn unavailable_wait(holds: bool, cost_s: u64) -> std::time::Duration {
     let knob = |var: &str, wait: std::time::Duration| {
-        if option_env!("BAY_RELEASE_VERSION").is_none()
+        if crate::version::TEST_HOOKS
             && let Some(secs) = std::env::var(var).ok().and_then(|secs| secs.parse().ok())
         {
             return std::time::Duration::from_secs(secs);

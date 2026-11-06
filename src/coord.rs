@@ -311,10 +311,7 @@ fn may_cover(repo: &Repo, id: &str) -> bool {
 
 /// A change whose inputs can still refuse a write.
 fn live(state: ChangeState) -> bool {
-    matches!(
-        state,
-        ChangeState::Open | ChangeState::Invalidated | ChangeState::Repairing | ChangeState::Ready
-    )
+    state.is_live()
 }
 
 /// The cache's age at `now` in seconds, or why it has none.

@@ -933,7 +933,7 @@ fn schedstat() -> Option<(u64, u64)> {
 /// [`judge`] makes (G430): `<trunk> read <n> in full`, or `<trunk> read <n> from <trunk>` when it
 /// started from an earlier one (BACKLOG 97); `<n>` is how many landings' answers it read (S4). A
 /// release build never reads the variable.
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// The [`TEST_HOOKS`] trace line of one judgement of `trunk` that read the answers of `read`
 /// landings, from `before` when it started from that one.

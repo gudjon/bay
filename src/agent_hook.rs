@@ -361,7 +361,7 @@ pub fn budget(event: &str) -> Option<std::time::Duration> {
     )
 }
 
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// `bay hook <event>` with `input` on stdin, run in `dir`, for the configured product. The
 /// exit protocol of both products (`INTERFACES` § 1): exit 2 denies, with the reason on stderr.

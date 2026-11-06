@@ -526,7 +526,7 @@ pub fn apparmor_remedy(bwrap: Option<&Path>, restricted: Option<&str>) -> Option
 /// Where this machine says whether `AppArmor` restricts unprivileged user namespaces; in a
 /// test build `BAY_TEST_USERNS_RESTRICT` names a file to read instead.
 const USERNS_RESTRICT: &str = "/proc/sys/kernel/apparmor_restrict_unprivileged_userns";
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// This machine's [`apparmor_remedy`], read from `PATH` and `/proc`.
 #[must_use]
@@ -1532,7 +1532,7 @@ const STILL_EVERY: Duration = Duration::from_secs(300);
 
 /// [`STILL_EVERY`]; a test build honours `BAY_TEST_STILL_EVERY_S`, a release build never does.
 fn still_every() -> Duration {
-    if option_env!("BAY_RELEASE_VERSION").is_none()
+    if crate::version::TEST_HOOKS
         && let Some(secs) = std::env::var("BAY_TEST_STILL_EVERY_S")
             .ok()
             .and_then(|secs| secs.parse().ok())

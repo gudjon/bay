@@ -116,10 +116,7 @@ fn landed(repo: &Repo) -> Result<HashMap<String, String>, String> {
 
 /// A change that has not ended by its chain.
 pub(crate) fn live(state: ChangeState) -> bool {
-    matches!(
-        state,
-        ChangeState::Open | ChangeState::Invalidated | ChangeState::Repairing | ChangeState::Ready
-    )
+    state.is_live()
 }
 
 /// A declared path without a leading `./` or `/`; the whole tree is empty.

@@ -9,8 +9,7 @@
 //! missing, never as success.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -41,11 +40,7 @@ pub struct Receipt {
     pub at_unix: u64,
 }
 
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
+use crate::live::unix_now;
 
 #[must_use]
 pub fn pending_dir(repo: &Repo) -> PathBuf {
@@ -324,13 +319,4 @@ fn latest_request(repo: &Repo, head: &str) -> Option<String> {
 #[must_use]
 pub fn age_s(receipt: &Receipt) -> u64 {
     unix_now().saturating_sub(receipt.at_unix)
-}
-
-/// Whether `path` is inside `dir`.
-#[must_use]
-pub fn is_inside(path: &Path, dir: &Path) -> bool {
-    path.canonicalize()
-        .ok()
-        .zip(dir.canonicalize().ok())
-        .is_some_and(|(path, dir)| path.starts_with(dir))
 }

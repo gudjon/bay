@@ -88,8 +88,6 @@ impl Step {
     }
 }
 
-/// The producer name of the built-in local executor's evidence.
-pub const LOCAL_PRODUCER: &str = "local";
 /// After this many `MAIN_MOVED` retries an operation joins the queue instead of rebuilding again.
 const TRUNK_MOVED_LIMIT: u32 = 2;
 
@@ -104,7 +102,7 @@ const EXECUTOR_IDENTITY: &[(&str, &str)] = &[
 /// Whether this build honours the publication test hooks: a build `scripts/release.sh` made
 /// (`BAY_RELEASE_VERSION` set at compile time) never does, so a release never pauses or ends
 /// itself because of its environment.
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// How long a paused process waits for its release when `BAY_TEST_PAUSE_TIMEOUT_S` does not
 /// say: far beyond any test, short enough that a forgotten pause ends.
@@ -8896,10 +8894,7 @@ fn landed_result(
     result
 }
 
-fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
-    git.run(&["rev-parse", &format!("{commit}^{{tree}}")])
-        .map_err(|error| error.message())
-}
+use crate::throughput::tree_of;
 
 fn parent_of(git: &Git, commit: &str) -> Result<Option<String>, String> {
     match git.run(&["rev-parse", "--verify", "-q", &format!("{commit}^1")]) {

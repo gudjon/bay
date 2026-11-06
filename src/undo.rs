@@ -153,10 +153,7 @@ fn undo_in(
     Ok(publish::land(view, Some(&id), wait, observe, None))
 }
 
-fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
-    git.run(&["rev-parse", &format!("{commit}^{{tree}}")])
-        .map_err(|error| error.message())
-}
+use crate::throughput::tree_of;
 
 /// The trunk commit that published `change`: the remote's `refs/bay/landed/<change>`, or the
 /// shard index record that stands in for it (§ 10a), names it, trunk reaches it (by ancestry,

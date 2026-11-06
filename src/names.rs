@@ -204,23 +204,9 @@ pub fn inflight_ref(op_id: &str) -> Result<String, String> {
     }
 }
 
-/// Whether some name in `names` is a directory prefix of another (`refs/x/a` and
-/// `refs/x/a/b`): such a set cannot exist at once.
-#[must_use]
-pub fn prefix_clash<'a>(names: &[&'a str]) -> Option<(&'a str, &'a str)> {
-    for a in names {
-        for b in names {
-            if b.len() > a.len() && b.starts_with(a) && b.as_bytes()[a.len()] == b'/' {
-                return Some((a, b));
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{bay_ref, operator_name, prefix_clash};
+    use super::{bay_ref, operator_name};
 
     #[test]
     fn operator_names_are_short_lower_case_and_have_no_slash() {
@@ -274,17 +260,5 @@ mod tests {
         assert!(inflight_ref("abcd2345").is_err());
         assert!(inflight_ref("abcd2345.1/x").is_err());
         assert!(inflight_ref("ABCD2345.1").is_err());
-    }
-
-    #[test]
-    fn a_name_that_is_a_prefix_of_another_is_found() {
-        assert_eq!(
-            prefix_clash(&["refs/bay/changes/abc", "refs/bay/changes/abc/request"]),
-            Some(("refs/bay/changes/abc", "refs/bay/changes/abc/request"))
-        );
-        assert_eq!(
-            prefix_clash(&["refs/bay/changes/abc", "refs/bay/changes/abcd"]),
-            None
-        );
     }
 }

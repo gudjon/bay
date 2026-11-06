@@ -60,7 +60,7 @@ enum Judged {
     BatchBase(String),
 }
 
-fn is_zero(oid: &str) -> bool {
+pub(crate) fn is_zero(oid: &str) -> bool {
     !oid.is_empty() && oid.bytes().all(|byte| byte == b'0')
 }
 

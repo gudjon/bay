@@ -119,6 +119,18 @@ fn land(test_box: &TestBox, view: &Path) -> (i32, serde_json::Value) {
     result_json(test_box.bay(view).args(["merge", "--wait"]))
 }
 
+/// The stale inputs of `record` at the main branch this clone last fetched, from cached answers.
+fn cached_stale(
+    repo: &bay::repo::Repo,
+    record: &bay::change::ChangeRecord,
+) -> Vec<bay::inputs::Judgement> {
+    let trunk = repo
+        .git
+        .run(&["rev-parse", &repo.trunk_tracking_ref()])
+        .unwrap();
+    bay::inputs::stale_at(repo, record, &trunk, bay::inputs::Probe::Cached).unwrap()
+}
+
 #[test]
 fn start_records_the_declared_input_and_the_version_it_observed() {
     let (test_box, repo, _remote) = trunk(None);
@@ -505,7 +517,7 @@ fn the_hooks_read_only_answers_already_in_the_cache() {
     let _ = std::fs::remove_file(&ran);
     let opened = bay::repo::Repo::open(&repo).unwrap();
     let (_, record) = bay::change::Chain::new(&opened.git).read(&id).unwrap();
-    let stale = bay::inputs::stale_inputs(&opened, &record).unwrap();
+    let stale = cached_stale(&opened, &record);
     assert!(stale.is_empty(), "{stale:?}");
     let cached = bay::status::cached(&opened, &|_, _| true).unwrap();
     let shown = &cached.detail.unwrap()["changes"][0];
@@ -644,7 +656,7 @@ fn the_stale_inputs_of_a_change_are_read_from_local_data_only() {
     );
     let opened = bay::repo::Repo::open(&repo).unwrap();
     let (_, record) = bay::change::Chain::new(&opened.git).read(&id).unwrap();
-    let stale = bay::inputs::stale_inputs(&opened, &record).unwrap();
+    let stale = cached_stale(&opened, &record);
     assert_eq!(stale.len(), 1, "{stale:?}");
     assert_eq!(stale[0].input.as_str(), INPUT);
     assert_eq!(stale[0].state, bay::inputs::InputState::Unobserved);

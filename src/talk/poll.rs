@@ -17,7 +17,7 @@ pub const BACKOFF_AFTER: u32 = 10;
 /// The longest interval of an idle wait.
 pub const MAX_POLL_S: u64 = 300;
 
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// The interval after `empty` empty polls, in seconds.
 #[must_use]

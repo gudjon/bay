@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, ChangeState, change_ref};
+use crate::change::{CHANGES_PREFIX, Chain, ChangeRecord, change_ref};
 use crate::clock::now_rfc3339;
 use crate::completion::{self, Dimension, Need};
 use crate::evidence::{self, EvidenceRecord};
@@ -810,7 +810,7 @@ fn test_wait(name: &str) {
     }
 }
 
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// Why [`settle_swept`] settled no read.
 enum Unsettled {
@@ -1493,10 +1493,7 @@ fn live_inputs(
     trunk: &str,
     probe: Probe,
 ) -> Result<Vec<crate::inputs::Judgement>, String> {
-    let live = matches!(
-        record.state,
-        ChangeState::Open | ChangeState::Invalidated | ChangeState::Repairing | ChangeState::Ready
-    );
+    let live = record.state.is_live();
     if landed || !live {
         return Ok(Vec::new());
     }

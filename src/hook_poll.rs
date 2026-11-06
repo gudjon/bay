@@ -23,7 +23,7 @@ pub const JOIN: Duration = Duration::from_secs(3);
 /// How often a hook looks whether its poll ended.
 const STEP: Duration = Duration::from_millis(25);
 
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// How long a hook waits for its poll: [`JOIN`], or in a test build `BAY_TEST_POLL_JOIN_S`, else
 /// the hook's whole budget, so a test reads what the poll brought on the hook that ran it.

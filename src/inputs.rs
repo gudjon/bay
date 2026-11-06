@@ -708,22 +708,6 @@ pub fn request_inputs(judged: &[Judgement]) -> Vec<String> {
         .collect()
 }
 
-/// The stale inputs of `record` against the local cache of trunk, from local data only: no
-/// fetch, no network, and no provider run, only answers already cached (for the `tool.before`
-/// refusal and any hook notice, which must stay cheap). `Unknown` inputs are not stale;
-/// [`judge`] reports them. `bay status --since`, a read the caller asked for, uses [`stale_at`].
-///
-/// # Errors
-///
-/// The local cache holds no trunk, or a git fault.
-pub fn stale_inputs(repo: &Repo, record: &ChangeRecord) -> Result<Vec<Judgement>, String> {
-    let trunk = repo
-        .git
-        .run(&["rev-parse", "--verify", &repo.trunk_tracking_ref()])
-        .map_err(|error| format!("the local cache holds no main branch: {}", error.message()))?;
-    stale_at(repo, record, &trunk, Probe::Cached)
-}
-
 /// The stale inputs of `record` judged at trunk commit `trunk`, got as `probe` says. `Unknown`
 /// inputs are not stale; [`judge`] reports them.
 ///

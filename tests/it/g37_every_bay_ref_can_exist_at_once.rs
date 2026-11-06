@@ -35,6 +35,31 @@ fn ref_set(id: &str, hash: &str) -> Vec<String> {
     .collect()
 }
 
+/// Whether some name in `names` is a directory prefix of another (`refs/x/a` and
+/// `refs/x/a/b`): such a set cannot exist at once.
+fn prefix_clash<'a>(names: &[&'a str]) -> Option<(&'a str, &'a str)> {
+    for a in names {
+        for b in names {
+            if b.len() > a.len() && b.starts_with(a) && b.as_bytes()[a.len()] == b'/' {
+                return Some((a, b));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn a_name_that_is_a_prefix_of_another_is_found() {
+    assert_eq!(
+        prefix_clash(&["refs/bay/changes/abc", "refs/bay/changes/abc/request"]),
+        Some(("refs/bay/changes/abc", "refs/bay/changes/abc/request"))
+    );
+    assert_eq!(
+        prefix_clash(&["refs/bay/changes/abc", "refs/bay/changes/abcd"]),
+        None
+    );
+}
+
 #[test]
 fn the_full_ref_set_of_two_changes_exists_at_once_on_reftable() {
     let test_box = TestBox::new();
@@ -67,13 +92,13 @@ fn the_full_ref_set_of_two_changes_exists_at_once_on_reftable() {
     for name in &as_str {
         bay::names::bay_ref(name).unwrap();
     }
-    assert_eq!(bay::names::prefix_clash(&as_str), None);
+    assert_eq!(prefix_clash(&as_str), None);
     // An in-flight ref is no pushable bay ref, and coexists with every one of them.
     let inflight = bay::names::inflight_ref("abcd2345.1").unwrap();
     assert!(bay::names::bay_ref(&inflight).is_err());
     let mut with_local = as_str.clone();
     with_local.push(inflight.as_str());
-    assert_eq!(bay::names::prefix_clash(&with_local), None);
+    assert_eq!(prefix_clash(&with_local), None);
 
     let input = names.iter().fold(String::new(), |mut input, name| {
         use std::fmt::Write as _;
@@ -117,7 +142,7 @@ fn a_name_that_is_a_directory_of_another_is_rejected() {
         "refs/bay/changes/abcd2345",
         "refs/bay/changes/abcd2345/request",
     ];
-    assert!(bay::names::prefix_clash(&proposed).is_some());
+    assert!(prefix_clash(&proposed).is_some());
     assert!(bay::names::bay_ref(proposed[1]).is_err());
     // Git refuses it too, on reftable as on files.
     let test_box = TestBox::new();

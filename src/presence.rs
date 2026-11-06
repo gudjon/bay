@@ -45,7 +45,7 @@ const STALE_CADENCES: u64 = 3;
 const OUTCOME_FILE: &str = "presence-push.json";
 
 /// Test builds honour `BAY_TEST_PRESENCE_CLOCK_SKEW_S`; a release build never does.
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 #[must_use]
 pub fn presence_ref(executor: &str) -> String {

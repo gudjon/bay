@@ -142,9 +142,7 @@ pub fn has_trunk_hook(git: &Git) -> bool {
     events.lines().any(|event| event == "update") && command.contains("host hook update")
 }
 
-fn is_zero(oid: &str) -> bool {
-    !oid.is_empty() && oid.bytes().all(|byte| byte == b'0')
-}
+use crate::hook::is_zero;
 
 /// The `update` hook: `<ref> <old> <new>`. Returns the refusal, or `None` to accept.
 ///

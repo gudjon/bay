@@ -316,7 +316,7 @@ fn pinned_elsewhere(target: &Path) -> Result<Option<BayResult>, String> {
 /// machine then ran that build): a development build never replaces another bay. Only a release
 /// moves a machine's binary. The binary already being this one is no replacement.
 fn development_over_installed(target: &Path) -> Option<String> {
-    if option_env!("BAY_RELEASE_VERSION").is_some() {
+    if !crate::version::TEST_HOOKS {
         return None;
     }
     let installed = std::fs::read(target).ok()?;

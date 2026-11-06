@@ -31,7 +31,7 @@ use super::{Entry, TALK_PREFIX, Talk, read_after_expiry, talks_where};
 use crate::clock::unix_of;
 use crate::git::Git;
 
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// No ack within this many seconds of `sent` is a lost arrival (`DESIGN` § 11c: 24 hours).
 pub const BAY_TALK_ACK_BOUND_S: u64 = 24 * 3600;

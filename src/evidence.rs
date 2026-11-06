@@ -1001,7 +1001,7 @@ pub fn combine(
 pub const RERUN: &str = "rerun";
 
 /// Test builds honour `BAY_TEST_RERUN_CLOCK_SKEW_S`; a release build never does.
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// G628: the reader's clock for a rerun's due time ([`RERUN`]): this machine's, or in a test
 /// build moved forward by `BAY_TEST_RERUN_CLOCK_SKEW_S` seconds, so a test reads a rerun that

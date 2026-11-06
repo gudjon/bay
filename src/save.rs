@@ -978,7 +978,4 @@ fn move_checkout(repo: &Repo, checkout: &Git, head: &str, commit: &str) -> Resul
     Ok(())
 }
 
-fn tree_of(git: &Git, commit: &str) -> Result<String, String> {
-    git.run(&["rev-parse", &format!("{commit}^{{tree}}")])
-        .map_err(|error| error.message())
-}
+use crate::throughput::tree_of;

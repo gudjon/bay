@@ -93,7 +93,7 @@ impl Source {
     /// unset) also honours `BAY_TEST_RELEASE_URL` and `BAY_TEST_RELEASE_KEY` (one key per line),
     /// for G50's fixture; a release build never does.
     fn current() -> Self {
-        let test = option_env!("BAY_RELEASE_VERSION").is_none();
+        let test = crate::version::TEST_HOOKS;
         let keys = std::env::var("BAY_TEST_RELEASE_KEY")
             .ok()
             .filter(|_| test)
@@ -222,7 +222,7 @@ pub fn update(request: &Request) -> BayResult {
     result
 }
 
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// G656: the step an update is on, which [`Ticker`] shows.
 static STEP: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
@@ -1110,11 +1110,7 @@ fn prune(keep: &[&str]) {
     }
 }
 
-fn now_s() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
+use crate::live::unix_now as now_s;
 
 /// Auto-update, from `status`, `doctor` and a looping runner between its passes (never `land`
 /// or the hook, which hold or may hold an operation): at most one check an hour, run as a detached
@@ -1127,9 +1123,7 @@ pub fn auto() {
     if std::env::var("BAY_DISABLE_AUTOUPDATE").is_ok_and(|value| value == "1") {
         return;
     }
-    if option_env!("BAY_RELEASE_VERSION").is_none()
-        && std::env::var_os("BAY_TEST_RELEASE_URL").is_none()
-    {
+    if crate::version::TEST_HOOKS && std::env::var_os("BAY_TEST_RELEASE_URL").is_none() {
         return;
     }
     let mut state = State::read().unwrap_or_default();

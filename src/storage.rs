@@ -20,7 +20,7 @@ const LARGEST: usize = 4;
 /// The other worktrees the row names.
 const OTHERS: usize = 50;
 
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 fn budget() -> Duration {
     std::env::var("BAY_TEST_STORAGE_BUDGET_MS")

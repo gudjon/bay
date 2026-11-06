@@ -746,8 +746,7 @@ fn asks_for_the_page() -> bool {
 fn stdout_is_terminal() -> bool {
     use std::io::IsTerminal;
     std::io::stdout().is_terminal()
-        || (option_env!("BAY_RELEASE_VERSION").is_none()
-            && std::env::var_os("BAY_TEST_STDOUT_TERMINAL").is_some())
+        || (bay::version::TEST_HOOKS && std::env::var_os("BAY_TEST_STDOUT_TERMINAL").is_some())
 }
 
 /// `bay runner run`: its result, then, between operations, the new version in its place.

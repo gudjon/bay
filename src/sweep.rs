@@ -43,7 +43,7 @@ pub const BAY_SWEPT_S: u64 = 15;
 /// The longest time, in seconds, a sweep serves the reads after it ends.
 pub const BAY_SWEPT_MAX_S: u64 = 60;
 
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// One update the fetch would make to the local ref it names.
 #[derive(Clone, Debug, PartialEq, Eq)]

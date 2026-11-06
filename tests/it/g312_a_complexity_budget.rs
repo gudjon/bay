@@ -10,7 +10,7 @@
 //! removes surface lowers the budget the same way, so the budget never hides slack.
 //!
 //! Guards to mutate (each makes a case here fail):
-//! - `src/main.rs`: un-hide a hidden alias, such as `start --intent-revision` (one flag more).
+//! - `src/main.rs`: add a flag to a command (one flag more).
 //! - `src/result.rs`: a new row in the reason table (one reason more).
 
 use crate::support;

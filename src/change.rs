@@ -209,6 +209,17 @@ pub enum ChangeState {
     NoEffect,
 }
 
+impl ChangeState {
+    /// Whether the change has not ended.
+    #[must_use]
+    pub fn is_live(self) -> bool {
+        matches!(
+            self,
+            Self::Open | Self::Invalidated | Self::Repairing | Self::Ready
+        )
+    }
+}
+
 /// The change record of § 3.1. Fields of later increments are added when they are built.
 /// `required_versions` and `coverage` are derived on read (`crate::inputs::judge`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

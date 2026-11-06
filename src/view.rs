@@ -61,11 +61,7 @@ struct JournalFile {
     actor: Option<String>,
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs())
-}
+use crate::live::unix_now;
 
 fn read_journal(repo: &Repo, id: &str) -> Option<JournalFile> {
     let text = std::fs::read_to_string(journal_path(repo, id)).ok()?;

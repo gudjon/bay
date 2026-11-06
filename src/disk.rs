@@ -20,7 +20,7 @@ pub const FLOOR_KEY: &str = "bay.minFreeMiB";
 /// small machine meets it only when nearly full.
 pub const DEFAULT_FLOOR_MIB: u64 = 5120;
 
-const TEST_HOOKS: bool = option_env!("BAY_RELEASE_VERSION").is_none();
+use crate::version::TEST_HOOKS;
 
 /// A filesystem below the box's floor.
 #[derive(Clone, Debug, PartialEq, Eq)]

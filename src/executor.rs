@@ -1051,7 +1051,7 @@ const PASS_BOUND: Duration = Duration::from_secs(300);
 
 /// [`PASS_BOUND`]; a test build honours `BAY_TEST_PASS_BOUND_S`, a release build never does.
 fn pass_bound() -> Duration {
-    if option_env!("BAY_RELEASE_VERSION").is_none()
+    if crate::version::TEST_HOOKS
         && let Some(secs) = std::env::var("BAY_TEST_PASS_BOUND_S")
             .ok()
             .and_then(|secs| secs.parse().ok())

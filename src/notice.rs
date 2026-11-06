@@ -208,11 +208,7 @@ impl Delivery {
     }
 }
 
-fn now_s() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
+use crate::live::unix_now as now_s;
 
 fn cursor_path(state_dir: &Path) -> PathBuf {
     state_dir.join(STATE_FILE)

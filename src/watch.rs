@@ -68,7 +68,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::change::{Chain, ChangeRecord, ChangeState};
+use crate::change::{Chain, ChangeRecord};
 use crate::clock::now_rfc3339;
 use crate::git::Git;
 use crate::inputs::{self, Probe};
@@ -883,10 +883,7 @@ fn invalidations(
     trunk: &str,
     probe: Probe,
 ) -> Result<Vec<inputs::Judgement>, String> {
-    let live = matches!(
-        record.state,
-        ChangeState::Open | ChangeState::Invalidated | ChangeState::Repairing | ChangeState::Ready
-    );
+    let live = record.state.is_live();
     if !live
         || !crate::publish::scan(&repo.git, &record.base_first, trunk, &record.id)?
             .publications
