@@ -40,7 +40,7 @@ fn a_view_killed_mid_creation_builds_no_candidate_until_resumed() {
         )
         .trim()
         .to_owned();
-    let view = repo.join(".git/bay/views").join(&id);
+    let view = test_box.views_dir(&repo).join(&id);
     assert!(view.exists(), "the half-made view is on disk");
     assert!(!view.join("src/a.rs").exists(), "and it is empty");
 

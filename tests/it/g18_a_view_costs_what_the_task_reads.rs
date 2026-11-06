@@ -172,7 +172,7 @@ fn a_check_cannot_write_into_another_changes_workspace() {
     };
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
-    let views = repo.join(".git/bay/views");
+    let views = test_box.views_dir(&repo);
     // The check tries to write into every view on the machine.
     let before = format!(
         "for v in '{}'/*/; do echo pwned > \"$v/src/pwned.rs\"; done",

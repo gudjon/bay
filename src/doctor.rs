@@ -383,12 +383,25 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
             "a fetch does not refresh the commit-graph (bay install sets fetch.writeCommitGraph)",
         );
     }
+    let left_behind = crate::view::left_behind();
+    let left_note = format!(
+        "views of a repository that is gone, not removed since they may hold unsaved work: {}",
+        left_behind
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if !left_behind.is_empty() {
+        notes.push(&left_note);
+    }
     json!({"name": "store",
         "state": if notes.is_empty() { "green" } else { "advisory" },
         "promisor_remote": promisor.then_some(remote),
         "filter": filter,
         "ref_format": info.ref_format,
         "views": views,
+        "views_left_behind": left_behind,
         "work_tree": if info.bare { "none" } else if populated { "populated" } else { "empty" },
         "maintenance_strategy": get("maintenance.strategy"),
         "auto_maintenance": auto,

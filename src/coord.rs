@@ -250,14 +250,14 @@ pub fn judge(cwd: &Path, file: Option<&Path>, now: SystemTime) -> Verdict {
         Err((None, _)) => return Verdict::Allow,
         Err((Some(common), why)) => return unopened(&common, target.as_deref(), &why),
     };
-    let views = repo.views_dir();
+    let views = repo.views_dirs();
     let Some(target) = target else {
         let id = resolve(cwd)
-            .and_then(|cwd| locate(&views, &cwd))
+            .and_then(|cwd| locate_in(&views, &cwd))
             .map(|(id, _)| id);
         return judge_in(&repo, id.as_deref(), None, now);
     };
-    match locate(&views, &target) {
+    match locate_in(&views, &target) {
         Some((id, path)) if !path.is_empty() => judge_in(&repo, Some(&id), Some(&path), now),
         _ => Verdict::Allow,
     }
@@ -268,7 +268,7 @@ pub fn judge(cwd: &Path, file: Option<&Path>, now: SystemTime) -> Verdict {
 fn unopened(common: &Path, target: Option<&Path>, why: &str) -> Verdict {
     let why = format!("bay cannot open this repository ({why})");
     match target {
-        Some(target) => match locate(&common.join("bay").join("views"), target) {
+        Some(target) => match locate_in(&crate::repo::views_dirs_of(common), target) {
             Some((id, path)) if !path.is_empty() => {
                 unknown(Some(&id), Some(&path), &why, None, None)
             }
@@ -541,6 +541,10 @@ pub(crate) fn resolve(file: &Path) -> Option<PathBuf> {
 
 /// The change whose view under `views` holds the resolved path `file`, and `file`'s path in that
 /// view (`/`-separated, empty for the view itself).
+fn locate_in(views: &[PathBuf], file: &Path) -> Option<(String, String)> {
+    views.iter().find_map(|dir| locate(dir, file))
+}
+
 fn locate(views: &Path, file: &Path) -> Option<(String, String)> {
     let views = views.canonicalize().ok()?;
     let inner = file.strip_prefix(&views).ok()?;

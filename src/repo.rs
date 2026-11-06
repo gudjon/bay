@@ -564,12 +564,36 @@ impl Repo {
 
     #[must_use]
     pub fn views_dir(&self) -> PathBuf {
-        self.common_dir.join("bay").join("views")
+        views_root(&self.common_dir)
+    }
+
+    /// Where a view went before G663, and where one still open there stays.
+    #[must_use]
+    pub fn inner_views_dir(&self) -> PathBuf {
+        inner_views_root(&self.common_dir)
+    }
+
+    /// Every directory that may hold a view of this repository.
+    #[must_use]
+    pub fn views_dirs(&self) -> Vec<PathBuf> {
+        views_dirs_of(&self.common_dir)
+    }
+
+    /// The directory of change `id`'s view and journal: the inner one while it holds either,
+    /// else [`Self::views_dir`].
+    #[must_use]
+    pub fn view_home(&self, id: &str) -> PathBuf {
+        let inner = self.inner_views_dir();
+        if inner.join(id).exists() || inner.join(format!("{id}.journal")).exists() {
+            inner
+        } else {
+            self.views_dir()
+        }
     }
 
     #[must_use]
     pub fn view_path(&self, id: &str) -> PathBuf {
-        self.views_dir().join(id)
+        self.view_home(id).join(id)
     }
 
     #[must_use]
@@ -938,8 +962,53 @@ impl Repo {
     pub fn view_change(&self, dir: &Path) -> Option<String> {
         let toplevel = Git::new(dir).run(&["rev-parse", "--show-toplevel"]).ok()?;
         let toplevel = PathBuf::from(toplevel).canonicalize().ok()?;
-        let views = self.views_dir().canonicalize().ok()?;
-        (toplevel.parent()? == views).then(|| toplevel.file_name()?.to_str().map(str::to_owned))?
+        let parent = toplevel.parent()?;
+        self.views_dirs()
+            .iter()
+            .any(|views| views.canonicalize().is_ok_and(|views| views == parent))
+            .then(|| toplevel.file_name()?.to_str().map(str::to_owned))?
+    }
+}
+
+/// Where a repository's new views go: `<bay state dir>/views/<id>`, `<id>` naming its common
+/// directory. With no state directory, under the common directory.
+///
+/// G663: never under the repository. A view inside the checkout stops no walk up the parents, so
+/// a tool looking for its workspace file or its packages finds the checkout's, and writes there.
+/// A path holding `/.git` is also one agent products refuse to edit, and some tools leave out
+/// (G241, `check::scratch_root`).
+#[must_use]
+pub fn views_root(common_dir: &Path) -> PathBuf {
+    // A unit test's temporary repository keeps its views itself, off this machine's state.
+    if cfg!(test) {
+        return inner_views_root(common_dir);
+    }
+    crate::update::state_dir().map_or_else(
+        || inner_views_root(common_dir),
+        |state| views_root_in(&state, common_dir),
+    )
+}
+
+/// [`views_root`] under the bay state directory `state`.
+#[must_use]
+pub fn views_root_in(state: &Path, common_dir: &Path) -> PathBuf {
+    state
+        .join("views")
+        .join(crate::check::repository_key(common_dir))
+}
+
+fn inner_views_root(common_dir: &Path) -> PathBuf {
+    common_dir.join("bay").join("views")
+}
+
+/// Every directory that may hold a view of the repository at `common_dir`.
+#[must_use]
+pub fn views_dirs_of(common_dir: &Path) -> Vec<PathBuf> {
+    let (root, inner) = (views_root(common_dir), inner_views_root(common_dir));
+    if root == inner {
+        vec![root]
+    } else {
+        vec![root, inner]
     }
 }
 

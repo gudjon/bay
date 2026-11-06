@@ -443,10 +443,16 @@ pub fn scratch_root(common_dir: &Path) -> Result<PathBuf, String> {
 /// [`scratch_root`] under the bay state directory `state`.
 #[must_use]
 pub fn scratch_root_in(state: &Path, common_dir: &Path) -> PathBuf {
+    state.join("check").join(repository_key(common_dir))
+}
+
+/// The name of the repository at `common_dir` under the bay state directory.
+#[must_use]
+pub fn repository_key(common_dir: &Path) -> String {
     let digest = crate::agent_settings::hex(&<sha2::Sha256 as sha2::Digest>::digest(
         real(common_dir).as_os_str().as_encoded_bytes(),
     ));
-    state.join("check").join(&digest[..16])
+    digest[..16].to_owned()
 }
 
 /// What an adapter, a check's or an input provider's, may neither read nor write (§ 7): the
@@ -458,11 +464,11 @@ pub fn hidden_for(repo: &crate::repo::Repo, keys: &crate::signing::Keys) -> Vec<
     if let Ok(root) = scratch_root(&repo.common_dir) {
         hidden.push(root);
     }
-    // A linked worktree bay was started in is the repository's too (a view is already under
-    // the common directory).
+    hidden.push(repo.views_dir());
+    // A linked worktree bay was started in is the repository's too (a view is already hidden).
     if let Ok(top) = Git::new(&repo.opened_in).run(&["rev-parse", "--show-toplevel"]) {
         let top = PathBuf::from(top);
-        if !top.starts_with(&repo.common_dir) && !hidden.contains(&top) {
+        if !hidden.iter().any(|path| top.starts_with(path)) {
             hidden.push(top);
         }
     }
@@ -674,12 +680,22 @@ pub fn read_paths(git: &Git) -> Result<Vec<PathBuf>, String> {
 /// repository, a view, a key, the checks' scratch), or holds one, so binding it would show what
 /// is hidden.
 fn read_path_overlap(read: &[PathBuf], hidden: &[PathBuf]) -> Option<String> {
+    // A hidden path may not exist yet (the first check's scratch): its nearest existing parent
+    // decides its real path, or a link in that parent (macOS's `/var`) hides the overlap.
+    let real_through = |path: &Path| {
+        path.ancestors()
+            .find_map(|dir| {
+                let rest = path.strip_prefix(dir).ok()?;
+                Some(dir.canonicalize().ok()?.join(rest))
+            })
+            .unwrap_or_else(|| path.to_path_buf())
+    };
     read.iter().find_map(|path| {
-        let path_real = real(path);
+        let path_real = real_through(path);
         hidden
             .iter()
             .find(|hidden| {
-                let hidden = real(hidden);
+                let hidden = real_through(hidden);
                 path_real.starts_with(&hidden) || hidden.starts_with(&path_real)
             })
             .map(|hidden| {

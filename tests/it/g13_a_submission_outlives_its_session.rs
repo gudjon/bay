@@ -123,7 +123,7 @@ fn disconnected_after_publication_before_the_acknowledgement() {
     assert_eq!(killed.status.code(), Some(137));
     let status = test_box.bay_ok(&repo, &["status", &id]);
     assert_eq!(change(&status)["state"], "merged", "{status}");
-    let view = repo.join(".git/bay/views").join(&id);
+    let view = test_box.views_dir(&repo).join(&id);
     let (code, again) = result_json(test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{again}");
     assert_eq!(again["decision"], "merged");

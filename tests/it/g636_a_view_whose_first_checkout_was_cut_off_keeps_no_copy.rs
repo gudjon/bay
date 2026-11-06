@@ -27,7 +27,7 @@ fn cut_off(test_box: &TestBox, repo: &Path, locked: bool) -> (String, PathBuf) {
     if locked {
         std::fs::write(index.with_extension("lock"), "").unwrap();
     }
-    let journal = repo.join(".git/bay/views").join(format!("{id}.journal"));
+    let journal = test_box.views_dir(repo).join(format!("{id}.journal"));
     std::fs::remove_file(&journal).unwrap();
     (id, view)
 }
@@ -43,8 +43,8 @@ fn seeded(test_box: &TestBox) -> PathBuf {
 }
 
 /// Each `.unsaved-*` copy under the views folder of `repo`.
-fn copies(repo: &Path) -> Vec<String> {
-    std::fs::read_dir(repo.join(".git/bay/views"))
+fn copies(test_box: &TestBox, repo: &Path) -> Vec<String> {
+    std::fs::read_dir(test_box.views_dir(repo))
         .unwrap()
         .flatten()
         .filter_map(|entry| entry.file_name().into_string().ok())
@@ -60,7 +60,11 @@ fn a_view_with_no_index_and_no_edits_is_made_again_with_nothing_kept() {
 
     let resumed = test_box.bay_ok(&repo, &["start", &id]);
     assert!(resumed["detail"]["unsaved_kept"].is_null(), "{resumed}");
-    assert!(copies(&repo).is_empty(), "{:?}", copies(&repo));
+    assert!(
+        copies(&test_box, &repo).is_empty(),
+        "{:?}",
+        copies(&test_box, &repo)
+    );
     // THEN the view is whole again: its files as the draft has them, and an index git reads.
     assert_eq!(
         std::fs::read_to_string(view.join("src/a.rs")).unwrap(),
@@ -102,7 +106,11 @@ fn a_view_with_no_index_and_a_lock_left_is_made_again_with_nothing_kept() {
 
     let resumed = test_box.bay_ok(&repo, &["start", &id]);
     assert!(resumed["detail"]["unsaved_kept"].is_null(), "{resumed}");
-    assert!(copies(&repo).is_empty(), "{:?}", copies(&repo));
+    assert!(
+        copies(&test_box, &repo).is_empty(),
+        "{:?}",
+        copies(&test_box, &repo)
+    );
     let status = test_box.git_ok(&view, &["status", "--porcelain"]);
     assert!(status.is_empty(), "{status}");
 }

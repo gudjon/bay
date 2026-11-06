@@ -231,3 +231,25 @@ fn doctor_lists_the_read_paths_and_a_missing_one_is_degraded() {
         "{result}"
     );
 }
+
+#[test]
+fn a_read_path_over_the_views_refuses_the_check_by_name() {
+    // G663: the views sit under the state directory, hidden as they were under the repository.
+    if support::sandbox().is_none() {
+        eprintln!("no check sandbox on this machine; G285 cannot run");
+        return;
+    }
+    let test_box = TestBox::new();
+    let store = store(&test_box);
+    add_read_path(&test_box, "~/.local/state/bay/views");
+    let (repo, view) = submitted(&test_box, &store);
+    // From the checkout: bay also hides the folder it was started in.
+    let id = view.file_name().unwrap().to_str().unwrap();
+    let (code, refused) = result_json(test_box.bay(&repo).args(["merge", "--wait", id]));
+    assert_eq!(code, 10, "{refused}");
+    let text = refused.to_string();
+    assert!(
+        text.contains("overlaps") && text.contains(".local/state/bay/views/"),
+        "the refusal does not name the views: {refused}"
+    );
+}

@@ -137,7 +137,7 @@ fn a_publication_signed_outside_the_executor_file_is_an_anomaly_not_a_landing() 
     assert!(anomalies.contains(&misnamed.as_str()), "{status}");
 
     // The real landing still goes through, and only it counts.
-    let view = Path::new(&repo).join(".git/bay/views").join(&id);
+    let view = test_box.views_dir(Path::new(&repo)).join(&id);
     let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     let tip = test_box.git_bare(&remote, &["rev-parse", "main"]);

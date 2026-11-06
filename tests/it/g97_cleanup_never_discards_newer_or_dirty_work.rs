@@ -62,13 +62,9 @@ fn land(test_box: &TestBox, view: &Path) {
     assert_eq!(code, 0, "{landed}");
 }
 
-/// The journal of change `id`: `<git-common-dir>/bay/views/<id>.journal`.
+/// The journal of change `id`, beside its view.
 fn journal(test_box: &TestBox, repo: &Path, id: &str) -> PathBuf {
-    let common = test_box.git_ok(
-        repo,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    );
-    PathBuf::from(common).join(format!("bay/views/{id}.journal"))
+    test_box.views_dir(repo).join(format!("{id}.journal"))
 }
 
 #[test]

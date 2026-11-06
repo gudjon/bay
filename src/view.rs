@@ -1,6 +1,7 @@
 //! A view: the sparse checkout of one change's declared inputs (`DESIGN` § 10).
 //!
-//! A view is a worktree of the repository at `<git-common-dir>/bay/views/<id>`, detached
+//! A view is a worktree of the repository at `<bay state dir>/views/<repository>/<id>` (G663, one
+//! opened earlier stays at `<git-common-dir>/bay/views/<id>`), detached
 //! at the change's draft. With declared paths it is sparse: an absent file is a
 //! skip-worktree entry of the index, so a draft built from the index never reads it as a
 //! deletion (§ 10, G27). The shared blob-less machine cache is kickstart item 15.
@@ -80,10 +81,11 @@ pub fn age_s(repo: &Repo, id: &str) -> Option<u64> {
 /// The change ids of every view on this machine, from their journals.
 #[must_use]
 pub fn all(repo: &Repo) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(repo.views_dir()) else {
-        return Vec::new();
-    };
-    let mut ids: Vec<String> = entries
+    let mut ids: Vec<String> = repo
+        .views_dirs()
+        .iter()
+        .filter_map(|dir| std::fs::read_dir(dir).ok())
+        .flatten()
         .flatten()
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
@@ -119,10 +121,10 @@ pub fn uncheckpointed(view: &Path, latest_draft: &str) -> Result<bool, GitError>
         .is_empty())
 }
 
-/// The journal sits beside the view, outside it: `<git-common-dir>/bay/views/<id>.journal`.
+/// The journal sits beside the view, outside it: `<id>.journal`.
 #[must_use]
 pub fn journal_path(repo: &Repo, id: &str) -> PathBuf {
-    repo.views_dir().join(format!("{id}.journal"))
+    repo.view_home(id).join(format!("{id}.journal"))
 }
 
 /// The view's journal state. A view with no journal is treated as incomplete.
@@ -189,7 +191,16 @@ pub fn actor_at(path: &Path) -> Option<(String, String)> {
         .ancestors()
         .find(|dir| dir.join(".git").symlink_metadata().is_ok())?;
     let views = top.parent()?;
-    if views.file_name()? != "views" || views.parent()?.file_name()? != "bay" {
+    // `<bay>/views/<id>` under a common directory, `<bay>/views/<repository>/<id>` under the state
+    // directory; the journal then decides.
+    let is_views = |dir: &Path| {
+        dir.file_name().is_some_and(|name| name == "views")
+            && dir
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "bay")
+    };
+    if !is_views(views) && !views.parent().is_some_and(is_views) {
         return None;
     }
     let id = top.file_name()?.to_str()?;
@@ -223,8 +234,10 @@ fn write_journal(repo: &Repo, id: &str, state: Journal, actor: Option<&str>) -> 
     // A temporary file of this writer's own: two processes recording the same journal at once
     // (two `bay status` runs) each rename a whole file, and the later rename wins.
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    std::fs::create_dir_all(repo.views_dir()).map_err(|error| error.to_string())?;
     let path = journal_path(repo, id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
+    }
     let tmp = path.with_extension(format!(
         "journal.{}.{}.tmp",
         std::process::id(),
@@ -468,7 +481,7 @@ pub fn discard(repo: &Repo, id: &str, saved: &str) -> Result<Option<PathBuf>, Gi
     let mut kept = None;
     if path.exists() && holds_unsaved(repo, &path, saved) {
         let aside = repo
-            .views_dir()
+            .view_home(id)
             .join(format!("{id}.unsaved-{}", unix_now()));
         crate::durable::rename(&path, &aside).map_err(GitError::Spawn)?;
         kept = Some(aside);
@@ -545,6 +558,41 @@ pub fn sparse_pattern(path: &str) -> String {
     format!("/{trimmed}")
 }
 
+/// Beside this repository's views under the state directory, the repository they belong to, so
+/// `bay doctor` can say when a deleted clone left them behind (G663).
+fn name_owner(repo: &Repo) -> std::io::Result<()> {
+    let root = repo.views_dir();
+    if root == repo.inner_views_dir() {
+        return Ok(());
+    }
+    std::fs::write(
+        root.with_extension("repository"),
+        repo.common_dir.as_os_str().as_encoded_bytes(),
+    )
+}
+
+/// The directories of views whose repository is gone: a deleted or moved clone's. Nothing can
+/// tell whether they hold unsaved work with their repository gone, so they are only named.
+#[must_use]
+pub fn left_behind() -> Vec<PathBuf> {
+    let Some(views) = crate::update::state_dir().map(|state| state.join("views")) else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(views) else {
+        return Vec::new();
+    };
+    let mut left: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "repository"))
+        .filter(|path| std::fs::read_to_string(path).is_ok_and(|owner| !Path::new(&owner).exists()))
+        .map(|path| path.with_extension(""))
+        .filter(|dir| dir.is_dir())
+        .collect();
+    left.sort();
+    left
+}
+
 /// Creates the view of change `id` at `commit`, sparse over `paths` when any are declared, for
 /// this command's actor (G520).
 ///
@@ -554,6 +602,7 @@ pub fn sparse_pattern(path: &str) -> String {
 pub fn create(repo: &Repo, id: &str, commit: &str, paths: &[String]) -> Result<PathBuf, GitError> {
     let path = repo.view_path(id);
     std::fs::create_dir_all(repo.views_dir()).map_err(GitError::Spawn)?;
+    name_owner(repo).map_err(GitError::Spawn)?;
     let path_text = path.display().to_string();
     let journal_error = |why| GitError::Failed {
         args: "view journal".to_owned(),

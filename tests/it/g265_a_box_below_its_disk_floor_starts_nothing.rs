@@ -34,8 +34,8 @@ fn seeded(test_box: &TestBox) -> PathBuf {
 }
 
 /// The views this repository holds.
-fn views(repo: &Path) -> usize {
-    std::fs::read_dir(repo.join(".git/bay/views")).map_or(0, Iterator::count)
+fn views(test_box: &TestBox, repo: &Path) -> usize {
+    std::fs::read_dir(test_box.views_dir(repo)).map_or(0, Iterator::count)
 }
 
 fn chains(test_box: &TestBox, repo: &Path) -> usize {
@@ -79,14 +79,14 @@ fn a_start_below_the_floor_refuses_disk_low_and_makes_no_view() {
     );
     // Nothing was created: no change, no claim, no view.
     assert_eq!(chains(&test_box, &repo), 0);
-    assert_eq!(views(&repo), 0);
+    assert_eq!(views(&test_box, &repo), 0);
 
     // A floor the filesystem is above starts as before.
     test_box.git_ok(&repo, &["config", "bay.minFreeMiB", "0"]);
     let started = test_box.bay_ok(&repo, &["start", "CARD-1", "--paths", "src/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     assert!(view.join("src/a.rs").is_file(), "{started}");
-    assert!(views(&repo) > 0, "{started}");
+    assert!(views(&test_box, &repo) > 0, "{started}");
 }
 
 #[test]

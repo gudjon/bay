@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.30
+
+- A new view sits outside your checkout, so tools looking up its parents never find the checkout's files.
+- Agent products no longer treat a view as a protected `.git` path. A view already open stays where it is.
+- `bay doctor` names views a deleted clone left behind; bay does not remove them.
+- The guide says to declare a workspace's root files and lockfile with its paths.
+
 ## 0.6.29
 
 - A session resumed without `BAY_ACTOR` keeps its name, so it is never refused its own view.

@@ -26,7 +26,7 @@ fn a_view_whose_journal_was_lost_keeps_its_unsaved_edits() {
     std::fs::create_dir_all(repo.join(".git/info")).unwrap();
     std::fs::write(repo.join(".git/info/exclude"), "*.env\n").unwrap();
     std::fs::write(view.join("src/local.env"), "TOKEN=x\n").unwrap();
-    let journal = repo.join(".git/bay/views").join(format!("{id}.journal"));
+    let journal = test_box.views_dir(&repo).join(format!("{id}.journal"));
     assert!(journal.exists(), "{journal:?}");
     std::fs::remove_file(&journal).unwrap();
 
@@ -58,7 +58,7 @@ fn a_view_with_nothing_unsaved_is_made_again_with_nothing_kept() {
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     let started = test_box.bay_ok(&repo, &["start", "CARD-1", "--paths", "src/"]);
     let id = started["change"].as_str().unwrap().to_owned();
-    let journal = repo.join(".git/bay/views").join(format!("{id}.journal"));
+    let journal = test_box.views_dir(&repo).join(format!("{id}.journal"));
     std::fs::remove_file(&journal).unwrap();
     let resumed = test_box.bay_ok(&repo, &["start", &id]);
     assert!(resumed["detail"]["unsaved_kept"].is_null(), "{resumed}");

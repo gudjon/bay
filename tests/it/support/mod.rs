@@ -229,6 +229,16 @@ impl TestBox {
         String::from_utf8(out.stdout).unwrap().trim().to_owned()
     }
 
+    /// Where this box's bay puts the new views of `repo` (G663).
+    #[must_use]
+    pub fn views_dir(&self, repo: &Path) -> PathBuf {
+        let common = self.git_ok(
+            repo,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        );
+        bay::repo::views_root_in(&self.home.join(".local/state/bay"), Path::new(&common))
+    }
+
     /// `bay -C <dir>` with this box's environment.
     #[must_use]
     pub fn bay(&self, dir: &Path) -> Command {
