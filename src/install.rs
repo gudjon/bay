@@ -77,6 +77,9 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
     if let Some(refusal) = pinned_elsewhere(&target)? {
         return Ok(refusal);
     }
+    if let Some(why) = development_over_installed(&target) {
+        return Err(why);
+    }
     place_binary(&bin_dir, &target)?;
 
     // § 15.3 item 4: the skill this binary carries, at the caller's path and (G319) in every
@@ -310,6 +313,24 @@ fn pinned_elsewhere(target: &Path) -> Result<Option<BayResult>, String> {
             "why": why,
         })),
     ))
+}
+
+/// G664 (2026-11-06: a scratch test ran a development build's install, and every session on the
+/// machine then ran that build): a development build never replaces another bay. Only a release
+/// moves a machine's binary. The binary already being this one is no replacement.
+fn development_over_installed(target: &Path) -> Option<String> {
+    if option_env!("BAY_RELEASE_VERSION").is_some() {
+        return None;
+    }
+    let installed = std::fs::read(target).ok()?;
+    let running = std::fs::read(std::env::current_exe().ok()?).ok()?;
+    (installed != running).then(|| {
+        format!(
+            "this is a development build of bay, so install leaves {0} as it is: run `{0} install`, \
+             or remove that file first",
+            target.display()
+        )
+    })
 }
 
 fn place_binary(bin_dir: &Path, target: &Path) -> Result<(), String> {

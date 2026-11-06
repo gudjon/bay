@@ -6,6 +6,7 @@
 - Agent products no longer treat a view as a protected `.git` path. A view already open stays where it is.
 - `bay doctor` names views a deleted clone left behind; bay does not remove them.
 - The guide says to declare a workspace's root files and lockfile with its paths.
+- `bay install` from a development build no longer replaces an installed bay.
 
 ## 0.6.29
 
