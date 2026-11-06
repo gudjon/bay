@@ -62,7 +62,9 @@ view, `bay merge`, `bay save`, `bay start <change>` and the hook's check of an e
 are refused `VIEW_NOT_YOURS`, which names that actor. Work in a view of your own, or take that one over
 first with `bay start <change> --adopt`.
 `<intent>` says what the work is, in a few words (or a card id). `--paths` lists every path the change reads and writes:
-the view holds only those (`--paths .` is the whole tree). Before `bay merge`, commit your work in the view
+the view holds only those (`--paths .` is the whole tree). In a workspace, also declare its root files and
+lockfile (such as `package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `Cargo.toml`, `go.work`): without them
+a tool run in the view can use the main checkout's, and a lockfile change goes there, not into your change. Before `bay merge`, commit your work in the view
 with a message saying what you did, and an `Open: <item>` line at its end for anything left undone or
 needing a person: main's commit keeps that message. Research, a plan or a review a person should see is a
 short file (`notes/<date>-<what>.md`), saved like any other change. When `bay merge` names
