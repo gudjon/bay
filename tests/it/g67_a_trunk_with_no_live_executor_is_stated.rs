@@ -85,7 +85,12 @@ fn an_executor_pass_publishes_its_presence_and_replaces_the_last_one() {
     // With an operation queued, the next pass names it as the one it drives first, and its
     // presence replaces the last one: one parentless commit, never a growing chain.
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    let (code, queued) = result_json(
+        test_box
+            .bay(&view)
+            .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+            .arg("merge"),
+    );
     assert_eq!(code, 0, "{queued}");
     let op_id = queued["op_id"].as_str().unwrap().to_owned();
     once(&test_box, &executor);
@@ -148,7 +153,12 @@ fn queued_work_with_only_a_stale_presence_says_no_live_executor() {
     let (test_box, repo, _remote, executor) = seeded();
     once(&test_box, &executor);
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    let (code, queued) = result_json(
+        test_box
+            .bay(&view)
+            .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+            .arg("merge"),
+    );
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
 
@@ -177,7 +187,12 @@ fn queued_work_with_only_a_stale_presence_says_no_live_executor() {
 fn queued_work_and_no_executor_ever_says_none_seen() {
     let (test_box, repo, _remote, _executor) = seeded();
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    let (code, queued) = result_json(
+        test_box
+            .bay(&view)
+            .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+            .arg("merge"),
+    );
     assert_eq!(code, 0, "{queued}");
     let result = status(&test_box, &view, 0);
     let warning = no_live_executor(&result).unwrap_or_else(|| panic!("no warning: {result}"));

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.31
+
+- In a repository with no checks, `bay merge` pushes a change itself, in seconds, instead of waiting for a runner.
+- A change to `.bay/` there still goes to a runner.
+- A runner no longer moves config keys renamed in 0.4.0; `bay install` still does, and `bay doctor` names them.
+
 ## 0.6.30
 
 - A new view sits outside your checkout, so tools looking up its parents never find the checkout's files.

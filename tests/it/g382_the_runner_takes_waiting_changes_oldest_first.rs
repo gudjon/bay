@@ -34,7 +34,12 @@ fn changes_waiting_for_the_runner_run_in_the_order_they_were_submitted() {
     // Submitted in reverse id order, a second apart: the oldest has the largest id.
     started.sort_by(|a, b| b.0.cmp(&a.0));
     for (_, view) in &started {
-        let (code, queued) = result_json(test_box.bay(view).arg("merge"));
+        let (code, queued) = result_json(
+            test_box
+                .bay(view)
+                .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+                .arg("merge"),
+        );
         assert_eq!(code, 0, "{queued}");
         std::thread::sleep(std::time::Duration::from_millis(1100));
     }

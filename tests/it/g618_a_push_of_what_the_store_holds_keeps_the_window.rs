@@ -28,7 +28,13 @@ fn listed_then_queued(test_box: &support::TestBox, repo: &Path) -> (String, Valu
     let (asked, first) = status(test_box, repo, None, OPEN, "first");
     assert_eq!(asked, 1, "the listing did not sweep: {first}");
     let (id, view) = test_box.start_and_edit(repo);
-    test_box.bay_ok(&view, &["merge"]);
+    let (code, queued) = support::result_json(
+        test_box
+            .bay(&view)
+            .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+            .arg("merge"),
+    );
+    assert_eq!(code, 0, "{queued}");
     (id, first["detail"]["main"].clone())
 }
 

@@ -81,7 +81,12 @@ fn status_names_the_queue_wait_and_check_time_of_landed_changes() {
             format!("fn {name}() {{}}\n"),
         )
         .unwrap();
-        let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
+        let (code, submitted) = result_json(
+            test_box
+                .bay(&view)
+                .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+                .arg("merge"),
+        );
         assert_eq!(code, 0, "{submitted}");
         let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
         assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
@@ -152,7 +157,12 @@ fn an_unchecked_merge_counts_no_check_run() {
     );
     let runner = test_box.clone_of(&remote, "runner");
     let (_, view) = test_box.start_and_edit(&repo);
-    let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
+    let (code, submitted) = result_json(
+        test_box
+            .bay(&view)
+            .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+            .arg("merge"),
+    );
     assert_eq!(code, 0, "{submitted}");
     let ran = test_box.bay_ok(&runner, &["runner", "run", "--once"]);
     assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");

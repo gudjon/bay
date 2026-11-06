@@ -224,8 +224,13 @@ fn a_queued_change_hears_of_its_early_conflict_once() {
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("src/b.rs"), "fn b() {}\n").unwrap();
     // The view's actor merges it (G520).
-    let (code, submitted) =
-        result_json(test_box.bay(&view).env("BAY_ACTOR", "agent-a").arg("merge"));
+    let (code, submitted) = result_json(
+        test_box
+            .bay(&view)
+            .env("BAY_ACTOR", "agent-a")
+            .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+            .arg("merge"),
+    );
     assert_eq!(code, 0, "{submitted}");
 
     hook(

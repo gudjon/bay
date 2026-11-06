@@ -4,6 +4,10 @@
 //! runner, as under a registry that signs everything, leaves it to one as before, and a change a
 //! check covers still goes to a runner.
 //!
+//! G666 (2026-11-06, the owner's ruling): a repository with no checks is the same, since nothing is
+//! left to check. Guard to mutate: `nothing_to_check` (the first case here stays queued, or with
+//! the `.bay/` test gone the last merges).
+//!
 //! Guards to mutate, in `src/publish.rs` `submit_land`: the `needs_no_check` test (the first case
 //! stays queued, or with it always true, the second merges); the `let Ok` that leaves a fault to
 //! a runner (the third fails for want of a runner key).
@@ -110,4 +114,41 @@ fn a_machine_with_no_runner_key_leaves_it_to_a_runner() {
     assert_eq!(queued["decision"], "queued", "{queued}");
     assert_eq!(queued["waiting_for"], "runner", "{queued}");
     assert!(!case.test_box.trunk_change_ids(&case.host).contains(&id));
+}
+
+#[test]
+fn a_change_in_a_repository_with_no_checks_is_on_main_when_its_merge_returns() {
+    // G666: nothing is left for a runner to check there either.
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let remote = test_box.path().join("repo-remote.git");
+    test_box.seed_with_check(
+        &repo,
+        &[("src/a.rs", "fn a() {}\n")],
+        &support::unchecked_files(),
+    );
+    let (id, view) = edit(&test_box, &repo, "NOTE", "src/", "src/note.rs");
+
+    let (code, landed) = result_json(test_box.bay(&view).args(["merge"]));
+
+    assert_eq!(code, 0, "{landed}");
+    assert_eq!(landed["decision"], "merged", "{landed}");
+    assert!(test_box.trunk_change_ids(&remote).contains(&id), "{landed}");
+}
+
+#[test]
+fn a_change_to_the_policy_of_a_repository_with_no_checks_still_goes_to_a_runner() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.seed_with_check(
+        &repo,
+        &[("src/a.rs", "fn a() {}\n")],
+        &support::unchecked_files(),
+    );
+    let (_, view) = edit(&test_box, &repo, "POLICY", ".bay/", ".bay/note.txt");
+
+    let (code, queued) = result_json(test_box.bay(&view).args(["merge"]));
+
+    assert_eq!(code, 0, "{queued}");
+    assert_eq!(queued["decision"], "queued", "{queued}");
 }

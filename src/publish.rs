@@ -1105,7 +1105,7 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     let left_to_a_runner = TEST_HOOKS && std::env::var_os("BAY_TEST_LEAVE_TO_RUNNER").is_some();
     if online
         && !left_to_a_runner
-        && needs_no_check(&repo.git, &trunk, &revision).unwrap_or(false)
+        && nothing_to_check(&repo.git, &trunk, &revision).unwrap_or(false)
         && let Ok(result) = execute_op(&mut ctx, &op_id, trunk.clone())
     {
         ctx.tell_deferred();
@@ -3564,6 +3564,25 @@ pub fn needs_no_check(git: &Git, trunk: &str, revision: &str) -> Result<bool, St
             .check(&id)
             .is_some_and(|check| check.stage == policy::Stage::Post)
     }))
+}
+
+/// G666: whether a runner has nothing to check of this change, so its own merge may push it: no
+/// pre-merge check covers it, or the policy at `trunk` has no checks (`unchecked = true`). A change
+/// to `.bay/` still goes to a runner.
+fn nothing_to_check(git: &Git, trunk: &str, revision: &str) -> Result<bool, String> {
+    if needs_no_check(git, trunk, revision)? {
+        return Ok(true);
+    }
+    let Ok(Some(policy)) = policy::load_at(git, trunk) else {
+        return Ok(false);
+    };
+    let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
+        return Ok(false);
+    };
+    let changed = check::changed_paths(git, &base, revision)?;
+    Ok(policy.unchecked
+        && !changed.is_empty()
+        && !changed.iter().any(|path| path.starts_with(".bay/")))
 }
 
 /// Whether this change names, by `Fixes:`, `Reverts:` or `Supersedes:`, what answers a red post

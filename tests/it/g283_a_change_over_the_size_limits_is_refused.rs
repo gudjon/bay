@@ -180,7 +180,12 @@ fn the_executor_refuses_a_change_over_the_limits_at_candidate_build() {
             ("src/c.rs".to_owned(), b"fn c() {}\n".to_vec()),
         ],
     );
-    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    let (code, queued) = result_json(
+        test_box
+            .bay(&view)
+            .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+            .arg("merge"),
+    );
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
     let id = queued["change"].as_str().unwrap().to_owned();

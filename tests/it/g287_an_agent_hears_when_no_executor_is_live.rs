@@ -106,7 +106,12 @@ fn seeded_with(config: Option<&str>) -> (TestBox, PathBuf, PathBuf) {
 /// Starts a change, edits it, and submits it: one operation queued.
 fn queue_one(test_box: &TestBox, repo: &Path) {
     let (_, view) = test_box.start_and_edit(repo);
-    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    let (code, queued) = result_json(
+        test_box
+            .bay(&view)
+            .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+            .arg("merge"),
+    );
     assert_eq!(code, 0, "{queued}");
     assert_eq!(queued["decision"], "queued", "{queued}");
 }
