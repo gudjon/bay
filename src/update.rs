@@ -216,9 +216,19 @@ fn binary_name() -> String {
 
 #[must_use]
 pub fn update(request: &Request) -> BayResult {
+    // G670 (an hourly audit's `--check` kept one box from ever updating itself): a check changes
+    // nothing, so what it finds is recorded and the clock of the next update stays where it was.
+    let clock = request
+        .check
+        .then(|| State::read().unwrap_or_default().checked_at);
     let ticker = Ticker::start();
     let result = run(request).unwrap_or_else(|refusal| *refusal);
     drop(ticker);
+    if let Some(checked_at) = clock {
+        let mut state = State::read().unwrap_or_default();
+        state.checked_at = checked_at;
+        let _ = state.write();
+    }
     result
 }
 

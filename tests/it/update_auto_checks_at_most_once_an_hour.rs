@@ -271,3 +271,34 @@ fn a_machine_install_never_touches_the_repository() {
     );
     assert!(repo.join(".claude/settings.json").exists());
 }
+
+/// G670 (a fleet finding, 2026-11-06: an hourly audit ran `bay update --check` on one box, and that
+/// box stopped updating itself): a check changes nothing, so it leaves the hourly clock alone.
+/// Guard to mutate: `src/update.rs` `update`, the clock put back (the first assert fails).
+#[test]
+fn a_check_does_not_put_off_the_next_update() {
+    let fixture = Fixture::new();
+    fixture.list(&[(bay::version::BAY, false)]);
+    let repo = fixture.repo("");
+    let two_hours_ago = fixture.checked_ago(2 * HOUR_S);
+
+    let out = fixture
+        .bay(&repo)
+        .args(["update", "--check"])
+        .env("BAY_DISABLE_AUTOUPDATE", "1")
+        .output_busy();
+    assert!(out.status.success(), "{out:?}");
+
+    assert_eq!(
+        checked_at(&fixture),
+        Some(two_hours_ago),
+        "a read-only check moved the clock"
+    );
+    // It still reports what it found, for doctor's row.
+    assert_eq!(fixture.state().unwrap()["newest"], bay::version::BAY);
+    // And the next command's check is still due.
+    let _ = fixture.bay(&repo).arg("status").output_busy();
+    eventually("the due check runs", || {
+        checked_at(&fixture).is_some_and(|checked| checked > two_hours_ago + HOUR_S)
+    });
+}

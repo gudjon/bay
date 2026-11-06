@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.35
+
+- `bay update --check` no longer puts off a machine's next automatic update.
+
 ## 0.6.34
 
 - A runner's line for each operation names the Git commands that took longest, with time and count.
