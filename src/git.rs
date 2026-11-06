@@ -531,7 +531,9 @@ impl Git {
             }
             run_bounded_for(cmd, &args_display, input, timeout)
         };
+        let began = std::time::Instant::now();
         let output = run();
+        record_time(args, began.elapsed());
         // G617, G618: a push, landed or not, may have changed what the remote holds, so no sweep
         // that began before it ends serves a status read, unless the store holds what it sent.
         if args.first() == Some(&"push")
@@ -1065,6 +1067,32 @@ impl Git {
 
 /// Test hooks are compiled in unless `scripts/release.sh` built this binary.
 use crate::version::TEST_HOOKS;
+
+/// G669: this process's time in each Git command since [`take_times`] last ran, and how many ran.
+static TIMES: Mutex<BTreeMap<String, (std::time::Duration, u32)>> = Mutex::new(BTreeMap::new());
+
+fn record_time(args: &[&str], spent: std::time::Duration) {
+    let command = args.first().copied().unwrap_or_default().to_owned();
+    let mut times = TIMES.lock().unwrap_or_else(PoisonError::into_inner);
+    let entry = times.entry(command).or_default();
+    entry.0 += spent;
+    entry.1 += 1;
+}
+
+/// The Git commands that took longest since the last call, longest first, and starts anew:
+/// `push 24.1s x1, fetch 3.2s x2`.
+#[must_use]
+pub fn take_times(most: usize) -> String {
+    let times = std::mem::take(&mut *TIMES.lock().unwrap_or_else(PoisonError::into_inner));
+    let mut times: Vec<_> = times.into_iter().collect();
+    times.sort_by_key(|(_, (spent, _))| std::cmp::Reverse(*spent));
+    times
+        .iter()
+        .take(most)
+        .map(|(command, (spent, count))| format!("{command} {:.1}s x{count}", spent.as_secs_f64()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// The file `BAY_TEST_GIT_TRACE` names, read once per process; `None` in a release build.
 fn trace_file() -> Option<&'static Path> {

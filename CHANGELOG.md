@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.34
+
+- A runner's line for each operation names the Git commands that took longest, with time and count.
+
 ## 0.6.33
 
 - Two unrelated edits to the policy no longer collide on `revision`; bay merges them and writes the next number.

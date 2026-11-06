@@ -1106,6 +1106,7 @@ fn run_op(
     // busy runner never reads as gone.
     let step = publish::Step::new("read");
     let began = std::time::Instant::now();
+    let _ = crate::git::take_times(0);
     let mut placing = || arrivals.step(repo, op_id);
     let result = beat.during(repo, op_id, depth, &mut placing, || {
         publish::execute(repo, id, op_id, &step).unwrap_or_else(BayResult::failed)
@@ -1170,16 +1171,21 @@ fn journal_line(
         .into_iter()
         .map(|(name, secs)| format!("{name} {secs}s"))
         .collect();
+    // G669 (a merge run of 65 s with a 1 s check, 30 s of it in "publish"): which Git calls.
+    let git = crate::git::take_times(GIT_TIMES_SHOWN);
     if steps.len() > 1 {
         format!(
-            "{line} ({}s: {})",
+            "{line} ({}s: {}; git: {git})",
             began.elapsed().as_secs(),
             steps.join(", ")
         )
     } else {
-        format!("{line} ({}s)", began.elapsed().as_secs())
+        format!("{line} ({}s; git: {git})", began.elapsed().as_secs())
     }
 }
+
+/// The Git commands a runner's line for an operation names.
+const GIT_TIMES_SHOWN: usize = 6;
 
 /// S1 (bay 0.6.0; a fleet measurement, 2026-10-28): a runner placed a submitted change only
 /// when its pass reached it, and a pass that ran a head or a pre-check placed nothing for
