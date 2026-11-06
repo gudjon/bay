@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.32
+
+- `bay status` read past its deadline says it is from the last fetch, and never "Done".
+
 ## 0.6.31
 
 - In a repository with no checks, `bay merge` pushes a change itself, in seconds, instead of waiting for a runner.

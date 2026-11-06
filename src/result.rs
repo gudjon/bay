@@ -1752,10 +1752,30 @@ fn status_say(result: &BayResult) -> Option<String> {
         (Some(changes), Some(talks)) => Some(format!("{changes} {talks}")),
         (changes, talks) => changes.or(talks),
     };
-    match (said, fleet_say(result)) {
+    let said = match (said, fleet_say(result)) {
         (Some(said), Some(fleet)) => Some(format!("{said} {fleet}")),
         (said, fleet) => said.or(fleet),
+    };
+    match (said, stale_say(result)) {
+        (Some(said), Some(stale)) => Some(format!("{said} {stale}")),
+        (None, Some(stale)) => Some(format!("Nothing to report yet. {stale}")),
+        (said, None) => said,
     }
+}
+
+/// G667 (2026-11-06: a box behind by days read "Done; nothing else is needed." from a store with no
+/// answer for any check): a read past its deadline says it is the last fetch's, whatever it found.
+fn stale_say(result: &BayResult) -> Option<&'static str> {
+    result
+        .detail
+        .as_ref()?
+        .get("warnings")?
+        .as_array()?
+        .iter()
+        .any(|warning| warning["code"] == "stale_read")
+        .then_some(
+            "This is from the last fetch, and a newer one is still running; read again shortly.",
+        )
 }
 
 /// G662: the sentence of `bay start --dry-run`.
@@ -2342,6 +2362,27 @@ mod tests {
         let none = said(json!([{"code": "no_live_executor"}]));
         assert!(!none.contains("Nothing needs you"), "{none}");
         assert!(none.contains("none is live"), "{none}");
+    }
+
+    #[test]
+    fn a_status_read_past_its_deadline_says_it_is_the_last_fetchs() {
+        // G667: with nothing found, and with something found.
+        let said = |red: serde_json::Value, warnings: serde_json::Value| {
+            BayResult::ok(
+                json!({"flow": {}, "warnings": warnings, "red": red, "red_pending": [],
+                "changes": []}),
+            )
+            .say()
+        };
+        let stale = json!([{"code": "stale_read"}]);
+        let empty = said(json!([]), stale.clone());
+        assert!(!empty.contains("Done"), "{empty}");
+        assert!(empty.contains("from the last fetch"), "{empty}");
+        let red = said(json!([{"check": "tests"}]), stale);
+        assert!(red.contains("Main is broken on tests"), "{red}");
+        assert!(red.contains("from the last fetch"), "{red}");
+        let fresh = said(json!([]), json!([]));
+        assert!(fresh.starts_with("Done"), "{fresh}");
     }
 
     #[test]
