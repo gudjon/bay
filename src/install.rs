@@ -77,9 +77,6 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
     if let Some(refusal) = pinned_elsewhere(&target)? {
         return Ok(refusal);
     }
-    if let Some(why) = development_over_installed(&target) {
-        return Err(why);
-    }
     place_binary(&bin_dir, &target)?;
 
     // § 15.3 item 4: the skill this binary carries, at the caller's path and (G319) in every
@@ -334,6 +331,9 @@ fn development_over_installed(target: &Path) -> Option<String> {
 }
 
 fn place_binary(bin_dir: &Path, target: &Path) -> Result<(), String> {
+    if let Some(why) = development_over_installed(target) {
+        return Err(why);
+    }
     let source =
         std::env::current_exe().map_err(|error| format!("cannot find the running bay: {error}"))?;
     std::fs::create_dir_all(bin_dir)

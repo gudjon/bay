@@ -80,6 +80,7 @@ pub mod signing;
 pub mod skill;
 pub mod start;
 pub mod status;
+pub mod storage;
 pub mod stranded;
 pub mod sweep;
 pub mod sweeper;

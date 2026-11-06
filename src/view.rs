@@ -308,33 +308,87 @@ pub fn release_ended(
         .collect()
 }
 
-/// Releases the view of ended change `id` when it holds nothing newer; whether it did.
-fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
+/// G665: the views [`release_ended`] would release, removing nothing. `in_time` stops the reading
+/// once it says no; then the second value is false.
+pub fn would_release(
+    repo: &Repo,
+    window: std::time::Duration,
+    ended: &dyn Fn(&str) -> Option<Ended>,
+    in_time: &dyn Fn() -> bool,
+) -> (Vec<String>, bool) {
+    let now = unix_now();
+    let mut free = Vec::new();
+    for id in all(repo) {
+        if !in_time() {
+            return (free, false);
+        }
+        let due = ended(&id).filter(|change| {
+            now.saturating_sub(change.at_unix) >= change.window.unwrap_or(window).as_secs()
+        });
+        if let Some(change) = due
+            && matches!(
+                standing(repo, &id, &change),
+                Ok(Standing::Free | Standing::Gone)
+            )
+        {
+            free.push(id);
+        }
+    }
+    (free, true)
+}
+
+/// What cleanup may do with the view of ended change `id`.
+enum Standing {
+    /// Locked, or not a worktree of this repository: kept.
+    Kept,
+    /// It holds something newer than its change's end: kept, without its ignored directories.
+    HoldsNewer,
+    /// Its directory is already gone: only its journal is left.
+    Gone,
+    /// It holds nothing newer, and may go.
+    Free,
+}
+
+fn standing(repo: &Repo, id: &str, ended: &Ended) -> Result<Standing, GitError> {
     let path = repo.view_path(id);
     // Git names a worktree's administrative directory after the view's own directory.
     let lock = repo.common_dir.join("worktrees").join(id).join("locked");
     if lock.exists() {
-        return Ok(false);
+        return Ok(Standing::Kept);
     }
     match std::fs::symlink_metadata(&path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(GitError::Spawn(error)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Standing::Gone),
+        Err(error) => Err(GitError::Spawn(error)),
         Ok(_) => {
             let Some(admin) = worktree_admin(repo, &path) else {
-                return Ok(false);
+                return Ok(Standing::Kept);
             };
             if admin.join("locked").exists() {
-                return Ok(false);
+                return Ok(Standing::Kept);
             }
-            if !holds_nothing_newer(&path, ended)? {
-                // G639: the view stays for its work, and its change has ended, so the directories
-                // its ignore rules match go. A loose ignored file, such as an `.env`, stays: bay
-                // cannot tell it from work. One that fails is tried at the next start.
-                remove_ignored_directories(&path);
-                return Ok(false);
+            if holds_nothing_newer(&path, ended)? {
+                Ok(Standing::Free)
+            } else {
+                Ok(Standing::HoldsNewer)
             }
-            remove_worktree(repo, &path).map_err(GitError::Spawn)?;
         }
+    }
+}
+
+/// Releases the view of ended change `id` when it holds nothing newer; whether it did.
+fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
+    let path = repo.view_path(id);
+    match standing(repo, id, ended)? {
+        Standing::Kept => return Ok(false),
+        Standing::HoldsNewer => {
+            // G639: the view stays for its work, and its change has ended, so the directories
+            // its ignore rules match go. A loose ignored file, such as an `.env`, stays: bay
+            // cannot tell it from work. One that fails is tried at the next start.
+            remove_ignored_directories(&path);
+            return Ok(false);
+        }
+        Standing::Gone => {}
+        Standing::Free => remove_worktree(repo, &path).map_err(GitError::Spawn)?,
     }
     unregister(repo, &path);
     match std::fs::remove_file(journal_path(repo, id)) {

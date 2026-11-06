@@ -243,6 +243,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
             report.rows.push(ref_format_row(&info.ref_format));
         }
         report.rows.push(store_row(&git, &config, info));
+        report.rows.push(crate::storage::row(&git, dir));
         gc_log_row(&git, &mut report);
         quarantine_row(&git, &config, info.bare, &mut report);
         signing_row(&git, &mut report);

@@ -973,19 +973,26 @@ pub(crate) fn sweep_tmp_packs(repo: &Repo) {
         return;
     };
     for entry in entries.flatten() {
-        let stale = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .ok()
-            .and_then(|at| at.elapsed().ok())
-            .is_some_and(|age| age >= STALE_TMP_PACK);
-        if stale
-            && entry.file_name().to_string_lossy().starts_with("tmp_")
-            && entry.file_type().is_ok_and(|kind| kind.is_file())
-        {
+        if is_tmp_pack(&entry) && tmp_pack_is_stale(&entry) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// Whether this entry of `objects/pack` is a half-written pack.
+pub(crate) fn is_tmp_pack(entry: &std::fs::DirEntry) -> bool {
+    entry.file_name().to_string_lossy().starts_with("tmp_")
+        && entry.file_type().is_ok_and(|kind| kind.is_file())
+}
+
+/// Whether nothing has touched this half-written pack for [`STALE_TMP_PACK`].
+pub(crate) fn tmp_pack_is_stale(entry: &std::fs::DirEntry) -> bool {
+    entry
+        .metadata()
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age >= STALE_TMP_PACK)
 }
 
 /// BACKLOG 157 (a fleet finding, 2026-10-30: 39% of one runner's journal lines): an operation

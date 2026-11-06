@@ -323,6 +323,35 @@ fn reclaim(repo: &Repo, dir: &Path) -> Vec<String> {
 /// is fresh and not ended), are in use and kept.
 fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
     let chain = Chain::new(&repo.git);
+    let in_use = views_in_use(repo, dir);
+    // Owner ruling 2026-10-26: a view of an ended change that holds nothing newer is released at
+    // once. Its work is on main or recorded on the chain; the retention window keeps the chain's
+    // records, never a view (a fleet's shared checkout held 574 views). A lane change keeps its
+    // own window.
+    view::release_ended(repo, std::time::Duration::ZERO, &|id| {
+        ended_view(repo, &chain, &in_use, id)
+    })
+}
+
+/// G665: the views [`release_ended`] would release, removing nothing. `in_time` stops the reading
+/// once it says no; then the second value is false.
+pub(crate) fn would_release(
+    repo: &Repo,
+    dir: &Path,
+    in_time: &dyn Fn() -> bool,
+) -> (Vec<String>, bool) {
+    let chain = Chain::new(&repo.git);
+    let in_use = views_in_use(repo, dir);
+    view::would_release(
+        repo,
+        std::time::Duration::ZERO,
+        &|id| ended_view(repo, &chain, &in_use, id),
+        in_time,
+    )
+}
+
+/// The view `dir` stands in, and the view of each live session on this machine.
+fn views_in_use(repo: &Repo, dir: &Path) -> Vec<String> {
     let mut in_use: Vec<String> = repo.view_change(dir).into_iter().collect();
     let lines = crate::live::lines(repo).unwrap_or_default();
     let rows = crate::live::rows_of(
@@ -334,57 +363,55 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
         rows.iter()
             .filter_map(|row| row["change"].as_str().map(str::to_owned)),
     );
-    let ended = |id: &str| {
-        if in_use.iter().any(|used| used == id) {
-            return None;
-        }
-        let (head, record) = chain.read(id).ok()?;
-        // NEW-4: a lane change never lands. Once its checks ran (`lane::CHECKED`) its work is done,
-        // and its view goes after the lane's shorter window; one of a lane the config no longer
-        // declares keeps the retention window.
-        let lane_window = record.lane.as_deref().map(|lane| {
-            repo.config.lane(lane).map_or_else(
-                || repo.config.retention_window(),
-                |lane| repo.config.lane_window(lane),
-            )
-        });
-        let never_lands = lane_window.is_some()
-            && record
-                .operations
-                .last()
-                .is_some_and(|op| op.outcome.as_deref() == Some(crate::lane::CHECKED));
-        let ended = never_lands
-            || matches!(
-                record.state,
-                ChangeState::Landed | ChangeState::Abandoned | ChangeState::NoEffect
-            );
-        if !ended {
-            return None;
-        }
-        let mut placed = chain.drafts(id).ok()?;
-        let revision = crate::status::last_revision(&record, placed.first()?);
-        // The change ended with its chain's last state commit; a time that cannot be read is
-        // never past the window.
-        let at_unix: u64 = repo
-            .git
-            .run(&["log", "-1", "--format=%ct", &head])
-            .ok()?
-            .trim()
-            .parse()
-            .ok()?;
-        placed.extend([record.base, record.base_first]);
-        Some(view::Ended {
-            revision,
-            at_unix,
-            placed,
-            window: lane_window,
-        })
-    };
-    // Owner ruling 2026-10-26: a view of an ended change that holds nothing newer is released at
-    // once. Its work is on main or recorded on the chain; the retention window keeps the chain's
-    // records, never a view (a fleet's shared checkout held 574 views). A lane change keeps its
-    // own window.
-    view::release_ended(repo, std::time::Duration::ZERO, &ended)
+    in_use
+}
+
+/// What cleanup knows of change `id`'s view: `None` while it is in use or has not ended.
+fn ended_view(repo: &Repo, chain: &Chain, in_use: &[String], id: &str) -> Option<view::Ended> {
+    if in_use.iter().any(|used| used == id) {
+        return None;
+    }
+    let (head, record) = chain.read(id).ok()?;
+    // NEW-4: a lane change never lands. Once its checks ran (`lane::CHECKED`) its work is done,
+    // and its view goes after the lane's shorter window; one of a lane the config no longer
+    // declares keeps the retention window.
+    let lane_window = record.lane.as_deref().map(|lane| {
+        repo.config.lane(lane).map_or_else(
+            || repo.config.retention_window(),
+            |lane| repo.config.lane_window(lane),
+        )
+    });
+    let never_lands = lane_window.is_some()
+        && record
+            .operations
+            .last()
+            .is_some_and(|op| op.outcome.as_deref() == Some(crate::lane::CHECKED));
+    let ended = never_lands
+        || matches!(
+            record.state,
+            ChangeState::Landed | ChangeState::Abandoned | ChangeState::NoEffect
+        );
+    if !ended {
+        return None;
+    }
+    let mut placed = chain.drafts(id).ok()?;
+    let revision = crate::status::last_revision(&record, placed.first()?);
+    // The change ended with its chain's last state commit; a time that cannot be read is
+    // never past the window.
+    let at_unix: u64 = repo
+        .git
+        .run(&["log", "-1", "--format=%ct", &head])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    placed.extend([record.base, record.base_first]);
+    Some(view::Ended {
+        revision,
+        at_unix,
+        placed,
+        window: lane_window,
+    })
 }
 
 /// The refusal of a start whose `--lane` the config at trunk does not declare, whose `--fixes`

@@ -7,6 +7,7 @@
 - `bay doctor` names views a deleted clone left behind; bay does not remove them.
 - The guide says to declare a workspace's root files and lockfile with its paths.
 - `bay install` from a development build no longer replaces an installed bay.
+- `bay doctor` says where a clone's disk went, and what the next `bay start` would free.
 
 ## 0.6.29
 

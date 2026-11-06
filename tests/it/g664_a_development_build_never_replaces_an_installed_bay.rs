@@ -31,7 +31,11 @@ fn skill(test_box: &TestBox) -> PathBuf {
 fn installed() -> (TestBox, PathBuf) {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
-    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &support::unchecked_files());
+    test_box.seed_with_check(
+        &repo,
+        &[("src/a.rs", "fn a() {}\n")],
+        &support::unchecked_files(),
+    );
     let path = target(&test_box);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, RELEASED).unwrap();
@@ -49,7 +53,10 @@ fn an_install_leaves_the_installed_bay_and_its_skill_as_they_are() {
     let text = refused.to_string();
     assert!(text.contains("development build"), "{text}");
     assert!(text.contains(target(&test_box).to_str().unwrap()), "{text}");
-    assert_eq!(std::fs::read_to_string(target(&test_box)).unwrap(), RELEASED);
+    assert_eq!(
+        std::fs::read_to_string(target(&test_box)).unwrap(),
+        RELEASED
+    );
     assert!(!skill(&test_box).exists(), "the skill was written");
 }
 
@@ -60,7 +67,10 @@ fn a_machine_install_refuses_too() {
     let (code, refused) = result_json(test_box.bay(&repo).args(["install", "--machine"]));
 
     assert_eq!(code, 20, "{refused}");
-    assert_eq!(std::fs::read_to_string(target(&test_box)).unwrap(), RELEASED);
+    assert_eq!(
+        std::fs::read_to_string(target(&test_box)).unwrap(),
+        RELEASED
+    );
 }
 
 #[test]
