@@ -2,10 +2,10 @@
 //! two unrelated edits collided on the `revision` line, twice in one hour). `revision` only says the
 //! policy changed. When a change raised it and main raised it too, that is no disagreement: bay merges
 //! the rest of the file and writes the next number. A real conflict elsewhere in the file stays one,
-//! and a change that did not raise it is still refused.
+//! and a change that did not raise it merges with the next number too (G675).
 //!
 //! Guards to mutate, in `src/merge.rs` `settle_revision`: the whole function (both collisions fail);
-//! the check that the change raised it (the unraised case merges); the merge of the rest of the file
+//! the merge of the rest of the file
 //! (the real conflict merges with one side lost); the next number (the same-number case).
 
 #![cfg(unix)]
@@ -113,7 +113,7 @@ fn a_real_conflict_elsewhere_in_the_file_stays_one() {
 }
 
 #[test]
-fn a_change_that_did_not_raise_it_is_still_refused() {
+fn a_change_that_did_not_raise_it_merges_with_the_next_number() {
     let (test_box, repo) = seeded();
     let (one, two) = (
         start(&test_box, &repo, "ONE"),
@@ -124,12 +124,13 @@ fn a_change_that_did_not_raise_it_is_still_refused() {
 
     let (code, merged) = merge(&test_box, &one);
     assert_eq!(code, 0, "{merged}");
-    let (code, refused) = merge(&test_box, &two);
+    let (code, merged) = merge(&test_box, &two);
 
-    assert_ne!(code, 0, "{refused}");
+    assert_eq!(code, 0, "{merged}");
+    let policy = main_policy(&test_box, &repo);
     assert!(
-        refused.to_string().contains("must raise revision"),
-        "{refused}"
+        policy.contains("# first, edited") && policy.contains("# last, edited"),
+        "{policy}"
     );
-    assert!(!main_policy(&test_box, &repo).contains("# last, edited"));
+    assert!(policy.starts_with("revision = 7\n"), "{policy}");
 }

@@ -6411,17 +6411,9 @@ fn check_candidate(
 ) -> Result<(bool, &'static str, Option<BayResult>), String> {
     let git = &ctx.repo.git;
     let facts = change_facts(ctx, revision);
-    let refuse = |why: String| {
-        Ok((
-            true,
-            "unknown",
-            Some(
-                BayResult::failed(why)
-                    .with_change(ctx.id.clone())
-                    .with_op(op_id),
-            ),
-        ))
-    };
+    // G676: a refused policy edit says `POLICY_INVALID`, its next step and its retry rule, on
+    // the result and the operation, so status and the author's wake say it; never an empty block.
+    let refuse = |why: String| Ok(policy_invalid(ctx, op_id, commit, "candidate", &why));
     let mut adapters_from: Option<String> = None;
     let base_policy = match policy::load_at(git, trunk) {
         Ok(policy) => policy,
@@ -6445,7 +6437,8 @@ fn check_candidate(
             }
             None => return Ok(policy_invalid(ctx, op_id, trunk, "base", &why)),
         },
-        Err(policy::LoadError::Git(why)) => return refuse(why),
+        // A read fault is a fault, retried; never a refusal of the change.
+        Err(policy::LoadError::Git(why)) => return Err(why),
     };
     let base_from = adapters_from.as_deref().unwrap_or(trunk);
     // G635: under `signing = "approvals"` no request is signed, so no signature marks a repair.
@@ -6509,7 +6502,8 @@ fn check_candidate(
         Err(policy::LoadError::Invalid(why)) => {
             return Ok(policy_invalid(ctx, op_id, commit, "candidate", &why));
         }
-        Err(policy::LoadError::Git(why)) => return refuse(why),
+        // A read fault is a fault, retried; never a refusal of the change.
+        Err(policy::LoadError::Git(why)) => return Err(why),
     };
     if let Some(why) = unraised(git, trunk, base_policy.as_ref(), &own_policy) {
         return refuse(why);

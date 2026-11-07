@@ -2457,8 +2457,10 @@ mod tests {
         let refused = read(json!({"change": "abcd1234", "state": "ready",
             "operation": {"lease": null, "outcome": Reason::CheckFailed.code()}}));
         assert!(!refused.contains("nothing else is needed"), "{refused}");
-        // G603: an operation a fault stopped has no outcome; its receipt's words say why.
-        let why = "it must raise revision above 70; it has 70";
+        // G603: an operation a fault stopped has no outcome; its receipt's words say why. Its
+        // fleet case, an unraised revision, now merges (G675) and other policy refusals carry
+        // POLICY_INVALID (G676), so this guards the sentence for any fault that remains.
+        let why = "the remote could not be read";
         let stopped = read(json!({"change": "abcd1234", "state": "ready",
             "operation": {"lease": null, "outcome": null, "state": "blocked", "receipt": "r-1",
                 "fault": {"why": why, "recovery": "fix the cause, then run bay merge again"}}}));

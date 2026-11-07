@@ -6,6 +6,7 @@
 - A change that edits the failed check's own files hears the check ran as main has it.
 - `bay merge` refuses `MERGE_CONFLICT` before the change queues and before any input provider runs.
 - An edit of the policy or a check's own files merges with the policy `revision` raised by bay.
+- A refused policy edit says `POLICY_INVALID` with its next step, and wakes its session; never an empty block.
 
 ## 0.6.38
 
