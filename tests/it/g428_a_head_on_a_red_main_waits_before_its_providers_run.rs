@@ -141,14 +141,15 @@ fn a_head_that_conflicts_with_main_is_refused_before_its_providers_run() {
     std::fs::write(their_view.join("src/a.rs"), "fn a() { 2; }\n").unwrap();
     let (code, landed) = result_json(test_box.bay(&their_view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
-    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
-    assert_eq!(code, 0, "{queued}");
-    let id = queued["change"].as_str().unwrap().to_owned();
-    let (refused, journal) = pass(&test_box, &repo);
-    assert!(refused.to_string().contains("MERGE_CONFLICT"), "{refused}");
+    // G674: `bay merge` says the conflict itself, before anything queues or any provider runs.
+    let (code, refused) = result_json(test_box.bay(&view).arg("merge"));
+    assert_eq!(code, 10, "{refused}");
+    assert_eq!(refused["reason"], "MERGE_CONFLICT", "{refused}");
+    let id = refused["change"].as_str().unwrap().to_owned();
+    let (_, journal) = pass(&test_box, &repo);
     assert!(
         !providers_ran(&journal, &id),
-        "the provider ran for a head that conflicts with main: {journal}"
+        "the provider ran for a change that conflicts with main: {journal}"
     );
 }
 

@@ -1072,18 +1072,23 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     {
         return Ok(refusal);
     }
+    // G672, G674: a conflict or an undo is told here, not after a turn in the queue. A runner
+    // still decides at its own turn, on main as it is then. Before any input provider runs (G428).
+    if ctx.op(&op_id).state == OpState::Submitted {
+        let tree = match merged(&mut ctx, &op_id, &revision, &trunk)? {
+            Ok(tree) => tree,
+            Err(refusal) => return Ok(refusal),
+        };
+        if let Some(refusal) = undoes_merged(&mut ctx, &op_id, &revision, &trunk, &tree)? {
+            return Ok(refusal);
+        }
+        step.set("freeze");
+    }
     // § 8 at admit: a change that has not observed what trunk requires is refused now, with
     // the outcome on its operation, never queued for a refusal no one is there to read. An
     // operation an executor already took is the executor's to judge.
     if ctx.op(&op_id).state == OpState::Submitted
         && let Err(refusal) = input_gate(&mut ctx, &op_id, &revision, &trunk)?
-    {
-        return Ok(refusal);
-    }
-    // G672: told here, not after a turn in the queue. A runner still decides at its own turn.
-    if ctx.op(&op_id).state == OpState::Submitted
-        && let Ok(Merge::Clean(tree)) = merge_onto(&repo.git, &trunk, &revision)
-        && let Some(refusal) = undoes_merged(&mut ctx, &op_id, &revision, &trunk, &tree)?
     {
         return Ok(refusal);
     }

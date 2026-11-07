@@ -4,6 +4,7 @@
 
 - A failed check's sentence names the failed unit and its first line, at `bay merge` and in `bay status`.
 - A change that edits the failed check's own files hears the check ran as main has it.
+- `bay merge` refuses `MERGE_CONFLICT` before the change queues and before any input provider runs.
 
 ## 0.6.38
 
