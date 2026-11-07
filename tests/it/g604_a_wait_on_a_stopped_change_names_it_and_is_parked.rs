@@ -103,10 +103,10 @@ fn a_wait_on_a_stopped_change_names_its_block_and_is_visited_again_once_it_moves
         policy: None,
         seed: &[("src/a.rs", "fn a() {}\n")],
         hold_first: false,
-        fails: "false",
+        fails: "[ -e src/stop.rs ]",
     });
-    // The dependency also edits the check's adapter and keeps the policy's revision: a runner
-    // blocks it.
+    // The dependency also writes a file its check fails on: a runner blocks it. (Its first form,
+    // an adapter edit that kept the policy's revision, merges since G675.)
     let (first, first_view) = start_writing(
         &held,
         "CARD-6041",
@@ -114,9 +114,8 @@ fn a_wait_on_a_stopped_change_names_its_block_and_is_visited_again_once_it_moves
         "src/first.rs",
         &[],
     );
-    let adapter = first_view.join("scripts/bay-check");
-    let original = std::fs::read_to_string(&adapter).unwrap();
-    std::fs::write(&adapter, format!("{original}# edited\n")).unwrap();
+    let stop = first_view.join("src/stop.rs");
+    std::fs::write(&stop, "fn stop() {}\n").unwrap();
     let (second, second_view) =
         start_writing(&held, "CARD-6042", &["src/"], "src/second.rs", &[&first]);
     let actor = host_record(&held, &first)["actor"]["name"]
@@ -171,14 +170,14 @@ fn a_wait_on_a_stopped_change_names_its_block_and_is_visited_again_once_it_moves
     );
     assert!(
         visits[0].contains(&format!(
-            "{first} is blocked ({block_op}): its actor {actor} must act on it"
+            "{first} is blocked ({block_op} CHECK_FAILED): its actor {actor} must act on it"
         )),
         "{visits:?}"
     );
 
     // The actor repairs the dependency: its chain moves, the wait is visited again, and the
     // dependent lands after it.
-    std::fs::write(&adapter, &original).unwrap();
+    std::fs::remove_file(&stop).unwrap();
     let (code, repaired) = result_json(held.test_box.bay(&first_view).arg("merge"));
     assert_eq!(code, 0, "{repaired}");
     let landed = until(Duration::from_secs(120), || {
