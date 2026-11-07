@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.37
+
+- A change moving thousands of files no longer spends minutes checking what it would undo.
+- Moving a file another change created is no longer refused as undoing that change.
+- `UNDOES_MERGED` names every file and change it found at once, in `detail.also` beyond the first.
+
 ## 0.6.36
 
 - A runner's line also names each Git command's slowest call.

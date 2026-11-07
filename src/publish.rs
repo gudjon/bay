@@ -5726,9 +5726,9 @@ fn undoes_merged(
         base.as_str()
     };
     let range = format!("{since}..{trunk}");
-    let mut args = vec!["log", "--first-parent", "--format=%H", range.as_str(), "--"];
-    args.extend(mine.iter().map(String::as_str));
-    let commits = git.run(&args).map_err(|error| error.message())?;
+    let commits = git
+        .run(&["log", "--first-parent", "--format=%H", range.as_str()])
+        .map_err(|error| error.message())?;
     if commits.is_empty() {
         return Ok(None);
     }
@@ -5754,22 +5754,30 @@ fn undoes_merged(
     git.run_with(&["read-tree", trunk], &main_envs, None)
         .map_err(|error| error.message())?;
     let skip = [Some(ctx.id.as_str()), ctx.record.reverts.as_deref()];
-    let found = first_undone(git, &commits, &mine, &skip, &envs, &main_envs);
+    let mine: BTreeSet<&str> = mine.iter().map(String::as_str).collect();
+    let merged = paths_of(git, tree)?;
+    let found = undone_by(
+        git,
+        &commits,
+        &mine,
+        &merged,
+        (trunk, tree),
+        &skip,
+        (&envs, &main_envs),
+    );
     let _ = std::fs::remove_file(&index);
     let _ = std::fs::remove_file(&main_index);
-    let Some((commit, change, path)) = found else {
+    let mut found = found.into_iter();
+    let Some(mut undone) = found.next() else {
         return Ok(None);
     };
+    undone.also = found.collect();
     let condition = condition(git, revision, trunk, None, &ctx.record.observed_versions)?;
     let op = ctx.op_mut(op_id);
     op.state = OpState::Blocked;
     op.outcome = Some(Reason::UndoesMerged.code().to_owned());
     op.blocked_on = Some(condition);
-    op.undoes = Some(crate::change::Undone {
-        paths: vec![path.clone()],
-        change: (!change.is_empty()).then(|| change.clone()),
-        commit: commit.clone(),
-    });
+    op.undoes = Some(undone.clone());
     ctx.save(revision, None, "blocked: undoes merged work")?;
     ctx.push_chain();
     Ok(Some(
@@ -5777,29 +5785,96 @@ fn undoes_merged(
             .with_change(ctx.id.clone())
             .with_op(op_id)
             .with_detail(json!({
-                "paths": [path],
-                "change": (!change.is_empty()).then_some(change),
-                "commit": commit,
+                "paths": undone.paths,
+                "change": undone.change,
+                "commit": undone.commit,
+                "also": undone.also,
                 "main": trunk,
             })),
     ))
 }
 
-/// The first of `commits` (newest first) whose patch of one of `mine` applies to the merged
-/// tree's index and not to main's (`envs`): `(commit, its change, the path)`. A commit of a
-/// change `skip` names (the change's own, or the one it reverts) is passed.
-fn first_undone(
+/// Every path of `tree`.
+fn paths_of(git: &Git, tree: &str) -> Result<BTreeSet<String>, String> {
+    Ok(git
+        .run(&["ls-tree", "-r", "--name-only", "-z", tree])
+        .map_err(|error| error.message())?
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
+/// A Git call's environment.
+type Envs<'a> = &'a [(&'a str, &'a str)];
+
+/// How many undone files a refusal names; the next refusal names any others.
+const UNDONE_SHOWN: usize = 100;
+
+/// G671: what each of `commits` (newest first) would lose: its files among `mine` whose patch
+/// applies to the merged tree's index and not to main's (`indexes`). A commit of a change `skip`
+/// names (the change's own, or the one it reverts) is passed. Git is asked once per commit; a
+/// patch is read only for a file that can apply: a created file where the merged tree has none,
+/// an edited or deleted file where it has one, which leaves out nearly every file of a move.
+fn undone_by(
     git: &Git,
     commits: &str,
-    mine: &[String],
+    mine: &BTreeSet<&str>,
+    merged: &BTreeSet<String>,
+    (trunk, tree): (&str, &str),
     skip: &[Option<&str>],
-    envs: &[(&str, &str)],
-    main_envs: &[(&str, &str)],
-) -> Option<(String, String, String)> {
+    (envs, main_envs): (Envs, Envs),
+) -> Vec<crate::change::Undone> {
+    let mut found = Vec::new();
+    let mut shown = 0;
     for commit in commits.lines() {
-        let Ok(parent) = git.run(&["rev-parse", &format!("{commit}^1")]) else {
+        let Ok(changed) = git.run(&[
+            "diff-tree",
+            "-r",
+            "--no-renames",
+            "--name-status",
+            "-z",
+            &format!("{commit}^1"),
+            commit,
+        ]) else {
             continue;
         };
+        let fields: Vec<&str> = changed.split('\0').collect();
+        let mut lost = Vec::new();
+        for &[status, path] in fields.as_chunks::<2>().0 {
+            if !mine.contains(path) || (status == "A") == merged.contains(path) {
+                continue;
+            }
+            let patch = git
+                .run_bytes(
+                    &[
+                        "diff",
+                        "--binary",
+                        "--no-renames",
+                        &format!("{commit}^1"),
+                        commit,
+                        "--",
+                        path,
+                    ],
+                    &[],
+                    None,
+                )
+                .unwrap_or_default();
+            let applies = |envs: &[(&str, &str)]| {
+                git.run_bytes(&["apply", "--cached", "--check", "-"], envs, Some(&patch))
+                    .is_ok()
+            };
+            if !patch.is_empty()
+                && applies(envs)
+                && !applies(main_envs)
+                && (status != "A" || !moved_away(git, path, merged, trunk, tree))
+            {
+                lost.push(path.to_owned());
+            }
+        }
+        if lost.is_empty() {
+            continue;
+        }
         let theirs = git
             .run(&[
                 "log",
@@ -5813,35 +5888,42 @@ fn first_undone(
         if !theirs.is_empty() && skip.contains(&Some(theirs)) {
             continue;
         }
-        for path in mine {
-            let patch = git
-                .run_bytes(
-                    &[
-                        "diff",
-                        "--binary",
-                        "--no-renames",
-                        &parent,
-                        commit,
-                        "--",
-                        path,
-                    ],
-                    &[],
-                    None,
-                )
-                .unwrap_or_default();
-            if patch.is_empty() {
-                continue;
-            }
-            let applies = |envs: &[(&str, &str)]| {
-                git.run_bytes(&["apply", "--cached", "--check", "-"], envs, Some(&patch))
-                    .is_ok()
-            };
-            if applies(envs) && !applies(main_envs) {
-                return Some((commit.to_owned(), theirs.to_owned(), path.clone()));
-            }
+        shown += lost.len();
+        found.push(crate::change::Undone {
+            paths: lost,
+            change: (!theirs.is_empty()).then(|| theirs.to_owned()),
+            commit: commit.to_owned(),
+            also: Vec::new(),
+        });
+        if shown >= UNDONE_SHOWN {
+            break;
         }
     }
-    None
+    found
+}
+
+/// G671: main's `path` is not lost when the merged tree holds it under another folder, reworked or
+/// not: Git sees a rename to a path of the same name that main does not have.
+fn moved_away(git: &Git, path: &str, merged: &BTreeSet<String>, trunk: &str, tree: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let mut args = vec![
+        "diff",
+        "--find-renames",
+        "--diff-filter=R",
+        "--name-only",
+        trunk,
+        tree,
+        "--",
+        path,
+    ];
+    let before = args.len();
+    args.extend(
+        merged
+            .iter()
+            .filter(|other| other.rsplit('/').next() == Some(name))
+            .map(String::as_str),
+    );
+    args.len() > before && git.run(&args).is_ok_and(|renamed| !renamed.is_empty())
 }
 
 /// G213: a merged `tree` equal to `trunk`'s own tree is work already on trunk, whether another

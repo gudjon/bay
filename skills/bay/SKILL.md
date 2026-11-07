@@ -143,7 +143,7 @@ session is being told of its refusals; `waiting_for` says what a queued change w
 - A `merged_on_your_paths` notice: another change merged on paths you declared. Refresh, re-read
   the named paths, then go on.
 - `UNDOES_MERGED`: your change holds a file as it was before another change merged. `bay status <change>` names the
-  file and that change in `operation.undoes`: bring in main, keep that work, then `bay merge`.
+  files and that change in `operation.undoes`, each other change in `undoes.also`: bring in main, keep that work, then `bay merge`.
 - `DISK_LOW`: the disk is below this machine's floor, 5 GiB unless `git config bay.minFreeMiB` sets another; `0` turns
   it off. `bay start` already freed what it could, and `detail.released_views` names those views. Free more, then start again.
 - `MAIN_RED` with `waiting_for: main`: main is broken on your paths. Your change keeps waiting in its place

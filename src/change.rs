@@ -507,6 +507,9 @@ pub struct Undone {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub change: Option<String>,
     pub commit: String,
+    /// G671: the same for each other merged change the refusal found.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also: Vec<Undone>,
 }
 
 /// Why an operation waits for a worker, and since when (`DESIGN` § 6, § 7).
