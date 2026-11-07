@@ -1080,6 +1080,13 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     {
         return Ok(refusal);
     }
+    // G672: told here, not after a turn in the queue. A runner still decides at its own turn.
+    if ctx.op(&op_id).state == OpState::Submitted
+        && let Ok(Merge::Clean(tree)) = merge_onto(&repo.git, &trunk, &revision)
+        && let Some(refusal) = undoes_merged(&mut ctx, &op_id, &revision, &trunk, &tree)?
+    {
+        return Ok(refusal);
+    }
     kill_point("after-freeze");
 
     // G273: a land that does not run the operation says at once that it waits on a change it
@@ -5726,9 +5733,13 @@ fn undoes_merged(
         base.as_str()
     };
     let range = format!("{since}..{trunk}");
-    let commits = git
-        .run(&["log", "--first-parent", "--format=%H", range.as_str()])
-        .map_err(|error| error.message())?;
+    let mut args = vec!["log", "--first-parent", "--format=%H", range.as_str(), "--"];
+    // A change of few files asks only for the commits that touched them, so every merge stays
+    // cheap; a list as long as a large move's costs more than reading each commit.
+    if mine.len() <= PATHS_NAMED_TO_LOG {
+        args.extend(mine.iter().map(String::as_str));
+    }
+    let commits = git.run(&args).map_err(|error| error.message())?;
     if commits.is_empty() {
         return Ok(None);
     }
@@ -5804,6 +5815,9 @@ fn paths_of(git: &Git, tree: &str) -> Result<BTreeSet<String>, String> {
         .map(str::to_owned)
         .collect())
 }
+
+/// The most files of a change [`undoes_merged`] names to `git log`.
+const PATHS_NAMED_TO_LOG: usize = 500;
 
 /// A Git call's environment.
 type Envs<'a> = &'a [(&'a str, &'a str)];

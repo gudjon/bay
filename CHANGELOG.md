@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.38
+
+- `bay merge` refuses `UNDOES_MERGED` before the change queues, so an agent hears at once.
+
 ## 0.6.37
 
 - A change moving thousands of files no longer spends minutes checking what it would undo.
