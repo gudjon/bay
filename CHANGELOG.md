@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.41
+
+- A red check's notices say changes on its paths run it before they merge, not that they wait.
+
 ## 0.6.40
 
 - Nothing waits on a red main: a change on its paths runs that check first and merges unless worse.

@@ -1134,7 +1134,7 @@ fn red_line(change: &str, event: &Value) -> String {
     };
     let mut out: String = format!(
         "bay: change {change}: main is red on {check}; your change {how}. Changes on its paths \
-         wait. Fix it with a new change: bay start <intent> --fixes {change}"
+         run it before they merge. Fix it with a new change: bay start <intent> --fixes {change}"
     )
     .chars()
     .filter(|char| !char.is_control())
@@ -1524,7 +1524,7 @@ mod tests {
         assert_eq!(
             told,
             "bay: change abcd1234: main is red on unit-tests; your change broke it: the check \
-             passed on the merge before it and failed on it. Changes on its paths wait. Fix it \
+             passed on the merge before it and failed on it. Changes on its paths run it before they merge. Fix it \
              with a new change: bay start <intent> --fixes abcd1234\n"
         );
         assert!(!told.contains("rm -rf"), "{told}");
@@ -1553,7 +1553,7 @@ mod tests {
             told,
             "bay: change abcd1234: main is red on suite; your change is the one merge on its \
              paths since the failing run before: it now fails on 1 more unit, not a proven cause. \
-             Changes on its paths wait. Fix it with a new change: bay start <intent> --fixes \
+             Changes on its paths run it before they merge. Fix it with a new change: bay start <intent> --fixes \
              abcd1234\n"
         );
         let event = serde_json::json!({
@@ -1581,7 +1581,7 @@ mod tests {
         assert_eq!(
             line("abcd1234", "red_owner", &event),
             "bay: change abcd1234: main is red on suite; your change is the one merge on its \
-             paths since it last passed, not a proven cause. Changes on its paths wait. Fix it \
+             paths since it last passed, not a proven cause. Changes on its paths run it before they merge. Fix it \
              with a new change: bay start <intent> --fixes abcd1234\n"
         );
         let event = serde_json::json!({"kind": "red_owner", "check": "suite", "among": 2});

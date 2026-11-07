@@ -423,7 +423,7 @@ fn said(red: &Red, owns: &Owns, record: &ChangeRecord) -> String {
         }
     };
     format!(
-        "main is red on {}; your change {named} {how}. Changes on its paths wait.",
+        "main is red on {}; your change {named} {how}. Changes on its paths run it before they merge.",
         red.check
     )
 }

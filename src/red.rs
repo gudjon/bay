@@ -351,7 +351,7 @@ impl Red {
         if let Some(fix) = &self.fix {
             return Some(format!(
                 "{check}: {} fixes it, and its run has not passed yet; until one passes, changes \
-                 on the check's paths wait.",
+                 on the check's paths run it before they merge.",
                 fix.named()
             ));
         }
