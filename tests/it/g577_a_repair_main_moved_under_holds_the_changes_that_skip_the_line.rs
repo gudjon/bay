@@ -3,9 +3,9 @@
 //! under it). Once main moved under a running repair, a change that needs no check keeps its
 //! place until the repair lands, as G552 holds it for the head.
 //!
-//! The head waits on the red, so G552 held nothing: its push was never refused. The repair runs
-//! from its own place behind it, and each document that landed during its check moved main
-//! under it again.
+//! The head waited (on the red, before G677; here in a check another runner holds), so G552 held
+//! nothing: its push was never refused. The repair runs from its own place behind it, and each
+//! document that landed during its check moved main under it again.
 //!
 //! Guard to mutate, in `src/publish.rs`: `repair_moved_under` returning `false` (the second
 //! document lands while the repair checks again).
@@ -121,12 +121,16 @@ fn a_document_waits_for_a_repair_that_main_moved_under() {
     assert!(on_main(&held, &broke), "{pass}");
     answer(&held, &broad, "product_failure");
 
-    // AND a head on web/ that waits on the red, and a repair of it whose check is held.
-    let waits = held.queue_with("waits", &["web"], &[("web/waits.ts", "waits\n")]);
+    // AND a head on src/ whose check (run 1) a third runner holds to the end, and a repair of
+    // the red that runs from its own place behind it, its first check (run 2) held.
+    let _head = held.queue_with("waits", &["src"], &[("src/waits.rs", "fn waits() {}\n")]);
+    let c = held.executor("exec-c", PRODUCER);
+    let runner_c = held.spawn(&c);
+    held.wait_held();
     let fix = repair(&held, &broke);
     held.hold_run(2);
     let runner_a = held.spawn(&a);
-    held.wait_held();
+    held.wait_held_run(2);
     std::thread::sleep(Duration::from_secs(1));
 
     // WHEN a document lands during the repair's first check THEN main moved under the repair.
@@ -136,15 +140,16 @@ fn a_document_waits_for_a_repair_that_main_moved_under() {
         on_main(&held, &first),
         "the first document waited for a repair main had not moved under: {pass}"
     );
-    held.go();
+    held.go_run(2);
     // The repair's push found main moved: it gave its claim back and kept its place.
     let ran = finished(runner_a);
     assert!(
         !on_main(&held, &fix),
         "the repair landed on its first check: {ran}"
     );
+    held.hold_run(3);
     let runner_a = held.spawn(&a);
-    held.wait_held_run(2);
+    held.wait_held_run(3);
 
     // THEN a second document keeps its place while the repair checks again.
     let second = held.queue_with("second", &["docs"], &[("docs/second.md", "second\n")]);
@@ -153,18 +158,19 @@ fn a_document_waits_for_a_repair_that_main_moved_under() {
         !on_main(&held, &second),
         "the second document moved main under the repair again: {pass}"
     );
-    held.go_run(2);
+    held.go_run(3);
     let ran = finished(runner_a);
     assert!(
         on_main(&held, &fix),
         "the repair did not land on its second check: {ran}"
     );
-    assert!(!on_main(&held, &waits), "the head landed on a red check");
 
-    // AND once the repair left the line, the second document lands.
+    // AND once the repair left the line, the second document lands; then the head's check ends.
     let pass = held.pass(&b);
     assert!(
         on_main(&held, &second),
         "the second document never landed: {pass}"
     );
+    held.go();
+    let _ = finished(runner_c);
 }
