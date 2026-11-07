@@ -171,6 +171,37 @@ fn with_revision(text: &str, at: usize, revision: u64) -> String {
     out
 }
 
+/// G675 (a lint change sat blocked 262 s: it edited a check's script and had not raised the
+/// policy's `revision`). `revision` only says the policy changed, so a merged `tree` that changes
+/// the policy or an adapter path of main's policy states main's revision plus one, unless it
+/// already states more. A policy main or the tree cannot read is left as it is, to its refusal.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn raise_revision(git: &Git, trunk: &str, tree: &str) -> Result<String, String> {
+    let Ok(Some(base)) = crate::policy::load_at(git, trunk) else {
+        return Ok(tree.to_owned());
+    };
+    if !crate::policy::policy_changed(git, trunk, tree, Some(&base))? {
+        return Ok(tree.to_owned());
+    }
+    let path = crate::policy::POLICY_PATH;
+    let Some(text) = git.file_at(tree, path).map_err(|error| error.message())? else {
+        return Ok(tree.to_owned());
+    };
+    let Some((at, stated)) = stated_revision(&text) else {
+        return Ok(tree.to_owned());
+    };
+    let main = crate::policy::revision_at(git, trunk)?
+        .unwrap_or(0)
+        .max(base.revision);
+    if stated > main {
+        return Ok(tree.to_owned());
+    }
+    with_file(git, tree, path, &with_revision(&text, at, main + 1)).map_err(|error| error.message())
+}
+
 /// G668 (a fleet finding, 2026-11-06: a policy edited 58 times in a week, and two unrelated edits
 /// collided on `revision`, twice in one hour; two that raise it to one number merge cleanly and
 /// then fail "must raise"). `revision` only says the policy changed, so when main and a change

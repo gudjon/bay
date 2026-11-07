@@ -6006,6 +6006,8 @@ fn build_and_check(
             Ok(tree) => tree,
             Err(refusal) => return Ok(Err(refusal)),
         };
+        // G675: an edit of the policy or a check's own files states the next revision itself.
+        let tree = crate::merge::raise_revision(&ctx.repo.git, trunk, &tree)?;
         // Owner ruling 2026-10-21: the candidate's change to trunk, over a size limit of the
         // policy at trunk, is refused before it is committed or checked.
         if let Some(refusal) = too_large(ctx, op_id, revision, trunk, &tree)? {

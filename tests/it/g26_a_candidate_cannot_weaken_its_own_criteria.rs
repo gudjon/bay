@@ -2,9 +2,11 @@
 //!
 //! A candidate that edits the check policy is judged by the base's policy; the manifest digest
 //! equals the one computed from the policy at the base (and the RFC 8785 test vector is a unit
-//! test of `policy.rs`); a policy edit that keeps the old revision is refused; two entries for
+//! test of `policy.rs`); a policy edit that keeps the old revision merges with the next one,
+//! which bay states (G675); two entries for
 //! one (id, environment) are refused; a candidate that edits its adapter is judged by the
-//! base's adapter, and without raising revision is refused; an adapter edit that fails under
+//! base's adapter, and without raising
+//! revision merges with the next one (G675); an adapter edit that fails under
 //! its own new adapter is refused; after a broken adapter lands, a registry-signed repair
 //! restores a passing trunk and an agent-signed repair is refused; an adapter that reads an
 //! unlisted file fails with `infra_failure`; a policy that lands while a candidate is checked
@@ -86,33 +88,27 @@ fn a_candidate_that_edits_the_policy_is_judged_by_the_bases_policy() {
 }
 
 #[test]
-fn a_policy_edit_that_keeps_the_old_revision_is_refused() {
+fn a_policy_edit_that_keeps_the_old_revision_merges_with_the_next() {
     let (test_box, _repo, remote, _id, view) = change(true);
-    let trunk = test_box.git_bare(&remote, &["rev-parse", "main"]);
-    write(&view, ".bay/policy.toml", &policy(1, 2));
-    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
-    // No reason code covers an invalid policy edit (INTERFACES § 2), so it is a refused
-    // operation with a receipt.
-    assert_eq!(code, 20, "{refused}");
-    assert!(
-        refused.to_string().contains("must raise revision"),
-        "{refused}"
+    write(
+        &view,
+        ".bay/policy.toml",
+        &format!("{}# edited\n", policy(1, 1)),
     );
-    assert_eq!(test_box.git_bare(&remote, &["rev-parse", "main"]), trunk);
+    let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{merged}");
+    let landed = test_box.git_bare(&remote, &["show", "main:.bay/policy.toml"]);
+    assert!(landed.starts_with("revision = 2\n"), "{landed}");
 }
 
 #[test]
-fn an_adapter_edit_without_raising_revision_is_refused() {
-    let (test_box, _repo, _remote, _id, view) = change(true);
+fn an_adapter_edit_without_raising_revision_merges_with_the_next() {
+    let (test_box, _repo, remote, _id, view) = change(true);
     write(&view, "scripts/bay-check", &script(true, "# adapter v2"));
-    let (code, refused) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
-    // No reason code covers an invalid policy edit (INTERFACES § 2), so it is a refused
-    // operation with a receipt.
-    assert_eq!(code, 20, "{refused}");
-    assert!(
-        refused.to_string().contains("must raise revision"),
-        "{refused}"
-    );
+    let (code, merged) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{merged}");
+    let landed = test_box.git_bare(&remote, &["show", "main:.bay/policy.toml"]);
+    assert!(landed.starts_with("revision = 2\n"), "{landed}");
 }
 
 #[test]
