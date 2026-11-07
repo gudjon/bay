@@ -6,6 +6,7 @@
 //! Guards to mutate: `src/git.rs` the recording around a Git call (no `git:` part); `take_times`, the
 //! reset (a later operation's line also counts the one before it); `record_time`, the slowest call
 //! (its `max` reads 0.0s).
+//! `src/git.rs` holds the unit test that a line leaves out other threads' calls (`TIMES` per thread).
 //! Not guarded: the reset in `src/executor.rs` before an operation, which keeps Git calls made between
 //! operations out of its line. Removing it changes only what a line counts, and no test here sees it.
 
@@ -70,14 +71,14 @@ fn a_merge_line_names_the_git_commands_that_took_longest() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let (first, second) = (git_part(&stderr, &one), git_part(&stderr, &two));
     assert!(!first.is_empty(), "{stderr}");
-    let slowest = first
-        .split(", ")
-        .next()
-        .and_then(|entry| entry.rsplit_once(" max "))
-        .map_or("", |(_, slowest)| slowest);
+    // A real slowest call shows on some command; many tiny calls can round to 0.0s on another.
     assert!(
-        slowest.ends_with('s') && !slowest.starts_with("0.0"),
-        "the slowest call of the longest command: {first}"
+        first
+            .split(", ")
+            .filter_map(|entry| entry.rsplit_once(" max "))
+            .any(|(_, slowest)| slowest.trim_end_matches(')').ends_with('s')
+                && !slowest.starts_with("0.0")),
+        "a slowest call on some command: {first}"
     );
     // Each line counts its own operation: the second is not the first's total and more.
     let total = |part: &str| -> u32 { part.split(", ").map(count_in).sum() };

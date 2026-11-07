@@ -1323,6 +1323,7 @@ fn place_arrival(repo: &Repo, change: &str, request: &str, holding: &str) -> Opt
     let op_id = op.op_id.clone();
     let step = publish::Step::new("place");
     let began = Instant::now();
+    let _ = crate::git::take_times(0);
     let result = match publish::place(repo, change, &op_id, &step) {
         Ok(Some(result)) => result,
         Ok(None) => return None,

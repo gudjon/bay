@@ -1068,25 +1068,30 @@ impl Git {
 /// Test hooks are compiled in unless `scripts/release.sh` built this binary.
 use crate::version::TEST_HOOKS;
 
-/// G669: this process's time in each Git command since [`take_times`] last ran, how many ran, and
-/// the slowest one.
-static TIMES: Mutex<BTreeMap<String, (std::time::Duration, u32, std::time::Duration)>> =
-    Mutex::new(BTreeMap::new());
+thread_local! {
+    /// G669: this thread's time in each Git command since [`take_times`] last ran, how many ran,
+    /// and the slowest one. Per thread: a runner's heartbeat, and the changes it places meanwhile,
+    /// run beside the operation and are not that operation's time.
+    static TIMES: std::cell::RefCell<
+        BTreeMap<String, (std::time::Duration, u32, std::time::Duration)>,
+    > = const { std::cell::RefCell::new(BTreeMap::new()) };
+}
 
 fn record_time(args: &[&str], spent: std::time::Duration) {
     let command = args.first().copied().unwrap_or_default().to_owned();
-    let mut times = TIMES.lock().unwrap_or_else(PoisonError::into_inner);
-    let entry = times.entry(command).or_default();
-    entry.0 += spent;
-    entry.1 += 1;
-    entry.2 = entry.2.max(spent);
+    TIMES.with_borrow_mut(|times| {
+        let entry = times.entry(command).or_default();
+        entry.0 += spent;
+        entry.1 += 1;
+        entry.2 = entry.2.max(spent);
+    });
 }
 
 /// The Git commands that took longest since the last call, longest first, and starts anew:
 /// `push 24.1s x3 max 14.2s, fetch 3.2s x2 max 1.9s`.
 #[must_use]
 pub fn take_times(most: usize) -> String {
-    let times = std::mem::take(&mut *TIMES.lock().unwrap_or_else(PoisonError::into_inner));
+    let times = TIMES.take();
     let mut times: Vec<_> = times.into_iter().collect();
     times.sort_by_key(|(_, (spent, _, _))| std::cmp::Reverse(*spent));
     times
@@ -1987,5 +1992,27 @@ mod tests {
         assert!(records_only(&["origin", &change, &format!("^{change}")]));
         assert!(!records_only(&["origin"]));
         assert!(!records_only(&["origin"]));
+    }
+}
+
+#[cfg(test)]
+mod times {
+    use super::{record_time, take_times};
+    use std::time::Duration;
+
+    /// G669: a heartbeat's push, or a change placed meanwhile on the same thread as the heartbeat,
+    /// is not counted on the line of the operation this thread runs.
+    #[test]
+    fn another_threads_git_calls_stay_off_this_threads_line() {
+        let _ = take_times(0);
+        std::thread::spawn(|| record_time(&["push"], Duration::from_secs(1)))
+            .join()
+            .unwrap();
+        record_time(&["fetch"], Duration::from_secs(1));
+
+        let line = take_times(6);
+
+        assert!(line.contains("fetch"), "{line}");
+        assert!(!line.contains("push"), "{line}");
     }
 }

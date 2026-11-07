@@ -3,6 +3,7 @@
 ## 0.6.38
 
 - `bay merge` refuses `UNDOES_MERGED` before the change queues, so an agent hears at once.
+- A runner's line counts only its own operation's Git calls, not heartbeats or other changes.
 
 ## 0.6.37
 
