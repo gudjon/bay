@@ -1,5 +1,5 @@
 //! G444. A box that serves none of the policy's post checks judges nothing for post work, and
-//! still refuses a change on a red main.
+//! still keeps a change on a red main off main.
 //!
 //! After its queue's work, every runner ran the post work (`crate::bisect::plan`: the post checks
 //! on main's tip and the culprit finding): each judged main's red over the whole window, and only then
@@ -10,7 +10,8 @@
 //!
 //! The post work was also the only reader of the post records on such a box: a head's red gate
 //! judges main from the box's own copy of them. So the pass now reads them once before any visit,
-//! and a red another runner recorded since this box's last pass refuses a change on its paths.
+//! and a red another runner recorded since this box's last pass reaches a change on its paths,
+//! which must run that check before it merges (G677): this box serves none, so it waits for one.
 //!
 //! The guards to mutate: the `serves_a_post_check` returns in `bisect::tips` and
 //! `bisect::culprits` (`src/bisect.rs`; the first case judges), and the pass's `fetch_evidence` before
@@ -139,5 +140,5 @@ fn a_box_that_serves_no_post_check_refuses_a_change_on_a_red_main_recorded_since
         !test_box.trunk_change_ids(&remote).contains(&id),
         "a change landed on a red main: {ran}"
     );
-    assert!(ran.to_string().contains("MAIN_RED"), "{ran}");
+    assert!(ran.to_string().contains("CHECK_UNAVAILABLE"), "{ran}");
 }

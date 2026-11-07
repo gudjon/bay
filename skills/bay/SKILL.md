@@ -92,8 +92,10 @@ bay exists to make merging faster than doing it by hand: you submit once, and th
 - **Checked ahead.** While one batch is checked, other runners check the next batches on the main the batch ahead
   will make. When a batch's turn comes and main is as predicted, it merges at once on that check.
 - **Placed at once.** A runner places a new change in line within seconds, even while it checks another.
-- **Skips, not stops.** A change that conflicts, may not join a batch, already failed, or waits for a red main is
-  passed over and keeps its place for its own turn.
+- **Skips, not stops.** A change that conflicts, may not join a batch, or already failed is passed over and keeps
+  its place for its own turn.
+- **A red main holds nothing.** A change on a red check's paths runs that check before it merges, judged against
+  main: it merges unless it adds a failure main does not have.
 
 What you do decides the speed for every agent:
 
@@ -114,6 +116,10 @@ What you do decides the speed for every agent:
   (or `bay undo <change>`) runs ahead of the line.
 - **Give up dead work.** `bay abandon <change> --why <reason>`: a runner frees its place at its next pass.
 - **Name `--input` only when the work relies on that version**; such a change is checked on its own.
+- **Move a tree in three changes.** A check runs as main has it, so first merge a change that teaches the checks
+  both the old and the new path; then the pure move, no rewrites; then drop the old path. Before each submit, take
+  main's copy of every file `bay merge` names as the last step, and run main's own check on the result.
+- **Edits outside a sparse view count.** `bay merge` stages them; your own `git add` there needs `--sparse`.
 
 Signals to read: `detail.batch.stopped` says why a batch ended; `detail.warnings` names `wake_failing` when no
 session is being told of its refusals; `waiting_for` says what a queued change waits for.
@@ -146,12 +152,11 @@ session is being told of its refusals; `waiting_for` says what a queued change w
   files and that change in `operation.undoes`, each other change in `undoes.also`: bring in main, keep that work, then `bay merge`.
 - `DISK_LOW`: the disk is below this machine's floor, 5 GiB unless `git config bay.minFreeMiB` sets another; `0` turns
   it off. `bay start` already freed what it could, and `detail.released_views` names those views. Free more, then start again.
-- `MAIN_RED` with `waiting_for: main`: main is broken on your paths. Your change keeps waiting in its place
-  in line and is checked again once main is green, before the changes that came after it; do not merge it
-  again. `bay status <change>` names the files that hold it in `operation.red_holds` and the rest in
-  `operation.red_frees`, which you can split into a change of their own. A change that fixes it goes ahead of the line: `bay start <intent> --fixes <check>`, the check
-  `detail.red[].check` names (the one name that never moves), or `--fixes` the change `detail.fixes` names. Main is then `pending_fix` in `detail.red_pending` until a run of the check on
-  the fix answers it.
+- Main is red on your paths (`bay status` lists the check in `detail.red`): nothing waits. Your change runs that check
+  before it merges, judged against main, and merges unless it adds a failure; its result names it in
+  `detail.red_checked`. A change that fixes it goes ahead of the line: `bay start <intent> --fixes <check>`, the check
+  `detail.red[].check` names (the one name that never moves). Main is then `pending_fix` in `detail.red_pending` until
+  a run of the check on the fix answers it.
 - A change that no check covers, such as a document no check reads, is on main when `bay merge` returns, unless this
   machine has no runner key where the repository signs everything. If every file is on the policy's
   `[policy] passes_red`, it passes a red main too, and `detail.passed_red` names each red check it passed. `bay start` says

@@ -928,6 +928,32 @@ impl Policy {
         .collect()
     }
 
+    /// G677 (owner ruling 2026-11-07, "merge unless worse"): this policy with each post check
+    /// `red` names run before the merge, judged against the base (`baseline = "base"`), so a
+    /// change on a red check's paths is refused only for a failure main does not have. The
+    /// manifest digest covers pre and post checks alike, so it is unchanged.
+    #[must_use]
+    pub fn judging_red(&self, red: &[String]) -> Self {
+        let mut policy = self.clone();
+        if red.is_empty() {
+            return policy;
+        }
+        let (moved, kept): (Vec<ManifestEntry>, Vec<ManifestEntry>) =
+            std::mem::take(&mut policy.post)
+                .into_iter()
+                .partition(|entry| red.contains(&entry.id));
+        policy.post = kept;
+        policy.manifest.extend(moved);
+        sort_manifest(&mut policy.manifest);
+        for entry in &mut policy.checks {
+            if entry.stage == Stage::Post && red.contains(&entry.id) {
+                entry.stage = Stage::Pre;
+                entry.baseline = Some(Baseline::Base);
+            }
+        }
+        policy
+    }
+
     /// G635 (a fleet finding, 2026-11-02: a policy fix that copied a file every TypeScript check
     /// needed was judged by the policy it fixed too, whose checks could not install without
     /// that file, so they answered unknown on each of its candidates, and no signature or

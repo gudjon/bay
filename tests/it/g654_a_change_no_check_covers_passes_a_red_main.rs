@@ -2,13 +2,13 @@
 //! it could not worsen). A repository declares in `[policy] passes_red` the paths whose changes may
 //! merge past a red main. A change passes when every file is on that list and no pre-merge check
 //! covers it, and its result names each red check it passed in `detail.passed_red`. The list starts
-//! empty, so a red main holds everything else as before (G244). A list, because "no pre-merge check
-//! covers it" is true of code a repository checks only after the merge, which must still wait on its
-//! own red check (G577).
+//! empty; every other change on a red check's paths runs that check before its merge (G677,
+//! `detail.red_checked`). A list, because "no pre-merge check covers it" is true of code a
+//! repository checks only after the merge, which must still run its own red check (G577).
 //!
 //! Guards to mutate, in `src/publish.rs` `red_gate`: the `may_pass_red` test (the unlisted document
-//! and the mixed change merge); the `needs_no_check` test (the listed file a pre-merge check covers
-//! merges); the `passed_red` it records (the name is missing).
+//! and the mixed change run no red check); the `needs_no_check` test (the listed file a pre-merge
+//! check covers runs none); the `passed_red` it records (the name is missing).
 
 // Each case runs a shell script (the check's adapter), so these run on Unix only.
 #![cfg(unix)]
@@ -93,43 +93,59 @@ fn a_document_merges_past_a_red_main_and_names_what_it_passed() {
 }
 
 #[test]
-fn a_change_a_pre_merge_check_covers_still_waits() {
+fn a_change_a_pre_merge_check_covers_runs_the_red_check() {
     let (test_box, repo) = red_main();
 
-    let (code, waiting) = merge(&test_box, &repo, "CODE", "src/", "src/c.rs");
+    let (code, checked) = merge(&test_box, &repo, "CODE", "src/", "src/c.rs");
 
-    assert_eq!(code, 0, "{waiting}");
-    assert_eq!(waiting["decision"], "queued", "{waiting}");
-    assert_eq!(waiting["reason"], "MAIN_RED", "{waiting}");
+    assert_eq!(code, 0, "{checked}");
+    assert_eq!(checked["decision"], "merged", "{checked}");
+    assert_eq!(
+        checked["detail"]["red_checked"],
+        serde_json::json!(["suite"]),
+        "{checked}"
+    );
 }
 
 #[test]
-fn a_document_off_the_list_waits() {
+fn a_document_off_the_list_runs_the_red_check() {
     let (test_box, repo) = red_main();
-    let (code, waiting) = merge(&test_box, &repo, "OTHER", "notes/", "notes/note.md");
-    assert_eq!(code, 0, "{waiting}");
-    assert_eq!(waiting["reason"], "MAIN_RED", "{waiting}");
+    let (code, checked) = merge(&test_box, &repo, "OTHER", "notes/", "notes/note.md");
+    assert_eq!(code, 0, "{checked}");
+    assert_eq!(
+        checked["detail"]["red_checked"],
+        serde_json::json!(["suite"]),
+        "{checked}"
+    );
 }
 
 #[test]
-fn a_change_with_one_file_off_the_list_waits() {
+fn a_change_with_one_file_off_the_list_runs_the_red_check() {
     let (test_box, repo) = red_main();
     let started = test_box.bay_ok(&repo, &["start", "MIXED", "--paths", "docs/", "notes/"]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join("docs/note.md"), "new\n").unwrap();
     std::fs::create_dir_all(view.join("notes")).unwrap();
     std::fs::write(view.join("notes/note.md"), "new\n").unwrap();
-    let (code, waiting) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
-    assert_eq!(code, 0, "{waiting}");
-    assert_eq!(waiting["reason"], "MAIN_RED", "{waiting}");
+    let (code, checked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{checked}");
+    assert_eq!(
+        checked["detail"]["red_checked"],
+        serde_json::json!(["suite"]),
+        "{checked}"
+    );
 }
 
 #[test]
-fn a_listed_file_a_pre_merge_check_covers_waits() {
+fn a_listed_file_a_pre_merge_check_covers_runs_the_red_check() {
     let (test_box, repo) = red_main();
-    let (code, waiting) = merge(&test_box, &repo, "LISTED", "src/", "src/listed.rs");
-    assert_eq!(code, 0, "{waiting}");
-    assert_eq!(waiting["reason"], "MAIN_RED", "{waiting}");
+    let (code, checked) = merge(&test_box, &repo, "LISTED", "src/", "src/listed.rs");
+    assert_eq!(code, 0, "{checked}");
+    assert_eq!(
+        checked["detail"]["red_checked"],
+        serde_json::json!(["suite"]),
+        "{checked}"
+    );
 }
 
 #[test]

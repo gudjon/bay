@@ -3,8 +3,8 @@
 //!
 //! A post-publication check that fails on a landing makes trunk red on that check's paths,
 //! owned by the landing. `bay status` names it. While red, a landing that touches those paths
-//! waits `MAIN_RED`, naming the owner, and holds no queue place; a landing elsewhere lands, and a change that names
-//! the owner (`--fixes`) lands and clears the red.
+//! runs the red check first and lands unless it adds a failure (G677); a landing elsewhere lands,
+//! and a change that names the owner (`--fixes`) lands and clears the red.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -116,18 +116,10 @@ fn a_failed_post_check_makes_its_paths_red_until_a_fix_lands() {
     assert_eq!(red[0]["change"], broke.as_str(), "{red}");
     assert_eq!(red[0]["merge"], landing.as_str(), "{red}");
 
-    // A landing on the red paths waits, naming the owner, and is never blocked into a re-merge
-    // (the trust-agents ruling, 2026-10-26).
-    let (code, refused, _) = trunk.land("src/next.rs", None);
-    assert_eq!(code, 0, "{refused}");
-    assert_eq!(refused["decision"], "queued", "{refused}");
-    assert_eq!(refused["reason"], "MAIN_RED", "{refused}");
-    assert_eq!(refused["waiting_for"], "main", "{refused}");
-    assert_eq!(
-        refused["detail"]["red"][0]["change"],
-        broke.as_str(),
-        "{refused}"
-    );
+    // G677: a landing on the red paths runs the red check first and lands, adding no failure.
+    let (code, next, _) = trunk.land("src/next.rs", None);
+    assert_eq!(code, 0, "{next}");
+    assert_eq!(next["decision"], "merged", "{next}");
 
     // A landing elsewhere lands.
     let (code, elsewhere, _) = trunk.land("docs/other.md", None);

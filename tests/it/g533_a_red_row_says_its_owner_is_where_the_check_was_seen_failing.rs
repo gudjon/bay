@@ -132,11 +132,4 @@ fn a_red_row_without_a_culprit_says_its_owner_is_not_a_proven_cause() {
         say.contains("one of the 2 merges") && say.contains("on its paths or not"),
         "the row says the cause is among the range, off its paths too: {red}"
     );
-
-    // The same row reaches a change the red holds.
-    let (_, view) = trunk.test_box.start_and_edit(&trunk.repo);
-    let (code, waiting) = result_json(trunk.test_box.bay(&view).args(["merge", "--wait"]));
-    assert_eq!(code, 0, "it waits for main: {waiting}");
-    assert_eq!(waiting["reason"], "MAIN_RED", "{waiting}");
-    assert_eq!(waiting["detail"]["red"][0]["say"], row["say"], "{waiting}");
 }

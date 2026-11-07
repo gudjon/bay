@@ -60,7 +60,6 @@
         "POLICY_MISSING",
         "VIEW_INCOMPLETE",
         "MERGE_OUTCOME_UNKNOWN",
-        "MAIN_RED",
         "CHANGE_ALREADY_MERGED",
         "CHANGE_SUPERSEDED",
         "CHANGE_HELD",

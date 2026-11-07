@@ -89,7 +89,13 @@ fn a_post_check_runs_in_a_tree_whose_path_holds_no_git() {
     submit("one");
     // The post work answers `suite` on main's tip; a tree under `/.git` answers it red.
     let ran = test_box.bay_ok(&repo, &["runner", "run", "--once"]);
-    // A red post check on `src/` would refuse the next change on it (MAIN_RED).
+    // The post work left main green: `bay status` names no red check.
+    let red = test_box.bay_ok(&repo, &["status"])["detail"]["red"].clone();
+    assert_eq!(
+        red,
+        serde_json::json!([]),
+        "main is red after the post work: {red} {ran}"
+    );
     let two = submit("two");
     assert!(
         test_box.trunk_change_ids(&remote).contains(&two),

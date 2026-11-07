@@ -16,7 +16,8 @@
 //! for the earlier owner waits), its check-name match (the fix that names the check waits),
 //! the `landings[..at]` bound of the fix search in `decide` (a fix older than the newest failure
 //! clears it), the `PENDING_FIX` push (main reads green before a run answers the fix), and the
-//! `fixing` push (E35: a change on the check's paths lands before the run on the fix). The
+//! `fixing` push (E35: a change on the check's paths lands without running the check, before the
+//! run on the fix; G677: with it, the change runs the check itself first). The
 //! runner and the host's hook judge a repair by one function, `red::repairs`; the host judged
 //! by the owner alone before, and refused the repair the runner ran from its own place. In
 //! `src/publish.rs` `queue_gate`, the join of a repair with no place: it lands a pass later.
@@ -273,23 +274,13 @@ fn a_change_on_the_red_paths_waits_for_the_run_on_the_fix() {
     suite.landed(&fix);
     assert_eq!(pending(&suite.status())[0]["state"], "pending_fix");
 
+    // G677: a change on the check's paths runs the check itself before the run on the fix.
     let next = suite.held.queue("next", "src");
     let pass = suite.held.pass(&suite.exec);
-    let test_box = &suite.held.test_box;
     assert!(
-        !test_box
-            .trunk_change_ids(&suite.held.remote)
-            .contains(&next),
-        "a change on the check's paths landed before the run on its fix: {pass}"
+        pass.to_string().contains("\"red_checked\":[\"suite\"]"),
+        "a change on the check's paths landed without running it: {pass}"
     );
-    let waiting = test_box.bay_ok(&suite.held.repo, &["status", &next]);
-    assert!(
-        waiting.to_string().contains("MAIN_RED"),
-        "the change does not say main's check holds it: {waiting}"
-    );
-    suite.land_off_paths("meanwhile");
-
-    suite.answer("pass");
     suite.landed(&next);
 }
 
@@ -312,17 +303,7 @@ fn a_fix_that_names_the_check_runs_from_its_place_after_a_pass_moves_the_red() {
     assert_eq!(red["check"], "suite", "{red}");
     assert_eq!(red["fixes"], two.as_str(), "the red's name moved: {red}");
 
-    // A change on the red's paths waits at the head of the line for main to be green.
-    let waits = suite.held.queue("waits", "src");
-    let pass = suite.held.pass(&suite.exec);
-    let trunk = || suite.held.test_box.trunk_change_ids(&suite.held.remote);
-    assert!(
-        !trunk().contains(&waits),
-        "a change on a red main merged: {pass}"
-    );
-
-    // The fix that names the check takes a place behind it and runs from there in the same
-    // visit, and the host takes it.
+    // The fix that names the check runs from its place in the same visit, and the host takes it.
     let fix = suite.submit_fix("fix", "suite");
     suite.landed(&fix);
     let status = suite.status();

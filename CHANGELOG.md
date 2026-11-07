@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.40
+
+- Nothing waits on a red main: a change on its paths runs that check first and merges unless worse.
+- A landing names the red checks it ran before its merge in `detail.red_checked`.
+- `MAIN_RED` is gone, with `operation.red_holds` and `operation.red_frees`.
+
 ## 0.6.39
 
 - A failed check's sentence names the failed unit and its first line, at `bay merge` and in `bay status`.

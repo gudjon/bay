@@ -1,9 +1,5 @@
-//! G428. A head on a red main's paths waits before its input providers run.
-//!
-//! A change that touches a red main's paths waits for the repair whatever its inputs say, and
-//! a batch already asks the red gate before it checks anything. A head with no batch ran every
-//! input provider first. Measured 2026-10-28, its providers ran twelve minutes while it held
-//! the head, and then it waited on the red main. Now the red gate comes first.
+//! G428 (retired by G677, owner ruling 2026-11-07: no head waits on a red main; it runs the red
+//! check before its merge instead, so there is no wait for its providers to precede).
 //!
 //! G429, the same rule for a conflict: a head that does not merge onto main is refused before
 //! its providers run (measured the same night: four to eight minutes of providers, then
@@ -13,9 +9,9 @@
 //! window of 250 each judgement took five to twelve minutes on a loaded box.
 //!
 //! The guards to mutate: the order in `build_and_check` (`src/publish.rs`); run `input_gate`
-//! before `red_gate`, or before the merge, and the provider runs for a head that cannot land.
-//! And the cached judgement in `red::red` (`src/red.rs`); judge every call afresh and one pass
-//! judges the same tip once per head.
+//! before the merge, and the provider runs for a head that cannot land. And the cached
+//! judgement in `red::red` (`src/red.rs`); judge every call afresh and one pass judges the same
+//! tip once per head.
 
 // Each case runs shell scripts (adapters, a provider), so these run on Unix only.
 #![cfg(unix)]
@@ -43,8 +39,13 @@ fn trunk() -> (TestBox, PathBuf) {
         "#!/bin/sh\ncat >/dev/null\nsleep 10\nprintf '{\"version\":\"v1\",\"consumers\":[{\"path\":\"src/\",\"kind\":\"executable\"}]}'\n",
     );
     let failing = passing_result(1).replace("\\\"pass\\\"", "\\\"product_failure\\\"");
+    // A file named `src/w*.rs` adds a second failing unit: a change that makes main worse.
+    let worse = passing_result(2).replace("\\\"pass\\\"", "\\\"product_failure\\\"");
     let mut files = check_files(
-        &format!("[ \"$1\" = suite ] && [ -e src/bad.rs ] && {{ {failing}; exit 0; }}"),
+        &format!(
+            "[ \"$1\" = suite ] && ls src/w*.rs >/dev/null 2>&1 && {{ {worse}; exit 0; }}; \
+             [ \"$1\" = suite ] && [ -e src/bad.rs ] && {{ {failing}; exit 0; }}"
+        ),
         &passing_result(1),
         1,
         60,
@@ -102,31 +103,6 @@ fn land(test_box: &TestBox, repo: &Path, path: &str) {
 }
 
 #[test]
-fn a_head_on_a_red_mains_paths_waits_before_its_providers_run() {
-    let (test_box, repo) = trunk();
-    // A landing breaks the post check, and a runner pass finds main red.
-    land(&test_box, &repo, "src/bad.rs");
-    let ran = test_box.bay_ok(&repo, &["runner", "run", "--once"]);
-    assert!(ran.to_string().contains("product_failure"), "{ran}");
-    // A change on the red paths that declares the input, submitted.
-    let started = test_box.bay_ok(
-        &repo,
-        &["start", "next", "--input", INPUT, "--paths", "src"],
-    );
-    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
-    std::fs::write(view.join("src/next.rs"), "fn next() {}\n").unwrap();
-    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
-    assert_eq!(code, 0, "{queued}");
-    let id = queued["change"].as_str().unwrap().to_owned();
-    let (held, journal) = pass(&test_box, &repo);
-    assert!(held.to_string().contains("MAIN_RED"), "{held}");
-    assert!(
-        !providers_ran(&journal, &id),
-        "the provider ran for a head that waits on a red main: {journal}"
-    );
-}
-
-#[test]
 fn a_head_that_conflicts_with_main_is_refused_before_its_providers_run() {
     let (test_box, repo) = trunk();
     // The head declares the input and edits a line that another change edits first.
@@ -159,8 +135,9 @@ fn a_red_main_is_judged_once_for_every_head_on_its_tip() {
     land(&test_box, &repo, "src/bad.rs");
     let ran = test_box.bay_ok(&repo, &["runner", "run", "--once"]);
     assert!(ran.to_string().contains("product_failure"), "{ran}");
-    // Three changes on the red paths, each the head in turn in one pass.
-    for name in ["one", "two", "three"] {
+    // Three changes that make the red worse, each the head in turn in one pass: each is
+    // refused, so main's tip never moves and its red is judged once.
+    for name in ["wone", "wtwo", "wthree"] {
         let started = test_box.bay_ok(&repo, &["start", name, "--paths", "src"]);
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
         std::fs::write(view.join(format!("src/{name}.rs")), "fn x() {}\n").unwrap();
@@ -174,15 +151,17 @@ fn a_red_main_is_judged_once_for_every_head_on_its_tip() {
             .args(["runner", "run", "--once"])
             .env("BAY_TEST_RED_TRACE", &trace),
     );
-    let waited = held.to_string().matches("MAIN_RED").count();
-    assert!(
-        waited >= 3,
-        "three heads did not wait on the red main: {held}"
-    );
+    let refused = held.to_string().matches("CHECK_FAILED").count();
+    assert!(refused >= 3, "three heads were not refused: {held}");
     let judged = std::fs::read_to_string(&trace).unwrap_or_default();
+    // A refused head writes the red check's records, so a later head reads those incrementally;
+    // the tip is judged in full once.
     assert_eq!(
-        judged.lines().count(),
+        judged
+            .lines()
+            .filter(|line| line.ends_with("in full"))
+            .count(),
         1,
-        "main's red was judged once per head on one tip: {judged}"
+        "main's red was judged in full once per head on one tip: {judged}"
     );
 }

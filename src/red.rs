@@ -60,10 +60,9 @@
 //!   ([`Suspect::added`]). With no pass after it, that landing owns the red, and `--fixes` names
 //!   it: the check never passed, so the cause is the check, its setup, or a merge since.
 //!
-//! While red or `pending_fix`, the executor refuses a candidate that touches those paths with
-//! `MAIN_RED`, naming the owner and the ways out; a change that names a merge the red names in
-//! `--fixes`, an undo of it, or a superseding change is never refused, and it runs ahead of the
-//! line.
+//! While red or `pending_fix`, a candidate that touches those paths runs the check before its
+//! merge, judged against main (G677); a change that names a merge the red names in `--fixes`, an
+//! undo of it, or a superseding change does not, and it runs ahead of the line.
 //!
 //! G195: `bay status --since` judges from what its cursor carries ([`Judged`]): how each check
 //! was decided, at which trunk, under which evidence tips and registry. It reads the answers of
@@ -75,9 +74,9 @@
 //! judgement keeps the answers of every landing it read, past the window too, whose notes did
 //! not move, so a read back to a far pass is paid once per runner, not once per head.
 //!
-//! BACKLOG 119: a change the red holds waits in its place in line, and no runner claims it
-//! while the red stands. The line passes such places in arrival order ([`holds_place`]), and
-//! once main is green the change runs before every change submitted after it.
+//! G677 (owner ruling 2026-11-07, "merge unless worse"): a red check holds no change and no place
+//! in line; a change on its paths runs it before its merge, judged against main
+//! (`crate::publish`, `crate::policy::Policy::judging_red`).
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -697,33 +696,6 @@ pub fn covers_change(git: &Git, reds: &[Red], trunk: &str, revision: &str) -> Re
         .map_err(|error| error.message())?;
     let changed = crate::check::changed_paths(git, &base, revision)?;
     Ok(reds.iter().any(|red| red.covers(&changed)))
-}
-
-/// BACKLOG 119: whether the queue place `entry` waits on `reds`, the red checks of `trunk`: its
-/// operation, as this store's chain holds it, changes a path one of them covers, or has ended
-/// and lands nothing. The line passes such places in arrival order, and they keep them
-/// (`crate::publish`, and the host's hook, `crate::hook`). A place whose chain or operation
-/// cannot be read is never passed.
-///
-/// # Errors
-///
-/// A git fault.
-pub fn holds_place(
-    git: &Git,
-    reds: &[Red],
-    trunk: &str,
-    entry: &crate::queue::Entry,
-) -> Result<bool, String> {
-    let Ok((_, record)) = crate::change::Chain::new(git).read(&entry.change) else {
-        return Ok(false);
-    };
-    let Some(op) = record.operations.iter().find(|op| op.op_id == entry.op_id) else {
-        return Ok(false);
-    };
-    if op.state.is_terminal() || op.state == crate::change::OpState::Blocked {
-        return Ok(true);
-    }
-    covers_change(git, reds, trunk, &op.revision)
 }
 
 /// The red and the pending checks of `trunk`, as [`state`] judges them, judged once per main tip,

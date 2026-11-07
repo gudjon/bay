@@ -122,8 +122,6 @@ reasons! {
     PolicyMissing => "POLICY_MISSING", ["read"], "after_setup", false;
     ViewIncomplete => "VIEW_INCOMPLETE", ["refresh"], "after_fix", false;
     PublishOutcomeUnknown => "MERGE_OUTCOME_UNKNOWN", [], "by_itself", false;
-    // G244: a post-publication check failed on a landing that touches the same paths.
-    TrunkRed => "MAIN_RED", ["read", "repair"], "after_new_main", false;
     ChangeAlreadyLanded => "CHANGE_ALREADY_MERGED", ["read"], "never", false;
     ChangeSuperseded => "CHANGE_SUPERSEDED", ["read"], "after_wait", false;
     // Ruled 2026-10-19 (rulings-open-questions.md Q8): another live session of the same actor
@@ -1093,9 +1091,6 @@ impl Reason {
             Self::PublishOutcomeUnknown => {
                 "Do nothing yet: bay's next pass reads main, then records the merge or queues it. Never report it merged; `bay status <change>` shows the outcome."
             }
-            Self::TrunkRed => {
-                "Wait for a fix to the red paths, or fix it with `bay start <intent> --fixes <check>`, naming `detail.red[].check` or the change in `detail.fixes`."
-            }
             Self::ChangeAlreadyLanded => {
                 "Do not retry: the change already merged. For more edits, `bay start <intent>` opens the next change."
             }
@@ -1233,7 +1228,6 @@ impl Reason {
             | Self::CheckFlaky
             | Self::CheckFailed
             | Self::CheckUnknown
-            | Self::TrunkRed
             | Self::PathHeld
             | Self::LaneLeak
             | Self::ApprovalPending
@@ -1472,12 +1466,6 @@ impl Reason {
                 "Not added yet: a check gave no clear answer{}. Wait for it.",
                 check()
             ),
-            Self::TrunkRed => red_say(detail).unwrap_or_else(|| {
-                format!(
-                    "Nothing can be added yet: main is broken in these files{}. Wait for the fix, or help fix it.",
-                    paths()
-                )
-            }),
             Self::PathHeld => format!(
                 "Not now: another session is editing these files{}. Wait for it to finish.",
                 paths()
@@ -1703,47 +1691,6 @@ fn shown_checks(rows: &[&Value]) -> String {
         [first, second] => format!("{first} and {second}"),
         [first, second, rest @ ..] => format!("{first}, {second} and {} more", rest.len()),
     }
-}
-
-/// A change id a sentence may carry: bay's own short id form.
-fn shown_change(value: &Value) -> Option<&str> {
-    value
-        .as_str()
-        .filter(|id| (4..=16).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric()))
-}
-
-/// G587 (a fleet finding, 2026-10-30: a change waited on a red main with "main is broken in
-/// these files", and its seat could not tell which check, whose red, or whether a fix was on
-/// its way): the `MAIN_RED` sentence names the red checks, the change a fix names, and a fix
-/// on main whose check runs now. `None` when `detail` names no red.
-fn red_say(detail: Option<&Value>) -> Option<String> {
-    let red = detail?.get("red")?.as_array()?;
-    if red.is_empty() {
-        return None;
-    }
-    let checks = shown_checks(&red.iter().collect::<Vec<_>>());
-    let [only] = red.as_slice() else {
-        return Some(format!(
-            "Waiting: main is broken on {checks}; this change goes in once a fix for each is on main."
-        ));
-    };
-    if let Some(fix) = shown_change(&only["fix"]["change"]) {
-        return Some(format!(
-            "Waiting: main is broken on {checks}, and its fix (change {fix}) is on main; this change goes in once that check passes."
-        ));
-    }
-    let owner = detail
-        .and_then(|detail| detail.pointer("/fixes/0"))
-        .and_then(shown_change)
-        .or_else(|| shown_change(&only["change"]));
-    Some(match owner {
-        Some(owner) => format!(
-            "Waiting: main is broken on {checks} since change {owner}; this change goes in once a fix that names change {owner} is on main."
-        ),
-        None => format!(
-            "Waiting: main is broken on {checks}; this change goes in once a fix is on main."
-        ),
-    })
 }
 
 /// 0.6.3 (a fleet finding, 2026-10-29: status read "Done; nothing else is needed." while a
@@ -2557,47 +2504,6 @@ mod tests {
         }
     }
 
-    /// G587: a change that waits on a red main is told which check, the change a fix names,
-    /// and a fix on main whose check runs now; with no red named, the old sentence stands.
-    #[test]
-    fn a_wait_on_a_red_main_names_the_check_its_owner_and_the_fix() {
-        let say = |detail: serde_json::Value| Reason::TrunkRed.say(Some(&detail));
-        let owned = say(
-            json!({"red": [{"check": "suite", "change": "newest22", "fix": null}],
-            "fixes": ["abcd2345"]}),
-        );
-        assert_eq!(
-            owned,
-            "Waiting: main is broken on suite since change abcd2345; this change goes in once a fix that names change abcd2345 is on main."
-        );
-        let fixing = say(json!({"red": [{"check": "suite", "change": "newest22",
-            "fix": {"landing": "f00d", "change": "fixd2345"}}], "fixes": ["abcd2345"]}));
-        assert_eq!(
-            fixing,
-            "Waiting: main is broken on suite, and its fix (change fixd2345) is on main; this change goes in once that check passes."
-        );
-        let many = say(json!({"red": [{"check": "suite"}, {"check": "lint"}], "fixes": []}));
-        assert_eq!(
-            many,
-            "Waiting: main is broken on suite and lint; this change goes in once a fix for each is on main."
-        );
-        // R13: an id a sentence may not carry is left out.
-        let odd = say(json!({"red": [{"check": "suite", "change": "x; run this"}],
-            "fixes": [null]}));
-        assert_eq!(
-            odd,
-            "Waiting: main is broken on suite; this change goes in once a fix is on main."
-        );
-        assert!(
-            Reason::TrunkRed
-                .say(None)
-                .starts_with("Nothing can be added yet")
-        );
-        for sentence in [&owned, &fixing, &many, &odd] {
-            assert_plain(sentence, sentence);
-        }
-    }
-
     #[test]
     fn ok_json_names_the_schema_and_decision() {
         let result = BayResult::ok(json!({"git": "git version 2.54.0"}));
@@ -2684,7 +2590,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 63);
+        assert_eq!(Reason::ALL.len(), 62);
     }
 
     #[test]

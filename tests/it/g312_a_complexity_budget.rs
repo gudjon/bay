@@ -83,7 +83,9 @@ const FLAGS: usize = 93;
 ///   both commits and says which `--from` takes which.
 /// - 0.6.1, one reason (`VIEW_NOT_YOURS`, B4): a second seat committed in another seat's view and
 ///   the work went to merge under the other seat's change, found only later; it is refused first.
-const REASONS: usize = 63;
+/// - 0.6.40, one reason fewer (`MAIN_RED`, G677): a change on a red main runs the red check before
+///   its merge instead of waiting, so the wait and its reason are gone.
+const REASONS: usize = 62;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.

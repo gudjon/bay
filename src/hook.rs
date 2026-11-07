@@ -466,35 +466,6 @@ impl Judge<'_> {
         crate::red::repairs(self.git, trunk, Some(self.registry), &record.repair_names())
     }
 
-    /// BACKLOG 119: a publication that is not the head's stands too when it releases its
-    /// change's own place in this push and every live place ahead of it is one main's red holds
-    /// on the trunk it moves (`crate::red::holds_place`): those wait in their places for main,
-    /// in arrival order, as the runners judge them (`crate::publish`).
-    fn passes_red(
-        &self,
-        queue: &crate::queue::Queue,
-        trunk: &str,
-        change: &str,
-    ) -> Result<bool, String> {
-        let Some(own) = queue.of_change(change) else {
-            return Ok(false);
-        };
-        let ahead = queue.ahead_of(own.seq);
-        if !self.releases(own.seq) || is_zero(trunk) || ahead.is_empty() {
-            return Ok(false);
-        }
-        let reds = crate::red::holding(self.git, trunk, Some(self.registry))?;
-        if reds.is_empty() {
-            return Ok(false);
-        }
-        for entry in ahead {
-            if !crate::red::holds_place(self.git, &reds, trunk, entry)? {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
     /// Whether this push creates the release of queue place `seq`.
     fn releases(&self, seq: u64) -> bool {
         let release = format!("{}{seq}", crate::queue::DONE_PREFIX);
@@ -796,10 +767,7 @@ impl Judge<'_> {
                 None => String::new(),
             };
             let heads_it = releases_head && head.change == change;
-            if !heads_it
-                && !self.repairs_red(&queue, &update.old, &change)?
-                && !self.passes_red(&queue, &update.old, &change)?
-            {
+            if !heads_it && !self.repairs_red(&queue, &update.old, &change)? {
                 return Err(format!(
                     "QUEUED: {QUEUE_HELD_BY} {} (place {})",
                     head.op_id, head.seq

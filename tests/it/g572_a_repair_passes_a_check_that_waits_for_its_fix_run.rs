@@ -1,17 +1,17 @@
 //! G572 (a fleet finding, 2026-10-29: a fix for one check waited `MAIN_RED` behind
 //! a scripts check, whose own fix was on main and waited only for the run on it, and that run
 //! waited for a worker). A repair, a change that answers one red post check, passes a check
-//! that is `pending_fix` and does not hold it: that check's fix is on main already, and only its
-//! run decides. It still waits for a check that is red, and a change that repairs nothing still
-//! waits for a `pending_fix` check (E35).
+//! that is `pending_fix`: that check's fix is on main already, and only its run decides. It still
+//! runs a check that is red before its merge (G677), and a change that repairs nothing still runs
+//! a `pending_fix` check (E35).
 //!
 //! `suite` (on `src/**`) and `docs` (on `docs/**`) are both red. A repair of `docs` on both
-//! trees waits for `suite`. A fix of `suite` lands, so `suite` is `pending_fix`: the repair of
-//! `docs` lands before any run of `suite`, and a plain change on `src/` still waits for one.
+//! trees runs `suite`, which fails there as on main. A fix of `suite` lands, so `suite` is
+//! `pending_fix`: a second repair of `docs` runs no red check, and a plain change on `src/`
+//! still runs `suite`.
 //!
-//! Guards to mutate, in `src/red.rs` `blocking`: drop the `repair &&` (the plain change lands
-//! before the run on the fix), or drop the `red.fix.is_some()` (the repair lands while `suite`
-//! is red); in `src/publish.rs` `red_gate`, filter by `answered_by` alone (the repair waits).
+//! Guards to mutate, in `src/red.rs` `blocking`: drop the `repair &&` (the plain change runs no
+//! check), or drop the `red.fix.is_some()` (the repair runs none).
 
 #![cfg(unix)]
 
@@ -19,12 +19,12 @@ use crate::support;
 
 use std::path::PathBuf;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use support::queued::{Check, Held, Trust, host_under};
 use support::{PRODUCER, check_files, passing_result, result_json};
 
 /// The post checks `suite` on `src/**` and `docs` on `docs/**`.
-const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\nwhen_paths = [\"src/**\"]\n\n[[check]]\nid = \"docs\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\nwhen_paths = [\"docs/**\"]\n";
+const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check suite\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\nwhen_paths = [\"src/**\"]\n\n[[check]]\nid = \"docs\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\nwhen_paths = [\"docs/**\"]\n";
 
 /// A host whose post checks are answered by records the test writes, as the broad suite's own
 /// box writes them (G244), and an executor clone that runs no post check.
@@ -47,7 +47,8 @@ impl Line {
                 policy: Some(&policy),
                 seed: &[("src/a.rs", "fn a() {}\n"), ("docs/a.md", "a\n")],
                 hold_first: false,
-                fails: "false",
+                // `suite` fails, as on main, on every tree that still holds the break.
+                fails: "[ \"$1\" = suite ] && [ -e src/broke.x ]",
             },
             // Unsigned, so the post records the suite box writes count.
             Trust::Unsigned,
@@ -104,7 +105,14 @@ impl Line {
         for dir in dirs {
             std::fs::write(view.join(format!("{dir}/{intent}.x")), "x\n").unwrap();
         }
-        let (code, queued) = result_json(self.held.test_box.bay(&view).arg("merge"));
+        // Left to the runner, so each landing's result is in the passes `lands` reads.
+        let (code, queued) = result_json(
+            self.held
+                .test_box
+                .bay(&view)
+                .env("BAY_TEST_LEAVE_TO_RUNNER", "1")
+                .arg("merge"),
+        );
         assert_eq!(code, 0, "{queued}");
         id
     }
@@ -131,14 +139,6 @@ impl Line {
     fn status(&self) -> Value {
         self.held.test_box.bay_ok(&self.held.repo, &["status"])
     }
-
-    /// The text of `bay status <id>`.
-    fn status_of(&self, id: &str) -> String {
-        self.held
-            .test_box
-            .bay_ok(&self.held.repo, &["status", id])
-            .to_string()
-    }
 }
 
 /// The `check` row of `status`'s `detail.red_pending`.
@@ -149,6 +149,19 @@ fn pending(status: &Value, check: &str) -> Option<Value> {
         .flatten()
         .find(|row| row["check"] == check)
         .cloned()
+}
+
+/// The red checks change `id` ran before its merge, as its landing in `ran` names them.
+fn red_checked(ran: &[Value], id: &str) -> Value {
+    ran.iter()
+        .flat_map(|pass| {
+            pass["detail"]["ran"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+        })
+        .find(|row| row["change"] == id && row["decision"] == "merged")
+        .map_or(Value::Null, |row| row["detail"]["red_checked"].clone())
 }
 
 /// The checks of `status`'s `detail.red`, sorted.
@@ -180,15 +193,12 @@ fn a_repair_passes_a_check_that_waits_for_its_fix_run_and_waits_for_a_red_one() 
     let status = line.status();
     assert_eq!(red(&status), ["docs", "suite"], "{status}");
 
-    // WHEN a repair of `docs` on both trees is submitted while `suite` is red THEN it waits.
+    // WHEN a repair of `docs` on both trees is submitted while `suite` is red THEN it runs
+    // `suite` before its merge (G677): it answers `docs` only.
     let repair = line.submit("repair", &["src", "docs"], Some("docs"));
-    let ran = line.held.pass(&line.exec);
-    assert!(
-        !line.on_main(&repair),
-        "a repair landed on a red check it does not answer: {ran}"
-    );
-    let waiting = line.status_of(&repair);
-    assert!(waiting.contains("MAIN_RED"), "{waiting}");
+    let (landed, ran) = line.lands(&repair);
+    assert!(landed, "{ran:?}");
+    assert_eq!(red_checked(&ran, &repair), json!(["suite"]), "{ran:?}");
 
     // WHEN a fix of `suite` lands THEN `suite` waits only for the run on it.
     let fix = line.submit("fix", &["src"], Some(&broke));
@@ -201,24 +211,14 @@ fn a_repair_passes_a_check_that_waits_for_its_fix_run_and_waits_for_a_red_one() 
         "{status}"
     );
 
-    // AND a plain change on src/ is submitted.
+    // THEN a repair passes a check whose fix is on main, and a plain change on src/ still runs
+    // it (E35).
+    let again = line.submit("again", &["src", "docs"], Some("docs"));
+    let (landed, ran) = line.lands(&again);
+    assert!(landed, "{ran:?}");
+    assert_eq!(red_checked(&ran, &again), Value::Null, "{ran:?}");
     let plain = line.submit("plain", &["src"], None);
-
-    // THEN the repair of `docs` lands before any run of `suite`, and the plain change waits.
-    let (landed, ran) = line.lands(&repair);
-    assert!(
-        landed,
-        "the repair waited for a check whose fix is on main: {ran:?}"
-    );
-    assert!(
-        !line.on_main(&plain),
-        "a change that repairs nothing landed before the run on the fix: {ran:?}"
-    );
-    let waiting = line.status_of(&plain);
-    assert!(waiting.contains("MAIN_RED"), "{waiting}");
-
-    // WHEN `suite` passes on the fix THEN the plain change lands.
-    line.answer("suite", "pass");
     let (landed, ran) = line.lands(&plain);
     assert!(landed, "{ran:?}");
+    assert_eq!(red_checked(&ran, &plain), json!(["suite"]), "{ran:?}");
 }

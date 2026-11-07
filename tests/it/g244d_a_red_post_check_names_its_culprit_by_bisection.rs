@@ -5,7 +5,7 @@
 //! that serves the check's environment runs it on the range's midpoints, first parent, records
 //! each verdict as ordinary post evidence, and runs the suspect once more to rule out a flake,
 //! in at most log2(n) + 1 runs. The pinned landing is the red's `culprit`, and it owns the
-//! red: `bay status` names it, and `MAIN_RED` names its change. Off by default.
+//! red: `bay status` names it. Off by default.
 
 // Each case runs shell scripts (adapters), so these run on Unix only.
 #![cfg(unix)]
@@ -210,21 +210,8 @@ fn a_bisect_names_the_landing_that_broke_the_post_check_not_the_newest_failure()
     // A pinned range is not bisected again.
     assert_eq!(trunk.executor_pass(), None);
 
-    // MAIN_RED names the culprit's change as the owner.
-    let (_, view) = trunk.test_box.start_and_edit(&trunk.repo);
-    let (code, refused) = result_json(trunk.test_box.bay(&view).args(["merge", "--wait"]));
-    assert_eq!(code, 0, "it waits for main: {refused}");
-    assert_eq!(refused["reason"], "MAIN_RED", "{refused}");
-    assert_eq!(
-        refused["detail"]["red"][0]["change"],
-        landings[3].0.as_str(),
-        "{refused}"
-    );
-    assert_eq!(
-        refused["detail"]["owners"],
-        json!([landings[3].0]),
-        "{refused}"
-    );
+    // The culprit's change owns the red.
+    assert_eq!(red[0]["change"], landings[3].0.as_str(), "{red}");
 }
 
 #[test]

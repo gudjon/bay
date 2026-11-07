@@ -548,6 +548,8 @@ struct Ctx<'a> {
     pushed_head: Option<String>,
     /// G654: the red checks this run passed, as it no pre-merge check covers.
     passed_red: Vec<String>,
+    /// G677: the red post checks this change's paths meet, run on its candidate before the merge.
+    red_checks: Vec<String>,
     /// The head this process's first write not yet on the remote went on; `None` once every
     /// write it made is pushed or withdrawn. [`Ctx::take_back`] takes those writes off the
     /// local chain ref, and only those, at every re-read of the remote chain and when the
@@ -619,6 +621,7 @@ impl<'a> Ctx<'a> {
             keys,
             pushed_head: None,
             passed_red: Vec::new(),
+            red_checks: Vec::new(),
             unpushed_from: None,
             my_epoch: 0,
             repair: None,
@@ -1801,11 +1804,8 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
         queue_gate(ctx, op_id, &trunk)?
     };
     let mut seq = match gate {
-        // No check ahead of its turn for a visit beside other work (S1), which ends at its place,
-        // or for a change main's red holds (BACKLOG 119).
-        Gate::Wait(result)
-            if ctx.visit == Visit::Place || result.reason == Some(Reason::TrunkRed) =>
-        {
+        // No check ahead of its turn for a visit beside other work (S1), which ends at its place.
+        Gate::Wait(result) if ctx.visit == Visit::Place => {
             return Ok(*result);
         }
         Gate::Wait(result) => return Ok(ahead_of_turn(ctx, op_id, &trunk, *result)),
@@ -1852,11 +1852,9 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     // the publishing push) passes the head on. Not an operation given up on `REGISTRY_CHANGED`:
     // its key can sign no release, and the place stays with the operation, which the executor
     // that takes it over publishes as the head (§ 10a).
-    // F11: nor a head that gave its pass back, nor one main's red holds (BACKLOG 119): each
-    // keeps its place for a later pass.
+    // F11: nor a head that gave its pass back: it keeps its place for a later pass.
     let given_up = outcome.as_ref().is_ok_and(|result| {
         result.reason == Some(Reason::RegistryChanged)
-            || result.reason == Some(Reason::TrunkRed)
             || result
                 .detail
                 .as_ref()
@@ -2104,9 +2102,7 @@ fn batch(
     if crate::hold::held(repo, trunk).is_some() {
         return Ok(None);
     }
-    if let Some(red) = red_gate(ctx, op_id, revision, trunk)? {
-        return Ok(Some(red));
-    }
+    red_gate(ctx, revision, trunk)?;
     if ends_before_red(ctx, &mut members, trunk)? {
         stopped = "main_red";
         let min = repo.config.batch().map_or(2, |bounds| bounds.min.max(2));
@@ -2347,9 +2343,7 @@ fn batch_plan(
     // while the head checked, and planned a batch of ten from the line behind it; the two
     // batches claimed the same members, one landed, and the other gave every member back): a
     // head that runs ahead of its turn, a repair or a change that needs no check, lands alone.
-    // BACKLOG 119: a head past places that main's red holds still batches, since none of them
-    // runs.
-    if queue.head().is_some_and(|head| head.seq != at) && !passes_red(ctx, &queue, at, trunk)? {
+    if queue.head().is_some_and(|head| head.seq != at) {
         eprintln!("bay runner: {op_id} no batch: it runs ahead of its turn");
         return Ok(None);
     }
@@ -3435,9 +3429,8 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     }
     if let Some(entry) = queue.of(op_id).cloned()
         && (repairs
-            || (((needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
-                && !main_moved_under(ctx.repo, &head))
-                || passes_red(ctx, &queue, entry.seq, trunk)?)
+            || (needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
+                && !main_moved_under(ctx.repo, &head)
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?))
     {
         return unless_red(ctx, op_id, trunk, Gate::Head(entry.seq));
@@ -3452,38 +3445,8 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
 /// its place before any runner claims it.
 fn unless_red(ctx: &mut Ctx, op_id: &str, trunk: &str, gate: Gate) -> Result<Gate, String> {
     let revision = ctx.op(op_id).revision.clone();
-    Ok(match red_gate(ctx, op_id, &revision, trunk)? {
-        Some(waiting) => Gate::Wait(Box::new(waiting)),
-        None => gate,
-    })
-}
-
-/// BACKLOG 119: whether every live place ahead of place `seq` is one main's red at `trunk`
-/// holds ([`crate::red::holds_place`]). Those wait for main, keeping their places, so this
-/// operation runs as a head from its own place, as the host's hook judges it (`crate::hook`).
-fn passes_red(
-    ctx: &Ctx,
-    queue: &crate::queue::Queue,
-    seq: u64,
-    trunk: &str,
-) -> Result<bool, String> {
-    let ahead = queue.ahead_of(seq);
-    if ahead.is_empty() {
-        return Ok(false);
-    }
-    let git = &ctx.repo.git;
-    let reds = journaled(ctx, || {
-        crate::red::holding(git, trunk, ctx.registry.as_ref())
-    })?;
-    if reds.is_empty() {
-        return Ok(false);
-    }
-    for entry in ahead {
-        if !crate::red::holds_place(git, &reds, trunk, entry)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    red_gate(ctx, &revision, trunk)?;
+    Ok(gate)
 }
 
 /// G552 (a fleet finding, 2026-10-29: one head yielded "main moved" pass after pass while
@@ -4776,8 +4739,6 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         unavailable: None,
         early_conflict: None,
         undoes: None,
-        red_holds: Vec::new(),
-        red_frees: Vec::new(),
         prechecks: Vec::new(),
         batch_culprit: None,
     });
@@ -5132,20 +5093,14 @@ fn lane_leak(ctx: &Ctx, trunk: &str, revision: &str) -> Result<Option<BayResult>
     ))
 }
 
-/// G244: trunk is red on paths this change touches, and the change does not name the landing
-/// that made it red (by `--fixes`, an undo, or a supersede): `MAIN_RED`, naming the owner and
-/// the ways out. The operation is blocked on trunk's state, never failed: it waits in its
-/// place in line ([`wait_in_line`], BACKLOG 119), asked before any claim ([`unless_red`]). A
-/// check a fix answers holds its paths the same way until a run passes (E35,
-/// [`crate::red::holding`]). A check no landing in the window answers (NEW-6,
-/// [`crate::red::Pending`]) is unknown, not red: it refuses nothing here, and `bay status`
-/// lists it as `red_pending`, never as clear.
-fn red_gate(
-    ctx: &mut Ctx,
-    op_id: &str,
-    revision: &str,
-    trunk: &str,
-) -> Result<Option<BayResult>, String> {
+/// G244, G677: the red post checks (and the checks a fix answers, E35) on paths this change
+/// touches, unless it names the landing that made it red (by `--fixes`, an undo, or a supersede),
+/// go in `ctx.red_checks`: they run on its candidate before the merge, judged against main
+/// ([`policy::Policy::judging_red`]). The change never waits for main (owner ruling 2026-11-07,
+/// "merge unless worse"). A check no landing in the window answers (NEW-6,
+/// [`crate::red::Pending`]) is unknown, not red: it adds nothing here, and `bay status` lists it
+/// as `red_pending`, never as clear.
+fn red_gate(ctx: &mut Ctx, revision: &str, trunk: &str) -> Result<(), String> {
     ctx.step.set("red");
     // G657: a run of its own, unlike a runner's pass, has not read the post records another
     // machine wrote, and would merge past a red it cannot see.
@@ -5157,7 +5112,7 @@ fn red_gate(
         crate::red::holding(git, trunk, ctx.registry.as_ref())
     })?;
     if reds.is_empty() {
-        return Ok(None);
+        return Ok(());
     }
     let base = git
         .run(&["merge-base", trunk, revision])
@@ -5166,7 +5121,7 @@ fn red_gate(
     let names = ctx.record.repair_names();
     let blocking = crate::red::blocking(&reds, &changed, &names);
     if blocking.is_empty() {
-        return Ok(None);
+        return Ok(());
     }
     // G654 (owner ruling, 2026-11-05): a change the repository lists in `[policy] passes_red`,
     // that no pre-merge check covers, passes, and its result names what it passed. A list, as
@@ -5177,50 +5132,13 @@ fn red_gate(
         .is_some_and(|policy| policy.may_pass_red(&changed));
     if listed && needs_no_check(git, trunk, revision)? {
         ctx.passed_red = blocking.iter().map(|red| red.check.clone()).collect();
-        return Ok(None);
+        return Ok(());
     }
-    let owners: Vec<Option<String>> = blocking.iter().map(|red| red.change.clone()).collect();
-    // E36: the owner moves with each newer failure while no culprit is pinned; `fixes` is the
-    // one name a fix gives, stable while the red stands.
-    let fixes: Vec<Option<String>> = blocking.iter().map(|red| red.fixes().cloned()).collect();
-    let red: Vec<serde_json::Value> = blocking.iter().map(|red| red.to_json()).collect();
-    // G661: which of its own files hold it, so a mixed change knows what to split out.
-    let (holds, frees): (Vec<String>, Vec<String>) = changed.iter().cloned().partition(|path| {
-        blocking
-            .iter()
-            .any(|red| red.covers(std::slice::from_ref(path)))
-    });
-    let op = ctx.op_mut(op_id);
-    op.red_holds.clone_from(&holds);
-    op.red_frees.clone_from(&frees);
-    // The trust-agents ruling (2026-10-26): a change on a red main's paths waits, the line and
-    // a fix behind it move, and it is checked again by itself once main is green; it is never
-    // blocked into a re-merge by hand. BACKLOG 119: it waits in its place in line.
-    wait_in_line(
-        ctx,
-        op_id,
-        revision,
-        &format!("waits {op_id}: main is red on its paths"),
-    )?;
-    let mut waiting = BayResult::refused(Decision::Queued, Reason::TrunkRed);
-    waiting.waiting_for = Some("main".to_owned());
-    Ok(Some(
-        waiting
-            .with_change(ctx.id.clone())
-            .with_op(op_id)
-            .with_detail(json!({
-                "red": red,
-                "ways_out": [
-                    "merge a change that names the red's check or its fixes: bay start --fixes <check>, or bay undo <fixes>",
-                    "a later run of the post check passes on main",
-                    "quarantine the check in the policy",
-                ],
-                "owners": owners,
-                "fixes": fixes,
-                "red_holds": holds,
-                "red_frees": frees,
-            })),
-    ))
+    // G677 (owner ruling 2026-11-07, "merge unless worse"): the change never waits for main;
+    // each red check on its paths runs on its candidate before the merge, judged against main,
+    // and only a failure main does not have refuses it ([`policy::Policy::judging_red`]).
+    ctx.red_checks = blocking.iter().map(|red| red.check.clone()).collect();
+    Ok(())
 }
 
 /// N-8 (`crate::hold`): trunk is held, and this change carries neither `Fixes:` nor `Reverts:`:
@@ -5319,19 +5237,6 @@ fn wait_unplaced(
     }
     give_back_place(ctx, op_id, release)?;
     note_wait(ctx, op_id, revision, reason, message)
-}
-
-/// BACKLOG 119: `op_id` waits on main's red (`MAIN_RED`) and keeps its place in line, if it
-/// holds one, so no change submitted after it goes ahead of it once main is green. The line
-/// passes it while the red stands ([`passes_red`]), and no runner claims it meanwhile
-/// ([`unless_red`]). With no live queue it waits with no place, and a later pass's visits
-/// come oldest first. A claim this executor holds is given back, and the outcome is written once
-/// with the chain message `message`. An operation another executor holds is left as it is.
-fn wait_in_line(ctx: &mut Ctx, op_id: &str, revision: &str, message: &str) -> Result<(), String> {
-    if held_elsewhere(ctx, op_id) {
-        return Ok(());
-    }
-    note_wait(ctx, op_id, revision, Reason::TrunkRed, message)
 }
 
 /// The wait of `op_id` as `reason`, written once with the chain message `message`: a claim
@@ -6049,10 +5954,8 @@ fn build_and_check(
     // G428, G429 (fleet findings, 2026-10-28): asked once the candidate merges, and before the
     // input providers run, as a batch asks it first. A head that conflicted with main judged
     // main's red for minutes before its twenty-second merge refused it.
-    if ctx.record.lane.is_none()
-        && let Some(red) = red_gate(ctx, op_id, revision, trunk)?
-    {
-        return Ok(Err(red));
+    if ctx.record.lane.is_none() {
+        red_gate(ctx, revision, trunk)?;
     }
     // G429 (a fleet finding, 2026-10-28): the input providers run once the candidate is known to
     // merge and to be landable. A head that conflicted with main ran them for four to eight
@@ -6482,6 +6385,7 @@ fn check_candidate(
         let Some(policy) = &base_policy else {
             return Ok(policy_missing(ctx, op_id, trunk));
         };
+        let policy = &policy.judging_red(&ctx.red_checks);
         let (verdict, refusal) = run(candidate_id, policy, base_from)?;
         return Ok((!policy.unchecked, verdict, refusal));
     }
@@ -6534,6 +6438,7 @@ fn check_candidate(
     if policy.unchecked {
         return Ok((false, UNCHECKED, None));
     }
+    let policy = &policy.judging_red(&ctx.red_checks);
     let (verdict, refusal) = run(candidate_id, policy, base_from)?;
     if refusal.is_some() {
         return Ok((true, verdict, refusal));
@@ -8311,6 +8216,12 @@ fn derive_landed(
     {
         detail["passed_red"] = json!(ctx.passed_red);
     }
+    // G677: the red checks the landing ran before its merge, judged against main.
+    if let Some(detail) = result.detail.as_mut()
+        && !ctx.red_checks.is_empty()
+    {
+        detail["red_checked"] = json!(ctx.red_checks);
+    }
     // A batch member names the batch whose tip was checked: its own tree was not checked alone.
     let batch = ctx
         .op(op_id)
@@ -8875,6 +8786,18 @@ fn answers_of(
     let now = crate::evidence::reader_now();
     // G163: only records from the producers a check lists answer it.
     let records = policy.answering(evidence::counted(git, records, registry)?);
+    // G677: a run judged against its base passes when every failure was already there, which
+    // lets a change merge on a red main; on main, those failures still stand, so as an answer to
+    // the post check it is a failure, and main stays red until a run fails nothing.
+    let records: Vec<evidence::EvidenceRecord> = records
+        .into_iter()
+        .map(|mut record| {
+            if !record.baseline_failures().is_empty() {
+                record.verdict = evidence::Verdict::ProductFailure;
+            }
+            record
+        })
+        .collect();
     let mut out = Vec::new();
     for entry in &policy.post {
         let id = evidence::CheckId::new(&entry.id, &entry.environment);

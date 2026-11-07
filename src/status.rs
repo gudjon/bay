@@ -1966,15 +1966,10 @@ pub fn approval_pending(
     Ok(Some(approval))
 }
 
-/// G658, G661: what a refused or waiting operation's files met: the work it would undo, and which
-/// of them a red main holds.
-fn held_by(op: &crate::change::Operation, published: bool, operation: &mut Value) {
+/// G658: the work a refused operation would undo.
+fn held_by(op: &crate::change::Operation, operation: &mut Value) {
     if let Some(undoes) = &op.undoes {
         operation["undoes"] = json!(undoes);
-    }
-    if !published && op.outcome.as_deref() == Some(Reason::TrunkRed.code()) {
-        operation["red_holds"] = json!(op.red_holds);
-        operation["red_frees"] = json!(op.red_frees);
     }
 }
 
@@ -2124,7 +2119,7 @@ fn describe(
         if !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked {
             waiting(op, &mut operation);
         }
-        held_by(op, published, &mut operation);
+        held_by(op, &mut operation);
         if let Some(fault) = fault(record, unsynced, op, published) {
             operation["fault"] = fault;
         }

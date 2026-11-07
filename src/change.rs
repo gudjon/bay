@@ -461,11 +461,6 @@ pub struct Operation {
     /// G658: what this operation's `UNDOES_MERGED` refusal would have undone.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undoes: Option<Undone>,
-    /// G661: while a red main holds this operation, its files the red covers, and the others.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub red_holds: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub red_frees: Vec<String>,
     /// NEW-2, NEW-10: the checks an executor that was not running this operation made of it
     /// while it waited behind the queue's head (`crate::throughput`), newest last, at most
     /// `throughput::PRECHECKS_KEPT`. Their records count only through reuse.

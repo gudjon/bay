@@ -2,11 +2,11 @@
 //! list keeps.
 //!
 //! Trunk is red on a failed post check's paths (G244), read as its `when_paths` are: with
-//! `["src/**", "!src/docs/**"]` a landing on `src/docs/` lands while the check is red, and a
-//! landing on the rest of `src/` waits `MAIN_RED`.
+//! `["src/**", "!src/docs/**"]` a landing on `src/docs/` lands as if main were green, and a
+//! landing on the rest of `src/` runs the red check first (G677, `detail.red_checked`).
 //!
 //! The guard to mutate: `Red::covers` in `src/red.rs` (back to any glob: the landing on the
-//! excluded path waits `MAIN_RED`; to `false`: the landing on `src/` lands on the red).
+//! excluded path runs the red check too; to `false`: the landing on `src/` does not run it).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -100,9 +100,15 @@ fn a_landing_on_an_excluded_path_lands_while_the_check_is_red() {
     let (code, docs) = trunk.land("src/docs/b.md");
     assert_eq!(code, 0, "{docs}");
     assert_eq!(docs["decision"], "merged", "{docs}");
+    assert!(docs["detail"]["red_checked"].is_null(), "{docs}");
 
-    // The rest of `src/` waits for main.
-    let (code, waiting) = trunk.land("src/next.rs");
-    assert_eq!(code, 0, "{waiting}");
-    assert_eq!(waiting["reason"], "MAIN_RED", "{waiting}");
+    // The rest of `src/` runs the red check first (G677), and lands adding no failure.
+    let (code, next) = trunk.land("src/next.rs");
+    assert_eq!(code, 0, "{next}");
+    assert_eq!(next["decision"], "merged", "{next}");
+    assert_eq!(
+        next["detail"]["red_checked"],
+        serde_json::json!(["suite"]),
+        "{next}"
+    );
 }
