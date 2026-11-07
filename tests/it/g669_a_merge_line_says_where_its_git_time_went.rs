@@ -1,9 +1,11 @@
 //! G669 (2026-11-06: a merge run took 65 s with a 1 s check, 30 s of it in "publish", and nothing
 //! said which Git calls made that up). A runner's line for an operation ends with the Git commands
-//! that took longest, each with its total time and how many times it ran.
+//! that took longest, each with its total time, how many times it ran and its slowest call, which
+//! tells one slow call from many ordinary ones.
 //!
 //! Guards to mutate: `src/git.rs` the recording around a Git call (no `git:` part); `take_times`, the
-//! reset (a later operation's line also counts the one before it).
+//! reset (a later operation's line also counts the one before it); `record_time`, the slowest call
+//! (its `max` reads 0.0s).
 //! Not guarded: the reset in `src/executor.rs` before an operation, which keeps Git calls made between
 //! operations out of its line. Removing it changes only what a line counts, and no test here sees it.
 
@@ -24,11 +26,16 @@ fn git_part<'a>(stderr: &'a str, id: &str) -> &'a str {
         .1
 }
 
+/// The count in `push 0.5s x3 max 0.2s`.
+fn count_in(entry: &str) -> u32 {
+    let (_, tail) = entry.rsplit_once(" x").unwrap();
+    tail.split_whitespace().next().unwrap().parse().unwrap()
+}
+
 fn count_of(part: &str, command: &str) -> u32 {
     part.split(", ")
         .find(|entry| entry.starts_with(&format!("{command} ")))
-        .and_then(|entry| entry.rsplit_once(" x"))
-        .map_or(0, |(_, count)| count.trim_end_matches(')').parse().unwrap())
+        .map_or(0, count_in)
 }
 
 #[test]
@@ -63,13 +70,17 @@ fn a_merge_line_names_the_git_commands_that_took_longest() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let (first, second) = (git_part(&stderr, &one), git_part(&stderr, &two));
     assert!(!first.is_empty(), "{stderr}");
+    let slowest = first
+        .split(", ")
+        .next()
+        .and_then(|entry| entry.rsplit_once(" max "))
+        .map_or("", |(_, slowest)| slowest);
+    assert!(
+        slowest.ends_with('s') && !slowest.starts_with("0.0"),
+        "the slowest call of the longest command: {first}"
+    );
     // Each line counts its own operation: the second is not the first's total and more.
-    let total = |part: &str| -> u32 {
-        part.split(", ")
-            .filter_map(|entry| entry.rsplit_once(" x"))
-            .map(|(_, count)| count.trim_end_matches(')').parse::<u32>().unwrap())
-            .sum()
-    };
+    let total = |part: &str| -> u32 { part.split(", ").map(count_in).sum() };
     assert!(total(second) < total(first) * 2, "{first} then {second}");
     assert!(
         count_of(first, "push") + count_of(second, "push") >= 2,

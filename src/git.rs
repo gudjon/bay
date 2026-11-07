@@ -1068,8 +1068,10 @@ impl Git {
 /// Test hooks are compiled in unless `scripts/release.sh` built this binary.
 use crate::version::TEST_HOOKS;
 
-/// G669: this process's time in each Git command since [`take_times`] last ran, and how many ran.
-static TIMES: Mutex<BTreeMap<String, (std::time::Duration, u32)>> = Mutex::new(BTreeMap::new());
+/// G669: this process's time in each Git command since [`take_times`] last ran, how many ran, and
+/// the slowest one.
+static TIMES: Mutex<BTreeMap<String, (std::time::Duration, u32, std::time::Duration)>> =
+    Mutex::new(BTreeMap::new());
 
 fn record_time(args: &[&str], spent: std::time::Duration) {
     let command = args.first().copied().unwrap_or_default().to_owned();
@@ -1077,19 +1079,26 @@ fn record_time(args: &[&str], spent: std::time::Duration) {
     let entry = times.entry(command).or_default();
     entry.0 += spent;
     entry.1 += 1;
+    entry.2 = entry.2.max(spent);
 }
 
 /// The Git commands that took longest since the last call, longest first, and starts anew:
-/// `push 24.1s x1, fetch 3.2s x2`.
+/// `push 24.1s x3 max 14.2s, fetch 3.2s x2 max 1.9s`.
 #[must_use]
 pub fn take_times(most: usize) -> String {
     let times = std::mem::take(&mut *TIMES.lock().unwrap_or_else(PoisonError::into_inner));
     let mut times: Vec<_> = times.into_iter().collect();
-    times.sort_by_key(|(_, (spent, _))| std::cmp::Reverse(*spent));
+    times.sort_by_key(|(_, (spent, _, _))| std::cmp::Reverse(*spent));
     times
         .iter()
         .take(most)
-        .map(|(command, (spent, count))| format!("{command} {:.1}s x{count}", spent.as_secs_f64()))
+        .map(|(command, (spent, count, slowest))| {
+            format!(
+                "{command} {:.1}s x{count} max {:.1}s",
+                spent.as_secs_f64(),
+                slowest.as_secs_f64()
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.36
+
+- A runner's line also names each Git command's slowest call.
+
 ## 0.6.35
 
 - `bay update --check` no longer puts off a machine's next automatic update.
