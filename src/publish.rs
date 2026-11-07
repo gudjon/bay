@@ -6944,6 +6944,32 @@ struct Seen<'a> {
     carried: &'a throughput::CarriedApprovals,
 }
 
+/// G673: on each failed check's row, the files of that check (its `adapter`) the change edits,
+/// as `runs_as_main`. A check runs as main has it (G26), so such an edit lands on its own first.
+fn runs_as_main(policy: &policy::Policy, changed: &[String], rows: &mut serde_json::Value) {
+    for row in rows.as_array_mut().into_iter().flatten() {
+        let Some(entry) = policy
+            .checks
+            .iter()
+            .find(|entry| row["check"].as_str() == Some(entry.id.as_str()))
+        else {
+            continue;
+        };
+        let own: Vec<&String> = changed
+            .iter()
+            .filter(|path| {
+                entry.adapter.iter().any(|file| {
+                    let file = file.trim_end_matches('/');
+                    *path == file || path.starts_with(&format!("{file}/"))
+                })
+            })
+            .collect();
+        if !own.is_empty() {
+            row["runs_as_main"] = json!(own);
+        }
+    }
+}
+
 /// The verdict of `policy` on what `seen` saw: `pass`, or the verdict word and the refusal
 /// that names each gap, with the approvals still owed (G245).
 fn judge_seen(
@@ -6969,6 +6995,9 @@ fn judge_seen(
         "checks": why,
         "trust": evidence::trust(registry),
     });
+    if code == Reason::CheckFailed {
+        runs_as_main(policy, seen.changed, &mut detail["checks"]);
+    }
     // G245: the approvals still owed, who can give them, and the exact candidate to name.
     let owed = approval_rows(
         policy,

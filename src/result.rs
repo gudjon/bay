@@ -911,6 +911,35 @@ fn listed(items: &[String]) -> Option<String> {
 }
 
 /// ` ({what})` when there is something to name, else nothing.
+/// G673: `: <unit>: <first line of its reason>` for the first failed unit of the first check
+/// in `detail`. A line an adapter cut at its start (`...`) is passed over; at most 160 characters.
+fn failed_unit(detail: Option<&Value>) -> Option<String> {
+    let reason = detail?.pointer("/checks/0/reasons/0")?;
+    let unit = reason["unit"].as_str()?;
+    let text = reason["reason"].as_str()?;
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let line = lines
+        .clone()
+        .find(|line| !line.starts_with("..."))
+        .or_else(|| lines.next())?;
+    let mut line: String = line.trim_end_matches('.').chars().take(160).collect();
+    if line.chars().count() == 160 {
+        line.push('…');
+    }
+    Some(format!(": {unit}: {line}"))
+}
+
+/// G673: the files of the failed check the change edits, joined, when it edits any.
+fn runs_as_main(detail: Option<&Value>) -> Option<String> {
+    let files: Vec<&str> = detail?
+        .pointer("/checks/0/runs_as_main")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    (!files.is_empty()).then(|| files.join(", "))
+}
+
 fn named(what: Option<String>) -> String {
     match what {
         Some(what) => format!(" ({what})"),
@@ -1427,10 +1456,18 @@ impl Reason {
                 "Nothing was added: a check{} gave two answers for the same change. Ask a developer to fix that check.",
                 check()
             ),
-            Self::CheckFailed => format!(
-                "Nothing was added: a check{} did not pass. Fix it, then save again.",
-                check()
-            ),
+            Self::CheckFailed => match runs_as_main(detail) {
+                Some(files) => format!(
+                    "Nothing was added: a check{} did not pass{}. It ran as main has it, and this change edits it ({files}): merge that edit on its own first.",
+                    check(),
+                    failed_unit(detail).unwrap_or_default()
+                ),
+                None => format!(
+                    "Nothing was added: a check{} did not pass{}. Fix it, then save again.",
+                    check(),
+                    failed_unit(detail).unwrap_or_default()
+                ),
+            },
             Self::CheckUnknown => format!(
                 "Not added yet: a check gave no clear answer{}. Wait for it.",
                 check()
@@ -2060,7 +2097,17 @@ fn change_say(result: &BayResult) -> Option<String> {
             crate::publish::UNKNOWN_RETRIES
         ));
     }
-    Reason::from_code(outcome).map(|reason| format!("{id}: {}", reason.say(None)))
+    // G673: a failed check's sentence names its unit and reason, from the change's evidence.
+    let failed = (outcome == Reason::CheckFailed.code())
+        .then(|| {
+            row["evidence"]["records"]
+                .as_array()?
+                .iter()
+                .find(|record| record["verdict"] == "product_failure")
+                .map(|record| serde_json::json!({"checks": [record]}))
+        })
+        .flatten();
+    Reason::from_code(outcome).map(|reason| format!("{id}: {}", reason.say(failed.as_ref())))
 }
 
 /// G603 (a fleet finding, 2026-10-31: status of a change whose operation a fault stopped read

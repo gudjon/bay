@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.39
+
+- A failed check's sentence names the failed unit and its first line, at `bay merge` and in `bay status`.
+- A change that edits the failed check's own files hears the check ran as main has it.
+
 ## 0.6.38
 
 - `bay merge` refuses `UNDOES_MERGED` before the change queues, so an agent hears at once.
