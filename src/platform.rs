@@ -237,7 +237,7 @@ fn git_sh() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Launch, launch_of, reap, resolve, sh_candidates};
+    use super::{Launch, launch_of, resolve, sh_candidates};
     use std::ffi::OsStr;
 
     fn dirs() -> (tempfile::TempDir, tempfile::TempDir) {
@@ -396,7 +396,7 @@ mod tests {
         // G575: an exited child bay never waits for stays in the process table.
         let child = std::process::Command::new("true").spawn().unwrap();
         let entry = std::path::PathBuf::from(format!("/proc/{}", child.id()));
-        reap(child);
+        super::reap(child);
         let started = std::time::Instant::now();
         while entry.exists() && started.elapsed() < std::time::Duration::from_secs(10) {
             std::thread::sleep(std::time::Duration::from_millis(20));

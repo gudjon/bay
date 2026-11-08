@@ -3,6 +3,7 @@
 ## 0.6.41
 
 - A red check's notices say changes on its paths run it before they merge, not that they wait.
+- `[policy] passes_red` is gone: a change on a red check's paths runs it first, so none needs a bypass.
 
 ## 0.6.40
 

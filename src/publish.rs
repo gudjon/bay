@@ -546,8 +546,6 @@ struct Ctx<'a> {
     /// The chain head this process last pushed: later pushes are leased on it, so a chain
     /// another executor moved is never overwritten.
     pushed_head: Option<String>,
-    /// G654: the red checks this run passed, as it no pre-merge check covers.
-    passed_red: Vec<String>,
     /// G677: the red post checks this change's paths meet, run on its candidate before the merge.
     red_checks: Vec<String>,
     /// The head this process's first write not yet on the remote went on; `None` once every
@@ -620,7 +618,6 @@ impl<'a> Ctx<'a> {
             registry: None,
             keys,
             pushed_head: None,
-            passed_red: Vec::new(),
             red_checks: Vec::new(),
             unpushed_from: None,
             my_epoch: 0,
@@ -5123,17 +5120,6 @@ fn red_gate(ctx: &mut Ctx, revision: &str, trunk: &str) -> Result<(), String> {
     if blocking.is_empty() {
         return Ok(());
     }
-    // G654 (owner ruling, 2026-11-05): a change the repository lists in `[policy] passes_red`,
-    // that no pre-merge check covers, passes, and its result names what it passed. A list, as
-    // "no pre-merge check" is also true of code a repository checks only after the merge.
-    let listed = policy::load_at(git, trunk)
-        .ok()
-        .flatten()
-        .is_some_and(|policy| policy.may_pass_red(&changed));
-    if listed && needs_no_check(git, trunk, revision)? {
-        ctx.passed_red = blocking.iter().map(|red| red.check.clone()).collect();
-        return Ok(());
-    }
     // G677 (owner ruling 2026-11-07, "merge unless worse"): the change never waits for main;
     // each red check on its paths runs on its candidate before the merge, judged against main,
     // and only a failure main does not have refuses it ([`policy::Policy::judging_red`]).
@@ -8210,11 +8196,6 @@ fn derive_landed(
     let unchecked = unchecked_landing(ctx, op_id, commit);
     if let (Some(detail), Some(why)) = (result.detail.as_mut(), unchecked) {
         detail["unchecked"] = json!(why);
-    }
-    if let Some(detail) = result.detail.as_mut()
-        && !ctx.passed_red.is_empty()
-    {
-        detail["passed_red"] = json!(ctx.passed_red);
     }
     // G677: the red checks the landing ran before its merge, judged against main.
     if let Some(detail) = result.detail.as_mut()

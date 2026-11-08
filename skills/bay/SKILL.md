@@ -158,8 +158,7 @@ session is being told of its refusals; `waiting_for` says what a queued change w
   `detail.red[].check` names (the one name that never moves). Main is then `pending_fix` in `detail.red_pending` until
   a run of the check on the fix answers it.
 - A change that no check covers, such as a document no check reads, is on main when `bay merge` returns, unless this
-  machine has no runner key where the repository signs everything. If every file is on the policy's
-  `[policy] passes_red`, it passes a red main too, and `detail.passed_red` names each red check it passed. `bay start` says
+  machine has no runner key where the repository signs everything. `bay start` says
   beforehand, in `detail.pre_merge`: `at_once`, and in `checks` each pre-merge check a file under your declared
   paths can wake, with that path and an example file. To stay fast, narrow your paths. `bay doctor` names a
   check every change waits for (`pre_merge`).
@@ -292,8 +291,6 @@ name no record names comes back in `detail.unseen` with a `detail.warning`: chec
    A run check may say `waivable = true` (never an approval check): an enrolled approver may then
    waive it on one candidate with `bay approve <change> --waive <check> --why <text>`. A waiver
    is never a pass; the merge names it in `coverage_gaps`. Without a registry no waiver counts.
-   To let plain records merge past a red main, list them: `[policy] passes_red = ["plans/**/*.md"]`, read as `when_paths`
-   are. It starts empty, and a pre-merge check on a file still holds it.
    A small team with no runner host sets `[policy] signing = "approvals"`: only approvals are
    signed, and no machine needs a `runner`, `producer` or `agent` key. Each clone takes its own
    producer name (`local-<id>` in its git config); set `bay.producerName` only to choose one.

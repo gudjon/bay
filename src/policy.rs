@@ -226,9 +226,6 @@ struct PolicyTable {
     signing: Signing,
     #[serde(default)]
     reuse_unsigned: bool,
-    /// G654: the paths whose changes may merge past a red main, read as `when_paths` are.
-    #[serde(default)]
-    passes_red: Vec<String>,
 }
 
 /// What a key registry signs (N-21, `[policy] signing`), judged at the accepted base like every
@@ -1110,16 +1107,6 @@ impl Policy {
             .collect()
     }
 
-    /// G654: whether the repository lets a change to `changed` merge past a red main: every file
-    /// is on `[policy] passes_red`. The list starts empty, so a red main holds everything.
-    #[must_use]
-    pub fn may_pass_red(&self, changed: &[String]) -> bool {
-        !changed.is_empty()
-            && changed
-                .iter()
-                .all(|path| globs_match(&self.passes_red, path))
-    }
-
     /// G641: whether `declared` can hold the policy or an adapter: a change to those is never
     /// a change no check covers.
     #[must_use]
@@ -1433,8 +1420,6 @@ pub struct Policy {
     /// The `[agent]` table (G152).
     pub agent: AgentPolicy,
     /// `[policy] signing` (N-21): what a key registry signs.
-    /// G654: `[policy] passes_red`, the paths whose changes may merge past a red main.
-    pub passes_red: Vec<String>,
     pub signing: Signing,
     /// `[policy] reuse_unsigned = true` (G318, owner ruling 2026-10-22): evidence reuse,
     /// pre-checks, footprint carry and batching run where evidence counts unsigned (no
@@ -1833,7 +1818,6 @@ fn read_at(git: &Git, commit: &str, ran_git: &mut bool) -> Result<Option<Policy>
         manifest_digest,
         agent: file.agent,
         signing: file.policy.signing,
-        passes_red: file.policy.passes_red.clone(),
         reuse_unsigned: file.policy.reuse_unsigned,
         limits: file.limits,
         talk: file.talk,
@@ -2019,18 +2003,6 @@ fn parse_error(text: &str, error: &toml::de::Error) -> String {
 
 /// The rules on the file's shape: its quarantines, `unchecked` and the minimum of its checks.
 fn validate_shape(file: &PolicyFile) -> Result<(), String> {
-    // G654: an exclusion drops only what a glob before it took, so a list starting with one is a typo.
-    if file
-        .policy
-        .passes_red
-        .first()
-        .is_some_and(|glob| glob.starts_with('!'))
-    {
-        return Err(
-            "[policy] passes_red starts with an exclusion: start it with a glob that takes paths"
-                .to_owned(),
-        );
-    }
     // Owner ruling 2026-10-21: each `[limits]` key is a positive integer.
     file.limits.validate()?;
     // BACKLOG 65 (owner ruling 2026-10-25): the class of a path has one home, `.gitattributes`
