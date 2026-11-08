@@ -100,14 +100,18 @@ pub fn own_producer_name(git: &Git) -> String {
         return name;
     }
     let Ok(id) = crate::ids::new_change_id() else {
-        return "local".to_owned();
+        return UNNAMED.to_owned();
     };
     let name = format!("local-{id}");
     match git.run(&["config", "--local", "bay.producerName", &name]) {
         Ok(_) => name,
-        Err(_) => "local".to_owned(),
+        Err(_) => UNNAMED.to_owned(),
     }
 }
+
+/// The name of a runner or producer this clone did not name (`bay.runnerName`,
+/// `bay.producerName` unset): a change's own run, on a clone that is no runner (G679).
+pub const UNNAMED: &str = "local";
 
 impl Keys {
     /// Validates the operator-chosen names (§ 10a).
@@ -127,15 +131,15 @@ impl Keys {
         let named = |key: &str, name: &str| {
             config(git, key).map(|path| Signer {
                 key: PathBuf::from(path),
-                name: config(git, name).unwrap_or_else(|| "local".to_owned()),
+                name: config(git, name).unwrap_or_else(|| UNNAMED.to_owned()),
             })
         };
         Self {
             agent: config(git, "bay.agentKey").map(PathBuf::from),
             executor: named("bay.runnerKey", "bay.runnerName"),
             producer: named("bay.producerKey", "bay.producerName"),
-            executor_name: config(git, "bay.runnerName").unwrap_or_else(|| "local".to_owned()),
-            producer_name: config(git, "bay.producerName").unwrap_or_else(|| "local".to_owned()),
+            executor_name: config(git, "bay.runnerName").unwrap_or_else(|| UNNAMED.to_owned()),
+            producer_name: config(git, "bay.producerName").unwrap_or_else(|| UNNAMED.to_owned()),
             reviewer_name: config(git, "bay.reviewerName"),
             approver_name: config(git, "bay.approverName"),
         }

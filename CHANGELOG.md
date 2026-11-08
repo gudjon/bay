@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.42
+
+- A claim left by a change's own `bay merge` that stopped is taken over after six heartbeats, not a lease.
+
 ## 0.6.41
 
 - A red check's notices say changes on its paths run it before they merge, not that they wait.

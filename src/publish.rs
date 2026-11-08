@@ -4056,7 +4056,11 @@ fn claim(
     // Another process holds the operation: take it over only once its lease expired, on this
     // process's own clock. A restarted supervisor watches a full lease again. A holder whose
     // executor key the registry revoked holds no lease (§ 10a).
-    if held && !holder_revoked(ctx, op_id)? && !lease_expired(ctx) {
+    let quiet = holder_lease(
+        &ctx.repo.config,
+        ctx.find_op(op_id).and_then(|op| op.owner.as_deref()),
+    );
+    if held && !holder_revoked(ctx, op_id)? && !lease_expired(ctx, quiet) {
         let mut result = BayResult::new(Decision::Ok).with_change(&id).with_op(op_id);
         result.state = Some("running".to_owned());
         let (owner, epoch) = ctx
@@ -7613,11 +7617,28 @@ fn heartbeat(ctx: &Ctx, op_id: &str) {
     }
 }
 
-/// Watches an operation another executor holds for one full lease on this process's monotonic
+/// G679 (a fleet finding, 2026-11-08: twice in one hour a change's own `bay merge` claimed its
+/// operation, recorded its check and stopped, and both runners watched the dead claim for the
+/// full 450 s lease, running nothing else): how long a holder's chain may stay quiet before its
+/// claim is taken over. A runner holds the configured lease, which covers its longest quiet
+/// step. A change's own run, whose owner is bay's default name for a clone that is no runner,
+/// holds six heartbeats: it beats its chain while its check runs, and its other steps are
+/// short. Taking over a live one costs a repeated check, never a second landing: the claim
+/// raises the epoch, and a holder whose epoch moved never publishes (§ 9a).
+#[must_use]
+pub fn holder_lease(config: &crate::config::Config, owner: Option<&str>) -> Duration {
+    let lease = config.lease();
+    if owner == Some(crate::signing::UNNAMED) {
+        lease.min(config.heartbeat() * 6)
+    } else {
+        lease
+    }
+}
+
+/// Watches an operation another executor holds for `lease` on this process's monotonic
 /// clock, from its own first sighting (§ 9a). Returns whether the lease expired: the chain head
 /// never changed. Any change means the owner is alive.
-fn lease_expired(ctx: &mut Ctx) -> bool {
-    let lease = ctx.repo.config.lease();
+fn lease_expired(ctx: &mut Ctx, lease: Duration) -> bool {
     let first = ctx.head.clone();
     let seen = Instant::now();
     while seen.elapsed() < lease {

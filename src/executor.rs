@@ -1362,7 +1362,14 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
         .parse::<u64>()
         .ok()?;
     let idle = crate::live::unix_now().saturating_sub(written);
-    (idle > repo.config.lease().as_secs() * 2).then_some((head.change, head.op_id))
+    // G679: a change's own run that stopped holds a short lease, not a runner's.
+    let owner = record
+        .operations
+        .iter()
+        .find(|op| op.op_id == head.op_id)
+        .and_then(|op| op.owner.as_deref());
+    let lease = crate::publish::holder_lease(&repo.config, owner).as_secs();
+    (idle > lease * 2).then_some((head.change, head.op_id))
 }
 
 /// G438: forgets the pass's shared reads after an operation that moved anything (it landed,
