@@ -177,7 +177,9 @@ session is being told of its refusals; `waiting_for` says what a queued change w
 - `bay status` waits for the remote at most `--deadline` seconds (default 3). Past it, the read
   answers from the store as the last sweep left it: `detail.stale_s` says how old that is, and a
   `stale_read` warning names the sweep that runs on. Read again a little later for a fresh answer;
-  do not raise the deadline to wait it out.
+  do not raise the deadline to wait it out. When the warning names `unreached`, this machine has
+  not reached the remote since `unreached.since`: tell the user its network is down. Your work
+  stays safe locally; nothing about the queue is known here until the remote answers.
 - `bay status` with `detail.warnings` naming `main_not_linear`: a merge pushed outside bay put
   merges off main's first-parent line. bay still finds them. Tell the user to require linear
   history on the host.
@@ -362,7 +364,8 @@ name no record names comes back in `detail.unseen` with a `detail.warning`: chec
    `git config --global --add bay.claudeConfigDirs <dir>` (each value is one config directory).
 6. Run a runner: `bay runner run`, under a supervisor. `bay runner install` writes one for
    this repository (a launchd agent on macOS, a systemd user unit on Linux) and prints the one
-   command that starts it; it starts nothing. Tell the user that command. `--print` only shows it.
+   command that starts it and schedules the repository's hourly Git maintenance; it starts
+   nothing. Tell the user that command. `--print` only shows it.
 7. A check that must read a directory outside its tree (a package store) needs it named on the
    machine that runs checks: `git config --global --add bay.checkReadPath ~/<dir>`. It is read-only.
 

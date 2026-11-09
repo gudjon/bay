@@ -80,3 +80,44 @@ fn a_looping_runner_outlives_a_failed_pass() {
     runner.kill().unwrap();
     let _ = runner.wait();
 }
+
+/// A runner whose repository is gone stops: no later pass can serve it, and one a killed test
+/// left behind would otherwise retry in a removed directory for good. Guard to mutate: in
+/// `src/executor.rs` `ends`, drop `|| repository_gone(dir)` (the runner never exits).
+#[test]
+fn a_looping_runner_whose_repository_is_gone_stops() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let remote = test_box.path().join("repo-remote.git");
+    let mut files = check_files("true", &passing_result(1), 1, 60);
+    files.push((
+        ".bay/config.toml".to_owned(),
+        "[runner]\nlease_s = 30\nheartbeat_s = 1\n".to_owned(),
+    ));
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    let exec = test_box.clone_of(&remote, "executor");
+    test_box.git_ok(&exec, &["config", "bay.runnerName", "exec-a"]);
+    test_box.git_ok(&exec, &["config", "bay.producerName", "exec-a-checks"]);
+    let mut runner = test_box
+        .bay_process(&exec)
+        .args(["runner", "run", "--interval-s", "1"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // GIVEN a looping runner that has made passes
+    let (first, view) = test_box.start_and_edit(&repo);
+    let (code, queued) = result_json(test_box.bay(&view).arg("merge"));
+    assert_eq!(code, 0, "{queued}");
+    wait_for("a landing", Duration::from_secs(60), || {
+        test_box.trunk_change_ids(&remote).contains(&first)
+    });
+    // WHEN its repository is removed THEN it exits
+    // The runner writes in it as it runs, so a removal may race a write: tried until it holds.
+    wait_for("the removal", Duration::from_secs(10), || {
+        std::fs::remove_dir_all(&exec).is_ok()
+    });
+    wait_for("the runner to exit", Duration::from_secs(30), || {
+        runner.try_wait().unwrap().is_some()
+    });
+}

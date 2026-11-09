@@ -682,14 +682,23 @@ fn stale_read(
         none,
     )?;
     refreshed.fetched_unix = unix;
-    refreshed.stale = Some(json!({
+    let mut warning = json!({
         "code": "stale_read",
         "fetched_at": at,
         "stale_s": stale_s,
         "waited_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "sweep": sweep,
         "note": "the remote sweep had not ended by this read's deadline: this is the store as the last sweep left it; the sweep runs on, and a read after it ends shows what it brought",
-    }));
+    });
+    // G684: a store whose last sweeps could not ask the remote says so, and since when: a sweep
+    // that runs on will most likely not reach it either.
+    if let Some(unreached) = sweep::last_unreached(&first.common_dir) {
+        warning["note"] = json!(
+            "the remote has not answered this store's sweeps: this is the store as the last sweep that reached it left it; a read once the remote answers shows what changed"
+        );
+        warning["unreached"] = json!({"since": unreached["since"], "why": unreached["why"]});
+    }
+    refreshed.stale = Some(warning);
     Some(Ok((first, refreshed)))
 }
 
@@ -767,9 +776,13 @@ fn swept_answer(dir: &Path, change: Option<&str>) -> Value {
         return json!({"open": true});
     }
     test_wait("BAY_TEST_SWEEP_DELAY_MS");
-    let Ok(swept) = sweep::sweep(&first.git, first.remote(), &plan.refspecs) else {
-        lock.end();
-        return json!({"unserved": "the remote sweep failed"});
+    let swept = match sweep::sweep(&first.git, first.remote(), &plan.refspecs) {
+        Ok(swept) => swept,
+        Err(error) => {
+            sweep::unreached(&first.common_dir, &error.message());
+            lock.end();
+            return json!({"unserved": "the remote sweep failed"});
+        }
     };
     test_wait("BAY_TEST_SWEEP_HOLD_MS");
     let Some(trunk) = swept

@@ -134,9 +134,8 @@ fn install_writes_the_service_and_starts_nothing() {
             )),
             "{content}"
         );
-        assert_eq!(
-            load,
-            format!("launchctl load -w '{}'", file.display()),
+        assert!(
+            load.ends_with(&format!(" && launchctl load -w '{}'", file.display())),
             "{installed}"
         );
     }
@@ -166,9 +165,8 @@ fn install_writes_the_service_and_starts_nothing() {
         );
         assert!(content.contains("\nWantedBy=default.target\n"), "{content}");
         let unit = file.file_name().unwrap().to_string_lossy().into_owned();
-        assert_eq!(
-            load,
-            format!("systemctl --user enable --now {unit}"),
+        assert!(
+            load.ends_with(&format!(" && systemctl --user enable --now {unit}")),
             "{installed}"
         );
     }

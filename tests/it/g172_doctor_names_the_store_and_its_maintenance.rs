@@ -48,7 +48,7 @@ fn doctor_names_each_kind_of_store() {
         notes(&row).contains("git clone --filter=blob:none --no-checkout"),
         "{row}"
     );
-    assert!(notes(&row).contains("git maintenance register"), "{row}");
+    assert!(notes(&row).contains("git maintenance start"), "{row}");
 
     // A blob-less no-checkout cache: the promisor and filter are named, the work tree is empty,
     // and a view started in it is counted.

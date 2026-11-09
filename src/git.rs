@@ -1364,9 +1364,15 @@ fn batch_missing(out: &[u8], contents: bool) -> Vec<String> {
 /// `log.showSignature` would print each signature's verification among the lines bay parses.
 /// And `--no-verify` after a `push` of bay's records alone (G376): a repository's `pre-push`
 /// hook guards its branches, and run on bay's own refs it only delays or breaks bay's records,
-/// so a push of main still runs it.
+/// so a push of main still runs it. And `--no-auto-maintenance` after every `fetch` (G685).
 fn as_formatted<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> {
     let first = args.first().copied();
+    // G685 (a fleet finding, 2026-11-09: 556 git processes and 20 GB of memory on a box whose
+    // bay commands fetched a 5 GB store every few seconds, each fetch leaving a detached
+    // `git maintenance run --auto` whose cruft repack outlived the next fetch): bay fetches far
+    // more often than a person, so none of its fetches starts Git's auto maintenance. The store
+    // is kept by scheduled maintenance, one run at a time (`bay runner install`, `bay doctor`).
+    let unmaintained = (first == Some("fetch")).then_some("--no-auto-maintenance");
     let quiet = match first {
         Some("log" | "show") => Some("--no-show-signature"),
         Some("push") if records_only(&args[1..]) => Some("--no-verify"),
@@ -1386,6 +1392,7 @@ fn as_formatted<'a>(args: &'a [&'a str]) -> impl Iterator<Item = &'a str> {
     };
     first
         .into_iter()
+        .chain(unmaintained)
         .chain(quiet)
         .chain(args.iter().skip(1).copied())
 }

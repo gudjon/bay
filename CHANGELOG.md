@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.44
+
+- `bay status` says since when the remote has not answered, instead of telling you to read again shortly.
+- A stale `bay status` of one change says it is stale too.
+- bay's fetches never start Git's auto maintenance, so frequent reads no longer pile up repacks.
+- `bay runner install` prints one command that also schedules hourly Git maintenance for the repository.
+- `bay doctor` names a store whose maintenance cannot run: a stale lock, too many packs, an empty ref.
+- A looping runner whose repository was removed stops instead of retrying.
+
 ## 0.6.43
 
 - A runner pushes a landing's evidence with its change record and its log without a fetch: three round trips fewer.

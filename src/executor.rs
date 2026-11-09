@@ -96,7 +96,7 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         // so a config that landed since the last pass governs this one.
         let repo = match Repo::open_fetched(dir) {
             Ok(repo) => Arc::new(repo),
-            Err(error) => match ends(error.into_result(), retries, interval) {
+            Err(error) => match ends(error.into_result(), retries, dir, interval) {
                 Some(result) => return result,
                 None => continue,
             },
@@ -126,7 +126,7 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             (&mut post, &mut parked),
         ) {
             Ok(ran) => ran,
-            Err(message) => match ends(BayResult::failed(message), retries, interval) {
+            Err(message) => match ends(BayResult::failed(message), retries, dir, interval) {
                 Some(result) => return result,
                 None => continue,
             },
@@ -184,9 +184,11 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
 /// G683 (a fleet finding, 2026-11-09: a runner stopped on one reset connection): the result a
 /// failed pass ends the runner with, or `None` when it `retries`: a looping runner that has made
 /// a pass says why this one failed and tries again after `interval`. A runner whose first pass
-/// fails stops, as its setup is what is wrong.
-fn ends(result: BayResult, retries: bool, interval: Duration) -> Option<BayResult> {
-    if !retries {
+/// fails stops, as its setup is what is wrong; so does one whose repository at `dir` is gone,
+/// which no later pass can serve: a runner a killed test left behind once retried in
+/// its removed directory for good.
+fn ends(result: BayResult, retries: bool, dir: &Path, interval: Duration) -> Option<BayResult> {
+    if !retries || repository_gone(dir) {
         return Some(result);
     }
     eprintln!(
@@ -195,6 +197,15 @@ fn ends(result: BayResult, retries: bool, interval: Duration) -> Option<BayResul
     );
     std::thread::sleep(interval);
     None
+}
+
+/// Whether the repository at `dir` is gone: no `HEAD` is left in its git directory, a linked
+/// work tree's `.git` file, or a bare one. The directories a runner writes its state in may
+/// come back as it writes, so their presence says nothing.
+fn repository_gone(dir: &Path) -> bool {
+    !(dir.join(".git").is_file()
+        || dir.join(".git").join("HEAD").is_file()
+        || dir.join("HEAD").is_file())
 }
 
 /// The executor's Git floor (`GIT-FEATURES` § 1, G68): below it the executor refuses with

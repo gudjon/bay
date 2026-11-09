@@ -1580,14 +1580,21 @@ impl BayResult {
                 ),
                 _ => "Saved. bay checks it and adds it to main next.".to_owned(),
             },
-            Decision::Ok => preview_say(self)
-                .or_else(|| queue_say(self))
-                .or_else(|| change_say(self))
-                .or_else(|| status_say(self))
-                .or_else(|| waiting_say(self))
-                .or_else(|| talk_say(self))
-                .or_else(|| update_say(self))
-                .unwrap_or_else(|| ok_say(self).to_owned()),
+            // G684: a stale read says so whatever it found, a read of one change too.
+            Decision::Ok => match (
+                preview_say(self)
+                    .or_else(|| queue_say(self))
+                    .or_else(|| change_say(self))
+                    .or_else(|| status_say(self))
+                    .or_else(|| waiting_say(self))
+                    .or_else(|| talk_say(self))
+                    .or_else(|| update_say(self)),
+                stale_say(self),
+            ) {
+                (Some(said), Some(stale)) => format!("{said} {stale}"),
+                (None, Some(stale)) => format!("Nothing to report yet. {stale}"),
+                (said, None) => said.unwrap_or_else(|| ok_say(self).to_owned()),
+            },
             Decision::Blocked => {
                 "Not done yet; read the detail for what is needed, then try again.".to_owned()
             }
@@ -1736,30 +1743,32 @@ fn status_say(result: &BayResult) -> Option<String> {
         (Some(changes), Some(talks)) => Some(format!("{changes} {talks}")),
         (changes, talks) => changes.or(talks),
     };
-    let said = match (said, fleet_say(result)) {
+    match (said, fleet_say(result)) {
         (Some(said), Some(fleet)) => Some(format!("{said} {fleet}")),
         (said, fleet) => said.or(fleet),
-    };
-    match (said, stale_say(result)) {
-        (Some(said), Some(stale)) => Some(format!("{said} {stale}")),
-        (None, Some(stale)) => Some(format!("Nothing to report yet. {stale}")),
-        (said, None) => said,
     }
 }
 
 /// G667 (2026-11-06: a box behind by days read "Done; nothing else is needed." from a store with no
 /// answer for any check): a read past its deadline says it is the last fetch's, whatever it found.
-fn stale_say(result: &BayResult) -> Option<&'static str> {
-    result
+/// G684: one whose remote has not answered says since when, not that a newer fetch runs.
+fn stale_say(result: &BayResult) -> Option<String> {
+    let warning = result
         .detail
         .as_ref()?
         .get("warnings")?
         .as_array()?
         .iter()
-        .any(|warning| warning["code"] == "stale_read")
-        .then_some(
-            "This is from the last fetch, and a newer one is still running; read again shortly.",
-        )
+        .find(|warning| warning["code"] == "stale_read")?;
+    Some(match warning["unreached"]["since"].as_str() {
+        Some(since) => format!(
+            "This is from the last fetch: the remote has not answered since {since}, so nothing newer is known here."
+        ),
+        None => {
+            "This is from the last fetch, and a newer one is still running; read again shortly."
+                .to_owned()
+        }
+    })
 }
 
 /// G662: the sentence of `bay start --dry-run`.

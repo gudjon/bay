@@ -245,6 +245,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
         report.rows.push(store_row(&git, &config, info));
         report.rows.push(crate::storage::row(&git, dir));
         gc_log_row(&git, &mut report);
+        stuck_store_row(&git, &mut report);
         quarantine_row(&git, &config, info.bare, &mut report);
         signing_row(&git, &mut report);
         if !info.bare {
@@ -354,13 +355,16 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
     if promisor && populated {
         notes.push("a blob-less store with a populated work tree holds the blobs it checked out");
     }
-    if !auto {
+    // G686: bay's fetches start no auto maintenance (G685), so a store bay reads is kept by
+    // scheduled maintenance; auto maintenance off is then the site's sound choice.
+    if !auto && !registered {
         notes.push(
-            "auto maintenance is off: nothing repacks or prunes this store after a fetch or push",
+            "auto maintenance is off and none is scheduled: nothing repacks or prunes this store (git maintenance start)",
         );
-    }
-    if !registered {
-        notes.push("not registered for scheduled maintenance (git maintenance register)");
+    } else if !registered {
+        notes.push(
+            "not registered for scheduled maintenance, and bay's fetches start none (git maintenance start)",
+        );
     }
     // G192: the commit-graph bay's path-limited walks read, from its files and config alone.
     let graph = crate::commit_graph::read(git);
@@ -431,6 +435,101 @@ fn gc_log_row(git: &Git, report: &mut Report) {
         "note": "a background git gc --auto failed, and git runs no auto gc while this file stays",
         "recovery": "read the file, fix what it names, then remove it",
     }));
+}
+
+/// The most packs a store holds before doctor says its maintenance is not keeping up.
+const PACKS_MOST: usize = 300;
+
+/// How long a maintenance lock stays before doctor calls it left behind: Git's runs take
+/// minutes, so one held an hour was left by a run that was killed.
+const LOCK_LEFT_S: u64 = 3600;
+
+/// G687 (a fleet finding, 2026-11-09: a runner's store was not repacked for 10 days, as a run
+/// killed on day one left `maintenance.lock` behind and every later run found it taken; 2,340
+/// packs and 240,000 loose objects followed, and an empty ref file left by a killed write stopped
+/// `git gc` itself): a store whose maintenance cannot run says why. Present only when one is so.
+fn stuck_store_row(git: &Git, report: &mut Report) {
+    let Ok(common) = git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"]) else {
+        return;
+    };
+    let common = Path::new(common.trim());
+    let mut findings = Vec::new();
+    let mut recoveries = Vec::new();
+    let lock = common.join("objects").join("maintenance.lock");
+    let held_s = std::fs::metadata(&lock)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .map(|age| age.as_secs());
+    if let Some(held_s) = held_s.filter(|held| *held >= LOCK_LEFT_S) {
+        findings.push(json!({
+            "lock": lock.display().to_string(),
+            "held_s": held_s,
+            "note": "a maintenance lock left by a run that ended: every later run finds it taken and does nothing",
+        }));
+        recoveries.push(format!(
+            "when no git maintenance runs, remove {}",
+            lock.display()
+        ));
+    }
+    let packs = std::fs::read_dir(common.join("objects").join("pack"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "pack"))
+        .count();
+    if packs > PACKS_MOST {
+        findings.push(json!({
+            "packs": packs,
+            "note": "maintenance is not keeping up: every read of the store searches each pack",
+        }));
+        recoveries.push("run git maintenance start, or one git gc".to_owned());
+    }
+    let empty = empty_refs(&common.join("refs"));
+    if !empty.is_empty() {
+        findings.push(json!({
+            "empty_refs": empty,
+            "note": "a ref file a killed write left empty: git gc and repack stop on it",
+        }));
+        recoveries.push(format!(
+            "remove each empty ref file, then fetch it again from the remote ({})",
+            empty.join(", ")
+        ));
+    }
+    if findings.is_empty() {
+        return;
+    }
+    report.rows.push(json!({
+        "name": "store-stuck",
+        "state": "degraded",
+        "findings": findings,
+        "recovery": recoveries.join("; "),
+    }));
+}
+
+/// The refs under `dir` (a `files` store's loose refs) whose file is empty, by name; at most 20.
+fn empty_refs(dir: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut dirs = vec![dir.to_path_buf()];
+    while let Some(next) = dirs.pop() {
+        for entry in std::fs::read_dir(&next).into_iter().flatten().flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file()
+                && entry.metadata().is_ok_and(|meta| meta.len() == 0)
+                && let Ok(name) = entry.path().strip_prefix(dir.parent().unwrap_or(dir))
+            {
+                found.push(name.display().to_string());
+                if found.len() >= 20 {
+                    return found;
+                }
+            }
+        }
+    }
+    found
 }
 
 /// G174: the ref backend of a bay-hosted trunk. On `files` a multi-ref update is not one

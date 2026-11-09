@@ -384,6 +384,37 @@ pub fn remember(common: &Path, remote: &str, refspecs: &[String], swept: &Swept)
         "ended": ended,
     });
     replace(&path, &held.to_string());
+    let _ = std::fs::remove_file(unreached_file(common));
+}
+
+/// G684 (a fleet finding, 2026-11-09: a box that could not reach its remote for two hours read "a
+/// newer one is still running" on every `bay status`): the record of the first sweep since the
+/// last one that settled the store that could not ask the remote, and why the last could not.
+fn unreached_file(common: &Path) -> PathBuf {
+    common.join("bay").join("sweep-unreached.json")
+}
+
+/// Records that a sweep of the store whose common directory is `common` could not ask its remote,
+/// `why`: since when (kept from the first such sweep), and the last one's reason. Best effort.
+pub fn unreached(common: &Path, why: &str) {
+    let now = crate::live::unix_now();
+    let since = last_unreached(common)
+        .and_then(|held| held["since_unix"].as_u64())
+        .unwrap_or(now);
+    let held = json!({
+        "since": crate::clock::rfc3339_of(since),
+        "since_unix": since,
+        "why": why,
+    });
+    replace(&unreached_file(common), &held.to_string());
+}
+
+/// Since when the store's sweeps could not ask its remote, and why the last could not; `None`
+/// when the last sweep that ended reached it.
+#[must_use]
+pub fn last_unreached(common: &Path) -> Option<Value> {
+    let text = std::fs::read_to_string(unreached_file(common)).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// Records that the store whose common directory is `common` ran `git push <args>` at `now`, `ok`

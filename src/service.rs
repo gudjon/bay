@@ -327,12 +327,17 @@ fn install_in(dir: &Path, request: &Request) -> Result<BayResult, String> {
     }
     std::fs::write(&service.path, &service.content)
         .map_err(|error| format!("{}: {error}", service.path.display()))?;
-    let load = load_command(&service, exists);
+    // G686 (a fleet finding, 2026-11-09: one store repacked by every fetch until 556 git processes
+    // held 20 GB, another not repacked for 10 days behind a stale lock): a runner's store is kept
+    // by Git's scheduled maintenance, hourly and one run at a time, never by its fetches (G685).
+    // The same one command registers it.
+    let maintain = format!("git -C '{}' maintenance start", repo.work_root.display());
+    let load = format!("{maintain} && {}", load_command(&service, exists));
     detail["written"] = json!(true);
     detail["replaced"] = json!(exists);
     detail["load"] = json!(load);
     let mut note = format!(
-        "wrote {}; bay started nothing. To start the runner now and at each login, run:\n  {load}",
+        "wrote {}; bay started nothing. To start the runner now and at each login, and keep its store maintained hourly, run:\n  {load}",
         service.path.display()
     );
     if kind == Kind::Systemd {
