@@ -551,6 +551,9 @@ struct Ctx<'a> {
     /// G551, BACKLOG 92: the claim watched another holder's lease before it won, so main may
     /// have moved since this visit read it.
     claim_waited: bool,
+    /// BACKLOG 92: the producer whose evidence notes go in the chain's next push, atomically, so
+    /// the remote holds them by the time the chain names the candidate checked.
+    evidence_rides: Option<String>,
     /// The head this process's first write not yet on the remote went on; `None` once every
     /// write it made is pushed or withdrawn. [`Ctx::take_back`] takes those writes off the
     /// local chain ref, and only those, at every re-read of the remote chain and when the
@@ -623,6 +626,7 @@ impl<'a> Ctx<'a> {
             pushed_head: None,
             red_checks: Vec::new(),
             claim_waited: false,
+            evidence_rides: None,
             unpushed_from: None,
             my_epoch: 0,
             repair: None,
@@ -829,6 +833,52 @@ impl<'a> Ctx<'a> {
             self.catch_up_local();
         }
         pushed
+    }
+
+    /// [`Ctx::push_chain`], carrying the evidence notes of [`Ctx::evidence_rides`] in the same
+    /// atomic push (BACKLOG 92: one round trip, not two). A refused push falls back to the
+    /// order it stands for: the notes alone ([`push_evidence`], whose refusal is this
+    /// method's error), then the chain.
+    ///
+    /// # Errors
+    ///
+    /// The notes cannot be pushed.
+    fn push_chain_with_evidence(&mut self) -> Result<bool, String> {
+        let Some(producer) = self.evidence_rides.take() else {
+            return Ok(self.push_chain());
+        };
+        // #123: no post piece writes the notes between the read of the local ref and the push.
+        let writing = evidence::writing();
+        let notes = evidence::notes_ref(&producer);
+        if self
+            .repo
+            .git
+            .ref_target(&notes)
+            .map_err(|error| error.message())?
+            .is_some()
+        {
+            let name = change_ref(&self.id);
+            let lease = self
+                .pushed_head
+                .as_ref()
+                .map(|expected| format!("--force-with-lease={name}:{expected}"));
+            let mut args = vec!["push", "-q", "--atomic"];
+            if let Some(lease) = &lease {
+                args.push(lease);
+            }
+            let chain = format!("{}:{name}", self.head);
+            let notes_spec = format!("{notes}:{notes}");
+            args.extend([self.repo.remote(), notes_spec.as_str(), chain.as_str()]);
+            if self.repo.git.run(&args).is_ok() {
+                self.pushed_head = Some(self.head.clone());
+                self.unpushed_from = None;
+                self.catch_up_local();
+                return Ok(true);
+            }
+        }
+        drop(writing);
+        push_evidence(self.repo, &producer)?;
+        Ok(self.push_chain())
     }
 
     /// Pushes the chain and moves `refs/bay/requests/<id>` to `request` in one atomic push
@@ -2526,7 +2576,7 @@ fn bisect_batch(
         ctx.pushed_head = Some(beat);
         ctx.unpushed_from = None;
     }
-    push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0)?;
+    push_evidence(ctx.repo, &ctx.producer()?.0)?;
     Ok(Some((search, checks)))
 }
 
@@ -3754,7 +3804,7 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
     {
         return Ok(None);
     }
-    push_and_read_back_evidence(repo, &ctx.producer()?.0)?;
+    push_evidence(repo, &ctx.producer()?.0)?;
     let op = ctx.op_mut(op_id);
     op.prechecks.push(Precheck {
         base: base.clone(),
@@ -3913,7 +3963,7 @@ fn checked_ahead(
     {
         return Ok(json!({"on": "batch", "size": size, "unchecked": "no worker answered"}));
     }
-    push_and_read_back_evidence(repo, &ctx.producer()?.0)?;
+    push_evidence(repo, &ctx.producer()?.0)?;
     let revision = ctx.op(op_id).revision.clone();
     let op = ctx.op_mut(op_id);
     op.prechecks.push(Precheck {
@@ -6026,9 +6076,10 @@ fn persist_attempt(
     } else {
         None
     };
-    // The evidence is on the remote before the chain names the candidate checked.
+    // The evidence is on the remote before the chain names the candidate checked: it goes in
+    // the chain's push, atomically (BACKLOG 92).
     if refusal.is_none() && has_policy {
-        push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0)?;
+        ctx.evidence_rides = Some(ctx.producer()?.0);
     }
     // N-9: a check's refusal shares its evidence too, so the approver who may waive the check
     // reads its real verdict. The refusal stands when that push fails; the approver then
@@ -6041,7 +6092,7 @@ fn persist_attempt(
             )
         })
     {
-        let _ = push_and_read_back_evidence(ctx.repo, &ctx.producer()?.0);
+        let _ = push_evidence(ctx.repo, &ctx.producer()?.0);
     }
     let (state, word) = if refusal.is_some() {
         (OpState::Blocked, "blocked")
@@ -6120,7 +6171,7 @@ fn persist_owned(
             ))));
         }
         apply(op);
-        if ctx.save_cas(revision, Some(candidate), message)? && ctx.push_chain() {
+        if ctx.save_cas(revision, Some(candidate), message)? && ctx.push_chain_with_evidence()? {
             return Ok(Persisted::Pushed);
         }
         if ctx.refetch().is_err() {
@@ -8061,20 +8112,22 @@ fn bay_message(
     )
 }
 
-/// Pushes the producer's notes ref and confirms the remote now holds exactly that commit.
-fn push_and_read_back_evidence(repo: &Repo, producer: &str) -> Result<(), String> {
-    // #123: no post piece writes the notes between the read of the local ref and the read back.
+/// Pushes the producer's notes ref. A push the remote took holds exactly that commit: Git reports
+/// a ref update only once the remote made it, so nothing is read back (BACKLOG 92).
+fn push_evidence(repo: &Repo, producer: &str) -> Result<(), String> {
+    // #123: no post piece writes the notes between the read of the local ref and the push.
     let _writing = evidence::writing();
     let notes = evidence::notes_ref(producer);
-    let Some(local) = repo
+    if repo
         .git
         .ref_target(&notes)
         .map_err(|error| error.message())?
-    else {
+        .is_none()
+    {
         // This producer wrote nothing: every record the pass rests on was resumed from
         // another producer's ref, fetched from the remote (a takeover, G22).
         return Ok(());
-    };
+    }
     repo.git
         .run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
         .map_err(|error| {
@@ -8088,17 +8141,7 @@ fn push_and_read_back_evidence(repo: &Repo, producer: &str) -> Result<(), String
                 format!("evidence could not be pushed: {message}")
             }
         })?;
-    let remote = repo
-        .git
-        .run(&["ls-remote", repo.remote(), &notes])
-        .map_err(|error| error.message())?;
-    if remote.split_whitespace().next() == Some(local.as_str()) {
-        Ok(())
-    } else {
-        Err(format!(
-            "the remote does not hold the evidence for {notes}; nothing was merged"
-        ))
-    }
+    Ok(())
 }
 
 /// Step 6: one atomic push of trunk and the landed marker. Never forced.

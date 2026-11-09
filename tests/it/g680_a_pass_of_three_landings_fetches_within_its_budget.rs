@@ -1,16 +1,23 @@
 //! G680 (BACKLOG 92, a fleet finding, 2026-11-08: a runner's merge spent about 23 s of its 64 s
 //! median in 20 fetches; merges after a pass's first made 15 to 24, as each head reused what
 //! the pass read since the landing before it, and then, by G438, read it all again before its
-//! claim). A pass that lands three changes makes at most 25 fetches: after a landing the queue
+//! claim). A pass that lands three changes makes at most 22 fetches: after a landing the queue
 //! is read once for the conflict notes and the abandoned-head check, the next head reads afresh
 //! once, never twice, and a claim that waited for no one keeps the main its visit read.
+//!
+//! G681 (BACKLOG 92, the same reading: 8 pushes a merge, about 3 s each). Its evidence notes go
+//! in the chain's push that names the candidate checked, atomically, and are not read back; an
+//! executor's log append pushes on its own tip and fetches only when the push is refused. So
+//! the pass makes at most 17 pushes and 2 listings.
 //!
 //! Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file (G171).
 //!
 //! Guards to mutate: in `src/executor.rs` `pass`, drop the `forget_reads` after a landing (each
 //! later head reads twice); in `run_op`, read the queue with `Queue::read` (it is fetched again
 //! for the abandoned-head check); in `src/publish.rs` `trunk_after_claim`, drop the
-//! `claim_waited` test (main is fetched again after each claim).
+//! `claim_waited` test (main is fetched again after each claim); in `persist_attempt`, push the
+//! evidence on its own again (a push more a landing); in `src/log.rs` `append`, fetch before
+//! the write (a fetch more a log record).
 
 #![cfg(unix)]
 
@@ -21,8 +28,8 @@ use std::path::PathBuf;
 use support::queued::{Check, Trust, host_under};
 use support::{PRODUCER, check_files, passing_result, result_json};
 
-/// The fetches one pass made, read from its trace.
-fn fetches(trace: &std::path::Path) -> Vec<String> {
+/// The calls of Git subcommand `sub` one pass made, read from its trace.
+fn calls(trace: &std::path::Path, sub: &str) -> Vec<String> {
     std::fs::read_to_string(trace)
         .unwrap()
         .lines()
@@ -33,7 +40,7 @@ fn fetches(trace: &std::path::Path) -> Vec<String> {
                 .iter()
                 .filter_map(serde_json::Value::as_str)
                 .collect();
-            args.contains(&"fetch").then(|| args.join(" "))
+            args.contains(&sub).then(|| args.join(" "))
         })
         .collect()
 }
@@ -89,12 +96,14 @@ fn a_pass_of_three_landings_fetches_within_its_budget() {
         assert!(on_main.contains(id), "{id} did not land: {ran}");
     }
 
-    // THEN it makes at most 25 fetches.
-    let made = fetches(&trace);
-    assert!(
-        made.len() <= 25,
-        "{} fetches:\n{}",
-        made.len(),
-        made.join("\n")
-    );
+    // THEN it makes at most 22 fetches (G680), 17 pushes and 2 listings (G681).
+    for (sub, most) in [("fetch", 22), ("push", 17), ("ls-remote", 2)] {
+        let made = calls(&trace, sub);
+        assert!(
+            made.len() <= most,
+            "{} {sub}:\n{}",
+            made.len(),
+            made.join("\n")
+        );
+    }
 }

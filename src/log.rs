@@ -47,7 +47,10 @@ pub fn fetch(repo: &Repo) {
     ]);
 }
 
-/// Appends `record` to this executor's log and pushes it. Only this executor writes its log.
+/// Appends `record` to this executor's log and pushes it. Only this executor writes its log,
+/// so the record goes on the local tip and is pushed at once (BACKLOG 92: no fetch first, one
+/// round trip). A push the remote refuses (its log is ahead, as a clone of the same runner
+/// name pushed it) takes the record back, fetches the log forward and writes it there again.
 ///
 /// # Errors
 ///
@@ -60,6 +63,20 @@ pub fn append(
 ) -> Result<String, String> {
     let git = &repo.git;
     let name = log_ref(executor);
+    let (commit, parent, pushed) = write_and_push(repo, &name, signer, record)?;
+    if pushed {
+        return Ok(commit);
+    }
+    let back = match &parent {
+        Some(parent) => format!("update {name} {parent} {commit}\n"),
+        None => format!("delete {name} {commit}\n"),
+    };
+    if git
+        .run_with(&["update-ref", "--stdin"], &[], Some(back.as_bytes()))
+        .is_err()
+    {
+        return Ok(commit);
+    }
     let _ = git.run(&[
         "fetch",
         "-q",
@@ -67,6 +84,18 @@ pub fn append(
         repo.remote(),
         &format!("{name}:{name}"),
     ]);
+    write_and_push(repo, &name, signer, record).map(|(commit, _, _)| commit)
+}
+
+/// Writes `record` on log `name`'s local tip and pushes it: the commit, the tip it went on, and
+/// whether the remote took it.
+fn write_and_push(
+    repo: &Repo,
+    name: &str,
+    signer: Option<&Signer>,
+    record: &Value,
+) -> Result<(String, Option<String>, bool), String> {
+    let git = &repo.git;
     let mut json = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
     json.push('\n');
     let blob = git
@@ -80,7 +109,7 @@ pub fn append(
     let tree = git
         .run_with(&["mktree"], &[], Some(entry.as_bytes()))
         .map_err(|error| error.message())?;
-    let parent = git.ref_target(&name).map_err(|error| error.message())?;
+    let parent = git.ref_target(name).map_err(|error| error.message())?;
     let mut args: Vec<String> = Vec::new();
     if let Some(signer) = signer {
         args.extend(signer.config_args());
@@ -133,8 +162,10 @@ pub fn append(
     };
     git.run_with(&["update-ref", "--stdin"], &[], Some(update.as_bytes()))
         .map_err(|error| error.message())?;
-    let _ = git.run(&["push", "-q", repo.remote(), &format!("{name}:{name}")]);
-    Ok(commit)
+    let pushed = git
+        .run(&["push", "-q", repo.remote(), &format!("{name}:{name}")])
+        .is_ok();
+    Ok((commit, parent, pushed))
 }
 
 /// Appends the `bay.event/1` record `event` to this executor's log unless a log already holds

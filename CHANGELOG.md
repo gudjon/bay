@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.43
+
+- A runner pushes a landing's evidence with its change record and its log without a fetch: three round trips fewer.
+
 ## 0.6.42
 
 - A claim left by a change's own `bay merge` that stopped is taken over after six heartbeats, not a lease.
