@@ -548,6 +548,9 @@ struct Ctx<'a> {
     pushed_head: Option<String>,
     /// G677: the red post checks this change's paths meet, run on its candidate before the merge.
     red_checks: Vec<String>,
+    /// G551, BACKLOG 92: the claim watched another holder's lease before it won, so main may
+    /// have moved since this visit read it.
+    claim_waited: bool,
     /// The head this process's first write not yet on the remote went on; `None` once every
     /// write it made is pushed or withdrawn. [`Ctx::take_back`] takes those writes off the
     /// local chain ref, and only those, at every re-read of the remote chain and when the
@@ -619,6 +622,7 @@ impl<'a> Ctx<'a> {
             keys,
             pushed_head: None,
             red_checks: Vec::new(),
+            claim_waited: false,
             unpushed_from: None,
             my_epoch: 0,
             repair: None,
@@ -1751,8 +1755,13 @@ pub fn recover_events(repo: &Repo, records: &[ChangeRecord]) -> Result<usize, St
 /// lease, planned its batch on the main it read before the wait, and its push was refused for a
 /// landing made during the wait): the claim can wait out a lease, so main is read again once it
 /// is won. A main that is no descendant of `trunk` keeps `trunk`; its push is refused, and the
-/// next pass reads main again.
+/// next pass reads main again. BACKLOG 92: a claim that waited for no one keeps the main this
+/// visit read moments before, one fetch fewer a merge; a main that moved since refuses the
+/// publishing push, and the operation builds again on the main it reads then.
 fn trunk_after_claim(ctx: &mut Ctx, trunk: String) -> String {
+    if !ctx.claim_waited {
+        return trunk;
+    }
     match ctx.repo.refetch_trunk() {
         Ok(now) if now != trunk && ctx.repo.git.is_ancestor(&trunk, &now).unwrap_or(false) => {
             ctx.record.observed_remote.clone_from(&now);
@@ -4060,6 +4069,7 @@ fn claim(
         &ctx.repo.config,
         ctx.find_op(op_id).and_then(|op| op.owner.as_deref()),
     );
+    ctx.claim_waited = held;
     if held && !holder_revoked(ctx, op_id)? && !lease_expired(ctx, quiet) {
         let mut result = BayResult::new(Decision::Ok).with_change(&id).with_op(op_id);
         result.state = Some("running".to_owned());

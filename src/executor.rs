@@ -703,6 +703,7 @@ fn pass(
             ran.push(run_op(repo, id, &op_id, depth, beat, notes, &mut arrivals));
             parked.note(repo, &ran[ran.len() - 1]);
             forget_if_moved(repo, &ran);
+            let landed = ran.last().is_some_and(|row| row["decision"] == "merged");
             // F13 (2026-10-25, again 2026-10-26: a runner hung holding the head 19 minutes):
             // between operations, a head whose holder stopped writing is taken now, not at the
             // next pass's start an hour later.
@@ -719,6 +720,12 @@ fn pass(
                 parked.note(repo, &ran[ran.len() - 1]);
                 forget_if_moved(repo, &ran);
                 taken.insert(head_op);
+            }
+            // BACKLOG 92: the next head would reuse the reads made since the landing and then,
+            // as G438 has it, read everything again before its claim: four fetches more a
+            // landing than reading once. It reads once.
+            if landed {
+                repo.forget_reads();
             }
         }
     }
@@ -1095,11 +1102,14 @@ fn run_op(
     let last = step.get();
     step.set("record");
     let result = receipted(repo, id, last, result).with_op(op_id.to_owned());
-    // Trunk moved: what waits behind the new head hears of a conflict now (G177).
-    if result.decision == Decision::Landed
-        && let Ok(queue) = Queue::read(repo)
-    {
-        notes.extend(early_conflicts(repo, &queue));
+    // Trunk moved: what waits behind the new head hears of a conflict now (G177). BACKLOG 92:
+    // what the pass read before the landing is forgotten here ([`forget_if_moved`]), and this
+    // fresh read of the queue is the one the abandoned-head check after it shares.
+    if result.decision == Decision::Landed {
+        repo.forget_reads();
+        if let Ok(queue) = Queue::read_shared(repo) {
+            notes.extend(early_conflicts(repo, &queue));
+        }
     }
     eprintln!(
         "bay runner: {}",
@@ -1376,9 +1386,10 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
 /// was refused or blocked, or gave up its place), so the next visit reads what it changed. A
 /// place it took is written to this store's own queue refs, which a shared read sees.
 fn forget_if_moved(repo: &Repo, ran: &[Value]) {
+    // A landing forgot them before its own fresh read of the queue (`run_op`).
     if ran
         .last()
-        .is_some_and(|row| row["decision"].as_str() != Some("queued"))
+        .is_some_and(|row| !matches!(row["decision"].as_str(), Some("queued" | "merged")))
     {
         repo.forget_reads();
     }

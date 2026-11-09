@@ -3,6 +3,7 @@
 ## 0.6.42
 
 - A claim left by a change's own `bay merge` that stopped is taken over after six heartbeats, not a lease.
+- A runner's later merges in one pass read the remote once, not twice: about a quarter fewer fetches.
 
 ## 0.6.41
 
