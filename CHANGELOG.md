@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.46
+
+- In Grok, bay's talk wait at a turn's end returns at once, so turns no longer stall on stop hooks.
+
 ## 0.6.45
 
 - `bay merge --from <branch>` after its change ended unmerged opens a new change from the branch's tip.

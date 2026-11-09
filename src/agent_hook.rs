@@ -367,12 +367,17 @@ use crate::version::TEST_HOOKS;
 /// exit protocol of both products (`INTERFACES` § 1): exit 2 denies, with the reason on stderr.
 #[must_use]
 pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
-    // G54: the idle wait an asynchronous hook runs: exit 2 (the wake) at the first accepted talk.
-    if event == "talk-wait" {
-        return talk_wait(dir);
-    }
     // BACKLOG 52 H4: a guest's payload in a shape bay reads (Grok's) is judged as Claude Code's.
     let translated = guest::as_claude(input);
+    // G54: the idle wait an asynchronous hook runs: exit 2 (the wake) at the first accepted talk.
+    // G689: a guest runs the entry in the foreground (it drops `asyncRewake`), so there the wait
+    // would hold every turn end: it ends at once.
+    if event == "talk-wait" {
+        if translated.is_some() {
+            return Outcome::default();
+        }
+        return talk_wait(dir);
+    }
     let input = translated.as_deref().unwrap_or(input);
     let product = Product::configured(input, dir);
     // BACKLOG 61 a: the product that called, a guest named as itself, reaches the session's row.
