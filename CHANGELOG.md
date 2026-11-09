@@ -4,6 +4,7 @@
 
 - A runner pushes a landing's evidence with its change record and its log without a fetch: three round trips fewer.
 - `bay merge` refuses a new revision of a merged change `CHANGE_ALREADY_MERGED`, even when main read stale.
+- A looping runner says why a pass failed and tries again at its next, instead of exiting.
 
 ## 0.6.42
 
