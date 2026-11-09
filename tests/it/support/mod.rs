@@ -39,6 +39,34 @@ pub struct TestBox {
     real_git: PathBuf,
 }
 
+/// A box's check runs leave read-only directories (the sandbox's adapter copies), which the
+/// temporary directory's own removal cannot delete: each box would stay on disk. Its tree is made
+/// writable first, so dropping the box removes all of it.
+impl Drop for TestBox {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        fn writable(dir: &Path) {
+            use std::os::unix::fs::PermissionsExt;
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    if let Ok(meta) = std::fs::metadata(&path) {
+                        let mut perms = meta.permissions();
+                        perms.set_mode(perms.mode() | 0o700);
+                        let _ = std::fs::set_permissions(&path, perms);
+                    }
+                    writable(&path);
+                }
+            }
+        }
+        #[cfg(unix)]
+        writable(self.root.path());
+    }
+}
+
 impl TestBox {
     #[must_use]
     pub fn new() -> Self {
