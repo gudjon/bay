@@ -4184,6 +4184,10 @@ fn claim(
         let read = op.epoch;
         op.epoch += 1;
         op.owner = Some(name.clone());
+        // G690: the claim ends a wait for a worker; this holder runs it under its lease, and a
+        // holder that cannot records the wait again. Kept, it let every serving runner take
+        // the operation from the one running its check.
+        op.unavailable = None;
         if op.state != OpState::Checked {
             op.state = OpState::Running;
         }

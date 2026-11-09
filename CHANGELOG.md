@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.47
+
+- A runner that takes a change another runner could not check keeps it until its lease ends.
+- Other runners no longer take it mid-check, which could stop a change from ever merging.
+
 ## 0.6.46
 
 - In Grok, bay's talk wait at a turn's end returns at once, so turns no longer stall on stop hooks.
