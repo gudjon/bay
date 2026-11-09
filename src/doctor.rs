@@ -483,7 +483,13 @@ fn stuck_store_row(git: &Git, report: &mut Report) {
             "packs": packs,
             "note": "maintenance is not keeping up: every read of the store searches each pack",
         }));
-        recoveries.push("run git maintenance start, or one git gc".to_owned());
+        // A fleet finding (2026-11-09): one git gc on a partial clone dropped 34 trees, which
+        // bay never fetches on demand, so a runner's every read of them failed. Git's scheduled
+        // incremental repack keeps every object.
+        recoveries.push(
+            "run git maintenance start, or once git maintenance run --task=incremental-repack"
+                .to_owned(),
+        );
     }
     let empty = empty_refs(&common.join("refs"));
     if !empty.is_empty() {

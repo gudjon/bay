@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.48
+
+- For a store with too many packs, `bay doctor` advises Git's incremental repack, not `git gc`.
+- A `git gc` can drop trees a partial clone needs, and bay never fetches them back.
+
 ## 0.6.47
 
 - A runner that takes a change another runner could not check keeps it until its lease ends.
