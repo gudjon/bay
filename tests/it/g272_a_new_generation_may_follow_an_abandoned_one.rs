@@ -11,9 +11,8 @@
 //! abandoned change says how many trunk commits it is behind, and how to bring them in.
 //!
 //! Guards to mutate:
-//! - start side, `src/start.rs` `open`: the match arm
-//!   `(false, true) if ended_unlanded(fetched_record(repo, change)?.state) =>` (drop the arm,
-//!   or make the guard `false`): the first case's `--new` is refused.
+//! - start side, `src/start.rs` `opens_next`: `request.new` (make it `false`): the first case's
+//!   `--new` is refused.
 //! - host side, `src/hook.rs` `Judge::generation_closed`:
 //!   `return Ok(ended_unlanded(current.state));` (make it `Ok(false)`): the host refuses the
 //!   first case's generation-2 claim.

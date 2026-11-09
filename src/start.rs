@@ -603,7 +603,7 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
                     // next one, `--new` or not; the new change supersedes the landed one.
                     (true, _) => (generation + 1, Some(change.clone())),
                     // G272: a change that ended without landing closes its generation too.
-                    (false, true) if ended_unlanded(fetched_record(repo, change)?.state) => {
+                    (false, _) if opens_next(repo, request, change)? => {
                         (generation + 1, Some(change.clone()))
                     }
                     (false, true) => {
@@ -753,12 +753,22 @@ fn remote_claims(
 
 /// Whether `state` ends a change without a landing (G272): abandoned, superseded or no effect.
 /// Such a change closes its generation, so `start --new` may claim the next one; a plain start
-/// adopts it.
+/// adopts it, unless it ended with nothing to add ([`opens_next`]).
 fn ended_unlanded(state: ChangeState) -> bool {
     matches!(
         state,
         ChangeState::Abandoned | ChangeState::Superseded | ChangeState::NoEffect
     )
+}
+
+/// Whether a start claims the generation after `change`, its intent's newest, which did not
+/// land: `--new` after any end without a landing (G272); and (G688) a branch taken in again, or
+/// any start once the change ended with nothing to add, which can never merge. Neither takes
+/// up the ended change's old draft.
+fn opens_next(repo: &Repo, request: &StartRequest, change: &str) -> Result<bool, String> {
+    let state = fetched_record(repo, change)?.state;
+    Ok(ended_unlanded(state)
+        && (request.new || request.from.is_some() || state == ChangeState::NoEffect))
 }
 
 /// The current record of `change`'s chain as the remote holds it ([`Repo::remote_record`]):

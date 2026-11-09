@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.45
+
+- `bay merge --from <branch>` after its change ended unmerged opens a new change from the branch's tip.
+- `bay start <intent>` after its change ended with nothing to add opens a new change.
+- `bay merge` of a change that ended with nothing to add is refused `CHANGE_ALREADY_MERGED`, not a missing-folder error.
+
 ## 0.6.44
 
 - `bay status` says since when the remote has not answered, instead of telling you to read again shortly.

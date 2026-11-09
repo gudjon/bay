@@ -1043,6 +1043,18 @@ impl Drop for Ctx<'_> {
 #[allow(clippy::too_many_lines)]
 fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
+    // G688: a change that ended with nothing to add (or behind a newer one) is refused in plain
+    // words before its view is read: bay removes an ended change's view.
+    let ended = match ctx.record.state {
+        ChangeState::NoEffect => Some(Reason::ChangeAlreadyLanded),
+        ChangeState::Superseded => Some(Reason::ChangeSuperseded),
+        _ => None,
+    };
+    if let Some(reason) = ended {
+        return Ok(BayResult::blocked(reason)
+            .with_change(id)
+            .with_detail(json!({"state": ctx.record.state})));
+    }
     // § 10a offline work: with the remote unreachable, the request is committed locally and
     // pushed by a later bay command when the remote returns.
     let (trunk, online) = match ctx.fetch_trunk() {
