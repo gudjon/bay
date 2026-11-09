@@ -89,27 +89,14 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     let mut drain = Drain::of(dir);
     // BACKLOG 157: the waits on a change nobody submitted, visited again once it moves.
     let mut parked = Parked::default();
-    // G683 (a fleet finding, 2026-11-09: a runner stopped on one reset connection): a looping
-    // runner that has made a pass says why a later one failed and tries again at the next. A
-    // runner whose first pass fails stops, as its setup is what is wrong.
-    let mut passed = false;
-    let failed = |result: BayResult, passed: bool| -> Option<BayResult> {
-        if once || !passed {
-            return Some(result);
-        }
-        eprintln!(
-            "bay runner: this pass failed, the next tries again: {}",
-            result.say()
-        );
-        std::thread::sleep(interval);
-        None
-    };
+    // G683: whether a failed pass is tried again, once a looping runner has made one.
+    let mut retries = false;
     loop {
         // Each pass reads the config at the trunk tip it fetched (ruling: config location),
         // so a config that landed since the last pass governs this one.
         let repo = match Repo::open_fetched(dir) {
             Ok(repo) => Arc::new(repo),
-            Err(error) => match failed(error.into_result(), passed) {
+            Err(error) => match ends(error.into_result(), retries, interval) {
                 Some(result) => return result,
                 None => continue,
             },
@@ -139,12 +126,12 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             (&mut post, &mut parked),
         ) {
             Ok(ran) => ran,
-            Err(message) => match failed(BayResult::failed(message), passed) {
+            Err(message) => match ends(BayResult::failed(message), retries, interval) {
                 Some(result) => return result,
                 None => continue,
             },
         };
-        passed = true;
+        retries = !once;
         // Between passes, never inside an operation: the re-exec point. G589: a drain asked of
         // this runner comes first: it stops there once its post pieces end, and its service
         // starts the installed binary, a new one too.
@@ -192,6 +179,22 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         crate::coord::after_command();
         std::thread::sleep(interval);
     }
+}
+
+/// G683 (a fleet finding, 2026-11-09: a runner stopped on one reset connection): the result a
+/// failed pass ends the runner with, or `None` when it `retries`: a looping runner that has made
+/// a pass says why this one failed and tries again after `interval`. A runner whose first pass
+/// fails stops, as its setup is what is wrong.
+fn ends(result: BayResult, retries: bool, interval: Duration) -> Option<BayResult> {
+    if !retries {
+        return Some(result);
+    }
+    eprintln!(
+        "bay runner: this pass failed, the next tries again: {}",
+        result.say()
+    );
+    std::thread::sleep(interval);
+    None
 }
 
 /// The executor's Git floor (`GIT-FEATURES` § 1, G68): below it the executor refuses with

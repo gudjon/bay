@@ -3,8 +3,8 @@
 //! has made a pass says why a later pass failed and tries again at its next pass; the remote
 //! back, it lands what waits.
 //!
-//! Guard to mutate: in `src/executor.rs` `run`, return the failed pass's result whatever
-//! `passed` says (the runner exits while the remote is away, and the second change waits).
+//! Guard to mutate: in `src/executor.rs` `ends`, return the failed pass's result whatever
+//! `retries` says (the runner exits while the remote is away, and the second change waits).
 
 #![cfg(unix)]
 
