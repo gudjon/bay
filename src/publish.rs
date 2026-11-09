@@ -1091,6 +1091,21 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     if let Some(result) = scanned(&mut ctx, &trunk, &revision)? {
         return Ok(result);
     }
+    // G682 (a fleet finding, 2026-11-09): main read before a landing and the chain read after it
+    // let a new revision of a merged change in as an operation no runner answers. The record
+    // decides too: a merged operation of another revision ends the change.
+    if let Some(merged_op) = ctx
+        .record
+        .operations
+        .iter()
+        .find(|op| op.state == OpState::Published && op.revision != revision)
+    {
+        return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded)
+            .with_change(id)
+            .with_detail(
+                json!({"landed_revision": merged_op.revision, "op_id": merged_op.op_id}),
+            ));
+    }
     // NEW-4: a change of no lane whose view reaches a lane's commits off trunk never lands them.
     if ctx.record.lane.is_none()
         && let Some(refusal) = lane_leak(&ctx, &trunk, &revision)?
