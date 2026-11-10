@@ -203,8 +203,16 @@ fn op_of<'a>(record: &'a ChangeRecord, request: &str) -> Option<&'a Operation> {
 /// dropped the operation its request ref still names, so this clone's record spares the fetch
 /// of its chain. An abandoned change may be adopted and asked again, so only the remote's record
 /// says that one waits for nothing.
+///
+/// G692 (a fleet finding, 2026-11-10: `bay queue` said the line's longest wait was 1,414 minutes,
+/// for a later revision of a change that had merged; no runner runs one, as its change has ended):
+/// a change with a published operation waits for nothing either, whatever its state says.
 fn waits(record: &ChangeRecord, request: &str) -> Option<bool> {
-    if record.state == ChangeState::Landed {
+    let published = record
+        .operations
+        .iter()
+        .any(|op| op.state == OpState::Published);
+    if record.state == ChangeState::Landed || published {
         return Some(false);
     }
     let op = op_of(record, request)?;

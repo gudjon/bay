@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.50
+
+- `bay queue` no longer lists a later request of a merged change as arriving.
+- No runner takes such a request, so the line showed a wait that only grew.
+
 ## 0.6.49
 
 - A passed change whose queue place another runner gave up while it merged rejoins the queue.
