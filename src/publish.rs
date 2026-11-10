@@ -4135,6 +4135,17 @@ fn claim(
     // The remote chain lacks an operation this process appended: its request never reached
     // the remote (another process on this box re-read the chain over it). The caller reads
     // the chain again and writes the request again.
+    if ctx.find_op(op_id).is_none() {
+        return Err(CHAIN_MOVED.to_owned());
+    }
+    // G693 (a fleet finding, 2026-11-10: three runners that did not serve a change's environment
+    // took it twelve times in fifteen minutes, a minute of each runner's time apiece): the visit
+    // judged the wait on the chain the pass had read, which a claim made since showed without
+    // one, since each claim ends the wait until its holder records it again (G690). The claim
+    // judges it again on the chain it just read.
+    if let Some(waiting) = waits_for_worker(ctx, op_id, revision, trunk) {
+        return Ok(Some(waiting));
+    }
     let Some(op) = ctx.find_op(op_id) else {
         return Err(CHAIN_MOVED.to_owned());
     };

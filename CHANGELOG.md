@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.51
+
+- A runner that cannot serve a change's check environment no longer takes it from the queue.
+- Before, such runners kept taking it, each spending a minute to find no worker.
+
 ## 0.6.50
 
 - `bay queue` no longer lists a later request of a merged change as arriving.
