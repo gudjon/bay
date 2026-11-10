@@ -5,6 +5,7 @@
 - A runner's pass fetches the queue less often, and fetches again only what it reused.
 - A runner lists the remote's refs for compaction at most hourly while under the ref budget.
 - Before, every pass listed them all, about 1.7 seconds on a store of 30,000 refs.
+- An approved change merges its approved candidate even when the runner's visit reads the remote again.
 
 ## 0.6.51
 

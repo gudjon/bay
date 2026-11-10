@@ -1516,10 +1516,12 @@ pub fn execute(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<BayRes
     // and starts again, so a head never claims or builds on what an earlier visit read. G694:
     // it reads again only what was read before it began.
     repo.begin_visit();
-    match execute_once(repo, id, op_id, step, Visit::Pass) {
+    // An approval the first try re-armed is the second's too: the chain no longer says it.
+    let mut approved = None;
+    match execute_once(repo, id, op_id, step, Visit::Pass, &mut approved) {
         Err(why) if why == READ_AGAIN => {
             repo.read_again();
-            execute_once(repo, id, op_id, step, Visit::Pass)
+            execute_once(repo, id, op_id, step, Visit::Pass, &mut approved)
         }
         other => other,
     }
@@ -1538,7 +1540,7 @@ const READ_AGAIN: &str = "this visit read shared state and may run its operation
 ///
 /// A fault of bay's own; refusals are results.
 pub fn place(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<Option<BayResult>, String> {
-    match execute_once(repo, id, op_id, step, Visit::Place) {
+    match execute_once(repo, id, op_id, step, Visit::Place, &mut None) {
         Err(why) if why == LEFT_FOR_PASS => Ok(None),
         other => other.map(Some),
     }
@@ -1553,9 +1555,11 @@ fn execute_once(
     op_id: &str,
     step: &Step,
     visit: Visit,
+    approved: &mut Option<String>,
 ) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
     ctx.visit = visit;
+    ctx.approved = approved.take();
     if !ctx.record.operations.iter().any(|op| op.op_id == op_id) {
         if ctx.record.retention_cut {
             // § 9a: a retry of an op id whose record expired is ambiguous, never new work.
@@ -1599,6 +1603,11 @@ fn execute_once(
         }
     }
     let result = execute_op(&mut ctx, op_id, trunk);
+    // G694: a visit that re-armed an approved operation and then reads again (G438) runs the
+    // candidate that was approved, never a new one: the re-arm left no mark on the chain.
+    if matches!(&result, Err(why) if why == READ_AGAIN) {
+        approved.clone_from(&ctx.approved);
+    }
     ctx.tell_deferred();
     let result = result?;
     kill_point("before-outcome-event");

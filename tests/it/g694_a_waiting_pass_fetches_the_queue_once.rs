@@ -9,6 +9,10 @@
 //!
 //! Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file (G171).
 //!
+//! A visit that re-arms an approved operation and then reads again runs the approved candidate
+//! (`src/publish.rs` `execute_once` carries `approved`); G284 fails without it, as the first visit
+//! of a pass now often reads again.
+//!
 //! Guard to mutate: in `src/executor.rs` `pass`, the `read_at` of the queue the deadlines read
 //! (the first visit fetches the queue again).
 
