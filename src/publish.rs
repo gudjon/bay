@@ -3003,6 +3003,15 @@ fn left_to_the_runners(
     Ok(queued)
 }
 
+/// Whether a head whose place was released with `reason` while it published rejoins (§ 6):
+/// after its progress deadline, or G691 (a fleet finding, 2026-11-09) after `unavailable`. A
+/// runner whose box could not serve the head releases its place a push or two after recording
+/// the wait, and a serving runner may take the head in between; its checks passed, so the wait
+/// is over.
+fn rejoins_mid_publish(reason: &str) -> bool {
+    matches!(reason, "deadline" | crate::queue::UNAVAILABLE)
+}
+
 /// A publishing push was refused (§ 6): reports the existing landing, retries the same
 /// candidate after a hook timeout, rejoins the queue, or moves to the new trunk (`None`: build
 /// and check again).
@@ -3056,7 +3065,7 @@ fn after_refused_push(
     if error.contains(Reason::HookTimeout.code()) {
         return hook_timed_out(ctx, op_id, revision);
     }
-    // A release created while this head was publishing (its progress deadline), whether or not
+    // A release created while this head was publishing ([`rejoins_mid_publish`]), whether or not
     // trunk moved: rejoin, uncounted toward `QUEUE_DEADLINE_EXCEEDED`, one publish retry (§ 6).
     // A release for any other reason is no publish retry and no reason to rejoin: a newer
     // revision, a cancel or another executor's outcome ended this head's turn, and the chain
@@ -3068,7 +3077,9 @@ fn after_refused_push(
             .cloned(),
         None => None,
     };
-    if let Some(reason) = reason.as_ref().filter(|reason| *reason != "deadline") {
+    if let Some(reason) = &reason
+        && !rejoins_mid_publish(reason)
+    {
         *seq = None;
         return Ok(Some(
             BayResult::failed(format!(
@@ -3085,9 +3096,7 @@ fn after_refused_push(
         // Saved in the chain with the retry it counts, so a later pass never counts this place
         // toward `QUEUE_DEADLINE_EXCEEDED`.
         ctx.op_mut(op_id).mid_publish_releases.push(at);
-        if let Some(blocked) =
-            uncounted_retry(ctx, op_id, revision, "deadline release mid-publish")?
-        {
+        if let Some(blocked) = uncounted_retry(ctx, op_id, revision, "a release mid-publish")? {
             return Ok(Some(blocked));
         }
         return enqueue(ctx, op_id, revision, Reason::Queued).map(Some);

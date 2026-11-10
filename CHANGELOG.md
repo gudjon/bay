@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.49
+
+- A passed change whose queue place another runner gave up while it merged rejoins the queue.
+- Before, it failed and another runner ran its check again.
+
 ## 0.6.48
 
 - For a store with too many packs, `bay doctor` advises Git's incremental repack, not `git gc`.

@@ -1279,6 +1279,34 @@ fn a_deadline_release_mid_publish_rejoins_and_counts_as_a_publish_retry() {
     assert_eq!(op["merge_retries"], 1, "{status}");
 }
 
+/// G691 (a fleet finding, 2026-11-09: a passed head was refused "released (unavailable) while it
+/// merged", and another box ran its check again). A runner whose box could not serve the head
+/// releases its place after recording the wait; a serving runner that took the head meanwhile
+/// and passed its checks rejoins, as after a deadline release, and lands.
+///
+/// Guard to mutate: in `src/publish.rs` `rejoins_mid_publish`, the `UNAVAILABLE` arm (the head
+/// ends `failed`, never queued).
+#[test]
+fn an_unavailable_release_mid_publish_rejoins_and_lands() {
+    let queued = setup(2, 0);
+    let (id, _) = land(&queued, "first");
+    let executor = queued.test_box.clone_of(&queued.remote, "executor");
+    queued
+        .test_box
+        .bay_ok(&executor, &["runner", "run", "--once"]);
+    let (child, go) = pause_head_and_release_as(&queued, &executor, &id, 1, "unavailable");
+    std::fs::write(&go, "go").unwrap();
+    let out = child.wait_with_output().unwrap();
+    let ran: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "queued", "{ran}");
+    for _ in 0..2 {
+        queued
+            .test_box
+            .bay_ok(&executor, &["runner", "run", "--once"]);
+    }
+    assert_eq!(queued.test_box.trunk_change_ids(&queued.remote), vec![id]);
+}
+
 /// The progress deadline releases the head while it publishes, five times in a row. Each
 /// release rejoins the queue and counts as an uncounted publish retry, never toward
 /// `QUEUE_DEADLINE_EXCEEDED`, so the third does not block it; the fifth ends the operation in
