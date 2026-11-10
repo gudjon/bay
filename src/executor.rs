@@ -459,6 +459,8 @@ fn alive(pid: u32) -> bool {
 struct Seen {
     before: Option<Queue>,
     after: Option<Queue>,
+    /// G694: when the fetch that read `after` began.
+    read_at: Option<Instant>,
 }
 
 /// Releases a queue head that made no progress within its deadline, measured from this
@@ -470,6 +472,7 @@ fn deadlines(
     heads: &mut HashMap<u64, Instant>,
     seen: &mut Seen,
 ) -> Result<(), String> {
+    seen.read_at = Some(Instant::now());
     let mut queue = Queue::read(repo)?;
     seen.before = Some(queue.clone());
     // Heads whose operation already reached an outcome release at once, one after another.
@@ -481,6 +484,7 @@ fn deadlines(
             .ok()
             .map(|remote| remote.record);
         pass_on_or_release(repo, record.as_ref(), &head, &reason)?;
+        seen.read_at = Some(Instant::now());
         queue = Queue::read(repo)?;
         // A place passed on to a live operation is a live head now.
         if queue.head().is_some_and(|now| now.seq == head.seq) {
@@ -648,6 +652,13 @@ fn pass(
     let repo: &Repo = shared;
     // G438: this pass's visits share what it reads from the remote.
     repo.share_reads(true);
+    // G694: the queue the deadlines left is the pass's shared read of it, not fetched again
+    // for the first visit.
+    if seen.after.is_some()
+        && let Some(at) = seen.read_at
+    {
+        repo.read_at(crate::repo::Shared::Queue, at);
+    }
     // BACKLOG 113 (a review, 2026-10-28): a head's red gate judges main from this box's copy of
     // the post records. Only the post work fetched them, at a pass's end, so a box that runs no
     // post check judged a red main green and landed on it. The pass reads them before any visit.
@@ -739,7 +750,6 @@ fn pass(
             ran.push(run_op(repo, id, &op_id, depth, beat, notes, &mut arrivals));
             parked.note(repo, &ran[ran.len() - 1]);
             forget_if_moved(repo, &ran);
-            let landed = ran.last().is_some_and(|row| row["decision"] == "merged");
             // F13 (2026-10-25, again 2026-10-26: a runner hung holding the head 19 minutes):
             // between operations, a head whose holder stopped writing is taken now, not at the
             // next pass's start an hour later.
@@ -756,12 +766,6 @@ fn pass(
                 parked.note(repo, &ran[ran.len() - 1]);
                 forget_if_moved(repo, &ran);
                 taken.insert(head_op);
-            }
-            // BACKLOG 92: the next head would reuse the reads made since the landing and then,
-            // as G438 has it, read everything again before its claim: four fetches more a
-            // landing than reading once. It reads once.
-            if landed {
-                repo.forget_reads();
             }
         }
     }

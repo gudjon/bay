@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.52
+
+- A runner's pass fetches the queue less often, and fetches again only what it reused.
+- A runner lists the remote's refs for compaction at most hourly while under the ref budget.
+- Before, every pass listed them all, about 1.7 seconds on a store of 30,000 refs.
+
 ## 0.6.51
 
 - A runner that cannot serve a change's check environment no longer takes it from the queue.

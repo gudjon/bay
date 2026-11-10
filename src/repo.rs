@@ -188,6 +188,9 @@ struct Reads {
     registry: Option<std::time::Instant>,
     queue: Option<std::time::Instant>,
     chains: std::collections::HashMap<String, (std::time::Instant, String)>,
+    /// G694: when the visit under way began ([`Repo::begin_visit`]). A read made since is the
+    /// visit's own: using it again is no shared read.
+    visit: Option<std::time::Instant>,
     reused: bool,
 }
 
@@ -493,6 +496,61 @@ impl Repo {
             .is_ok_and(|mut reads| reads.mine() && std::mem::take(&mut reads.reused))
     }
 
+    /// G694: a visit begins now: what it reads from here on is its own, and only a read made
+    /// before it marks the visit as using a shared one.
+    pub fn begin_visit(&self) {
+        if let Ok(mut reads) = self.reads.lock()
+            && reads.mine()
+        {
+            reads.visit = Some(std::time::Instant::now());
+            reads.reused = false;
+        }
+    }
+
+    /// G694 (a fleet finding, 2026-11-10: a runner's pass fetched the queue four times): a visit
+    /// that used a shared read reads again only what was read before it began. What it fetched
+    /// itself is as fresh as a second fetch would be, so main, the registry, the queue and the
+    /// head's chain are no longer all fetched again for one of them.
+    pub fn read_again(&self) {
+        if let Ok(mut guard) = self.reads.lock()
+            && guard.mine()
+        {
+            let reads = &mut *guard;
+            let Some(visit) = reads.visit else {
+                *reads = Reads {
+                    on: true,
+                    owner: reads.owner,
+                    ..Reads::default()
+                };
+                return;
+            };
+            let before = |at: &Option<std::time::Instant>| at.is_some_and(|at| at < visit);
+            for stamp in [&mut reads.trunk, &mut reads.registry, &mut reads.queue] {
+                if before(stamp) {
+                    *stamp = None;
+                }
+            }
+            reads.chains.retain(|_, (at, _)| *at >= visit);
+            reads.reused = false;
+        }
+    }
+
+    /// G694: what the pass read of `what` at `at`, before it shared its reads, stands as a
+    /// shared read from then on: the queue its deadlines read is not fetched again for its
+    /// first visit.
+    pub fn read_at(&self, what: Shared, at: std::time::Instant) {
+        if let Ok(mut reads) = self.reads.lock()
+            && reads.mine()
+        {
+            let stamp = match what {
+                Shared::Trunk => &mut reads.trunk,
+                Shared::Registry => &mut reads.registry,
+                Shared::Queue => &mut reads.queue,
+            };
+            *stamp = Some(at);
+        }
+    }
+
     /// G438: whether the shared read of `what` may stand for a fetch now (and the visit is
     /// marked as using one); when not, the caller fetches and this stamps it as read now. On
     /// any thread but the one that shares the reads, never (S1).
@@ -508,8 +566,13 @@ impl Repo {
             Shared::Registry => &mut reads.registry,
             Shared::Queue => &mut reads.queue,
         };
-        if stamp.is_some_and(|at| at.elapsed() < READ_REUSE) {
-            reads.reused = true;
+        if let Some(at) = *stamp
+            && at.elapsed() < READ_REUSE
+        {
+            // G694: a read the visit made itself is its own, not a shared one.
+            if reads.visit.is_none_or(|visit| at < visit) {
+                reads.reused = true;
+            }
             return true;
         }
         *stamp = Some(std::time::Instant::now());
@@ -548,7 +611,9 @@ impl Repo {
             && let Some((at, head)) = reads.chains.get(change).cloned()
             && at.elapsed() < READ_REUSE
         {
-            reads.reused = true;
+            if reads.visit.is_none_or(|visit| at < visit) {
+                reads.reused = true;
+            }
             return Ok(head);
         }
         let head = self.remote_chain(change)?;

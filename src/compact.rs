@@ -25,6 +25,9 @@ pub const INDEX_PREFIX: &str = crate::names::LANDED_INDEX;
 pub const DEFAULT_BUDGET: u64 = 100_000;
 /// The most names one compaction push moves, so the host's judgement of it stays bounded.
 pub const PUSH_MAX: usize = 4096;
+/// G695: how long a count of the remote's bay refs under the budget stands, so a pass lists
+/// them at most this often while the remote stays under it.
+const COUNTED_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
 /// The namespaces whose markers are compacted.
 const NAMESPACES: [&str; 3] = [
     crate::names::LANDED,
@@ -289,8 +292,34 @@ pub fn run(
     signer: Option<&Signer>,
     records: &[ChangeRecord],
 ) -> Result<Vec<String>, String> {
+    // G695 (a fleet finding, 2026-11-10: every runner pass listed 30,000 refs, 2.3 MB and
+    // 1.7 s, to learn the remote was under a budget of 100,000). Under the budget, the count
+    // stands for an hour; over it, each pass counts again until the markers are moved.
+    let marker = repo.git.common_dir().ok().map(|common| {
+        std::path::Path::new(&common)
+            .join("bay")
+            .join("under-ref-budget")
+    });
+    let counted = marker
+        .as_ref()
+        .and_then(|marker| {
+            std::fs::metadata(marker)
+                .and_then(|meta| meta.modified())
+                .ok()
+        })
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < COUNTED_EVERY);
+    if counted {
+        return Ok(Vec::new());
+    }
     let remote = remote_bay_refs(repo)?;
     if (remote.len() as u64) <= repo.config.ref_budget() {
+        if let Some(marker) = &marker
+            && let Some(dir) = marker.parent()
+            && std::fs::create_dir_all(dir).is_ok()
+        {
+            let _ = std::fs::write(marker, b"");
+        }
         return Ok(Vec::new());
     }
     let mut moved: Vec<(String, String)> = records

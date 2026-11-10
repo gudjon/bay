@@ -1,9 +1,10 @@
 //! G680 (BACKLOG 92, a fleet finding, 2026-11-08: a runner's merge spent about 23 s of its 64 s
 //! median in 20 fetches; merges after a pass's first made 15 to 24, as each head reused what
 //! the pass read since the landing before it, and then, by G438, read it all again before its
-//! claim). A pass that lands three changes makes at most 22 fetches: after a landing the queue
-//! is read once for the conflict notes and the abandoned-head check, the next head reads afresh
-//! once, never twice, and a claim that waited for no one keeps the main its visit read.
+//! claim). A pass that lands three changes makes at most 21 fetches: after a landing the queue
+//! is read once for the conflict notes, the abandoned-head check and the post work's look at the
+//! head, the next head reads afresh once, never twice, and a claim that waited for no one keeps
+//! the main its visit read. G694: a visit reads again only what it reused, never what it fetched.
 //!
 //! G681 (BACKLOG 92, the same reading: 8 pushes a merge, about 3 s each). Its evidence notes go
 //! in the chain's push that names the candidate checked, atomically, and are not read back; an
@@ -12,8 +13,9 @@
 //!
 //! Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file (G171).
 //!
-//! Guards to mutate: in `src/executor.rs` `pass`, drop the `forget_reads` after a landing (each
-//! later head reads twice); in `run_op`, read the queue with `Queue::read` (it is fetched again
+//! Guards to mutate: in `src/repo.rs` `read_again`, forget every read (each later head reads
+//! main twice); in `src/executor.rs` `pass`, forget the reads after a landing (the post work
+//! fetches the queue again); in `run_op`, read the queue with `Queue::read` (it is fetched again
 //! for the abandoned-head check); in `src/publish.rs` `trunk_after_claim`, drop the
 //! `claim_waited` test (main is fetched again after each claim); in `persist_attempt`, push the
 //! evidence on its own again (a push more a landing); in `src/log.rs` `append`, fetch before
@@ -96,8 +98,8 @@ fn a_pass_of_three_landings_fetches_within_its_budget() {
         assert!(on_main.contains(id), "{id} did not land: {ran}");
     }
 
-    // THEN it makes at most 22 fetches (G680), 17 pushes and 2 listings (G681).
-    for (sub, most) in [("fetch", 22), ("push", 17), ("ls-remote", 2)] {
+    // THEN it makes at most 21 fetches (G680, G694), 17 pushes and 1 listing (G681, G695).
+    for (sub, most) in [("fetch", 21), ("push", 17), ("ls-remote", 1)] {
         let made = calls(&trace, sub);
         assert!(
             made.len() <= most,

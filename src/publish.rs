@@ -1513,11 +1513,12 @@ fn with_progress(git: &Git, op: &Operation, mut result: BayResult) -> BayResult 
 /// A fault of bay's own; refusals are results.
 pub fn execute(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<BayResult, String> {
     // G438: a visit runs on the pass's shared reads; one whose operation may run reads afresh
-    // and starts again, so a head never claims or builds on what an earlier visit read.
-    let _ = repo.took_shared_read();
+    // and starts again, so a head never claims or builds on what an earlier visit read. G694:
+    // it reads again only what was read before it began.
+    repo.begin_visit();
     match execute_once(repo, id, op_id, step, Visit::Pass) {
         Err(why) if why == READ_AGAIN => {
-            repo.forget_reads();
+            repo.read_again();
             execute_once(repo, id, op_id, step, Visit::Pass)
         }
         other => other,
