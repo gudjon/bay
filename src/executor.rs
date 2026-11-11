@@ -91,6 +91,10 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     let mut parked = Parked::default();
     // G683: whether a failed pass is tried again, once a looping runner has made one.
     let mut retries = false;
+    // G696: a looping runner watches another's lease across its passes, never inside one.
+    if !once {
+        publish::watch_leases_across_passes();
+    }
     loop {
         // Each pass reads the config at the trunk tip it fetched (ruling: config location),
         // so a config that landed since the last pass governs this one.

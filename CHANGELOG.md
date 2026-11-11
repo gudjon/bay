@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.53
+
+- A runner no longer waits inside its pass while another runner holds a change; it looks again next pass.
+- `bay start <change> --adopt` takes a change idle longer than the takeover window at once.
+- `ABANDON_REFUSED` names the change's owner and you apart, and points to `--adopt` once the owner is gone.
+
 ## 0.6.52
 
 - A runner's pass fetches the queue less often, and fetches again only what it reused.

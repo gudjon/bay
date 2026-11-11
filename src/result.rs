@@ -1101,7 +1101,7 @@ impl Reason {
                 "Another live session holds this change: wait until it ends, or work on another change. `bay status --all` shows the holder."
             }
             Self::AbandonRefused => {
-                "Only the change's own actor may abandon it: ask that actor, or leave the change as it is."
+                "Ask the change's owner (`detail.owner`) to abandon it; if that owner is gone, run `bay start <change> --adopt` first, then abandon it."
             }
             Self::ActorUnnamed => "Set `BAY_ACTOR` to your actor name, then run the command again.",
             Self::ActorUnproven => {
@@ -1288,7 +1288,7 @@ impl Reason {
                 "Not now: another session is working on this change. Wait for it to finish."
             }
             Self::AbandonRefused => {
-                "Nothing was given up: only the person who owns this change can give it up."
+                "Nothing was given up: only the change's owner can give it up. If the owner is gone, take the change over first."
             }
             Self::ActorUnnamed => "To save, set your name in BAY_ACTOR, then try again.",
             Self::ActorUnproven => {

@@ -4920,10 +4920,14 @@ fn abandon_change(
     };
     let me = crate::change::current_actor(&repo.common_dir)?;
     if me.name != ctx.record.actor.name {
+        // A fleet finding (2026-11-11): the refusal named the change's actor `current_actor`,
+        // which a session read as its own identity, and so looked for an owner it was shown.
+        // It names the change's owner and the caller apart.
         return Ok(BayResult::blocked(Reason::AbandonRefused)
             .with_change(id)
-            .with_detail(json!({"current_actor": ctx.record.actor,
-                "current_actor_source": ctx.record.actor_source})));
+            .with_detail(json!({"owner": ctx.record.actor,
+                "owner_source": ctx.record.actor_source,
+                "you": me.name})));
     }
     let landed = !scan(&repo.git, &ctx.record.base_first, &trunk, id)?
         .publications
@@ -7757,10 +7761,42 @@ pub fn holder_lease(config: &crate::config::Config, owner: Option<&str>) -> Dura
     }
 }
 
+/// G696: a looping runner's sightings of the chains other runners hold, by change: the head it
+/// saw and when it first saw it. `None` until the runner loops ([`watch_leases_across_passes`]).
+static SIGHTINGS: std::sync::Mutex<Option<std::collections::HashMap<String, (String, Instant)>>> =
+    std::sync::Mutex::new(None);
+
+/// G696: this process is a looping runner; a held lease is watched across its passes.
+pub fn watch_leases_across_passes() {
+    if let Ok(mut sightings) = SIGHTINGS.lock()
+        && sightings.is_none()
+    {
+        *sightings = Some(std::collections::HashMap::new());
+    }
+}
+
 /// Watches an operation another executor holds for `lease` on this process's monotonic
 /// clock, from its own first sighting (§ 9a). Returns whether the lease expired: the chain head
 /// never changed. Any change means the owner is alive.
+///
+/// G696 (a fleet finding, 2026-11-11: every runner but the head's holder spent 20 to 35 s of
+/// each pass, and up to 30 fetches, watching the holder's chain until its next heartbeat). A
+/// looping runner's pass never waits here: it notes when it first saw this head and judges the
+/// lease against that on each later pass. Any other caller watches as before.
 fn lease_expired(ctx: &mut Ctx, lease: Duration) -> bool {
+    if ctx.visit == Visit::Pass
+        && let Ok(mut sightings) = SIGHTINGS.lock()
+        && let Some(seen) = sightings.as_mut()
+    {
+        let now = Instant::now();
+        let sighting = seen
+            .entry(ctx.id.clone())
+            .or_insert_with(|| (ctx.head.clone(), now));
+        if sighting.0 != ctx.head {
+            *sighting = (ctx.head.clone(), now);
+        }
+        return sighting.1.elapsed() >= lease;
+    }
     let first = ctx.head.clone();
     let seen = Instant::now();
     while seen.elapsed() < lease {

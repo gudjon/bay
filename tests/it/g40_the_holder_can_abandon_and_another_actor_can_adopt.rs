@@ -42,6 +42,17 @@ fn the_holder_abandons_and_another_actor_adopts() {
     );
     assert_eq!(code, 10, "{refused}");
     assert_eq!(refused["reason"], "ABANDON_REFUSED");
+    // The refusal names the change's owner and the caller apart, and the way to take it over.
+    assert_ne!(
+        refused["detail"]["owner"]["name"], "someone-else",
+        "{refused}"
+    );
+    assert!(refused["detail"]["owner"]["name"].is_string(), "{refused}");
+    assert_eq!(refused["detail"]["you"], "someone-else", "{refused}");
+    assert!(
+        refused["next_step"].to_string().contains("--adopt"),
+        "{refused}"
+    );
 
     // The holder abandons: the state is abandoned; trunk and the view stay.
     let (code, abandoned) = result_json(test_box.bay(&view).args(["abandon"]));

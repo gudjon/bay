@@ -1548,6 +1548,39 @@ fn holder_works(
     repo.fetch_registry();
     let agents = crate::live::agents_file(&repo.git)?;
     let mut tips = crate::live::tips(&repo.git)?;
+    // G697 (a fleet finding, 2026-11-11: taking over 38 changes whose actors were gone for days
+    // took about four minutes each, each one watched for the full window). A chain whose head
+    // was written longer than the window ago, with no heartbeat of its actor naming it written
+    // within the window, already shows its actor idle for the window: it is taken at once.
+    let now = crate::live::unix_now();
+    let age = |commit: &str| {
+        repo.git
+            .run(&["log", "-1", "--format=%ct", commit])
+            .ok()
+            .and_then(|at| at.trim().parse::<u64>().ok())
+            .map(|at| now.saturating_sub(at))
+    };
+    if age(head).is_some_and(|quiet| quiet >= window.as_secs()) {
+        let mut beating = false;
+        for tip in tips.values() {
+            if age(tip).is_some_and(|quiet| quiet < window.as_secs())
+                && crate::live::heartbeat_of(
+                    &repo.git,
+                    tip,
+                    change,
+                    actor,
+                    agents.as_deref(),
+                    window.as_secs(),
+                )?
+            {
+                beating = true;
+                break;
+            }
+        }
+        if !beating {
+            return Ok(None);
+        }
+    }
     let seen = std::time::Instant::now();
     while seen.elapsed() < window {
         std::thread::sleep(std::time::Duration::from_millis(200).min(window));
