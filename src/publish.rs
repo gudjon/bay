@@ -8162,9 +8162,21 @@ fn candidate_message(
     let Some((subject, bay_trailers)) = message.split_once("\n\n") else {
         return message;
     };
-    let mut out = format!("{subject}\n\n");
-    if !text.is_empty() {
-        out.push_str(&text);
+    // G702 (a fleet finding, 2026-11-12: main's title kept an intent the work had outgrown,
+    // and contradicted the body): the agent's own first line titles main's commit, written when
+    // the work was done; the intent titles it only when the agent wrote no message. The intent
+    // stays in its trailer.
+    let (title, body) = match text.split_once('\n') {
+        Some((first, rest)) => (first.trim(), rest.trim()),
+        None => (text.trim(), ""),
+    };
+    let mut out = if title.is_empty() {
+        format!("{subject}\n\n")
+    } else {
+        format!("{title}: change {}\n\n", ctx.id)
+    };
+    if !body.is_empty() {
+        out.push_str(body);
         out.push_str("\n\n");
     }
     out.push_str(bay_trailers);

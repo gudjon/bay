@@ -66,7 +66,8 @@ the view holds only those (`--paths .` is the whole tree). In a workspace, also 
 lockfile (such as `package.json`, `pnpm-workspace.yaml`, `pnpm-lock.yaml`, `Cargo.toml`, `go.work`): without them
 a tool run in the view can use the main checkout's, and a lockfile change goes there, not into your change. Before `bay merge`, commit your work in the view
 with a message saying what you did, and an `Open: <item>` line at its end for anything left undone or
-needing a person: main's commit keeps that message. Research, a plan or a review a person should see is a
+needing a person: main's commit keeps that message, and its first line is main's title, so write it last,
+saying what the work became. Research, a plan or a review a person should see is a
 short file (`notes/<date>-<what>.md`), saved like any other change. When `bay merge` names
 `detail.main_changed`, main changed those files of yours since your change began: read its `commit`.
 When you need a person's decision, ask with your product's question tool (Claude Code's

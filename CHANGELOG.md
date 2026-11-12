@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.59
+
+- Main's commit is titled by the agent's own first line; the intent titles it only when the agent wrote none.
+
 ## 0.6.58
 
 - The skill says where one change's times are: `bay status <change>`, in `operation.timing`.

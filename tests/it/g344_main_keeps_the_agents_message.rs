@@ -2,8 +2,8 @@
 //!
 //! A host shows what a change did from main's commit. An agent says it in its own commit in
 //! the view, with an `Open:` line for anything left undone or needing a person. `bay merge`
-//! keeps that message: main's commit has bay's subject, then the agent's words, then bay's
-//! trailers and the agent's own (`git interpret-trailers --parse` reads `Open:` there). A
+//! keeps that message: main's commit is titled by the agent's first line (G702; the intent when the
+//! agent wrote none), then the rest of the agent's words, then bay's trailers and the agent's own (`git interpret-trailers --parse` reads `Open:` there). A
 //! trailer bay writes itself (`Change-Id` and the rest) never comes from the agent. No flag:
 //! the message is the view's latest commit's.
 //!
@@ -11,6 +11,8 @@
 //! - `src/change.rs` `freeze_draft`: always use `message` (the draft says "draft").
 //! - `src/publish.rs` `candidate_message`: return `bay_message` alone (main's commit holds
 //!   only bay's lines).
+//! - `src/publish.rs` `candidate_message`: title with bay's subject, not the agent's first line
+//!   (G702: the title kept an intent the work had outgrown).
 
 // Each case runs shell scripts (adapters), so these run on Unix only.
 #![cfg(unix)]
@@ -51,11 +53,11 @@ fn main_keeps_the_agents_words_and_open_items() {
 
     let message = test_box.git_bare(&remote, &["log", "-1", "--format=%B", "main"]);
     assert!(
-        message.starts_with("speed up the parser: change "),
+        message.starts_with(&format!("Speed up the parser: change {id}\n\n")),
         "{message}"
     );
     assert!(
-        message.contains("\n\nSpeed up the parser\n\nThe tokenizer no longer copies each line."),
+        message.contains("\n\nThe tokenizer no longer copies each line.\n\n"),
         "{message}"
     );
     let trailers = test_box.git_bare(
