@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.60
+
+- A change whose files no check ahead of it reads merges while those checks still run.
+- The hook after a tool batch no longer waits for its talk poll; talks arrive at the next hook.
+- In a headless Claude Code run, the turn-end talk wait ends at once instead of holding the run.
+- The hook before a tool call reads the trunk's name and tip once, not five times.
+- A tool batch that only reads files skips the view's status read.
+
 ## 0.6.59
 
 - Main's commit is titled by the agent's own first line; the intent titles it only when the agent wrote none.

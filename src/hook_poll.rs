@@ -25,11 +25,22 @@ const STEP: Duration = Duration::from_millis(25);
 
 use crate::version::TEST_HOOKS;
 
-/// How long a hook waits for its poll: [`JOIN`], or in a test build `BAY_TEST_POLL_JOIN_S`, else
-/// the hook's whole budget, so a test reads what the poll brought on the hook that ran it.
-fn join() -> Duration {
-    if !TEST_HOOKS {
-        return JOIN;
+/// How long the hook of `event` waits for its poll: [`JOIN`], and nothing at `step.end` (G704),
+/// or in a test build `BAY_TEST_POLL_JOIN_S`, else the hook's whole budget, so a test reads what
+/// the poll brought on the hook that ran it; `BAY_TEST_RELEASE_JOIN=1` waits as a release does.
+fn join(event: &str) -> Duration {
+    let release = || {
+        // G704 (a measurement, 2026-11-12: a poll was due on 40% of tool batches and each held
+        // the batch for the full 3 s, 9 minutes of an 83-minute session): a tool batch's hook
+        // never waits for its poll; what the poll brings is told at the next hook (G147).
+        if event == "step.end" {
+            Duration::ZERO
+        } else {
+            JOIN
+        }
+    };
+    if !TEST_HOOKS || std::env::var("BAY_TEST_RELEASE_JOIN").is_ok_and(|on| on == "1") {
+        return release();
     }
     std::env::var("BAY_TEST_POLL_JOIN_S")
         .ok()
@@ -94,7 +105,7 @@ pub fn start(dir: &Path, event: &str, questions: &[String]) {
     let Ok(mut child) = cmd.spawn() else {
         return;
     };
-    let wait = join().min(crate::agent_hook::BUDGET);
+    let wait = join(event).min(crate::agent_hook::BUDGET);
     let until = crate::deadline::bounded(wait).map(|wait| Instant::now() + wait);
     while until.is_some_and(|until| Instant::now() < until) {
         if !matches!(child.try_wait(), Ok(None)) {

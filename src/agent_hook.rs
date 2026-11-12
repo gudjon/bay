@@ -262,6 +262,34 @@ pub struct Payload {
     /// The product's `permission_mode` (fixtures 02-15, e.g. `bypassPermissions`), when it is
     /// one plain word: the value reaches the fleet map, so any other text is dropped (G153).
     pub permission_mode: Option<String>,
+    /// G707: the step's tool calls were all of tools that write no file ([`READ_ONLY_TOOLS`]).
+    pub reads_only: bool,
+}
+
+/// G707 (a measurement, 2026-11-12: the view's status took 1.4 s on a large tree at every tool
+/// batch): tools that write no file, so a batch of only these leaves the view as it was. A
+/// batch's writes are then not read; the next step's read finds whatever came before it.
+const READ_ONLY_TOOLS: [&str; 7] = [
+    "Read",
+    "Grep",
+    "Glob",
+    "LS",
+    "WebFetch",
+    "WebSearch",
+    "TodoWrite",
+];
+
+/// Whether `value`'s tool calls (a batch's `tool_calls`) are all of [`READ_ONLY_TOOLS`]; false
+/// when it names none.
+fn reads_only(value: &Value) -> bool {
+    value["tool_calls"].as_array().is_some_and(|calls| {
+        !calls.is_empty()
+            && calls.iter().all(|call| {
+                call["tool_name"]
+                    .as_str()
+                    .is_some_and(|tool| READ_ONLY_TOOLS.contains(&tool))
+            })
+    })
 }
 
 impl Payload {
@@ -292,6 +320,7 @@ impl Payload {
             cwd: crate::session::hook_cwd(&value, dir),
             stop_hook_active: value["stop_hook_active"].as_bool(),
             edited: product.edited(event, &value),
+            reads_only: reads_only(&value),
             permission_mode: value["permission_mode"]
                 .as_str()
                 .filter(|mode| {
@@ -322,7 +351,7 @@ impl Payload {
     #[must_use]
     pub fn writes(&self) -> Option<crate::writes::Step> {
         if self.ends_step() {
-            Some(crate::writes::Step::Diff)
+            (!self.reads_only).then_some(crate::writes::Step::Diff)
         } else {
             self.event.writes()
         }
@@ -367,13 +396,17 @@ use crate::version::TEST_HOOKS;
 /// exit protocol of both products (`INTERFACES` § 1): exit 2 denies, with the reason on stderr.
 #[must_use]
 pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
+    crate::git::keep_ref_reads();
     // BACKLOG 52 H4: a guest's payload in a shape bay reads (Grok's) is judged as Claude Code's.
     let translated = guest::as_claude(input);
     // G54: the idle wait an asynchronous hook runs: exit 2 (the wake) at the first accepted talk.
     // G689: a guest runs the entry in the foreground (it drops `asyncRewake`), so there the wait
     // would hold every turn end: it ends at once.
+    // G705 (a measurement, 2026-11-12: headless runs on one box were held 525 to 3,649 s each,
+    // some 36 hours in six days): Claude Code's headless entry runs the entry in the foreground
+    // too, and no one waits there to be woken, so the wait ends at once.
     if event == "talk-wait" {
-        if translated.is_some() {
+        if translated.is_some() || headless() {
             return Outcome::default();
         }
         return talk_wait(dir);
@@ -384,6 +417,12 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
     let caller = translated.as_ref().map_or(product.name(), |_| guest::GROK);
     let outcome = dispatch_as(product, caller, event, input, dir);
     product.deliver(event, outcome)
+}
+
+/// Whether Claude Code runs headless (`claude -p`, `CLAUDE_CODE_ENTRYPOINT=sdk-cli`), where an
+/// asynchronous hook is waited for like any other.
+fn headless() -> bool {
+    std::env::var("CLAUDE_CODE_ENTRYPOINT").is_ok_and(|entry| entry == "sdk-cli")
 }
 
 /// [`dispatch`] of a payload from `product`, which `caller` (the product, or a guest running its

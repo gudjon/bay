@@ -93,6 +93,8 @@ bay exists to make merging faster than doing it by hand: you submit once, and th
 - **Checked ahead.** While one batch is checked, other runners check the next batches on the main the batch ahead
   will make. When a batch's turn comes and main is as predicted, it merges at once on that check.
 - **Placed at once.** A runner places a new change in line within seconds, even while it checks another.
+- **Unrelated changes pass.** A change whose files lie outside what the checks of every change ahead of it read
+  is checked and merges while those checks still run; the changes it passed keep their results.
 - **Skips, not stops.** A change that conflicts, may not join a batch, or already failed is passed over and keeps
   its place for its own turn.
 - **A red main holds nothing.** A change on a red check's paths runs that check before it merges, judged against
@@ -140,6 +142,9 @@ A repository's maintainer sets it up for speed in `.bay/` (details under "Set up
   check without `when_paths` sends every change, notes included, through the runners' line.
 - **Hold sizes with `[limits]`, not with a check.** bay judges them at submit, with no runner.
 - **Split a slow check by part**, each with its own `when_paths`, so a change runs only the checks its files reach.
+- **Say what each check reads**, so unrelated changes pass it: `footprint = "observed"` (bay records the reads),
+  or `materialize = "changed"` for a check that judges only the change's own files. A check with neither is read
+  as reading everything, and nothing passes a change that runs it.
 - **Add `[plugin.wake]`**, so sessions hear outcomes instead of asking for them.
 - **Serve each check `environment` from two runners or more**, on machines with CPU to spare, and set `ahead`,
   `batch` and `parallel_checks`. `evidence_reuse = "exact-inputs"` with `footprint = "observed"` on a check

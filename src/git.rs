@@ -126,6 +126,51 @@ static SNAPSHOTS: std::sync::LazyLock<Mutex<std::collections::HashMap<PathBuf, O
 /// G200: the common directory of each directory a handle asked, by the path it was given.
 static COMMON_DIRS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
 
+/// One read of a ref in a git directory: the directory and the call's arguments.
+type RefRead = (PathBuf, Vec<String>);
+
+/// G706 (a measurement, 2026-11-12: a hook before each tool call ran 15 Git calls, 9 of them
+/// the same reads of the trunk's name and tip): the ref reads of a hook process, kept from its
+/// first read until it runs a Git command that may move a ref. `None` outside a hook.
+static HOOK_READS: Mutex<Option<BTreeMap<RefRead, Vec<u8>>>> = Mutex::new(None);
+
+/// Keeps this process's ref reads ([`HOOK_READS`]): for a hook, a short process that reads the
+/// trunk's name and tip several times and moves no ref of its own in between.
+pub fn keep_ref_reads() {
+    *HOOK_READS.lock().unwrap_or_else(PoisonError::into_inner) = Some(BTreeMap::new());
+}
+
+/// Whether `args` reads one ref: `symbolic-ref -q <ref>` or `rev-parse --verify -q <rev>`.
+fn ref_read(args: &[&str]) -> bool {
+    matches!(
+        args,
+        ["symbolic-ref", "-q", _] | ["rev-parse", "--verify", "-q", _]
+    )
+}
+
+/// Whether `args` moves no ref: a read of objects, refs, the index or config. Anything else
+/// (a fetch, a push, an update of a ref, a commit, a config write) drops the kept ref reads.
+fn reads_only(args: &[&str]) -> bool {
+    match args.first().copied() {
+        Some(
+            "rev-parse" | "cat-file" | "ls-tree" | "ls-files" | "merge-base" | "diff" | "diff-tree"
+            | "diff-index" | "log" | "rev-list" | "for-each-ref" | "status" | "check-attr"
+            | "check-ignore" | "show" | "var" | "version" | "ls-remote" | "hash-object" | "mktree"
+            | "count-objects",
+        ) => true,
+        Some("symbolic-ref") => {
+            args.len() <= 3 && args.contains(&"-q") || args.contains(&"--short")
+        }
+        Some("config") => args.iter().any(|arg| {
+            matches!(
+                *arg,
+                "--get" | "--get-all" | "--get-regexp" | "--list" | "-l"
+            )
+        }),
+        _ => false,
+    }
+}
+
 /// Formats and location of a repository, as reported by Git.
 pub struct RepoInfo {
     /// The work tree, or the git directory of a bare repository.
@@ -434,6 +479,46 @@ impl Git {
     ///
     /// The git binary is missing, the call exceeds `timeout`, or git exits non-zero.
     pub fn run_bytes_for(
+        &self,
+        args: &[&str],
+        envs: &[(&str, &str)],
+        input: Option<&[u8]>,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<u8>, GitError> {
+        // G706: in a hook, a ref read again is answered from this process's first read of it,
+        // until this process runs a Git command that may move a ref.
+        let key = (envs.is_empty() && input.is_none() && ref_read(args)).then(|| {
+            (
+                self.dir.clone(),
+                args.iter().map(|arg| (*arg).to_owned()).collect(),
+            )
+        });
+        let mut cache = HOOK_READS.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(reads) = cache.as_mut() {
+            match &key {
+                Some(key) => {
+                    if let Some(kept) = reads.get(key) {
+                        return Ok(kept.clone());
+                    }
+                }
+                None if !reads_only(args) => reads.clear(),
+                None => {}
+            }
+        }
+        drop(cache);
+        let read = self.run_bytes_uncached(args, envs, input, timeout);
+        if let (Some(key), Ok(out)) = (key, &read)
+            && let Some(reads) = HOOK_READS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_mut()
+        {
+            reads.insert(key, out.clone());
+        }
+        read
+    }
+
+    fn run_bytes_uncached(
         &self,
         args: &[&str],
         envs: &[(&str, &str)],

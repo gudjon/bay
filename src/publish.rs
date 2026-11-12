@@ -3533,12 +3533,146 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
         && (repairs
             || (needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
                 && !main_moved_under(ctx.repo, &head)
+                && !repair_moved_under(ctx, &queue, trunk, op_id)?)
+            || (passes_unread(ctx, &queue, entry.seq, trunk, &ctx.op(op_id).revision)?
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?))
     {
         return unless_red(ctx, op_id, trunk, Gate::Head(entry.seq));
     }
     let revision = ctx.op(op_id).revision.clone();
     enqueue(ctx, op_id, &revision, Reason::Queued).map(|result| Gate::Wait(Box::new(result)))
+}
+
+/// How often main may move under one queue entry before no change passes it any more (G703):
+/// each move costs that entry a rebuild of its candidate, and a check only where its record is
+/// not carried.
+const PASSES_PER_ENTRY: u32 = 3;
+
+/// G703 (owner ruling 2026-11-12; a fleet finding the same day: changes to notes waited 213 to
+/// 395 s behind a code change's check that never read them): whether the operation at queue
+/// place `place`, of `revision`, runs from its own place, ahead of every live entry before it.
+/// It does when evidence reuse is on, it changes no `.bay/` path, and for each live entry ahead
+/// the pre-merge checks that entry requires read, as far as the policy at `trunk` says, none of
+/// its paths, and main moved under that entry fewer than [`PASSES_PER_ENTRY`] times. A check's
+/// reads are its changed files and `paths` for `materialize = "changed"`, else its `paths` (or
+/// `when_paths`) for `footprint = "observed"`, whose record is carried across an unrelated merge
+/// byte for byte. Any other check, or one that reads history, is read as reading everything:
+/// footprint lanes (`footprint = true`) keep their own order, a pre-check and queue order (G257).
+///
+/// It is a prediction of cost, never of correctness: the entry passed rebuilds its candidate
+/// on the new main and lands only on records of that candidate, carried byte for byte or run
+/// again.
+fn passes_unread(
+    ctx: &Ctx,
+    queue: &crate::queue::Queue,
+    place: u64,
+    trunk: &str,
+    revision: &str,
+) -> Result<bool, String> {
+    let git = &ctx.repo.git;
+    if !ctx.repo.config.evidence_reuse() {
+        return Ok(false);
+    }
+    let Ok(Some(policy)) = policy::load_at(git, trunk) else {
+        return Ok(false);
+    };
+    if policy.unchecked || policy.checks.is_empty() {
+        return Ok(false);
+    }
+    let Some(ours) = own_paths(git, trunk, revision)? else {
+        return Ok(false);
+    };
+    let ahead = queue.ahead_of(place);
+    if ahead.is_empty() {
+        return Ok(false);
+    }
+    for entry in ahead {
+        let Some(queued) = throughput::Queued::read(git, entry) else {
+            return Ok(false);
+        };
+        if !queued.live {
+            continue;
+        }
+        if moves_under(ctx.repo, entry) >= PASSES_PER_ENTRY {
+            return Ok(false);
+        }
+        let Some(theirs) = own_paths(git, trunk, &queued.revision)? else {
+            return Ok(false);
+        };
+        let Some(reads) = predicted_reads(&policy, &theirs) else {
+            return Ok(false);
+        };
+        if throughput::Footprint::Globs(reads).overlaps(&throughput::Footprint::Globs(ours.clone()))
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// The paths `revision` changes from where it meets `trunk`; `None` when it changes none, or a
+/// `.bay/` path (a policy edit passes nothing).
+fn own_paths(git: &Git, trunk: &str, revision: &str) -> Result<Option<Vec<String>>, String> {
+    let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
+        return Ok(None);
+    };
+    let changed = check::changed_paths(git, &base, revision)?;
+    if changed.is_empty() || changed.iter().any(|path| path.starts_with(".bay/")) {
+        return Ok(None);
+    }
+    Ok(Some(changed))
+}
+
+/// What the pre-merge checks a change of `changed` requires under `policy` read, as globs;
+/// `None` when one of them may read anything (see [`passes_unread`]).
+fn predicted_reads(policy: &policy::Policy, changed: &[String]) -> Option<Vec<String>> {
+    let (required, _) = policy.required(changed);
+    let mut reads = Vec::new();
+    for entry in required {
+        let check = policy.check(&crate::evidence::CheckId::new(
+            &entry.id,
+            &entry.environment,
+        ))?;
+        if check.stage == policy::Stage::Post {
+            continue;
+        }
+        if check.reads_history() {
+            return None;
+        }
+        if check.changed_only() {
+            reads.extend(changed.iter().cloned());
+            reads.extend(check.paths.iter().flatten().cloned());
+            continue;
+        }
+        if check.footprint != policy::FootprintMode::Observed {
+            return None;
+        }
+        reads.extend(
+            check
+                .paths
+                .as_ref()
+                .or(check.when_paths.as_ref())?
+                .iter()
+                .cloned(),
+        );
+    }
+    Some(reads)
+}
+
+/// How often a publishing push of queue place `entry`'s operation was refused because main
+/// moved, as this box last fetched its chain.
+fn moves_under(repo: &Repo, entry: &crate::queue::Entry) -> u32 {
+    Chain::new(&repo.git)
+        .read(&entry.change)
+        .ok()
+        .and_then(|(_, record)| {
+            record
+                .operations
+                .iter()
+                .find(|op| op.op_id == entry.op_id)
+                .map(|op| op.trunk_moved)
+        })
+        .unwrap_or(0)
 }
 
 /// BACKLOG 119 (a fleet finding, 2026-10-28: zynsylhi was claimed eight times in half an hour
