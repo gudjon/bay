@@ -927,6 +927,30 @@ fn failed_unit(detail: Option<&Value>) -> Option<String> {
     Some(format!(": {unit}: {line}"))
 }
 
+/// G698: what a check that gave no clear answer said of itself, as `<check>: <why>`: the first
+/// unknown check of `detail.checks` with a `why`, its first line cut to 160 characters.
+#[must_use]
+pub fn unknown_why(detail: Option<&Value>) -> Option<String> {
+    let row = detail?
+        .get("checks")?
+        .as_array()?
+        .iter()
+        .find(|row| row["verdict"] == "unknown" && row["why"].is_string())?;
+    let line = row["why"]
+        .as_str()?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let mut line: String = line.trim_end_matches('.').chars().take(160).collect();
+    if line.chars().count() == 160 {
+        line.push('…');
+    }
+    Some(match row["check"].as_str() {
+        Some(check) => format!("{check}: {line}"),
+        None => line,
+    })
+}
+
 /// G673: the files of the failed check the change edits, joined, when it edits any.
 fn runs_as_main(detail: Option<&Value>) -> Option<String> {
     let files: Vec<&str> = detail?
@@ -1462,10 +1486,13 @@ impl Reason {
                     failed_unit(detail).unwrap_or_default()
                 ),
             },
-            Self::CheckUnknown => format!(
-                "Not added yet: a check gave no clear answer{}. Wait for it.",
-                check()
-            ),
+            Self::CheckUnknown => match unknown_why(detail) {
+                Some(why) => format!("Not added yet: a check gave no clear answer ({why})."),
+                None => format!(
+                    "Not added yet: a check gave no clear answer{}. Wait for it.",
+                    check()
+                ),
+            },
             Self::PathHeld => format!(
                 "Not now: another session is editing these files{}. Wait for it to finish.",
                 paths()
@@ -2264,7 +2291,14 @@ fn ok_say(result: &BayResult) -> &'static str {
         .and_then(|detail| detail.get("saved"))
         .and_then(Value::as_array)
         .is_some_and(Vec::is_empty);
-    if view {
+    // G699: picking up a change saved its edits first, and may have moved them onto newer main.
+    let saved_first = detail.is_some_and(|detail| detail["checkpointed"] == true);
+    let moved = detail.is_some_and(|detail| detail["trunk_moved"] == true);
+    if view && saved_first && moved {
+        "Ready; your edits so far were kept and now sit on the newest main. Keep editing in the folder shown."
+    } else if view && saved_first {
+        "Ready; your edits so far were kept. Keep editing in the folder shown, then save them."
+    } else if view {
         "Ready; make your edits in the folder shown, then save them."
     } else if nothing_saved {
         "Nothing to save; no files were changed."

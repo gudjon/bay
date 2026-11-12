@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.54
+
+- `CHECK_UNKNOWN` says why the check gave no answer, and `bay status` shows it on the receipt.
+- `bay start <change>` says when it kept your edits and moved them onto the newest main.
+
 ## 0.6.53
 
 - A runner no longer waits inside its pass while another runner holds a change; it looks again next pass.

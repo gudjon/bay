@@ -2176,9 +2176,11 @@ fn describe(
         }).map(|receipt| json!({
             "id": receipt.id, "op_id": receipt.op_id, "step": receipt.step, "reason": receipt.reason,
             "recovery": receipt.recovery, "at": receipt.at, "synced": true,
+            "why": crate::result::unknown_why(Some(&receipt.detail)),
         })).chain(unsynced.iter().map(|receipt| json!({
             "id": receipt.id, "op_id": receipt.op_id, "step": receipt.step, "reason": receipt.reason,
             "recovery": receipt.recovery, "at": receipt.at, "age_s": receipts::age_s(receipt), "synced": false,
+            "why": crate::result::unknown_why(Some(&receipt.detail)),
         }))).collect::<Vec<_>>(),
     }))
 }
