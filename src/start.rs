@@ -1735,12 +1735,7 @@ fn resume(
     }
     chain.sign_with(agent_signer(repo, &record.actor.name)?);
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
-    let latest = chain
-        .drafts(id)
-        .map_err(|error| error.message())?
-        .first()
-        .cloned()
-        .ok_or("the change has no draft")?;
+    let latest = chain.latest_draft(id).map_err(|error| error.message())?;
     // BACKLOG 143 (a fleet finding, 2026-10-30: `start <change> --paths` kept the change's old
     // paths, so the only way to widen a change was a new change at the back of the line): the
     // change declares the paths it does not cover yet and keeps its place.
@@ -1923,12 +1918,7 @@ fn checkpoint_here(repo: &Repo, id: &str) -> Result<BayResult, String> {
         .with_change(id));
     }
     chain.sign_with(agent_signer(repo, &record.actor.name)?);
-    let latest = chain
-        .drafts(id)
-        .map_err(|error| error.message())?
-        .first()
-        .cloned()
-        .ok_or("the change has no draft")?;
+    let latest = chain.latest_draft(id).map_err(|error| error.message())?;
     let made = checkpoint_view(repo, &chain, &head, &mut record, &latest)?;
     let pushed = push_change(repo, id);
     Ok(BayResult::ok(json!({

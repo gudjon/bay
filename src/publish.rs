@@ -7715,13 +7715,15 @@ fn heartbeat(ctx: &Ctx, op_id: &str) {
     if expected.as_deref() != Some(head.as_str()) {
         return;
     }
-    let (Ok(record), Ok(drafts)) = (chain.record_at(&head), chain.drafts(&ctx.id)) else {
+    // G700: the newest draft, read from the head state alone; a walk of every draft grew with
+    // each beat, so a long check's beats cost its square.
+    let (Ok(record), Ok(draft)) = (chain.record_at(&head), chain.latest_draft(&ctx.id)) else {
         return;
     };
     let Ok(beat) = chain.append(
         &head,
         &record,
-        &drafts[0],
+        &draft,
         &format!("heartbeat {op_id} epoch {}", ctx.my_epoch),
     ) else {
         return;

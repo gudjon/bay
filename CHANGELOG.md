@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.55
+
+- A runner's heartbeat during a long check costs the same at its end as at its start.
+
 ## 0.6.54
 
 - `CHECK_UNKNOWN` says why the check gave no answer, and `bay status` shows it on the receipt.

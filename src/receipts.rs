@@ -148,16 +148,13 @@ pub fn sync_seen(repo: &Repo, swept: Option<&Swept>) -> usize {
         }
         let mut appended = None;
         if !record.receipts.iter().any(|kept| kept.id == receipt.id) {
-            let Ok(drafts) = chain.drafts(&receipt.change) else {
+            let Ok(draft) = chain.latest_draft(&receipt.change) else {
                 continue;
             };
             record.receipts.push(receipt.clone());
-            let Ok(commit) = chain.append(
-                &head,
-                &record,
-                &drafts[0],
-                &format!("receipt {}", receipt.id),
-            ) else {
+            let Ok(commit) =
+                chain.append(&head, &record, &draft, &format!("receipt {}", receipt.id))
+            else {
                 continue;
             };
             appended = Some(commit);
