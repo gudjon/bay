@@ -101,6 +101,9 @@ What you do decides the speed for every agent:
 
 - **Submit once, then go on with other work.** `bay merge` once. Running it again does not move the change up.
   Read the outcome with `bay status <change>` or `bay status --since`, not in a tight loop.
+- **Wait without a loop.** Plain `bay merge` returns at once, and with `[plugin.wake]` the outcome wakes your
+  session. When one command may only run for a while, use `bay merge --wait=<seconds>` below that limit, then
+  `bay status <change>`; the run goes on meanwhile.
 - **Fix in place.** When a change is refused, fails a check, or `bay status` shows `operation.conflict`:
   `bay start <change>` (it brings in newer main), fix it in the view, then `bay merge <change>`. The new revision
   keeps the change's place in line, even at the head. Never abandon it and start a new change for the same work:
@@ -108,13 +111,18 @@ What you do decides the speed for every agent:
 - **Green before you submit.** Run the repository's fast checks in your view first. A red change costs the whole
   batch it is in a split to find it.
 - **Small and narrow.** One intent per change, only the paths that intent needs.
+- **One live change per file.** When `detail.overlaps` at `bay start` names another live change of yours on the
+  same file, finish that one first or put the work in it: two changes adding rows to one table conflict.
 - **Never push main, and never merge on the host.** Every commit that reaches main outside bay throws away the batch
   being checked and the batches checked ahead of it.
 - **Changes to `.bay/` go through bay** like any other change, in a change of their own; never by a pull request or
-  a direct push.
+  a direct push. Keep a check's `adapter` files apart too: a change to the policy or to them runs its checks twice,
+  as main has them and as it has them.
 - **A fix for a red main goes first.** `bay start <intent> --fixes <check>` (the red check), `--fixes <change>`
   (or `bay undo <change>`) runs ahead of the line.
 - **Give up dead work.** `bay abandon <change> --why <reason>`: a runner frees its place at its next pass.
+  Work whose actor is gone: `bay start <change> --adopt` (at once when it was idle past the takeover window),
+  then merge or abandon it.
 - **Name `--input` only when the work relies on that version**; such a change is checked on its own.
 - **Move a tree in three changes.** A check runs as main has it, so first merge a change that teaches the checks
   both the old and the new path; then the pure move, no rewrites; then drop the old path. Before each submit, take
@@ -122,7 +130,80 @@ What you do decides the speed for every agent:
 - **Edits outside a sparse view count.** `bay merge` stages them; your own `git add` there needs `--sparse`.
 
 Signals to read: `detail.batch.stopped` says why a batch ended; `detail.warnings` names `wake_failing` when no
-session is being told of its refusals; `waiting_for` says what a queued change waits for.
+session is being told of its refusals; `waiting_for` says what a queued change waits for. A `CHECK_UNKNOWN`
+names why the check gave no answer in `say`, and `bay status` shows it as the receipt's `why`.
+
+A repository's maintainer sets it up for speed in `.bay/` (details under "Set up a repository"):
+
+- **Give every check `when_paths`.** A change no check covers is merged by `bay merge` itself, in seconds. One
+  check without `when_paths` sends every change, notes included, through the runners' line.
+- **Hold sizes with `[limits]`, not with a check.** bay judges them at submit, with no runner.
+- **Split a slow check by part**, each with its own `when_paths`, so a change runs only the checks its files reach.
+- **Add `[plugin.wake]`**, so sessions hear outcomes instead of asking for them.
+- **Serve each check `environment` from two runners or more**, on machines with CPU to spare, and set `ahead`,
+  `batch` and `parallel_checks`. `evidence_reuse = "exact-inputs"` with `footprint = "observed"` on a check
+  reuses a result whose reads did not change; `[runner] warm = true` has one ready on main's newest tip.
+- **Keep each store healthy.** Run the command `bay runner install` prints, which schedules hourly Git
+  maintenance, and act on what `bay doctor` names.
+
+An example for a repository with a service, a web app and shared code. A change to `docs/` meets no check and
+merges in seconds; a change to `apps/web/` runs `lint` and `web`, never `api`:
+
+```toml
+# .bay/policy.toml
+revision = 1
+
+[limits]
+max_file_mib = 1
+
+[[check]]
+id = "lint"
+environment = "linux"
+command = "scripts/check lint"
+adapter = ["scripts/check"]
+when_paths = ["services/**", "apps/**", "libs/**", "scripts/check"]
+footprint = "observed"
+expected_minimum = 1
+timeout_s = 300
+
+[[check]]
+id = "api"
+environment = "linux"
+command = "scripts/check api"
+adapter = ["scripts/check"]
+when_paths = ["services/api/**", "libs/**", "scripts/check"]
+footprint = "observed"
+expected_minimum = 1
+timeout_s = 900
+
+[[check]]
+id = "web"
+environment = "linux"
+command = "scripts/check web"
+adapter = ["scripts/check"]
+when_paths = ["apps/web/**", "libs/**", "package.json", "pnpm-lock.yaml", "scripts/check"]
+footprint = "observed"
+expected_minimum = 1
+timeout_s = 900
+```
+
+```toml
+# .bay/config.toml
+[policy]
+evidence_reuse = "exact-inputs"   # reuse a result whose reads did not change
+
+[runner]
+ahead = 8                         # runners not on the head check the next changes early
+batch = { max = 8, max_failure_rate = 0.3 }
+parallel_checks = 3               # a change's checks run at once
+warm = true                       # results ready on main's newest tip
+
+[plugin.wake]
+command = "scripts/wake"          # sessions hear outcomes; no polling
+```
+
+Then start a runner for `linux` on two machines or more (`bay runner install` on each). To see what a change
+would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
 
 ## Read the result
 

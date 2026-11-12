@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.56
+
+- The skill gathers how to keep merges fast: waiting without a loop, one live change per file, adoption.
+- It also lists a maintainer's settings for speed, with a worked example of a policy and config.
+
 ## 0.6.55
 
 - A runner's heartbeat during a long check costs the same at its end as at its start.

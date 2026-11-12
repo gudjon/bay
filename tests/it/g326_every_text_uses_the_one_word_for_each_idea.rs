@@ -6,7 +6,7 @@
 //! every command's and flag's help, each command's `writes` and `never`, every reason's
 //! `next_step` in `bay help --json`, and the skill are held to the new words. A name in backticks
 //! (`no_live_executor`, `` `executor` `` as a key class) or a dotted config key
-//! (`bay.runnerKey`) is a literal name, and is not read as a word.
+//! (`bay.runnerKey`) is a literal name, and is not read as a word; so is a fenced block of config.
 //!
 //! Guards to mutate (each makes a case here fail):
 //! - `src/main.rs` `Command::Undo`: its help back to "checked and landed like any other".
@@ -120,8 +120,16 @@ fn the_contract_and_the_skill_say_merge_main_runner_plugin_and_machine() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/bay/SKILL.md"),
     )
     .unwrap();
+    // A fenced block is literal config, as a backticked name is.
+    let mut fenced = false;
     for (n, line) in skill.lines().enumerate() {
-        check(format!("SKILL.md:{}", n + 1), line);
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced {
+            check(format!("SKILL.md:{}", n + 1), line);
+        }
     }
     assert!(
         found.is_empty(),
