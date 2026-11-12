@@ -92,7 +92,18 @@ pub fn counts_live<S: std::hash::BuildHasher>(
     held: &HeldChain,
     landed: &HashMap<String, String, S>,
 ) -> bool {
-    live(held.record.state) && !landed.contains_key(&held.id)
+    live(held.record.state) && !landed.contains_key(&held.id) && !refused_as_merged(held)
+}
+
+/// G701 (a fleet finding, 2026-11-12: `bay status` named a change merged 15 days before as the
+/// oldest live one): a change whose newest operation was refused `CHANGE_ALREADY_MERGED` is on
+/// main, though its chain never recorded the landing; it is not live.
+fn refused_as_merged(held: &HeldChain) -> bool {
+    held.record
+        .operations
+        .last()
+        .and_then(|op| op.outcome.as_deref())
+        == Some(crate::result::Reason::ChangeAlreadyLanded.code())
 }
 
 /// The landed markers this repository holds: change id to the publication the marker names.

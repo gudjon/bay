@@ -1738,7 +1738,7 @@ fn main_say(result: &BayResult) -> Option<String> {
     let checks = shown_checks;
     if !red.is_empty() {
         return Some(format!(
-            "Main is broken on {}; changes that touch its files wait until a fix is on main.",
+            "Main is broken on {}; a change to its files runs it first and is added unless it makes it worse.",
             checks(&red.iter().collect::<Vec<_>>())
         ));
     }
@@ -2523,7 +2523,7 @@ mod tests {
         );
         assert_eq!(
             broken,
-            "Main is broken on suite, lint and 1 more; changes that touch its files wait until a fix is on main."
+            "Main is broken on suite, lint and 1 more; a change to its files runs it first and is added unless it makes it worse."
         );
         let fixing = read(
             json!([]),

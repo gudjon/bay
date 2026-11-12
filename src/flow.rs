@@ -3,7 +3,7 @@
 //!
 //! `bay status` names the flow of work under `detail.flow`: how many changes are live, by
 //! actor, beside the WIP limit the policy sets (`[agent] max_live_changes`, G264); how many
-//! landed in the last 7 days; the cycle time, start to landing, of those landed in the last 30;
+//! landed in the last 7 days; the cycle time, start to landing, of those same landings;
 //! the oldest live change; and how many live changes wait for a person's approval. It reads the
 //! chains and landed markers as the WIP limit reads them ([`crate::overlap::read_chains`],
 //! [`crate::overlap::counts_live`]), so the two never disagree on what is live, and makes at most
@@ -13,7 +13,7 @@
 //! G316: the flow also names the queue wait and the check time of those landings, p50 and p90.
 //! It does not time them again: each operation's terminal record already holds its queue wait
 //! and its check runs ([`crate::timing`]), so the flow reads the published records of the
-//! changes landed in the last 30 days from the executor logs, in three more git calls however
+//! changes landed in the last 7 days from the executor logs, in three more git calls however
 //! long the logs are ([`crate::log::published_of`]), and none when nothing landed then.
 //!
 //! A record keeps no clock of its own, so each time is the committer time of the commit that
@@ -38,8 +38,10 @@ use crate::repo::Repo;
 const DAY_S: u64 = 86_400;
 /// The window `landed` counts over.
 const LANDED_DAYS: u64 = 7;
-/// The window `cycle_time_s` is judged over.
-const CYCLE_DAYS: u64 = 30;
+/// The window `cycle_time_s`, `queue_wait_s` and `check_time_s` are judged over: the same week
+/// `landed` counts (G701: over 30 days, a fleet's percentiles still showed the slower weeks before
+/// its fixes, and read as today's speed).
+const CYCLE_DAYS: u64 = 7;
 
 /// The live changes that wait for a person's approval, and the oldest of them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -79,10 +81,10 @@ pub fn review_queue(repo: &Repo, except: Option<&str>) -> Result<Review, String>
 ///   `limit` the policy's `[agent] max_live_changes` (null when it sets none);
 /// - `landed`: how many changes landed in the last 7 days;
 /// - `cycle_time_s`: `{p50, p90, landed}`, the median and 90th percentile in seconds from start
-///   to landing of the changes landed in the last 30 days, and how many those are; null when
+///   to landing of the changes landed in the last 7 days, and how many those are; null when
 ///   none landed then;
 /// - `queue_wait_s` (G316): `{p50, p90, landed}`, the median and 90th percentile in seconds of
-///   the queue wait of the changes landed in the last 30 days, and how many carry one; null when
+///   the queue wait of the changes landed in the last 7 days, and how many carry one; null when
 ///   none does. Each is the `queue_wait_s` of the change's published terminal record
 ///   ([`crate::timing`]): from the state commit that gave it a queue place (`queued <op>`), or
 ///   from its land request when it never queued, to its first claim after that, when it became

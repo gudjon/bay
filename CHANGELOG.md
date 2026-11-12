@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.57
+
+- A change already on main whose record missed its landing is no longer counted live, nor named oldest.
+- `bay status` judges cycle time, queue wait and check time over the last 7 days, not 30.
+- A red main's sentence says a change to its files runs the check first; it no longer says they wait.
+
 ## 0.6.56
 
 - The skill gathers how to keep merges fast: waiting without a loop, one live change per file, adoption.
