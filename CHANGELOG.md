@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.58
+
+- The skill says where one change's times are: `bay status <change>`, in `operation.timing`.
+
 ## 0.6.57
 
 - A change already on main whose record missed its landing is no longer counted live, nor named oldest.

@@ -50,7 +50,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Give the change up, so another agent may adopt it | `bay abandon [<change>] [--why "<reason>"]` (default: the view's change; say why, e.g. where the work merged) |
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
 | Read state, and main commits that did not merge through bay (`unattributed`; `by_writer` counts them per committer) | `bay status` (lists live changes only: your own described, at most 20; the rest are named in `detail.more_changes`, and `bay status <change>` reads any one, merged too) |
-| See the flow: live changes by actor and their limit, merges this week, cycle time, queue wait and check time (p50, p90), the oldest live change, what waits for a yes | `bay status` (`detail.flow`) |
+| See the flow: live changes by actor and their limit, merges this week, and their cycle time, queue wait and check time (p50, p90); the oldest live change; what waits for a yes | `bay status` (`detail.flow`); one change's own times and each check's runs: `bay status <change>` (`operation.timing`) |
 | See each promotion target (`staging`): its tip, `drift`, `lag`, checks, freeze and the `promotable` commit | `bay status` (`detail.targets`) |
 | See whether main is held, by whom (`source`: `window` or `plugin`), why and until when | `bay status` (`detail.hold`) |
 | Reverse a merged change with a new, checked change | `bay undo <change> [--wait[=<seconds>]]` |
@@ -394,7 +394,8 @@ name no record names comes back in `detail.unseen` with a `detail.warning`: chec
    `[policy] reuse_unsigned = true`. `parallel_checks = N` (1 to 16) runs one change's checks at
    once, with no reuse. A required check with no `when_paths` makes every change's footprint the
    whole tree, so no change is checked beside another. Each runner is its own check slot: more runners give more early checks. When
-   `bay status` `detail.flow` shows queue wait well above check time, add a runner or one of these.
+   `bay status` `detail.flow` shows queue wait well above check time over the week, add a runner or one of these;
+   `operation.timing` of the slowest changes names the checks that took longest.
    A check reads `turn` in its request (`head` or `ahead`), so a busy worker can serve the head first.
    A slow check that reads the whole tree can run after merge instead of on every change:
    `stage = "post"` in its `[[check]]`, and `[runner] post = true` in `.bay/config.toml`. The runner then runs it
