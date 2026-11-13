@@ -61,8 +61,71 @@ pub fn default_deadline() -> Duration {
 /// `bay status [change]`, waiting for the remote at most `deadline` from now (G619).
 #[must_use]
 pub fn status(dir: &Path, change: Option<&str>, deadline: Duration) -> BayResult {
+    if change.is_none()
+        && let Some(saved) = saved_listing(dir, deadline)
+    {
+        return saved;
+    }
     run(dir, change, deadline).unwrap_or_else(BayResult::failed)
 }
+
+/// G714: the listing at `dir` from its saved answer, when the store stands as it was built from
+/// ([`crate::saved`]) and the read would wait for no sweep: inside the last sweep's window, or past
+/// it when that sweep took longer than `deadline` (G710). `None` when it must be read.
+#[must_use]
+pub fn saved_listing(dir: &Path, deadline: Duration) -> Option<BayResult> {
+    let (_, common) = crate::saved::own_checkout(dir)?;
+    let open = sweep::open_by_time(&common, crate::live::unix_now());
+    if !open && sweep::last_took(&common).is_none_or(|took| Duration::from_secs(took) <= deadline) {
+        return None;
+    }
+    let mut saved = crate::saved::answer(dir)?;
+    if !open {
+        stale_saved(dir, &common, &mut saved);
+    }
+    Some(saved)
+}
+
+/// A saved answer served past its sweep's window: it starts the sweep and leaves it running, as a
+/// read past its deadline does (G710), and says how old the answer's view of the remote is
+/// (`stale_read`), and since when the remote has not answered (G684).
+fn stale_saved(dir: &Path, common: &Path, saved: &mut BayResult) {
+    let sweep = match crate::sweeper::start(dir, None, Some(Instant::now())) {
+        Answer::Late(pid) => json!({"state": "started", "by": {"pid": pid}}),
+        Answer::Busy(running) => json!({"state": "running", "by": running}),
+        _ => json!({"state": "started"}),
+    };
+    let Some(detail) = saved.detail.as_mut() else {
+        return;
+    };
+    let mut warning = json!({
+        "code": "stale_read",
+        "fetched_at": detail["fetched_at"],
+        "stale_s": detail["stale_s"],
+        "waited_ms": 0,
+        "sweep": sweep,
+        "note": STALE_NOTE,
+    });
+    if let Some(unreached) = sweep::last_unreached(common) {
+        warning["note"] = json!(UNREACHED_NOTE);
+        warning["unreached"] = json!({"since": unreached["since"], "why": unreached["why"]});
+    }
+    let mut warnings: Vec<Value> = detail["warnings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row["code"] != "stale_read")
+        .collect();
+    warnings.insert(0, warning);
+    detail["warnings"] = Value::from(warnings);
+}
+
+/// The note of a `stale_read` warning.
+const STALE_NOTE: &str = "the remote sweep had not ended by this read's deadline: this is the store as the last sweep left it; the sweep runs on, and a read after it ends shows what it brought";
+
+/// The note of a `stale_read` warning when the remote has not answered the store's sweeps (G684).
+const UNREACHED_NOTE: &str = "the remote has not answered this store's sweeps: this is the store as the last sweep that reached it left it; a read once the remote answers shows what changed";
 
 /// What a cached read says instead of a fetch time: it never synchronized.
 pub const CACHED: &str = "local cache (not fetched by this read)";
@@ -423,6 +486,7 @@ fn held_records(chain: &Chain, ids: &[String], named: bool) -> Result<Vec<Change
 }
 
 /// What a status read brought from the remote before it reads anything.
+#[derive(Clone)]
 struct Refreshed {
     trunk: String,
     fetched_at: Option<String>,
@@ -703,14 +767,12 @@ fn stale_read(
         "stale_s": stale_s,
         "waited_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         "sweep": sweep,
-        "note": "the remote sweep had not ended by this read's deadline: this is the store as the last sweep left it; the sweep runs on, and a read after it ends shows what it brought",
+        "note": STALE_NOTE,
     });
     // G684: a store whose last sweeps could not ask the remote says so, and since when: a sweep
     // that runs on will most likely not reach it either.
     if let Some(unreached) = sweep::last_unreached(&first.common_dir) {
-        warning["note"] = json!(
-            "the remote has not answered this store's sweeps: this is the store as the last sweep that reached it left it; a read once the remote answers shows what changed"
-        );
+        warning["note"] = json!(UNREACHED_NOTE);
         warning["unreached"] = json!({"since": unreached["since"], "why": unreached["why"]});
     }
     refreshed.stale = Some(warning);
@@ -764,31 +826,42 @@ fn local_read(
 /// `failed`) for the read, which may have answered and left by then.
 pub fn sweep_child(dir: &Path, change: Option<&str>) {
     use std::io::Write as _;
-    let answer = swept_answer(dir, change);
+    let (answer, then) = swept_answer(dir, change);
     // The sweep fetched trunk: the coordination cache the `tool.before` hook reads is written
     // before the answer, so a read that returns on it never leaves the hook an older cache.
     crate::coord::after_command();
-    let mut out = std::io::stdout().lock();
-    // The read that started this sweep may have left: then no one reads the answer.
-    let _ = writeln!(out, "{answer}").and_then(|()| out.flush());
+    {
+        let mut out = std::io::stdout().lock();
+        // The read that started this sweep may have left: then no one reads the answer.
+        let _ = writeln!(out, "{answer}").and_then(|()| out.flush());
+    }
+    if let Some(then) = then {
+        then();
+    }
 }
 
-fn swept_answer(dir: &Path, change: Option<&str>) -> Value {
+/// What a sweep did, and the work it leaves for after its answer.
+type Then<'a> = Option<Box<dyn FnOnce() + 'a>>;
+
+fn swept_answer<'a>(dir: &'a Path, change: Option<&str>) -> (Value, Then<'a>) {
     let Ok(first) = Repo::open_with(dir, crate::repo::Fetch::Never) else {
-        return json!({"unserved": "the repository cannot be opened"});
+        return (json!({"unserved": "the repository cannot be opened"}), None);
     };
     let Some(plan) = Plan::of(&first) else {
-        return json!({"unserved": "no config at the trunk this store holds"});
+        return (
+            json!({"unserved": "no config at the trunk this store holds"}),
+            None,
+        );
     };
     let lock = match sweep::lock(&first.common_dir) {
         Ok(Ok(lock)) => lock,
-        Ok(Err(running)) => return json!({ "busy": running }),
-        Err(why) => return json!({ "unserved": why }),
+        Ok(Err(running)) => return (json!({ "busy": running }), None),
+        Err(why) => return (json!({ "unserved": why }), None),
     };
     let named = change.map(str::to_owned).or_else(|| first.view_change(dir));
     if plan.window(&first).is_some() && holds_named(&first, named.as_deref()) {
         lock.end();
-        return json!({"open": true});
+        return (json!({"open": true}), None);
     }
     test_wait("BAY_TEST_SWEEP_DELAY_MS");
     let swept = match sweep::sweep(&first.git, first.remote(), &plan.refspecs) {
@@ -796,7 +869,7 @@ fn swept_answer(dir: &Path, change: Option<&str>) -> Value {
         Err(error) => {
             sweep::unreached(&first.common_dir, &error.message());
             lock.end();
-            return json!({"unserved": "the remote sweep failed"});
+            return (json!({"unserved": "the remote sweep failed"}), None);
         }
     };
     test_wait("BAY_TEST_SWEEP_HOLD_MS");
@@ -805,24 +878,47 @@ fn swept_answer(dir: &Path, change: Option<&str>) -> Value {
         .map(str::to_owned)
     else {
         lock.end();
-        return json!({"unserved": "the remote holds no trunk"});
+        return (json!({"unserved": "the remote holds no trunk"}), None);
     };
     let (common, remote) = (first.common_dir.clone(), first.remote().to_owned());
-    let answer = match settle_swept(dir, change, first, &swept, &plan.targets, trunk) {
-        Ok((_, refreshed)) => {
+    let (answer, settled) = match settle_swept(dir, change, first, &swept, &plan.targets, trunk) {
+        Ok((repo, refreshed)) => {
             sweep::remember(&common, &remote, &plan.refspecs, &swept);
-            json!({"done": {
+            let done = json!({"done": {
                 "at": swept.at,
                 "ids": refreshed.ids,
                 "targets": refreshed.targets,
                 "talk_accept": refreshed.talk_accept,
-            }})
+            }});
+            (done, Some((repo, refreshed)))
         }
-        Err(Unsettled::Moved) => json!({ "moved": swept.at }),
-        Err(Unsettled::Failed(message)) => json!({ "failed": message }),
+        Err(Unsettled::Moved) => (json!({ "moved": swept.at }), None),
+        Err(Unsettled::Failed(message)) => (json!({ "failed": message }), None),
     };
     lock.end();
-    answer
+    // G714: the listing of the store this sweep settled is saved for the reads after it. The
+    // sweep's answer is the read's, which may be waiting: it goes first.
+    if let Some((repo, refreshed)) = settled.filter(|_| change.is_none()) {
+        return (
+            answer,
+            Some(Box::new(move || save_listing(dir, &repo, refreshed))),
+        );
+    }
+    (answer, None)
+}
+
+/// G714: builds the listing of the store a sweep settled and saves it, when the store did not
+/// move while it was built.
+fn save_listing(dir: &Path, repo: &Repo, refreshed: Refreshed) {
+    if repo.view_change(dir).is_some() {
+        return;
+    }
+    let Some(before) = crate::saved::Before::of(dir) else {
+        return;
+    };
+    if let Ok(result) = listing(dir, None, repo, refreshed) {
+        before.save(&result);
+    }
 }
 
 /// In a test build, the milliseconds the variable `name` sets hold the sweep: before it asks the
@@ -930,6 +1026,11 @@ fn settle_swept(
 
 fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult, String> {
     let started = Instant::now();
+    // G714: a listing's answer is saved for the reads after it, stamped with the store before it.
+    let before = change
+        .is_none()
+        .then(|| crate::saved::Before::of(dir))
+        .flatten();
     let (repo, refreshed) = match fetch_swept(dir, change, started, started + deadline) {
         Some(Ok(swept)) => swept,
         Some(Err(refused)) => return Ok(*refused),
@@ -945,6 +1046,21 @@ fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult
             (repo, refreshed)
         }
     };
+    let saves = before.filter(|_| refreshed.stale.is_none() && repo.view_change(dir).is_none());
+    let result = listing(dir, change, &repo, refreshed)?;
+    if let Some(before) = saves {
+        before.save(&result);
+    }
+    Ok(result)
+}
+
+/// The answer of a read of `change` (or the listing) at `dir`, from what `refreshed` brought.
+fn listing(
+    dir: &Path,
+    change: Option<&str>,
+    repo: &Repo,
+    refreshed: Refreshed,
+) -> Result<BayResult, String> {
     let Refreshed {
         trunk,
         fetched_at,
@@ -965,7 +1081,7 @@ fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult
     // finding, 2026-10-26: 43 views cost a named status about 26 s).
     let view = change.map(str::to_owned).or_else(|| repo.view_change(dir));
     let (shown, sections) = read_sections(
-        &repo,
+        repo,
         trunk.as_str(),
         &ids,
         named,
@@ -986,7 +1102,7 @@ fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult
         "quarantines": sections.quarantines,
         "red": red_rows_now,
         "red_pending": red_pending,
-        "talks_owed": talks_owed(&repo, &sections.talks),
+        "talks_owed": talks_owed(repo, &sections.talks),
         "talks": sections.talks,
         "targets": sections.targets,
         "trunk": trunk,

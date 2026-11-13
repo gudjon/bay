@@ -267,6 +267,8 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
   do not raise the deadline to wait it out. When the warning names `unreached`, this machine has
   not reached the remote since `unreached.since`: tell the user its network is down. Your work
   stays safe locally; nothing about the queue is known here until the remote answers.
+- `bay status` with `detail.saved_s`: nothing in this clone moved since that answer was built,
+  that many seconds ago, so it came back at once. Act on it as on any other read.
 - `bay status` with `detail.warnings` naming `main_not_linear`: a merge pushed outside bay put
   merges off main's first-parent line. bay still finds them. Tell the user to require linear
   history on the host.

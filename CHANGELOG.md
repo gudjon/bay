@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.66
+
+- `bay status` answers at once, from its last answer, while nothing in the clone has moved.
+
 ## 0.6.65
 
 - A batch's failing change is refused on the batch's own check when its checked files match, not rechecked alone.

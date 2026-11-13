@@ -57,7 +57,9 @@ pub(crate) fn status(
         .args(id)
         .env("BAY_ACTOR", "reader")
         .env("BAY_TEST_SWEPT_S", window)
-        .env("BAY_TEST_GIT_TRACE", &trace);
+        .env("BAY_TEST_GIT_TRACE", &trace)
+        // What the read asks the remote is under test, never a saved answer of it (G714).
+        .env("BAY_TEST_SAVED", "off");
     let (code, result) = result_json(&mut cmd);
     assert_eq!(code, 0, "{result}");
     let text = std::fs::read_to_string(&trace).expect("the trace was written");

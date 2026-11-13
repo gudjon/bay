@@ -241,6 +241,24 @@ pub fn last(common: &Path) -> Option<(String, u64)> {
     Some((held["at"].as_str()?.to_owned(), held["unix"].as_u64()?))
 }
 
+/// G714: whether the last sweep's window is open at `now` by its times alone: a listing served
+/// from a saved answer starts no sweep inside it.
+#[must_use]
+pub fn open_by_time(common: &Path, now: u64) -> bool {
+    let Ok(text) = std::fs::read_to_string(record(common)) else {
+        return false;
+    };
+    let Ok(held) = serde_json::from_str::<Value>(&text) else {
+        return false;
+    };
+    let (Some(unix), Some(ended)) = (held["unix"].as_u64(), held["ended"].as_u64()) else {
+        return false;
+    };
+    unix <= now
+        && now < ended.saturating_add(window_after(ended.saturating_sub(unix)))
+        && now < unix.saturating_add(served_s())
+}
+
 /// How many seconds the store's last recorded sweep took, start to end; `None` when none
 /// recorded its end.
 #[must_use]

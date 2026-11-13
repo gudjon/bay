@@ -54,7 +54,9 @@ fn status(test_box: &TestBox, repo: &Path) -> (Value, Vec<String>) {
         test_box
             .bay(repo)
             .arg("status")
-            .env("BAY_TEST_RED_TRACE", &trace),
+            .env("BAY_TEST_RED_TRACE", &trace)
+            // What the read judges is under test, never a saved answer of it (G714).
+            .env("BAY_TEST_SAVED", "off"),
     );
     assert_eq!(code, 0, "{status}");
     let lines = std::fs::read_to_string(&trace)

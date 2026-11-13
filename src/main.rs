@@ -675,6 +675,27 @@ enum RunnerAction {
 /// `.bay/config.toml` committed at trunk (ruling: config location), before anything else the
 /// command does.
 /// The host, doctor's box rows, install, update and the agent hook do not.
+/// G714: a listing whose store stands as its saved answer was built from is that answer, read
+/// with no Git: the config it was built under is still the one at trunk.
+fn saved_listing(cli: &Cli) -> Option<BayResult> {
+    let Command::Status {
+        change: None,
+        all: false,
+        lineage: None,
+        branches: false,
+        since: None,
+        deadline,
+        ..
+    } = &cli.command
+    else {
+        return None;
+    };
+    bay::status::saved_listing(
+        &cli.dir,
+        deadline.map_or_else(bay::status::default_deadline, Duration::from_secs),
+    )
+}
+
 fn config_refusal(cli: &Cli) -> Option<BayResult> {
     // `status --all` never fetches (G49): it reads the config without a fetch itself.
     let needs_config = !matches!(
@@ -901,6 +922,10 @@ fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
 
 fn main() -> ExitCode {
     let cli = parse();
+    if let Some(saved) = saved_listing(&cli) {
+        bay::update::auto();
+        return render(&saved, cli.json);
+    }
     if let Some(refusal) = config_refusal(&cli) {
         return render(&refusal, cli.json);
     }
