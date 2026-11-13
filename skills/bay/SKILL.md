@@ -353,6 +353,20 @@ name no record names comes back in `detail.unseen` with a `detail.warning`: chec
   (`cause: "outcome"`). Your repository's command may start a session when yours has ended. The plugin's answer
   is the event's `wake` in `bay status --since`. An outcome your own `bay merge --wait` returns wakes nothing.
 
+## Hand work over to another agent
+
+A handover is a message, not a merge. Never make the next agent wait for your last change to merge.
+
+- **Start the next agent now.** Put the task card's text, or its path and change id, in the prompt that starts
+  it. Submit the card's change too; the two run side by side.
+- **Its first change waits, not the agent.** It opens each change that builds on yours with
+  `bay start <intent> --paths <paths> --after <change>` and submits at once. bay merges it after yours, and
+  `bay merge` returns `DEPENDENCY_PENDING` without holding the agent.
+- **Unfinished work moves with its change.** `bay abandon <change> --why "handed to <agent>"`, and the next
+  agent runs `bay start <change> --adopt`.
+- **Wait without polling.** To hear when a change merges, run `bay merge <change> --wait` (it does not submit it
+  again) or let `[plugin.wake]` wake the session. Never loop on `bay status`: its answer can be a minute old.
+
 ## Set up a repository (only when the user asks)
 
 1. Commit `.bay/config.toml` and `.bay/policy.toml` to main and push them. bay reads both only from

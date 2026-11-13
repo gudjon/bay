@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.62
+
+- The skill shows how to hand work to another agent without waiting for a merge.
+
 ## 0.6.61
 
 - `bay status` no longer lists changes already on main whose records still read ready.
