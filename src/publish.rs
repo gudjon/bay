@@ -2397,6 +2397,29 @@ fn say_commit_keyed(
     Ok(())
 }
 
+/// G712 (a fleet finding, 2026-11-13: a code change's batch took in two notes changes, each
+/// merged from its own place by G703 while the batch was checked, and the batch was cut and
+/// checked again twice, 189 s and 370 s lost; changes behind it waited 16 to 35 minutes): a
+/// change that runs from its own place past this head joins no batch of it. It lands alone in
+/// seconds, and the batch's check stays the one that lands.
+fn pass_over_passing(
+    ctx: &Ctx,
+    queue: &crate::queue::Queue,
+    trunk: &str,
+    behind: &mut [throughput::Queued],
+) -> Result<(), String> {
+    for queued in behind {
+        if queued.live
+            && queued.batchable
+            && passes_unread(ctx, queue, queued.seq, trunk, &queued.revision)?
+            && !repair_moved_under(ctx, queue, trunk, &queued.op_id)?
+        {
+            queued.batchable = false;
+        }
+    }
+    Ok(())
+}
+
 /// The batch the head `op_id` at place `at` would form on `trunk`, with the policy at
 /// `trunk`: `None` when batching is off, reuse cannot stand for a run (§ 7,
 /// [`Ctx::reuse_trusted`]), the head runs ahead of its turn (G554), is a repair, a culprit or
@@ -2451,7 +2474,8 @@ fn batch_plan(
         fails_on: Vec::new(),
     };
     let waiting = queue.behind(at);
-    let (behind, unread) = throughput::read_line(git, waiting.iter().copied());
+    let (mut behind, unread) = throughput::read_line(git, waiting.iter().copied());
+    pass_over_passing(ctx, &queue, trunk, &mut behind)?;
     let by_lane = repo.config.footprint_lanes();
     let (mut members, mut stopped, mut stopped_at) = throughput::plan_batch(
         git,

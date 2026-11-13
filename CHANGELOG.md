@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.64
+
+- A change that merges past the head no longer joins its batch, so the head's check is never thrown away.
+
 ## 0.6.63
 
 - `bay status` reads all its talks in one batch, not one Git call per entry.
