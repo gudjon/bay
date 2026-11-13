@@ -9,8 +9,8 @@
 //! a change another clone opened is listed once a fetching command (`bay status`, `bay start`,
 //! `land`) brought its chain.
 //!
-//! A change is live while its chain says it is open, invalidated, repairing or ready, it holds
-//! no landed marker here, and it is in no sandbox lane (a lane change never lands, NEW-4). Two
+//! A change is live while its chain says it is open, invalidated, repairing or ready and it
+//! published no operation, it holds no landed marker here, and it is in no sandbox lane (a lane change never lands, NEW-4). Two
 //! declared paths overlap when one holds the other (`crate::inputs::within`); a change that
 //! declares none covers the whole tree, named `.`. Each overlap names the narrower path.
 
@@ -85,14 +85,16 @@ pub fn read_chains(repo: &Repo) -> Result<(Vec<HeldChain>, HashMap<String, Strin
     Ok((chains, landed(repo)?))
 }
 
-/// Whether `held` is live: its chain says it has not ended ([`live`]) and `landed`, the
-/// markers [`read_chains`] read, holds no landing of it. A lane change counts.
+/// Whether `held` is live: its chain says it has not ended, by its state or by an operation it
+/// published (`ChangeRecord::ended`, the rule runners keep), and `landed`, the markers
+/// [`read_chains`] read, holds no landing of it. A lane change counts. `bay status` lists by it
+/// too (G708), so a listing never names a change it would then call on main.
 #[must_use]
 pub fn counts_live<S: std::hash::BuildHasher>(
     held: &HeldChain,
     landed: &HashMap<String, String, S>,
 ) -> bool {
-    live(held.record.state) && !landed.contains_key(&held.id) && !refused_as_merged(held)
+    !held.record.ended() && !landed.contains_key(&held.id) && !refused_as_merged(held)
 }
 
 /// G701 (a fleet finding, 2026-11-12: `bay status` named a change merged 15 days before as the

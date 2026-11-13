@@ -157,19 +157,23 @@ fn listed(repo: &Repo, chain: &Chain, named: Option<String>) -> Result<Vec<Strin
         refresh_chains(repo, chain, &ids)?;
         return Ok(ids);
     }
-    let ids = live_ids(repo, chain)?;
+    let ids = live_ids(repo)?;
     let _ = repo.remote_chains(&ids);
     Ok(ids)
 }
 
 /// Every change this repository holds that has not ended.
-fn live_ids(repo: &Repo, chain: &Chain) -> Result<Vec<String>, String> {
+///
+/// G708 (a fleet finding, 2026-11-13: a status listing named five changes whose own reads said
+/// they were on main): ended is [`crate::overlap::counts_live`]'s rule, which also reads a
+/// published operation, a landed marker and a refusal as already merged, not the chain's state
+/// alone.
+fn live_ids(repo: &Repo) -> Result<Vec<String>, String> {
     // W5: every chain's record in one batch (G200b); a chain it cannot read stays listed.
-    let ended_here: std::collections::BTreeSet<String> = chain
-        .read_all()
-        .map_err(|error| error.message())?
+    let (chains, landed) = crate::overlap::read_chains(repo)?;
+    let ended_here: std::collections::BTreeSet<String> = chains
         .into_iter()
-        .filter(|held| ended(held.record.state))
+        .filter(|held| !crate::overlap::counts_live(held, &landed))
         .map(|held| held.id)
         .collect();
     Ok(repo
@@ -195,7 +199,7 @@ fn settle_listed(
 ) -> Result<Vec<String>, String> {
     let is_named = named.is_some();
     // G619: every sweep settles every live chain, so each one serves the reads in its window.
-    let mut settled = live_ids(repo, chain)?;
+    let mut settled = live_ids(repo)?;
     let ids = match named {
         Some(id) => {
             if !settled.contains(&id) {
@@ -724,7 +728,7 @@ fn local_read(
             chain.head(&id).ok()??;
             vec![id]
         }
-        (None, None) => live_ids(repo, &chain).ok()?,
+        (None, None) => live_ids(repo).ok()?,
     };
     // The sweep brought the evidence notes red, flakes, post checks and targets judge.
     repo.swept_evidence();

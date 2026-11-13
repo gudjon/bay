@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.61
+
+- `bay status` no longer lists changes already on main whose records still read ready.
+
 ## 0.6.60
 
 - A change whose files no check ahead of it reads merges while those checks still run.
