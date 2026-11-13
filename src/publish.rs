@@ -8082,7 +8082,8 @@ fn finished_checks(
 }
 
 /// NEW-10 footprint-keyed evidence (`crate::throughput`): the records of check `entry`, which
-/// declares `footprint = true`, on this operation's earlier candidates and pre-checks whose
+/// declares `footprint = true`, on this operation's earlier candidates and pre-checks, and on
+/// the candidate's own tree checked on another base (G713, a batch's bisection), whose
 /// stamp is the candidate's (the same read set, byte for byte, in its tree and in its base's),
 /// under the same policy revision, provenance, manifest and fixtures. Each is carried onto the
 /// candidate's tree as a record of this executor's producer that names the record it carries,
@@ -8105,11 +8106,13 @@ fn carry_over(
         // Items 1 and 2: main's own tip, the candidate's base, where the last landing's records
         // and the runner's warm records sit, for an observed footprint.
         .chain((entry.footprint == policy::FootprintMode::Observed).then_some(judged.base_tree))
-        .filter(|tree| *tree != judged.tree)
+        // G713: the candidate's own tree, checked on another base. A batch's bisection checks
+        // each prefix on the batch's base; once the prefix before its culprit lands, the
+        // culprit's candidate is that failing prefix's tree, exactly, on a base the prefix
+        // moved. Its record then answers the culprit here when the read set is the same in
+        // both bases, instead of a run alone that repeats it.
+        .chain(std::iter::once(judged.tree))
         .collect();
-    if trees.is_empty() {
-        return Ok(Vec::new());
-    }
     let observed = entry.footprint == policy::FootprintMode::Observed;
     let declared = throughput::stamp(git, entry, judged.tree, judged.base_tree);
     if declared.is_none() && !observed {
@@ -8123,7 +8126,10 @@ fn carry_over(
         .position(|check| check.id == entry.id && check.environment == entry.environment)
         .map_or(0, |at| at + 1);
     let holds = |record: &&evidence::EvidenceRecord| {
-        record.kind == evidence::KIND_CHECK
+        // A record on these very inputs is exact reuse's, and a carried one is never carried
+        // again.
+        (record.subject.tree != judged.tree || record.subject.base_tree != judged.base_tree)
+            && record.kind == evidence::KIND_CHECK
             && record.check == id
             && record.manifest_digest == policy.manifest_digest
             && record.policy_revision == policy.revision

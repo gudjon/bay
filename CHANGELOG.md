@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.65
+
+- A batch's failing change is refused on the batch's own check when its checked files are unchanged, not checked again alone.
+
 ## 0.6.64
 
 - A change that merges past the head no longer joins its batch, so the head's check is never thrown away.
