@@ -605,6 +605,17 @@ fn fetch_swept(
     {
         return Some(Ok((first, refreshed)));
     }
+    // G710 (a measurement, 2026-11-13: on a remote of 59,387 refs a sweep took 18 s, and every
+    // read past a sweep's window waited its whole 3 s deadline, then answered from the store
+    // anyway): when the store's last sweep took longer than this read may wait, the read waits
+    // for none. It answers from the store now, and the sweep it starts runs on.
+    let until = if sweep::last_took(&first.common_dir)
+        .is_some_and(|took| Duration::from_secs(took) > until.saturating_duration_since(started))
+    {
+        started
+    } else {
+        until
+    };
     let until = holds_named(&first, named.as_deref()).then_some(until);
     let sweep = match crate::sweeper::start(dir, change, until) {
         Answer::Done {

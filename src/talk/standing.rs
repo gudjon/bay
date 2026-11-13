@@ -133,7 +133,27 @@ pub fn open_rows(git: &Git, now: u64) -> Result<Vec<Value>, String> {
 fn open_where(git: &Git, now: u64, keep: impl Fn(&Talk) -> bool) -> Result<Vec<Value>, String> {
     let mut talks = talks_where(git, TALK_PREFIX, |talk| !talk.closed() && keep(talk))?;
     talks.sort_by_key(Talk::sent);
+    preload(git, &talks)?;
     talks.iter().map(|talk| row(git, talk, now)).collect()
+}
+
+/// G709: every object the rows of `talks` read, its entries and its root commit, in one batch
+/// read, so a row runs no Git of its own.
+fn preload(git: &Git, talks: &[Talk]) -> Result<(), String> {
+    let names: Vec<String> = talks
+        .iter()
+        .flat_map(|talk| {
+            talk.entries
+                .iter()
+                .map(|entry| entry.blob.clone())
+                .chain(std::iter::once(format!(
+                    "{}~{}",
+                    talk.tip,
+                    talk.entries.len()
+                )))
+        })
+        .collect();
+    git.preload(&names).map_err(|error| error.message())
 }
 
 /// One talk as `bay status --since` follows it (G47b).
@@ -171,6 +191,7 @@ pub fn followed(
         (talk.from_name() == me || talk.who == me)
             && (!talk.closed() || held.is_none_or(|held| held.contains_key(&talk.id)))
     })?;
+    preload(git, &mine)?;
     let mut talks = Vec::with_capacity(mine.len());
     for talk in mine {
         if held.is_none() && talk.closed() && !closed_within(git, &talk, now, RECENT_S)? {

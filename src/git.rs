@@ -134,6 +134,28 @@ type RefRead = (PathBuf, Vec<String>);
 /// first read until it runs a Git command that may move a ref. `None` outside a hook.
 static HOOK_READS: Mutex<Option<BTreeMap<RefRead, Vec<u8>>>> = Mutex::new(None);
 
+/// G709 (a measurement, 2026-11-13: one `bay status <change>` ran 266 Git calls, about 150 of
+/// them one `cat-file` each for a talk's entries and its root commit): objects read ahead in one
+/// `cat-file --batch` ([`Git::preload`]), by directory and the name read: a full object id, or
+/// one and `~<n>`. An object never changes, so a kept one is right in any process.
+/// One object [`OBJECTS`] keeps: its directory and the name read, and its type and content.
+type Kept = std::collections::HashMap<(PathBuf, String), (String, Vec<u8>)>;
+
+static OBJECTS: std::sync::LazyLock<Mutex<Kept>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// The most objects [`OBJECTS`] keeps; past it, it starts again empty.
+const OBJECTS_KEPT: usize = 20_000;
+
+/// Whether `name` names one object for good: a full hex object id, alone or with `~<n>`.
+fn fixed_name(name: &str) -> bool {
+    let (id, back) = name.split_once('~').unwrap_or((name, "0"));
+    matches!(id.len(), 40 | 64)
+        && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && !back.is_empty()
+        && back.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 /// Keeps this process's ref reads ([`HOOK_READS`]): for a hook, a short process that reads the
 /// trunk's name and tip several times and moves no ref of its own in between.
 pub fn keep_ref_reads() {
@@ -485,6 +507,19 @@ impl Git {
         input: Option<&[u8]>,
         timeout: std::time::Duration,
     ) -> Result<Vec<u8>, GitError> {
+        // G709: an object read ahead is answered from what [`Git::preload`] read.
+        if envs.is_empty()
+            && input.is_none()
+            && let ["cat-file", kind @ ("blob" | "commit"), name] = args
+            && fixed_name(name)
+            && let Some((held, content)) = OBJECTS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get(&(self.dir.clone(), (*name).to_owned()))
+            && held == kind
+        {
+            return Ok(content.clone());
+        }
         // G706: in a hook, a ref read again is answered from this process's first read of it,
         // until this process runs a Git command that may move a ref.
         let key = (envs.is_empty() && input.is_none() && ref_read(args)).then(|| {
@@ -516,6 +551,62 @@ impl Git {
             reads.insert(key, out.clone());
         }
         read
+    }
+
+    /// G709: reads the objects `names` names (each a full object id, alone or with `~<n>`) in
+    /// one `cat-file --batch`, so each `cat-file blob|commit <name>` after it runs no Git. A name
+    /// already read, or not such a name, is skipped; a missing object is left to its own read.
+    ///
+    /// # Errors
+    ///
+    /// The batch read fails.
+    pub fn preload(&self, names: &[String]) -> Result<(), GitError> {
+        let wanted: Vec<&str> = {
+            let held = OBJECTS.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut seen = std::collections::BTreeSet::new();
+            names
+                .iter()
+                .map(String::as_str)
+                .filter(|name| fixed_name(name))
+                .filter(|name| !held.contains_key(&(self.dir.clone(), (*name).to_owned())))
+                .filter(|name| seen.insert(*name))
+                .collect()
+        };
+        if wanted.is_empty() {
+            return Ok(());
+        }
+        let mut input = wanted.join("\n");
+        input.push('\n');
+        let out = self.run_bytes(&["cat-file", "--batch"], &[], Some(input.as_bytes()))?;
+        let mut rest = out.as_slice();
+        let mut read = Vec::with_capacity(wanted.len());
+        for name in wanted {
+            let Some(end) = rest.iter().position(|byte| *byte == b'\n') else {
+                break;
+            };
+            let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+            rest = &rest[end + 1..];
+            let words: Vec<&str> = header.split(' ').collect();
+            let [_, kind, size] = words.as_slice() else {
+                continue;
+            };
+            let Ok(size) = size.parse::<usize>() else {
+                break;
+            };
+            let Some(content) = rest.get(..size) else {
+                break;
+            };
+            read.push((name.to_owned(), ((*kind).to_owned(), content.to_vec())));
+            rest = rest.get(size + 1..).unwrap_or_default();
+        }
+        let mut held = OBJECTS.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.len() + read.len() > OBJECTS_KEPT {
+            held.clear();
+        }
+        for (name, object) in read {
+            held.insert((self.dir.clone(), name), object);
+        }
+        Ok(())
     }
 
     fn run_bytes_uncached(

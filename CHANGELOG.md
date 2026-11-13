@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.63
+
+- `bay status` reads all its talks in one batch, not one Git call per entry.
+- `bay status` no longer waits for a remote sweep that cannot finish before its deadline.
+
 ## 0.6.62
 
 - The skill shows how to hand work to another agent without waiting for a merge.

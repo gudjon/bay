@@ -241,6 +241,19 @@ pub fn last(common: &Path) -> Option<(String, u64)> {
     Some((held["at"].as_str()?.to_owned(), held["unix"].as_u64()?))
 }
 
+/// How many seconds the store's last recorded sweep took, start to end; `None` when none
+/// recorded its end.
+#[must_use]
+pub fn last_took(common: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(record(common)).ok()?;
+    let held: Value = serde_json::from_str(&text).ok()?;
+    Some(
+        held["ended"]
+            .as_u64()?
+            .saturating_sub(held["unix"].as_u64()?),
+    )
+}
+
 /// The marks of the store's pushes ([`pushed`]), one file each, named `<unix>-<pid>-<n>`.
 fn push_marks(common: &Path) -> PathBuf {
     common.join("bay").join("swept-pushes")
