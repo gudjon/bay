@@ -46,8 +46,10 @@ fn passes_until(test_box: &TestBox, repo: &Path, passes: usize, done: impl Fn(&V
     );
 }
 
-/// One `bay status` with the red trace on: its red rows and the trace lines it wrote.
-fn status(test_box: &TestBox, repo: &Path) -> (Value, Vec<String>) {
+/// One `bay status` with the red trace on, served by the last sweep: its red rows and the trace
+/// lines it wrote. It starts no sweep, so no sweep of its own judges red and saves a judgement
+/// while this read judges.
+fn status_in_window(test_box: &TestBox, repo: &Path) -> (Value, Vec<String>) {
     let trace = test_box.path().join("red-trace");
     // The sweep of an earlier read writes its judgement and its trace too.
     support::sweeps_ended(repo);
@@ -58,7 +60,8 @@ fn status(test_box: &TestBox, repo: &Path) -> (Value, Vec<String>) {
             .arg("status")
             .env("BAY_TEST_RED_TRACE", &trace)
             // What the read judges is under test, never a saved answer of it (G714).
-            .env("BAY_TEST_SAVED", "off"),
+            .env("BAY_TEST_SAVED", "off")
+            .env("BAY_TEST_SWEPT_S", "600"),
     );
     assert_eq!(code, 0, "{status}");
     support::sweeps_ended(repo);
@@ -109,7 +112,7 @@ fn a_status_judges_red_from_the_judgement_the_last_status_saved() {
     support::sweeps_ended(&repo);
     assert!(saved.is_file(), "no status saved a judgement");
     std::fs::remove_file(&saved).unwrap();
-    let (first, judged) = status(&test_box, &repo);
+    let (first, judged) = status_in_window(&test_box, &repo);
     assert!(
         judged.len() == 1 && judged[0].ends_with("in full"),
         "the first status did not judge the window: {judged:?}"
@@ -118,7 +121,7 @@ fn a_status_judges_red_from_the_judgement_the_last_status_saved() {
 
     // Nothing moved: the next status starts from the saved judgement, reads no answers, and
     // finds the same red.
-    let (second, judged) = status(&test_box, &repo);
+    let (second, judged) = status_in_window(&test_box, &repo);
     assert!(
         judged.len() == 1 && judged[0].contains(" read 0 from "),
         "the next status judged again what nothing moved: {judged:?}"
@@ -130,7 +133,7 @@ fn a_status_judges_red_from_the_judgement_the_last_status_saved() {
     let mut other: Value = serde_json::from_str(&text).unwrap();
     other["bay"] = Value::from("0.0.1");
     std::fs::write(&saved, other.to_string()).unwrap();
-    let (third, judged) = status(&test_box, &repo);
+    let (third, judged) = status_in_window(&test_box, &repo);
     assert!(
         judged.len() == 1 && judged[0].ends_with("in full"),
         "a status read the judgement another bay saved: {judged:?}"
