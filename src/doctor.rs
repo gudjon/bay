@@ -381,9 +381,13 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
         ),
         GraphState::Ok => {}
     }
-    let fetch_writes = (!info.bare)
-        .then(|| crate::commit_graph::config_bool(git, "fetch.writeCommitGraph") == Some(true));
-    if fetch_writes == Some(false) {
+    let fetch_key =
+        (!info.bare).then(|| crate::commit_graph::config_bool(git, "fetch.writeCommitGraph"));
+    let fetch_writes = fetch_key.map(|key| key == Some(true));
+    // G718 (a fleet's doctor, 2026-11-14: a store many sessions fetch into keeps one writer of
+    // its commit-graph, and doctor advised every fetch to write it): a site that set the key to
+    // false chose so, and doctor gives no advice against it.
+    if fetch_key == Some(None) {
         notes.push(
             "a fetch does not refresh the commit-graph (bay install sets fetch.writeCommitGraph)",
         );

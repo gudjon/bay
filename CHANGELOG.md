@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.70
+
+- The skill covers working in more than one repository; `--after` follows only the same repository.
+- `bay doctor` no longer advises fetch commit-graph writes where the site turned them off.
+
 ## 0.6.69
 
 - `bay install` leaves an up-to-date settings file unchanged; it no longer reorders bay's hook entries.

@@ -369,6 +369,19 @@ A handover is a message, not a merge. Never make the next agent wait for your la
 - **Wait without polling.** To hear when a change merges, run `bay merge <change> --wait` (it does not submit it
   again) or let `[plugin.wake]` wake the session. Never loop on `bay status`: its answer can be a minute old.
 
+## Work in more than one repository
+
+Each repository is its own bay: its own main, queue, checks, changes and talks. Nothing in one moves the other.
+
+- **Run each command in that repository's own clone.** A change id names a change of one repository only.
+- **One change, one repository.** Work that touches two repositories is two changes, one in each. Name the other
+  change's id in each intent, so a reader finds the pair.
+- **`--after` follows only a change of the same repository.** A change of another repository never merges here,
+  so a change that names it waits for ever. When work needs another repository's change first, run
+  `bay merge <change> --wait` in that repository's clone, then submit the dependent change in its own.
+- **Keep both moving.** Submit each change as soon as it is ready; a repository's queue never waits for the other's.
+  Read `bay status` in each repository: a red main in one says nothing about the other.
+
 ## Set up a repository (only when the user asks)
 
 1. Commit `.bay/config.toml` and `.bay/policy.toml` to main and push them. bay reads both only from
@@ -502,7 +515,10 @@ The order, learned in a fleet rollout:
    hook this bay adds that the project's settings lack: repeat step 3.
 3. In one clone, run `bay install`, and merge the change that commits `.claude/settings.json` with bay's entries.
    Every machine gets the hooks as it takes that change. A machine without bay is unaffected: each entry first
-   checks that bay is present.
+   checks that bay is present. A settings file that already carries bay's entries is left unchanged, so a clone
+   whose `bay install` changes nothing has nothing to merge. The project may add its own conditions to an entry
+   that never stops the agent (the wait for talk), between the presence check and `exec bay hook <event>`:
+   doctor and `bay install` keep it as written. A guard entry changed that way reads as missing.
 4. Run `bay doctor` on each machine after it takes the change. `bay status --all` then shows every machine's
    verdict in one place (`ready`); fix each red machine it names, and do not guess.
 
