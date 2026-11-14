@@ -49,6 +49,8 @@ fn passes_until(test_box: &TestBox, repo: &Path, passes: usize, done: impl Fn(&V
 /// One `bay status` with the red trace on: its red rows and the trace lines it wrote.
 fn status(test_box: &TestBox, repo: &Path) -> (Value, Vec<String>) {
     let trace = test_box.path().join("red-trace");
+    // The sweep of an earlier read writes its judgement and its trace too.
+    support::sweeps_ended(repo);
     let _ = std::fs::remove_file(&trace);
     let (code, status) = result_json(
         test_box
@@ -59,6 +61,7 @@ fn status(test_box: &TestBox, repo: &Path) -> (Value, Vec<String>) {
             .env("BAY_TEST_SAVED", "off"),
     );
     assert_eq!(code, 0, "{status}");
+    support::sweeps_ended(repo);
     let lines = std::fs::read_to_string(&trace)
         .unwrap_or_default()
         .lines()
@@ -103,6 +106,7 @@ fn a_status_judges_red_from_the_judgement_the_last_status_saved() {
 
     // The statuses above saved their judgements: a status with none saved judges the window.
     let saved = repo.join(".git/bay/red-judged.json");
+    support::sweeps_ended(&repo);
     assert!(saved.is_file(), "no status saved a judgement");
     std::fs::remove_file(&saved).unwrap();
     let (first, judged) = status(&test_box, &repo);

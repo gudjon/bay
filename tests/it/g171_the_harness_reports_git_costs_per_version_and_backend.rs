@@ -73,6 +73,7 @@ fn a_status_traces_each_git_spawn_once() {
             .arg("status"),
     );
     assert_eq!(code, 0, "{result}");
+    support::sweeps_ended(&repo);
 
     let called = logged(&log);
     assert!(!called.is_empty(), "bay status ran no git at all");

@@ -59,7 +59,8 @@ fn each_leftover_reports_state_age_and_uncheckpointed_edits() {
 
     let text = status.to_string();
     assert!(
-        !text.contains("pull_request") && !text.contains("chat"),
+        // As keys: a random change id may spell either word.
+        !text.contains("\"pull_request\"") && !text.contains("\"chat\""),
         "{text}"
     );
 }

@@ -1034,3 +1034,18 @@ pub fn row<'a>(result: &'a serde_json::Value, name: &str) -> &'a serde_json::Val
         .find(|row| row["name"] == name)
         .unwrap_or_else(|| panic!("no row {name} in {result}"))
 }
+
+/// Waits until no sweep of the store at `repo` runs. A status read returns once its sweep has
+/// answered, but the sweep runs on to save the listing it built (G714): a test that reads what
+/// a status wrote, or counts what it ran, waits for it first.
+pub fn sweeps_ended(repo: &Path) {
+    let path = repo.join(".git/bay/sweep.lock");
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+    {
+        let _ = file.lock();
+        let _ = file.unlock();
+    }
+}
