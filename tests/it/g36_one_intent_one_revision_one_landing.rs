@@ -6,7 +6,8 @@
 //! `Supersedes:`); each generation lands once; two concurrent `start` calls of one actor yield
 //! one change; another actor is refused while the holder works, and adopts an idle change
 //! after the takeover window and lands it once; the actor it was adopted from is told so; two
-//! changes holding one generation still land once (the landed-intent marker). A resubmission of
+//! changes holding one generation still land once (the landed-intent marker), and the one that
+//! did not merge is refused as superseded by the one that did (BACKLOG 235). A resubmission of
 //! the same revision attaches to its operation (G10, G13). An observer that reboots waits a full
 //! takeover window again; adopting a chain retention already cut re-roots it and lands once. A
 //! same-name `start` while another session of that name has a fresh heartbeat naming the change
@@ -249,7 +250,14 @@ fn two_changes_holding_one_generation_land_once() {
     assert_eq!(code, 0);
     let (code, refused) = edit_and_land(&test_box, "agent-a", &twin_view, "twin");
     assert_eq!(code, 10, "{refused}");
-    assert_eq!(refused["reason"], "CHANGE_ALREADY_MERGED");
+    // BACKLOG 235: the twin's work is not on main; it is superseded by the merge, never
+    // "already merged", which would count it as ended (G701).
+    assert_eq!(refused["reason"], "CHANGE_SUPERSEDED", "{refused}");
+    assert_eq!(
+        refused["detail"]["superseded_by"],
+        first_id.as_str(),
+        "{refused}"
+    );
     assert_eq!(test_box.trunk_change_ids(&remote), vec![first_id]);
 }
 

@@ -3046,6 +3046,45 @@ fn rejoins_mid_publish(reason: &str) -> bool {
     matches!(reason, "deadline" | crate::queue::UNAVAILABLE)
 }
 
+/// Another change landed this generation of the intent: never a retry (§ 6). The marker is
+/// the ref or its shard index record (§ 10a); an unread remote is an error, never "absent".
+/// BACKLOG 235: the generation may be one this change never won, whose merge is another
+/// change's. That change superseded this one, whose work is not on main: never "already
+/// merged", whose guidance says never to retry a change that has work still to land. `None`
+/// when no merge holds the generation.
+fn generation_landed(ctx: &Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
+    let Some(claim) = &ctx.record.claim else {
+        return Ok(None);
+    };
+    let Some(landed) = crate::compact::remote_marker(ctx.repo, &claim.landed_ref())? else {
+        return Ok(None);
+    };
+    let merged_by = crate::start::merged_change(ctx.repo, &landed, &claim.landed_ref())?;
+    if merged_by != ctx.id {
+        return Ok(Some(
+            BayResult::blocked(Reason::ChangeSuperseded)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(json!({
+                    "landed_intent": claim.landed_ref(),
+                    "superseded_by": merged_by,
+                    "generation": claim.generation,
+                    "why": format!("generation {} of the intent of change {} merged as change \
+                        {merged_by}; the work of {} is not on main",
+                        claim.generation, ctx.id, ctx.id),
+                    "recovery": format!("bay start {} claims the next generation of its intent, \
+                        then bay merge", ctx.id),
+                })),
+        ));
+    }
+    Ok(Some(
+        BayResult::blocked(Reason::ChangeAlreadyLanded)
+            .with_change(ctx.id.clone())
+            .with_op(op_id)
+            .with_detail(json!({"landed_intent": claim.landed_ref()})),
+    ))
+}
+
 /// A publishing push was refused (§ 6): reports the existing landing, retries the same
 /// candidate after a hook timeout, rejoins the queue, or moves to the new trunk (`None`: build
 /// and check again).
@@ -3067,17 +3106,8 @@ fn after_refused_push(
     if let Some(result) = scanned(ctx, &now, revision)? {
         return Ok(Some(existing(result)));
     }
-    // Another change landed this generation of the intent: never a retry (§ 6).
-    // The ref or its shard index record (§ 10a); an unread remote is an error, never "absent".
-    if let Some(claim) = &ctx.record.claim
-        && crate::compact::remote_marker(ctx.repo, &claim.landed_ref())?.is_some()
-    {
-        return Ok(Some(
-            BayResult::blocked(Reason::ChangeAlreadyLanded)
-                .with_change(ctx.id.clone())
-                .with_op(op_id)
-                .with_detail(json!({"landed_intent": claim.landed_ref()})),
-        ));
+    if let Some(refused) = generation_landed(ctx, op_id)? {
+        return Ok(Some(refused));
     }
     // A cancel or a newer request that the hook's own transaction saw: the refusal is the
     // stated answer, never `failed` (G33).

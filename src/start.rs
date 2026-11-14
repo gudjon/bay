@@ -811,6 +811,127 @@ fn superseded_by_newer(id: &str, record: &ChangeRecord, newer: &(u64, String)) -
         }))
 }
 
+/// BACKLOG 235 (a fleet finding, 2026-11-14, bay 0.6.70: h3u6cttl's start ended after its
+/// chain was written and before its claim was pushed; a second start of the same intent claimed
+/// that generation and landed; the next day `bay start h3u6cttl` pushed the first chain as it
+/// was, and its publish was refused `CHANGE_ALREADY_MERGED` while its work was not on main).
+/// A change has not won its generation when the remote's claim of it names another change, or
+/// none, or when another change merged it. Picked up, such a change claims its intent's next
+/// free generation: one atomic push of its chain and the new claim, which is create-only as a
+/// start's is (G198). While the intent's newest generation is another live change, it claims
+/// nothing, as an intent has one live change, and names that change; its merge is then refused
+/// `CHANGE_SUPERSEDED` once that change merges, and a start after that claims. Main is fetched
+/// first: a merge is read by its commit.
+/// `None` when the change won its generation, or has no claim; else what it claimed, or the
+/// live change it waits on.
+fn claim_unwon(
+    repo: &Repo,
+    chain: &Chain,
+    head: &mut String,
+    record: &mut ChangeRecord,
+) -> Result<Option<Value>, String> {
+    let id = record.id.clone();
+    let name = change_ref(&id);
+    for _ in 0..ADOPT_ATTEMPTS {
+        let Some(claim) = record.claim.clone() else {
+            return Ok(None);
+        };
+        let claims = remote_claims(repo, &claim.hash)?;
+        let held_by = claims.get(&claim.generation).cloned();
+        let merged_by = match crate::compact::remote_marker(repo, &claim.landed_ref())? {
+            Some(landed) => Some(merged_change(repo, &landed, &claim.landed_ref())?),
+            None => None,
+        };
+        // Its own merge is a landed change's, which a start never reopens (G417).
+        if merged_by.as_deref() == Some(id.as_str())
+            || (merged_by.is_none() && held_by.as_deref() == Some(id.as_str()))
+        {
+            return Ok(None);
+        }
+        if let Some((newest, change)) = claims.last_key_value()
+            && *change != id
+            && !remote_has(repo, &claim_of(&claim.hash, *newest).landed_ref())?
+            && fetched_record(repo, change)?.state.is_live()
+        {
+            return Ok(Some(json!({
+                "generation": null,
+                "unwon": claim.generation,
+                "held_by": merged_by.or(held_by),
+                "waits_on": change,
+                "why": format!("change {id} never won generation {} of its intent, and \
+                    generation {newest} is live change {change}: it claims one once {change} \
+                    merges or ends", claim.generation),
+            })));
+        }
+        let generation = claims
+            .keys()
+            .next_back()
+            .map_or(claim.generation, |newest| {
+                (newest + 1).max(claim.generation)
+            });
+        let before = head.clone();
+        if generation != claim.generation {
+            record.claim = Some(claim_of(&claim.hash, generation));
+            let draft = newest_draft(chain, &id)?;
+            *head = chain
+                .append(
+                    head,
+                    record,
+                    &draft,
+                    &format!("claim generation {generation}"),
+                )
+                .map_err(|error| error.message())?;
+        }
+        let intent_ref = claim_of(&claim.hash, generation).intent_ref();
+        let pushed = repo.git.run(&[
+            "push",
+            "-q",
+            "--atomic",
+            &format!("--force-with-lease={intent_ref}:"),
+            repo.remote(),
+            &format!("{name}:{name}"),
+            &format!("{head}:{intent_ref}"),
+        ]);
+        match pushed {
+            Ok(_) => {
+                // The claim is the remote's now; its local copy is created, never moved (G198).
+                let _ = repo.git.run(&["update-ref", &intent_ref, head, ""]);
+                return Ok(Some(json!({
+                    "generation": generation,
+                    "unwon": claim.generation,
+                    "held_by": merged_by.or(held_by),
+                })));
+            }
+            Err(error) => {
+                if *head != before {
+                    let _ = repo.git.run(&["update-ref", &name, &before, head]);
+                    *head = before;
+                    record.claim = Some(claim);
+                }
+                // Another start claimed that generation first: the claims are read again.
+                if !remote_has(repo, &intent_ref)? && !error.message().contains("cannot lock ref") {
+                    return Err(format!(
+                        "the claim of generation {generation} could not be pushed: {}",
+                        error.message()
+                    ));
+                }
+                std::thread::sleep(CLAIM_LOCK_WAIT);
+            }
+        }
+    }
+    Err(format!(
+        "change {id} could not claim a generation of its intent: newer starts claimed each one first"
+    ))
+}
+
+/// Generation `generation` of the intent hashed `hash`.
+fn claim_of(hash: &str, generation: u64) -> IntentClaim {
+    IntentClaim {
+        hash: hash.to_owned(),
+        generation,
+    }
+}
+
 /// Whether the remote holds the marker `name`: as a ref, or compacted into its shard index
 /// (§ 10a), where the record stands in for the ref.
 fn remote_has(repo: &Repo, name: &str) -> Result<bool, String> {
@@ -848,25 +969,37 @@ fn compacted_claims(
                 claim.intent_ref()
             )
         })?;
-        let change = repo
-            .git
-            .run(&[
-                "log",
-                "-1",
-                "--format=%(trailers:key=Change-Id,valueonly,separator=%x2c)",
-                &landed,
-            ])
-            .map_err(|error| error.message())?;
-        let change = change.trim();
-        if !is_change_id(change) {
-            return Err(format!(
-                "the merge {landed} of {} names no one change",
-                claim.landed_ref()
-            ));
-        }
-        claims.insert(generation, change.to_owned());
+        claims.insert(
+            generation,
+            merged_change(repo, &landed, &claim.landed_ref())?,
+        );
     }
     Ok(())
+}
+
+/// The change the merge `landed`, which the merged claim `marker` names, carries in its
+/// `Change-Id` trailer.
+///
+/// # Errors
+///
+/// A git fault, or a merge that names no one change.
+pub(crate) fn merged_change(repo: &Repo, landed: &str, marker: &str) -> Result<String, String> {
+    let change = repo
+        .git
+        .run(&[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Change-Id,valueonly,separator=%x2c)",
+            landed,
+        ])
+        .map_err(|error| error.message())?;
+    let change = change.trim();
+    if !is_change_id(change) {
+        return Err(format!(
+            "the merge {landed} of {marker} names no one change"
+        ));
+    }
+    Ok(change.to_owned())
 }
 
 /// An outside branch a start takes in (`start --from`, G268): what the record keeps of it, and
@@ -1208,6 +1341,10 @@ fn create(
         .create(&record, draft, &format!("start {intent}"))
         .map_err(|error| error.message())?;
     let name = change_ref(&id);
+    // BACKLOG 235: a start that ends here leaves a chain whose claim the remote never took.
+    if std::env::var("BAY_TEST_KILL_AT").is_ok_and(|at| at == "start-before-claim-push") {
+        std::process::exit(137);
+    }
     // G198: both refs are create-only. A lease that expects no ref refuses one that exists,
     // even when the new value fast-forwards it, so of racing starts exactly one creates the
     // claim and every other one re-reads the claims.
@@ -1735,6 +1872,7 @@ fn resume(
     }
     chain.sign_with(agent_signer(repo, &record.actor.name)?);
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
+    let claim = claim_unwon(repo, &chain, &mut head, &mut record)?;
     let latest = chain.latest_draft(id).map_err(|error| error.message())?;
     // BACKLOG 143 (a fleet finding, 2026-10-30: `start <change> --paths` kept the change's old
     // paths, so the only way to widen a change was a new change at the back of the line): the
@@ -1830,6 +1968,7 @@ fn resume(
         "landed": landed,
         "unsaved_kept": unsaved_kept.map(|path| path.display().to_string()),
         "paths_added": paths_added,
+        "claim": claim,
     }))
     .with_change(id))
 }

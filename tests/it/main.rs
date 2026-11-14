@@ -14,6 +14,7 @@
 mod release_fixture;
 mod support;
 
+mod a_change_that_never_won_its_claim_takes_the_next_one;
 mod a_check_never_runs_unconfined_unless_the_box_chose_it;
 mod a_config_naming_another_main_says_install_main;
 mod a_declared_path_is_never_read_as_a_glob;
