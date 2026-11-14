@@ -1048,4 +1048,22 @@ pub fn sweeps_ended(repo: &Path) {
         let _ = file.lock();
         let _ = file.unlock();
     }
+    // The sweep ends its lock before it saves the listing it built, so wait for its process too:
+    // the lock names it.
+    let pid = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|held| held["pid"].as_u64());
+    if let Some(pid) = pid {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while std::time::Instant::now() < deadline
+            && std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|status| status.success())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
 }
