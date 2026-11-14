@@ -31,6 +31,7 @@ pub mod durable;
 pub mod enrol;
 pub mod evidence;
 pub mod executor;
+pub mod facts;
 pub mod fleet;
 pub mod flow;
 pub mod git;

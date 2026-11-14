@@ -38,6 +38,8 @@ fn a_listing_runs_each_query_of_fixed_objects_once() {
             .arg("status")
             .env("BAY_TEST_SAVED", "off")
             .env("BAY_TEST_SWEPT_S", "600")
+            // Answers another process kept (G721) would hide what this one asks.
+            .env("BAY_TEST_FACTS", "off")
             .env("BAY_TEST_GIT_TRACE", &trace),
     );
     assert_eq!(code, 0, "{result}");

@@ -340,6 +340,34 @@ const FIXED_ANSWERS_KEPT: usize = 4_096;
 /// The largest answer [`FIXED_ANSWERS`] keeps.
 const FIXED_ANSWER_BYTES: usize = 16 << 20;
 
+/// G721: the facts context of each store this process read, by its common directory: `None`
+/// where nothing is kept.
+static FACT_CONTEXTS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<PathBuf, Option<String>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// G721: the `git` this process runs, named for good with no spawn: the path `PATH` finds it
+/// at, and that file's length and modification time. Another Git there is another identity.
+fn git_identity() -> Option<String> {
+    static IDENTITY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    IDENTITY
+        .get_or_init(|| {
+            let path = std::env::var_os("PATH")?;
+            let git = std::env::split_paths(&path)
+                .map(|dir| dir.join("git"))
+                .find(|candidate| candidate.is_file())?;
+            let meta = std::fs::metadata(&git).ok()?;
+            let modified = meta
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos();
+            Some(format!("{}:{}:{modified}", git.display(), meta.len()))
+        })
+        .clone()
+}
+
 /// Keeps this process's ref reads ([`HOOK_READS`]): for a hook, a short process that reads the
 /// trunk's name and tip several times and moves no ref of its own in between.
 pub fn keep_ref_reads() {
@@ -740,33 +768,9 @@ impl Git {
         {
             return Ok(out[end + 1..end + 1 + size].to_vec());
         }
-        // G720: a query of fixed objects asked again is answered from this process's first answer.
-        let fixed = (envs.is_empty() && !self.writes_tree && fixed_query(args, input)).then(|| {
-            (
-                self.dir.clone(),
-                args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
-                input.unwrap_or_default().to_vec(),
-            )
-        });
-        if let Some(key) = fixed {
-            let slot = {
-                let mut answers = FIXED_ANSWERS.lock().unwrap_or_else(PoisonError::into_inner);
-                if answers.len() >= FIXED_ANSWERS_KEPT {
-                    answers.clear();
-                }
-                std::sync::Arc::clone(answers.entry(key).or_default())
-            };
-            let mut answer = slot.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(answer) = answer.as_ref() {
-                return Ok(answer.clone());
-            }
-            let read = self.run_bytes_uncached(args, envs, input, timeout);
-            if let Ok(read) = &read
-                && read.len() <= FIXED_ANSWER_BYTES
-            {
-                *answer = Some(read.clone());
-            }
-            return read;
+        // G720, G721: a query of fixed objects is answered once, for this process and the next.
+        if envs.is_empty() && !self.writes_tree && fixed_query(args, input) {
+            return self.run_fixed(args, input, timeout);
         }
         // G706: in a hook, a ref read again is answered from this process's first read of it,
         // until this process runs a Git command that may move a ref.
@@ -1229,6 +1233,27 @@ impl Git {
     /// Git cannot run, or it exits other than 0 or 1 (an absent object, a name that is no
     /// commit).
     pub fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, String> {
+        // G721: whether one commit is an ancestor of another never changes.
+        let facts = (fixed_name(ancestor) && fixed_name(descendant))
+            .then(|| self.facts())
+            .flatten()
+            .map(|(common, context)| {
+                let key = crate::facts::key(&context, "is-ancestor", &[ancestor, descendant], None);
+                (key, common)
+            });
+        if let Some((key, common)) = &facts
+            && let Some(kept) = crate::facts::get(common, key)
+        {
+            return Ok(kept == b"1");
+        }
+        let answer = self.is_ancestor_of_git(ancestor, descendant)?;
+        if let Some((key, common)) = &facts {
+            crate::facts::put(common, key, if answer { b"1" } else { b"0" });
+        }
+        Ok(answer)
+    }
+
+    fn is_ancestor_of_git(&self, ancestor: &str, descendant: &str) -> Result<bool, String> {
         let (code, _, stderr) = self
             .run_status(&["merge-base", "--is-ancestor", ancestor, descendant])
             .map_err(|error| error.message())?;
@@ -1322,6 +1347,120 @@ impl Git {
             rest = &rest[size + 1..];
         }
         Ok(read)
+    }
+
+    /// G720, G721: the answer of the fixed query `args`: this process's first answer, else one
+    /// another process kept, else Git's, kept for both.
+    fn run_fixed(
+        &self,
+        args: &[&str],
+        input: Option<&[u8]>,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<u8>, GitError> {
+        let key = (
+            self.dir.clone(),
+            args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+            input.unwrap_or_default().to_vec(),
+        );
+        let slot = {
+            let mut answers = FIXED_ANSWERS.lock().unwrap_or_else(PoisonError::into_inner);
+            if answers.len() >= FIXED_ANSWERS_KEPT {
+                answers.clear();
+            }
+            std::sync::Arc::clone(answers.entry(key).or_default())
+        };
+        let mut answer = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(answer) = answer.as_ref() {
+            return Ok(answer.clone());
+        }
+        // G721: another process may have asked it already.
+        let facts = self
+            .facts()
+            .map(|(common, context)| (crate::facts::key(&context, "query", args, input), common));
+        if let Some((key, common)) = &facts
+            && let Some(kept) = crate::facts::get(common, key)
+        {
+            *answer = Some(kept.clone());
+            return Ok(kept);
+        }
+        let read = self.run_bytes_uncached(args, &[], input, timeout);
+        if let Ok(read) = &read {
+            if read.len() <= FIXED_ANSWER_BYTES {
+                *answer = Some(read.clone());
+            }
+            if let Some((key, common)) = &facts {
+                crate::facts::put(common, key, read);
+            }
+        }
+        read
+    }
+
+    /// G721: where this store keeps answers that cannot change, and the context they are keyed
+    /// under (the Git version and the digest of the config Git reads here). `None` where history
+    /// can change under a commit (replace refs, shallow history) or nothing can be kept.
+    fn facts(&self) -> Option<(PathBuf, String)> {
+        if self.writes_tree {
+            return None;
+        }
+        let common = self.store_dir()?;
+        let context = {
+            let mut contexts = FACT_CONTEXTS.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(known) = contexts.get(&common) {
+                known.clone()
+            } else {
+                let context = self.fact_context(&common);
+                contexts.insert(common.clone(), context.clone());
+                context
+            }
+        }?;
+        Some((common, context))
+    }
+
+    /// The context of [`Git::facts`] for the store at `common`, read once per process.
+    fn fact_context(&self, common: &Path) -> Option<String> {
+        if common.join("shallow").exists() || common.join("refs/replace").exists() {
+            return None;
+        }
+        let replaced = self
+            .run_bytes_uncached(
+                &[
+                    "for-each-ref",
+                    "--count=1",
+                    "--format=%(refname)",
+                    "refs/replace/",
+                ],
+                &[],
+                None,
+                GIT_CALL_TIMEOUT,
+            )
+            .ok()?;
+        if !replaced.is_empty() {
+            return None;
+        }
+        let digest = self.config_digest()?;
+        Some(format!("{}\0{digest}", git_identity()?))
+    }
+
+    /// G721: a digest of the config Git reads here, from this process's snapshot of it.
+    fn config_digest(&self) -> Option<String> {
+        use sha2::Digest as _;
+        let mut snapshots = SNAPSHOTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let slot = snapshots.entry(self.dir.clone()).or_default();
+        let writes = CONFIG_WRITES.load(Ordering::SeqCst);
+        if slot
+            .as_ref()
+            .is_none_or(|snapshot| snapshot.writes != writes || snapshot.changed())
+        {
+            *slot = Some(self.list_config(writes).ok()?);
+        }
+        let mut hasher = sha2::Sha256::new();
+        for entry in &slot.as_ref()?.entries {
+            hasher.update(&entry.key);
+            hasher.update(b"=");
+            hasher.update(entry.value.as_deref().unwrap_or(b"(none)"));
+            hasher.update(b"\0");
+        }
+        Some(crate::agent_settings::hex(&hasher.finalize()))
     }
 
     /// G719: the `cat-file --batch` answer for `names` from this process's open reader of this

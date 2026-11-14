@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.72
+
+- A history answer that cannot change is kept in the store, so the next command reads it without Git.
+
 ## 0.6.71
 
 - `bay status` starts far fewer Git processes: one object reader per run, and each fixed query once.
