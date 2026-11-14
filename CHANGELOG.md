@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.67
+
+- `bay status` keeps answering at once when only runner and agent presence has moved.
+
 ## 0.6.66
 
 - `bay status` answers at once, from its last answer, while nothing in the clone has moved.

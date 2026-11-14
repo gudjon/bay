@@ -33,6 +33,12 @@ const NAMESPACES: [&str; 7] = [
     "bay", "notes", "remotes", "heads", "tags", "deploy", "sandbox",
 ];
 
+/// G715 (a measurement, 2026-11-14: on a store whose agent sessions each fetch the fleet's
+/// presence at a turn's start, no listing was ever served its saved answer): the presence refs
+/// are not stamped. What a listing judges from them, whether a runner was seen lately, is judged
+/// against the clock, and a saved answer is never older than [`SAVED_MAX_S`].
+const UNSTAMPED: [&str; 2] = [crate::names::FLEET, crate::names::FLEET_EXECUTOR];
+
 /// The saved answer of the store whose common directory is `common`.
 fn file(common: &Path) -> PathBuf {
     common.join("bay").join("status-answer.json")
@@ -86,8 +92,12 @@ fn paths(common: &Path) -> Vec<String> {
             continue;
         };
         for entry in entries.flatten() {
-            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                pending.push(format!("{dir}/{}", entry.file_name().to_string_lossy()));
+            let path = format!("{dir}/{}", entry.file_name().to_string_lossy());
+            let presence = UNSTAMPED
+                .iter()
+                .any(|space| space.strip_suffix('/') == Some(&*path));
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) && !presence {
+                pending.push(path);
             }
         }
         paths.push(dir);
@@ -98,7 +108,45 @@ fn paths(common: &Path) -> Vec<String> {
 
 /// The stamp of `paths` in the store at `common`.
 fn stamp(common: &Path, paths: &[String]) -> Vec<Value> {
-    paths.iter().map(|path| mark(&common.join(path))).collect()
+    paths
+        .iter()
+        .map(|path| {
+            if PRESENCE_PARENT.strip_suffix('/') == Some(path.as_str()) {
+                held(&common.join(path))
+            } else {
+                mark(&common.join(path))
+            }
+        })
+        .collect()
+}
+
+/// The directory that holds the presence refs ([`UNSTAMPED`]).
+const PRESENCE_PARENT: &str = "refs/bay/";
+
+/// G715: the directory `dir` stamped by what it holds, not by its own time: each entry's name, and
+/// each file's mark, but for the presence directories, which a presence fetch prunes away and
+/// makes again ([`UNSTAMPED`]).
+fn held(dir: &Path) -> Value {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Value::Null;
+    };
+    let mut rows: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let path = format!("{PRESENCE_PARENT}{name}/");
+            if UNSTAMPED.contains(&path.as_str()) {
+                return None;
+            }
+            Some(if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                name
+            } else {
+                format!("{name} {}", mark(&entry.path()))
+            })
+        })
+        .collect();
+    rows.sort();
+    json!(rows)
 }
 
 /// The sweep record's time, which a saved answer was built after.
