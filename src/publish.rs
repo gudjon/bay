@@ -9102,6 +9102,94 @@ pub fn post_answers_many(
     Ok(out)
 }
 
+/// BACKLOG 237: the answer row field of a post check its landing's own tree holds no record of,
+/// which a newer landing's run on trunk answered for it: that landing's commit.
+pub const ANSWERED_ON: &str = "answered_on";
+
+/// [`post_checks`] of landed `commit`, read on main as of `trunk` (BACKLOG 237, a fleet finding,
+/// 2026-11-14: four landings showed their post checks `pending` for hours, each answered by a run
+/// on a newer tip). A runner runs a post check on main's newest tip only, and that run answers
+/// every landing since the check's previous run (G439), so the first record at or after a landing
+/// is its answer. A row still `pending` reads forward along main's first-parent line, the oldest
+/// landing first, to the first landing with a record of the check: when that answer is a pass,
+/// the row passes and names the landing in [`ANSWERED_ON`]. Any other answer leaves it `pending`:
+/// a red names its range, never one landing in it, and only a run narrowed to this one (G495,
+/// `[runner] bisect_post`) can say it failed. At most [`crate::red::DEFAULT_REACH`] newer
+/// landings are read, a few at first, as the first record is near.
+///
+/// # Errors
+///
+/// A git fault, or an unreadable note.
+pub fn post_checks_on_trunk(
+    git: &Git,
+    commit: &str,
+    trunk: &str,
+    registry: Option<&crate::registry::Registry>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut rows = post_checks(git, commit, registry)?;
+    let unanswered =
+        |row: &serde_json::Value| row["state"] == "pending" && row[RERUN_DUE].is_null();
+    let mut open: Vec<usize> = (0..rows.len())
+        .filter(|at| unanswered(&rows[*at]))
+        .collect();
+    if open.is_empty() {
+        return Ok(rows);
+    }
+    let range = format!("{commit}..{trunk}");
+    let line = git
+        .run(&[
+            "log",
+            "--first-parent",
+            "--reverse",
+            "--format=%H %T %P",
+            &range,
+        ])
+        .map_err(|error| error.message())?;
+    let mut newer: Vec<(&str, &str)> = Vec::new();
+    let mut parent = commit;
+    for landing in line.lines().take(crate::red::DEFAULT_REACH) {
+        let mut fields = landing.split(' ');
+        let (Some(id), Some(tree)) = (fields.next(), fields.next()) else {
+            break;
+        };
+        // Only a landing on top of this one answers it: one off main's line says nothing of it.
+        if fields.next() != Some(parent) {
+            break;
+        }
+        newer.push((id, tree));
+        parent = id;
+    }
+    let (mut from, mut take) = (0, 8);
+    while !open.is_empty() && from < newer.len() {
+        let read = &newer[from..newer.len().min(from + take)];
+        for ((landing, _), answers) in read
+            .iter()
+            .zip(post_answers_many(git, read, registry, true)?)
+        {
+            open.retain(|at| {
+                let row = &mut rows[*at];
+                let Some(theirs) = answers.iter().find(|answer| {
+                    answer["check"] == row["check"] && answer["environment"] == row["environment"]
+                }) else {
+                    // The policy there lists it no more, so no run after it answers it.
+                    return false;
+                };
+                if unanswered(theirs) {
+                    return true;
+                }
+                if theirs["state"] == "pass" {
+                    row["state"] = json!("pass");
+                    row[ANSWERED_ON] = json!(landing);
+                }
+                false
+            });
+        }
+        from += read.len();
+        take *= 2;
+    }
+    Ok(rows)
+}
+
 /// The post answers of landed `commit` ([`post_answers`]), from its base's `policy`, the paths
 /// its diff `changed` and the evidence `records` on its tree.
 fn answers_of(

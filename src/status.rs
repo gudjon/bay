@@ -2033,14 +2033,21 @@ fn runtime(
 }
 
 /// G91: the post-publication checks of landed `landed`, each pending until a record for its
-/// tree arrives ([`crate::publish::post_checks`]); `null` when not landed, or on the hook's
-/// read, which reads no evidence. A record arrives from a runner elsewhere, so while one is
-/// pending the other producers' evidence is fetched first. A fault is named, never hidden.
-fn post_checks(repo: &Repo, landed: Option<&crate::publish::Found>, read: &Read) -> Value {
+/// tree, or a pass of a newer landing on `trunk` that answers it, arrives
+/// ([`crate::publish::post_checks_on_trunk`], BACKLOG 237); `null` when not landed, or on the
+/// hook's read, which reads no evidence. A record arrives from a runner elsewhere, so while one
+/// is pending the other producers' evidence is fetched first. A fault is named, never hidden.
+fn post_checks(
+    repo: &Repo,
+    landed: Option<&crate::publish::Found>,
+    trunk: &str,
+    read: &Read,
+) -> Value {
     let (Some(found), Read::Full { registry, .. }) = (landed, read) else {
         return json!(null);
     };
-    let judge = || crate::publish::post_checks(&repo.git, &found.commit, registry.as_ref());
+    let judge =
+        || crate::publish::post_checks_on_trunk(&repo.git, &found.commit, trunk, registry.as_ref());
     let pending = |rows: &[Value]| rows.iter().any(|row| row["state"] == "pending");
     let rows = match judge() {
         Ok(rows) if pending(&rows) => {
@@ -2297,7 +2304,7 @@ fn describe(
         })).collect::<Vec<_>>(),
         "completion": completion(repo, record, trunk, landed, read)?,
         "evidence": evidence_read(repo, record, landed, read)?,
-        "post_checks": post_checks(repo, landed, read),
+        "post_checks": post_checks(repo, landed, trunk, read),
         "retention_cut": record.retention_cut,
         "terminal": terminal,
         "receipts": record.receipts.iter().filter(|receipt| {
