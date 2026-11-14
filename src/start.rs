@@ -122,7 +122,13 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         .or_else(|| names_change(&repo, request));
     let result = match &resumed {
         Some(id) if request.adopt => adopt(&repo, id, request),
-        Some(id) => resume(&repo, id, request.from.as_deref(), &request.paths),
+        Some(id) => resume(
+            &repo,
+            id,
+            request.from.as_deref(),
+            &request.paths,
+            request.fixes.as_deref(),
+        ),
         None if request.adopt => Err(format!(
             "--adopt takes the id of a change to take over, and {} names no change here or on \
              the remote",
@@ -170,13 +176,12 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
 /// G300: the change a plain `bay start <CHANGE>` picks up, as `--resume <CHANGE>` does. The
 /// positional names a change when it is a change id and that change's ref is here or on the
 /// remote; otherwise it is an intent, as before. A start that asks for what only a new change
-/// takes (`--new`, `--fixes`, `--lane`, `--after`, a save) always opens one. `--from` with a
-/// change named replaces its draft (`resume`).
+/// takes (`--new`, `--lane`, `--after`, a save) always opens one. `--from` with a change named
+/// replaces its draft, and `--fixes` names it the repair (`resume`, BACKLOG 234).
 fn names_change(repo: &Repo, request: &StartRequest) -> Option<String> {
     let id = request.intent.as_deref().filter(|id| is_change_id(id))?;
     if request.new
         || request.reverts.is_some()
-        || request.fixes.is_some()
         || request.lane.is_some()
         || !request.after.is_empty()
         || request.saved.is_some()
@@ -422,22 +427,19 @@ fn named_or_refused(
     request: &StartRequest,
     base: &str,
 ) -> Result<Option<BayResult>, String> {
-    // Fleet findings (2026-10-27): `bay start <change> --after <id>` (or `--fixes`) opened a new,
-    // empty change whose intent was that change's id, while its author meant to refresh it. A
-    // change named with what only a new change takes is refused, never a second change by it.
+    // Fleet findings (2026-10-27): `bay start <change> --after <id>` opened a new, empty change
+    // whose intent was that change's id, while its author meant to refresh it. A change named
+    // with what only a new change takes is refused, never a second change by it.
     if let Some(id) = request.intent.as_deref().filter(|id| is_change_id(id))
         && !request.new
-        && (request.fixes.is_some()
-            || request.lane.is_some()
-            || request.reverts.is_some()
-            || !request.after.is_empty())
+        && (request.lane.is_some() || request.reverts.is_some() || !request.after.is_empty())
         && (Chain::new(&repo.git).head(id).ok().flatten().is_some()
             || repo.fetch_refs(&[change_ref(id)]).is_ok())
     {
         return Err(format!(
             "{id} is a change: `bay start {id}` alone refreshes it in place and keeps its place; \
-             --after, --fixes, --lane and --reverts open a new change, so give that one its own \
-             intent, or pass --new"
+             --after, --lane and --reverts open a new change, so give that one its own intent, \
+             or pass --new"
         ));
     }
     // Fleet findings (2026-10-27): `--paths a,b,c` was read as one path named `a,b,c`.
@@ -474,29 +476,10 @@ fn named_or_refused(
             crate::config::CONFIG_PATH
         ));
     }
-    // G161: a fix names a change on trunk, or a post check of the policy at `base` (its red's
-    // one name that never moves, `crate::red::Red::answered_by`), or nothing is created.
-    if let Some(fixed) = &request.fixes {
-        if !is_change_id(fixed) {
-            let post = match crate::policy::load_at(&repo.git, base) {
-                Ok(Some(policy)) => policy.post,
-                _ => Vec::new(),
-            };
-            if !post.iter().any(|check| &check.id == fixed) {
-                let named: Vec<&str> = post.iter().map(|check| check.id.as_str()).collect();
-                return Err(format!(
-                    "--fixes {fixed} is not a change id, and main's policy has no post check by \
-                     that name (its post checks: {named:?})"
-                ));
-            }
-        } else if crate::undo::landed_commit(repo, fixed, base)?.is_none() {
-            return Ok(Some(
-                BayResult::blocked(Reason::ChangeNotLanded)
-                    .with_change(fixed.clone())
-                    .with_detail(json!({"trunk": base, "fixes": fixed,
-                    "why": "a fix names a change that merged"})),
-            ));
-        }
+    if let Some(fixed) = &request.fixes
+        && let Some(refused) = fix_refused(repo, fixed, base)?
+    {
+        return Ok(Some(refused));
     }
     // G273: a dependency is a change the remote holds; it need not have landed.
     for dependency in &request.after {
@@ -509,6 +492,32 @@ fn named_or_refused(
                 "--after {dependency}: the remote holds no such change"
             ));
         }
+    }
+    Ok(None)
+}
+
+/// G161: a fix names a change on trunk, or a post check of the policy at `base` (its red's one
+/// name that never moves, `crate::red::Red::answered_by`), or nothing is written: the refusal.
+fn fix_refused(repo: &Repo, fixed: &str, base: &str) -> Result<Option<BayResult>, String> {
+    if !is_change_id(fixed) {
+        let post = match crate::policy::load_at(&repo.git, base) {
+            Ok(Some(policy)) => policy.post,
+            _ => Vec::new(),
+        };
+        if !post.iter().any(|check| check.id == fixed) {
+            let named: Vec<&str> = post.iter().map(|check| check.id.as_str()).collect();
+            return Err(format!(
+                "--fixes {fixed} is not a change id, and main's policy has no post check by that \
+                 name (its post checks: {named:?})"
+            ));
+        }
+    } else if crate::undo::landed_commit(repo, fixed, base)?.is_none() {
+        return Ok(Some(
+            BayResult::blocked(Reason::ChangeNotLanded)
+                .with_change(fixed.to_owned())
+                .with_detail(json!({"trunk": base, "fixes": fixed,
+                "why": "a fix names a change that merged"})),
+        ));
     }
     Ok(None)
 }
@@ -1836,6 +1845,7 @@ fn resume(
     id: &str,
     from: Option<&str>,
     paths: &[String],
+    fixes: Option<&str>,
 ) -> Result<BayResult, String> {
     if !is_change_id(id) {
         return Err(format!("{id} is not a change id"));
@@ -1872,15 +1882,39 @@ fn resume(
     }
     chain.sign_with(agent_signer(repo, &record.actor.name)?);
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
+    // BACKLOG 234 (a fleet finding, 2026-11-03: a change that waited on main's red was itself
+    // its repair, and only a new change could say so, at the back of the line and without the
+    // approver's waiver): `--fixes` names this change the repair, judged as an opening start
+    // judges it (G161), before anything is written. A change fixes one change or check.
+    let fix_added = fixes.filter(|fixed| record.fixes.as_deref() != Some(*fixed));
+    if let Some(fixed) = fix_added {
+        if let Some(other) = &record.fixes {
+            return Err(format!(
+                "change {id} already fixes {other}: a change fixes one change or check"
+            ));
+        }
+        if let Some(refused) = fix_refused(repo, fixed, &trunk)? {
+            return Ok(refused);
+        }
+    }
     let claim = claim_unwon(repo, &chain, &mut head, &mut record)?;
     let latest = chain.latest_draft(id).map_err(|error| error.message())?;
     // BACKLOG 143 (a fleet finding, 2026-10-30: `start <change> --paths` kept the change's old
     // paths, so the only way to widen a change was a new change at the back of the line): the
-    // change declares the paths it does not cover yet and keeps its place.
+    // change declares the paths it does not cover yet and keeps its place. BACKLOG 234: so does
+    // a repair; its `Fixes:` is read from the record by every later pass and by the merge.
     let paths_added = declare_paths(&mut record, paths);
-    if !paths_added.is_empty() {
+    if let Some(fixed) = fix_added {
+        record.fixes = Some(fixed.to_owned());
+    }
+    if !paths_added.is_empty() || fix_added.is_some() {
+        let message = if fix_added.is_some() {
+            "declare fix"
+        } else {
+            "declare paths"
+        };
         head = chain
-            .append(&head, &record, &latest, "declare paths")
+            .append(&head, &record, &latest, message)
             .map_err(|error| error.message())?;
     }
 
@@ -1968,6 +2002,7 @@ fn resume(
         "landed": landed,
         "unsaved_kept": unsaved_kept.map(|path| path.display().to_string()),
         "paths_added": paths_added,
+        "fix_added": fix_added,
         "claim": claim,
     }))
     .with_change(id))

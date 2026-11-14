@@ -3,7 +3,8 @@
 //! whose intent was the first change's id; `--paths a,b,c` was read as one path named `a,b,c`).
 //! A start that names an existing change with what only a new change takes is refused and says
 //! how to refresh in place; a comma-joined path main does not hold is refused as one. Nothing is
-//! created by either.
+//! created by either. BACKLOG 234: `--fixes` names the change the repair in place, so naming a
+//! change that has not merged is refused as no change's fix, and creates nothing either.
 //!
 //! Guards to mutate: `src/start.rs` `named_or_refused`, its first two checks.
 
@@ -28,8 +29,12 @@ fn naming_a_change_with_after_is_refused_and_says_how_to_refresh() {
                 .args(["start", &id, flag, &id, "--paths", "src/"]),
         );
         assert_ne!(code, 0, "{refused}");
-        let text = refused.to_string();
-        assert!(text.contains(&format!("bay start {id}")), "{refused}");
+        let says = if flag == "--after" {
+            format!("bay start {id}")
+        } else {
+            "a fix names a change that merged".to_owned()
+        };
+        assert!(refused.to_string().contains(&says), "{refused}");
     }
     let after = test_box.git_ok(
         &repo,
