@@ -89,6 +89,29 @@ fn hook_runs(hook: &Value, bay_event: &str) -> bool {
         .is_some_and(|event| event == bay_event)
 }
 
+/// G716 (a fleet's doctor, 2026-11-14: every box read "not guarded" because the project ran
+/// `talk-wait` only for some sessions). The `bay hook` event of a project's own narrowing of bay's
+/// entry: bay's presence test, the project's conditions, then `exec bay hook <event>`. A project
+/// may narrow only an entry that never stops the agent ([`narrows`]).
+fn narrowed_event_of(command: &str) -> Option<&str> {
+    let presence = PRESENCE_GUARD.strip_suffix("exec ")?;
+    let rest = command.strip_prefix(presence)?;
+    let (conditions, event) = rest.rsplit_once(&format!("; exec {BAY_COMMAND_PREFIX}"))?;
+    (!conditions.trim().is_empty() && !event.is_empty() && !event.contains(char::is_whitespace))
+        .then_some(event)
+}
+
+/// G716: whether `hook`, under the Claude event `event`, is a project's narrowing of bay's entry
+/// for `bay_event`, an entry that never stops the agent. A narrowed guard (`tool.before`, the stop
+/// refusal) is not bay's: its conditions could skip the guard.
+fn narrows(event: &str, hook: &Value, bay_event: &str) -> bool {
+    !entry_shape(event, bay_event).blocks
+        && hook["command"]
+            .as_str()
+            .and_then(narrowed_event_of)
+            .is_some_and(|narrowed| narrowed == bay_event)
+}
+
 /// The `timeout` (seconds) on bay's `PreToolUse` entry (G158): bay's hook takes about half a
 /// second, so a hook still running at 30 s is hung, and the product denies the call.
 pub const PRE_TOOL_TIMEOUT_S: u64 = 30;
@@ -320,7 +343,7 @@ pub fn codex_entry_shape(event: &str, _bay_event: &str) -> EntryShape {
 /// bay's hooks under `event` that run `bay hook <bay_event>`, in groups bay owns.
 fn bay_hooks<'a>(
     settings: &'a Map<String, Value>,
-    event: &str,
+    event: &'a str,
     bay_event: &'a str,
 ) -> impl Iterator<Item = &'a Value> + 'a {
     settings
@@ -329,9 +352,16 @@ fn bay_hooks<'a>(
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter(|group| is_bay_group(group))
-        .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
-        .filter(move |hook| hook_runs(hook, bay_event))
+        .flat_map(move |group| {
+            let ours = is_bay_group(group);
+            group["hooks"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(move |hook| {
+                    (ours && hook_runs(hook, bay_event)) || narrows(event, hook, bay_event)
+                })
+        })
 }
 
 /// The Claude events that have no bay entry.
@@ -424,7 +454,10 @@ pub fn outdated_claude_events(settings: &Map<String, Value>) -> Vec<&'static str
         .filter(|(event, bay_event)| {
             let current = hook_command(bay_event);
             let mut entries = bay_hooks(settings, event, bay_event).peekable();
-            entries.peek().is_some() && !entries.any(|hook| hook["command"] == current.as_str())
+            entries.peek().is_some()
+                && !entries.any(|hook| {
+                    hook["command"] == current.as_str() || narrows(event, hook, bay_event)
+                })
         })
         .map(|(event, _)| *event)
         .fold(Vec::new(), once)
@@ -447,7 +480,7 @@ pub fn claude_events_without_bay(settings: &Map<String, Value>) -> Vec<&'static 
                         .iter()
                         .filter_map(|group| group["hooks"].as_array())
                         .flatten()
-                        .any(|hook| hook_runs(hook, bay_event))
+                        .any(|hook| hook_runs(hook, bay_event) || narrows(event, hook, bay_event))
                 })
             })
         })
@@ -550,7 +583,15 @@ fn add_entries(
     }
     for (event, bay_event) in events {
         if let Some(groups) = hooks.get_mut(*event).and_then(Value::as_array_mut) {
-            groups.push(group_for(event, bay_event));
+            // G716: a project's narrowing of this entry stands in for it, as the project wrote it.
+            let narrowed = groups
+                .iter()
+                .filter_map(|group| group["hooks"].as_array())
+                .flatten()
+                .any(|hook| narrows(event, hook, bay_event));
+            if !narrowed {
+                groups.push(group_for(event, bay_event));
+            }
         }
     }
 }

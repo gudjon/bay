@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.68
+
+- A project may add its own conditions to bay's wait-for-talk hook; doctor and install keep them.
+
 ## 0.6.67
 
 - `bay status` keeps answering at once when only runner and agent presence has moved.
