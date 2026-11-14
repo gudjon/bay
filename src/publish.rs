@@ -1105,18 +1105,25 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     }
     // G682 (a fleet finding, 2026-11-09): main read before a landing and the chain read after it
     // let a new revision of a merged change in as an operation no runner answers. The record
-    // decides too: a merged operation of another revision ends the change.
-    if let Some(merged_op) = ctx
+    // decides too: a merged operation of another revision ends the change. BACKLOG 238 (a fleet
+    // finding, 2026-11-14): one of this revision is the change's landing, whatever main this
+    // process read; a main read before the landing reached it held no publication, and the
+    // same revision was submitted again (3xq4d7ow.2, 2026-11-12, the change set back to ready).
+    let landed_op = ctx
         .record
         .operations
         .iter()
-        .find(|op| op.state == OpState::Published && op.revision != revision)
-    {
+        .find(|op| op.state == OpState::Published)
+        .map(|op| (op.op_id.clone(), op.revision.clone()));
+    if let Some((op_id, landed_revision)) = landed_op {
+        if landed_revision == revision
+            && let Some(commit) = published_commit(&ctx.record).map(str::to_owned)
+        {
+            return derive_landed(&mut ctx, &op_id, &revision, &commit);
+        }
         return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded)
             .with_change(id)
-            .with_detail(
-                json!({"landed_revision": merged_op.revision, "op_id": merged_op.op_id}),
-            ));
+            .with_detail(json!({"landed_revision": landed_revision, "op_id": op_id})));
     }
     // NEW-4: a change of no lane whose view reaches a lane's commits off trunk never lands them.
     if ctx.record.lane.is_none()
