@@ -192,10 +192,11 @@ impl Drop for OpenReader {
     }
 }
 
-/// The open readers of this process, by the directory each reads.
-static OPEN_READERS: std::sync::LazyLock<
-    Mutex<std::collections::HashMap<PathBuf, Vec<OpenReader>>>,
-> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+/// The open reader of each store this process reads, by its directory: one per store, which
+/// threads take in turn, so a process starts at most one reader of a store.
+type OpenReaders = std::collections::HashMap<PathBuf, std::sync::Arc<Mutex<Option<OpenReader>>>>;
+static OPEN_READERS: std::sync::LazyLock<Mutex<OpenReaders>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// G719: in a test build, `BAY_TEST_OPEN_READER=off` reads every batch by a process of its own.
 fn open_reader_off() -> bool {
@@ -1331,22 +1332,23 @@ impl Git {
             return None;
         }
         let began = std::time::Instant::now();
-        let kept = OPEN_READERS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get_mut(&self.dir)
-            .and_then(Vec::pop);
-        let mut reader = match kept {
-            Some(reader) => reader,
-            None => self.open_reader()?,
-        };
-        let out = read_batch(&mut reader, names)?;
-        OPEN_READERS
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .entry(self.dir.clone())
-            .or_default()
-            .push(reader);
+        let slot = std::sync::Arc::clone(
+            OPEN_READERS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .entry(self.dir.clone())
+                .or_default(),
+        );
+        let mut held = slot.lock().unwrap_or_else(PoisonError::into_inner);
+        if held.is_none() {
+            *held = self.open_reader();
+        }
+        let out = read_batch(held.as_mut()?, names);
+        if out.is_none() {
+            // A reader that failed is dropped; the next read starts another.
+            *held = None;
+        }
+        let out = out?;
         record_time(&["cat-file"], began.elapsed());
         Some(out)
     }
