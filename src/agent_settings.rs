@@ -568,28 +568,63 @@ fn add_entries(
         list.retain(|group| !is_bay_group(group));
         !(list.is_empty() && before > 0)
     });
-    // One event may hold several of bay's groups (`PreToolUse`: `tool.before` and `tool.ask`):
-    // bay's are taken out once per event, then each is added.
+    // G717 (a fleet's install, 2026-11-14: every re-install moved bay's stop entry behind the
+    // project's and so changed the tracked file): each of bay's groups is rewritten where it
+    // stands, and only a missing one is added, at the end. One event may hold several of bay's
+    // groups (`PreToolUse`: `tool.before` and `tool.ask`).
+    let mut seen: Vec<&str> = Vec::new();
     for (event, _) in events {
+        if seen.contains(event) {
+            continue;
+        }
+        seen.push(event);
+        let ours: Vec<&str> = events
+            .iter()
+            .filter(|(hooked, _)| hooked == event)
+            .map(|(_, bay_event)| *bay_event)
+            .collect();
         let groups = hooks
             .entry(*event)
             .or_insert_with(|| Value::Array(Vec::new()));
         if !groups.is_array() {
             *groups = Value::Array(Vec::new());
         }
-        if let Some(groups) = groups.as_array_mut() {
-            groups.retain(|group| !is_bay_group(group));
+        let Some(groups) = groups.as_array_mut() else {
+            continue;
+        };
+        // G716: a project's narrowing of an entry stands in for it, as the project wrote it.
+        let narrowed: Vec<&str> = ours
+            .iter()
+            .copied()
+            .filter(|bay_event| {
+                groups
+                    .iter()
+                    .filter_map(|group| group["hooks"].as_array())
+                    .flatten()
+                    .any(|hook| narrows(event, hook, bay_event))
+            })
+            .collect();
+        let mut placed: Vec<&str> = Vec::new();
+        let old = std::mem::take(groups);
+        for group in old {
+            if !is_bay_group(&group) {
+                groups.push(group);
+                continue;
+            }
+            let runs = group["hooks"][0]["command"]
+                .as_str()
+                .and_then(bay_event_of)
+                .and_then(|named| ours.iter().copied().find(|ours| *ours == named));
+            if let Some(bay_event) = runs
+                && !placed.contains(&bay_event)
+                && !narrowed.contains(&bay_event)
+            {
+                placed.push(bay_event);
+                groups.push(group_for(event, bay_event));
+            }
         }
-    }
-    for (event, bay_event) in events {
-        if let Some(groups) = hooks.get_mut(*event).and_then(Value::as_array_mut) {
-            // G716: a project's narrowing of this entry stands in for it, as the project wrote it.
-            let narrowed = groups
-                .iter()
-                .filter_map(|group| group["hooks"].as_array())
-                .flatten()
-                .any(|hook| narrows(event, hook, bay_event));
-            if !narrowed {
+        for bay_event in ours {
+            if !placed.contains(&bay_event) && !narrowed.contains(&bay_event) {
                 groups.push(group_for(event, bay_event));
             }
         }

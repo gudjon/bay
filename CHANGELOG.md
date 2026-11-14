@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.69
+
+- `bay install` leaves an up-to-date settings file unchanged; it no longer reorders bay's hook entries.
+
 ## 0.6.68
 
 - A project may add its own conditions to bay's wait-for-talk hook; doctor and install keep them.
