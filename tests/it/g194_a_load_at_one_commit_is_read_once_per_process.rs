@@ -59,8 +59,10 @@ fn a_status_reads_the_registry_policy_and_config_at_trunk_once() {
 
     let log = test_box.path().join("git-calls.log");
     let log_text = log.display();
+    // One record is one write: a status and its sweep run Git side by side, and a record written
+    // in two parts could be split by another process's.
     test_box.wrap_git(&format!(
-        "printf '%s\\037' \"$PPID\" \"$@\" >> '{log_text}'; printf '\\036' >> '{log_text}'"
+        "record=$(printf '%s\\037' \"$PPID\" \"$@\"); printf '%s\\036' \"$record\" >> '{log_text}'"
     ));
     let status = test_box.bay_ok(&repo, &["status"]);
     assert_eq!(status["detail"]["main"], trunk.as_str(), "{status}");
