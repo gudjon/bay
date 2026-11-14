@@ -121,7 +121,7 @@ fn stamp(common: &Path, paths: &[String]) -> Vec<Value> {
 }
 
 /// The directory that holds the presence refs ([`UNSTAMPED`]).
-const PRESENCE_PARENT: &str = "refs/bay/";
+const PRESENCE_PARENT: &str = crate::names::BAY;
 
 /// G715: the directory `dir` stamped by what it holds, not by its own time: each entry's name, and
 /// each file's mark, but for the presence directories, which a presence fetch prunes away and
