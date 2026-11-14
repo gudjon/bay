@@ -64,7 +64,15 @@ fn a_status_reads_the_registry_policy_and_config_at_trunk_once() {
     test_box.wrap_git(&format!(
         "record=$(printf '%s\\037' \"$PPID\" \"$@\"); printf '%s\\036' \"$record\" >> '{log_text}'"
     ));
-    let status = test_box.bay_ok(&repo, &["status"]);
+    // Reads are counted by the arguments the wrapper sees: none through the open reader (G719),
+    // whose names go on its input.
+    let (code, status) = support::result_json(
+        test_box
+            .bay(&repo)
+            .arg("status")
+            .env("BAY_TEST_OPEN_READER", "off"),
+    );
+    assert_eq!(code, 0, "{status}");
     assert_eq!(status["detail"]["main"], trunk.as_str(), "{status}");
     let listed = status["detail"]["changes"].as_array().unwrap();
     assert!(

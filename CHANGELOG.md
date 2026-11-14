@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.71
+
+- `bay status` starts far fewer Git processes: one object reader per run, and each fixed query once.
+
 ## 0.6.70
 
 - The skill covers working in more than one repository; `--after` follows only the same repository.

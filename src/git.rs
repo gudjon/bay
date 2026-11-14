@@ -156,6 +156,189 @@ fn fixed_name(name: &str) -> bool {
         && back.bytes().all(|byte| byte.is_ascii_digit())
 }
 
+/// G719: whether `name` names one object for good: a full hex object id, then any of `~<n>`,
+/// `^<n>` or `^`, then at most one `:<path>`. No ref is read to resolve it.
+fn fixed_object(name: &str) -> bool {
+    let rev = match name.split_once(':') {
+        Some((_, "")) => return false,
+        Some((rev, _)) => rev,
+        None => name,
+    };
+    let (id, mut walk) = rev.split_at(rev.find(['~', '^']).unwrap_or(rev.len()));
+    if !matches!(id.len(), 40 | 64) || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return false;
+    }
+    while let Some(step) = walk.strip_prefix(['~', '^']) {
+        let digits = step.bytes().take_while(u8::is_ascii_digit).count();
+        walk = &step[digits..];
+    }
+    walk.is_empty()
+}
+
+/// G719 (a measurement, 2026-11-14: one `bay status` started 77 `cat-file` processes, about a
+/// third of its Git time): one `git cat-file --batch` each store keeps open in this process, so
+/// a read of objects named for good starts no process. Readers wait here between reads; a
+/// reader that fails is dropped, and its read runs as a process of its own.
+struct OpenReader {
+    child: std::process::Child,
+    input: std::process::ChildStdin,
+    output: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl Drop for OpenReader {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// The open readers of this process, by the directory each reads.
+static OPEN_READERS: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<PathBuf, Vec<OpenReader>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// G719: in a test build, `BAY_TEST_OPEN_READER=off` reads every batch by a process of its own.
+fn open_reader_off() -> bool {
+    crate::version::TEST_HOOKS
+        && std::env::var("BAY_TEST_OPEN_READER").is_ok_and(|value| value == "off")
+}
+
+/// G719: asks `reader` for `names` and reads its answers whole, as one `cat-file --batch` would
+/// print them. The names are written by a thread of their own, so neither side waits on a full
+/// pipe. `None` when the reader fails.
+fn read_batch(reader: &mut OpenReader, names: &[String]) -> Option<Vec<u8>> {
+    use std::io::{BufRead, Read, Write};
+    let mut text = names.join("\n");
+    text.push('\n');
+    let input = &mut reader.input;
+    let output = &mut reader.output;
+    std::thread::scope(|scope| {
+        let writer = scope.spawn(move || {
+            input
+                .write_all(text.as_bytes())
+                .and_then(|()| input.flush())
+        });
+        let mut out = Vec::new();
+        for _ in names {
+            let mut header = Vec::new();
+            if output.read_until(b'\n', &mut header).ok()? == 0 {
+                return None;
+            }
+            out.extend_from_slice(&header);
+            let line = std::str::from_utf8(&header).ok()?.trim_end();
+            if line.ends_with(" missing") || line.ends_with(" ambiguous") {
+                continue;
+            }
+            let size: usize = line.rsplit(' ').next()?.parse().ok()?;
+            let start = out.len();
+            out.resize(start + size + 1, 0);
+            output.read_exact(&mut out[start..]).ok()?;
+        }
+        writer.join().ok()?.ok()?;
+        Some(out)
+    })
+}
+
+/// G720 (a measurement, 2026-11-14: one `bay status` ran the same history query on the same
+/// object ids two and three times): a query that reads only objects named for good is answered
+/// once per process. Its answer cannot change: no ref, date or signature key enters it.
+fn fixed_query(args: &[&str], input: Option<&[u8]>) -> bool {
+    const READS: [&str; 5] = ["log", "rev-list", "merge-base", "diff-tree", "ls-tree"];
+    // Options whose answer reads refs, the clock, signature keys, notes or mailmaps.
+    const MOVING: [&str; 21] = [
+        "--all",
+        "--branches",
+        "--tags",
+        "--remotes",
+        "--glob",
+        "--exclude",
+        "--since",
+        "--until",
+        "--after",
+        "--before",
+        "--max-age",
+        "--min-age",
+        "--reflog",
+        "--walk-reflogs",
+        "-g",
+        "--show-signature",
+        "--notes",
+        "--show-notes",
+        "--use-mailmap",
+        "--mailmap",
+        "--alternate-refs",
+    ];
+    const MOVING_FORMATS: [&str; 12] = [
+        "%G",
+        "%N",
+        "%d",
+        "%D",
+        "%S",
+        "%ar",
+        "%cr",
+        "%aN",
+        "%cN",
+        "%aE",
+        "%cE",
+        "%(describe",
+    ];
+    let Some((sub, rest)) = args.split_first() else {
+        return false;
+    };
+    if !READS.contains(sub) {
+        return false;
+    }
+    let revs = rest.split(|arg| *arg == "--").next().unwrap_or_default();
+    for arg in revs {
+        if arg.starts_with('-') {
+            if MOVING
+                .iter()
+                .any(|option| arg == option || arg.starts_with(&format!("{option}=")))
+                || arg.starts_with("--decorate")
+                || arg.starts_with("--source")
+                || arg.starts_with("--bisect")
+                || MOVING_FORMATS.iter().any(|format| arg.contains(format))
+            {
+                return false;
+            }
+        } else if !arg.bytes().all(|byte| byte.is_ascii_digit()) && !fixed_range(arg) {
+            return false;
+        }
+    }
+    input.is_none_or(|input| {
+        std::str::from_utf8(input).is_ok_and(|text| {
+            text.lines()
+                .all(|line| fixed_range(line.trim()) || line.trim().is_empty())
+        })
+    })
+}
+
+/// G720: a revision of fixed objects: `<object>`, `^<object>`, or `<object>..<object>` and
+/// `<object>...<object>`, each a [`fixed_object`] without a path.
+fn fixed_range(rev: &str) -> bool {
+    let fixed =
+        |side: &str| !side.contains(':') && fixed_object(side.strip_prefix('^').unwrap_or(side));
+    match rev.split_once("...").or_else(|| rev.split_once("..")) {
+        Some((from, to)) => fixed(from) && fixed(to),
+        None => fixed(rev),
+    }
+}
+
+/// G720: this process's answers to fixed queries, by directory, arguments and input. Each is
+/// held behind a lock of its own, so threads that ask together wait for the first one's answer.
+type FixedAnswers = std::collections::HashMap<
+    (PathBuf, Vec<String>, Vec<u8>),
+    std::sync::Arc<Mutex<Option<Vec<u8>>>>,
+>;
+static FIXED_ANSWERS: std::sync::LazyLock<Mutex<FixedAnswers>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// The most answers [`FIXED_ANSWERS`] keeps; past it, it starts again empty.
+const FIXED_ANSWERS_KEPT: usize = 4_096;
+
+/// The largest answer [`FIXED_ANSWERS`] keeps.
+const FIXED_ANSWER_BYTES: usize = 16 << 20;
+
 /// Keeps this process's ref reads ([`HOOK_READS`]): for a hook, a short process that reads the
 /// trunk's name and tip several times and moves no ref of its own in between.
 pub fn keep_ref_reads() {
@@ -519,6 +702,70 @@ impl Git {
             && held == kind
         {
             return Ok(content.clone());
+        }
+        // G719: a batch whose every name names one object for good is read by this process's
+        // open reader, whoever asks for it.
+        if envs.is_empty()
+            && !self.writes_tree
+            && !self.lazy_fetch
+            && args == ["cat-file", "--batch"]
+            && let Some(input) = input
+            && let Ok(text) = std::str::from_utf8(input)
+            && let Some(text) = text.strip_suffix('\n')
+            && !text.is_empty()
+        {
+            let names: Vec<String> = text.split('\n').map(str::to_owned).collect();
+            if names.iter().all(|name| fixed_object(name))
+                && let Some(out) = self.read_open(&names)
+            {
+                return Ok(out);
+            }
+        }
+        // G719: one object named for good is read by this process's open reader, when it is of
+        // the kind asked for; anything else runs as before, so its error is Git's own.
+        if envs.is_empty()
+            && input.is_none()
+            && !self.writes_tree
+            && !self.lazy_fetch
+            && let ["cat-file", kind @ ("blob" | "commit"), name] = args
+            && fixed_object(name)
+            && let Some(out) = self.read_open(&[(*name).to_owned()])
+            && let Some(end) = out.iter().position(|&byte| byte == b'\n')
+            && let Ok(header) = std::str::from_utf8(&out[..end])
+            && let [_, held, size] = header.split(' ').collect::<Vec<_>>()[..]
+            && held == *kind
+            && let Ok(size) = size.parse::<usize>()
+            && out.len() == end + 1 + size + 1
+        {
+            return Ok(out[end + 1..end + 1 + size].to_vec());
+        }
+        // G720: a query of fixed objects asked again is answered from this process's first answer.
+        let fixed = (envs.is_empty() && !self.writes_tree && fixed_query(args, input)).then(|| {
+            (
+                self.dir.clone(),
+                args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+                input.unwrap_or_default().to_vec(),
+            )
+        });
+        if let Some(key) = fixed {
+            let slot = {
+                let mut answers = FIXED_ANSWERS.lock().unwrap_or_else(PoisonError::into_inner);
+                if answers.len() >= FIXED_ANSWERS_KEPT {
+                    answers.clear();
+                }
+                std::sync::Arc::clone(answers.entry(key).or_default())
+            };
+            let mut answer = slot.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(answer) = answer.as_ref() {
+                return Ok(answer.clone());
+            }
+            let read = self.run_bytes_uncached(args, envs, input, timeout);
+            if let Ok(read) = &read
+                && read.len() <= FIXED_ANSWER_BYTES
+            {
+                *answer = Some(read.clone());
+            }
+            return read;
         }
         // G706: in a hook, a ref read again is answered from this process's first read of it,
         // until this process runs a Git command that may move a ref.
@@ -1074,6 +1321,55 @@ impl Git {
             rest = &rest[size + 1..];
         }
         Ok(read)
+    }
+
+    /// G719: the `cat-file --batch` answer for `names` from this process's open reader of this
+    /// store, or `None` when there is none to read by (a partial clone, whose absent objects a
+    /// read of its own fetches) or it failed.
+    fn read_open(&self, names: &[String]) -> Option<Vec<u8>> {
+        if open_reader_off() || self.is_partial() {
+            return None;
+        }
+        let began = std::time::Instant::now();
+        let kept = OPEN_READERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_mut(&self.dir)
+            .and_then(Vec::pop);
+        let mut reader = match kept {
+            Some(reader) => reader,
+            None => self.open_reader()?,
+        };
+        let out = read_batch(&mut reader, names)?;
+        OPEN_READERS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(self.dir.clone())
+            .or_default()
+            .push(reader);
+        record_time(&["cat-file"], began.elapsed());
+        Some(out)
+    }
+
+    /// A new `git cat-file --batch` of this store, its input and output held open.
+    fn open_reader(&self) -> Option<OpenReader> {
+        let mut cmd = self.command();
+        cmd.args(["cat-file", "--batch"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null());
+        let began = std::time::Instant::now();
+        let mut child = cmd.spawn().ok()?;
+        // G171: the reader is a `git` this process starts, so the trace names it; it ends with the
+        // process, so no exit code.
+        trace(&cmd, began, None);
+        let input = child.stdin.take()?;
+        let output = std::io::BufReader::new(child.stdout.take()?);
+        Some(OpenReader {
+            child,
+            input,
+            output,
+        })
     }
 
     /// The id of each object `names` names (an object id, `<commit>:<path>`, `<commit>^1`), in
@@ -2197,5 +2493,89 @@ mod times {
 
         assert!(line.contains("fetch"), "{line}");
         assert!(!line.contains("push"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod fixed_objects {
+    use super::fixed_object;
+
+    const ID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    #[test]
+    fn names_resolved_by_no_ref_are_fixed() {
+        for name in [
+            ID.to_owned(),
+            format!("{ID}:change.json"),
+            format!("{ID}^1:.bay/policy.toml"),
+            format!("{ID}~3^2"),
+            format!("{ID}^"),
+        ] {
+            assert!(fixed_object(&name), "{name}");
+        }
+        for name in [
+            "refs/bay/changes/abc:change.json".to_owned(),
+            "HEAD".to_owned(),
+            format!("{ID}:"),
+            format!("{ID}@{{1}}"),
+            ID[..39].to_owned(),
+            format!("main:{ID}"),
+        ] {
+            assert!(!fixed_object(&name), "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod fixed_queries {
+    use super::fixed_query;
+
+    const A: &str = "0123456789abcdef0123456789abcdef01234567";
+    const B: &str = "89abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn a_query_of_fixed_objects_is_fixed_and_one_that_reads_refs_or_the_clock_is_not() {
+        let range = format!("{A}..{B}");
+        assert!(fixed_query(
+            &["log", "--format=%H %s", "-n", "50", &range],
+            None
+        ));
+        assert!(fixed_query(
+            &["rev-list", "--first-parent", B, "--", "src/"],
+            None
+        ));
+        assert!(fixed_query(&["merge-base", A, B], None));
+        assert!(fixed_query(
+            &[
+                "log",
+                "--format=%H%x1f%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Revision-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%cn%x1e",
+                &format!("{A}..{A}"),
+            ],
+            None
+        ));
+        assert!(fixed_query(
+            &["ls-tree", "-z", "--full-tree", A, "--", ".bay/config.toml"],
+            None
+        ));
+        let stdin = format!("{A}\n^{B}\n");
+        assert!(fixed_query(
+            &["rev-list", "--stdin"],
+            Some(stdin.as_bytes())
+        ));
+        for args in [
+            vec!["log", "--format=%H", "main"],
+            vec!["log", "--all"],
+            vec!["log", "--since=1.week.ago", B],
+            vec!["log", "--format=%G?", B],
+            vec!["log", "--format=%d", B],
+            vec!["for-each-ref"],
+            vec!["log", "--decorate", B],
+        ] {
+            assert!(!fixed_query(&args, None), "{args:?}");
+        }
+        assert!(!fixed_query(
+            &["rev-list", "--stdin"],
+            Some(b"refs/heads/main\n")
+        ));
     }
 }
