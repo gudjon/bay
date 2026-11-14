@@ -601,11 +601,48 @@ fn differs(git: &Git, envs: &[(&str, &str)], saved: &str) -> bool {
 }
 
 /// A declared path as a non-cone sparse-checkout pattern rooted at the top: `src/` stays a
-/// directory, `a.txt` a file.
+/// directory, `a.txt` a file. Git reads a non-cone pattern as a glob, so each character git's
+/// own cone mode escapes (`\`, `*`, `?`, `[`) is escaped, and a trailing space, which git would
+/// drop: `app/[org]/` names that one folder, never `app/o/` (BACKLOG 236). A leading `!` or `#`
+/// cannot occur, since the pattern starts with `/`.
 #[must_use]
 pub fn sparse_pattern(path: &str) -> String {
     let trimmed = path.trim_start_matches("./").trim_start_matches('/');
-    format!("/{trimmed}")
+    let kept = trimmed.trim_end_matches(' ');
+    let mut pattern = String::with_capacity(trimmed.len() + 8);
+    pattern.push('/');
+    for character in kept.chars() {
+        if matches!(character, '\\' | '*' | '?' | '[') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    for _ in kept.len()..trimmed.len() {
+        pattern.push_str("\\ ");
+    }
+    pattern
+}
+
+/// The path a sparse pattern names, the inverse of [`sparse_pattern`]: `/app/\[org\]/` is
+/// `app/[org]/`.
+#[must_use]
+pub fn pattern_path(pattern: &str) -> String {
+    let mut path = String::with_capacity(pattern.len());
+    let mut characters = pattern.trim_start_matches('/').chars();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' => path.extend(characters.next()),
+            other => path.push(other),
+        }
+    }
+    path
+}
+
+/// Whether `list`, a view's `git sparse-checkout list`, holds `pattern`. Git prints a pattern
+/// without a trailing space it would drop, and bay's git calls trim their output, so both
+/// sides are compared trimmed.
+fn lists(list: &str, pattern: &str) -> bool {
+    list.lines().any(|line| line.trim() == pattern.trim())
 }
 
 /// Beside this repository's views under the state directory, the repository they belong to, so
@@ -733,10 +770,7 @@ pub fn keep_declared(repo: &Repo, id: &str, declared: &[String]) -> Result<(), G
     let list = view.run(&["sparse-checkout", "list"])?;
     let missing: Vec<&String> = declared
         .iter()
-        .filter(|declared| {
-            let pattern = sparse_pattern(declared);
-            !list.lines().any(|line| line.trim() == pattern)
-        })
+        .filter(|declared| !lists(&list, &sparse_pattern(declared)))
         .collect();
     if missing.is_empty() {
         return Ok(());
@@ -776,7 +810,7 @@ pub fn keep_hook_settings(repo: &Repo, id: &str, declared: &[String]) -> Result<
     };
     let pattern = sparse_pattern(file);
     let list = view.run(&["sparse-checkout", "list"])?;
-    if list.lines().any(|line| line.trim() == pattern) {
+    if lists(&list, &pattern) {
         return Ok(());
     }
     view.fetching()
@@ -940,8 +974,10 @@ pub fn undeclared_paths(
     Ok(list
         .lines()
         .map(str::trim)
-        .filter(|pattern| !pattern.is_empty() && !declared.iter().any(|known| known == pattern))
-        .map(|pattern| pattern.trim_start_matches('/').to_owned())
+        .filter(|pattern| {
+            !pattern.is_empty() && !declared.iter().any(|known| known.trim() == *pattern)
+        })
+        .map(pattern_path)
         .collect())
 }
 
@@ -970,8 +1006,53 @@ pub fn record_observed(
 
 #[cfg(test)]
 mod tests {
-    use super::{Journal, journal, set_journal};
+    use super::{Journal, journal, lists, pattern_path, set_journal, sparse_pattern};
     use crate::repo::Repo;
+
+    #[test]
+    fn a_sparse_pattern_escapes_what_git_reads_as_a_glob() {
+        // BACKLOG 236: a Next.js dynamic-route folder is a literal path, never a class.
+        // `]` closes no class once its `[` is escaped, and git's cone mode leaves it bare.
+        assert_eq!(
+            sparse_pattern("app/[org]/[venue]/cal/"),
+            r"/app/\[org]/\[venue]/cal/"
+        );
+        assert_eq!(sparse_pattern(r"./a*b?c\d"), r"/a\*b\?c\\d");
+        assert_eq!(sparse_pattern("/src/"), "/src/");
+        assert_eq!(sparse_pattern("name  "), r"/name\ \ ");
+        assert_eq!(sparse_pattern("a b/c"), "/a b/c");
+        assert_eq!(sparse_pattern("#x"), "/#x");
+        assert_eq!(sparse_pattern("!x"), "/!x");
+    }
+
+    #[test]
+    fn a_sparse_pattern_names_the_path_it_was_made_from() {
+        for path in [
+            "src/",
+            "app/[org]/[venue]/cal/",
+            r"a*b?c\d",
+            "name  ",
+            "a b/c",
+            "#x",
+        ] {
+            assert_eq!(pattern_path(&sparse_pattern(path)), path, "{path}");
+        }
+        // A pattern written by hand with git's own escapes names the same path.
+        assert_eq!(
+            pattern_path(r"/app/\[org\]/\[venue\]/cal/"),
+            "app/[org]/[venue]/cal/"
+        );
+    }
+
+    #[test]
+    fn a_listed_pattern_is_found_whether_or_not_its_trailing_space_was_trimmed() {
+        let pattern = sparse_pattern("name ");
+        assert!(lists("/src/\n/name\\ ", &pattern));
+        assert!(lists("/src/\n/name\\", &pattern));
+        assert!(!lists("/src/\n/name", &pattern));
+        assert!(lists(r"/app/\[org]/", &sparse_pattern("app/[org]/")));
+        assert!(!lists("/app/[org]/", &sparse_pattern("app/[org]/")));
+    }
 
     #[test]
     fn concurrent_journal_writes_never_fail() {

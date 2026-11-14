@@ -16,6 +16,7 @@ mod support;
 
 mod a_check_never_runs_unconfined_unless_the_box_chose_it;
 mod a_config_naming_another_main_says_install_main;
+mod a_declared_path_is_never_read_as_a_glob;
 mod a_landing_needs_a_policy_at_its_base;
 mod check_cost_is_reported;
 mod cli;
