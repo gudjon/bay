@@ -32,10 +32,11 @@ fn spawns(test_box: &TestBox, name: &str, cmd: &mut Command) -> (BTreeMap<String
         .collect();
     let pid = lines.first().map(|line| line["pid"].clone());
     let mut counts = BTreeMap::new();
-    for line in lines
-        .iter()
-        .filter(|line| Some(&line["pid"]) == pid.as_ref())
-    {
+    // A process's open object reader (G719) is one spawn that serves every read after it; it
+    // ends with the process, so its line has no exit code. It is not a read one by one.
+    for line in lines.iter().filter(|line| {
+        Some(&line["pid"]) == pid.as_ref() && !(line["sub"] == "cat-file" && line["exit"].is_null())
+    }) {
         *counts
             .entry(line["sub"].as_str().unwrap_or_default().to_owned())
             .or_insert(0) += 1;
