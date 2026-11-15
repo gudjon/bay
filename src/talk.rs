@@ -1067,9 +1067,10 @@ impl Talk {
     }
 
     /// Closed: a close entry (superseded, answered, done, or read after its `expires`, G52), or a
-    /// discovery talk with an answer (ruling T2). A delivery talk closes on the landing that
-    /// names its change (G148), a reliability talk on the trunk commit its latest `done` or
-    /// `validated` backbrief names as evidence (BACKLOG 240).
+    /// discovery talk with an answer (ruling T2). A reliability talk closes on the trunk commit
+    /// its latest `done` or `validated` backbrief names as evidence (BACKLOG 240), a delivery talk
+    /// on the landing that names its change (G148) or on a landing that backbrief names as
+    /// evidence (BACKLOG 241).
     #[must_use]
     pub fn closed(&self) -> bool {
         self.has("close") || (self.body["kind"] == "discovery" && self.has("answer"))

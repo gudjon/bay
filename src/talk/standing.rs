@@ -18,7 +18,7 @@
 //! (G452): the recipient read the talk to reply to it. An answer by `decides` says nothing of
 //! `who`. The reply is the latest backbrief or answer. A backbrief that says `done` closes
 //! nothing: only evidence does (a reliability talk's trunk commit, BACKLOG 240; a delivery
-//! talk's landing, G148).
+//! talk's landing, named by a trailer, G148, or as evidence, BACKLOG 241).
 //!
 //! Each row says `signed`: whether a key signed the talk's sender. Under `[policy] signing =
 //! "approvals"` (G445) it is `false`, and `from` is the name the sender claims.

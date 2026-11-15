@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.74
+
+- A delivery talk closes once its recipient backbriefs `done` with a bay merge on trunk as evidence.
+
 ## 0.6.73
 
 - Kept history answers are one small file each, so a command reads only the one it needs.

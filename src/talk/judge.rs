@@ -936,12 +936,14 @@ fn close(
 
 /// BACKLOG 240: a `done` close of a reliability talk names no talk `by` and, as `evidence`, the
 /// commit its latest backbrief's evidence resolves to here, when that backbrief says `done` or
-/// `validated` and the commit is on this host's trunk after the push. A delivery talk closes on
-/// its change's landing (G148), never on evidence.
+/// `validated` and the commit is on this host's trunk after the push. BACKLOG 241: a delivery
+/// talk closes the same way only when that commit is a merge, the commit its `Change-Id:`
+/// change's landed marker names.
 fn evidenced(push: &Push, talk: &Talk, entry: &Value, known: &Known) -> Result<(), String> {
-    if talk.body["kind"] != "reliability" {
+    let kind = talk.body["kind"].as_str();
+    if !matches!(kind, Some("reliability" | "delivery")) {
         return Err(format!(
-            "only a reliability talk closes on evidence, and talk {} is {}",
+            "only a reliability or delivery talk closes on evidence, and talk {} is {}",
             talk.id, talk.body["kind"]
         ));
     }
@@ -964,7 +966,26 @@ fn evidenced(push: &Push, talk: &Talk, entry: &Value, known: &Known) -> Result<(
             talk.id
         ));
     }
+    if kind == Some("delivery") && !merged(push, commit)? {
+        return Err(format!(
+            "{commit} is not a merge, so it closes no delivery talk ({})",
+            talk.id
+        ));
+    }
     Ok(())
+}
+
+/// BACKLOG 241: whether trunk commit `commit` is a merge: its one `Change-Id:` names a change
+/// whose landed marker is `commit`.
+fn merged(push: &Push, commit: &str) -> Result<bool, String> {
+    let ids = trailer_values(push.git, commit, "Change-Id")?;
+    let [change] = ids.as_slice() else {
+        return Ok(false);
+    };
+    if !is_change_id(change) {
+        return Ok(false);
+    }
+    Ok((push.marker)(&format!("{}{change}", crate::names::LANDED))?.as_deref() == Some(commit))
 }
 
 /// G52 (ruling T3): an `expired` close names no successor, and stands only on a talk read after

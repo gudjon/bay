@@ -547,8 +547,10 @@ fn close_answered(
 /// BACKLOG 240: closes each acked open reliability talk to `me` as `done` once its latest
 /// backbrief says `done` or `validated` and its `evidence` names a commit on trunk, naming that
 /// commit in full (`evidence`). A reliability talk names a check, not a change, so no landing
-/// answers it (G148), and without `expires` nothing else closed it. A talk whose backbrief or
-/// evidence cannot be read here stays open.
+/// answers it (G148), and without `expires` nothing else closed it. BACKLOG 241: a delivery talk
+/// closes the same way when that commit is a merge (`is_merge`): only its recipient knows the
+/// delivery happened, and the change that delivered it may name it in no trailer. A talk whose
+/// backbrief or evidence cannot be read here stays open.
 fn close_evidenced(
     repo: &Repo,
     prefix: &str,
@@ -560,7 +562,11 @@ fn close_evidenced(
     let known = Known::new();
     let ended: Vec<(&Talk, String)> = talks
         .iter()
-        .filter(|talk| talk.body["kind"] == "reliability" && talk.has("ack") && !talk.closed())
+        .filter(|talk| {
+            matches!(talk.body["kind"].as_str(), Some("reliability" | "delivery"))
+                && talk.has("ack")
+                && !talk.closed()
+        })
         .filter_map(|talk| match talk.end_evidence(&repo.git, &known) {
             Ok(Some(evidence)) => Some((talk, evidence)),
             Ok(None) | Err(_) => None,
@@ -579,6 +585,9 @@ fn close_evidenced(
         let Ok(Some(commit)) = evidence_on_trunk(&repo.git, &evidence, &trunk) else {
             continue;
         };
+        if talk.body["kind"] == "delivery" && !matches!(is_merge(repo, &commit), Ok(true)) {
+            continue;
+        }
         let close = json!({"schema": TALK_SCHEMA, "entry": "close", "talk": talk.id,
             "actor": {"name": me.name, "session": me.session}, "state": "done",
             "evidence": commit, "at": now_rfc3339()});
@@ -590,6 +599,26 @@ fn close_evidenced(
         }
     }
     Ok(())
+}
+
+/// BACKLOG 241: whether trunk commit `commit` is a merge: its `Change-Id:` names a change and it
+/// verifies as a registered runner's publication, as G148's answering merge must.
+fn is_merge(repo: &Repo, commit: &str) -> Result<bool, String> {
+    let read = repo
+        .git
+        .run(&[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Change-Id,valueonly,separator=%x2c)%x1f%(trailers:key=Registry-Id,valueonly,separator=%x2c)%x1f%cn",
+            commit,
+        ])
+        .map_err(|error| error.message())?;
+    let fields: Vec<&str> = read.trim().split('\u{1f}').map(str::trim).collect();
+    let [change, registry_id, committer] = fields.as_slice() else {
+        return Ok(false);
+    };
+    Ok(is_change_id(change)
+        && crate::publish::verify_publication(&repo.git, commit, registry_id, committer))
 }
 
 /// A landing that answers a change (G148).

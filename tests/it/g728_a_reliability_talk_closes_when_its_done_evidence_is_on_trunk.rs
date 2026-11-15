@@ -128,13 +128,14 @@ fn a_reliability_talk_closes_on_a_done_backbrief_whose_evidence_is_on_trunk() {
 }
 
 #[test]
-fn a_delivery_talk_takes_no_close_on_evidence() {
+fn a_delivery_talk_takes_no_close_on_evidence_that_is_no_merge() {
     let case = hosted_talk_landing();
     let id = ask(&case, "Tag it", "delivery", &["--change", "abcd2345"]);
     assert_eq!(closed_now(&case, &id), Vec::<Value>::new(), "acked only");
     let trunk = trunk_tip(&case);
     backbrief(&case, &id, &["done", "--evidence", &trunk]);
-    // G148 closes a delivery talk: a landing that names its change. Evidence closes nothing.
+    // A delivery talk closes on a landing: one that names its change (G148), or one its
+    // evidence names (BACKLOG 241). Trunk evidence that is no landing closes nothing.
     assert_eq!(closed_now(&case, &id), Vec::<Value>::new());
 }
 
@@ -199,13 +200,13 @@ fn the_host_takes_a_done_close_only_on_the_latest_backbriefs_trunk_evidence() {
         assert!(stderr.contains(why), "{extra}: {stderr}");
     }
 
-    // A delivery talk closes on its change's landing (G148), never on evidence.
+    // A delivery talk closes on evidence only when it names a landing (BACKLOG 241).
     backbrief(&case, &about, &["done", "--evidence", &trunk]);
     let stderr = case.refused(
         &case.a,
         &forged_close(&case, &about, &json!({"evidence": trunk})),
     );
-    assert!(stderr.contains("only a reliability talk"), "{stderr}");
+    assert!(stderr.contains("is not a merge"), "{stderr}");
 
     // Evidence the host holds off its trunk (an entry of the talk itself) closes nothing.
     let side = case.host_tip(&talk_ref("agent", &id)).unwrap();
