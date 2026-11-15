@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.81
+
+- `bay doctor` publishes its verdict only when it changed, or every ten minutes, not on every run.
+
 ## 0.6.80
 
 - `bay start` judges a kept view of an ended change again only after something in it moved.

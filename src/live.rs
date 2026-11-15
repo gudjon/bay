@@ -405,11 +405,44 @@ fn push_once(repo: &Repo) -> Result<Value, String> {
     push_written(repo, write(repo)?)
 }
 
+/// G744: the oldest a published doctor verdict that has not changed is left standing.
+const DOCTOR_REPUBLISH_S: u64 = 600;
+
 /// G314, for `bay doctor`: writes this machine's summary carrying `doctor`, its verdict, and
 /// pushes it, waiting for the push. Best effort: the outcome is kept as a live push's is, so a
 /// failure shows in doctor's `live` row, and it never changes doctor's result.
 pub fn publish_doctor(repo: &Repo, doctor: Value) {
+    // G744 (a measurement, 2026-11-15: a machine ran `bay doctor` about once a minute, each
+    // waiting on a push of its summary, 12 s at the median, for a verdict that never changed):
+    // the verdict goes out when it changed, or when the one out is older than
+    // DOCTOR_REPUBLISH_S; otherwise the summary out already says it.
+    let sent = bay_dir(repo).join("live-doctor.json");
+    let now = unix_now();
+    // The verdict without its time: what it says, not when it was said.
+    let mut said = doctor.clone();
+    if let Some(said) = said.as_object_mut() {
+        said.remove("at");
+    }
+    let same = std::fs::read_to_string(&sent)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .is_some_and(|held| {
+            held["verdict"] == said
+                && held["at"]
+                    .as_u64()
+                    .is_some_and(|at| now.saturating_sub(at) < DOCTOR_REPUBLISH_S)
+        });
+    if same {
+        return;
+    }
     let outcome = write_with(repo, Some(doctor)).and_then(|written| push_written(repo, written));
+    if outcome.is_ok() {
+        let held = json!({"verdict": said, "at": now}).to_string();
+        let tmp = sent.with_extension(format!("{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, held).is_ok() {
+            let _ = crate::durable::rename(&tmp, &sent);
+        }
+    }
     if std::fs::create_dir_all(bay_dir(repo)).is_ok() {
         keep_outcome(repo, &outcome);
     }
