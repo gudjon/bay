@@ -3,6 +3,7 @@
 ## 0.6.81
 
 - `bay doctor` publishes its verdict only when it changed, or every ten minutes, not on every run.
+- `bay start` of your own abandoned change opens it again, instead of answering ready while it stays abandoned.
 
 ## 0.6.80
 

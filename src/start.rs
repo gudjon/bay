@@ -1546,8 +1546,15 @@ fn adopt_or_refuse(
     }
     let previous = record.actor.clone();
     let previous_source = record.actor_source;
-    if previous != *me {
-        record.adopted_from.push(previous.clone());
+    // G745 (a fleet finding, 2026-11-15: after `bay abandon`, its own actor's `bay start` of the
+    // change answered ready with the change still abandoned, and the same start released its
+    // view as an ended change's): a start by its own actor reopens an abandoned change, as an
+    // adoption does, so it is live again before its view is judged.
+    let reopens = previous == *me && record.state == ChangeState::Abandoned;
+    if previous != *me || reopens {
+        if !reopens {
+            record.adopted_from.push(previous.clone());
+        }
         record.actor = me.clone();
         record.actor_source = Some(actor_source());
         if record.state == ChangeState::Abandoned {
@@ -1565,7 +1572,11 @@ fn adopt_or_refuse(
                 &head,
                 &record,
                 &draft,
-                &format!("adopt {change} by {}", me.name),
+                &if reopens {
+                    format!("reopen {change} by {}", me.name)
+                } else {
+                    format!("adopt {change} by {}", me.name)
+                },
             )
             .map_err(|error| error.message())?;
         if let Err(error) = repo
@@ -1940,8 +1951,16 @@ fn resume(
     if let Some(fixed) = fix_added {
         record.fixes = Some(fixed.to_owned());
     }
-    if !paths_added.is_empty() || fix_added.is_some() {
-        let message = if fix_added.is_some() {
+    // G745: a start of an abandoned change by its own actor opens it again, before its view is
+    // made or judged.
+    let reopens = record.state == ChangeState::Abandoned;
+    if reopens {
+        record.state = ChangeState::Open;
+    }
+    if !paths_added.is_empty() || fix_added.is_some() || reopens {
+        let message = if reopens {
+            "reopen"
+        } else if fix_added.is_some() {
             "declare fix"
         } else {
             "declare paths"
