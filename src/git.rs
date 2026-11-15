@@ -1480,7 +1480,7 @@ impl Git {
         if std::fs::create_dir_all(common.join("bay")).is_ok()
             && std::fs::write(&tmp, format!("{mark} {}\n", u8::from(held))).is_ok()
         {
-            let _ = std::fs::rename(&tmp, &verdict);
+            let _ = crate::durable::rename(&tmp, &verdict);
         }
         Some(held)
     }
