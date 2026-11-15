@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.75
+
+- `bay status` checks its views and describes its changes side by side, so a busy store answers sooner.
+
 ## 0.6.74
 
 - A delivery talk closes once its recipient backbriefs `done` with a bay merge on trunk as evidence.

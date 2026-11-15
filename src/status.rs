@@ -348,28 +348,41 @@ fn read_sections(
     // reading this store, each section after the one before): every section only reads this
     // store, so each runs beside the others, and the read costs about its longest section.
     std::thread::scope(|scope| {
-        let leftovers = scope.spawn(move || leftovers(repo, trunk, view, me));
-        let quarantines = scope.spawn(move || quarantines(repo, trunk));
-        let flakes = scope.spawn(move || flake_rows(repo, trunk, read));
-        let red_now = scope.spawn(move || red_rows(repo, trunk));
-        let targets = scope.spawn(move || target_rows(repo, trunk, targets_fetched, read));
+        let leftovers =
+            scope.spawn(move || timed("leftovers", || leftovers(repo, trunk, view, me)));
+        let quarantines = scope.spawn(move || timed("quarantines", || quarantines(repo, trunk)));
+        let flakes = scope.spawn(move || timed("flakes", || flake_rows(repo, trunk, read)));
+        let red_now = scope.spawn(move || timed("red", || red_rows(repo, trunk)));
+        let targets = scope.spawn(move || {
+            timed("targets", || {
+                target_rows(repo, trunk, targets_fetched, read)
+            })
+        });
         // G309: the flow of work, derived on read from the chains this repository holds.
         let flow = scope.spawn(move || {
-            crate::flow::flow(repo, trunk).unwrap_or_else(|why| json!({"unread": why}))
+            timed("flow", || {
+                crate::flow::flow(repo, trunk).unwrap_or_else(|why| json!({"unread": why}))
+            })
         });
-        let talks = scope.spawn(move || talk_rows(repo));
-        let unattributed = scope.spawn(move || unattributed_rows(repo, trunk));
+        let talks = scope.spawn(move || timed("talks", || talk_rows(repo)));
+        let unattributed =
+            scope.spawn(move || timed("unattributed", || unattributed_rows(repo, trunk)));
         // N-8: a held trunk is named, with where the hold comes from, its reason and its end.
-        let hold = scope.spawn(move || crate::hold::held(repo, trunk));
+        let hold = scope.spawn(move || timed("hold", || crate::hold::held(repo, trunk)));
         // N-20: each outside merge in the red window that pushed bay landings off the line.
-        let not_linear = scope.spawn(move || not_linear(&repo.git, trunk));
+        let not_linear = scope.spawn(move || timed("not_linear", || not_linear(&repo.git, trunk)));
         // R11: delivery that fails is never silent.
-        let wake_failing = scope.spawn(move || crate::log::wake_failing(&repo.git));
-        let shown = shown_changes(repo, ids, named, me, trunk, read);
-        let runner = shown.as_ref().map_or_else(
-            |_| Vec::new(),
-            |shown| crate::presence::runner_warnings(repo, shown.queued, trunk),
-        );
+        let wake_failing =
+            scope.spawn(move || timed("wake_failing", || crate::log::wake_failing(&repo.git)));
+        let shown = timed("shown_changes", || {
+            shown_changes(repo, ids, named, me, trunk, read)
+        });
+        let runner = timed("runner_warnings", || {
+            shown.as_ref().map_or_else(
+                |_| Vec::new(),
+                |shown| crate::presence::runner_warnings(repo, shown.queued, trunk),
+            )
+        });
         let sections = Sections {
             runner,
             leftovers: joined(leftovers),
@@ -386,6 +399,29 @@ fn read_sections(
         };
         (shown, sections)
     })
+}
+
+/// In a test build, `BAY_TEST_SECTION_TRACE` names a file that each timed part of a listing
+/// appends one line to: its name and its milliseconds.
+fn timed<T>(name: &str, part: impl FnOnce() -> T) -> T {
+    let began = Instant::now();
+    let out = part();
+    section_line(name, began);
+    out
+}
+
+/// One line of `BAY_TEST_SECTION_TRACE`: `name` and the milliseconds since `began`.
+fn section_line(name: &str, began: Instant) {
+    if let Some(file) = std::env::var_os("BAY_TEST_SECTION_TRACE").filter(|_| TEST_HOOKS) {
+        use std::io::Write as _;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)
+        {
+            let _ = writeln!(file, "{name} {}", began.elapsed().as_millis());
+        }
+    }
 }
 
 /// The changes a listing describes and the ids it only names, and how many operations wait.
@@ -437,20 +473,42 @@ fn shown_changes(
     let queued: usize = records.iter().map(crate::presence::waiting).sum();
     records.sort_by_key(|record| me != Some(record.actor.name.as_str()));
     let mine_only = ids.len() > 1 && me.is_some();
-    let (mut changes, mut more) = (Vec::new(), Vec::new());
+    let (mut described, mut more) = (Vec::new(), Vec::new());
     for record in &records {
         let others = mine_only && me != Some(record.actor.name.as_str());
-        if changes.len() >= LISTED || others {
+        if described.len() >= LISTED || others {
             more.push(record.id.clone());
             continue;
         }
-        let unsynced: Vec<&Receipt> = pending
-            .iter()
-            .map(|(_, receipt)| receipt)
-            .filter(|receipt| receipt.change == record.id)
-            .collect();
-        changes.push(describe(repo, record, trunk, &unsynced, read)?);
+        described.push(record);
     }
+    // A measurement (2026-11-15: the listing's second-longest section, 0.9-1.4 s on a clone of
+    // 6,200 changes, described each shown change in turn): the changes are described side by
+    // side, each in its place.
+    let threads = described.len().clamp(1, LEFTOVER_THREADS);
+    let per = described.len().div_ceil(threads).max(1);
+    let pending = &pending;
+    let rows: Vec<Result<Value, String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = described
+            .chunks(per)
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|record| {
+                            let unsynced: Vec<&Receipt> = pending
+                                .iter()
+                                .map(|(_, receipt)| receipt)
+                                .filter(|receipt| receipt.change == record.id)
+                                .collect();
+                            describe(repo, record, trunk, &unsynced, read)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(joined).collect()
+    });
+    let changes = rows.into_iter().collect::<Result<Vec<_>, _>>()?;
     Ok(Shown {
         changes,
         more,
@@ -1027,11 +1085,16 @@ fn settle_swept(
 fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult, String> {
     let started = Instant::now();
     // G714: a listing's answer is saved for the reads after it, stamped with the store before it.
-    let before = change
-        .is_none()
-        .then(|| crate::saved::Before::of(dir))
-        .flatten();
-    let (repo, refreshed) = match fetch_swept(dir, change, started, started + deadline) {
+    let before = timed("saved_stamp", || {
+        change
+            .is_none()
+            .then(|| crate::saved::Before::of(dir))
+            .flatten()
+    });
+    let swept = timed("fetch_or_local_read", || {
+        fetch_swept(dir, change, started, started + deadline)
+    });
+    let (repo, refreshed) = match swept {
         Some(Ok(swept)) => swept,
         Some(Err(refused)) => return Ok(*refused),
         None => {
@@ -1047,10 +1110,11 @@ fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult
         }
     };
     let saves = before.filter(|_| refreshed.stale.is_none() && repo.view_change(dir).is_none());
-    let result = listing(dir, change, &repo, refreshed)?;
+    let result = timed("listing", || listing(dir, change, &repo, refreshed))?;
     if let Some(before) = saves {
-        before.save(&result);
+        timed("saved_save", || before.save(&result));
     }
+    section_line("total", started);
     Ok(result)
 }
 
@@ -1443,51 +1507,82 @@ fn leftovers(
         .map(|(id, record)| (record.base_first.as_str(), id.as_str()))
         .collect();
     let scans = scan_many(&repo.git, trunk, &bases)?;
-    let mut out = Vec::new();
-    for (id, record) in checked {
-        let landed = scans
-            .get(&id)
-            .is_some_and(|scan| !scan.publications.is_empty());
-        let state = if landed {
-            json!("landed")
-        } else {
-            json!(record.state)
-        };
-        let path = repo.view_path(&id);
-        let latest = chain.latest_draft(&id).map_err(|error| error.message())?;
-        let uncheckpointed = if view::exists(&path) {
-            json!(view::uncheckpointed(&path, &latest).map_err(|error| error.message())?)
-        } else {
-            json!(null)
-        };
-        // § 9a: after a landing, the view is releasable only when it holds no newer work than
-        // the published revision. Newer work is kept, never cleaned away.
-        let mut newer_work = false;
-        if landed && view::exists(&path) {
-            let published = last_revision(&record, &latest);
-            newer_work =
-                view::uncheckpointed(&path, &published).map_err(|error| error.message())?;
-            let next = if newer_work {
-                view::Journal::Published
-            } else {
-                view::Journal::Releasable
-            };
-            if view::journal(repo, &id) != Some(next) {
-                view::set_journal(repo, &id, next)?;
-            }
-        }
-        out.push(json!({
-            "change": id,
-            "view": path.display().to_string(),
-            "state": state,
-            "age_s": view::age_s(repo, &id),
-            "uncheckpointed": uncheckpointed,
-            "newer_work": newer_work,
-            "journal": view::journal(repo, &id),
-        }));
-    }
+    // A measurement (2026-11-15: on a clone of 6,200 changes the listing's longest section was
+    // this loop, 2-3.6 s, each checked view's work tree read in turn): the views are read side
+    // by side, each row in its place.
+    let threads = checked.len().clamp(1, LEFTOVER_THREADS);
+    let per = checked.len().div_ceil(threads);
+    let rows: Vec<Result<Value, String>> = std::thread::scope(|scope| {
+        let chain = &chain;
+        let scans = &scans;
+        let handles: Vec<_> = checked
+            .chunks(per.max(1))
+            .map(|part| {
+                scope.spawn(move || {
+                    part.iter()
+                        .map(|(id, record)| leftover_row(repo, chain, scans, id, record))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        handles.into_iter().flat_map(joined).collect()
+    });
+    let mut out = rows.into_iter().collect::<Result<Vec<_>, _>>()?;
     out.extend(stale_inflight(repo, &chain)?);
     Ok((out, more))
+}
+
+/// How many views a listing reads at once.
+const LEFTOVER_THREADS: usize = 8;
+
+/// The row of a checked view `id` of change `record`: its state, whether it holds work no
+/// checkpoint records, and, once landed, whether it holds work newer than what landed.
+fn leftover_row(
+    repo: &Repo,
+    chain: &Chain,
+    scans: &std::collections::HashMap<String, crate::publish::Scan>,
+    id: &str,
+    record: &ChangeRecord,
+) -> Result<Value, String> {
+    let landed = scans
+        .get(id)
+        .is_some_and(|scan| !scan.publications.is_empty());
+    let state = if landed {
+        json!("landed")
+    } else {
+        json!(record.state)
+    };
+    let path = repo.view_path(id);
+    let latest = chain.latest_draft(id).map_err(|error| error.message())?;
+    let uncheckpointed = if view::exists(&path) {
+        json!(view::uncheckpointed(&path, &latest).map_err(|error| error.message())?)
+    } else {
+        json!(null)
+    };
+    // § 9a: after a landing, the view is releasable only when it holds no newer work than
+    // the published revision. Newer work is kept, never cleaned away.
+    let mut newer_work = false;
+    if landed && view::exists(&path) {
+        let published = last_revision(record, &latest);
+        newer_work = view::uncheckpointed(&path, &published).map_err(|error| error.message())?;
+        let next = if newer_work {
+            view::Journal::Published
+        } else {
+            view::Journal::Releasable
+        };
+        if view::journal(repo, id) != Some(next) {
+            view::set_journal(repo, id, next)?;
+        }
+    }
+    Ok(json!({
+        "change": id,
+        "view": path.display().to_string(),
+        "state": state,
+        "age_s": view::age_s(repo, id),
+        "uncheckpointed": uncheckpointed,
+        "newer_work": newer_work,
+        "journal": view::journal(repo, id),
+    }))
 }
 
 /// The revision a view is measured against once its change ended (§ 9a): the change's last
