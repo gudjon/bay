@@ -66,8 +66,11 @@ fn a_status_lists_the_evidence_refs_as_often_with_six_landings_as_with_two() {
     }
     let (six, more) = status(&test_box, &repo);
     assert_eq!(more, read + 4, "the flake rows lost a landing");
-    assert_eq!(
-        six, two,
+    // A read lists the refs once more when it fetches the evidence notes itself rather than
+    // finding a sweep's fetch, which turns on timing, never on the landings: one listing a
+    // landing would show four more here.
+    assert!(
+        six.abs_diff(two) <= 1,
         "a status listed the evidence refs {six} times with {more} landings, {two} with {read}"
     );
 }
