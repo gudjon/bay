@@ -117,6 +117,38 @@ pub fn uncheckpointed(view: &Path, latest_draft: &str) -> Result<bool, GitError>
         .is_empty())
 }
 
+/// G735: a stamp of what a view's check reads that a writer moves: its index file and `HEAD`
+/// (a checkpoint, a commit or `git add` rewrites them by rename) and its root directory (a file
+/// made or removed there); `None` for a view whose Git directory cannot be found.
+#[must_use]
+pub fn stamp(view: &Path) -> Option<String> {
+    let link = std::fs::read_to_string(view.join(".git")).ok()?;
+    let git_dir = view.join(link.trim().strip_prefix("gitdir:")?.trim());
+    let mark = |path: &Path| -> String {
+        std::fs::metadata(path).map_or_else(
+            |_| "-".to_owned(),
+            |meta| {
+                let nanos = meta
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |time| time.as_nanos());
+                #[cfg(unix)]
+                let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+                #[cfg(not(unix))]
+                let inode = 0_u64;
+                format!("{nanos}/{}/{inode}", meta.len())
+            },
+        )
+    };
+    Some(format!(
+        "{} {} {}",
+        mark(&git_dir.join("index")),
+        mark(&git_dir.join("HEAD")),
+        mark(view)
+    ))
+}
+
 /// The journal sits beside the view, outside it: `<id>.journal`.
 #[must_use]
 pub fn journal_path(repo: &Repo, id: &str) -> PathBuf {

@@ -298,6 +298,42 @@ fn fixed_query(args: &[&str], input: Option<&[u8]>) -> bool {
     let Some((sub, rest)) = args.split_first() else {
         return false;
     };
+    // G736 (a measurement, 2026-11-15: each listing read the same evidence notes of fixed notes
+    // commits in two sections, a 4,100-line `cat-file --batch-check` among them, 0.3 s): a batch
+    // read of objects each named for good, its answer naming only what they are.
+    if *sub == "cat-file" {
+        let fixed_format = |format: &str| {
+            let mut rest = format;
+            while let Some(at) = rest.find("%(") {
+                let Some(end) = rest[at..].find(')') else {
+                    return false;
+                };
+                if !matches!(
+                    &rest[at..=at + end],
+                    "%(objectname)" | "%(objecttype)" | "%(objectsize)"
+                ) {
+                    return false;
+                }
+                rest = &rest[at + end + 1..];
+            }
+            true
+        };
+        let batch = match rest {
+            ["--batch" | "--batch-check"] => true,
+            [option] => option
+                .strip_prefix("--batch-check=")
+                .or_else(|| option.strip_prefix("--batch="))
+                .is_some_and(fixed_format),
+            _ => false,
+        };
+        return batch
+            && input.is_some_and(|input| {
+                std::str::from_utf8(input).is_ok_and(|text| {
+                    text.lines()
+                        .all(|line| line.trim().is_empty() || fixed_object(line.trim()))
+                })
+            });
+    }
     if !READS.contains(sub) {
         return false;
     }
@@ -324,6 +360,13 @@ fn fixed_query(args: &[&str], input: Option<&[u8]>) -> bool {
                 .all(|line| fixed_range(line.trim()) || line.trim().is_empty())
         })
     })
+}
+
+/// Whether `haystack` holds `needle`.
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
 
 /// G720: a revision of fixed objects: `<object>`, `^<object>`, or `<object>..<object>` and
@@ -1441,7 +1484,9 @@ impl Git {
             return Ok(kept);
         }
         let read = self.run_bytes_uncached(args, &[], input, timeout);
-        if let Ok(read) = &read {
+        if let Ok(read) = &read
+            && !(args.first() == Some(&"cat-file") && self.unsettled(read, input, timeout))
+        {
             if read.len() <= FIXED_ANSWER_BYTES {
                 *answer = Some(read.clone());
             }
@@ -1450,6 +1495,55 @@ impl Git {
             }
         }
         read
+    }
+
+    /// G736: whether the answer `read` of a batch over the names `input` holds what this store
+    /// holds now, which a fetch can change: a name ambiguous, or a name missing that is no path
+    /// in an object this store holds. A path missing from a tree held here is missing for good:
+    /// the tree is what its id names.
+    fn unsettled(&self, read: &[u8], input: Option<&[u8]>, timeout: std::time::Duration) -> bool {
+        if contains(read, b" ambiguous\n") {
+            return true;
+        }
+        if !contains(read, b" missing\n") {
+            return false;
+        }
+        let Some(names) = input.and_then(|input| std::str::from_utf8(input).ok()) else {
+            return true;
+        };
+        let names: std::collections::HashSet<&str> = names
+            .lines()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        let mut held = std::collections::BTreeSet::new();
+        for line in read.split(|&byte| byte == b'\n') {
+            let Some(name) = line
+                .strip_suffix(b" missing")
+                .and_then(|name| std::str::from_utf8(name).ok())
+                .filter(|name| names.contains(name))
+            else {
+                continue;
+            };
+            match name.split_once(':') {
+                Some((rev, _)) => {
+                    held.insert(rev.to_owned());
+                }
+                None => return true,
+            }
+        }
+        let mut check = String::new();
+        for rev in &held {
+            check.push_str(rev);
+            check.push('\n');
+        }
+        self.run_bytes_uncached(
+            &["cat-file", "--batch-check=%(objectname)"],
+            &[],
+            Some(check.as_bytes()),
+            timeout,
+        )
+        .map_or(true, |found| contains(&found, b" missing\n"))
     }
 
     /// G721: where this store keeps answers that cannot change, and the context they are keyed
@@ -2828,6 +2922,36 @@ mod fixed_queries {
         assert!(!fixed_query(
             &["rev-list", "--stdin"],
             Some(b"refs/heads/main\n")
+        ));
+    }
+
+    #[test]
+    fn a_batch_read_of_objects_named_for_good_is_fixed_and_one_through_a_ref_is_not() {
+        let fixed = format!("{A}:ab/cdef\n{B}\n");
+        for args in [
+            vec!["cat-file", "--batch"],
+            vec!["cat-file", "--batch-check"],
+            vec!["cat-file", "--batch-check=%(objectname)"],
+            vec![
+                "cat-file",
+                "--batch-check=%(objectname) %(objecttype) %(objectsize)",
+            ],
+        ] {
+            assert!(fixed_query(&args, Some(fixed.as_bytes())), "{args:?}");
+        }
+        // A name through a ref, a format that reads more than the object, or no names at all.
+        assert!(!fixed_query(
+            &["cat-file", "--batch"],
+            Some(b"refs/notes/bay/evidence/ci:ab/cdef\n")
+        ));
+        assert!(!fixed_query(
+            &["cat-file", "--batch-check=%(objectname) %(deltabase)"],
+            Some(fixed.as_bytes())
+        ));
+        assert!(!fixed_query(&["cat-file", "--batch"], None));
+        assert!(!fixed_query(
+            &["cat-file", "--batch", "--follow-symlinks"],
+            Some(fixed.as_bytes())
         ));
     }
 }

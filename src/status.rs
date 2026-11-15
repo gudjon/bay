@@ -1548,6 +1548,9 @@ fn leftovers(
 /// How many views a listing reads at once.
 const LEFTOVER_THREADS: usize = 8;
 
+/// G735: the oldest, in seconds, a kept check of an ended change's view is shown.
+const VIEW_CHECK_KEPT_S: u64 = 600;
+
 /// The row of a checked view `id` of change `record`: its state, whether it holds work no
 /// checkpoint records, and, once landed, whether it holds work newer than what landed.
 fn leftover_row(
@@ -1567,7 +1570,35 @@ fn leftover_row(
     };
     let path = repo.view_path(id);
     let latest = chain.latest_draft(id).map_err(|error| error.message())?;
-    let uncheckpointed = if view::exists(&path) {
+    let published = landed.then(|| last_revision(record, &latest));
+    // G735: the view of an ended change is checked again only when what it holds moved, or
+    // its last check is older than VIEW_CHECK_KEPT_S; `checked_s` says how old.
+    let kept_key = (landed || ended(record.state))
+        .then(|| view::stamp(&path))
+        .flatten()
+        .map(|stamp| {
+            let view = path.display().to_string();
+            let published = published.clone().unwrap_or_default();
+            crate::facts::key(
+                "view-check-1",
+                "leftover",
+                &[&view, &latest, &published, &stamp],
+                None,
+            )
+        });
+    let now = crate::live::unix_now();
+    let kept = kept_key.as_ref().and_then(|key| {
+        let text = String::from_utf8(crate::facts::get(&repo.common_dir, key)?).ok()?;
+        let mut words = text.split(' ');
+        let at: u64 = words.next()?.parse().ok()?;
+        let uncheckpointed = words.next()? == "1";
+        let newer_work = words.next()? == "1";
+        (now.saturating_sub(at) <= VIEW_CHECK_KEPT_S).then_some((at, uncheckpointed, newer_work))
+    });
+    let checked_at = kept.map_or(now, |(at, _, _)| at);
+    let uncheckpointed = if let Some((_, uncheckpointed, _)) = kept {
+        json!(uncheckpointed)
+    } else if view::exists(&path) {
         json!(view::uncheckpointed(&path, &latest).map_err(|error| error.message())?)
     } else {
         json!(null)
@@ -1575,9 +1606,11 @@ fn leftover_row(
     // § 9a: after a landing, the view is releasable only when it holds no newer work than
     // the published revision. Newer work is kept, never cleaned away.
     let mut newer_work = false;
-    if landed && view::exists(&path) {
-        let published = last_revision(record, &latest);
-        newer_work = view::uncheckpointed(&path, &published).map_err(|error| error.message())?;
+    if let Some(published) = published.as_deref().filter(|_| view::exists(&path)) {
+        newer_work = match kept {
+            Some((_, _, newer_work)) => newer_work,
+            None => view::uncheckpointed(&path, published).map_err(|error| error.message())?,
+        };
         let next = if newer_work {
             view::Journal::Published
         } else {
@@ -1587,6 +1620,16 @@ fn leftover_row(
             view::set_journal(repo, id, next)?;
         }
     }
+    if kept.is_none()
+        && let (Some(key), Some(uncheckpointed)) = (&kept_key, uncheckpointed.as_bool())
+    {
+        let text = format!(
+            "{now} {} {}",
+            u8::from(uncheckpointed),
+            u8::from(newer_work)
+        );
+        crate::facts::put(&repo.common_dir, key, text.as_bytes());
+    }
     Ok(json!({
         "change": id,
         "view": path.display().to_string(),
@@ -1594,6 +1637,7 @@ fn leftover_row(
         "age_s": view::age_s(repo, id),
         "uncheckpointed": uncheckpointed,
         "newer_work": newer_work,
+        "checked_s": now.saturating_sub(checked_at),
         "journal": view::journal(repo, id),
     }))
 }

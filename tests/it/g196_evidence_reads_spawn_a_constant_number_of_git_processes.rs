@@ -75,7 +75,9 @@ fn status_spawns(
         test_box
             .bay(repo)
             .args(["status", id])
-            .env("BAY_TEST_GIT_TRACE", &trace),
+            .env("BAY_TEST_GIT_TRACE", &trace)
+            // How the reads are made is under test, never an answer kept from one before (G736).
+            .env("BAY_TEST_FACTS", "off"),
     );
     assert_eq!(code, 0, "{result}");
     let text = std::fs::read_to_string(&trace).expect("the trace was written");

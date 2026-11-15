@@ -3,6 +3,9 @@
 ## 0.6.78
 
 - `bay merge` reads the remote side by side before it writes: four waves of calls instead of seven.
+- `bay merge` and `bay abandon` retry a chain another writer moved eight times, pausing longer each time.
+- `bay status` keeps an ended change's view check until the view moves; `checked_s` says its age.
+- `bay status` keeps evidence reads of unchanged notes, so a later read skips them.
 
 ## 0.6.77
 

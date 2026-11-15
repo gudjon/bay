@@ -560,7 +560,7 @@ fn notes_on(
     if producers.is_empty() {
         return Ok(trees.iter().map(|_| Vec::new()).collect());
     }
-    let fanouts = match fanouts(git, producers, trees) {
+    let fanouts = match fanouts(git, producers, notes_trees, trees) {
         Ok(fanouts) => fanouts,
         Err(GitError::Failed { .. }) => {
             return trees.iter().map(|tree| one_by_one(tree)).collect();
@@ -573,9 +573,9 @@ fn notes_on(
         .zip(&fanouts)
         .filter(|(tree, _)| crate::compact::is_object_id(tree))
     {
-        for (producer, &fanout) in producers.iter().zip(fanouts) {
+        for (at, &fanout) in fanouts.iter().enumerate() {
             for levels in 0..=fanout {
-                input.push_str(&notes_ref(producer));
+                input.push_str(&notes_source(producers[at], notes_trees.get(at).copied()));
                 input.push(':');
                 input.push_str(&note_path(tree, levels));
                 input.push('\n');
@@ -751,7 +751,12 @@ fn lost_note(
 /// # Errors
 ///
 /// A git fault.
-fn fanouts(git: &Git, producers: &[&str], trees: &[&str]) -> Result<Vec<Vec<usize>>, GitError> {
+fn fanouts(
+    git: &Git,
+    producers: &[&str],
+    notes_trees: &[&str],
+    trees: &[&str],
+) -> Result<Vec<Vec<usize>>, GitError> {
     let mut fanouts = vec![vec![0; producers.len()]; trees.len()];
     let mut open: Vec<(usize, usize)> = trees
         .iter()
@@ -767,7 +772,7 @@ fn fanouts(git: &Git, producers: &[&str], trees: &[&str]) -> Result<Vec<Vec<usiz
             .map(|&(at, producer)| {
                 format!(
                     "{}:{}",
-                    notes_ref(producers[producer]),
+                    notes_source(producers[producer], notes_trees.get(producer).copied()),
                     fanout_dir(trees[at], levels)
                 )
             })
@@ -784,6 +789,14 @@ fn fanouts(git: &Git, producers: &[&str], trees: &[&str]) -> Result<Vec<Vec<usiz
         levels += 1;
     }
     Ok(fanouts)
+}
+
+/// G736: what a batch read names `producer`'s notes by: its notes tree `notes_tree` when that is
+/// a full object id, so the answer cannot change and is kept ([`crate::git`]), else its ref.
+fn notes_source(producer: &str, notes_tree: Option<&str>) -> String {
+    notes_tree
+        .filter(|tree| crate::compact::is_object_id(tree))
+        .map_or_else(|| notes_ref(producer), str::to_owned)
 }
 
 /// The path a note on `tree` sits at in a notes tree under `levels` fanout directories of two

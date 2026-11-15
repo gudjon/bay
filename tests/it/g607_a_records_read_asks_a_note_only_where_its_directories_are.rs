@@ -49,6 +49,15 @@ fn a_records_read_asks_for_a_note_only_where_its_notes_tree_has_directories() {
         }
         held.insert(name.to_owned(), levels);
     }
+    // G736: a read names each producer's notes by its notes tree, so a name read back is mapped
+    // to the ref whose tree it is.
+    let by_tree: BTreeMap<String, String> = held
+        .keys()
+        .map(|name| {
+            let tree = test_box.git_ok(&repo, &["rev-parse", &format!("{name}^{{tree}}")]);
+            (tree, name.clone())
+        })
+        .collect();
     assert_eq!(
         held.get(&format!("{EVIDENCE_PREFIX}fanned-2")),
         Some(&2),
@@ -77,6 +86,7 @@ fn a_records_read_asks_for_a_note_only_where_its_notes_tree_has_directories() {
             let Some((name, path)) = line.split_once(':') else {
                 continue;
             };
+            let name = by_tree.get(name).map_or(name, String::as_str);
             let joined = path.replace('/', "");
             if !name.starts_with(EVIDENCE_PREFIX) || joined.is_empty() || !tree.starts_with(&joined)
             {
