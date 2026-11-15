@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.80
+
+- `bay start` judges a kept view of an ended change again only after something in it moved.
+
 ## 0.6.79
 
 - `bay status` names on each live change the red checks of main its change touches (`red_on_paths`).

@@ -371,6 +371,9 @@ enum Standing {
     Kept,
     /// It holds something newer than its change's end: kept, without its ignored directories.
     HoldsNewer,
+    /// G743: judged holding something newer before, and nothing it holds moved since: kept as it
+    /// is, judged and cleaned no more.
+    HoldsNewerKept,
     /// Its directory is already gone: only its journal is left.
     Gone,
     /// It holds nothing newer, and may go.
@@ -388,6 +391,11 @@ fn standing(repo: &Repo, id: &str, ended: &Ended) -> Result<Standing, GitError> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Standing::Gone),
         Err(error) => Err(GitError::Spawn(error)),
         Ok(_) => {
+            if let Some(key) = holds_newer_key(&path, ended)
+                && crate::facts::get(&repo.common_dir, &key).is_some()
+            {
+                return Ok(Standing::HoldsNewerKept);
+            }
             let Some(admin) = worktree_admin(repo, &path) else {
                 return Ok(Standing::Kept);
             };
@@ -403,16 +411,39 @@ fn standing(repo: &Repo, id: &str, ended: &Ended) -> Result<Standing, GitError> 
     }
 }
 
+/// G743 (a measurement, 2026-11-15: on a shared store with 91 views of ended changes, each
+/// agent's `bay start` judged every one again, about 1,200 Git calls and a walk of each view's
+/// tree for ignored directories, 42 s at the median, though nobody touched those views): the key
+/// a view's "holds something newer" is kept under: the view, the revision its change ended with
+/// and the views it placed, and its stamp ([`stamp`]: its index, `HEAD` and root directory). A
+/// view whose stamp moved, or whose change ended again, is judged again. `None` for a view
+/// whose Git directory cannot be read.
+fn holds_newer_key(path: &Path, ended: &Ended) -> Option<[u8; 32]> {
+    let stamp = stamp(path)?;
+    let view = path.display().to_string();
+    let placed = ended.placed.join(" ");
+    Some(crate::facts::key(
+        "view-release-1",
+        "holds-newer",
+        &[&view, &ended.revision, &placed, &stamp],
+        None,
+    ))
+}
+
 /// Releases the view of ended change `id` when it holds nothing newer; whether it did.
 fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
     let path = repo.view_path(id);
     match standing(repo, id, ended)? {
-        Standing::Kept => return Ok(false),
+        Standing::Kept | Standing::HoldsNewerKept => return Ok(false),
         Standing::HoldsNewer => {
             // G639: the view stays for its work, and its change has ended, so the directories
             // its ignore rules match go. A loose ignored file, such as an `.env`, stays: bay
             // cannot tell it from work. One that fails is tried at the next start.
             remove_ignored_directories(&path);
+            // G743: kept as judged, under the view's stamp after its cleaning.
+            if let Some(key) = holds_newer_key(&path, ended) {
+                crate::facts::put(&repo.common_dir, &key, b"1");
+            }
             return Ok(false);
         }
         Standing::Gone => {}
