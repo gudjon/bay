@@ -122,7 +122,8 @@ What you do decides the speed for every agent:
   a direct push. Keep a check's `adapter` files apart too: a change to the policy or to them runs its checks twice,
   as main has them and as it has them.
 - **A fix for a red main goes first.** `bay start <intent> --fixes <check>` (the red check), `--fixes <change>`
-  (or `bay undo <change>`) runs ahead of the line.
+  (or `bay undo <change>`) runs ahead of the line. A change already open that turns out to be the fix is named
+  so in place, keeping its id: `bay start <change> --fixes <check|change>`.
 - **Give up dead work.** `bay abandon <change> --why <reason>`: a runner frees its place at its next pass.
   Work whose actor is gone: `bay start <change> --adopt` (at once when it was idle past the takeover window),
   then merge or abandon it.

@@ -1,4 +1,4 @@
-//! BACKLOG 237 (a fleet finding, 2026-11-14, bay 0.6.70: numtmd6o showed all six of its post
+//! G724, BACKLOG 237 (a fleet finding, 2026-11-14, bay 0.6.70: numtmd6o showed all six of its post
 //! checks `pending` for hours, and jvfmplp5, phrphray and u52n5nc2 one each, while a run on a
 //! newer tip had answered each one). A runner runs a post check on main's newest tip only, and
 //! that run answers every landing since the check's previous run (G439), but a landing's status

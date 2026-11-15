@@ -1,4 +1,4 @@
-//! BACKLOG 238 (a fleet finding, 2026-11-14). A landed change merged again, on a main read
+//! G727, BACKLOG 238 (a fleet finding, 2026-11-14). A landed change merged again, on a main read
 //! before its landing reached it, was submitted again: 3xq4d7ow landed e403611 on 2026-11-12,
 //! and its next `bay merge` read main at 02e12cc, found no publication there, and wrote
 //! operation .2 and the change `ready`. No runner answers that operation (a merged operation

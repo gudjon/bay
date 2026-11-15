@@ -1,4 +1,4 @@
-//! BACKLOG 235 (a fleet finding, 2026-11-14, bay 0.6.70: h3u6cttl and rqhaya4p, one actor, both
+//! G725, BACKLOG 235 (a fleet finding, 2026-11-14, bay 0.6.70: h3u6cttl and rqhaya4p, one actor, both
 //! read generation 6 of one intent; rqhaya4p claimed it and landed; the next day `bay start
 //! h3u6cttl` pushed its chain as it was, its checks passed, and its publish was refused
 //! `CHANGE_ALREADY_MERGED` while its work was not on main, which then counted it as ended).

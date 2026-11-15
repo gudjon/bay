@@ -3,6 +3,12 @@
 ## 0.6.73
 
 - Kept history answers are one small file each, so a command reads only the one it needs.
+- `bay start --paths` holds a folder whose name has `[`, `*`, `?` or `\`, never folders its glob matches.
+- A landing's post check reads `pass` once a run on a newer main tip passed it, naming that landing.
+- A change whose start ended before its claim was pushed takes the intent's next free generation.
+- `bay start <change> --fixes <change|check>` makes a live change the repair in place, keeping its id.
+- Merging a landed change again answers `merged` from its record and writes no operation.
+- A reliability talk closes once its recipient backbriefs `done` with evidence on trunk.
 
 ## 0.6.72
 

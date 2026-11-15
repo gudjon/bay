@@ -1,4 +1,4 @@
-//! BACKLOG 236 (a fleet finding, 2026-11-14, bay 0.6.70: change 6p73hr2t declared
+//! G723, BACKLOG 236 (a fleet finding, 2026-11-14, bay 0.6.70: change 6p73hr2t declared
 //! `apps/cloud/studio/src/app/(dashboard)/[org]/[venue]/calibration`, and its view did not hold
 //! the folder). `bay start --paths` wrote each declared path into the non-cone sparse set as it
 //! was, and git reads a non-cone pattern as a glob: `[org]` was a class of one character, so the

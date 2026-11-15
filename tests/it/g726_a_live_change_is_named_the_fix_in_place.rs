@@ -1,4 +1,4 @@
-//! BACKLOG 234 (a fleet finding, 2026-11-03: bnaq3w46 waited 26 minutes on main's red on its
+//! G726, BACKLOG 234 (a fleet finding, 2026-11-03: bnaq3w46 waited 26 minutes on main's red on its
 //! paths while it carried that red's repair; `bay start bnaq3w46 --fixes scripts-fast` was
 //! refused, "--after, --fixes, --lane and --reverts open a new change", so the repair moved to a
 //! new change at the back of the line, and the approver's waiver did not move with it).

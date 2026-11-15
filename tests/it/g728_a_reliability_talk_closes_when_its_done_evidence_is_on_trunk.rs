@@ -1,4 +1,4 @@
-//! BACKLOG 240 (v12-bay-core, 2026-11-15). A reliability talk closes as `done` once its
+//! G728, BACKLOG 240 (v12-bay-core, 2026-11-15). A reliability talk closes as `done` once its
 //! recipient's latest backbrief says `done` or `validated` and its `evidence` names a commit on
 //! trunk.
 //!
