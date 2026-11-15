@@ -1421,24 +1421,68 @@ impl Git {
         if common.join("shallow").exists() || common.join("refs/replace").exists() {
             return None;
         }
-        let replaced = self
-            .run_bytes_uncached(
-                &[
-                    "for-each-ref",
-                    "--count=1",
-                    "--format=%(refname)",
-                    "refs/replace/",
-                ],
-                &[],
-                None,
-                GIT_CALL_TIMEOUT,
-            )
-            .ok()?;
-        if !replaced.is_empty() {
+        if self.replace_refs(common)? {
             return None;
         }
         let digest = self.config_digest()?;
         Some(format!("{}\0{digest}", git_identity()?))
+    }
+
+    /// G721: whether the store at `common` holds replace refs, mostly without Git: a loose one is
+    /// a file under `refs/replace`; a packed one a line of `packed-refs`, whose verdict is kept
+    /// beside the facts by that file's length and time, so a short process (a hook) reads a few
+    /// bytes, not the file. A reftable store asks Git. `None` when it cannot be told.
+    fn replace_refs(&self, common: &Path) -> Option<bool> {
+        if common.join("refs/replace").exists() {
+            return Some(true);
+        }
+        if common.join("reftable").exists() {
+            let listed = self
+                .run_bytes_uncached(
+                    &[
+                        "for-each-ref",
+                        "--count=1",
+                        "--format=%(refname)",
+                        "refs/replace/",
+                    ],
+                    &[],
+                    None,
+                    GIT_CALL_TIMEOUT,
+                )
+                .ok()?;
+            return Some(!listed.is_empty());
+        }
+        let packed = common.join("packed-refs");
+        let Ok(meta) = std::fs::metadata(&packed) else {
+            return Some(false);
+        };
+        let modified = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        let mark = format!("{}/{modified}", meta.len());
+        let verdict = common.join("bay/facts-replace");
+        if let Ok(kept) = std::fs::read_to_string(&verdict)
+            && let Some((at, held)) = kept.trim().split_once(' ')
+            && at == mark
+        {
+            return Some(held == "1");
+        }
+        let text = std::fs::read(&packed).ok()?;
+        let held = text.split(|&byte| byte == b'\n').any(|line| {
+            line.splitn(2, |&byte| byte == b' ')
+                .nth(1)
+                .is_some_and(|name| name.starts_with(b"refs/replace/"))
+        });
+        let tmp = common.join(format!("bay/facts-replace.{}.tmp", std::process::id()));
+        if std::fs::create_dir_all(common.join("bay")).is_ok()
+            && std::fs::write(&tmp, format!("{mark} {}\n", u8::from(held))).is_ok()
+        {
+            let _ = std::fs::rename(&tmp, &verdict);
+        }
+        Some(held)
     }
 
     /// G721: a digest of the config Git reads here, from this process's snapshot of it.
