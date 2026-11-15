@@ -163,6 +163,42 @@ fn released(release: &Path, limit: Duration, mut alive: impl FnMut() -> bool) ->
     true
 }
 
+/// G734: the reads of the remote a merge of `change` makes before it writes, started side by
+/// side: the listing of chains and requests the receipts' sync reads, this actor's talks, the
+/// change's chain and the registry. Each is taken by the call that makes it, in its place.
+fn read_ahead(repo: &Repo, change: Option<&str>) {
+    let remote = repo.remote().to_owned();
+    let fetch = |refspec: String| -> Vec<String> {
+        vec![
+            "fetch".to_owned(),
+            "-q".to_owned(),
+            "--no-tags".to_owned(),
+            remote.clone(),
+            refspec,
+        ]
+    };
+    let talks = format!(
+        "{}{}/*",
+        crate::talk::TALK_PREFIX,
+        crate::change::actor_name()
+    );
+    let mut calls = vec![
+        vec![
+            "ls-remote".to_owned(),
+            remote.clone(),
+            format!("{}*", crate::change::CHANGES_PREFIX),
+            format!("{}*", crate::names::REQUESTS),
+        ],
+        fetch(format!("{talks}:{talks}")),
+        fetch(Repo::registry_refspec()),
+    ];
+    if let Some(change) = change {
+        let name = crate::change::change_ref(change);
+        calls.push(fetch(format!("{name}:{name}")));
+    }
+    repo.git.read_ahead(&calls);
+}
+
 #[must_use]
 pub fn land(
     dir: &Path,
@@ -175,8 +211,10 @@ pub fn land(
         Ok(repo) => repo,
         Err(error) => return error.into_result(),
     };
+    let id = change.map(str::to_owned).or_else(|| repo.view_change(dir));
+    read_ahead(&repo, id.as_deref());
     let _ = receipts::sync(&repo);
-    let Some(id) = change.map(str::to_owned).or_else(|| repo.view_change(dir)) else {
+    let Some(id) = id else {
         return BayResult::failed("run bay merge in a change's view, or name the change");
     };
     // G56 (ruling T9): the talks on this change, fetched before the landing and named in its

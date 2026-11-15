@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.78
+
+- `bay merge` reads the remote side by side before it writes: four waves of calls instead of seven.
+
 ## 0.6.77
 
 - `bay status` answers at once from a sweep under 60 s old, while one shared sweep refreshes the store.

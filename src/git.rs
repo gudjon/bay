@@ -126,6 +126,18 @@ static SNAPSHOTS: std::sync::LazyLock<Mutex<std::collections::HashMap<PathBuf, O
 /// G200: the common directory of each directory a handle asked, by the path it was given.
 static COMMON_DIRS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
 
+/// G734: each remote read [`Git::read_ahead`] started, by its handle's directory and arguments,
+/// until the first call with the same arguments takes its answer.
+type ReadAhead = thread::JoinHandle<Result<Vec<u8>, GitError>>;
+type ReadsAhead = std::collections::HashMap<(PathBuf, Vec<String>), ReadAhead>;
+static READ_AHEAD: std::sync::LazyLock<Mutex<ReadsAhead>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+thread_local! {
+    /// Whether this thread runs a read of [`Git::read_ahead`], which never waits for itself.
+    static READING_AHEAD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 /// One read of a ref in a git directory: the directory and the call's arguments.
 type RefRead = (PathBuf, Vec<String>);
 
@@ -664,6 +676,35 @@ impl Git {
         Ok(common)
     }
 
+    /// G734 (a measurement, 2026-11-15: agents' `bay merge` took 10.7 s at the median, seven
+    /// round trips to the remote one after another, five of them reads that need nothing of each
+    /// other): starts each of `calls`, reads of the remote that write only refs no other read
+    /// depends on, side by side now. The first [`Git::run`] with the same arguments takes the
+    /// answer, waiting for it if it is still on its way; a later one asks again. A read started
+    /// and never taken only brought its refs early.
+    pub fn read_ahead(&self, calls: &[Vec<String>]) {
+        let mut started = READ_AHEAD.lock().unwrap_or_else(PoisonError::into_inner);
+        for call in calls {
+            let key = (self.dir.clone(), call.clone());
+            if started.contains_key(&key) {
+                continue;
+            }
+            let git = Self {
+                dir: self.dir.clone(),
+                bare_dir: self.bare_dir,
+                lazy_fetch: self.lazy_fetch,
+                writes_tree: self.writes_tree,
+            };
+            let args = call.clone();
+            let handle = thread::spawn(move || {
+                READING_AHEAD.with(|reading| reading.set(true));
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                git.run_bytes_for(&args, &[], None, GIT_CALL_TIMEOUT)
+            });
+            started.insert(key, handle);
+        }
+    }
+
     /// Runs `git <args>` and returns trimmed stdout.
     ///
     /// # Errors
@@ -719,6 +760,22 @@ impl Git {
         input: Option<&[u8]>,
         timeout: std::time::Duration,
     ) -> Result<Vec<u8>, GitError> {
+        // G734: a remote read started ahead is answered by it, once.
+        if envs.is_empty() && input.is_none() && !READING_AHEAD.with(std::cell::Cell::get) {
+            let key = (
+                self.dir.clone(),
+                args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+            );
+            let started = READ_AHEAD
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .remove(&key);
+            if let Some(started) = started
+                && let Ok(answer) = started.join()
+            {
+                return answer;
+            }
+        }
         // G709: an object read ahead is answered from what [`Git::preload`] read.
         if envs.is_empty()
             && input.is_none()
