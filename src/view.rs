@@ -302,6 +302,8 @@ pub struct Ended {
     /// The change's own retention window, in place of the one [`release_ended`] is given: a
     /// lane change's shorter one (NEW-4, `[[lane]] window_s`).
     pub window: Option<std::time::Duration>,
+    /// G743: the head of the change's chain the rest was read at, which names it all.
+    pub head: String,
 }
 
 /// G97: removes this machine's views of ended changes whose end is `window` (or the change's
@@ -419,15 +421,28 @@ fn standing(repo: &Repo, id: &str, ended: &Ended) -> Result<Standing, GitError> 
 /// view whose stamp moved, or whose change ended again, is judged again. `None` for a view
 /// whose Git directory cannot be read.
 fn holds_newer_key(path: &Path, ended: &Ended) -> Option<[u8; 32]> {
+    holds_newer_at(path, &ended.head)
+}
+
+/// [`holds_newer_key`] of the view at `path` for the change whose chain head is `head`: the head
+/// names the revision the change ended with and the commits it placed.
+fn holds_newer_at(path: &Path, head: &str) -> Option<[u8; 32]> {
     let stamp = stamp(path)?;
     let view = path.display().to_string();
-    let placed = ended.placed.join(" ");
     Some(crate::facts::key(
-        "view-release-1",
+        "view-release-2",
         "holds-newer",
-        &[&view, &ended.revision, &placed, &stamp],
+        &[&view, head, &stamp],
         None,
     ))
+}
+
+/// G747: whether the view of change `id`, whose chain head is `head`, was judged holding
+/// something newer and nothing in it moved since: a start then reads nothing more of it.
+#[must_use]
+pub fn kept_holding_newer(repo: &Repo, id: &str, head: &str) -> bool {
+    holds_newer_at(&repo.view_path(id), head)
+        .is_some_and(|key| crate::facts::get(&repo.common_dir, &key).is_some())
 }
 
 /// Releases the view of ended change `id` when it holds nothing newer; whether it did.

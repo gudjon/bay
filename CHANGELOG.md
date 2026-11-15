@@ -5,6 +5,7 @@
 - `bay doctor` publishes its verdict only when it changed, or every ten minutes, not on every run.
 - `bay start` of your own abandoned change opens it again, instead of answering ready while it stays abandoned.
 - `bay status --all` names the machine it ran on in `this_machine`.
+- `bay start` passes over a kept view whose change and files did not move, reading nothing of it.
 
 ## 0.6.80
 

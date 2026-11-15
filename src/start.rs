@@ -334,9 +334,37 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
     // once. Its work is on main or recorded on the chain; the retention window keeps the chain's
     // records, never a view (a fleet's shared checkout held 574 views). A lane change keeps its
     // own window.
+    // G747 (a measurement, 2026-11-15: after G743 a start still read each of 106 views' change,
+    // its drafts and its end time, about 900 Git calls, before taking the kept judgement): one
+    // listing names every chain's head, and a view kept as holding something newer at that head,
+    // with nothing in it moved, is passed over before anything of it is read.
+    let heads = chain_heads(repo);
     view::release_ended(repo, std::time::Duration::ZERO, &|id| {
+        if heads
+            .get(id)
+            .is_some_and(|head| view::kept_holding_newer(repo, id, head))
+        {
+            return None;
+        }
         ended_view(repo, &chain, &in_use, id)
     })
+}
+
+/// Every change chain's head, by change, from one listing of the change refs.
+fn chain_heads(repo: &Repo) -> std::collections::HashMap<String, String> {
+    let prefix = crate::change::CHANGES_PREFIX;
+    repo.git
+        .run(&["for-each-ref", "--format=%(objectname) %(refname)", prefix])
+        .map(|listed| {
+            listed
+                .lines()
+                .filter_map(|line| {
+                    let (head, name) = line.split_once(' ')?;
+                    Some((name.strip_prefix(prefix)?.to_owned(), head.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// G665: the views [`release_ended`] would release, removing nothing. `in_time` stops the reading
@@ -417,6 +445,7 @@ fn ended_view(repo: &Repo, chain: &Chain, in_use: &[String], id: &str) -> Option
         at_unix,
         placed,
         window: lane_window,
+        head,
     })
 }
 
