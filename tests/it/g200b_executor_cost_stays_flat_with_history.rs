@@ -23,7 +23,7 @@ const HISTORY_SLACK: usize = 2;
 /// A repository with `closed` abandoned changes, one landed change, `closed` finished queue
 /// places (every one released, each naming the landed operation), and a live head above them
 /// that names an open change. Returns the box, the remote and the executor's clone.
-fn history(closed: u64) -> (TestBox, PathBuf, PathBuf) {
+pub(crate) fn history(closed: u64) -> (TestBox, PathBuf, PathBuf) {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
@@ -53,7 +53,7 @@ fn history(closed: u64) -> (TestBox, PathBuf, PathBuf) {
 
 /// The subcommands one `bay runner run --once` in `dir` spawned, by count, from bay's own
 /// process only, and its result.
-fn pass(test_box: &TestBox, dir: &Path, name: &str) -> (BTreeMap<String, usize>, Value) {
+pub(crate) fn pass(test_box: &TestBox, dir: &Path, name: &str) -> (BTreeMap<String, usize>, Value) {
     let trace = test_box.path().join(format!("{name}-trace.jsonl"));
     let (code, result) = result_json(
         test_box
@@ -81,7 +81,7 @@ fn pass(test_box: &TestBox, dir: &Path, name: &str) -> (BTreeMap<String, usize>,
 }
 
 /// The queue refs on the remote.
-fn queue_refs(test_box: &TestBox, remote: &Path) -> Vec<String> {
+pub(crate) fn queue_refs(test_box: &TestBox, remote: &Path) -> Vec<String> {
     test_box
         .git_bare(
             remote,

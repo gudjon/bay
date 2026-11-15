@@ -1647,6 +1647,9 @@ fn advance(repo: &Repo) -> Vec<Value> {
     moved.unwrap_or_else(|why| vec![json!({"error": why})])
 }
 
+/// G741: the longest a finished operation's queue pair is kept after its release.
+const QUEUE_KEPT_S: u64 = 3600;
+
 /// The pass's queue retention (§ 10a): the (reservation, release) pairs below the head of the
 /// queue as this pass found it (`before`, read ahead of any release the pass made, so a place
 /// released in this pass stays for one pass more) whose operation the pass's chains show
@@ -1665,7 +1668,16 @@ fn queue_retention(repo: &Repo, before: &Queue, chains: &[HeldChain]) -> Option<
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    let cutoff = now.saturating_sub(repo.config.retention_window().as_secs());
+    // G741 (a fleet finding, 2026-11-15: a remote held 1,127 queue places and 1,126 releases,
+    // one place live, and listing them took 43 s): a finished operation's pair is kept at most
+    // QUEUE_KEPT_S after its release, not the whole retention window. Nothing reads it later:
+    // queue waits come from the terminal records, and a deadline count reads only places of
+    // operations still waiting.
+    let kept = repo
+        .config
+        .retention_window()
+        .min(Duration::from_secs(QUEUE_KEPT_S));
+    let cutoff = now.saturating_sub(kept.as_secs());
     let seqs = before.prunable(finished, cutoff);
     if seqs.is_empty() {
         return None;

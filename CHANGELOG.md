@@ -4,6 +4,7 @@
 
 - `bay merge` reads the remote side by side before it writes: four waves of calls instead of seven.
 - A runner keeps a live head's queue place past its deadline, up to twice it, while its chain moves.
+- A runner removes a finished operation's queue places an hour after their release, not after the retention window.
 - `bay status` keeps an ended change's view check until the view moves; `checked_s` says its age.
 - `bay status` keeps evidence reads of unchanged notes, so a later read skips them.
 - `bay status` reads each ref once, and none its listing of the changes just named.
