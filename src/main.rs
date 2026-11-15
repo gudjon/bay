@@ -731,7 +731,11 @@ fn install(dir: &std::path::Path, args: InstallArgs) -> BayResult {
 
 /// The command line. The file every child `bay` starts from is resolved now, before an update
 /// can replace the running one; the executor pins its own first (`bay::update::pin_own_binary`).
+/// G738: when this command began, taken as its arguments are read.
+static BEGAN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
 fn parse() -> Cli {
+    BEGAN.get_or_init(std::time::Instant::now);
     // R6 (ruling 2026-10-22): `bay --help` is the page `bay help` prints (G303), grouped for
     // people, agents and admins; `bay <command> --help` stays clap's help of that command.
     if asks_for_the_page() {
@@ -924,7 +928,7 @@ fn main() -> ExitCode {
     let cli = parse();
     if let Some(saved) = saved_listing(&cli) {
         bay::update::auto();
-        return render(&saved, cli.json);
+        return finish(&cli.dir, &saved, cli.json);
     }
     if let Some(refusal) = config_refusal(&cli) {
         return render(&refusal, cli.json);
@@ -1028,7 +1032,13 @@ fn main() -> ExitCode {
     // A command that fetched trunk leaves the coordination cache the `tool.before` hook reads
     // (`DESIGN` § 11); a hook never writes it.
     bay::coord::after_command();
-    render(&result, cli.json)
+    finish(&cli.dir, &result, cli.json)
+}
+
+/// G738: records where the command's time went, then renders its result.
+fn finish(dir: &std::path::Path, result: &BayResult, json: bool) -> ExitCode {
+    spent(dir, result, *BEGAN.get_or_init(std::time::Instant::now));
+    render(result, json)
 }
 
 /// `bay help [COMMAND]`: with no command, every command, subcommand and flag on one page
@@ -1271,6 +1281,26 @@ fn with_config_used(text: String) -> String {
     };
     detail.insert("config_used".to_owned(), used);
     serde_json::to_string(&document).map_or(text, |line| line + "\n")
+}
+
+/// G738: one line of where this command's time went, in the store it ran in.
+fn spent(dir: &std::path::Path, result: &BayResult, began: std::time::Instant) {
+    // The command's own word: the first argument that is no option and no option's value.
+    let mut words = std::env::args().skip(1);
+    let mut command = String::from("bay");
+    while let Some(word) = words.next() {
+        if word == "-C" {
+            words.next();
+        } else if !word.starts_with('-') {
+            command = word;
+            break;
+        }
+    }
+    let decision = serde_json::to_value(result.decision)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    bay::spent::record(dir, &command, &decision, began);
 }
 
 fn render(result: &BayResult, json: bool) -> ExitCode {

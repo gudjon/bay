@@ -19,13 +19,18 @@ use support::result_json;
 const CONFIG: &str = "[runner]\nlease_s = 30\nheartbeat_s = 1\n";
 
 /// The git processes of a trace2 event log that run `word` and name a path in an evidence
-/// notes ref (`refs/notes/bay/evidence/<producer>:<path>`), or the ref alone with `path` false.
-fn evidence_calls(trace: &Path, word: &str, path: bool) -> Vec<String> {
+/// notes ref (`refs/notes/bay/evidence/<producer>:<path>`, or by the notes tree's id `<tree>:<path>`
+/// as G736 names it), or the ref or tree alone with `path` false.
+fn evidence_calls(trace: &Path, word: &str, path: bool, trees: &[String]) -> Vec<String> {
+    let mut names: Vec<String> = vec!["refs/notes/bay/evidence/".to_owned()];
+    names.extend(trees.iter().cloned());
     let names_path = |line: &str| {
-        line.split("refs/notes/bay/evidence/").skip(1).any(|rest| {
-            rest.split('"')
-                .next()
-                .is_some_and(|name| name.contains(':'))
+        names.iter().any(|name| {
+            line.split(name.as_str()).skip(1).any(|rest| {
+                rest.split('"')
+                    .next()
+                    .is_some_and(|name| name.contains(':'))
+            })
         })
     };
     std::fs::read_to_string(trace)
@@ -33,7 +38,7 @@ fn evidence_calls(trace: &Path, word: &str, path: bool) -> Vec<String> {
         .lines()
         .filter(|line| line.contains(r#""event":"start""#))
         .filter(|line| line.contains(&format!(r#""{word}""#)))
-        .filter(|line| line.contains("refs/notes/bay/evidence/"))
+        .filter(|line| names.iter().any(|name| line.contains(name.as_str())))
         .filter(|line| !path || names_path(line))
         .map(str::to_owned)
         .collect()
@@ -79,14 +84,26 @@ fn a_blob_less_clone_resolves_absent_note_names_a_listing_at_a_time() {
             .args(["status", &id]),
     );
     assert_eq!(code, 0, "{status}");
-    let alone = evidence_calls(&trace, "rev-parse", true);
+    let trees: Vec<String> = test_box
+        .git_ok(
+            &cache,
+            &[
+                "for-each-ref",
+                "--format=%(tree)",
+                "refs/notes/bay/evidence/",
+            ],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let alone = evidence_calls(&trace, "rev-parse", true, &trees);
     assert!(
         alone.is_empty(),
         "{} note names resolved one at a time: {:#?}",
         alone.len(),
         alone.iter().take(3).collect::<Vec<_>>()
     );
-    let listings = evidence_calls(&trace, "ls-tree", false);
+    let listings = evidence_calls(&trace, "ls-tree", false, &trees);
     assert!(!listings.is_empty(), "the absent note names were listed");
     let change = &status["detail"]["changes"][0];
     assert_eq!(change["change"], id.as_str(), "{status}");

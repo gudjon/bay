@@ -3,9 +3,11 @@
 ## 0.6.78
 
 - `bay merge` reads the remote side by side before it writes: four waves of calls instead of seven.
-- `bay merge` and `bay abandon` retry a chain another writer moved eight times, pausing longer each time.
+- A runner keeps a live head's queue place past its deadline, up to twice it, while its chain moves.
 - `bay status` keeps an ended change's view check until the view moves; `checked_s` says its age.
 - `bay status` keeps evidence reads of unchanged notes, so a later read skips them.
+- `bay status` reads each ref once, and none its listing of the changes just named.
+- Each command records its time, Git time and network time in `.git/bay/spent/`, kept seven days.
 
 ## 0.6.77
 

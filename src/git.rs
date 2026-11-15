@@ -429,6 +429,33 @@ pub fn keep_ref_reads() {
     *HOOK_READS.lock().unwrap_or_else(PoisonError::into_inner) = Some(BTreeMap::new());
 }
 
+/// G739 (a measurement, 2026-11-15: a listing ran about 50 one-ref reads, 33 of them distinct, 20
+/// of them refs its own listing of the change refs had just named): keeps this process's ref
+/// reads while the returned guard lives, as [`keep_ref_reads`] does for a hook, and stops when it
+/// drops, unless they were kept before. A Git command that may move a ref still drops them.
+#[must_use]
+pub fn ref_reads_kept() -> RefReadsKept {
+    let mut reads = HOOK_READS.lock().unwrap_or_else(PoisonError::into_inner);
+    let began = reads.is_none();
+    if began {
+        *reads = Some(BTreeMap::new());
+    }
+    RefReadsKept { began }
+}
+
+/// While it lives, this process's ref reads are kept ([`ref_reads_kept`]).
+pub struct RefReadsKept {
+    began: bool,
+}
+
+impl Drop for RefReadsKept {
+    fn drop(&mut self) {
+        if self.began {
+            *HOOK_READS.lock().unwrap_or_else(PoisonError::into_inner) = None;
+        }
+    }
+}
+
 /// Whether `args` reads one ref: `symbolic-ref -q <ref>` or `rev-parse --verify -q <rev>`.
 fn ref_read(args: &[&str]) -> bool {
     matches!(
@@ -719,6 +746,23 @@ impl Git {
         Ok(common)
     }
 
+    /// The answer of the read [`Git::read_ahead`] started with `args`, taken once; `None` when
+    /// none was started, or in a thread that runs one.
+    fn taken_ahead(&self, args: &[&str]) -> Option<Result<Vec<u8>, GitError>> {
+        if READING_AHEAD.with(std::cell::Cell::get) {
+            return None;
+        }
+        let key = (
+            self.dir.clone(),
+            args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
+        );
+        let started = READ_AHEAD
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&key)?;
+        started.join().ok()
+    }
+
     /// G734 (a measurement, 2026-11-15: agents' `bay merge` took 10.7 s at the median, seven
     /// round trips to the remote one after another, five of them reads that need nothing of each
     /// other): starts each of `calls`, reads of the remote that write only refs no other read
@@ -804,20 +848,11 @@ impl Git {
         timeout: std::time::Duration,
     ) -> Result<Vec<u8>, GitError> {
         // G734: a remote read started ahead is answered by it, once.
-        if envs.is_empty() && input.is_none() && !READING_AHEAD.with(std::cell::Cell::get) {
-            let key = (
-                self.dir.clone(),
-                args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>(),
-            );
-            let started = READ_AHEAD
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .remove(&key);
-            if let Some(started) = started
-                && let Ok(answer) = started.join()
-            {
-                return answer;
-            }
+        if envs.is_empty()
+            && input.is_none()
+            && let Some(answer) = self.taken_ahead(args)
+        {
+            return answer;
         }
         // G709: an object read ahead is answered from what [`Git::preload`] read.
         if envs.is_empty()
@@ -885,6 +920,13 @@ impl Git {
             match &key {
                 Some(key) => {
                     if let Some(kept) = reads.get(key) {
+                        // G739: a ref read and found absent is kept as no answer.
+                        if kept.is_empty() {
+                            return Err(GitError::Failed {
+                                args: args.join(" "),
+                                stderr: String::new(),
+                            });
+                        }
                         return Ok(kept.clone());
                     }
                 }
@@ -894,13 +936,21 @@ impl Git {
         }
         drop(cache);
         let read = self.run_bytes_uncached(args, envs, input, timeout);
-        if let (Some(key), Ok(out)) = (key, &read)
+        if let Some(key) = key
             && let Some(reads) = HOOK_READS
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .as_mut()
         {
-            reads.insert(key, out.clone());
+            match &read {
+                Ok(out) if !out.is_empty() => {
+                    reads.insert(key, out.clone());
+                }
+                Err(GitError::Failed { .. }) => {
+                    reads.insert(key, Vec::new());
+                }
+                _ => {}
+            }
         }
         read
     }
@@ -1366,6 +1416,27 @@ impl Git {
         }
     }
 
+    /// G739: while ref reads are kept, answers each `(name, object)` a listing just read, so a
+    /// [`Git::ref_target`] of one of them after it runs no Git.
+    pub fn remember_refs<'a>(&self, listed: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        let mut reads = HOOK_READS.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(reads) = reads.as_mut() else {
+            return;
+        };
+        for (name, object) in listed {
+            let key = (
+                self.dir.clone(),
+                vec![
+                    "rev-parse".to_owned(),
+                    "--verify".to_owned(),
+                    "-q".to_owned(),
+                    format!("{name}^{{object}}"),
+                ],
+            );
+            reads.insert(key, format!("{object}\n").into_bytes());
+        }
+    }
+
     /// The object a ref points at, or `None` when the ref does not exist.
     ///
     /// # Errors
@@ -1507,6 +1578,10 @@ impl Git {
         }
         if !contains(read, b" missing\n") {
             return false;
+        }
+        // In a partial clone a blob the store has not fetched yet is missing too.
+        if self.is_partial() {
+            return true;
         }
         let Some(names) = input.and_then(|input| std::str::from_utf8(input).ok()) else {
             return true;
@@ -1895,8 +1970,29 @@ thread_local! {
     > = const { std::cell::RefCell::new(BTreeMap::new()) };
 }
 
+/// G738: this process's time in each Git command, over every thread, and how many ran.
+static PROCESS_TIMES: Mutex<BTreeMap<String, (std::time::Duration, u32)>> =
+    Mutex::new(BTreeMap::new());
+
+/// This process's time in each Git command so far, over every thread: command, time, count.
+#[must_use]
+pub fn process_times() -> Vec<(String, std::time::Duration, u32)> {
+    PROCESS_TIMES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .map(|(command, (spent, count))| (command.clone(), *spent, *count))
+        .collect()
+}
+
 fn record_time(args: &[&str], spent: std::time::Duration) {
     let command = args.first().copied().unwrap_or_default().to_owned();
+    {
+        let mut all = PROCESS_TIMES.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = all.entry(command.clone()).or_default();
+        entry.0 += spent;
+        entry.1 += 1;
+    }
     TIMES.with_borrow_mut(|times| {
         let entry = times.entry(command).or_default();
         entry.0 += spent;

@@ -878,6 +878,13 @@ impl<'a> Chain<'a> {
                 Some((head.to_owned(), id))
             })
             .collect();
+        // G739: a change ref looked up after this listing, while ref reads are kept, runs no Git.
+        self.git.remember_refs(
+            listed
+                .lines()
+                .filter_map(|line| line.split_once(' '))
+                .map(|(head, name)| (name, head)),
+        );
         let _turn = READING
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

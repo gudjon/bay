@@ -163,21 +163,6 @@ fn released(release: &Path, limit: Duration, mut alive: impl FnMut() -> bool) ->
     true
 }
 
-/// G737 (a gate finding, 2026-11-15: at load 50 to 90 an `abandon` lost the change's chain to a
-/// runner renewing its lease each second, three times running, and failed): how many times a
-/// merge or abandon reads the chain again after another writer moved it.
-const LAND_ATTEMPTS: u32 = 8;
-
-/// The pause before attempt `attempt` after the chain moved: longer each time, from 50 ms to
-/// 800 ms, and up to 100 ms more by the clock, so two writers that lost to each other part.
-fn chain_moved_pause(attempt: u32) -> Duration {
-    let base = 50_u64 << attempt.min(4);
-    let spread = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| u64::from(since.subsec_nanos()) % 100);
-    Duration::from_millis(base + spread)
-}
-
 /// G734: the reads of the remote a merge of `change` makes before it writes, started side by
 /// side: the listing of chains and requests the receipts' sync reads, this actor's talks, the
 /// change's chain and the registry. Each is taken by the call that makes it, in its place.
@@ -237,10 +222,7 @@ pub fn land(
     let open_talks = crate::talk::open_on(&repo, &id);
     let step = Step::new("read");
     let mut result = Err(CHAIN_MOVED.to_owned());
-    for attempt in 0..LAND_ATTEMPTS {
-        if attempt > 0 {
-            std::thread::sleep(chain_moved_pause(attempt));
-        }
+    for _ in 0..3 {
         adopt_remote_chain(&repo, &id);
         if let Some(why) = abandon {
             result = abandon_change(&repo, &id, &step, why);
@@ -9687,20 +9669,6 @@ mod tests {
 
     use super::{UNCHECKED, UNCHECKED_BY_POLICY, unchecked_reason};
     use crate::git::Git;
-
-    #[test]
-    fn a_retry_after_a_moved_chain_pauses_longer_each_time_within_a_second() {
-        let pauses: Vec<std::time::Duration> = (1..super::LAND_ATTEMPTS)
-            .map(super::chain_moved_pause)
-            .collect();
-        for (at, pause) in pauses.iter().enumerate() {
-            let base = 50_u64 << (at + 1).min(4);
-            assert!(pause.as_millis() >= u128::from(base), "{pause:?}");
-            assert!(pause.as_millis() < u128::from(base) + 100, "{pause:?}");
-        }
-        let total: std::time::Duration = pauses.iter().sum();
-        assert!(total < std::time::Duration::from_secs(6), "{total:?}");
-    }
 
     /// BACKLOG 81: a refusal record keeps what the host said, never the command line.
     #[test]

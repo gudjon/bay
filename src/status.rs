@@ -864,6 +864,8 @@ fn local_read(
     targets: bool,
     talk: impl FnOnce(&Repo) -> Option<Value>,
 ) -> Option<Refreshed> {
+    // G739: the read keeps its ref reads once its sweep is done, and only while it runs.
+    let _kept = crate::git::ref_reads_kept();
     let trunk = held?;
     let chain = Chain::new(&repo.git);
     let ids = match (listed, named) {
@@ -1123,7 +1125,10 @@ fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult
         }
     };
     let saves = before.filter(|_| refreshed.stale.is_none() && repo.view_change(dir).is_none());
+    // G739: the listing keeps its ref reads too: the store stands as the read above left it.
+    let kept = crate::git::ref_reads_kept();
     let result = timed("listing", || listing(dir, change, &repo, refreshed))?;
+    drop(kept);
     if let Some(before) = saves {
         timed("saved_save", || before.save(&result));
     }

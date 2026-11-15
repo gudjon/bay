@@ -80,6 +80,7 @@ pub mod setup;
 pub mod share;
 pub mod signing;
 pub mod skill;
+pub mod spent;
 pub mod start;
 pub mod status;
 pub mod storage;

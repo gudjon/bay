@@ -77,7 +77,7 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     let _presence = Presence::hold();
     crate::update::pin_own_binary();
     // The supervisor's own sightings of queue heads, on its monotonic clock (§ 6).
-    let mut heads: HashMap<u64, Instant> = HashMap::new();
+    let mut heads: HashMap<u64, HeadSighting> = HashMap::new();
     let mut binary = Binary::now();
     // A looping executor moves to a new binary between operations; `--once` finishes its pass.
     let moves = !once && MOVES;
@@ -471,9 +471,29 @@ struct Seen {
 /// supervisor's first sighting of it as head; a late observer or a restart only delays it.
 /// An error is a release the remote refused or did not take; the next pass tries it again.
 /// What it read of the queue goes to `seen`.
+/// A queue head as this supervisor watches it for its progress deadline: when it first saw it
+/// as head, the head of its change's chain then, and when that chain last moved.
+struct HeadSighting {
+    first: Instant,
+    chain: Option<String>,
+    moved: Instant,
+}
+
+/// G740 (a fleet finding, 2026-11-15: a passing head was released mid-publish twice, 31
+/// minutes after a runner first saw it as head, while its owner beat its lease every few
+/// seconds through an 812 s batch check at load 70; the line stood still for 80 minutes):
+/// whether a head past its progress deadline is released. Past the deadline its chain is watched:
+/// a head whose owner moved it within the last lease is alive and keeps its place, up to twice
+/// the deadline; one whose chain stood still for a lease is released, one lease after the
+/// deadline at the earliest.
+fn released_by_deadline(sighting: &HeadSighting, deadline: Duration, lease: Duration) -> bool {
+    let waited = sighting.first.elapsed();
+    waited >= deadline && (sighting.moved.elapsed() >= lease || waited >= deadline * 2)
+}
+
 fn deadlines(
     repo: &Repo,
-    heads: &mut HashMap<u64, Instant>,
+    heads: &mut HashMap<u64, HeadSighting>,
     seen: &mut Seen,
 ) -> Result<(), String> {
     seen.read_at = Some(Instant::now());
@@ -500,8 +520,24 @@ fn deadlines(
         seen.after = Some(queue);
         return Ok(());
     };
-    let first = *heads.entry(head.seq).or_insert_with(Instant::now);
-    if first.elapsed() < repo.config.progress_deadline() {
+    let deadline = repo.config.progress_deadline();
+    let sighting = heads.entry(head.seq).or_insert_with(|| HeadSighting {
+        first: Instant::now(),
+        chain: None,
+        moved: Instant::now(),
+    });
+    if sighting.first.elapsed() < deadline {
+        seen.after = Some(queue);
+        return Ok(());
+    }
+    // G740: past the deadline, the head's chain is read to see whether its owner still moves it.
+    // The first read starts the watch: the head then has one lease to show it moves.
+    let chain = repo.remote_chain(&head.change).ok();
+    if chain.is_some() && chain != sighting.chain {
+        sighting.moved = Instant::now();
+        sighting.chain = chain;
+    }
+    if !released_by_deadline(sighting, deadline, repo.config.lease()) {
         seen.after = Some(queue);
         return Ok(());
     }
@@ -1768,6 +1804,32 @@ mod tests {
     use crate::queue::{Entry, Queue};
     use crate::result::{BayResult, Decision, Reason};
     use std::collections::HashSet;
+
+    #[test]
+    fn a_head_past_its_deadline_keeps_its_place_while_its_chain_moves() {
+        use super::{HeadSighting, released_by_deadline};
+        use std::time::{Duration, Instant};
+        let deadline = Duration::from_secs(100);
+        let lease = Duration::from_secs(10);
+        let ago = |secs| {
+            Instant::now()
+                .checked_sub(Duration::from_secs(secs))
+                .unwrap()
+        };
+        let sighting = |first, moved| HeadSighting {
+            first: ago(first),
+            chain: Some("c".to_owned()),
+            moved: ago(moved),
+        };
+        // Before the deadline nothing is released.
+        assert!(!released_by_deadline(&sighting(50, 50), deadline, lease));
+        // Past it, a chain that moved within the lease keeps its place.
+        assert!(!released_by_deadline(&sighting(150, 3), deadline, lease));
+        // A chain that stood still for a lease is released.
+        assert!(released_by_deadline(&sighting(150, 20), deadline, lease));
+        // Twice the deadline releases a moving one too.
+        assert!(released_by_deadline(&sighting(250, 1), deadline, lease));
+    }
 
     fn held(id: &str, state: &str, committed: u64) -> HeldChain {
         let record: ChangeRecord = serde_json::from_value(serde_json::json!({
