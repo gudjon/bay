@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.73
+
+- Kept history answers are one small file each, so a command reads only the one it needs.
+
 ## 0.6.72
 
 - A history answer that cannot change is kept in the store, so the next command reads it without Git.
