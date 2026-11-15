@@ -1398,6 +1398,16 @@ impl Git {
     /// G721: where this store keeps answers that cannot change, and the context they are keyed
     /// under (the Git version and the digest of the config Git reads here). `None` where history
     /// can change under a commit (replace refs, shallow history) or nothing can be kept.
+    /// G731: the store's common directory, where answers that depend only on bytes (a
+    /// signature's verdict) are kept; none for a process that writes the tree.
+    #[must_use]
+    pub fn answer_store(&self) -> Option<PathBuf> {
+        if self.writes_tree {
+            return None;
+        }
+        self.store_dir()
+    }
+
     fn facts(&self) -> Option<(PathBuf, String)> {
         if self.writes_tree {
             return None;

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.76
+
+- `bay status` remembers each verified evidence signature, so a later read skips checking it again.
+
 ## 0.6.75
 
 - `bay status` checks its views and describes its changes side by side, so a busy store answers sooner.

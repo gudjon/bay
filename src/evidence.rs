@@ -340,7 +340,38 @@ impl EvidenceRecord {
     /// The class file cannot be written.
     pub fn verifies_in(&self, git: &Git, registry: &Registry) -> Result<bool, String> {
         let file = registry.class_file_at(git, signer_class(&self.kind), &self.at)?;
-        Ok(self.verifies(&file))
+        // G731: a verdict depends only on the record's bytes, its signature and the keys the
+        // class file names, so a yes is kept and read back by every later process. A no is
+        // never kept: ssh-keygen may have failed for a reason of the moment.
+        let kept = git.answer_store().and_then(|common| {
+            let (Some(signature), Ok(payload)) = (&self.signature, self.signing_payload()) else {
+                return None;
+            };
+            let keys = std::fs::read(&file).ok()?;
+            let mut input = payload;
+            input.push(0);
+            input.extend_from_slice(signature.as_bytes());
+            input.push(0);
+            input.extend_from_slice(&keys);
+            let namespace = signer_class(&self.kind).namespace();
+            let key = crate::facts::key(
+                "ssh-keygen",
+                "verify",
+                &[&self.producer.name, namespace],
+                Some(&input),
+            );
+            Some((common, key))
+        });
+        if let Some((common, key)) = &kept
+            && crate::facts::get(common, key).as_deref() == Some(b"1")
+        {
+            return Ok(true);
+        }
+        let verified = self.verifies(&file);
+        if verified && let Some((common, key)) = &kept {
+            crate::facts::put(common, key, b"1");
+        }
+        Ok(verified)
     }
 }
 
