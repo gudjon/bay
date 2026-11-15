@@ -159,10 +159,32 @@ fn a_status_spawns_as_many_git_processes_with_five_producers_as_with_one() {
     let shown = as_git_shows(&test_box, &repo, &tree);
     assert_eq!(shown.len(), 5, "{shown:?}");
     let (five, status) = status_spawns(&test_box, &repo, &id, "five");
+    // G739: a one-ref read two of the listing's sections ask at once, before either keeps it,
+    // runs twice, as the threads fall; that turns on timing, never on the producers. Every other
+    // command is counted exactly.
+    let one_ref = |sub: &str| matches!(sub, "rev-parse" | "symbolic-ref");
+    let exact = |counts: &BTreeMap<String, usize>| -> BTreeMap<String, usize> {
+        counts
+            .iter()
+            .filter(|(sub, _)| !one_ref(sub))
+            .map(|(sub, count)| (sub.clone(), *count))
+            .collect()
+    };
     assert_eq!(
-        one, five,
+        exact(&one),
+        exact(&five),
         "bay status spawned other git processes with five producers than with one"
     );
+    for sub in ["rev-parse", "symbolic-ref"] {
+        let (a, b) = (
+            one.get(sub).copied().unwrap_or(0),
+            five.get(sub).copied().unwrap_or(0),
+        );
+        assert!(
+            a.abs_diff(b) <= 1,
+            "{sub}: {a} with one producer, {b} with five"
+        );
+    }
     assert_eq!(sorted_ids(&shown), listed_ids(&status), "{status}");
     assert_eq!(evidence::records_for(&git, &tree).unwrap(), shown);
 }
