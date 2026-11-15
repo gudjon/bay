@@ -17,7 +17,8 @@
 //! The arrival is the ack or, when none came first, a backbrief or an answer written by `who`
 //! (G452): the recipient read the talk to reply to it. An answer by `decides` says nothing of
 //! `who`. The reply is the latest backbrief or answer. A backbrief that says `done` closes
-//! nothing: only evidence does.
+//! nothing: only evidence does (a reliability talk's trunk commit, BACKLOG 240; a delivery
+//! talk's landing, G148).
 //!
 //! Each row says `signed`: whether a key signed the talk's sender. Under `[policy] signing =
 //! "approvals"` (G445) it is `false`, and `from` is the name the sender claims.

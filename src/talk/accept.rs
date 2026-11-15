@@ -12,7 +12,9 @@
 //! reviewer's talk about a change that stands beside another open talk of that reviewer about
 //! that change, one this box acked or an earlier one, is refused (G149b). An acked
 //! delivery talk about a change closes as `answered` once a landing on trunk names that change in
-//! `Fixes:`, `Reverts:` or `Supersedes:`, naming the landing (G148). A talk read after its
+//! `Fixes:`, `Reverts:` or `Supersedes:`, naming the landing (G148). An acked reliability talk
+//! closes as `done` once its latest backbrief says `done` or `validated` and its `evidence` names
+//! a commit on trunk, naming that commit (BACKLOG 240). A talk read after its
 //! `expires` (its ack's commit time is later) closes as `expired`: the ack keeps arrival a fact,
 //! and no backbrief is owed (G52, ruling T3). Then every
 //! chain this machine moved is pushed. A push the host refuses (another session acked first)
@@ -37,7 +39,8 @@ use serde_json::{Value, json};
 use super::send::{Pushed, agent_key, fetch_matching, push};
 use super::{
     ANSWERS, Known, TALK_PREFIX, TALK_SCHEMA, Talk, Trust, check_body, check_parties,
-    entry_commit_as, files, open_findings, split_values, talks_matching, talks_where,
+    entry_commit_as, evidence_on_trunk, files, open_findings, split_values, talks_matching,
+    talks_where,
 };
 use crate::change::{Actor, Chain, change_ref};
 use crate::clock::{now_rfc3339, unix_of};
@@ -262,6 +265,7 @@ fn accept(repo: &Repo, trust: &Trust) -> Result<Outcome, String> {
     close_superseded(repo, &prefix, key, &me, &mut outcome)?;
     close_expired(repo, &prefix, key, &me, &mut outcome)?;
     close_answered(repo, &prefix, key, &me, &mut outcome)?;
+    close_evidenced(repo, &prefix, key, &me, &mut outcome)?;
     outcome.pushed = push_moved(repo, &prefix, &remote)?;
     Ok(outcome)
 }
@@ -534,6 +538,54 @@ fn close_answered(
                 closed[answer.relation] = json!(answer.by);
                 outcome.closed.push(closed);
             }
+            Err(why) => outcome.failed.push(json!({"talk": talk.id, "why": why})),
+        }
+    }
+    Ok(())
+}
+
+/// BACKLOG 240: closes each acked open reliability talk to `me` as `done` once its latest
+/// backbrief says `done` or `validated` and its `evidence` names a commit on trunk, naming that
+/// commit in full (`evidence`). A reliability talk names a check, not a change, so no landing
+/// answers it (G148), and without `expires` nothing else closed it. A talk whose backbrief or
+/// evidence cannot be read here stays open.
+fn close_evidenced(
+    repo: &Repo,
+    prefix: &str,
+    key: Option<&std::path::Path>,
+    me: &Actor,
+    outcome: &mut Outcome,
+) -> Result<(), String> {
+    let talks = talks_matching(&repo.git, prefix)?;
+    let known = Known::new();
+    let ended: Vec<(&Talk, String)> = talks
+        .iter()
+        .filter(|talk| talk.body["kind"] == "reliability" && talk.has("ack") && !talk.closed())
+        .filter_map(|talk| match talk.end_evidence(&repo.git, &known) {
+            Ok(Some(evidence)) => Some((talk, evidence)),
+            Ok(None) | Err(_) => None,
+        })
+        .collect();
+    if ended.is_empty() {
+        return Ok(());
+    }
+    let Ok(trunk) = repo
+        .git
+        .run(&["rev-parse", "--verify", "-q", &repo.trunk_tracking_ref()])
+    else {
+        return Ok(());
+    };
+    for (talk, evidence) in ended {
+        let Ok(Some(commit)) = evidence_on_trunk(&repo.git, &evidence, &trunk) else {
+            continue;
+        };
+        let close = json!({"schema": TALK_SCHEMA, "entry": "close", "talk": talk.id,
+            "actor": {"name": me.name, "session": me.session}, "state": "done",
+            "evidence": commit, "at": now_rfc3339()});
+        match append(repo, talk, &close, key, &me.name) {
+            Ok(()) => outcome
+                .closed
+                .push(json!({"talk": talk.id, "state": "done", "evidence": commit})),
             Err(why) => outcome.failed.push(json!({"talk": talk.id, "why": why})),
         }
     }

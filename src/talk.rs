@@ -274,6 +274,7 @@ const ENTRY_FIELDS: [(&str, &[&str]); 4] = [
             "undone_by",
             "superseded_by",
             "landing",
+            "evidence",
         ],
     ),
 ];
@@ -1065,12 +1066,30 @@ impl Talk {
             .and_then(|close| close["state"].as_str().map(str::to_owned)))
     }
 
-    /// Closed: a close entry (superseded, answered, or read after its `expires`, G52), or a
-    /// discovery talk with an answer (ruling T2). Delivery and reliability talks close on
-    /// evidence, which comes with backbriefs (G47).
+    /// Closed: a close entry (superseded, answered, done, or read after its `expires`, G52), or a
+    /// discovery talk with an answer (ruling T2). A delivery talk closes on the landing that
+    /// names its change (G148), a reliability talk on the trunk commit its latest `done` or
+    /// `validated` backbrief names as evidence (BACKLOG 240).
     #[must_use]
     pub fn closed(&self) -> bool {
         self.has("close") || (self.body["kind"] == "discovery" && self.has("answer"))
+    }
+
+    /// BACKLOG 240: the `evidence` of the talk's latest backbrief when that backbrief reports an
+    /// end (`done` or `validated`), as written. `None` when no backbrief came, the latest says
+    /// `ready` or `blocked`, or it names no evidence.
+    ///
+    /// # Errors
+    ///
+    /// A git fault, or a backbrief that is not JSON.
+    pub(crate) fn end_evidence(&self, git: &Git, known: &Known) -> Result<Option<String>, String> {
+        let Some(latest) = self.last_entry(git, known, "backbrief")? else {
+            return Ok(None);
+        };
+        if !matches!(latest["status"].as_str(), Some("done" | "validated")) {
+            return Ok(None);
+        }
+        Ok(latest["evidence"].as_str().map(str::to_owned))
     }
 
     /// Whether `actor` is the talk's `who` or its `decides`: a party who answers it.
@@ -1171,6 +1190,33 @@ impl Talk {
             .map_err(|error| error.message())?;
         Ok(Some((commit, value)))
     }
+}
+
+/// BACKLOG 240: the commit a backbrief's `evidence` names, in full, when it is on `trunk` (the
+/// trunk tip or an ancestor of it). Evidence names a commit by its object name (7 to 64 hex
+/// digits), never by a ref, whose value moves. `None` for any other evidence, a name this clone
+/// does not hold, or a commit off trunk.
+///
+/// # Errors
+///
+/// Git cannot judge the ancestry of a commit it holds.
+pub(crate) fn evidence_on_trunk(
+    git: &Git,
+    evidence: &str,
+    trunk: &str,
+) -> Result<Option<String>, String> {
+    if !(7..=64).contains(&evidence.len()) || !evidence.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(None);
+    }
+    let Ok(commit) = git.run(&[
+        "rev-parse",
+        "--verify",
+        "-q",
+        &format!("{evidence}^{{commit}}"),
+    ]) else {
+        return Ok(None);
+    };
+    Ok(git.is_ancestor(&commit, trunk)?.then_some(commit))
 }
 
 /// The values of trailer `key` on `commit`.

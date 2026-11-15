@@ -22,6 +22,7 @@ mod a_landed_change_merged_again_answers_from_its_record;
 mod a_landing_needs_a_policy_at_its_base;
 mod a_live_change_is_named_the_fix_in_place;
 mod a_newer_pass_on_trunk_answers_a_landings_post_check;
+mod a_reliability_talk_closes_when_its_done_evidence_is_on_trunk;
 mod check_cost_is_reported;
 mod cli;
 mod demo_9a_the_agent_submits_and_leaves;

@@ -23,7 +23,10 @@
 //! the standing answer names that answer's commit in `supersedes` (`TALK_REFUSED`); a
 //! close as `superseded` by a talk under the same `who` that supersedes it, or as `answered` by
 //! the landing of a change whose `Fixes:`, `Reverts:` or `Supersedes:` names the delivery talk's
-//! change (G148), or as `expired` when its ack's commit time is later than its `expires` (G52).
+//! change (G148), or as `done` when the reliability talk's latest backbrief says `done` or
+//! `validated` with evidence that resolves to the close's `evidence`, a commit on this host's
+//! trunk (BACKLOG 240), or as `expired` when its ack's commit time is later than its `expires`
+//! (G52).
 //! A closed talk takes nothing. A chain holds at most [`ENTRIES_MAX`] entries.
 
 use serde_json::Value;
@@ -891,6 +894,12 @@ fn close(
     {
         return Err("only an answered close names a landing".to_owned());
     }
+    if entry["state"] == "done" {
+        return evidenced(push, talk, entry, known);
+    }
+    if entry.get("evidence").is_some() {
+        return Err("only a done close names `evidence`".to_owned());
+    }
     if entry["state"] == "expired" {
         return expired(push, talk, entry, known);
     }
@@ -921,6 +930,39 @@ fn close(
     let successor = Talk::read(push.git, &name, &tip)?;
     if successor.supersedes() != Some(talk.id.as_str()) {
         return Err(format!("talk {by} does not supersede {}", talk.id));
+    }
+    Ok(())
+}
+
+/// BACKLOG 240: a `done` close of a reliability talk names no talk `by` and, as `evidence`, the
+/// commit its latest backbrief's evidence resolves to here, when that backbrief says `done` or
+/// `validated` and the commit is on this host's trunk after the push. A delivery talk closes on
+/// its change's landing (G148), never on evidence.
+fn evidenced(push: &Push, talk: &Talk, entry: &Value, known: &Known) -> Result<(), String> {
+    if talk.body["kind"] != "reliability" {
+        return Err(format!(
+            "only a reliability talk closes on evidence, and talk {} is {}",
+            talk.id, talk.body["kind"]
+        ));
+    }
+    let (Some(commit), None) = (entry["evidence"].as_str(), entry.get("by")) else {
+        return Err("a done close names its `evidence` commit and no talk `by`".to_owned());
+    };
+    let Some(evidence) = talk.end_evidence(push.git, known)? else {
+        return Err(format!(
+            "the latest backbrief of talk {} is not done or validated with evidence",
+            talk.id
+        ));
+    };
+    let trunk_ref = format!("refs/heads/{}", crate::host::served_branch(push.git));
+    let Some(trunk) = (push.after)(&trunk_ref)? else {
+        return Err(format!("this host holds no {trunk_ref}"));
+    };
+    if super::evidence_on_trunk(push.git, &evidence, &trunk)?.as_deref() != Some(commit) {
+        return Err(format!(
+            "{commit} is not the evidence of talk {}'s latest backbrief on {trunk_ref}",
+            talk.id
+        ));
     }
     Ok(())
 }

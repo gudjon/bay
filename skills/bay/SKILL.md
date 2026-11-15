@@ -344,6 +344,9 @@ name no record names comes back in `detail.unseen` with a `detail.warning`: chec
 - The notice of a talk to you names its one reply command: `--answer` for a discovery talk,
   `--backbrief` for a delivery or reliability talk. Send a new backbrief when the status changes;
   the same one again writes nothing. The sender is told the status word, never your text.
+- A reliability talk closes once your latest backbrief is `done` or `validated` with `--evidence`
+  naming a commit on main by its hash. A delivery talk closes when a merge names its change in a
+  `Fixes:`, `Reverts:` or `Supersedes:` trailer.
 - A talk read after its `--expires` is void: the notice prints `EXPIRED`, and it owes no reply.
 - A talk event in `bay status --since` carries the reply: `answer` (the answer's value) and `reply` (the
   backbrief's `status` and `evidence`). A closed talk says `standing: "closed"` and owes nothing. With no
