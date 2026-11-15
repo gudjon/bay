@@ -1202,6 +1202,9 @@ struct Held {
 
 /// The takeover window of the live case; the seed adds a 2 s lease and a 1 s heartbeat.
 const TAKEOVER_S: u64 = 3;
+/// The adoption case's takeover window: wide enough for a loaded box to push the first adopt
+/// inside it.
+const ADOPTION_TAKEOVER_S: u64 = 10;
 const LIVE_INTENT: &str = "CARD-LIVE";
 
 fn live_tip(test_box: &TestBox, host: &Path, machine: &str) -> Option<String> {
@@ -1394,7 +1397,10 @@ fn live_case_with(takeover_s: u64) -> (TestBox, PathBuf, PathBuf, PathBuf, PathB
 
 #[test]
 fn adoption_and_live_heartbeats_are_scoped_to_their_actor() {
-    let (test_box, host, repo, b, b_key) = live_case();
+    // A window long enough that the adopt pushed first is inside it on a loaded box, and short
+    // enough that the case waits it out.
+    let window = ADOPTION_TAKEOVER_S;
+    let (test_box, host, repo, b, b_key) = live_case_with(window);
     let started = test_box.bay_ok(&repo, &["start", LIVE_INTENT, "--paths", "src/"]);
     let started_at = Instant::now();
     let id = started["change"].as_str().unwrap().to_owned();
@@ -1463,7 +1469,7 @@ fn adoption_and_live_heartbeats_are_scoped_to_their_actor() {
         "{refusal}"
     );
     // The chain head is past the window from here on, whatever the box's load was.
-    let past = Duration::from_secs(TAKEOVER_S + 1);
+    let past = Duration::from_secs(window + 1);
     std::thread::sleep(past.saturating_sub(started_at.elapsed()));
     a_heartbeat(&test_box, &host, &view);
     let why = refused(&test_box, &b, &[&format!("{adopt}:{change_ref}")]);
@@ -1476,7 +1482,7 @@ fn adoption_and_live_heartbeats_are_scoped_to_their_actor() {
     // dead session's row ages out on its own heartbeat, so box-a's fresh summaries do not keep
     // the change un-adoptable. B's heartbeat naming A's change does not delay adoption either:
     // once A's last heartbeat is older than the window, B adopts while both beat.
-    std::thread::sleep(Duration::from_secs(TAKEOVER_S + 1));
+    std::thread::sleep(Duration::from_secs(window + 1));
     let beat = || {
         a_hook_event_of(&test_box, &repo, "s-sibling");
         let commit = live_commit(&test_box, &b, &b_key, "agent-b", "box-b", &id);
@@ -1685,7 +1691,9 @@ fn a_burst_of_hook_events_ends_published_and_a_refused_live_push_shows_in_doctor
 /// Guard to mutate: `src/hook.rs` `takeover_window` reading `Config::load_or_committed` alone.
 #[test]
 fn the_takeover_window_reads_the_last_valid_config() {
-    let (test_box, host, repo, b, b_key) = live_case();
+    // Only a refusal inside the window is under test: a long window, so a loaded box never ages
+    // the chain past it before the adopt is pushed.
+    let (test_box, host, repo, b, b_key) = live_case_with(120);
     let started = test_box.bay_ok(&repo, &["start", LIVE_INTENT, "--paths", "src/"]);
     let id = started["change"].as_str().unwrap().to_owned();
     // A config that does not load reaches main around bay, as a person's merge would.
