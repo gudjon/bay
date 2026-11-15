@@ -55,6 +55,7 @@ pub struct Config {
     pub hooks: Option<Hooks>,
     pub view: Option<View>,
     pub red: Option<Red>,
+    pub status: Option<Status>,
     /// `[[lane]]` (NEW-4): the sandbox lanes, whose changes run their checks and never land.
     #[serde(default, rename = "lane")]
     pub lanes: Vec<Lane>,
@@ -306,6 +307,18 @@ pub struct Hooks {
     pub notice_budget_bytes: Option<u64>,
     pub checkpoint_idle_s: Option<u64>,
 }
+
+/// `[status] serve_stale_s` (G732): how old a sweep may be for a `bay status` read to answer
+/// from the store as it left it at once, while one shared sweep runs on. Default
+/// [`DEFAULT_SERVE_STALE_S`]; 0 makes every read past a sweep's window wait for its own sweep.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Status {
+    pub serve_stale_s: Option<u64>,
+}
+
+/// The default `[status] serve_stale_s`.
+pub const DEFAULT_SERVE_STALE_S: u64 = 60;
 
 /// `[view] warm_history` (G175): whether `bay start` and `start --resume` also fetch the history
 /// of the view's declared paths (`crate::view::warm_history`). Off by default: a view costs what
@@ -937,6 +950,15 @@ impl Config {
                 .and_then(|hooks| hooks.cache_max_age_s)
                 .unwrap_or(30),
         )
+    }
+
+    /// `[status] serve_stale_s` (G732): how old a sweep a status read answers from at once.
+    #[must_use]
+    pub fn serve_stale_s(&self) -> u64 {
+        self.status
+            .as_ref()
+            .and_then(|status| status.serve_stale_s)
+            .unwrap_or(DEFAULT_SERVE_STALE_S)
     }
 
     /// The completion profile `[policy] profile` selects; `default` unless configured.

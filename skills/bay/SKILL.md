@@ -262,10 +262,11 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
   been seen recently. Tell the user a runner must run (`bay runner run`, or
   `bay runner install` to keep one running). The work stays queued. The agent hook says the
   same once, at session start or a prompt: "bay: no runner is running for this repository".
-- `bay status` waits for the remote at most `--deadline` seconds (default 3). Past it, the read
-  answers from the store as the last sweep left it: `detail.stale_s` says how old that is, and a
-  `stale_read` warning names the sweep that runs on. Read again a little later for a fresh answer;
-  do not raise the deadline to wait it out. When the warning names `unreached`, this machine has
+- `bay status` waits for the remote at most `--deadline` seconds (default 3), and none when the
+  last sweep is under `[status] serve_stale_s` old (default 60). Then the read answers from the
+  store as that sweep left it: `detail.stale_s` says how old, and a `stale_read` warning names the
+  sweep that runs on. Act on it: your own pushes are in it, and `bay merge` reads the remote
+  itself. Read again later for a fresher answer; do not raise the deadline to wait it out. When the warning names `unreached`, this machine has
   not reached the remote since `unreached.since`: tell the user its network is down. Your work
   stays safe locally; nothing about the queue is known here until the remote answers.
 - `bay status` with `detail.saved_s`: nothing in this clone moved since that answer was built,

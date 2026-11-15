@@ -308,6 +308,42 @@ pub fn window(
     open.then(|| held["at"].as_str().map(str::to_owned))?
 }
 
+/// G732: whether the store's last sweep of `remote` by `refspecs` ended at most `serve_s` seconds
+/// before `now`, and the store holds what it pushed since that sweep began ([`holds_pushed`]): a
+/// read may then answer from the store as that sweep left it, while the next sweep runs on. A
+/// status read writes nothing, and every write reads the remote again, so an older read only
+/// learns later; a push it does not hold still makes the read wait.
+#[must_use]
+pub fn serves_stale(
+    git: &Git,
+    common: &Path,
+    remote: &str,
+    refspecs: &[String],
+    now: u64,
+    serve_s: u64,
+) -> bool {
+    let Some(held) = std::fs::read_to_string(record(common))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    else {
+        return false;
+    };
+    let (Some(unix), Some(ended)) = (held["unix"].as_u64(), held["ended"].as_u64()) else {
+        return false;
+    };
+    let serve_s = std::env::var("BAY_TEST_SERVE_STALE_S")
+        .ok()
+        .filter(|_| TEST_HOOKS)
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(serve_s);
+    serve_s > 0
+        && held["remote"] == remote
+        && held["refspecs"] == json!(refspecs)
+        && unix <= now
+        && now < ended.saturating_add(serve_s)
+        && holds_pushed(git, common, refspecs, unix)
+}
+
 /// Whether the store of `git` holds what each of its pushes since `unix` sent (G618): each ref a
 /// push sent is, as the ref the sweep's `refspecs` map it to, at the object the push sent. A ref
 /// no refspec maps is one the read does not judge. A push that failed, or whose mark cannot be

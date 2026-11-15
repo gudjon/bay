@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.77
+
+- `bay status` answers at once from a sweep under 60 s old, while one shared sweep refreshes the store.
+- `[status] serve_stale_s` sets that age; 0 makes each read wait for its own sweep.
+
 ## 0.6.76
 
 - `bay status` remembers each verified evidence signature, so a later read skips checking it again.

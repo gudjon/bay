@@ -731,9 +731,22 @@ fn fetch_swept(
     // read past a sweep's window waited its whole 3 s deadline, then answered from the store
     // anyway): when the store's last sweep took longer than this read may wait, the read waits
     // for none. It answers from the store now, and the sweep it starts runs on.
-    let until = if sweep::last_took(&first.common_dir)
-        .is_some_and(|took| Duration::from_secs(took) > until.saturating_duration_since(started))
-    {
+    // G732 (a measurement, 2026-11-15: agents' status reads took 4.4 s at the median, most of it
+    // their own fetch, as reads came more than a window apart): a read whose store a sweep left
+    // at most `[status] serve_stale_s` ago answers from it now, and the sweep it starts runs on
+    // for the next read.
+    let serves_stale = sweep::serves_stale(
+        &first.git,
+        &first.common_dir,
+        first.remote(),
+        &plan.refspecs,
+        crate::live::unix_now(),
+        first.config.serve_stale_s(),
+    );
+    let until = if serves_stale
+        || sweep::last_took(&first.common_dir).is_some_and(|took| {
+            Duration::from_secs(took) > until.saturating_duration_since(started)
+        }) {
         started
     } else {
         until
