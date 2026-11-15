@@ -18,15 +18,29 @@ use std::path::Path;
 use bay::evidence::EVIDENCE_PREFIX;
 use support::{TestBox, check_files, passing_result};
 
-/// One `bay status`: how many times it listed the evidence refs, and the landings its flake
-/// rows counted.
+/// One `bay status`: how many times its own process listed the evidence refs, and the landings
+/// its flake rows counted. A sweep is a process of its own, which runs when its window says, so
+/// its listings are not the read's (read from the trace a test build writes, G171).
 fn status(test_box: &TestBox, repo: &Path) -> (usize, u64) {
-    let listed = test_box.path().join("listed");
-    let _ = std::fs::remove_file(&listed);
-    let status = test_box.bay_ok(repo, &["status"]);
-    let lists = std::fs::read_to_string(&listed)
+    let trace = test_box.path().join("status-trace.jsonl");
+    let _ = std::fs::remove_file(&trace);
+    let (code, status) = support::result_json(
+        test_box
+            .bay(repo)
+            .args(["status"])
+            .env("BAY_TEST_GIT_TRACE", &trace),
+    );
+    assert_eq!(code, 0, "{status}");
+    let lines: Vec<serde_json::Value> = std::fs::read_to_string(&trace)
         .unwrap_or_default()
         .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let pid = lines.first().map(|line| line["pid"].clone());
+    let lists = lines
+        .iter()
+        .filter(|line| Some(&line["pid"]) == pid.as_ref() && line["sub"] == "for-each-ref")
+        .filter(|line| line["args"].to_string().contains(EVIDENCE_PREFIX))
         .count();
     let landings = status["detail"]["flakes"][0]["merges"]
         .as_u64()
@@ -44,11 +58,6 @@ fn a_status_lists_the_evidence_refs_as_often_with_six_landings_as_with_two() {
         land(&test_box, &repo, &format!("src/first{n}.rs"));
     }
 
-    // Each `git for-each-ref` of the evidence refs leaves one line.
-    test_box.wrap_git(&format!(
-        "case \"$*\" in\n  *for-each-ref*{EVIDENCE_PREFIX}*) echo listed >> '{listed}' ;;\nesac",
-        listed = test_box.path().join("listed").display(),
-    ));
     let (two, read) = status(&test_box, &repo);
     assert!(read >= 2, "the flake rows counted {read} landings");
 
