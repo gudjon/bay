@@ -875,6 +875,8 @@ fn map(repo: &Repo, fetched: &Fetched) -> Result<BayResult, String> {
         "trunk": map.trunk,
         "ready": ready(&machines),
         "machines": machines,
+        // G746: which of `machines` is the one this read ran on, by the name its rows carry.
+        "this_machine": here,
         "machines_truncated": truncated,
         "executors": executors,
         "actors": map.actors.into_iter().map(|(actor, (age, on))| json!({
