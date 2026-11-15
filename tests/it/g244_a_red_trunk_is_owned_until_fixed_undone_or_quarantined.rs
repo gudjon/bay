@@ -18,13 +18,13 @@ use support::{TestBox, check_files, passing_result, result_json};
 
 const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\nwhen_paths = [\"src/**\"]\n";
 
-struct Trunk {
-    test_box: TestBox,
-    repo: PathBuf,
+pub(crate) struct Trunk {
+    pub(crate) test_box: TestBox,
+    pub(crate) repo: PathBuf,
     suite_box: PathBuf,
 }
 
-fn trunk() -> Trunk {
+pub(crate) fn trunk() -> Trunk {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
@@ -56,7 +56,7 @@ fn trunk() -> Trunk {
 
 impl Trunk {
     /// Starts a change writing `path` (`--fixes <fixes>` when given) and lands it.
-    fn land(&self, path: &str, fixes: Option<&str>) -> (i32, serde_json::Value, String) {
+    pub(crate) fn land(&self, path: &str, fixes: Option<&str>) -> (i32, serde_json::Value, String) {
         let dir = Path::new(path)
             .parent()
             .unwrap()
@@ -75,7 +75,7 @@ impl Trunk {
         (code, result, id)
     }
 
-    fn suite(&self, landing: &str, verdict: &str) {
+    pub(crate) fn suite(&self, landing: &str, verdict: &str) {
         let (code, written) = result_json(self.test_box.bay(&self.suite_box).args([
             "evidence",
             "record",

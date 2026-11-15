@@ -1171,9 +1171,12 @@ fn listing(
         targets_fetched,
         &read,
     );
-    let Shown { changes, more, .. } = shown?;
+    let Shown {
+        mut changes, more, ..
+    } = shown?;
     let (leftovers, more_leftovers) = sections.leftovers?;
     let (red_rows_now, red_pending) = sections.red;
+    red_on_paths(repo, trunk.as_str(), &mut changes);
     let mut result = BayResult::ok(json!({
         "changes": changes,
         "more_changes": more_changes(&more),
@@ -1323,6 +1326,49 @@ fn target_rows(repo: &Repo, trunk: &str, fetched: bool, read: &Read) -> Value {
 /// its suspect range; and (NEW-6) those no landing in the window answers, `red_pending`, never
 /// clear. A judgement bay cannot make (a policy, config or registry it cannot read, G104b)
 /// lists none in either and says why: an unread trunk is never read as not red.
+/// G742 (a request of a status panel, 2026-11-15: it showed "main is red" to every agent, whose
+/// change mostly touched none of the red check's paths, and could not tell which without
+/// matching globs of its own): each live change row names `red_on_paths`, main's red checks its
+/// change touches, by the one rule its merge is judged by ([`crate::red::blocking`]): a check a
+/// change touches runs on its candidate first. Empty when main's red is not on its paths. Not
+/// named when main's red cannot be read here.
+fn red_on_paths(repo: &Repo, trunk: &str, changes: &mut [Value]) {
+    let live = |row: &Value| matches!(row["state"].as_str(), Some("open" | "ready"));
+    let Ok(registry) = crate::registry::Registry::current(&repo.git) else {
+        return;
+    };
+    let Ok(reds) = crate::red::holding(&repo.git, trunk, registry.as_ref()) else {
+        return;
+    };
+    let chain = Chain::new(&repo.git);
+    for row in changes.iter_mut().filter(|row| live(row)) {
+        let names: Vec<String> = if reds.is_empty() {
+            Vec::new()
+        } else {
+            let Some(id) = row["change"].as_str() else {
+                continue;
+            };
+            let Ok(latest) = chain.latest_draft(id) else {
+                continue;
+            };
+            let Ok((_, record)) = chain.read(id) else {
+                continue;
+            };
+            let Ok(base) = repo.git.run(&["merge-base", trunk, &latest]) else {
+                continue;
+            };
+            let Ok(touched) = crate::check::changed_paths(&repo.git, &base, &latest) else {
+                continue;
+            };
+            crate::red::blocking(&reds, &touched, &record.repair_names())
+                .into_iter()
+                .map(|red| red.check.clone())
+                .collect()
+        };
+        row["red_on_paths"] = json!(names);
+    }
+}
+
 fn red_rows(repo: &Repo, trunk: &str) -> (Value, Value) {
     crate::registry::Registry::current(&repo.git)
         .and_then(|registry| crate::red::shown(&repo.git, trunk, registry.as_ref()))

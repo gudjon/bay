@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.79
+
+- `bay status` names on each live change the red checks of main its change touches (`red_on_paths`).
+
 ## 0.6.78
 
 - `bay merge` reads the remote side by side before it writes: four waves of calls instead of seven.

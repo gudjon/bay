@@ -240,7 +240,7 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
   files and that change in `operation.undoes`, each other change in `undoes.also`: bring in main, keep that work, then `bay merge`.
 - `DISK_LOW`: the disk is below this machine's floor, 5 GiB unless `git config bay.minFreeMiB` sets another; `0` turns
   it off. `bay start` already freed what it could, and `detail.released_views` names those views. Free more, then start again.
-- Main is red on your paths (`bay status` lists the check in `detail.red`): nothing waits. Your change runs that check
+- Main is red on your paths (your change's row in `bay status` names the check in `red_on_paths`): nothing waits. Your change runs that check
   before it merges, judged against main, and merges unless it adds a failure; its result names it in
   `detail.red_checked`. A change that fixes it goes ahead of the line: `bay start <intent> --fixes <check>`, the check
   `detail.red[].check` names (the one name that never moves). Main is then `pending_fix` in `detail.red_pending` until
