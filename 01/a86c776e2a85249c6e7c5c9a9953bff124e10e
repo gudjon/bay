@@ -113,5 +113,28 @@
     "verdict": "pass",
     "at": "2026-11-15T04:58:33Z",
     "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgWA9Do2pD/ZhdNBpan5FFOcD6gT\nXTtW6oxP9R8E+vkioAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQCsDNsf1sDcUYxAo2gNhqhlllt9jvrm/P0/vwZh/oj9EXdpwmkovV1\nBGDt/CbYQr6Ugsvlp5yA0+ahcnD9ZqCgw=\n-----END SSH SIGNATURE-----\n"
+  },
+  {
+    "schema": "bay.evidence/1",
+    "id": "linux-1/check-windows-linux-x86_64-git2.56.0-c1099b73abd9",
+    "kind": "check",
+    "subject": {
+      "tree": "01a86c776e2a85249c6e7c5c9a9953bff124e10e",
+      "commit": "c1099b73abd96a5cc29816fabefef1e40ec4c272",
+      "base_tree": "01a86c776e2a85249c6e7c5c9a9953bff124e10e"
+    },
+    "check": {
+      "id": "check-windows",
+      "environment": "linux-x86_64-git2.56.0"
+    },
+    "policy_revision": 0,
+    "manifest_digest": "gate",
+    "producer": {
+      "name": "linux-1",
+      "version": "0.6.74"
+    },
+    "verdict": "pass",
+    "at": "2026-11-15T04:58:33Z",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgWA9Do2pD/ZhdNBpan5FFOcD6gT\nXTtW6oxP9R8E+vkioAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQGCso+OSu6tDW6HeC68ay9gBtOO/N04Iy+R7nlkWYLdKiBRoQeLgEL\nWnaizbpVT7C4iuebVKV97EAZITQDgBOQQ=\n-----END SSH SIGNATURE-----\n"
   }
 ]
