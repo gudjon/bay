@@ -4,6 +4,7 @@
 
 - `bay status` answers at once from a sweep under 60 s old, while one shared sweep refreshes the store.
 - `[status] serve_stale_s` sets that age; 0 makes each read wait for its own sweep.
+- `bay start` reads the remote in one fetch after trunk, three round trips instead of five.
 
 ## 0.6.76
 

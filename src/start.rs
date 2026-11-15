@@ -94,6 +94,7 @@ pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
         Ok(repo) => repo,
         Err(error) => return error.into_result(),
     };
+    prefetch(&repo, request);
     // G265 (N-13): a box below its disk floor (`bay.minFreeMiB`) starts nothing: no change and
     // no view, measured where the views are made.
     let mut floor = crate::disk::below_floor(&repo.git, &repo.views_dir());
@@ -725,18 +726,50 @@ pub fn claimed(repo: &Repo, intent: &str, revision: &str) -> Result<bool, String
 }
 
 /// The claims on an intent the remote holds: generation → change id.
+/// G733: what a new change's start reads from the remote after trunk, in one round trip: the
+/// claims on its intent, the shard index and, when this store holds one, the registry. A start
+/// that resumes, or names no intent, reads them as before.
+fn prefetch(repo: &Repo, request: &StartRequest) {
+    let Some(intent) = request
+        .intent
+        .as_deref()
+        .filter(|_| request.resume.is_none())
+    else {
+        return;
+    };
+    let mut refspecs = vec![
+        claims_refspec(&intent_hash(intent, &request.intent_revision)),
+        crate::compact::refspec(),
+    ];
+    if repo
+        .git
+        .ref_target(crate::registry::REGISTRY_REF)
+        .ok()
+        .flatten()
+        .is_some()
+    {
+        refspecs.push(Repo::registry_refspec());
+    }
+    repo.prefetch(&refspecs);
+}
+
+/// The refspec of every claim on the intent of `hash`.
+fn claims_refspec(hash: &str) -> String {
+    let prefix = format!("{}{hash}/", crate::names::INTENT);
+    format!("+{prefix}*:{prefix}*")
+}
+
 fn remote_claims(
     repo: &Repo,
     hash: &str,
 ) -> Result<std::collections::BTreeMap<u64, String>, String> {
     let prefix = format!("{}{hash}/", crate::names::INTENT);
-    let _ = repo.git.run(&[
-        "fetch",
-        "-q",
-        "--no-tags",
-        repo.remote(),
-        &format!("+{prefix}*:{prefix}*"),
-    ]);
+    let refspec = claims_refspec(hash);
+    if !repo.take_prefetched(&refspec) {
+        let _ = repo
+            .git
+            .run(&["fetch", "-q", "--no-tags", repo.remote(), &refspec]);
+    }
     let refs = repo
         .git
         .run(&["for-each-ref", "--format=%(objectname) %(refname)", &prefix])

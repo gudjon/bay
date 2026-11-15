@@ -164,6 +164,9 @@ pub struct Repo {
     fetched_at: Mutex<Option<String>>,
     /// Whether [`Repo::fetch_evidence_once`] has run.
     evidence_fetched: std::sync::atomic::AtomicBool,
+    /// G733: the refspecs one fetch of [`Repo::prefetch`] brought, each taken by the first
+    /// fetch of it after, which then asks the remote nothing.
+    prefetched_specs: Mutex<std::collections::HashSet<String>>,
     /// G438: what a runner's pass last read from the remote, shared by its visits.
     reads: Mutex<Reads>,
 }
@@ -458,6 +461,7 @@ impl Repo {
             ),
             prefetched: Mutex::new(prefetched),
             evidence_fetched: std::sync::atomic::AtomicBool::new(false),
+            prefetched_specs: Mutex::new(std::collections::HashSet::new()),
             reads: Mutex::new(Reads::default()),
         })
     }
@@ -729,17 +733,50 @@ impl Repo {
         Some(crate::result::Freshness { trunk, fetched_at })
     }
 
+    /// G733 (a measurement, 2026-11-15: agents' `bay start` took 9.7 s at the median, five round
+    /// trips to the remote one after another: trunk, the intent's claims, the shard index, the
+    /// registry and the push): fetches `refspecs` in one round trip. Each is then taken once by
+    /// [`Repo::take_prefetched`], so the first fetch of it after asks the remote nothing and a
+    /// second (a re-read after a lost race) asks again. A fetch that fails leaves none taken:
+    /// each is fetched alone as before (a remote without one of the refs refuses the whole).
+    pub fn prefetch(&self, refspecs: &[String]) {
+        if refspecs.is_empty() {
+            return;
+        }
+        let mut args = vec!["fetch", "-q", "--no-tags", self.remote()];
+        args.extend(refspecs.iter().map(String::as_str));
+        if self.git.run(&args).is_ok()
+            && let Ok(mut specs) = self.prefetched_specs.lock()
+        {
+            specs.extend(refspecs.iter().cloned());
+        }
+    }
+
+    /// Whether [`Repo::prefetch`] brought `refspec` and no fetch has taken it yet; taking it.
+    #[must_use]
+    pub fn take_prefetched(&self, refspec: &str) -> bool {
+        self.prefetched_specs
+            .lock()
+            .is_ok_and(|mut specs| specs.remove(refspec))
+    }
+
+    /// The refspec [`Repo::fetch_registry`] fetches.
+    #[must_use]
+    pub fn registry_refspec() -> String {
+        let name = crate::registry::REGISTRY_REF;
+        format!("+{name}:{name}")
+    }
+
     /// Fetches `refs/bay/registry` when the remote has one. A remote without a registry leaves
     /// the local one as it is.
     pub fn fetch_registry(&self) {
-        let name = crate::registry::REGISTRY_REF;
-        let _ = self.git.run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            self.remote(),
-            &format!("+{name}:{name}"),
-        ]);
+        let refspec = Self::registry_refspec();
+        if self.take_prefetched(&refspec) {
+            return;
+        }
+        let _ = self
+            .git
+            .run(&["fetch", "-q", "--no-tags", self.remote(), &refspec]);
     }
 
     /// Fetches every other writer's evidence notes ref from the remote, so an operation

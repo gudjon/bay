@@ -110,13 +110,23 @@ pub fn recorded(git: &Git, name: &str) -> Result<Option<String>, String> {
     }
 }
 
-/// Brings in the remote's shard indexes. A remote that cannot be read is an error.
+/// The refspec [`fetch`] fetches: every shard index ref.
+#[must_use]
+pub fn refspec() -> String {
+    format!("+{INDEX_PREFIX}*:{INDEX_PREFIX}*")
+}
+
+/// Brings in the remote's shard indexes, unless [`Repo::prefetch`] just did (G733). A remote that
+/// cannot be read is an error.
 ///
 /// # Errors
 ///
 /// The fetch fails.
 pub fn fetch(repo: &Repo) -> Result<(), String> {
-    let refspec = format!("+{INDEX_PREFIX}*:{INDEX_PREFIX}*");
+    let refspec = refspec();
+    if repo.take_prefetched(&refspec) {
+        return Ok(());
+    }
     repo.git
         .run(&["fetch", "-q", "--no-tags", repo.remote(), &refspec])
         .map(|_| ())
