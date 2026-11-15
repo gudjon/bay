@@ -83,12 +83,8 @@ fn last_line(repo: &Path, session: &str) -> Value {
     serde_json::from_str(text.lines().last().unwrap()).unwrap()
 }
 
-/// A repository set up for bay with no checks, its remote, and a clone an executor runs in.
-fn seeded() -> (TestBox, PathBuf, PathBuf) {
-    seeded_with(None)
-}
-
-/// [`seeded`], with `.bay/config.toml` set to `config` (the seed keeps a lease the config
+/// A repository set up for bay with no checks, its remote, and a clone an executor runs in, with
+/// `.bay/config.toml` set to `config` (the seed keeps a lease the config
 /// names, and gives every other one two seconds).
 fn seeded_with(config: Option<&str>) -> (TestBox, PathBuf, PathBuf) {
     let test_box = TestBox::new();
@@ -118,7 +114,10 @@ fn queue_one(test_box: &TestBox, repo: &Path) {
 
 #[test]
 fn queued_work_with_no_executor_is_told_once_per_state() {
-    let (test_box, repo, executor) = seeded();
+    // A takeover window of a minute: the line is said only while the last fetch of presence is
+    // younger than it, and a loaded box takes more than the seed's few seconds between the
+    // fetch and the second session's start. An hour's skew still ages presence past it.
+    let (test_box, repo, executor) = seeded_with(Some("[runner]\nlease_s = 30\n"));
     // Nothing queued: nothing to tell.
     let started = hook(&test_box, &repo, "s-1", "session.start", 0);
     assert!(!started.contains(LINE), "{started}");
