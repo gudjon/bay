@@ -60,18 +60,26 @@ fn hook(test_box: &TestBox, cwd: &Path, event: &str, payload: &Value) -> (Option
 }
 
 /// The map's row of `session`, after this machine's presence is pushed and fetched.
+/// A push the session's own hook started may hold the live push's lock, and then this push
+/// starts none: the row is read again, a few times, until that push lands (a gate box at load
+/// 60 read the map first).
 fn row(test_box: &TestBox, repo: &Path, session: &str) -> Value {
-    test_box.bay_ok(repo, &["live", "push"]);
-    test_box.bay_ok(repo, &["status"]);
-    let (code, map) = result_json(test_box.bay(repo).args(["status", "--all"]));
-    assert_eq!(code, 0, "{map}");
-    map["detail"]["sessions"]
-        .as_array()
-        .unwrap_or_else(|| panic!("no sessions: {map}"))
-        .iter()
-        .find(|row| row["session"] == session)
-        .cloned()
-        .unwrap_or_else(|| panic!("no row of {session}: {map}"))
+    let mut map = Value::Null;
+    for _ in 0..20 {
+        test_box.bay_ok(repo, &["live", "push"]);
+        test_box.bay_ok(repo, &["status"]);
+        let (code, read) = result_json(test_box.bay(repo).args(["status", "--all"]));
+        assert_eq!(code, 0, "{read}");
+        map = read;
+        if let Some(row) = map["detail"]["sessions"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["session"] == session))
+        {
+            return row.clone();
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    panic!("no row of {session}: {map}")
 }
 
 /// The last line of `session`'s own record.
