@@ -157,6 +157,16 @@ impl Queue {
     /// A git fault other than an unreachable remote (then the local copy is read).
     pub fn live(repo: &Repo) -> Result<Vec<Place>, String> {
         fetch(repo);
+        Self::live_here(repo)
+    }
+
+    /// G755: [`Queue::live`] from the queue refs this store holds, with no fetch: what a read
+    /// of one change says of its place costs no call to the remote.
+    ///
+    /// # Errors
+    ///
+    /// A git fault.
+    pub fn live_here(repo: &Repo) -> Result<Vec<Place>, String> {
         let listed = list(&repo.git)?;
         let released: BTreeSet<u64> = listed
             .iter()

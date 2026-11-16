@@ -2456,6 +2456,60 @@ fn receipt_state(
     }
 }
 
+/// G755 (owner, 2026-11-16: busy people want to know at once when their change is on main):
+/// an operation in the line names its place, how many live places are ahead of it, and how
+/// long the line takes to reach it at the pace main measured: the changes that landed on main
+/// in the last two and the last eight hours. The faster pace gives the low end, the slower the
+/// high end, each with its window and count; with no landing in a window there is no estimate,
+/// never a guess. Read from this store's queue refs and main, with no call to the remote.
+fn line_of(repo: &Repo, trunk: &str, op_id: &str) -> Option<Value> {
+    let places = crate::queue::Queue::live_here(repo).ok()?;
+    let at = places.iter().position(|place| place.entry.op_id == op_id)?;
+    let ahead = at;
+    let rates: Vec<(u64, u64)> = [LINE_SHORT_S, LINE_LONG_S]
+        .iter()
+        .filter_map(|window| {
+            let since = format!("--since={window} seconds ago");
+            let count = repo
+                .git
+                .run(&["rev-list", "--count", "--first-parent", &since, trunk])
+                .ok()?
+                .trim()
+                .parse::<u64>()
+                .ok()?;
+            Some((*window, count))
+        })
+        .collect();
+    // Whole seconds: the line reaches this place after `ahead + 1` landings, one per
+    // `window / count` seconds at that window's pace.
+    let reach: Vec<u64> = rates
+        .iter()
+        .filter(|(_, count)| *count > 0)
+        .map(|(window, count)| (ahead as u64 + 1) * window / count)
+        .collect();
+    let eta = match (reach.iter().min(), reach.iter().max()) {
+        (Some(low), Some(high)) => json!({"low_s": low, "high_s": high}),
+        _ => Value::Null,
+    };
+    let basis: Vec<Value> = rates
+        .iter()
+        .map(|(window, count)| {
+            json!({"window_s": window, "merged": count, "per_hour": (count * 3600 + window / 2) / window})
+        })
+        .collect();
+    Some(json!({
+        "place": at + 1,
+        "ahead": ahead,
+        "of": places.len(),
+        "eta": eta,
+        "basis": basis,
+    }))
+}
+
+/// G755: the windows a line's pace is measured over.
+const LINE_SHORT_S: u64 = 2 * 3600;
+const LINE_LONG_S: u64 = 8 * 3600;
+
 fn describe(
     repo: &Repo,
     record: &ChangeRecord,
@@ -2514,6 +2568,7 @@ fn describe(
         }
         if !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked {
             waiting(op, &mut operation);
+            operation["line"] = line_of(repo, trunk, &op.op_id).unwrap_or(Value::Null);
         }
         held_by(op, &mut operation);
         if let Some(fault) = fault(record, unsynced, op, published) {

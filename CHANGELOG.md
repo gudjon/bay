@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.86
+
+- `bay status <change>` names a queued change's place, how many are ahead, and when it reaches main.
+
 ## 0.6.85
 
 - A head is passed by at most three unrelated changes, counted while it checks or waits, not only on yields.
