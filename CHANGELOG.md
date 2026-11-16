@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.83
+
+- `bay merge --wait` behind a held change reads it once a heartbeat, not five times a second.
+
 ## 0.6.82
 
 - `bay status <change>` builds only that change's row, not the fleet's sections, so polling costs far less.

@@ -8034,8 +8034,17 @@ fn lease_expired(ctx: &mut Ctx, lease: Duration) -> bool {
     }
     let first = ctx.head.clone();
     let seen = Instant::now();
+    // G749 (a fleet finding, 2026-11-16: each `merge --wait` behind a held operation fetched its
+    // chain five times a second, about 3,000 to 7,700 Git commands a wait, while the holder moves
+    // it once a heartbeat): the chain is read again once a heartbeat, never faster.
+    let every = ctx
+        .repo
+        .config
+        .heartbeat()
+        .max(Duration::from_millis(200))
+        .min(lease);
     while seen.elapsed() < lease {
-        std::thread::sleep(Duration::from_millis(200).min(lease));
+        std::thread::sleep(every);
         if ctx.refetch().is_ok() && ctx.head != first {
             return false;
         }
