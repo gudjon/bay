@@ -2506,6 +2506,47 @@ fn line_of(repo: &Repo, trunk: &str, op_id: &str) -> Option<Value> {
     }))
 }
 
+/// What an operation under way says beyond its state: what it waits on ([`waiting`]), its place
+/// in the line (G755, [`line_of`]), and, while a runner holds it, how long since that runner
+/// claimed it (G757, `claimed_s`).
+fn under_way(
+    repo: &Repo,
+    trunk: &str,
+    change: &str,
+    op: &crate::change::Operation,
+    operation: &mut Value,
+) {
+    waiting(op, operation);
+    operation["line"] = line_of(repo, trunk, &op.op_id).unwrap_or(Value::Null);
+    if op.owner.is_some() {
+        operation["claimed_s"] =
+            claimed_s(repo, change, &op.op_id).map_or(Value::Null, |s| json!(s));
+    }
+}
+
+/// G757 (owner, 2026-11-16: a panel draws the head's check against the line's typical check
+/// time, and the operation's `elapsed_s` counts from its request, not its claim): seconds since
+/// the current runner claimed `op_id`, from that claim's commit in the change's chain as this
+/// store holds it.
+fn claimed_s(repo: &Repo, change: &str, op_id: &str) -> Option<u64> {
+    let grep = format!("--grep=^claim {op_id} ");
+    let at: u64 = repo
+        .git
+        .run(&[
+            "log",
+            "-1",
+            "--first-parent",
+            "--format=%ct",
+            &grep,
+            &crate::change::change_ref(change),
+        ])
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(crate::live::unix_now().saturating_sub(at))
+}
+
 /// G755: the windows a line's pace is measured over.
 const LINE_SHORT_S: u64 = 2 * 3600;
 const LINE_LONG_S: u64 = 8 * 3600;
@@ -2567,8 +2608,7 @@ fn describe(
             operation["next"] = json!(next);
         }
         if !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked {
-            waiting(op, &mut operation);
-            operation["line"] = line_of(repo, trunk, &op.op_id).unwrap_or(Value::Null);
+            under_way(repo, trunk, &record.id, op, &mut operation);
         }
         held_by(op, &mut operation);
         if let Some(fault) = fault(record, unsynced, op, published) {

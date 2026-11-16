@@ -48,6 +48,11 @@ pub const FIELDS: &[&str] = &[
     "queue_wait_s",
     "check_s",
     "total_s",
+    "claims",
+    "last_claim_at",
+    "rework_s",
+    "final_s",
+    "rework",
 ];
 
 /// The most chain states read back from the head.
@@ -316,9 +321,74 @@ pub fn of(git: &Git, head: &str, op: &Operation, outcome: &str) -> Map<String, V
             .zip(submitted_at)
             .map(|(end, from)| end.saturating_sub(from)),
     );
+    // G759 (owner, 2026-11-16: "make sure we are doing all the right measurements … so we can
+    // learn where to best improve"; by hand, 82% of six hours' cycle time was the wait before a
+    // change's work counted, much of it checked work thrown away): the claims it took, the time
+    // between its first and its last claim (work done again), the time from its last claim to
+    // its end, and each cause its work was given back for, from the same chain states.
+    let claims: Vec<u64> = states
+        .iter()
+        .filter(|state| state.subject.starts_with(&claim))
+        .map(|state| state.at)
+        .collect();
+    let last_claim_at = claims.last().copied();
+    put_after(&mut out, "last_claim_at", last_claim_at);
+    put_after(
+        &mut out,
+        "rework_s",
+        last_claim_at
+            .zip(head_at)
+            .map(|(last, first)| last.saturating_sub(first)),
+    );
+    put_after(
+        &mut out,
+        "final_s",
+        end_at
+            .zip(last_claim_at)
+            .map(|(end, last)| end.saturating_sub(last)),
+    );
+    out.insert("claims".to_owned(), json!(claims.len()));
+    out.insert("rework".to_owned(), rework(&states, op_id));
     out.insert("attempts".to_owned(), json!(op.attempts.len()));
     out.insert("checks".to_owned(), json!(rows));
     out
+}
+
+/// G759: inserts `key` when `value` is known.
+fn put_after(out: &mut Map<String, Value>, key: &str, value: Option<u64>) {
+    if let Some(value) = value {
+        out.insert(key.to_owned(), json!(value));
+    }
+}
+
+/// G759: why operation `op_id`'s work was given back, by cause, read from its chain states: a
+/// head that yielded (`yielded <op> at <seq>: <cause>`) and a claim given back after a fault
+/// (`released <op> epoch <n> after a fault: <cause>`). Each counts as `main_moved`,
+/// `member_left` (a batch member left before its push) or `other`.
+fn rework(states: &[State], op_id: &str) -> Value {
+    let yielded = format!("yielded {op_id} ");
+    let released = format!("released {op_id} ");
+    let (mut main_moved, mut member_left, mut other, mut yields) = (0u64, 0u64, 0u64, 0u64);
+    for state in states {
+        let cause = if state.subject.starts_with(&yielded) {
+            yields += 1;
+            state.subject.split_once(": ").map(|(_, cause)| cause)
+        } else if state.subject.starts_with(&released) {
+            state
+                .subject
+                .split_once("after a fault: ")
+                .map(|(_, cause)| cause)
+        } else {
+            None
+        };
+        match cause {
+            Some(cause) if cause.contains("main moved") => main_moved += 1,
+            Some(cause) if cause.contains("member left") => member_left += 1,
+            Some(_) => other += 1,
+            None => {}
+        }
+    }
+    json!({"main_moved": main_moved, "member_left": member_left, "other": other, "yields": yields})
 }
 
 /// The timing fields terminal record `record` carries, as one object; `None` on a record
@@ -335,4 +405,30 @@ pub fn from_terminal(record: &Value) -> Option<Value> {
         })
         .collect();
     (!timing.is_empty()).then_some(Value::Object(timing))
+}
+
+#[cfg(test)]
+mod tests {
+    /// G759: work given back is counted by cause, from the chain's subjects alone.
+    #[test]
+    fn rework_counts_each_cause_of_work_given_back() {
+        let state = |subject: &str| super::State {
+            commit: String::new(),
+            at: 0,
+            subject: subject.to_owned(),
+        };
+        let states = vec![
+            state("claim c.1 epoch 1 by r"),
+            state("released c.1 epoch 1 after a fault: main moved under the batch"),
+            state("released c.1 epoch 2 after a fault: a member left the batch before its push"),
+            state("yielded c.1 at 7: main moved"),
+            state("released c.1 epoch 3 after a fault: the host refused"),
+            state("released c.10 epoch 1 after a fault: main moved under the batch"),
+        ];
+        let counted = super::rework(&states, "c.1");
+        assert_eq!(counted["main_moved"], 2, "{counted}");
+        assert_eq!(counted["member_left"], 1, "{counted}");
+        assert_eq!(counted["other"], 1, "{counted}");
+        assert_eq!(counted["yields"], 1, "{counted}");
+    }
 }

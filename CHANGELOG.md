@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.89
+
+- `bay status` shows the last six hours: merges an hour, waits, work done again by cause, and time to main.
+- A change a runner holds says how long since its claim.
+
 ## 0.6.88
 
 - A change revised during its batch's check merges as checked; the next `bay merge` sends the newer edits.

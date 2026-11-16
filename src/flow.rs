@@ -167,6 +167,7 @@ pub fn flow(repo: &Repo, trunk: &str) -> Result<Value, String> {
         "cycle_time_s": spread(&mut cycles, "landed"),
         "queue_wait_s": queue_wait(&published),
         "check_time_s": check_time(&published),
+        "recent": lately(&published, now),
         "oldest_live": oldest_live,
         "waiting_approval": {
             "count": review.waiting,
@@ -239,6 +240,89 @@ fn queue_wait(published: &[Value]) -> Value {
         .filter_map(|record| record["queue_wait_s"].as_u64())
         .collect();
     spread(&mut waits, "landed")
+}
+
+/// G759: the window `recent` reads, in seconds: the last six hours, so a busy morning reads as
+/// that morning, not as the week.
+const RECENT_S: u64 = 6 * 3600;
+
+/// G759 (owner, 2026-11-16: "make sure we are doing all the right measurements to measure the
+/// velocity, throughput, each wait time"): `recent` of [`flow`], the landings of the last
+/// [`RECENT_S`], from their published terminal records ([`crate::timing`]): how many and how many
+/// an hour; the spread of their time from request to main (`total_s`), of the wait for a first
+/// claim (`queue_wait_s`), of the time between first and last claim, where work was done again
+/// (`rework_s`), and of the time from the last claim to main (`final_s`); each part's share of
+/// the summed time, in whole percent; and the rework by cause. Null when none landed; a record
+/// written before G759 counts in `landed` and `total_s` only.
+fn lately(published: &[Value], now: u64) -> Value {
+    let since = now.saturating_sub(RECENT_S);
+    let records: Vec<&Value> = published
+        .iter()
+        .filter(|record| {
+            record["published_at"]
+                .as_u64()
+                .is_some_and(|at| at >= since)
+        })
+        .collect();
+    if records.is_empty() {
+        return Value::Null;
+    }
+    let field = |key: &str| -> Vec<u64> {
+        records
+            .iter()
+            .filter_map(|record| record[key].as_u64())
+            .collect()
+    };
+    let (mut total, mut wait, mut redo, mut last) = (
+        field("total_s"),
+        field("queue_wait_s"),
+        field("rework_s"),
+        field("final_s"),
+    );
+    // Shares over the landings that carry all three parts, so the parts sum to their total.
+    let whole: Vec<(u64, u64, u64)> = records
+        .iter()
+        .filter_map(|record| {
+            Some((
+                record["queue_wait_s"].as_u64()?,
+                record["rework_s"].as_u64()?,
+                record["final_s"].as_u64()?,
+            ))
+        })
+        .collect();
+    let parts = whole.iter().fold((0u64, 0u64, 0u64), |acc, part| {
+        (acc.0 + part.0, acc.1 + part.1, acc.2 + part.2)
+    });
+    let all = parts.0 + parts.1 + parts.2;
+    let share = |part: u64| (all > 0).then(|| (part * 100 + all / 2) / all);
+    let cause = |key: &str| -> u64 {
+        records
+            .iter()
+            .filter_map(|record| record["rework"][key].as_u64())
+            .sum()
+    };
+    let landed = records.len() as u64;
+    json!({
+        "window_s": RECENT_S,
+        "landed": landed,
+        "per_hour": (landed * 3600 + RECENT_S / 2) / RECENT_S,
+        "total_s": spread(&mut total, "landed"),
+        "queue_wait_s": spread(&mut wait, "landed"),
+        "rework_s": spread(&mut redo, "landed"),
+        "final_s": spread(&mut last, "landed"),
+        "share_pct": {
+            "queue_wait": share(parts.0),
+            "rework": share(parts.1),
+            "final": share(parts.2),
+            "landed": whole.len(),
+        },
+        "rework": {
+            "main_moved": cause("main_moved"),
+            "member_left": cause("member_left"),
+            "other": cause("other"),
+            "yields": cause("yields"),
+        },
+    })
 }
 
 /// `check_time_s` of [`flow`]: the `seconds` of each attempt row (`checks[]`) the published
