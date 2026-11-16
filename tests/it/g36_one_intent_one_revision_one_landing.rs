@@ -261,7 +261,9 @@ fn two_changes_holding_one_generation_land_once() {
     assert_eq!(test_box.trunk_change_ids(&remote), vec![first_id]);
 }
 
-const TAKEOVER_S: u64 = 6;
+// Long against the setup before the watch: at 6 s a gate box at load 60 took longer to start the
+// change than the window, and the takeover came at once (a fleet gate, 2026-11-16).
+const TAKEOVER_S: u64 = 20;
 
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
