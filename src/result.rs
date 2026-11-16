@@ -1577,6 +1577,20 @@ impl BayResult {
     /// here from the decision, the reason and a few detail fields, never at a call site.
     #[must_use]
     pub fn say(&self) -> String {
+        let said = self.say_core();
+        // G754: a change bay opened from an author's newer revision names the one it follows.
+        let follow_up = self.detail.as_ref().map(|detail| &detail["follow_up"]);
+        match follow_up
+            .and_then(|follow| Some((follow["from"].as_str()?, follow["change"].as_str()?)))
+        {
+            Some((from, next)) => format!(
+                "{from}'s earlier version went to main; your newer edits are {next}. {said}"
+            ),
+            None => said,
+        }
+    }
+
+    fn say_core(&self) -> String {
         let detail = self.detail.as_ref();
         if let Some(reason) = self.reason {
             return reason.say(detail);

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.87
+
+- A change revised during its batch's check merges as checked; the next `bay merge` sends the newer edits.
+
 ## 0.6.85
 
 - A head is passed by at most three unrelated changes, counted while it checks or waits, not only on yields.

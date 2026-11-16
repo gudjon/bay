@@ -6,7 +6,9 @@
 //! head ran alone, so the batch check and each join before it were lost, and the journal named
 //! neither the member nor why (E59, a fleet finding, 2026-10-30). Now the batch is cut to the
 //! members before it: that prefix is checked again as its own tree and lands as one batch, and
-//! the journal names the member and the reason. The member keeps its place for its own turn.
+//! the journal names the member and the reason. G754 (owner ruling 2026-11-16): a member whose
+//! owner sent a new revision now joins and lands as checked, so the case here is a member its
+//! owner abandoned while the batch was checked; it never lands.
 //!
 //! The guard to mutate: `join_or_cut` (`src/publish.rs`); give every claim back at the first
 //! member that cannot join and the head lands alone.
@@ -15,8 +17,6 @@
 #![cfg(unix)]
 
 use crate::support;
-
-use std::path::PathBuf;
 
 use support::PRODUCER;
 use support::queued::{Check, host, ran_for};
@@ -44,12 +44,10 @@ fn a_member_resubmitted_while_its_batch_is_checked_cuts_the_batch() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    // The batch of three is checked; while it is, three's owner sends a new revision.
+    // The batch of three is checked; while it is, three's owner abandons it.
     held.wait_held();
-    let started = held.test_box.bay_ok(&held.repo, &["start", &three]);
-    let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
-    std::fs::write(view.join("src/three.rs"), "fn three() { let _ = 3; }\n").unwrap();
-    held.test_box.bay_ok(&view, &["merge"]);
+    held.test_box
+        .bay_ok(&held.repo, &["abandon", &three, "--why", "not needed"]);
     held.go();
     let output = runner.wait_with_output().unwrap();
     let journal = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -83,10 +81,10 @@ fn a_member_resubmitted_while_its_batch_is_checked_cuts_the_batch() {
         [3, 2],
         "the batch of three, then one and two as their own tree: {batch}"
     );
-    // Three keeps its place and lands on its own turn, as its new revision.
+    // Three, abandoned, never lands.
     let landed = held.test_box.trunk_change_ids(&held.remote);
     assert!(
-        [&one, &two, &three].iter().all(|id| landed.contains(id)),
+        [&one, &two].iter().all(|id| landed.contains(id)) && !landed.contains(&three),
         "{landed:?}\n{journal}"
     );
 }

@@ -888,7 +888,12 @@ impl Judge<'_> {
             .after(&format!("{}{change}", crate::names::REQUESTS))?
             .ok_or_else(|| format!("change {change} has no requests ref"))?;
         let latest = self.request(&latest, &change)?;
-        if latest.revision != revision {
+        // G754 (owner ruling 2026-11-16, "freeze batch members"): a batch member its author
+        // revised during the batch's check lands the revision it was checked as; the newer one
+        // goes in after as the next change. Never once the change was abandoned.
+        if latest.revision != revision
+            && (latest.revision.is_empty() || !self.frozen_member(&change, &request_id, commit)?)
+        {
             return Err(format!(
                 "{commit} merges a revision a newer request superseded"
             ));
@@ -1056,6 +1061,32 @@ impl Judge<'_> {
     /// it names (so a later revocation does not strand it), or by a registry key (a repair).
     /// That version must be on the registry chain (§ 10a): a request naming a registry commit
     /// off the chain, which anyone can write, is never judged under it.
+    /// G754: whether `commit` lands the batch candidate the change's chain records as checked
+    /// for the operation of request `request_id`, of a change neither abandoned nor taken over:
+    /// a batch member whose author revised it during the batch's check.
+    fn frozen_member(&self, change: &str, request_id: &str, commit: &str) -> Result<bool, String> {
+        let Some(head) = self.after(&format!("{}{change}", crate::names::CHANGES))? else {
+            return Ok(false);
+        };
+        let record = Chain::new(self.git)
+            .record_at(&head)
+            .map_err(|error| error.message())?;
+        if matches!(
+            record.state,
+            crate::change::ChangeState::Abandoned | crate::change::ChangeState::Superseded
+        ) {
+            return Ok(false);
+        }
+        Ok(record.operations.iter().any(|op| {
+            op.request_id.as_deref() == Some(request_id)
+                && op.state == crate::change::OpState::Checked
+                && op
+                    .attempts
+                    .last()
+                    .is_some_and(|attempt| attempt.batch.is_some() && attempt.commit == commit)
+        }))
+    }
+
     fn request(&self, request_id: &str, change: &str) -> Result<Request, String> {
         let text = self
             .git
