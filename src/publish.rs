@@ -2372,6 +2372,42 @@ fn name_batch(
 /// no batch forms or none lands: the head runs its ordinary path, on the records of its own
 /// prefix when the bisection checked it, since that prefix is its own candidate's tree on its
 /// own base.
+/// G760 (a gate finding, 2026-11-16): the changes of the batch this process lands, from its plan
+/// until it ends. A runner places a change's newer revision in line while its head runs
+/// (`crate::executor`); for a change of that batch, each such write raced the batch's own claim
+/// and persist on the change's chain, and under load the batch lost its member. A member's newer
+/// revision is placed by a later pass, after the batch.
+static BATCHED: std::sync::Mutex<BTreeSet<String>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// G760: whether `change` is a member of the batch this process is landing ([`BATCHED`]).
+#[must_use]
+pub fn in_running_batch(change: &str) -> bool {
+    BATCHED.lock().is_ok_and(|batched| batched.contains(change))
+}
+
+/// G760: the members of a batch, registered in [`BATCHED`] while it lands.
+struct Batched(Vec<String>);
+
+impl Batched {
+    fn new(members: &[throughput::Member]) -> Self {
+        let changes: Vec<String> = members.iter().map(|member| member.change.clone()).collect();
+        if let Ok(mut batched) = BATCHED.lock() {
+            batched.extend(changes.iter().cloned());
+        }
+        Self(changes)
+    }
+}
+
+impl Drop for Batched {
+    fn drop(&mut self) {
+        if let Ok(mut batched) = BATCHED.lock() {
+            for change in &self.0 {
+                batched.remove(change);
+            }
+        }
+    }
+}
+
 fn batch(
     ctx: &mut Ctx,
     op_id: &str,
@@ -2388,6 +2424,7 @@ fn batch(
         return Ok(None);
     };
     let planned = stopped;
+    let _batched = Batched::new(&members);
     // N-8: a held trunk publishes no batch, whose members need not all be fixes; the head
     // runs its ordinary path, judged by the hold alone.
     if crate::hold::held(repo, trunk).is_some() {
@@ -4633,6 +4670,9 @@ fn claim(
         let before = ctx.head.clone();
         if ctx.save_cas(revision, None, &message)? {
             kill_point("before-claim-push");
+            if ctx.membership == Membership::Batch {
+                kill_point("before-member-claim-push");
+            }
             if ctx.push_chain() {
                 ctx.my_epoch = epoch;
                 return Ok(None);
@@ -4662,7 +4702,10 @@ fn lost_claim(ctx: &mut Ctx, op_id: &str, read: u64) -> Result<Option<BayResult>
     let Some(op) = ctx.find_op(op_id) else {
         return Err(CHAIN_MOVED.to_owned());
     };
-    let ended = op.state.is_terminal() || op.state == OpState::Blocked;
+    // G760 (a gate finding, 2026-11-16): a batch member its author revised is not ended for its
+    // batch's claim ([`frozen`]); a claim that lost its push to the author's write, or to this
+    // runner placing the newer revision, claims it again instead of cutting the batch.
+    let ended = (op.state.is_terminal() && !frozen(ctx, op_id)) || op.state == OpState::Blocked;
     let claimed = op.epoch != read
         && op.owner.is_some()
         && matches!(op.state, OpState::Running | OpState::Checked);

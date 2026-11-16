@@ -4,6 +4,7 @@
 
 - `bay status` shows the last six hours: merges an hour, waits, work done again by cause, and time to main.
 - A change a runner holds says how long since its claim.
+- A change revised during its batch's check now merges with the batch under load too.
 
 ## 0.6.88
 

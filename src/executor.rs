@@ -1447,9 +1447,11 @@ impl Arrivals {
 /// change whose operation `holding` the pass runs. Its row, and one journal line.
 fn place_arrival(repo: &Repo, change: &str, request: &str, holding: &str) -> Option<Value> {
     let (_, record) = Chain::new(&repo.git).read(change).ok()?;
+    // G760: nor one of a change in the batch this runner lands; a later pass places it.
     if record.ended()
         || record.lane.is_some()
         || record.operations.iter().any(|op| op.op_id == holding)
+        || publish::in_running_batch(change)
     {
         return None;
     }
