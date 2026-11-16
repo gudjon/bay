@@ -723,6 +723,9 @@ struct Ctx<'a> {
     /// G754: this context holds a member of a batch in its check (the head too): an operation
     /// of it its author revised meanwhile still lands its checked revision ([`revised`]).
     membership: Membership,
+    /// G761: whether this context's chain pushes wait to go in one atomic push with the
+    /// batch's other members ([`push_owed`]).
+    push_mode: PushMode,
     /// BACKLOG 92: the producer whose evidence notes go in the chain's next push, atomically, so
     /// the remote holds them by the time the chain names the candidate checked.
     evidence_rides: Option<String>,
@@ -799,6 +802,7 @@ impl<'a> Ctx<'a> {
             red_checks: Vec::new(),
             claim_waited: false,
             membership: Membership::Alone,
+            push_mode: PushMode::Now,
             evidence_rides: None,
             unpushed_from: None,
             my_epoch: 0,
@@ -988,6 +992,11 @@ impl<'a> Ctx<'a> {
     /// process on this box may have moved that ref, and a push of it could succeed without
     /// carrying this process's write.
     fn push_chain(&mut self) -> bool {
+        // G761: a batch member's push waits for the batch's one atomic push.
+        if self.push_mode != PushMode::Now {
+            self.push_mode = PushMode::Owed;
+            return true;
+        }
         let name = change_ref(&self.id);
         let lease = self
             .pushed_head
@@ -1017,6 +1026,11 @@ impl<'a> Ctx<'a> {
     ///
     /// The notes cannot be pushed.
     fn push_chain_with_evidence(&mut self) -> Result<bool, String> {
+        // G761: the notes ride in the batch's one atomic push too ([`push_owed`]).
+        if self.push_mode != PushMode::Now {
+            self.push_mode = PushMode::Owed;
+            return Ok(true);
+        }
         let Some(producer) = self.evidence_rides.take() else {
             return Ok(self.push_chain());
         };
@@ -2895,19 +2909,19 @@ fn join_or_cut<'a>(
     (checks, stopped): (&mut Vec<serde_json::Value>, &mut &'static str),
 ) -> Result<Option<usize>, String> {
     ctx.step.set("join");
-    let mut cut = None;
-    for (at, member) in landing.iter().enumerate().skip(1) {
-        match joined(ctx, member, trunk) {
-            Ok(Ok(other)) => others.push(other),
-            Ok(Err(why)) => {
-                cut = Some((at, why));
-                break;
-            }
-            Err(error) => {
-                cut = Some((at, format!("it could not be read: {error}")));
-                break;
-            }
+    // G761: every member's claim goes in one atomic push; a lost lease joins them one by one.
+    let mut cut = join_members(ctx, landing, trunk, others, PushMode::Defer);
+    let mut owners: Vec<&mut Ctx> = others.iter_mut().collect();
+    let flushed = push_owed(&mut owners)?;
+    drop(owners);
+    if flushed {
+        for other in others.iter_mut() {
+            other.push_mode = PushMode::Now;
         }
+    } else {
+        // Each dropped context takes its unpushed claim back off the local chain ref (G294).
+        others.clear();
+        cut = join_members(ctx, landing, trunk, others, PushMode::Now);
     }
     let Some((size, why)) = cut else {
         return Ok(Some(landing.len()));
@@ -2948,6 +2962,26 @@ fn join_or_cut<'a>(
     Ok(Some(again))
 }
 
+/// The members of `landing` after the head, joined in order ([`joined`]) into `others` until one
+/// cannot join: where and why, or `None` when all joined. With [`PushMode::Defer`] each claim
+/// waits for one atomic push ([`push_owed`]).
+fn join_members<'a>(
+    ctx: &Ctx<'a>,
+    landing: &[throughput::Member],
+    trunk: &str,
+    others: &mut Vec<Ctx<'a>>,
+    mode: PushMode,
+) -> Option<(usize, String)> {
+    for (at, member) in landing.iter().enumerate().skip(1) {
+        match joined(ctx, member, trunk, mode) {
+            Ok(Ok(other)) => others.push(other),
+            Ok(Err(why)) => return Some((at, why)),
+            Err(error) => return Some((at, format!("it could not be read: {error}"))),
+        }
+    }
+    None
+}
+
 /// A batch member other than the head, loaded, verified and claimed by this executor (§ 9a),
 /// or, when it cannot join, why: its request no longer verifies, it is a repair or waits for
 /// a change not on trunk, or it is not this executor's to run.
@@ -2955,9 +2989,11 @@ fn joined<'a>(
     ctx: &Ctx<'a>,
     member: &throughput::Member,
     trunk: &str,
+    mode: PushMode,
 ) -> Result<Result<Ctx<'a>, String>, String> {
     let mut other = Ctx::load(ctx.repo, ctx.step, &member.change)?;
     other.membership = Membership::Batch;
+    other.push_mode = mode;
     other.registry.clone_from(&ctx.registry);
     let signer = other.executor_signer()?;
     other.chain.sign_with(signer);
@@ -3087,6 +3123,48 @@ fn land_batch<'a>(
 /// only once every other member's is, so no partial batch is ever the head's to publish.
 /// Returns whether every write reached the remote under this executor's epoch.
 fn persist_batch<'a>(
+    ctx: &mut Ctx<'a>,
+    others: &mut [Ctx<'a>],
+    members: &[throughput::Member],
+    built: &[Built],
+    trunk: &str,
+    id: &str,
+) -> Result<bool, String> {
+    // G761: every member's checked state, the head's last, goes in one atomic push.
+    ctx.push_mode = PushMode::Defer;
+    for other in others.iter_mut() {
+        other.push_mode = PushMode::Defer;
+    }
+    let written = persist_each(ctx, others, members, built, trunk, id);
+    let flushed = if matches!(written, Ok(true)) {
+        kill_point("before-batch-persist-push");
+        let mut owners: Vec<&mut Ctx> = std::iter::once(&mut *ctx)
+            .chain(others.iter_mut())
+            .collect();
+        push_owed(&mut owners)
+    } else {
+        Ok(false)
+    };
+    let fast = matches!(flushed, Ok(true));
+    for owner in std::iter::once(&mut *ctx).chain(others.iter_mut()) {
+        // A write the atomic push did not carry leaves this box's chain ref and the record
+        // (G294), so no later push of this context carries it.
+        if !fast && owner.push_mode == PushMode::Owed {
+            owner.push_mode = PushMode::Now;
+            owner.refetch()?;
+        }
+        owner.push_mode = PushMode::Now;
+    }
+    if fast {
+        return Ok(true);
+    }
+    written?;
+    flushed?;
+    persist_each(ctx, others, members, built, trunk, id)
+}
+
+/// [`persist_batch`] member by member: each persisted by a push of its own, the head's last.
+fn persist_each<'a>(
     ctx: &mut Ctx<'a>,
     others: &mut [Ctx<'a>],
     members: &[throughput::Member],
@@ -4756,6 +4834,79 @@ fn existing(mut result: BayResult) -> BayResult {
 }
 
 /// G754: whether a context's operation runs alone or as a member of a batch in its check.
+/// G761: when a context's chain push goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PushMode {
+    /// At once, on its own (every context but a batch's fast path).
+    Now,
+    /// With the batch's other members, in one atomic push ([`push_owed`]).
+    Defer,
+    /// Deferred, and a write waits for that push.
+    Owed,
+}
+
+/// G761 (a fleet measurement, 2026-11-16: a batch of twenty made 41 pushes, 160 s, to land, each
+/// member claimed and persisted by a push of its own): pushes every owed chain of `owners`, with
+/// the evidence notes any of them carries, in one `git push --atomic`, each chain leased on the
+/// head this process last pushed or read. `true` when the remote took them all; then each is
+/// pushed, as [`Ctx::push_chain`] leaves it. `false` when any lease was lost: nothing moved, and
+/// the caller goes member by member.
+fn push_owed(owners: &mut [&mut Ctx]) -> Result<bool, String> {
+    let owed: Vec<usize> = (0..owners.len())
+        .filter(|&index| owners[index].push_mode == PushMode::Owed)
+        .collect();
+    let Some(&first) = owed.first() else {
+        return Ok(true);
+    };
+    let repo = owners[first].repo;
+    let mut producers: Vec<String> = owed
+        .iter()
+        .filter_map(|&index| owners[index].evidence_rides.clone())
+        .collect();
+    producers.sort();
+    producers.dedup();
+    let writing = (!producers.is_empty()).then(evidence::writing);
+    let mut leases = Vec::new();
+    let mut specs = Vec::new();
+    for &index in &owed {
+        let owner = &owners[index];
+        let name = change_ref(&owner.id);
+        if let Some(expected) = &owner.pushed_head {
+            leases.push(format!("--force-with-lease={name}:{expected}"));
+        }
+        specs.push(format!("{}:{name}", owner.head));
+    }
+    for producer in &producers {
+        let notes = evidence::notes_ref(producer);
+        if repo
+            .git
+            .ref_target(&notes)
+            .map_err(|error| error.message())?
+            .is_some()
+        {
+            specs.push(format!("{notes}:{notes}"));
+        }
+    }
+    let mut args: Vec<&str> = vec!["push", "-q", "--atomic"];
+    args.extend(leases.iter().map(String::as_str));
+    args.push(repo.remote());
+    args.extend(specs.iter().map(String::as_str));
+    let pushed = repo.git.run(&args).is_ok();
+    drop(writing);
+    if !pushed {
+        return Ok(false);
+    }
+    for &index in &owed {
+        let owner = &mut *owners[index];
+        owner.pushed_head = Some(owner.head.clone());
+        owner.unpushed_from = None;
+        owner.evidence_rides = None;
+        owner.push_mode = PushMode::Defer;
+        owner.catch_up_local();
+    }
+    Ok(true)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Membership {
     Alone,

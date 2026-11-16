@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.90
+
+- A batch claims its members in one push and records them as checked in one more, not two each.
+
 ## 0.6.89
 
 - `bay status` shows the last six hours: merges an hour, waits, work done again by cause, and time to main.
