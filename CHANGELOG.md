@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.85
+
+- A head is passed by at most three unrelated changes, counted while it checks or waits, not only on yields.
+
 ## 0.6.84
 
 - `bay merge --wait=<seconds>` reads its change once a second, not five times, while it waits.

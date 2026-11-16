@@ -3704,7 +3704,7 @@ fn passes_unread(
         if !queued.live {
             continue;
         }
-        if moves_under(ctx.repo, entry) >= PASSES_PER_ENTRY {
+        if moves_under(ctx.repo, queue, entry) >= PASSES_PER_ENTRY {
             return Ok(false);
         }
         let Some(theirs) = own_paths(git, trunk, &queued.revision)? else {
@@ -3772,8 +3772,8 @@ fn predicted_reads(policy: &policy::Policy, changed: &[String]) -> Option<Vec<St
 
 /// How often a publishing push of queue place `entry`'s operation was refused because main
 /// moved, as this box last fetched its chain.
-fn moves_under(repo: &Repo, entry: &crate::queue::Entry) -> u32 {
-    Chain::new(&repo.git)
+fn moves_under(repo: &Repo, queue: &crate::queue::Queue, entry: &crate::queue::Entry) -> u32 {
+    let yielded = Chain::new(&repo.git)
         .read(&entry.change)
         .ok()
         .and_then(|(_, record)| {
@@ -3783,7 +3783,22 @@ fn moves_under(repo: &Repo, entry: &crate::queue::Entry) -> u32 {
                 .find(|op| op.op_id == entry.op_id)
                 .map(|op| op.trunk_moved)
         })
-        .unwrap_or(0)
+        .unwrap_or(0);
+    yielded.max(passed(queue, entry))
+}
+
+/// G753 (a fleet finding, 2026-11-16: four changes merged past one head in 23 minutes while it
+/// checked and then waited for another box's runner, and it yielded once: the cap counted its
+/// yields only): how many changes landed past `entry` while it was live, read from the queue:
+/// each later place released `published`. A head that checks, or waits for a runner of another
+/// environment, counts every change that passed it, not only those it yielded to.
+fn passed(queue: &crate::queue::Queue, entry: &crate::queue::Entry) -> u32 {
+    let count = queue
+        .release_reasons
+        .range(entry.seq + 1..)
+        .filter(|(_, reason)| reason.as_str() == "published")
+        .count();
+    u32::try_from(count).unwrap_or(u32::MAX)
 }
 
 /// BACKLOG 119 (a fleet finding, 2026-10-28: zynsylhi was claimed eight times in half an hour
