@@ -4,7 +4,6 @@
 
 - A change revised during its batch's check merges as checked; the next `bay merge` sends the newer edits.
 - `bay queue --deadline 0` and `bay doctor --deadline 0` answer at once from this machine, with their age.
-- A change needing no check passes a checking head once, so one batch is not checked again per change.
 
 ## 0.6.86
 
