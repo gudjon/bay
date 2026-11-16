@@ -68,7 +68,14 @@ fn a_member_revised_in_its_batch_check_lands_and_its_new_edits_follow() {
     let tree = held
         .test_box
         .git_bare(&held.remote, &["ls-tree", "-r", "--name-only", "main"]);
-    assert!(!tree.contains("lib/later.rs"), "{tree}");
+    let chain = held.test_box.git_bare(
+        &held.remote,
+        &["log", "--format=%s", &format!("refs/bay/changes/{two}")],
+    );
+    assert!(
+        !tree.contains("lib/later.rs"),
+        "the newer edits went in with the batch: {tree}\nchain of two:\n{chain}\npass: {pass}"
+    );
 
     // AND the author's next merge opens the next change from the newer version and sends it
     let (code, again) = result_json(held.test_box.bay(&view).arg("merge"));
