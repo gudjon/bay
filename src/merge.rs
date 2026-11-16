@@ -106,11 +106,28 @@ fn manifest_resolved(
     })
 }
 
-/// A temporary file's path no other merge in this process or another uses.
+/// A temporary file's path no other merge in this process or another uses. G751 (a fleet
+/// finding, 2026-11-16: a `write-tree` killed at its bound left `<index>.lock` behind, and a
+/// later process that reused the process id and counter failed with "File exists"): the name
+/// carries the time in nanoseconds too, so a reused process id never names a dead one's file.
 fn scratch_file(name: &str) -> std::path::PathBuf {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!("bay-merge-{}-{next}.{name}", std::process::id()))
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    std::env::temp_dir().join(format!(
+        "bay-merge-{}-{nanos}-{next}.{name}",
+        std::process::id()
+    ))
+}
+
+/// G751: removes a temporary index and the lock a killed Git command left beside it.
+pub(crate) fn remove_scratch_index(index: &std::path::Path) {
+    let _ = std::fs::remove_file(index);
+    let mut lock = index.as_os_str().to_owned();
+    lock.push(".lock");
+    let _ = std::fs::remove_file(std::path::PathBuf::from(lock));
 }
 
 /// `tree` with `path` holding `text`.
@@ -137,7 +154,7 @@ fn with_file(git: &Git, tree: &str, path: &str, text: &str) -> Result<String, Gi
             )
         })
         .and_then(|_| git.run_with(&["write-tree"], &envs, None));
-    let _ = std::fs::remove_file(&index);
+    remove_scratch_index(&index);
     resolved
 }
 
@@ -299,4 +316,22 @@ fn settle_revision(
     let tree = with_file(git, &tree, path, &with_revision(&merged, at, next))?;
     paths.retain(|conflicted| conflicted != path);
     Ok(unchanged(paths, tree))
+}
+
+#[cfg(test)]
+mod tests {
+    /// G751: a temporary index is removed with the lock a killed Git command left beside it,
+    /// and two names made at once in one process never meet.
+    #[test]
+    fn a_scratch_index_goes_with_its_lock_and_never_repeats() {
+        let index = super::scratch_file("index");
+        assert_ne!(index, super::scratch_file("index"));
+        let mut lock = index.as_os_str().to_owned();
+        lock.push(".lock");
+        let lock = std::path::PathBuf::from(lock);
+        std::fs::write(&index, "i").unwrap();
+        std::fs::write(&lock, "l").unwrap();
+        super::remove_scratch_index(&index);
+        assert!(!index.exists() && !lock.exists(), "{}", lock.display());
+    }
 }

@@ -566,9 +566,10 @@ fn snapshot_tree(
         .iter()
         .flat_map(|path| path.bytes().chain(std::iter::once(0)))
         .collect();
-    let _ = std::fs::remove_file(&index);
+    // G751: an index, and the lock a killed Git command left beside it, from before.
+    crate::merge::remove_scratch_index(&index);
     let written = write_snapshot(checkout, &envs, head, &list);
-    let _ = std::fs::remove_file(&index);
+    crate::merge::remove_scratch_index(&index);
     written.map_err(|error| error.message())
 }
 

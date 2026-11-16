@@ -6018,6 +6018,9 @@ fn undoes_merged(
     );
     let envs = [("GIT_INDEX_FILE", index_var.as_str())];
     let main_envs = [("GIT_INDEX_FILE", main_var.as_str())];
+    // G751: what a killed run of this operation left, lock and all, never fails this one.
+    crate::merge::remove_scratch_index(&index);
+    crate::merge::remove_scratch_index(&main_index);
     git.run_with(&["read-tree", tree], &envs, None)
         .map_err(|error| error.message())?;
     git.run_with(&["read-tree", trunk], &main_envs, None)
@@ -6034,8 +6037,9 @@ fn undoes_merged(
         &skip,
         (&envs, &main_envs),
     );
-    let _ = std::fs::remove_file(&index);
-    let _ = std::fs::remove_file(&main_index);
+    // G751: with the locks a killed Git command left beside them.
+    crate::merge::remove_scratch_index(&index);
+    crate::merge::remove_scratch_index(&main_index);
     let mut found = found.into_iter();
     let Some(mut undone) = found.next() else {
         return Ok(None);

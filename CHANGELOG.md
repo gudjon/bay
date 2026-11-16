@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.84
+
+- A Git command killed at its time limit no longer leaves an index lock that fails the next merge.
+
 ## 0.6.83
 
 - `bay merge --wait` behind a held change reads it once a heartbeat, not five times a second.
