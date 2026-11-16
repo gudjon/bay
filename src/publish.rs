@@ -3789,7 +3789,7 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     if let Some(entry) = queue.of(op_id).cloned()
         && (repairs
             || (needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
-                && !main_moved_under(ctx.repo, &head)
+                && !main_moved_under(ctx.repo, &queue, &head)
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?)
             || (passes_unread(ctx, &queue, entry.seq, trunk, &ctx.op(op_id).revision)?
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?))
@@ -3930,7 +3930,37 @@ fn moves_under(repo: &Repo, queue: &crate::queue::Queue, entry: &crate::queue::E
                 .map(|op| op.trunk_moved)
         })
         .unwrap_or(0);
-    yielded.max(passed(queue, entry))
+    yielded
+        .max(passed(queue, entry))
+        .max(landed_since_claim(repo, entry))
+}
+
+/// G758: how many changes landed on main since the runner holding `entry` claimed it, read from
+/// its claim's commit and this store's main. A pass reads the queue once (G438), so a release
+/// that pass pushed is not in its copy; main, which every landing moves here, is.
+fn landed_since_claim(repo: &Repo, entry: &crate::queue::Entry) -> u32 {
+    let chain = crate::change::change_ref(&entry.change);
+    let grep = format!("--grep=^claim {} ", entry.op_id);
+    let Some(claimed) = repo
+        .git
+        .run(&["log", "-1", "--format=%ct", &grep, &chain])
+        .ok()
+        .and_then(|at| at.trim().parse::<u64>().ok())
+    else {
+        return 0;
+    };
+    let since = format!("--since={claimed}");
+    repo.git
+        .run(&[
+            "rev-list",
+            "--count",
+            "--first-parent",
+            &since,
+            &repo.trunk_tracking_ref(),
+        ])
+        .ok()
+        .and_then(|count| count.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// G753 (a fleet finding, 2026-11-16: four changes merged past one head in 23 minutes while it
@@ -3963,8 +3993,14 @@ fn unless_red(ctx: &mut Ctx, op_id: &str, trunk: &str, gate: Gate) -> Result<Gat
 /// chain as this box last fetched it. A change that needs no check then waits its turn, so one
 /// move costs the head one check, never one per change behind it. A head that waits on a repair
 /// (`Blocked`) holds nothing.
-fn main_moved_under(repo: &Repo, head: &crate::queue::Entry) -> bool {
+fn main_moved_under(repo: &Repo, queue: &crate::queue::Queue, head: &crate::queue::Entry) -> bool {
+    // G758 (a fleet finding, 2026-11-16: 73 batch members were given back in seven hours with
+    // "main moved under the batch", every move a change landed past the head while its batch
+    // checked; the head had not yielded, so it read as unmoved): a change landed past the head
+    // counts as main moving under it, as G753 counts it for the cap.
     moved_under(repo, head).is_some()
+        || passed(queue, head) > 0
+        || landed_since_claim(repo, head) > 0
 }
 
 /// The change record of queue place `entry`, as this box last fetched its chain, when a
