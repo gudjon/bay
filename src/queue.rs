@@ -117,7 +117,7 @@ fn list(git: &Git) -> Result<Vec<Listed>, String> {
 /// Fetches the remote's queue refs, pruning the ones it removed. Best effort: offline, the
 /// local copy is what this machine can see.
 fn fetch(repo: &Repo) {
-    let _ = repo.git.run(&[
+    let fetched = repo.git.run(&[
         "fetch",
         "-q",
         "--no-tags",
@@ -126,6 +126,47 @@ fn fetch(repo: &Repo) {
         &format!("+{QUEUE_PREFIX}*:{QUEUE_PREFIX}*"),
         &format!("+{DONE_PREFIX}*:{DONE_PREFIX}*"),
     ]);
+    if fetched.is_ok() {
+        fetched_now(&repo.common_dir);
+    }
+}
+
+/// G765: the refspecs of the line, for a fetch that brings it with other refs.
+#[must_use]
+pub fn refspecs() -> [String; 2] {
+    [
+        format!("+{QUEUE_PREFIX}*:{QUEUE_PREFIX}*"),
+        format!("+{DONE_PREFIX}*:{DONE_PREFIX}*"),
+    ]
+}
+
+/// G765: the file whose content is when this store last fetched the line, in Unix seconds.
+fn fetched_file(common: &std::path::Path) -> std::path::PathBuf {
+    common.join("bay").join("queue-fetched")
+}
+
+/// G765: notes that this store fetched the line now.
+pub fn fetched_now(common: &std::path::Path) {
+    let file = fetched_file(common);
+    if let Some(dir) = file.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        let tmp = file.with_extension(format!("{}.tmp", std::process::id()));
+        if std::fs::write(&tmp, crate::live::unix_now().to_string()).is_ok() {
+            let _ = crate::durable::rename(&tmp, &file);
+        }
+    }
+}
+
+/// G765: how many seconds ago this store last fetched the line; `None` when it never did.
+#[must_use]
+pub fn fetched_age_s(common: &std::path::Path) -> Option<u64> {
+    let at: u64 = std::fs::read_to_string(fetched_file(common))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(crate::live::unix_now().saturating_sub(at))
 }
 
 /// One live place of the line, as `bay queue` shows it.

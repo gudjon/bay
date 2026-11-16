@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.93
+
+- A refusal quotes the check's failing line, never a passing one.
+- `bay queue --deadline 0` says how old its copy of the line is; `bay status` keeps it fresh.
+
 ## 0.6.92
 
 - A check's scratch tree goes once its operation ends, in stores without a runner too.

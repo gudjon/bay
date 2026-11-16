@@ -915,16 +915,43 @@ fn failed_unit(detail: Option<&Value>) -> Option<String> {
     let reason = detail?.pointer("/checks/0/reasons/0")?;
     let unit = reason["unit"].as_str()?;
     let text = reason["reason"].as_str()?;
-    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
-    let line = lines
-        .clone()
-        .find(|line| !line.starts_with("..."))
-        .or_else(|| lines.next())?;
+    let lines: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let line = failing_line(&lines)?;
     let mut line: String = line.trim_end_matches('.').chars().take(160).collect();
     if line.chars().count() == 160 {
         line.push('…');
     }
     Some(format!(": {unit}: {line}"))
+}
+
+/// G764 (a fleet finding, 2026-11-16: a refusal said a check failed on `test a_row_without_a_max_age
+/// … ok`, a test that passed, since the reason's first line was the first test it ran): the line
+/// of a failing unit's reason the sentence quotes: the first that reads as the failure (it says it
+/// failed, panicked, or names an error or an assertion), else the first that is no passing line
+/// (`… ok`) and no `...` filler, else the first.
+fn failing_line<'a>(lines: &[&'a str]) -> Option<&'a str> {
+    const FAILURE: [&str; 6] = ["fail", "error", "panic", "assert", "expected", "refused"];
+    let passing = |line: &str| {
+        let lower = line.to_ascii_lowercase();
+        lower.ends_with(" ok") || lower.ends_with("... ok") || lower == "ok"
+    };
+    lines
+        .iter()
+        .find(|line| {
+            let lower = line.to_ascii_lowercase();
+            !passing(line) && FAILURE.iter().any(|word| lower.contains(word))
+        })
+        .or_else(|| {
+            lines
+                .iter()
+                .find(|line| !line.starts_with("...") && !passing(line))
+        })
+        .or_else(|| lines.first())
+        .copied()
 }
 
 /// G698: what a check that gave no clear answer said of itself, as `<check>: <why>`: the first
@@ -3001,6 +3028,32 @@ mod tests {
         assert_eq!(
             human.lines().next(),
             Some(Reason::TrunkMoved.say(None).as_str())
+        );
+    }
+
+    /// G764: a refusal quotes the failing line of a reason, never a passing one.
+    #[test]
+    fn a_failed_unit_quotes_its_failing_line_never_a_passing_one() {
+        let detail = |reason: &str| serde_json::json!({"checks": [{"reasons": [{"unit": "test", "reason": reason}]}]});
+        let said = super::failed_unit(Some(&detail(
+            "test a_row_without_a_max_age ... ok\ntest b ... ok\ntest c ... FAILED\nthread 'c' panicked at src/x.rs:3",
+        )));
+        assert_eq!(
+            said.as_deref(),
+            Some(": test: test c ... FAILED"),
+            "{said:?}"
+        );
+        let plain = super::failed_unit(Some(&detail("the report is missing\nmore")));
+        assert_eq!(
+            plain.as_deref(),
+            Some(": test: the report is missing"),
+            "{plain:?}"
+        );
+        let only_passing = super::failed_unit(Some(&detail("test a ... ok\nsummary: 3 of 4")));
+        assert_eq!(
+            only_passing.as_deref(),
+            Some(": test: summary: 3 of 4"),
+            "{only_passing:?}"
         );
     }
 }

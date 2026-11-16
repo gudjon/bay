@@ -685,6 +685,8 @@ impl Plan {
             refspecs.push(format!("+{prefix}*:{prefix}*"));
         }
         refspecs.extend(crate::fleet::refspecs());
+        // G765: the line too, so a store's copy of it is no older than its last sweep.
+        refspecs.extend(crate::queue::refspecs());
         // Each target is asked by its name as a prefix, so one the remote no longer holds fails
         // no sweep: it is named as a prune of its copy. A ref that shares the prefix is never
         // taken.
@@ -1001,6 +1003,7 @@ fn swept_answer<'a>(dir: &'a Path, change: Option<&str>) -> (Value, Then<'a>) {
     let (answer, settled) = match settle_swept(dir, change, first, &swept, &plan.targets, trunk) {
         Ok((repo, refreshed)) => {
             sweep::remember(&common, &remote, &plan.refspecs, &swept);
+            crate::queue::fetched_now(&common);
             // G763: with the chains this sweep brought, no check scratch of an operation that
             // ended stays.
             crate::executor::sweep_check_scratch(&repo);
@@ -1093,6 +1096,9 @@ fn settle_swept(
         crate::fleet::FLEET_PREFIX,
         crate::fleet::FLEET_EXECUTOR_PREFIX,
         crate::names::LOCKS,
+        // G765: the line, places and releases alike, pruned as the remote prunes them.
+        crate::names::QUEUE,
+        crate::names::QUEUE_DONE,
     ] {
         updates.extend(swept.taken(prefix, |_, _| true));
     }

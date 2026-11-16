@@ -109,6 +109,8 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
         "arriving": arriving,
         "unread": unread,
         "from_store": from_store,
+        // G765: how old this store's copy of the line is; null when it never fetched it here.
+        "age_s": if from_store { crate::queue::fetched_age_s(&repo.common_dir).map_or(Value::Null, |age| json!(age)) } else { json!(0) },
     }))
 }
 
@@ -319,13 +321,14 @@ pub fn schema() -> Value {
         "type": "object",
         "required": [
             "schema", "read_at", "depth", "oldest_wait_s", "places", "arriving", "unread",
-            "from_store",
+            "from_store", "age_s",
         ],
         "additionalProperties": false,
         "properties": {
             "schema": {"const": SCHEMA},
             "read_at": string,
             "from_store": {"type": "boolean"},
+            "age_s": maybe(count.clone()),
             "depth": count,
             "oldest_wait_s": maybe(count.clone()),
             "places": {
