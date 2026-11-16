@@ -1003,25 +1003,64 @@ const STALE_SCRATCH: Duration = Duration::from_hours(6);
 /// directory a running check writes to is newer than that, and is kept. Both roots are swept:
 /// the scratch root ([`check::scratch_root`]) and `<common-dir>/bay/check/`, where a bay before
 /// 0.5.42 made its checks' trees.
-fn sweep_check_scratch(repo: &Repo) {
+///
+/// G763 (owner, 2026-11-16: "it's a real issue how much disk space Bay actually needs"; one box
+/// held 41 GB of check scratch, one tree of 14 GB, every one older than two hours): a directory
+/// named for an operation (`<change>.<n>.<attempt>`, or `…-own` for a check run in a view) whose
+/// operation or change has ended, as this store's chain reads, is removed at once, whatever its
+/// age; an operation still under way keeps its tree. The status sweep runs this too, so a store
+/// no runner passes over (one agents' views share) is swept as well.
+pub(crate) fn sweep_check_scratch(repo: &Repo) {
     let mut roots = vec![repo.common_dir.join("bay").join("check")];
     roots.extend(check::scratch_root(&repo.common_dir));
+    let chain = Chain::new(&repo.git);
     for root in roots {
         let Ok(entries) = std::fs::read_dir(&root) else {
             continue;
         };
         for entry in entries.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
             let stale = entry
                 .metadata()
                 .and_then(|meta| meta.modified())
                 .ok()
                 .and_then(|at| at.elapsed().ok())
                 .is_some_and(|age| age >= STALE_SCRATCH);
-            if stale && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            if stale || scratch_of_ended(&chain, &entry.file_name().to_string_lossy()) {
                 let _ = check::remove_tree(&entry.path());
             }
         }
     }
+}
+
+/// G763: whether check scratch directory `name` (`<change>.<n>.<attempt>`, maybe `-own`) is of
+/// an operation that has ended, or of a change that has, by this store's chain. A name that
+/// names no operation, or a change this store cannot read, is not judged ended.
+fn scratch_of_ended(chain: &Chain, name: &str) -> bool {
+    // A check run in a view (`-own`) may run for an operation that ended (a fix checked before it
+    // is sent again), so only its change having ended frees its tree.
+    let own = name.ends_with("-own");
+    let name = name.strip_suffix("-own").unwrap_or(name);
+    let mut parts = name.split('.');
+    let (Some(change), Some(n)) = (parts.next(), parts.next()) else {
+        return false;
+    };
+    if change.is_empty() || n.parse::<u64>().is_err() {
+        return false;
+    }
+    let op_id = format!("{change}.{n}");
+    let Ok((_, record)) = chain.read(change) else {
+        return false;
+    };
+    record.ended()
+        || (!own
+            && record
+                .operations
+                .iter()
+                .find(|op| op.op_id == op_id)
+                .is_some_and(|op| op.state.is_terminal()))
 }
 
 /// How long a half-written pack may stand untouched before a pass removes it.

@@ -1001,6 +1001,9 @@ fn swept_answer<'a>(dir: &'a Path, change: Option<&str>) -> (Value, Then<'a>) {
     let (answer, settled) = match settle_swept(dir, change, first, &swept, &plan.targets, trunk) {
         Ok((repo, refreshed)) => {
             sweep::remember(&common, &remote, &plan.refspecs, &swept);
+            // G763: with the chains this sweep brought, no check scratch of an operation that
+            // ended stays.
+            crate::executor::sweep_check_scratch(&repo);
             let done = json!({"done": {
                 "at": swept.at,
                 "ids": refreshed.ids,

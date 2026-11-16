@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.92
+
+- A check's scratch tree goes once its operation ends, in stores without a runner too.
+
 ## 0.6.91
 
 - A store bay fetches into keeps few packs: past 50, bay compacts it in the background.
