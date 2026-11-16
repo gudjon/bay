@@ -128,6 +128,15 @@ pub fn row(git: &Git, dir: &Path) -> Value {
     // What a start would free comes first: it is the row's answer, and the cheapest to bound.
     let (free, mut whole) = crate::start::would_release(&repo, dir, &in_time);
 
+    // G767 (a fleet finding, 2026-11-16: doctor said `check_scratch_bytes: 0` on a box that held
+    // 41 GB of it; the views spent the time budget first, and a size never taken read as 0): the
+    // check scratch and bay's own folder are sized before the views, and a size not taken in time
+    // is null, never 0.
+    let scratch = crate::check::scratch_root(&repo.common_dir).ok();
+    let (scratch_bytes, scratch_whole) = scratch.map_or((0, true), |root| size_of(&root, deadline));
+    let (bay_bytes, bay_whole) = size_of(&repo.common_dir.join("bay"), deadline);
+    whole &= scratch_whole && bay_whole;
+
     let ids = crate::view::all(&repo);
     let mut sized: Vec<(String, u64)> = Vec::new();
     for id in &ids {
@@ -146,10 +155,6 @@ pub fn row(git: &Git, dir: &Path) -> Value {
         .map(|(id, bytes)| json!({"change": id, "bytes": bytes}))
         .collect();
 
-    let scratch = crate::check::scratch_root(&repo.common_dir).ok();
-    let (scratch_bytes, complete) = scratch.map_or((0, true), |root| size_of(&root, deadline));
-    whole &= complete;
-
     let others = other_worktrees(&repo);
     row["half_written_packs"] = json!({"count": packs, "bytes": packs_bytes});
     row["views"] = json!({
@@ -158,7 +163,9 @@ pub fn row(git: &Git, dir: &Path) -> Value {
         "bytes": views_bytes,
         "largest": largest,
     });
-    row["check_scratch_bytes"] = json!(scratch_bytes);
+    let taken = |bytes: u64, whole: bool| if whole { json!(bytes) } else { Value::Null };
+    row["check_scratch_bytes"] = taken(scratch_bytes, scratch_whole);
+    row["bay_bytes"] = taken(bay_bytes, bay_whole);
     row["other_worktrees"] = json!({
         "count": others.len(),
         "paths": others.iter().take(OTHERS).collect::<Vec<_>>(),

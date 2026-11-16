@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.95
+
+- `bay doctor` sizes check scratch and bay's own folder first, and says `null`, never 0, when out of time.
+
 ## 0.6.94
 
 - A change in line that conflicts with main says so and names the fix, not "wait your turn".

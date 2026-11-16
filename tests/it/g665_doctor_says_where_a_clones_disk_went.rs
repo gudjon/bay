@@ -128,10 +128,39 @@ fn a_view_with_newer_work_is_not_named_as_freed() {
 fn sizing_that_runs_out_of_time_says_so() {
     let (test_box, repo) = seeded();
     start(&test_box, &repo, "BIG");
+    let root =
+        bay::check::scratch_root_in(&test_box.home.join(".local/state/bay"), &repo.join(".git"));
+    std::fs::create_dir_all(root.join("left.1.1")).unwrap();
+    std::fs::write(root.join("left.1.1/blob"), "x").unwrap();
 
     let row = storage(&test_box, &repo, &[("BAY_TEST_STORAGE_BUDGET_MS", "0")]);
 
     assert_eq!(row["partial"], true, "{row}");
     assert_eq!(row["views"]["count"], 1, "{row}");
     assert_eq!(row["views"]["measured"], 0, "{row}");
+    // G767: a size not taken in time is null, never 0.
+    assert!(row["check_scratch_bytes"].is_null(), "{row}");
+}
+
+/// G767 (a fleet finding, 2026-11-16: doctor said `check_scratch_bytes: 0` on a box holding
+/// 41 GB of it, since the views spent the time first): the check scratch and bay's own folder
+/// are sized before the views, so they are told even when the views are many.
+#[test]
+fn the_check_scratch_and_bays_folder_are_sized_first() {
+    let (test_box, repo) = seeded();
+    start(&test_box, &repo, "ONE");
+    let root =
+        bay::check::scratch_root_in(&test_box.home.join(".local/state/bay"), &repo.join(".git"));
+    std::fs::create_dir_all(root.join("left.1.1")).unwrap();
+    std::fs::write(root.join("left.1.1/blob"), vec![b'x'; 70_000]).unwrap();
+
+    let row = storage(&test_box, &repo, &[]);
+
+    assert!(
+        row["check_scratch_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes >= 70_000),
+        "{row}"
+    );
+    assert!(row["bay_bytes"].as_u64().is_some(), "{row}");
 }
