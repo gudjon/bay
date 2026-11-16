@@ -45,6 +45,9 @@ fn a_read_answers_from_a_recent_sweep_and_the_sweep_it_starts_serves_the_next() 
     // GIVEN a store a sweep has just read
     let (first, _) = status(&test_box, &reader, &[]);
     let main = first["detail"]["main"].clone();
+    // The first read's own sweep ends before main moves, so it cannot bring the new main in
+    // (a gate box at load 60 let it finish after the move).
+    support::sweeps_ended(&reader);
     let next = move_trunk(&test_box, &remote);
 
     // WHEN a read past the window, inside serve_stale_s, finds the next sweep slow

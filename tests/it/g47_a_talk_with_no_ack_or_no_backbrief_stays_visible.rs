@@ -26,7 +26,8 @@ fn talk_row(status: &Value, id: &str) -> Value {
 #[test]
 fn status_lists_a_talk_until_it_closes_and_names_who_owes_the_reply() {
     let case = hosted_talk();
-    let follow_up = from_now(6);
+    // Far enough out that a loaded box reads the recipient's side before it passes.
+    let follow_up = from_now(20);
     let (code, sent) = case.talk(
         "agent",
         &[
@@ -57,7 +58,7 @@ fn status_lists_a_talk_until_it_closes_and_names_who_owes_the_reply() {
     assert!(row["ack_age_s"].is_u64(), "{row}");
 
     // Past follow_up with no backbrief: stale, and still listed.
-    std::thread::sleep(std::time::Duration::from_secs(7));
+    std::thread::sleep(std::time::Duration::from_secs(21));
     let (_, status) = case.status("agent-b");
     let row = talk_row(&status, &id);
     assert_eq!(row["standing"], "stale", "{row}");
