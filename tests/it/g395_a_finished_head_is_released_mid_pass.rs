@@ -39,13 +39,28 @@ fn a_head_that_ended_is_released_between_a_runners_operations() {
     std::thread::sleep(Duration::from_secs(3));
     runner_a.kill().unwrap();
     let _ = runner_a.wait();
-    let (code, abandoned) = support::result_json(held.test_box.bay(&held.repo).args([
-        "abandon",
-        one.as_str(),
-        "--why",
-        "done elsewhere",
-    ]));
-    assert_eq!(code, 0, "{abandoned}");
+    // Runner B writes the chain each second; an abandon that loses that race is asked again,
+    // as its author would (a gate box at load 60 lost it three times in a row).
+    let mut abandoned = serde_json::Value::Null;
+    for _ in 0..5 {
+        let (code, answer) = support::result_json(held.test_box.bay(&held.repo).args([
+            "abandon",
+            one.as_str(),
+            "--why",
+            "done elsewhere",
+        ]));
+        abandoned = answer;
+        if code == 0 {
+            break;
+        }
+        assert!(
+            abandoned["detail"]
+                .as_str()
+                .is_some_and(|why| why.contains("chain moved")),
+            "{abandoned}"
+        );
+    }
+    assert_eq!(abandoned["decision"], "ok", "{abandoned}");
     let pass = finished(runner_b);
     let released = held
         .test_box
