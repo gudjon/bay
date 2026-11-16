@@ -51,7 +51,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Start over after abandoning, with a fresh change | `bay start <intent> --new` |
 | Take up a change you abandoned again, with its work | `bay start <change>` (it is open again) |
 | Read state, and main commits that did not merge through bay (`unattributed`; `by_writer` counts them per committer) | `bay status` (lists live changes only: your own described, at most 20; the rest are named in `detail.more_changes`, and `bay status <change>` reads any one, merged too) |
-| See the flow: live changes by actor and their limit, merges this week, and their cycle time, queue wait and check time (p50, p90); the oldest live change; what waits for a yes | `bay status` (`detail.flow`); one change's own times and each check's runs: `bay status <change>` (`operation.timing`) |
+| See the flow: live changes by actor and their limit, merges this week, and their cycle time, queue wait and check time (p50, p90); the oldest live change; what waits for a yes | `bay status` in the main checkout (`detail.flow`; a read of one change, or in a view, leaves the fleet's sections `null`); one change's own times and each check's runs: `bay status <change>` (`operation.timing`) |
 | See each promotion target (`staging`): its tip, `drift`, `lag`, checks, freeze and the `promotable` commit | `bay status` (`detail.targets`) |
 | See whether main is held, by whom (`source`: `window` or `plugin`), why and until when | `bay status` (`detail.hold`) |
 | Reverse a merged change with a new, checked change | `bay undo <change> [--wait[=<seconds>]]` |

@@ -185,12 +185,14 @@ fn a_policy_the_cache_cannot_read_is_an_error_naming_it_never_no_policy() {
         red["unread"].as_str().is_some_and(|why| why.contains(path)),
         "an unreadable policy is no judgement of red: {status}"
     );
-    // Nor of its quarantines: unread, naming the file, never an empty list.
+    // Nor of its quarantines: unread, naming the file, or not read at all by a read of one
+    // change (G748), never an empty list.
     let quarantines = &status["detail"]["quarantines"];
     assert!(
-        quarantines["unread"]
-            .as_str()
-            .is_some_and(|why| why.contains(path)),
+        quarantines.is_null()
+            || quarantines["unread"]
+                .as_str()
+                .is_some_and(|why| why.contains(path)),
         "an unreadable policy is no list of quarantines: {status}"
     );
 

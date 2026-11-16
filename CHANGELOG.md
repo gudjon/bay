@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.82
+
+- `bay status <change>` builds only that change's row, not the fleet's sections, so polling costs far less.
+
 ## 0.6.81
 
 - `bay doctor` publishes its verdict only when it changed, or every ten minutes, not on every run.

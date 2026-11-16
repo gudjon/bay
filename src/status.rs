@@ -347,33 +347,75 @@ fn read_sections(
     // G616 (a fleet finding, 2026-10-31: after its one round trip a status spent about 6 s
     // reading this store, each section after the one before): every section only reads this
     // store, so each runs beside the others, and the read costs about its longest section.
+    // G748 (a fleet finding, 2026-11-16: about twenty agents at a time polled `bay status
+    // <change>` in loops on a box at load 108, and each read built every section of a listing
+    // for its one change, while the line it waited on starved for CPU): a read of one change
+    // builds its row, its view's leftovers, main's red, its hold and the reader's talks, and none
+    // of the fleet's
+    // sections, which a listing alone shows: each reads `null`, not read here, never an empty
+    // list that would say there is none.
+    let one = named && ids.len() == 1;
+    let fleet = move |section: fn() -> Value, build: &dyn Fn() -> Value| {
+        if one { section() } else { build() }
+    };
     std::thread::scope(|scope| {
         let leftovers =
             scope.spawn(move || timed("leftovers", || leftovers(repo, trunk, view, me)));
-        let quarantines = scope.spawn(move || timed("quarantines", || quarantines(repo, trunk)));
-        let flakes = scope.spawn(move || timed("flakes", || flake_rows(repo, trunk, read)));
+        let quarantines = scope.spawn(move || {
+            timed("quarantines", || {
+                fleet(|| Value::Null, &|| quarantines(repo, trunk))
+            })
+        });
+        let flakes = scope.spawn(move || {
+            timed("flakes", || {
+                fleet(|| Value::Null, &|| flake_rows(repo, trunk, read))
+            })
+        });
         let red_now = scope.spawn(move || timed("red", || red_rows(repo, trunk)));
         let targets = scope.spawn(move || {
             timed("targets", || {
-                target_rows(repo, trunk, targets_fetched, read)
+                fleet(|| Value::Null, &|| {
+                    target_rows(repo, trunk, targets_fetched, read)
+                })
             })
         });
         // G309: the flow of work, derived on read from the chains this repository holds.
         let flow = scope.spawn(move || {
             timed("flow", || {
-                crate::flow::flow(repo, trunk).unwrap_or_else(|why| json!({"unread": why}))
+                fleet(|| Value::Null, &|| {
+                    crate::flow::flow(repo, trunk).unwrap_or_else(|why| json!({"unread": why}))
+                })
             })
         });
+        // The reader's own talks: a read in a view names what it owes as a listing does.
         let talks = scope.spawn(move || timed("talks", || talk_rows(repo)));
-        let unattributed =
-            scope.spawn(move || timed("unattributed", || unattributed_rows(repo, trunk)));
+        let unattributed = scope.spawn(move || {
+            timed("unattributed", || {
+                fleet(|| Value::Null, &|| unattributed_rows(repo, trunk))
+            })
+        });
         // N-8: a held trunk is named, with where the hold comes from, its reason and its end.
         let hold = scope.spawn(move || timed("hold", || crate::hold::held(repo, trunk)));
         // N-20: each outside merge in the red window that pushed bay landings off the line.
-        let not_linear = scope.spawn(move || timed("not_linear", || not_linear(&repo.git, trunk)));
+        let not_linear = scope.spawn(move || {
+            timed("not_linear", || {
+                if one {
+                    Vec::new()
+                } else {
+                    not_linear(&repo.git, trunk)
+                }
+            })
+        });
         // R11: delivery that fails is never silent.
-        let wake_failing =
-            scope.spawn(move || timed("wake_failing", || crate::log::wake_failing(&repo.git)));
+        let wake_failing = scope.spawn(move || {
+            timed("wake_failing", || {
+                if one {
+                    None
+                } else {
+                    crate::log::wake_failing(&repo.git)
+                }
+            })
+        });
         let shown = timed("shown_changes", || {
             shown_changes(repo, ids, named, me, trunk, read)
         });
