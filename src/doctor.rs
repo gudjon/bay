@@ -404,7 +404,22 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
     if !left_behind.is_empty() {
         notes.push(&left_note);
     }
+    // G762: how many packs the store holds; past the limit, bay's runner pass or status sweep
+    // compacts it, at most every half hour.
+    let packs = git
+        .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .ok()
+        .map(|common| crate::packs::count(std::path::Path::new(common.trim())));
+    let pack_note = format!(
+        "{} packs: past {}, bay compacts the store in the background (git repack --geometric)",
+        packs.unwrap_or(0),
+        crate::packs::PACK_LIMIT
+    );
+    if packs.is_some_and(|packs| packs > crate::packs::PACK_LIMIT) {
+        notes.push(&pack_note);
+    }
     json!({"name": "store",
+        "packs": packs,
         "state": if notes.is_empty() { "green" } else { "advisory" },
         "promisor_remote": promisor.then_some(remote),
         "filter": filter,

@@ -59,6 +59,7 @@ pub mod notice;
 pub mod notify;
 pub mod outside;
 pub mod overlap;
+pub mod packs;
 pub mod platform;
 pub mod policy;
 pub mod presence;

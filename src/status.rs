@@ -988,6 +988,8 @@ fn swept_answer<'a>(dir: &'a Path, change: Option<&str>) -> (Value, Then<'a>) {
         }
     };
     test_wait("BAY_TEST_SWEEP_HOLD_MS");
+    // G762: the sweep's store keeps a bounded number of packs.
+    crate::packs::bound(&first.common_dir);
     let Some(trunk) = swept
         .remote_of(&plan.tracking, plan.held.as_deref())
         .map(str::to_owned)

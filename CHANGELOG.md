@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.91
+
+- A store bay fetches into keeps few packs: past 50, bay compacts it in the background.
+
 ## 0.6.90
 
 - A batch claims its members in one push and records them as checked in one more, not two each.

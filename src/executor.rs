@@ -706,6 +706,8 @@ fn pass(
     let _ = receipts::sync(repo);
     sweep_check_scratch(repo);
     sweep_tmp_packs(repo);
+    // G762: a store bay fetches into keeps a bounded number of packs.
+    crate::packs::bound(&repo.common_dir);
     // G289, G294: never forced; a chain ahead of the remote keeps its work, one apart from it
     // is set aside.
     // G434 (a fleet finding, 2026-10-28): fourteen submitted changes no pass could read went
