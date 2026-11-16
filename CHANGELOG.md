@@ -2,6 +2,7 @@
 
 ## 0.6.84
 
+- `bay merge --wait=<seconds>` reads its change once a second, not five times, while it waits.
 - A Git command killed at its time limit no longer leaves an index lock that fails the next merge.
 
 ## 0.6.83

@@ -374,11 +374,23 @@ fn observe_land(
     );
     let started = Instant::now();
     let chain = Chain::new(&repo.git);
+    // G752 (a fleet finding, 2026-11-16: a `merge --wait=7200` ran 61,303 Git commands, a
+    // `rev-parse` and a `cat-file` five times a second, and nineteen such waits ended in fifteen
+    // minutes on one box at load 70): the chain's head is read once a second, and its record only
+    // when the head moved.
+    let mut seen: Option<String> = None;
     while started.elapsed() < timeout {
-        std::thread::sleep(Duration::from_millis(200));
-        let Ok((_, record)) = chain.read(id) else {
+        std::thread::sleep(Duration::from_secs(1).min(timeout));
+        let Ok(Some(head)) = chain.head(id) else {
             continue;
         };
+        if seen.as_deref() == Some(head.as_str()) {
+            continue;
+        }
+        let Ok(record) = chain.record_at(&head) else {
+            continue;
+        };
+        seen = Some(head);
         let done = record
             .operations
             .iter()
