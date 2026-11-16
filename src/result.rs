@@ -2107,6 +2107,17 @@ fn change_say(result: &BayResult) -> Option<String> {
     let Some(outcome) = op["outcome"].as_str() else {
         return Some(no_outcome_say(id, op));
     };
+    // G766: a change in line that conflicts with main says so, and what its author does.
+    if outcome == Reason::Queued.code()
+        && let Some(paths) = op["conflict"]["conflicts"].as_array()
+    {
+        let paths: Vec<&str> = paths.iter().filter_map(Value::as_str).take(3).collect();
+        let raw = row["change"].as_str().unwrap_or_default();
+        return Some(format!(
+            "{id} waits in line, but it conflicts with main on {}: run `bay start {raw}`, resolve them, then `bay merge` again.",
+            paths.join(", ")
+        ));
+    }
     if outcome == Reason::Queued.code() {
         return Some(match op["place"].as_u64() {
             Some(place) => format!(

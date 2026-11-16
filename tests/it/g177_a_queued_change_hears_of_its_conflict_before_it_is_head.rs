@@ -195,6 +195,14 @@ fn the_third_queued_change_sees_its_conflict_while_the_head_is_checked() {
             .is_some_and(|allowed| allowed.iter().any(|action| action == "refresh")),
         "{third_op}"
     );
+    // G766: the conflict decides what the change waits for, and its say tells its author.
+    assert_eq!(third_op["retry_when"], "after_fix", "{third_op}");
+    let said = held.test_box.bay_ok(&held.repo, &["status", &third]);
+    let say = said["say"].as_str().unwrap_or_default();
+    assert!(
+        say.contains("conflicts with main on src/third.rs") && say.contains("bay start"),
+        "{say}"
+    );
     assert_woken_once(&held, &third);
     // It keeps its place: still queued, not blocked, and its reservation is not released.
     assert_eq!(third_op["state"], "admitted", "{third_op}");

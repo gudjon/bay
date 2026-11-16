@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.94
+
+- A change in line that conflicts with main says so and names the fix, not "wait your turn".
+
 ## 0.6.93
 
 - A refusal quotes the check's failing line, never a passing one.

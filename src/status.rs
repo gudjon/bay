@@ -2399,6 +2399,13 @@ fn waiting(op: &crate::change::Operation, operation: &mut Value) {
             "retry_when": reason.retry_when(),
             "next_step": reason.next(),
         });
+        // G766 (a fleet finding, 2026-11-16: a change waited in line for 30 minutes saying "it
+        // waits its turn, nothing to do" while its own row named a conflict with main that would
+        // refuse it at the head): a known conflict decides what the change waits for. Its author
+        // acts, now, not bay in its turn.
+        operation["retry_when"] = json!(reason.retry_when());
+        operation["next_step"] = json!(reason.next());
+        operation["allowed"] = json!(reason.allowed());
     }
 }
 
