@@ -1658,6 +1658,31 @@ fn status_line(
     )
 }
 
+/// G756 (owner, 2026-11-16: a panel waited 15 s on `bay doctor` for a verdict that rarely
+/// changes): `bay doctor --deadline 0` probes nothing and answers at once with this machine's
+/// last published verdict (`crate::live::publish_doctor`) and its age, or says none is held.
+#[must_use]
+pub fn saved(dir: &Path) -> BayResult {
+    let repo = match crate::repo::Repo::open(dir) {
+        Ok(repo) => repo,
+        Err(error) => return BayResult::failed(error),
+    };
+    let held = crate::live::saved_doctor(&repo);
+    let now = crate::live::unix_now();
+    let detail = match held {
+        Some((verdict, at)) => json!({
+            "from_store": true,
+            "verdict": verdict,
+            "age_s": now.saturating_sub(at),
+            "bay": crate::version::BAY,
+        }),
+        None => {
+            json!({"from_store": true, "verdict": null, "age_s": null, "bay": crate::version::BAY})
+        }
+    };
+    BayResult::ok(detail)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Report, sandbox_row};

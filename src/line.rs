@@ -31,19 +31,26 @@ pub const SCHEMA: &str = "bay.queue/1";
 
 /// `bay queue`.
 #[must_use]
-pub fn queue(dir: &Path) -> BayResult {
+pub fn queue(dir: &Path, from_store: bool) -> BayResult {
     let repo = match Repo::open(dir) {
         Ok(repo) => repo,
         Err(error) => return BayResult::failed(error),
     };
-    let mut result = read(&repo).map_or_else(BayResult::failed, BayResult::ok);
+    let mut result = read(&repo, from_store).map_or_else(BayResult::failed, BayResult::ok);
     result.freshness = repo.freshness();
     result
 }
 
-/// The `bay.queue/1` document of the line as the remote holds it now.
-fn read(repo: &Repo) -> Result<Value, String> {
-    let places = Queue::live(repo)?;
+/// The `bay.queue/1` document of the line as the remote holds it now. G756 (owner,
+/// 2026-11-16: a panel waited 23 s for the line while bay's own status answered in 0.03 s):
+/// `from_store` reads this machine's copy of the line and of its changes, with no call to the
+/// remote, and says so in `from_store`; how old that copy is, `freshness` names.
+fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
+    let places = if from_store {
+        Queue::live_here(repo)?
+    } else {
+        Queue::live(repo)?
+    };
     let mut ids: Vec<String> = places
         .iter()
         .map(|place| place.entry.change.clone())
@@ -51,11 +58,14 @@ fn read(repo: &Repo) -> Result<Value, String> {
         .collect();
     ids.sort();
     ids.dedup();
-    let mut unread: Vec<Value> = repo
-        .remote_chains(&ids)
-        .into_iter()
-        .map(|(change, why)| json!({"change": change, "why": why}))
-        .collect();
+    let mut unread: Vec<Value> = if from_store {
+        Vec::new()
+    } else {
+        repo.remote_chains(&ids)
+            .into_iter()
+            .map(|(change, why)| json!({"change": change, "why": why}))
+            .collect()
+    };
     let records = records(repo, &ids);
     let now = crate::live::unix_now();
     let rows: Vec<Value> = places
@@ -79,7 +89,12 @@ fn read(repo: &Repo) -> Result<Value, String> {
         .iter()
         .map(|place| place.entry.change.as_str())
         .collect();
-    let arriving = arriving(repo, &in_line, now, &mut unread)?;
+    // The arrivals are read from the remote's list of requests: none from the store alone.
+    let arriving = if from_store {
+        Vec::new()
+    } else {
+        arriving(repo, &in_line, now, &mut unread)?
+    };
     let oldest = places
         .iter()
         .map(|place| now.saturating_sub(place.joined))
@@ -93,6 +108,7 @@ fn read(repo: &Repo) -> Result<Value, String> {
         "places": rows,
         "arriving": arriving,
         "unread": unread,
+        "from_store": from_store,
     }))
 }
 
@@ -303,11 +319,13 @@ pub fn schema() -> Value {
         "type": "object",
         "required": [
             "schema", "read_at", "depth", "oldest_wait_s", "places", "arriving", "unread",
+            "from_store",
         ],
         "additionalProperties": false,
         "properties": {
             "schema": {"const": SCHEMA},
             "read_at": string,
+            "from_store": {"type": "boolean"},
             "depth": count,
             "oldest_wait_s": maybe(count.clone()),
             "places": {

@@ -405,6 +405,14 @@ fn push_once(repo: &Repo) -> Result<Value, String> {
     push_written(repo, write(repo)?)
 }
 
+/// G756: the doctor verdict this machine last published, and when, if it holds one.
+#[must_use]
+pub fn saved_doctor(repo: &Repo) -> Option<(Value, u64)> {
+    let text = std::fs::read_to_string(bay_dir(repo).join("live-doctor.json")).ok()?;
+    let held: Value = serde_json::from_str(&text).ok()?;
+    Some((held["verdict"].clone(), held["at"].as_u64()?))
+}
+
 /// G744: the oldest a published doctor verdict that has not changed is left standing.
 const DOCTOR_REPUBLISH_S: u64 = 600;
 

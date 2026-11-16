@@ -179,7 +179,12 @@ enum Command {
     /// state and runner, as one `bay.queue/1` document in `detail`. Reads the live places and
     /// their changes alone, never the line's history; writes only fetched copies of the
     /// remote's refs
-    Queue,
+    Queue {
+        /// Wait at most this long for the remote; 0 answers at once from this machine's copy of
+        /// the line and its changes, named by `detail.from_store`
+        #[arg(long, value_name = "SECONDS")]
+        deadline: Option<u64>,
+    },
     /// Delete the remote's branches merged by ancestor or patch, each under a lease of the tip
     /// judged, after archiving the tip on the remote and logging the push that restores it to
     /// bay/pruned-heads.log in the repository's common directory; then runs the config's
@@ -209,6 +214,10 @@ enum Command {
         /// Judge this machine in this role instead of the one doctor infers
         #[arg(long, value_parser = ["runner"])]
         role: Option<String>,
+        /// Wait at most this long for the remote; 0 answers at once with this machine's last
+        /// verdict and its age, and probes nothing
+        #[arg(long, value_name = "SECONDS")]
+        deadline: Option<u64>,
     },
     /// Admin: place bay at $HOME/.local/bin/bay, its skill and its project hook entries
     Install(InstallArgs),
@@ -989,13 +998,13 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         command @ Command::Status { .. } => status(&cli.dir, command),
-        Command::Queue => bay::line::queue(&cli.dir),
+        Command::Queue { deadline } => queue(&cli.dir, deadline),
         // The one prune: the request `status --branches` makes, deleting (G302).
         Command::Prune { stale_days } => heads(&cli.dir, true, stale_days),
         Command::Talk(args) => talk(&cli.dir, *args),
         Command::Evidence { action } => evidence(&cli.dir, action),
         Command::Enrol(args) => enrol(&cli.dir, args),
-        Command::Doctor { role } => doctor(&cli.dir, role.as_deref()),
+        Command::Doctor { role, deadline } => doctor_by(&cli.dir, role.as_deref(), deadline),
         Command::Install(args) => install(&cli.dir, args),
         Command::Update { version, check } => {
             bay::update::update(&bay::update::Request { version, check })
@@ -1061,6 +1070,28 @@ fn help(command: &[String], json: bool) -> ExitCode {
 }
 
 /// `bay doctor`, then the daily update check.
+/// G756: `bay queue`, from this machine's copy at `--deadline 0`.
+fn queue(dir: &std::path::Path, deadline: Option<u64>) -> BayResult {
+    bound(deadline);
+    bay::line::queue(dir, deadline == Some(0))
+}
+
+/// G756: `bay doctor`; at `--deadline 0`, this machine's last verdict, probing nothing.
+fn doctor_by(dir: &std::path::Path, role: Option<&str>, deadline: Option<u64>) -> BayResult {
+    if deadline == Some(0) {
+        return bay::doctor::saved(dir);
+    }
+    bound(deadline);
+    doctor(dir, role)
+}
+
+/// G756: a command's `--deadline`: no call to the remote starts after it.
+fn bound(deadline: Option<u64>) {
+    if let Some(seconds) = deadline {
+        bay::deadline::set(std::time::Instant::now() + std::time::Duration::from_secs(seconds));
+    }
+}
+
 fn doctor(dir: &std::path::Path, role: Option<&str>) -> BayResult {
     let result = bay::doctor::doctor_as(dir, role == Some("runner"));
     bay::update::auto();

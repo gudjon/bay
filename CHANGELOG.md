@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.87
+
+- `bay queue --deadline 0` and `bay doctor --deadline 0` answer at once from this machine, with their age.
+
 ## 0.6.86
 
 - `bay status <change>` names a queued change's place, how many are ahead, and when it reaches main.

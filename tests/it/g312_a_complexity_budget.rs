@@ -68,8 +68,11 @@ use support::TestBox;
 ///   it answers by its deadline from the store and names how old that is.
 /// - 0.6.29, one flag (`start --dry-run`, G662): to learn whether a check would hold some paths,
 ///   an agent opened a change or read the policy by hand; now it asks, and nothing is written.
+/// - 0.6.87, two flags (`queue --deadline`, `doctor --deadline`, G756): a panel showing a busy
+///   person their line and their machine's health waited 23 s and 15 s for these two reads; now
+///   `--deadline 0` answers at once from this machine, as `status --deadline` already did.
 const COMMANDS: usize = 30;
-const FLAGS: usize = 93;
+const FLAGS: usize = 95;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,
