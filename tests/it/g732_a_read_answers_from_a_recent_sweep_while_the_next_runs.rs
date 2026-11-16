@@ -71,7 +71,16 @@ fn a_read_answers_from_a_recent_sweep_and_the_sweep_it_starts_serves_the_next() 
 
     // AND the sweep it started serves the next read with the trunk it brought
     support::sweeps_ended(&reader);
-    let (after, _) = status(&test_box, &reader, &[("BAY_TEST_SWEPT_S", OPEN)]);
+    // A loaded box may end the sweep's lock before its store is read back: the read inside the
+    // open window is asked again for a few seconds, never a sweep of its own.
+    let mut after = serde_json::Value::Null;
+    for _ in 0..20 {
+        (after, _) = status(&test_box, &reader, &[("BAY_TEST_SWEPT_S", OPEN)]);
+        if after["detail"]["main"] == next.as_str() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
     assert_eq!(after["detail"]["main"], next.as_str(), "{after}");
     assert!(stale_read(&after).is_none(), "{after}");
 }

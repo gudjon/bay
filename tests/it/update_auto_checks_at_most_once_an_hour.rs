@@ -30,8 +30,26 @@ fn doctor(fixture: &Fixture, repo: &std::path::Path, disabled: bool) -> (i32, St
     let out = cmd.output_busy();
     (
         out.status.code().unwrap(),
-        String::from_utf8(out.stdout).unwrap(),
+        steady(&String::from_utf8(out.stdout).unwrap()),
     )
+}
+
+/// `text` with the sizes doctor measures of bay's own folders taken out (G767): doctor writes
+/// there itself, so they change from one run to the next whatever the update check does.
+fn steady(text: &str) -> String {
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return text.to_owned();
+    };
+    if let Some(rows) = value["detail"]["rows"].as_array_mut() {
+        for row in rows.iter_mut().filter(|row| row["name"] == "storage") {
+            if let Some(row) = row.as_object_mut() {
+                row.remove("bay_bytes");
+                row.remove("check_scratch_bytes");
+                row.remove("objects_bytes");
+            }
+        }
+    }
+    value.to_string()
 }
 
 /// Waits until `done` holds, for the background check.
