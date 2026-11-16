@@ -199,6 +199,119 @@ fn read_ahead(repo: &Repo, change: Option<&str>) {
     repo.git.read_ahead(&calls);
 }
 
+/// G754: what the follow-up of a revision submitted while an earlier one of the change landed
+/// with its batch carries ([`follow_up`]): the newer `revision`, the intent, and the paths it
+/// changes since its merge base with `trunk`. `None` unless this change's own operation of
+/// that revision exists and is not on main, the change was neither abandoned nor taken over,
+/// and the revision's tree differs from the landed one's (a revision that adds nothing is
+/// answered as before).
+fn carry(
+    ctx: &Ctx,
+    trunk: &str,
+    revision: &str,
+    landed_revision: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    if matches!(
+        ctx.record.state,
+        ChangeState::Abandoned | ChangeState::Superseded
+    ) {
+        return Ok(None);
+    }
+    let git = &ctx.repo.git;
+    let tree = |rev: &str| {
+        git.run(&["rev-parse", &format!("{rev}^{{tree}}")])
+            .map_err(|error| error.message())
+    };
+    let ours = tree(revision)?;
+    if ours == tree(landed_revision)? {
+        return Ok(None);
+    }
+    // The author sent these files as an operation of this change, one not on main: a merge
+    // checkpoints its folder again, so the same files may come as another commit.
+    let mut sent = false;
+    for op in &ctx.record.operations {
+        if op.state != OpState::Published && tree(&op.revision).is_ok_and(|theirs| theirs == ours) {
+            sent = true;
+            break;
+        }
+    }
+    if !sent {
+        return Ok(None);
+    }
+    let base = git
+        .run(&["merge-base", trunk, revision])
+        .map_err(|error| error.message())?;
+    let paths = check::changed_paths(git, &base, revision)?;
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(json!({
+        "revision": revision,
+        "intent": ctx.record.intent.reference,
+        "paths": paths,
+    })))
+}
+
+/// G754: the author's `bay merge` of a revision submitted while an earlier revision of the
+/// change landed with its batch opens the next change of the same intent from that revision,
+/// in this process under the author's own key, as `bay save` opens one from a checkout's edits,
+/// and merges it: the answer is that change's, naming the change it follows in
+/// `detail.follow_up`. `None` when `result` carries nothing ([`carry`]).
+fn follow_up(
+    dir: &Path,
+    id: &str,
+    result: &mut BayResult,
+    wait: bool,
+    observe: Option<Duration>,
+) -> Option<BayResult> {
+    let carry = result.detail.as_mut()?.as_object_mut()?.remove("carry")?;
+    let revision = carry["revision"].as_str()?.to_owned();
+    let intent = carry["intent"].as_str()?.to_owned();
+    let paths: Vec<String> = carry["paths"]
+        .as_array()?
+        .iter()
+        .filter_map(|path| path.as_str().map(str::to_owned))
+        .collect();
+    let request = |new: bool| crate::start::StartRequest {
+        intent: Some(intent.clone()),
+        new,
+        intent_revision: "1".to_owned(),
+        paths: paths.clone(),
+        inputs: Vec::new(),
+        resume: None,
+        reverts: None,
+        fixes: None,
+        lane: None,
+        from: None,
+        after: Vec::new(),
+        saved: Some(crate::start::Saved {
+            commit: revision.clone(),
+            message: format!("{intent}: the edits made after {id} was checked"),
+            checkout: format!("{id}'s newer revision"),
+        }),
+        adopt: false,
+    };
+    let mut started = crate::start::start(dir, &request(false));
+    if started.reason == Some(Reason::ChangeAlreadyLanded) {
+        started = crate::start::start(dir, &request(true));
+    }
+    let (Decision::Ok, Some(next)) = (started.decision, started.change.clone()) else {
+        return Some(started);
+    };
+    let view = started.detail.as_ref()?["view"].as_str()?.to_owned();
+    let mut landed = land(Path::new(&view), Some(&next), wait, observe, None);
+    if let Some(detail) = landed.detail.as_mut().and_then(|d| d.as_object_mut()) {
+        detail.insert(
+            "follow_up".to_owned(),
+            json!({"change": next, "from": id, "revision": revision}),
+        );
+    } else {
+        landed.detail =
+            Some(json!({"follow_up": {"change": next, "from": id, "revision": revision}}));
+    }
+    Some(landed)
+}
+
 #[must_use]
 pub fn land(
     dir: &Path,
@@ -238,7 +351,13 @@ pub fn land(
         }
         break;
     }
-    let result = result.unwrap_or_else(BayResult::failed);
+    let mut result = result.unwrap_or_else(BayResult::failed);
+    // G754: an author's newer revision of a change an earlier revision merged goes in next.
+    if abandon.is_none()
+        && let Some(next) = follow_up(dir, &id, &mut result, wait, observe)
+    {
+        return next;
+    }
     let mut result = with_receipt(&repo, &id, step.get(), result);
     // G80: every result says which trunk it reflects, and when that trunk was fetched.
     result.freshness = result.freshness.or_else(|| repo.freshness());
@@ -601,6 +720,9 @@ struct Ctx<'a> {
     /// G551, BACKLOG 92: the claim watched another holder's lease before it won, so main may
     /// have moved since this visit read it.
     claim_waited: bool,
+    /// G754: this context holds a member of a batch in its check (the head too): an operation
+    /// of it its author revised meanwhile still lands its checked revision ([`revised`]).
+    membership: Membership,
     /// BACKLOG 92: the producer whose evidence notes go in the chain's next push, atomically, so
     /// the remote holds them by the time the chain names the candidate checked.
     evidence_rides: Option<String>,
@@ -676,6 +798,7 @@ impl<'a> Ctx<'a> {
             pushed_head: None,
             red_checks: Vec::new(),
             claim_waited: false,
+            membership: Membership::Alone,
             evidence_rides: None,
             unpushed_from: None,
             my_epoch: 0,
@@ -1150,7 +1273,21 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     };
     observe_inputs(&mut ctx)?;
 
-    if let Some(result) = scanned(&mut ctx, &trunk, &revision)? {
+    if let Some(mut result) = scanned(&mut ctx, &trunk, &revision)? {
+        // G754: main holds an earlier revision of this change; the author's newer one goes in
+        // next ([`follow_up`]).
+        let landed = result
+            .detail
+            .as_ref()
+            .and_then(|detail| detail["landed_revision"].as_str())
+            .map(str::to_owned);
+        if result.reason == Some(Reason::ChangeAlreadyLanded)
+            && let Some(landed) = landed
+            && let Some(carried) = carry(&ctx, &trunk, &revision, &landed)?
+            && let Some(detail) = result.detail.as_mut()
+        {
+            detail["carry"] = carried;
+        }
         return Ok(result);
     }
     // G682 (a fleet finding, 2026-11-09): main read before a landing and the chain read after it
@@ -1171,9 +1308,13 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
         {
             return derive_landed(&mut ctx, &op_id, &revision, &commit);
         }
+        let mut detail = json!({"landed_revision": landed_revision, "op_id": op_id});
+        if let Some(carry) = carry(&ctx, &trunk, &revision, &landed_revision)? {
+            detail["carry"] = carry;
+        }
         return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded)
             .with_change(id)
-            .with_detail(json!({"landed_revision": landed_revision, "op_id": op_id})));
+            .with_detail(detail));
     }
     // NEW-4: a change of no lane whose view reaches a lane's commits off trunk never lands them.
     if ctx.record.lane.is_none()
@@ -2285,7 +2426,10 @@ fn batch(
         return Ok(None);
     };
     let landing = &members[..size];
-    match land_batch(ctx, &mut others, landing, trunk, &id) {
+    let landed = land_batch(ctx, &mut others, landing, trunk, &id);
+    // G754: once its batch is done, a head that runs on alone keeps the lone rule.
+    ctx.membership = Membership::Alone;
+    match landed {
         Ok(Some(mut result)) => {
             if let Some(detail) = result.detail.as_mut() {
                 let at = stopped_at.as_deref().filter(|_| stopped == planned);
@@ -2776,6 +2920,7 @@ fn joined<'a>(
     trunk: &str,
 ) -> Result<Result<Ctx<'a>, String>, String> {
     let mut other = Ctx::load(ctx.repo, ctx.step, &member.change)?;
+    other.membership = Membership::Batch;
     other.registry.clone_from(&ctx.registry);
     let signer = other.executor_signer()?;
     other.chain.sign_with(signer);
@@ -2832,6 +2977,7 @@ fn land_batch<'a>(
 ) -> Result<Option<BayResult>, String> {
     let repo = ctx.repo;
     let git = &repo.git;
+    ctx.membership = Membership::Batch;
     let (built, anchors) = build_batch(ctx, others, members, trunk, id)?;
     if !persist_batch(ctx, others, members, &built, trunk, id)? {
         return Ok(None);
@@ -4458,10 +4604,11 @@ fn claim(
             .map_or(0, |elapsed| elapsed.as_nanos())
     );
     for _ in 0..3 {
+        let frozen = frozen(ctx, op_id);
         let Some(op) = ctx.find_op_mut(op_id) else {
             return Err(CHAIN_MOVED.to_owned());
         };
-        if op.state.is_terminal() {
+        if op.state.is_terminal() && !frozen {
             return Ok(Some(superseded(&id, op_id, op.epoch, op.owner.as_ref())));
         }
         // G600 (a fleet finding, 2026-10-31: four runners claimed and checked a failed operation
@@ -4538,8 +4685,9 @@ fn still_owner(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<BayR
         return Ok(None);
     }
     // An operation the remote chain lacks is no one's to publish.
+    let frozen = frozen(ctx, op_id);
     let (epoch, owner) = match ctx.find_op(op_id) {
-        Some(op) if op.epoch == ctx.my_epoch && op.state != OpState::Superseded => {
+        Some(op) if op.epoch == ctx.my_epoch && (op.state != OpState::Superseded || frozen) => {
             return Ok(None);
         }
         Some(op) => (op.epoch, op.owner.clone()),
@@ -4562,6 +4710,43 @@ fn existing(mut result: BayResult) -> BayResult {
         detail.insert("existing".to_owned(), json!(true));
     }
     result
+}
+
+/// G754: whether a context's operation runs alone or as a member of a batch in its check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Membership {
+    Alone,
+    Batch,
+}
+
+/// G754 (owner ruling 2026-11-16, "freeze batch members"; a fleet finding the same day: two
+/// checked batches of six were thrown away because an author revised one member during the
+/// batch's check): whether `op` was superseded only by its author's newer request, of a change
+/// neither abandoned nor taken over and not on main. Such a member of a batch in its check still
+/// lands its checked revision; the newer revision goes in after it as the next change of the same
+/// intent, opened by its author's own `bay merge` ([`follow_up`]).
+fn revised(record: &ChangeRecord, op: &Operation) -> bool {
+    op.state == OpState::Superseded
+        && op
+            .outcome
+            .as_deref()
+            .is_some_and(|outcome| outcome.starts_with("superseded by "))
+        && !matches!(
+            record.state,
+            ChangeState::Abandoned | ChangeState::Superseded
+        )
+        && !record
+            .operations
+            .iter()
+            .any(|op| op.state == OpState::Published)
+}
+
+/// G754: whether `op_id`, held by `ctx`, is a batch member its author revised ([`revised`]).
+fn frozen(ctx: &Ctx, op_id: &str) -> bool {
+    ctx.membership == Membership::Batch
+        && ctx
+            .find_op(op_id)
+            .is_some_and(|op| revised(&ctx.record, op))
 }
 
 fn superseded(id: &str, op_id: &str, epoch: u64, owner: Option<&String>) -> BayResult {
@@ -6485,12 +6670,13 @@ fn persist_owned(
 ) -> Result<Persisted, String> {
     for _ in 0..3 {
         let mine = ctx.my_epoch;
+        let frozen = frozen(ctx, op_id);
         let Some(op) = ctx.find_op_mut(op_id) else {
             return Ok(Persisted::Lost(Box::new(superseded(
                 &ctx.id, op_id, 0, None,
             ))));
         };
-        if op.epoch != mine || op.state.is_terminal() {
+        if op.epoch != mine || (op.state.is_terminal() && !frozen) {
             let (epoch, owner) = (op.epoch, op.owner.clone());
             return Ok(Persisted::Lost(Box::new(superseded(
                 &ctx.id,

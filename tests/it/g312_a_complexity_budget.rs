@@ -68,7 +68,7 @@ use support::TestBox;
 ///   it answers by its deadline from the store and names how old that is.
 /// - 0.6.29, one flag (`start --dry-run`, G662): to learn whether a check would hold some paths,
 ///   an agent opened a change or read the policy by hand; now it asks, and nothing is written.
-/// - 0.6.87, two flags (`queue --deadline`, `doctor --deadline`, G756): a panel showing a busy
+/// - 0.6.88, two flags (`queue --deadline`, `doctor --deadline`, G756): a panel showing a busy
 ///   person their line and their machine's health waited 23 s and 15 s for these two reads; now
 ///   `--deadline 0` answers at once from this machine, as `status --deadline` already did.
 const COMMANDS: usize = 30;

@@ -1,7 +1,8 @@
 # Changelog
 
-## 0.6.87
+## 0.6.88
 
+- A change revised during its batch's check merges as checked; the next `bay merge` sends the newer edits.
 - `bay queue --deadline 0` and `bay doctor --deadline 0` answer at once from this machine, with their age.
 
 ## 0.6.86

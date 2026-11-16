@@ -111,7 +111,9 @@ What you do decides the speed for every agent:
 - **Fix in place.** When a change is refused, fails a check, or `bay status` shows `operation.conflict`:
   `bay start <change>` (it brings in newer main), fix it in the view, then `bay merge <change>`. The new revision
   keeps the change's place in line, even at the head. Never abandon it and start a new change for the same work:
-  a new change joins at the back.
+  a new change joins at the back. A revision sent while the change's batch is being checked waits: the checked
+  one merges with the batch, and your next `bay merge` sends the newer edits as the next change
+  (`detail.follow_up`).
 - **Green before you submit.** Run the repository's fast checks in your view first. A red change costs the whole
   batch it is in a split to find it.
 - **Small and narrow.** One intent per change, only the paths that intent needs.
