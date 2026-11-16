@@ -723,6 +723,16 @@ fn pass(
         Some(queue) => queue,
         None => Queue::read(repo)?,
     };
+    // G750: a `QUEUED` wait is visited again once the line's head or main moved.
+    let trunk = repo
+        .git
+        .ref_target(&repo.trunk_tracking_ref())
+        .ok()
+        .flatten();
+    parked.keep_stands(
+        queue.head().map(|entry| entry.op_id.as_str()),
+        trunk.as_deref(),
+    );
     in_pass_order(&mut chains, &queue);
     let records: Vec<ChangeRecord> = chains.iter().map(|held| held.record.clone()).collect();
     let mut arrivals = Arrivals::new(&records);
@@ -766,7 +776,8 @@ fn pass(
             // A fleet finding (2026-10-27): an abandoned change's older operation was still
             // queued and run hours later. No operation of an ended change runs.
             .filter(|_| !record.ended())
-            .filter(|op| !parked.holds(&op.op_id))
+            // G750: a repair is never parked: a red main, which no stand names, frees it.
+            .filter(|op| !parked.holds(&op.op_id) || names_a_repair(record))
             .filter(|op| runs(op) && (names_a_repair(record) || reach(op, freed(&ran))))
             .filter(|op| !taken.contains(&op.op_id))
             .map(|op| op.op_id.clone())
@@ -1053,8 +1064,30 @@ pub(crate) fn tmp_pack_is_stale(entry: &std::fs::DirEntry) -> bool {
 /// passes, by operation id: its change's chain head and that of each change it waits on, at the
 /// visit. A pass visits it again only once one of them moved. Held in the runner's memory only:
 /// after a restart each is visited once.
+///
+/// G750 (a fleet finding, 2026-11-16: two runners on one box visited each of 41 changes waiting
+/// in line every pass, each visit 16 to 40 s of fetches, a push and a hundred local reads,
+/// while the head checked for 86 minutes, and each visit answered `QUEUED` as the last had):
+/// an operation answered `QUEUED` is parked too, with the queue's head operation and main's
+/// commit it was answered under. It is visited again once its own chain moved, the queue's
+/// head changed, main moved, or [`STAND_KEPT`] passed.
 #[derive(Default)]
-struct Parked(HashMap<String, Vec<(String, String)>>);
+struct Parked(
+    HashMap<String, Vec<(String, String)>>,
+    HashMap<String, Stand>,
+);
+
+/// G750: what a `QUEUED` answer was given under: the queue's head operation and main's commit,
+/// and when.
+struct Stand {
+    head: Option<String>,
+    trunk: Option<String>,
+    at: std::time::Instant,
+}
+
+/// G750: the longest a `QUEUED` operation goes unvisited while nothing it was answered under
+/// moved: what no key names (a red main, a policy, a deadline) is read again within this.
+const STAND_KEPT: Duration = Duration::from_secs(600);
 
 impl Parked {
     /// Keeps only the waits whose every chain holds, in `chains`, the head it held at the visit,
@@ -1069,6 +1102,27 @@ impl Parked {
                 !unread.contains(change) && heads.get(change.as_str()) == Some(&head.as_str())
             })
         });
+        let parked = &self.0;
+        self.1.retain(|op_id, _| parked.contains_key(op_id));
+    }
+
+    /// G750: keeps only the `QUEUED` stands answered under the queue head `head` and main at
+    /// `trunk`, within [`STAND_KEPT`]; the waits of any other stand end.
+    fn keep_stands(&mut self, head: Option<&str>, trunk: Option<&str>) {
+        let gone: Vec<String> = self
+            .1
+            .iter()
+            .filter(|(_, stand)| {
+                stand.head.as_deref() != head
+                    || stand.trunk.as_deref() != trunk
+                    || stand.at.elapsed() >= STAND_KEPT
+            })
+            .map(|(op_id, _)| op_id.clone())
+            .collect();
+        for op_id in gone {
+            self.1.remove(&op_id);
+            self.0.remove(&op_id);
+        }
     }
 
     /// Whether `op_id` waits, and nothing it waits on moved.
@@ -1087,14 +1141,34 @@ impl Parked {
         } else {
             Vec::new()
         };
+        let queued = row["decision"].as_str() == Some("queued")
+            && row["reason"].as_str() == Some(Reason::Queued.code());
         let own = Chain::new(&repo.git).head(change).ok().flatten();
-        let Some(own) = own.filter(|_| !waits.is_empty()) else {
+        self.1.remove(op_id);
+        let Some(own) = own.filter(|_| !waits.is_empty() || queued) else {
             self.0.remove(op_id);
             return;
         };
         let mut read = vec![(change.to_owned(), own)];
         read.extend(waits.into_iter().map(|wait| (wait.change, wait.head)));
         self.0.insert(op_id.to_owned(), read);
+        if queued {
+            let head = crate::queue::Queue::read_shared(repo)
+                .ok()
+                .and_then(|queue| queue.head().map(|entry| entry.op_id.clone()));
+            let trunk = repo
+                .git
+                .ref_target(&repo.trunk_tracking_ref())
+                .ok()
+                .flatten();
+            // A head that yielded keeps its place and runs next pass: never parked.
+            if head.as_deref() == Some(op_id) || row["detail"]["yielded"] == true {
+                self.0.remove(op_id);
+                return;
+            }
+            let at = std::time::Instant::now();
+            self.1.insert(op_id.to_owned(), Stand { head, trunk, at });
+        }
     }
 }
 

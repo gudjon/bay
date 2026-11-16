@@ -3,6 +3,7 @@
 ## 0.6.83
 
 - `bay merge --wait` behind a held change reads it once a heartbeat, not five times a second.
+- A runner visits a change waiting in line again only when the line, main or the change moves.
 
 ## 0.6.82
 
