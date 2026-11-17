@@ -292,7 +292,10 @@ fn a_runner_moves_to_a_new_binary_only_after_its_post_pieces_end() {
     );
     assert_eq!(records(&test_box, &remote, "slow").len(), 1, "{result}");
     assert!(
-        within(Duration::from_secs(60), || ran_new.exists()),
+        // The shell creates its log before it writes the line: wait for the line.
+        within(Duration::from_secs(60), || {
+            std::fs::read_to_string(&ran_new).is_ok_and(|args| args.ends_with('\n'))
+        }),
         "the new bay never runs as the runner: {}",
         said()
     );

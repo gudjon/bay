@@ -134,7 +134,10 @@ fn an_update_never_waits_and_the_executor_moves_between_operations() {
 
     // Then the new version runs in its place, with the same arguments; it logs and exits.
     let ran_new = test_box.home.join(format!("ran-{NEWER}"));
-    eventually("the new version runs as the executor", || ran_new.exists());
+    // The shell creates its log before it writes the line: wait for the line, not the file.
+    eventually("the new version runs as the executor", || {
+        std::fs::read_to_string(&ran_new).is_ok_and(|args| args.ends_with('\n'))
+    });
     let args = std::fs::read_to_string(&ran_new).unwrap();
     assert_eq!(
         args.trim(),
