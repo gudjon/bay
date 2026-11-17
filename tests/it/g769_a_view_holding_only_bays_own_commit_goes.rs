@@ -2,7 +2,7 @@
 //! views of 15 merged changes, each clean at an older draft bay itself wrote, so each read as
 //! holding newer work and stayed). A view of an ended change whose `HEAD` is a commit bay wrote,
 //! with nothing else in it (no edit, no untracked file, no ignored file), goes at the next start,
-//! and its `HEAD` stays in the store under `refs/bay/kept/<change>`. The same view with an
+//! and its `HEAD` stays in the store under `refs/bay/view-kept/<change>`. The same view with an
 //! untracked file stays, and a commit an agent made keeps its view (G97).
 //!
 //! Guard to mutate: in `src/view.rs` `release`, drop the `committed_only` branch, and the view
@@ -75,7 +75,10 @@ fn a_view_holding_only_bays_own_commit_goes_and_its_commit_stays() {
 
     // THEN the view holding only bay's commit is gone, and its commit is kept by a ref
     assert!(!freed_view.exists(), "the view of {freed} stayed");
-    let pinned = test_box.git_ok(&repo, &["rev-parse", &format!("refs/bay/kept/{freed}")]);
+    let pinned = test_box.git_ok(
+        &repo,
+        &["rev-parse", &format!("refs/bay/view-kept/{freed}")],
+    );
     assert_eq!(pinned.trim(), freed_head);
     // AND the view with an untracked file stays
     assert!(

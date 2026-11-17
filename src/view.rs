@@ -488,7 +488,7 @@ fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
 /// each read as holding newer work): whether the view at `path` holds nothing but commits: no
 /// edit, no untracked file and no ignored file at all (its ignored directories already went), its
 /// `HEAD` is a commit bay wrote itself (an older draft; an agent's own commit keeps its view,
-/// G97), and that `HEAD` is now kept by the local ref `refs/bay/kept/<id>`, so no commit of it is
+/// G97), and that `HEAD` is now kept by the local ref `refs/bay/view-kept/<id>`, so no commit of it is
 /// lost when the view goes. Any doubt keeps the view.
 fn committed_only(repo: &Repo, id: &str, path: &Path) -> bool {
     let git = Git::new(path);
@@ -516,7 +516,7 @@ fn committed_only(repo: &Repo, id: &str, path: &Path) -> bool {
     if author.as_deref().map(str::trim) != bays {
         return false;
     }
-    let kept = format!("refs/bay/kept/{id}");
+    let kept = format!("{}{id}", crate::names::VIEW_KEPT);
     repo.git.run(&["update-ref", &kept, head.trim()]).is_ok()
 }
 

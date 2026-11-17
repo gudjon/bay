@@ -30,6 +30,9 @@ pub const LANDED_INDEX: &str = "refs/bay/landed-index/";
 pub const QUEUE: &str = "refs/bay/queue/";
 /// `refs/bay/queue-done/<shard>`: finished queue places.
 pub const QUEUE_DONE: &str = "refs/bay/queue-done/";
+/// `refs/bay/view-kept/<Change-Id>`: the `HEAD` of a freed view of an ended change, which only
+/// that view held (G769), local only.
+pub const VIEW_KEPT: &str = "refs/bay/view-kept/";
 /// `refs/bay/live/<machine>`: a machine's live summary.
 pub const LIVE: &str = "refs/bay/live/";
 /// `refs/bay/log/<name>`: an event log.
