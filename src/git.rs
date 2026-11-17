@@ -456,13 +456,13 @@ impl Drop for RefReadsKept {
     }
 }
 
-/// Whether `args` reads refs and nothing else: `symbolic-ref -q <ref>`, `rev-parse --verify -q
-/// <rev>`, or a `for-each-ref` listing. G773 (owner, 2026-11-17: a status read of 30 changes
-/// listed the executor logs' tips once per change, 20 times): a listing is kept as a ref read is.
+/// Whether `args` reads one ref: `symbolic-ref -q <ref>` or `rev-parse --verify -q <rev>`. A
+/// `for-each-ref` listing is never kept: a runner's pass lists refs again after its own child
+/// processes moved them, and a kept listing then answered with refs that had moved (G773).
 fn ref_read(args: &[&str]) -> bool {
     matches!(
         args,
-        ["symbolic-ref", "-q", _] | ["rev-parse", "--verify", "-q", _] | ["for-each-ref", ..]
+        ["symbolic-ref", "-q", _] | ["rev-parse", "--verify", "-q", _]
     )
 }
 
