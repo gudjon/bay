@@ -1,11 +1,13 @@
 //! G733 (a measurement, 2026-11-15: agents' `bay start` took 9.7 s at the median on a store read
 //! by 51 sessions, five round trips to the remote one after another: trunk, the intent's claims,
-//! the shard index, the registry and the push). A new change's start reads trunk, then the claims
-//! on its intent, the shard index and the registry in one fetch, and pushes once: three round
-//! trips. Read from the trace a test build writes (G171).
+//! the shard index, the registry and the push). A new change's start reads the claims on its
+//! intent, the shard index and the registry in one fetch, and pushes once. G775: that fetch is
+//! trunk's own, so a start in a store that holds the registry asks the remote twice. Read from
+//! the trace a test build writes (G171).
 //!
-//! Guard to mutate: in `src/start.rs` `start`, drop the call of `prefetch`, and the start fetches
-//! the claims, the shard index and the registry each alone.
+//! Guard to mutate: in `src/start.rs` `start`, open the repository with `Repo::open_fetched` and
+//! drop the call of `prefetch`, and the start fetches the claims, the shard index and the
+//! registry each alone.
 
 // The host hook is a shell script, so this runs on Unix only.
 #![cfg(unix)]
@@ -16,7 +18,7 @@ use serde_json::Value;
 use support::{TestBox, check_files, passing_result};
 
 #[test]
-fn a_new_changes_start_asks_the_remote_three_times() {
+fn a_new_changes_start_asks_the_remote_twice() {
     let test_box = TestBox::new();
     let files = check_files("true", &passing_result(1), 1, 60);
     let host = test_box.path().join("host.git");
@@ -42,7 +44,7 @@ fn a_new_changes_start_asks_the_remote_three_times() {
         String::from_utf8_lossy(&out.stdout)
     );
 
-    // THEN it asked the remote three times: trunk, one fetch of the rest, and the push
+    // THEN it asked the remote twice: one fetch of trunk and the rest, and the push
     let text = std::fs::read_to_string(&trace).expect("the trace was written");
     let asks: Vec<String> = text
         .lines()
@@ -52,7 +54,7 @@ fn a_new_changes_start_asks_the_remote_three_times() {
         .collect();
     assert_eq!(
         asks.len(),
-        3,
+        2,
         "the start asked the remote {}:\n{}",
         asks.len(),
         asks.join("\n")
