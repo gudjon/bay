@@ -3,7 +3,7 @@
 ## 0.6.100
 
 - `bay start` asks the remote twice, one fetch and one push, instead of four or five times.
-- `bay status --all` reads each ref once.
+- `bay status` and `bay status --all` keep history answers in a shallow store, two to six times faster.
 
 ## 0.6.99
 
