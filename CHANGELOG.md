@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.100
+
+- `bay start` asks the remote twice, one fetch and one push, instead of four or five times.
+- `bay status --all` reads each ref once.
+
 ## 0.6.99
 
 - `bay queue --deadline 0` says when this machine read the line, once its copy is a minute old.
