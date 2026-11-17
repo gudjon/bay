@@ -4,6 +4,8 @@
 
 - `bay start` asks the remote twice, one fetch and one push, instead of four or five times.
 - `bay status` and `bay status --all` keep history answers in a shallow store, two to six times faster.
+- `bay status --deadline 0` answers at once from this machine's last answer, names its age, and refreshes behind.
+- The bay skill is a short core with reference files beside it; `bay install` places the whole folder.
 
 ## 0.6.99
 
