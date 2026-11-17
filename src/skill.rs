@@ -15,7 +15,20 @@ use crate::git::Git;
 
 /// Every file of `skills/bay/`, by its path inside that directory. A unit test holds this list
 /// to the source directory, so a file added there and not here fails the build's tests.
-pub const FILES: &[(&str, &str)] = &[("SKILL.md", include_str!("../skills/bay/SKILL.md"))];
+/// G777 (a measurement, 2026-11-17: one 49 KB SKILL.md, about 13,000 tokens, was read whole on
+/// every use, 183 times a day on one box): `SKILL.md` is the short core an agent reads every
+/// time, and each other file is a reference the core names, read only when it is needed.
+pub const FILES: &[(&str, &str)] = &[
+    ("SKILL.md", include_str!("../skills/bay/SKILL.md")),
+    ("commands.md", include_str!("../skills/bay/commands.md")),
+    ("results.md", include_str!("../skills/bay/results.md")),
+    ("setup.md", include_str!("../skills/bay/setup.md")),
+    ("together.md", include_str!("../skills/bay/together.md")),
+];
+
+/// G777: the most bytes the core `SKILL.md` may hold, so it never grows back into the whole
+/// guide; what an agent needs only sometimes goes in a reference file beside it.
+pub const CORE_MAX_BYTES: usize = 12 * 1024;
 
 /// The installed copy compared with the skill this bay version installs.
 #[derive(Debug, PartialEq, Eq)]
@@ -24,8 +37,9 @@ pub enum Installed {
     Missing,
     /// The same files with the same bytes, and no other file.
     Matches,
-    /// A file differs, is missing, or is not one this version installs.
-    Differs,
+    /// A file differs, is missing, or is not one this version installs: each such file's path
+    /// inside the copy (G777).
+    Differs(Vec<String>),
 }
 
 /// The variable Claude Code reads for its config directory, in place of `$HOME/.claude`.
@@ -219,7 +233,7 @@ pub fn compare(dir: &Path) -> Result<Installed, String> {
             return Ok(Installed::Missing);
         }
         Err(error) => return Err(format!("cannot read {}: {error}", dir.display())),
-        Ok(_) if !dir.is_dir() => return Ok(Installed::Differs),
+        Ok(_) if !dir.is_dir() => return Ok(Installed::Differs(Vec::new())),
         Ok(_) => {}
     }
     let mut found = BTreeMap::new();
@@ -228,14 +242,22 @@ pub fn compare(dir: &Path) -> Result<Installed, String> {
         .iter()
         .map(|(path, text)| ((*path).to_owned(), text.as_bytes()))
         .collect();
-    let same = found.len() == expected.len()
-        && found
-            .iter()
-            .all(|(path, bytes)| bytes.as_deref() == expected.get(path).copied());
-    Ok(if same {
+    let mut differ: Vec<String> = found
+        .iter()
+        .filter(|(path, bytes)| bytes.as_deref() != expected.get(path.as_str()).copied())
+        .map(|(path, _)| path.clone())
+        .collect();
+    differ.extend(
+        expected
+            .keys()
+            .filter(|path| !found.contains_key(*path))
+            .cloned(),
+    );
+    differ.sort();
+    Ok(if differ.is_empty() {
         Installed::Matches
     } else {
-        Installed::Differs
+        Installed::Differs(differ)
     })
 }
 
@@ -365,6 +387,26 @@ mod tests {
     }
 
     #[test]
+    fn the_core_stays_short() {
+        let core = FILES
+            .iter()
+            .find(|(path, _)| *path == "SKILL.md")
+            .map_or(0, |(_, text)| text.len());
+        assert!(
+            core <= super::CORE_MAX_BYTES,
+            "SKILL.md is {core} bytes, over {}: move what an agent needs only sometimes into a reference file",
+            super::CORE_MAX_BYTES
+        );
+        for (path, _) in FILES.iter().filter(|(path, _)| *path != "SKILL.md") {
+            let core = FILES[0].1;
+            assert!(
+                core.contains(&format!("`{path}`")),
+                "SKILL.md never names {path}"
+            );
+        }
+    }
+
+    #[test]
     fn install_then_compare_matches() {
         let dir = tempfile::TempDir::new().unwrap();
         let copy = dir.path().join("bay");
@@ -373,7 +415,10 @@ mod tests {
         assert_eq!(compare(&copy).unwrap(), Installed::Matches);
         std::fs::create_dir_all(copy.join("old")).unwrap();
         std::fs::write(copy.join("old/notes.md"), "x").unwrap();
-        assert_eq!(compare(&copy).unwrap(), Installed::Differs);
+        assert_eq!(
+            compare(&copy).unwrap(),
+            Installed::Differs(vec!["old/notes.md".to_owned()])
+        );
         install(&copy).unwrap();
         assert_eq!(compare(&copy).unwrap(), Installed::Matches);
     }

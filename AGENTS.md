@@ -73,8 +73,10 @@ repository that showed it.
 
 ## Files with one owner
 
-- **The bay skill**, `skills/bay/SKILL.md`, is the one copy for every agent and organisation. `bay install`
-  copies it, and `bay doctor` reports `SKILL_MISMATCH` when an installed copy differs. When a command or
+- **The bay skill**, `skills/bay/`, is the one copy for every agent and organisation: a short core,
+  `SKILL.md`, that an agent reads every time, and reference files beside it that the core names and an agent
+  reads only when needed. Keep the core short (G777 holds it to a byte budget). `bay install` copies the folder,
+  and `bay doctor` reports `SKILL_MISMATCH`, naming the file, when an installed copy differs. When a command or
   flag changes, change the skill in the same commit.
 - **`CHANGELOG.md`**: one `## <version>` section per release, newest first, user-visible changes only, no
   test ids. getbay.io copies it at each release tag, so keep each sentence to 20 words or fewer.

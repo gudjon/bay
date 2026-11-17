@@ -145,7 +145,7 @@ fn a_differing_copy_in_another_config_dir_is_red() {
     let skill = row(&result, "skill");
     assert_eq!(skill["state"], "red", "{result}");
     assert_eq!(skill["required"], false);
-    assert_eq!(skill["note"], "skill does not match this bay");
+    assert_eq!(skill["note"], "skill does not match this bay: SKILL.md");
     assert_eq!(
         skill["mismatched"],
         serde_json::json!([second.display().to_string()]),

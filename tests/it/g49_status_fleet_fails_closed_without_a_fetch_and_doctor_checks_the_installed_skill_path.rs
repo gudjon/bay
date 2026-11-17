@@ -159,7 +159,7 @@ fn a_mismatched_copy_is_red_with_the_claude_adapter() {
     let skill = row(&result, "skill");
     assert_eq!(skill["state"], "red");
     assert_eq!(skill["required"], true);
-    assert_eq!(skill["note"], "skill does not match this bay");
+    assert_eq!(skill["note"], "skill does not match this bay: SKILL.md");
 }
 
 /// Something other than a directory at the skill path (a file, a dangling link) is a mismatch,

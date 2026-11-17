@@ -21,12 +21,10 @@ use support::TestBox;
 
 /// The words the skill's "Never say ... to them" line names.
 fn skill_words() -> BTreeSet<String> {
-    let skill = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/bay/SKILL.md"),
-    )
-    .unwrap();
-    let line = skill
-        .lines()
+    // G777: the line may sit in any file of the skill.
+    let line = bay::skill::FILES
+        .iter()
+        .flat_map(|(_, text)| text.lines())
         .find(|line| line.contains("Never say "))
         .unwrap_or_else(|| panic!("the skill has no \"Never say\" line"));
     let listed = line

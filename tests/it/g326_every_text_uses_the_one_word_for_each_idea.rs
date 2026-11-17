@@ -116,19 +116,18 @@ fn the_contract_and_the_skill_say_merge_main_runner_plugin_and_machine() {
             reason["next_step"].as_str().unwrap_or_default(),
         );
     }
-    let skill = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/bay/SKILL.md"),
-    )
-    .unwrap();
-    // A fenced block is literal config, as a backticked name is.
-    let mut fenced = false;
-    for (n, line) in skill.lines().enumerate() {
-        if line.trim_start().starts_with("```") {
-            fenced = !fenced;
-            continue;
-        }
-        if !fenced {
-            check(format!("SKILL.md:{}", n + 1), line);
+    // G777: every file of the skill, the core and each reference file beside it.
+    for (file, skill) in bay::skill::FILES {
+        // A fenced block is literal config, as a backticked name is.
+        let mut fenced = false;
+        for (n, line) in skill.lines().enumerate() {
+            if line.trim_start().starts_with("```") {
+                fenced = !fenced;
+                continue;
+            }
+            if !fenced {
+                check(format!("{file}:{}", n + 1), line);
+            }
         }
     }
     assert!(

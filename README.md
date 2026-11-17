@@ -182,8 +182,8 @@ The [Quickstart](https://getbay.io/docs/quickstart) walks through each step.
 
 ### Teach your agent bay
 
-`bay install` copies the bay skill, [`skills/bay/SKILL.md`](skills/bay/SKILL.md), where Claude Code reads
-it. For other agents, or before bay is installed, add the skill with the skills CLI:
+`bay install` copies the bay skill, [`skills/bay/`](skills/bay/) (a short core, `SKILL.md`, and the
+reference files it names), where Claude Code reads it. For other agents, or before bay is installed, add the skill with the skills CLI:
 
 ```sh
 npx skills add gudjon/bay --skill bay -g

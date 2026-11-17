@@ -1570,6 +1570,7 @@ fn skill_row(git: &Git, config: &Config, report: &mut Report) -> Result<(), Stri
     let mut dirs = Vec::new();
     let mut mismatched = Vec::new();
     let (mut missing, mut differs) = (false, false);
+    let mut differing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for dir in skill::config_dirs(Path::new(&home), git) {
         let state = match skill::compare(&dir.join("skills").join("bay"))? {
             skill::Installed::Matches => "green",
@@ -1580,10 +1581,14 @@ fn skill_row(git: &Git, config: &Config, report: &mut Report) -> Result<(), Stri
                 }
                 "missing"
             }
-            skill::Installed::Differs => {
+            skill::Installed::Differs(files) => {
                 differs = true;
+                differing.extend(files.iter().cloned());
                 mismatched.push(dir.display().to_string());
-                "differs"
+                // G777: which files of the copy differ, so a stale reference file is named.
+                dirs.push(json!({"dir": dir.display().to_string(), "state": "differs",
+                    "files": files}));
+                continue;
             }
         };
         dirs.push(json!({"dir": dir.display().to_string(), "state": state}));
@@ -1593,16 +1598,26 @@ fn skill_row(git: &Git, config: &Config, report: &mut Report) -> Result<(), Stri
     if mismatched.is_empty() {
         row["state"] = json!(if missing { "missing" } else { "green" });
     } else {
-        let note = if differs {
-            "skill does not match this bay"
+        let note = if !differs {
+            "skill not installed".to_owned()
+        } else if differing.is_empty() {
+            "skill does not match this bay".to_owned()
         } else {
-            "skill not installed"
+            let names: Vec<String> = differing.into_iter().collect();
+            format!("skill does not match this bay: {}", names.join(", "))
         };
         row["state"] = json!("red");
         row["note"] = json!(note);
         row["mismatched"] = json!(mismatched);
         row["recovery"] = json!("run install again");
-        report.red(Reason::SkillMismatch, Some(note));
+        report.red(
+            Reason::SkillMismatch,
+            Some(if differs {
+                "skill does not match this bay"
+            } else {
+                "skill not installed"
+            }),
+        );
     }
     report.rows.push(row);
     Ok(())
