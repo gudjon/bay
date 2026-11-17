@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.99
+
+- `bay queue --deadline 0` says when this machine read the line, once its copy is a minute old.
+
 ## 0.6.98
 
 - A view kept by an earlier bay's judgement is judged again, so a view holding only bay's commit goes.

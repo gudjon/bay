@@ -1716,11 +1716,27 @@ fn answered_say(detail: Option<&Value>) -> Option<&'static str> {
 }
 
 /// `bay queue`: how many changes wait, those no runner has placed too, and the longest wait.
+/// G770 (a fleet finding, 2026-11-17: a saved line an hour old said "4 changes wait … the
+/// longest has waited 68 minutes" while nothing waited): a line read from this machine's copy
+/// a minute or more old, or of no known age, says when that copy was read.
 fn queue_say(result: &BayResult) -> Option<String> {
     let detail = result.detail.as_ref()?;
     if detail.get("schema")? != crate::line::SCHEMA {
         return None;
     }
+    let said = line_say(detail)?;
+    if detail.get("from_store").and_then(Value::as_bool) != Some(true) {
+        return Some(said);
+    }
+    Some(match detail.get("age_s").and_then(Value::as_u64) {
+        Some(age) if age < 60 => said,
+        Some(age) => format!("{said} This machine read the line {} ago.", waited(age)),
+        None => format!("{said} This is this machine's last copy of the line."),
+    })
+}
+
+/// [`queue_say`] of the line in `detail`, whenever it was read.
+fn line_say(detail: &Value) -> Option<String> {
     let count = |key: &str| {
         detail
             .get(key)
@@ -2373,6 +2389,31 @@ mod tests {
     use super::{BayResult, Decision, Freshness, Reason, SCHEMA, plain, unplain};
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_line_from_an_old_copy_says_when_it_was_read() {
+        let said = |from_store: bool, age: serde_json::Value| {
+            BayResult::ok(json!({
+                "schema": crate::line::SCHEMA,
+                "places": [{"place": 1}, {"place": 2}],
+                "arriving": [],
+                "oldest_wait_s": 4121,
+                "from_store": from_store,
+                "age_s": age,
+            }))
+            .say()
+        };
+        let old = said(true, json!(3941));
+        assert!(
+            old.ends_with("This machine read the line 65 minutes ago."),
+            "{old}"
+        );
+        assert!(old.starts_with("2 changes wait"), "{old}");
+        let unknown = said(true, serde_json::Value::Null);
+        assert!(unknown.ends_with("last copy of the line."), "{unknown}");
+        assert!(!said(true, json!(20)).contains("This machine"));
+        assert!(!said(false, json!(0)).contains("This machine"));
+    }
 
     #[test]
     fn a_talk_read_says_it_changed_nothing_and_never_that_it_sent() {
