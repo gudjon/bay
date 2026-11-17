@@ -60,6 +60,10 @@ pub fn fleet(dir: &Path) -> BayResult {
 }
 
 fn run(dir: &Path) -> Result<BayResult, String> {
+    // G772 (owner, 2026-11-17: the panel sat on "Reading bay…"; one map ran 46 Git commands, 19
+    // of them the same registry read and 5 the same trunk read): the map moves no ref, so each
+    // ref it reads is read once.
+    let _kept = crate::git::ref_reads_kept();
     // Never a fetch (G49). A trunk never fetched is a fleet never fetched: `bay status` fetches
     // trunk before the fleet refs.
     let repo = match Repo::open_with(dir, Fetch::Never) {
