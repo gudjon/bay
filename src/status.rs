@@ -1176,8 +1176,12 @@ fn settle_swept(
 fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult, String> {
     let started = Instant::now();
     // G714: a listing's answer is saved for the reads after it, stamped with the store before it.
+    // Only a listing in a store's own checkout, read with a deadline, is served again while the
+    // store stands still (G714), so only it pays for the stamp of the store.
     let before = timed("saved_stamp", || {
-        crate::saved::Before::of(dir, change, !deadline.is_zero())
+        let stamped =
+            !deadline.is_zero() && change.is_none() && crate::saved::own_checkout(dir).is_some();
+        crate::saved::Before::of(dir, change, stamped)
     });
     let swept = timed("fetch_or_local_read", || {
         fetch_swept(dir, change, started, started + deadline)
@@ -1199,7 +1203,10 @@ fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult
     };
     // G778: every read saves its answer for the next `--deadline 0` read of the same thing; only
     // a listing in a store's own checkout is served again by a read that waits (G714).
-    let stale = refreshed.stale.is_some() || deadline.is_zero();
+    let stale = refreshed.stale.is_some()
+        || deadline.is_zero()
+        || change.is_some()
+        || crate::saved::own_checkout(dir).is_none();
     let saves = before;
     // G739: the listing keeps its ref reads too: the store stands as the read above left it.
     let kept = crate::git::ref_reads_kept();
