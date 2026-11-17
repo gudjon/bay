@@ -81,10 +81,19 @@ fn product_of<'a>(map: &'a Value, session: &str) -> &'a Value {
 fn each_sessions_row_names_the_product_that_called() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
+    // A session drops out of the map a takeover window after its last row: the harness's
+    // two-second lease makes that four seconds, which a loaded box spends between the hook and
+    // the map. A minute keeps the rows this test reads.
     test_box.seed_with_check(
         &repo,
         &[("src/a.rs", "fn a() {}\n")],
-        &[(".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned())],
+        &[
+            (".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned()),
+            (
+                ".bay/config.toml".to_owned(),
+                "[runner]\ntakeover_s = 60\n".to_owned(),
+            ),
+        ],
     );
     hook(
         &test_box,
