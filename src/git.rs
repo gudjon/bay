@@ -456,11 +456,13 @@ impl Drop for RefReadsKept {
     }
 }
 
-/// Whether `args` reads one ref: `symbolic-ref -q <ref>` or `rev-parse --verify -q <rev>`.
+/// Whether `args` reads refs and nothing else: `symbolic-ref -q <ref>`, `rev-parse --verify -q
+/// <rev>`, or a `for-each-ref` listing. G773 (owner, 2026-11-17: a status read of 30 changes
+/// listed the executor logs' tips once per change, 20 times): a listing is kept as a ref read is.
 fn ref_read(args: &[&str]) -> bool {
     matches!(
         args,
-        ["symbolic-ref", "-q", _] | ["rev-parse", "--verify", "-q", _]
+        ["symbolic-ref", "-q", _] | ["rev-parse", "--verify", "-q", _] | ["for-each-ref", ..]
     )
 }
 
@@ -1653,15 +1655,30 @@ impl Git {
     }
 
     /// The context of [`Git::facts`] for the store at `common`, read once per process.
+    ///
+    /// G773 (a measurement, 2026-11-17: a shallow store kept no fact, so each of its reads walked
+    /// the same history again, 4 s a listing under load): a shallow store's facts are kept under
+    /// its boundary, the `shallow` file's commits. A fetch that moves the boundary moves the
+    /// context, and no fact of the old boundary answers again.
     fn fact_context(&self, common: &Path) -> Option<String> {
-        if common.join("shallow").exists() || common.join("refs/replace").exists() {
+        if common.join("refs/replace").exists() {
             return None;
         }
         if self.replace_refs(common)? {
             return None;
         }
         let digest = self.config_digest()?;
-        Some(format!("{}\0{digest}", git_identity()?))
+        let boundary = match std::fs::read(common.join("shallow")) {
+            Ok(boundary) => crate::agent_settings::hex(&crate::facts::key(
+                "shallow",
+                "boundary",
+                &[],
+                Some(&boundary),
+            )),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(_) => return None,
+        };
+        Some(format!("{}\0{digest}\0{boundary}", git_identity()?))
     }
 
     /// G721: whether the store at `common` holds replace refs, mostly without Git: a loose one is

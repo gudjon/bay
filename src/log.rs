@@ -493,6 +493,12 @@ fn every_record(git: &Git, keep: &dyn Fn(&Value) -> bool) -> Result<Vec<Value>, 
 fn all_records(git: &Git) -> Result<std::sync::Arc<Vec<Value>>, String> {
     use std::sync::{Arc, Mutex};
     static READ: Mutex<Option<(String, Arc<Vec<Value>>)>> = Mutex::new(None);
+    // G773 (a measurement, 2026-11-17: a listing's threads each listed the logs' tips before the
+    // first read was kept, 20 listings in one read): one thread reads, the others wait for it.
+    static ONE: Mutex<()> = Mutex::new(());
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let tips = git
         .run(&[
             "for-each-ref",
