@@ -455,6 +455,18 @@ fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
             // its ignore rules match go. A loose ignored file, such as an `.env`, stays: bay
             // cannot tell it from work. One that fails is tried at the next start.
             remove_ignored_directories(&path);
+            // G769: a view whose only "newer" thing is a commit, with nothing else in it, keeps
+            // that commit under a ref of its own and goes.
+            if committed_only(repo, id, &path) {
+                remove_worktree(repo, &path).map_err(GitError::Spawn)?;
+                unregister(repo, &path);
+                return match std::fs::remove_file(journal_path(repo, id)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        Err(GitError::Spawn(error))
+                    }
+                    _ => Ok(true),
+                };
+            }
             // G743: kept as judged, under the view's stamp after its cleaning.
             if let Some(key) = holds_newer_key(&path, ended) {
                 crate::facts::put(&repo.common_dir, &key, b"1");
@@ -469,6 +481,43 @@ fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(GitError::Spawn(error)),
         _ => Ok(true),
     }
+}
+
+/// G769 (owner, 2026-11-16: "greatly optimizing for disk space for users"; a Mac held 5.2 GB in
+/// views of 15 merged changes, each clean at a commit its change's last draft does not name, so
+/// each read as holding newer work): whether the view at `path` holds nothing but commits: no
+/// edit, no untracked file and no ignored file at all (its ignored directories already went), its
+/// `HEAD` is a commit bay wrote itself (an older draft; an agent's own commit keeps its view,
+/// G97), and that `HEAD` is now kept by the local ref `refs/bay/kept/<id>`, so no commit of it is
+/// lost when the view goes. Any doubt keeps the view.
+fn committed_only(repo: &Repo, id: &str, path: &Path) -> bool {
+    let git = Git::new(path);
+    let clean = git
+        .run(&[
+            "status",
+            "--porcelain",
+            "--ignored",
+            "--untracked-files=all",
+        ])
+        .is_ok_and(|out| out.trim().is_empty());
+    if !clean {
+        return false;
+    }
+    let Ok(head) = git.run(&["rev-parse", "--verify", "HEAD"]) else {
+        return false;
+    };
+    // Only a commit bay wrote itself (an older draft of the change), never one an agent made:
+    // a view with a commit of its own stays (G97).
+    let bays = crate::change::RECORD_IDENTITY
+        .iter()
+        .find(|(key, _)| *key == "GIT_AUTHOR_EMAIL")
+        .map(|(_, email)| *email);
+    let author = git.run(&["log", "-1", "--format=%ae", "HEAD"]).ok();
+    if author.as_deref().map(str::trim) != bays {
+        return false;
+    }
+    let kept = format!("refs/bay/kept/{id}");
+    repo.git.run(&["update-ref", &kept, head.trim()]).is_ok()
 }
 
 /// G646: removes the worktree at `path`, which holds nothing to keep. A build tool may leave

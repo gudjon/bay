@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.96
+
+- An ended change's view holding only bay's own commit is freed; the commit stays under a ref.
+
 ## 0.6.95
 
 - `bay doctor` sizes check scratch and bay's own folder first, and says `null`, never 0, when out of time.
