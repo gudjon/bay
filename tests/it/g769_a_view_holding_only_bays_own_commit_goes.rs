@@ -5,8 +5,12 @@
 //! and its `HEAD` stays in the store under `refs/bay/view-kept/<change>`. The same view with an
 //! untracked file stays, and a commit an agent made keeps its view (G97).
 //!
-//! Guard to mutate: in `src/view.rs` `release`, drop the `committed_only` branch, and the view
-//! stays.
+//! A view an earlier bay judged as holding newer work, and cached so, is judged again: the
+//! cached verdict's name changed with G769.
+//!
+//! Guards to mutate: in `src/view.rs` `release`, drop the `committed_only` branch, and the view
+//! stays; in `holds_newer_at`, name the verdict `view-release-2` again, and the view an earlier
+//! bay judged stays.
 
 #![cfg(unix)]
 
@@ -85,4 +89,40 @@ fn a_view_holding_only_bays_own_commit_goes_and_its_commit_stays() {
         kept_view.exists(),
         "the view of {kept} with a file of its own was removed"
     );
+}
+
+/// The verdict a bay before G769 cached for the view at `view` of change `id`: held newer work.
+fn cache_an_earlier_verdict(test_box: &TestBox, repo: &Path, id: &str, view: &Path) {
+    let head = test_box.git_ok(repo, &["rev-parse", &format!("refs/bay/changes/{id}")]);
+    let stamp = bay::view::stamp(view).expect("a view's stamp");
+    let key = bay::facts::key(
+        "view-release-2",
+        "holds-newer",
+        &[&view.display().to_string(), head.trim(), &stamp],
+        None,
+    );
+    let common = test_box.git_ok(
+        repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    );
+    bay::facts::put(Path::new(common.trim()), &key, b"1");
+}
+
+#[test]
+fn a_view_an_earlier_bay_kept_is_judged_again() {
+    let test_box = TestBox::new();
+    let repo = seeded(&test_box);
+    let (id, view, head) = merged_at_bays_commit(&test_box, &repo, "judged");
+    cache_an_earlier_verdict(&test_box, &repo, &id, &view);
+
+    // WHEN the next change starts
+    let _ = test_box.bay_ok(&repo, &["start", "CARD-NEXT", "--paths", "src/"]);
+
+    // THEN the earlier verdict holds nothing: the view is gone and its commit kept
+    assert!(
+        !view.exists(),
+        "the view of {id} stayed on an earlier bay's verdict"
+    );
+    let pinned = test_box.git_ok(&repo, &["rev-parse", &format!("refs/bay/view-kept/{id}")]);
+    assert_eq!(pinned.trim(), head);
 }

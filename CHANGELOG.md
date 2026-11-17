@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.98
+
+- A view kept by an earlier bay's judgement is judged again, so a view holding only bay's commit goes.
+
 ## 0.6.97
 
 - A head needing no check lands in the same pass when main moves under it, not a pass later.

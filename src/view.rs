@@ -429,8 +429,9 @@ fn holds_newer_key(path: &Path, ended: &Ended) -> Option<[u8; 32]> {
 fn holds_newer_at(path: &Path, head: &str) -> Option<[u8; 32]> {
     let stamp = stamp(path)?;
     let view = path.display().to_string();
+    // G769: a verdict cached before a view holding only bay's own commit could go is not read.
     Some(crate::facts::key(
-        "view-release-2",
+        "view-release-3",
         "holds-newer",
         &[&view, head, &stamp],
         None,
