@@ -61,12 +61,35 @@ pub fn default_deadline() -> Duration {
 /// `bay status [change]`, waiting for the remote at most `deadline` from now (G619).
 #[must_use]
 pub fn status(dir: &Path, change: Option<&str>, deadline: Duration) -> BayResult {
+    if deadline.is_zero()
+        && let Some(saved) = from_store(dir, change)
+    {
+        return saved;
+    }
     if change.is_none()
+        && !crate::saved::refreshing()
         && let Some(saved) = saved_listing(dir, deadline)
     {
         return saved;
     }
-    run(dir, change, deadline).unwrap_or_else(BayResult::failed)
+    let result = run(dir, change, deadline).unwrap_or_else(BayResult::failed);
+    crate::saved::refreshed(dir, change);
+    result
+}
+
+/// G778: a read that may wait for nothing answers with what this machine last saved for it, its
+/// age named, and has it read again in the background once it is a few seconds old; `None` when
+/// nothing was saved for it, or in the read again itself.
+#[must_use]
+pub fn from_store(dir: &Path, change: Option<&str>) -> Option<BayResult> {
+    if crate::saved::refreshing() {
+        return None;
+    }
+    let (saved, old) = crate::saved::from_store(dir, change)?;
+    if old {
+        crate::saved::refresh(dir, change);
+    }
+    Some(saved)
 }
 
 /// G714: the listing at `dir` from its saved answer, when the store stands as it was built from
@@ -1036,11 +1059,11 @@ fn save_listing(dir: &Path, repo: &Repo, refreshed: Refreshed) {
     if repo.view_change(dir).is_some() {
         return;
     }
-    let Some(before) = crate::saved::Before::of(dir) else {
+    let Some(before) = crate::saved::Before::of(dir, None, true) else {
         return;
     };
     if let Ok(result) = listing(dir, None, repo, refreshed) {
-        before.save(&result);
+        before.save(&result, false);
     }
 }
 
@@ -1154,10 +1177,7 @@ fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult
     let started = Instant::now();
     // G714: a listing's answer is saved for the reads after it, stamped with the store before it.
     let before = timed("saved_stamp", || {
-        change
-            .is_none()
-            .then(|| crate::saved::Before::of(dir))
-            .flatten()
+        crate::saved::Before::of(dir, change, !deadline.is_zero())
     });
     let swept = timed("fetch_or_local_read", || {
         fetch_swept(dir, change, started, started + deadline)
@@ -1177,13 +1197,16 @@ fn run(dir: &Path, change: Option<&str>, deadline: Duration) -> Result<BayResult
             (repo, refreshed)
         }
     };
-    let saves = before.filter(|_| refreshed.stale.is_none() && repo.view_change(dir).is_none());
+    // G778: every read saves its answer for the next `--deadline 0` read of the same thing; only
+    // a listing in a store's own checkout is served again by a read that waits (G714).
+    let stale = refreshed.stale.is_some() || deadline.is_zero();
+    let saves = before;
     // G739: the listing keeps its ref reads too: the store stands as the read above left it.
     let kept = crate::git::ref_reads_kept();
     let result = timed("listing", || listing(dir, change, &repo, refreshed))?;
     drop(kept);
     if let Some(before) = saves {
-        timed("saved_save", || before.save(&result));
+        timed("saved_save", || before.save(&result, stale));
     }
     section_line("total", started);
     Ok(result)

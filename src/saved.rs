@@ -39,9 +39,41 @@ const NAMESPACES: [&str; 7] = [
 /// against the clock, and a saved answer is never older than [`SAVED_MAX_S`].
 const UNSTAMPED: [&str; 2] = [crate::names::FLEET, crate::names::FLEET_EXECUTOR];
 
-/// The saved answer of the store whose common directory is `common`.
-fn file(common: &Path) -> PathBuf {
-    common.join("bay").join("status-answer.json")
+/// G778: the saved answer of a read in the checkout at `root` of the store whose common directory
+/// is `common`, as `actor`, of `change` (or the listing): one file each, so a seat's read in its
+/// own worktree and a read of one change keep answers of their own.
+fn file(common: &Path, root: &Path, actor: &str, change: Option<&str>) -> PathBuf {
+    use sha2::{Digest as _, Sha256};
+    let mut hash = Sha256::new();
+    for part in [root.to_string_lossy().as_ref(), actor, change.unwrap_or("")] {
+        hash.update(part.as_bytes());
+        hash.update([0]);
+    }
+    let digest = hash.finalize();
+    let name = crate::agent_settings::hex(&digest[..12]);
+    common
+        .join("bay")
+        .join("status-answers")
+        .join(format!("{name}.json"))
+}
+
+/// G778: the checkout of `dir` and its store's common directory, found with no Git: a store's own
+/// checkout, or a linked worktree or view, whose `.git` file leads to its common directory.
+#[must_use]
+pub fn checkout(dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    let dir = dir.canonicalize().ok()?;
+    let root = dir.ancestors().find(|root| root.join(".git").exists())?;
+    let git = root.join(".git");
+    if git.is_dir() {
+        return Some((root.to_path_buf(), git));
+    }
+    let link = std::fs::read_to_string(&git).ok()?;
+    let own = root.join(link.trim().strip_prefix("gitdir:")?.trim());
+    let common = std::fs::read_to_string(own.join("commondir")).ok()?;
+    Some((
+        root.to_path_buf(),
+        own.join(common.trim()).canonicalize().ok()?,
+    ))
 }
 
 /// The checkout of `dir` and its Git directory, when the checkout is a store's own (its `.git`
@@ -154,11 +186,9 @@ fn swept_at(common: &Path) -> Option<String> {
     crate::sweep::last(common).map(|(at, _)| at)
 }
 
-/// The actor a listing is read as.
-fn actor(common: &Path) -> Option<String> {
-    crate::change::current_actor(common)
-        .ok()
-        .map(|actor| actor.name)
+/// The actor a read is made as: its name alone, with no look for its session.
+fn actor() -> String {
+    crate::change::actor_name()
 }
 
 /// What a listing's answer is built from, stamped before it is built: saved by [`Before::save`]
@@ -166,39 +196,44 @@ fn actor(common: &Path) -> Option<String> {
 pub struct Before {
     root: PathBuf,
     common: PathBuf,
+    change: Option<String>,
     paths: Vec<String>,
     stamp: Vec<Value>,
     swept_at: Option<String>,
 }
 
 impl Before {
-    /// The store of `dir` before an answer of it is built; `None` for a view or a linked
-    /// worktree.
+    /// The store of `dir` before an answer of `change` (or the listing) is built in it. A read
+    /// that waits for nothing (`stamped` false) is saved for the next such read alone and stamps
+    /// nothing: the stamp walks every ref directory, seconds on a store of thousands of changes.
     #[must_use]
-    pub fn of(dir: &Path) -> Option<Self> {
+    pub fn of(dir: &Path, change: Option<&str>, stamped: bool) -> Option<Self> {
         if off() {
             return None;
         }
-        let (root, common) = own_checkout(dir)?;
-        let paths = paths(&common);
+        let (root, common) = checkout(dir)?;
+        let paths = if stamped { paths(&common) } else { Vec::new() };
         let stamp = stamp(&common, &paths);
         Some(Self {
             root,
             swept_at: swept_at(&common),
             common,
+            change: change.map(str::to_owned),
             paths,
             stamp,
         })
     }
 
     /// Saves `result`, a listing of the store, when nothing it was built from moved while it was
-    /// built. A talk accept is never saved: it happened once.
-    pub fn save(self, result: &BayResult) {
-        if result.decision != crate::result::Decision::Ok
-            || stamp(&self.common, &self.paths) != self.stamp
-            || swept_at(&self.common) != self.swept_at
-        {
-            let _ = std::fs::remove_file(file(&self.common));
+    /// built. A talk accept is never saved: it happened once. A `stale` answer, one read from the
+    /// store with no sweep, is saved for `--deadline 0` reads alone (G778): a read that waits
+    /// never serves it ([`answer`]).
+    pub fn save(self, result: &BayResult, stale: bool) {
+        let moved = || {
+            stamp(&self.common, &self.paths) != self.stamp
+                || swept_at(&self.common) != self.swept_at
+        };
+        if result.decision != crate::result::Decision::Ok || (!stale && moved()) {
             return;
         }
         let Some(mut detail) = result.detail.clone() else {
@@ -210,19 +245,24 @@ impl Before {
         let saved = json!({
             "bay": crate::version::BAY,
             "root": self.root,
-            "actor": actor(&self.common),
+            "actor": actor(),
             "swept_at": self.swept_at,
             "saved": crate::live::unix_now(),
             "paths": self.paths,
             "stamp": self.stamp,
             "change": result.change,
+            "stale": stale,
             "freshness": result.freshness.as_ref().map(|fresh| json!({
                 "trunk": fresh.trunk,
                 "fetched_at": fresh.fetched_at,
             })),
             "detail": detail,
         });
-        replace(&file(&self.common), &saved.to_string());
+        let path = file(&self.common, &self.root, &actor(), self.change.as_deref());
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        replace(&path, &saved.to_string());
     }
 }
 
@@ -248,20 +288,11 @@ pub fn answer(dir: &Path) -> Option<BayResult> {
         return None;
     }
     let (root, common) = own_checkout(dir)?;
-    let text = std::fs::read_to_string(file(&common)).ok()?;
-    let saved: Value = serde_json::from_str(&text).ok()?;
-    let now = crate::live::unix_now();
-    let age = now.checked_sub(saved["saved"].as_u64()?)?;
-    let paths: Vec<String> = serde_json::from_value(saved["paths"].clone()).ok()?;
-    let fresh = saved["bay"] == crate::version::BAY
-        && age <= SAVED_MAX_S
-        && saved["root"] == json!(root)
-        && saved["swept_at"] == json!(swept_at(&common))
-        && saved["actor"] == json!(actor(&common))
-        && saved["stamp"] == json!(stamp(&common, &paths));
-    if !fresh {
+    let (saved, age) = read(&common, &root, None)?;
+    if saved["stale"] == true || !fresh(&common, &saved, age) {
         return None;
     }
+    let now = crate::live::unix_now();
     let mut detail = saved["detail"].clone();
     detail["saved_s"] = json!(age);
     if let Some((_, unix)) = crate::sweep::last(&common)
@@ -280,4 +311,156 @@ pub fn answer(dir: &Path) -> Option<BayResult> {
         })
     });
     Some(result)
+}
+
+/// The answer saved for `change` (or the listing) in the checkout at `root`, as this actor, by
+/// this bay, and its age in seconds.
+fn read(common: &Path, root: &Path, change: Option<&str>) -> Option<(Value, u64)> {
+    let text = std::fs::read_to_string(file(common, root, &actor(), change)).ok()?;
+    let saved: Value = serde_json::from_str(&text).ok()?;
+    let age = crate::live::unix_now().checked_sub(saved["saved"].as_u64()?)?;
+    (saved["bay"] == crate::version::BAY && saved["root"] == json!(root)).then_some((saved, age))
+}
+
+/// Whether `saved`, `age` seconds old, stands for the store at `common` as it is now: young, after
+/// the same sweep, and every stamped path as it was.
+fn fresh(common: &Path, saved: &Value, age: u64) -> bool {
+    let Ok(paths) = serde_json::from_value::<Vec<String>>(saved["paths"].clone()) else {
+        return false;
+    };
+    age <= SAVED_MAX_S
+        && saved["swept_at"] == json!(swept_at(common))
+        && saved["stamp"] == json!(stamp(common, &paths))
+}
+
+/// G778 (owner, 2026-11-17: a panel that shows bay was still very long to load; a seat's
+/// `bay status --deadline 0` took 8-11 s and a read of one change 4.5 s alone and 77 s beside
+/// the panel's other reads, each built again from the store because no saved answer served a
+/// linked worktree, a named change, or a store that had moved): the answer this machine last
+/// saved for a read of `change` at `dir` as this actor, whatever moved since, with its age in
+/// `detail.age_s` and `detail.from_store` true, and whether it is old enough to be read again in
+/// the background ([`REFRESH_AFTER_S`]). `None` when none was saved.
+#[must_use]
+pub fn from_store(dir: &Path, change: Option<&str>) -> Option<(BayResult, bool)> {
+    if off() {
+        return None;
+    }
+    let (root, common) = checkout(dir)?;
+    let (mut saved, age) = read(&common, &root, change)?;
+    let stands = age < refresh_after_s();
+    let mut detail = saved["detail"].take();
+    detail["from_store"] = json!(true);
+    detail["age_s"] = json!(age);
+    detail["saved_s"] = json!(age);
+    if let Some((_, unix)) = crate::sweep::last(&common)
+        && detail.get("stale_s").is_some_and(|stale| !stale.is_null())
+    {
+        detail["stale_s"] = json!(crate::live::unix_now().saturating_sub(unix));
+    }
+    let mut result = BayResult::ok(detail);
+    if let Some(change) = saved["change"].as_str() {
+        result = result.with_change(change.to_owned());
+    }
+    result.freshness = saved["freshness"].as_object().and_then(|fresh| {
+        Some(Freshness {
+            trunk: fresh.get("trunk")?.as_str()?.to_owned(),
+            fetched_at: fresh.get("fetched_at")?.as_str()?.to_owned(),
+        })
+    });
+    Some((result, !stands))
+}
+
+/// How old, in seconds, a saved answer served at once may be before it is read again in the
+/// background for the next read: judged by age alone, since stamping the store costs seconds.
+const REFRESH_AFTER_S: u64 = 5;
+
+/// [`REFRESH_AFTER_S`], or in a test build `BAY_TEST_REFRESH_AFTER_S`.
+fn refresh_after_s() -> u64 {
+    std::env::var("BAY_TEST_REFRESH_AFTER_S")
+        .ok()
+        .filter(|_| crate::version::TEST_HOOKS)
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(REFRESH_AFTER_S)
+}
+
+/// How long one background read again of a saved answer holds its lock before a later read may
+/// take it over as dead.
+const REFRESH_HELD_S: u64 = 120;
+
+/// In the process that reads a saved answer again for the next read, `BAY_SAVED_REFRESH` is set:
+/// it builds the answer from the store and saves it, serving none.
+pub const REFRESH_ENV: &str = "BAY_SAVED_REFRESH";
+
+/// Whether this process reads a saved answer again ([`REFRESH_ENV`]).
+#[must_use]
+pub fn refreshing() -> bool {
+    std::env::var_os(REFRESH_ENV).is_some()
+}
+
+/// The lock of the background read again of the answer of `change` at `root`.
+fn refresh_lock(common: &Path, root: &Path, change: Option<&str>) -> PathBuf {
+    file(common, root, &actor(), change).with_extension("refresh")
+}
+
+/// G778: has the answer of a read of `change` at `dir` built again from the store and saved, by a
+/// `bay status` of its own at low priority that outlives this one: one at a time for one answer,
+/// under a lock the read again drops when it ends ([`refreshed`]). Best effort.
+pub fn refresh(dir: &Path, change: Option<&str>) {
+    let Some((root, common)) = checkout(dir) else {
+        return;
+    };
+    let lock = refresh_lock(&common, &root, change);
+    let held = std::fs::metadata(&lock)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.elapsed().ok())
+        .is_some_and(|elapsed| elapsed.as_secs() < REFRESH_HELD_S);
+    if held {
+        return;
+    }
+    if let Some(parent) = lock.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if std::fs::write(&lock, std::process::id().to_string()).is_err() {
+        return;
+    }
+    let Ok(bay) = std::env::current_exe() else {
+        return;
+    };
+    // Below the reads people wait for, as the store's own compaction runs (G762).
+    let mut cmd = if cfg!(unix) {
+        let mut nice = std::process::Command::new("nice");
+        nice.args(["-n", "10"]).arg(bay);
+        nice
+    } else {
+        std::process::Command::new(bay)
+    };
+    cmd.arg("status");
+    if let Some(change) = change {
+        cmd.arg(change);
+    }
+    cmd.args(["--json", "--deadline", "0"])
+        .current_dir(&root)
+        .env(REFRESH_ENV, "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::platform::detach(&mut cmd);
+    match cmd.spawn() {
+        Ok(child) => crate::platform::reap(child),
+        Err(_) => {
+            let _ = std::fs::remove_file(&lock);
+        }
+    }
+}
+
+/// The end of a background read again ([`refresh`]): its lock goes, so the next read that finds
+/// the store moved may start another.
+pub fn refreshed(dir: &Path, change: Option<&str>) {
+    if !refreshing() {
+        return;
+    }
+    if let Some((root, common)) = checkout(dir) {
+        let _ = std::fs::remove_file(refresh_lock(&common, &root, change));
+    }
 }

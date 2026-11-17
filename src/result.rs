@@ -1605,6 +1605,21 @@ impl BayResult {
     #[must_use]
     pub fn say(&self) -> String {
         let said = self.say_core();
+        // G778: a status answer served from what this machine saved earlier names its age once it
+        // is a minute or more, as a queue read does (G770).
+        let said = match self.detail.as_ref() {
+            Some(detail)
+                if detail.get("schema").is_none()
+                    && detail["from_store"] == true
+                    && detail["age_s"].as_u64().is_some_and(|age| age >= 60) =>
+            {
+                format!(
+                    "{said} As read {} ago.",
+                    waited(detail["age_s"].as_u64().unwrap_or_default())
+                )
+            }
+            _ => said,
+        };
         // G754: a change bay opened from an author's newer revision names the one it follows.
         let follow_up = self.detail.as_ref().map(|detail| &detail["follow_up"]);
         match follow_up
@@ -2389,6 +2404,19 @@ mod tests {
     use super::{BayResult, Decision, Freshness, Reason, SCHEMA, plain, unplain};
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_status_answer_from_an_old_copy_says_how_old_it_is() {
+        let said = |age: u64| {
+            BayResult::ok(json!({"changes": [], "from_store": true, "age_s": age})).say()
+        };
+        assert!(
+            said(125).ends_with(" As read 2 minutes ago."),
+            "{}",
+            said(125)
+        );
+        assert!(!said(30).contains("As read"), "{}", said(30));
+    }
 
     #[test]
     fn a_line_from_an_old_copy_says_when_it_was_read() {

@@ -688,7 +688,7 @@ enum RunnerAction {
 /// with no Git: the config it was built under is still the one at trunk.
 fn saved_listing(cli: &Cli) -> Option<BayResult> {
     let Command::Status {
-        change: None,
+        change,
         all: false,
         lineage: None,
         branches: false,
@@ -699,6 +699,13 @@ fn saved_listing(cli: &Cli) -> Option<BayResult> {
     else {
         return None;
     };
+    // G778: a read that waits for nothing is answered before the config is read.
+    if *deadline == Some(0) {
+        return bay::status::from_store(&cli.dir, change.as_deref());
+    }
+    if change.is_some() {
+        return None;
+    }
     bay::status::saved_listing(
         &cli.dir,
         deadline.map_or_else(bay::status::default_deadline, Duration::from_secs),
