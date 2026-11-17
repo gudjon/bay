@@ -3761,6 +3761,16 @@ fn after_trunk_moved(
     if let Some(at) = *seq
         && ctx.visit != Visit::Own
     {
+        // G768 (a fleet measurement, 2026-11-17: a head that yielded "main moved" waited 277 s
+        // at the median for its next pass, which then ran no check on the new main: of 33 such
+        // merges in three hours, one ran a check after the move, and 7,301 s were that wait):
+        // a head no pre-merge check covers on the new main is built again and published in
+        // this visit, at most [`PASSES_PER_ENTRY`] times; a head a check must run for yields.
+        if ctx.op(op_id).trunk_moved <= PASSES_PER_ENTRY
+            && needs_no_check(&ctx.repo.git, moved.trunk, revision)?
+        {
+            return Ok(None);
+        }
         return yield_head(ctx, op_id, revision, at, "main moved").map(Some);
     }
     // § 6: bay retries once more, then the operation joins the publication queue.

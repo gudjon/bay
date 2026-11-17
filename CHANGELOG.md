@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.97
+
+- A head that needs no check lands in the same pass when main moves under it, instead of waiting a pass.
+
 ## 0.6.96
 
 - An ended change's view holding only bay's own commit is freed; the commit stays under a ref.
