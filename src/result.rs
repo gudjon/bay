@@ -1724,7 +1724,7 @@ fn queue_say(result: &BayResult) -> Option<String> {
     if detail.get("schema")? != crate::line::SCHEMA {
         return None;
     }
-    let said = line_say(detail)?;
+    let said = line_say(detail);
     if detail.get("from_store").and_then(Value::as_bool) != Some(true) {
         return Some(said);
     }
@@ -1736,7 +1736,7 @@ fn queue_say(result: &BayResult) -> Option<String> {
 }
 
 /// [`queue_say`] of the line in `detail`, whenever it was read.
-fn line_say(detail: &Value) -> Option<String> {
+fn line_say(detail: &Value) -> String {
     let count = |key: &str| {
         detail
             .get(key)
@@ -1746,7 +1746,7 @@ fn line_say(detail: &Value) -> Option<String> {
     let placed = count("places");
     let total = placed + count("arriving");
     if total == 0 {
-        return Some("Nothing waits to be added to main.".to_owned());
+        return "Nothing waits to be added to main.".to_owned();
     }
     let (subject, longest, them) = if total == 1 {
         ("One change waits".to_owned(), "it has", "it")
@@ -1759,10 +1759,10 @@ fn line_say(detail: &Value) -> Option<String> {
     } else {
         "to be added to main".to_owned()
     };
-    Some(match detail.get("oldest_wait_s").and_then(Value::as_u64) {
+    match detail.get("oldest_wait_s").and_then(Value::as_u64) {
         Some(secs) => format!("{subject} {object}; {longest} waited {}.", waited(secs)),
         None => format!("{subject} {object}."),
-    })
+    }
 }
 
 /// How a sentence names the checks of `rows` (each a red row with a `check`).
