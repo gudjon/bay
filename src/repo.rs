@@ -317,6 +317,18 @@ impl Repo {
         Self::open_with(dir, Fetch::First)
     }
 
+    /// G775: [`Repo::open_fetched`] whose one opening fetch also brings `reads`, refspecs that
+    /// never fail on a remote without their refs (patterns). Each is then taken once by
+    /// [`Repo::take_prefetched`], as a [`Repo::prefetch`] of it would be: a command that knows
+    /// its reads before it opens asks the remote once for all of them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Repo::open_fetched`].
+    pub fn open_fetched_with(dir: &Path, reads: &[String]) -> Result<Self, OpenError> {
+        Self::open_reading(dir, Fetch::First, reads)
+    }
+
     /// [`Repo::open`], whose error carries the common git directory when `dir` is in a
     /// repository bay cannot open, and `None` when no repository holds `dir`.
     ///
@@ -352,8 +364,13 @@ impl Repo {
     /// # Errors
     ///
     /// See [`OpenError`].
-    #[allow(clippy::too_many_lines)]
     pub fn open_with(dir: &Path, fetch: Fetch) -> Result<Self, OpenError> {
+        Self::open_reading(dir, fetch, &[])
+    }
+
+    /// [`Repo::open_with`], whose opening fetch, when it makes one, also brings `reads`.
+    #[allow(clippy::too_many_lines)]
+    fn open_reading(dir: &Path, fetch: Fetch, reads: &[String]) -> Result<Self, OpenError> {
         let here = Git::new(dir);
         let common = here
             .common_dir()
@@ -389,9 +406,11 @@ impl Repo {
         };
         let mut prefetched = None;
         let mut fetch_error = None;
+        let mut brought = Vec::new();
         let mut have = tip_of(&git).map_err(known)?;
         if fetch == Fetch::First || (fetch == Fetch::IfMissing && have.is_none()) {
-            let fetched = fetch_into(&git, &bootstrap, &work_root);
+            let fetched;
+            (fetched, brought) = opening_fetch(&git, &bootstrap, &work_root, reads);
             if let Err(error) = &fetched {
                 fetch_error = Some(error.message());
             }
@@ -436,7 +455,7 @@ impl Repo {
                     && bootstrap.source == format!("refs/remotes/{}/HEAD", bootstrap.remote)
                     && refresh_default(&git, &bootstrap)
                 {
-                    return Self::open_with(dir, fetch);
+                    return Self::open_reading(dir, fetch, reads);
                 }
                 return Err(known(format!(
                     "{tracking}:{CONFIG_PATH} names {key} \"{named}\", but this repository's {key} is \"{used}\" (main from {}); make \"{named}\" the remote's default branch, or run bay install --{key} {named}",
@@ -461,7 +480,7 @@ impl Repo {
             ),
             prefetched: Mutex::new(prefetched),
             evidence_fetched: std::sync::atomic::AtomicBool::new(false),
-            prefetched_specs: Mutex::new(std::collections::HashSet::new()),
+            prefetched_specs: Mutex::new(brought.into_iter().collect()),
             reads: Mutex::new(Reads::default()),
         })
     }
@@ -693,7 +712,7 @@ impl Repo {
         if let Some(opened) = opened {
             return opened;
         }
-        let fetched = fetch_into(&self.git, &self.bootstrap, &self.work_root);
+        let fetched = fetch_into(&self.git, &self.bootstrap, &self.work_root, &[]);
         if fetched.is_ok()
             && let Ok(mut at) = self.fetched_at.lock()
         {
@@ -740,16 +759,33 @@ impl Repo {
     /// second (a re-read after a lost race) asks again. A fetch that fails leaves none taken:
     /// each is fetched alone as before (a remote without one of the refs refuses the whole).
     pub fn prefetch(&self, refspecs: &[String]) {
+        // G775: what the opening fetch already brought is not asked for again.
+        let refspecs: Vec<&String> = match self.prefetched_specs.lock() {
+            Ok(specs) => refspecs
+                .iter()
+                .filter(|spec| !specs.contains(*spec))
+                .collect(),
+            Err(_) => refspecs.iter().collect(),
+        };
         if refspecs.is_empty() {
             return;
         }
         let mut args = vec!["fetch", "-q", "--no-tags", self.remote()];
-        args.extend(refspecs.iter().map(String::as_str));
+        args.extend(refspecs.iter().map(|spec| spec.as_str()));
         if self.git.run(&args).is_ok()
             && let Ok(mut specs) = self.prefetched_specs.lock()
         {
-            specs.extend(refspecs.iter().cloned());
+            specs.extend(refspecs.into_iter().cloned());
         }
+    }
+
+    /// Whether [`Repo::prefetch`] or the opening fetch brought `refspec` and no fetch has taken
+    /// it yet, leaving it untaken.
+    #[must_use]
+    pub fn has_prefetched(&self, refspec: &str) -> bool {
+        self.prefetched_specs
+            .lock()
+            .is_ok_and(|specs| specs.contains(refspec))
     }
 
     /// Whether [`Repo::prefetch`] brought `refspec` and no fetch has taken it yet; taking it.
@@ -758,6 +794,15 @@ impl Repo {
         self.prefetched_specs
             .lock()
             .is_ok_and(|mut specs| specs.remove(refspec))
+    }
+
+    /// G775: the registry as a pattern, which a remote without one answers with nothing rather
+    /// than refusing the fetch it rides in. No other ref of bay's begins with the registry's name.
+    /// Brought by the opening fetch, it stands for [`Repo::registry_refspec`].
+    #[must_use]
+    pub fn registry_pattern() -> String {
+        let name = crate::registry::REGISTRY_REF;
+        format!("+{name}*:{name}*")
     }
 
     /// The refspec [`Repo::fetch_registry`] fetches.
@@ -1115,10 +1160,59 @@ pub fn views_dirs_of(common_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Fetches the trunk `bootstrap` names into its tracking ref and returns its tip.
-fn fetch_into(git: &Git, bootstrap: &Bootstrap, work_root: &Path) -> Result<String, GitError> {
+/// An opening fetch of trunk, and of `reads` with it when this store is no partial clone (G775):
+/// a blob-less store fetches bay's records alone, with their blobs (G432), and a fetch that also
+/// brought trunk would bring trunk's blobs too, so there they wait for their own fetch. Returns
+/// the trunk's tip and the refspecs brought, the registry's own among them when its pattern was.
+fn opening_fetch(
+    git: &Git,
+    bootstrap: &Bootstrap,
+    work_root: &Path,
+    reads: &[String],
+) -> (Result<String, GitError>, Vec<String>) {
+    let reads = if reads.is_empty() || promisor(git, &bootstrap.remote) {
+        &[]
+    } else {
+        reads
+    };
+    let fetched = fetch_into(git, bootstrap, work_root, reads);
+    if fetched.is_err() {
+        return (fetched, Vec::new());
+    }
+    let mut brought = reads.to_vec();
+    if brought.contains(&Repo::registry_pattern()) {
+        brought.push(Repo::registry_refspec());
+    }
+    (fetched, brought)
+}
+
+/// Whether `remote` is a promisor remote: this store is a partial clone of it.
+fn promisor(git: &Git, remote: &str) -> bool {
+    git.config_get(&format!("remote.{remote}.promisor"))
+        .ok()
+        .flatten()
+        .is_some_and(|value| value == "true")
+}
+
+/// Fetches the remote's trunk into its tracking ref, and `reads` with it in the same round trip
+/// (G775), and returns the trunk's tip.
+fn fetch_into(
+    git: &Git,
+    bootstrap: &Bootstrap,
+    work_root: &Path,
+    reads: &[String],
+) -> Result<String, GitError> {
     let tracking = bootstrap.tracking_ref();
     let refspec = format!("+refs/heads/{}:{tracking}", bootstrap.trunk);
-    git.run(&["fetch", "-q", "--no-tags", &bootstrap.remote, &refspec])?;
+    let mut args = vec![
+        "fetch",
+        "-q",
+        "--no-tags",
+        bootstrap.remote.as_str(),
+        &refspec,
+    ];
+    args.extend(reads.iter().map(String::as_str));
+    git.run(&args)?;
     crate::coord::fetched(work_root);
     git.run(&["rev-parse", "--verify", &tracking])
 }

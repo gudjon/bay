@@ -90,7 +90,7 @@ pub fn declared_paths(paths: Vec<String>) -> Vec<String> {
 
 #[must_use]
 pub fn start(dir: &Path, request: &StartRequest) -> BayResult {
-    let repo = match Repo::open_fetched(dir) {
+    let repo = match Repo::open_fetched_with(dir, &start_reads(request)) {
         Ok(repo) => repo,
         Err(error) => return error.into_result(),
     };
@@ -636,7 +636,7 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         let (generation, supersedes) = match claims.last_key_value() {
             None => (1, None),
             Some((generation, change)) => {
-                let landed = remote_has(repo, &format!("{}{change}", crate::names::LANDED))?;
+                let landed = claim_merged(repo, &hash, *generation, change)?;
                 match (landed, request.new) {
                     // G293: a landed change closes its generation, so any start claims the
                     // next one, `--new` or not; the new change supersedes the landed one.
@@ -780,6 +780,57 @@ fn prefetch(repo: &Repo, request: &StartRequest) {
         refspecs.push(Repo::registry_refspec());
     }
     repo.prefetch(&refspecs);
+}
+
+/// G775 (a measurement, 2026-11-17: 469 starts on a busy box spent 18.1 s of their 23.4 s median
+/// on the network, in four fetches, an `ls-remote` and a push, each a round trip of 1.4 to 2.5 s
+/// whatever it carried): what a new change's start reads from the remote, as patterns a remote
+/// without those refs answers with nothing, so the opening fetch of trunk brings them in the same
+/// round trip: the intent's claims and merged claims, the shard index and the registry.
+fn start_reads(request: &StartRequest) -> Vec<String> {
+    let Some(intent) = request
+        .intent
+        .as_deref()
+        .filter(|_| request.resume.is_none())
+    else {
+        return Vec::new();
+    };
+    let hash = intent_hash(intent, &request.intent_revision);
+    vec![
+        claims_refspec(&hash),
+        merged_claims_refspec(&hash),
+        crate::compact::refspec(),
+        Repo::registry_pattern(),
+    ]
+}
+
+/// The refspec of every merged claim on the intent of `hash`.
+fn merged_claims_refspec(hash: &str) -> String {
+    let prefix = format!("{}{hash}/", crate::names::LANDED_INTENT);
+    format!("+{prefix}*:{prefix}*")
+}
+
+/// Whether generation `generation` of the intent hashed `hash`, which `change` claimed, merged.
+/// G775: when this start's opening fetch brought the intent's merged claims and the shard index
+/// and no read has taken them, the answer is local: a change's merge pushes its marker and its
+/// merged claim in one atomic push, and a claim is create-only, so the merged claim of the
+/// generation `change` claimed is there exactly when `change` merged. Else the remote is asked.
+fn claim_merged(repo: &Repo, hash: &str, generation: u64, change: &str) -> Result<bool, String> {
+    if repo.take_prefetched(&merged_claims_refspec(hash)) {
+        let merged = claim_of(hash, generation).landed_ref();
+        if repo
+            .git
+            .ref_target(&merged)
+            .map_err(|error| error.message())?
+            .is_some()
+        {
+            return Ok(true);
+        }
+        let marker = format!("{}{change}", crate::names::LANDED);
+        return Ok(crate::compact::recorded(&repo.git, &merged)?.is_some()
+            || crate::compact::recorded(&repo.git, &marker)?.is_some());
+    }
+    remote_has(repo, &format!("{}{change}", crate::names::LANDED))
 }
 
 /// The refspec of every claim on the intent of `hash`.
