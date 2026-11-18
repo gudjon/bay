@@ -68,13 +68,118 @@ pub fn status(dir: &Path, change: Option<&str>, deadline: Duration) -> BayResult
     }
     if change.is_none()
         && !crate::saved::refreshing()
-        && let Some(saved) = saved_listing(dir, deadline)
+        && let Some(mut saved) = saved_listing(dir, deadline)
     {
+        unchanged(dir, change, &mut saved);
         return saved;
     }
-    let result = run(dir, change, deadline).unwrap_or_else(BayResult::failed);
+    let mut result = run(dir, change, deadline).unwrap_or_else(BayResult::failed);
     crate::saved::refreshed(dir, change);
+    unchanged(dir, change, &mut result);
     result
+}
+
+/// The file in a session's state that keeps what its last status reads found (G776).
+const READS_FILE: &str = "status-reads.json";
+
+/// G776 (a measurement, 2026-11-17: 61 agent sessions read `bay status` 12,452 times in a day, a
+/// median of 315 each, most of them finding what the read before had found): a read whose
+/// changes stand as the session's earlier read of the same thing found them names how long,
+/// in `detail.unchanged_s`, and the change a wait in one call would watch, in
+/// `detail.wait_with`. The session is `BAY_SESSION`, which bay's hook gives each command of an
+/// agent's session; a read with none, or in the background read again, is not judged.
+fn unchanged(dir: &Path, change: Option<&str>, result: &mut BayResult) {
+    if result.decision != crate::result::Decision::Ok || crate::saved::refreshing() {
+        return;
+    }
+    let Ok(session) = std::env::var("BAY_SESSION") else {
+        return;
+    };
+    let safe = !session.is_empty()
+        && session.len() <= 128
+        && session
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    let (Some((_, common)), Some(detail), true) =
+        (crate::saved::checkout(dir), result.detail.as_mut(), safe)
+    else {
+        return;
+    };
+    let path = common
+        .join("bay")
+        .join("session-state")
+        .join(&session)
+        .join(READS_FILE);
+    let mut reads: serde_json::Map<String, Value> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let key = change.unwrap_or("").to_owned();
+    let print = standing_of(detail);
+    let now = crate::live::unix_now();
+    match reads.get(&key) {
+        Some(earlier) if earlier["print"] == print => {
+            let since = now.saturating_sub(earlier["at"].as_u64().unwrap_or(now));
+            detail["unchanged_s"] = json!(since);
+            if let Some(wait) = change.map(str::to_owned).or_else(|| one_under_way(detail)) {
+                detail["wait_with"] = json!(wait);
+            }
+        }
+        _ => {
+            reads.insert(key, json!({"print": print, "at": now}));
+            if let Some(parent) = path.parent()
+                && std::fs::create_dir_all(parent).is_ok()
+            {
+                let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+                if std::fs::write(&tmp, Value::Object(reads).to_string()).is_ok() {
+                    let _ = crate::durable::rename(&tmp, &path);
+                }
+            }
+        }
+    }
+}
+
+/// What a reader of `detail` acts on, of each change it names: its state and its operation's
+/// id, state, outcome, tries and place in line. Times and ages, which move every second, are
+/// not part of it.
+fn standing_of(detail: &Value) -> Value {
+    detail["changes"]
+        .as_array()
+        .map(|changes| {
+            changes
+                .iter()
+                .map(|row| {
+                    let op = &row["operation"];
+                    json!([
+                        row["change"],
+                        row["state"],
+                        op["op_id"],
+                        op["state"],
+                        op["outcome"],
+                        op["attempts"],
+                        op["line"]["place"],
+                        op["conflict"].is_null(),
+                    ])
+                })
+                .collect::<Vec<_>>()
+        })
+        .map_or(Value::Null, Value::from)
+}
+
+/// The one change of `detail` whose operation is under way, when it names exactly one.
+fn one_under_way(detail: &Value) -> Option<String> {
+    let under_way: Vec<&str> = detail["changes"]
+        .as_array()?
+        .iter()
+        .filter(|row| {
+            matches!(
+                row["operation"]["state"].as_str(),
+                Some("submitted" | "admitted" | "running" | "checked")
+            )
+        })
+        .filter_map(|row| row["change"].as_str())
+        .collect();
+    (under_way.len() == 1).then(|| under_way[0].to_owned())
 }
 
 /// G778: a read that may wait for nothing answers with what this machine last saved for it, its
@@ -85,10 +190,11 @@ pub fn from_store(dir: &Path, change: Option<&str>) -> Option<BayResult> {
     if crate::saved::refreshing() {
         return None;
     }
-    let (saved, old) = crate::saved::from_store(dir, change)?;
+    let (mut saved, old) = crate::saved::from_store(dir, change)?;
     if old {
         crate::saved::refresh(dir, change);
     }
+    unchanged(dir, change, &mut saved);
     Some(saved)
 }
 
@@ -2599,6 +2705,39 @@ fn claimed_s(repo: &Repo, change: &str, op_id: &str) -> Option<u64> {
 const LINE_SHORT_S: u64 = 2 * 3600;
 const LINE_LONG_S: u64 = 8 * 3600;
 
+/// G776 (a fleet finding, 2026-11-17: a change waited 171 minutes on another, and its status said
+/// only that it waits): each change `record` names in `after`, under an operation under way, read from this machine's records with no
+/// remote: its state, its latest operation's state and outcome, and its actor.
+fn after_here(
+    repo: &Repo,
+    record: &ChangeRecord,
+    published: bool,
+    op: &crate::change::Operation,
+    operation: &mut Value,
+) {
+    if record.after.is_empty() || published || op.state.is_terminal() {
+        return;
+    }
+    let chain = Chain::new(&repo.git);
+    operation["after"] = record
+        .after
+        .iter()
+        .map(|change| match chain.read(change) {
+            Ok((_, record)) => {
+                let op = record.operations.last();
+                json!({
+                    "change": change,
+                    "state": record.state,
+                    "operation": op.map(|op| op.state),
+                    "outcome": op.and_then(|op| op.outcome.clone()),
+                    "actor": record.actor.name,
+                })
+            }
+            Err(_) => json!({"change": change, "state": null}),
+        })
+        .collect();
+}
+
 fn describe(
     repo: &Repo,
     record: &ChangeRecord,
@@ -2659,6 +2798,8 @@ fn describe(
             under_way(repo, trunk, &record.id, op, &mut operation);
         }
         held_by(op, &mut operation);
+        // G776: a change held until others merge (`--after`) names each one and where it stands.
+        after_here(repo, record, published, op, &mut operation);
         if let Some(fault) = fault(record, unsynced, op, published) {
             operation["fault"] = fault;
         }

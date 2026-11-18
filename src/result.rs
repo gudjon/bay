@@ -1253,7 +1253,7 @@ impl Reason {
                 "Run `bay start` again with `--from <commit>`: `detail.local` takes this repository's branch, `detail.remote` the remote's. Or push yours first."
             }
             Self::DependencyPending => {
-                "Wait: it merges once each `--after` change merges. A `detail.pending` entry with `submitted: false` needs `bay merge`; one `blocked` needs what `bay status <change>` says."
+                "Wait: it merges once each `--after` change merges, each named in its status's `operation.after`; one not submitted needs `bay merge`."
             }
             Self::DependencyAbandoned => {
                 "Run `bay abandon`, then `bay start <intent> --new` without that `--after`; or restart the dropped change."
@@ -1620,6 +1620,20 @@ impl BayResult {
             }
             _ => said,
         };
+        // G776: a read that finds what the session's earlier read found says so, and names the
+        // wait in one call that replaces reading again.
+        let said = match self.detail.as_ref() {
+            Some(detail) if detail["unchanged_s"].is_u64() => {
+                let since = waited(detail["unchanged_s"].as_u64().unwrap_or_default());
+                match detail["wait_with"].as_str() {
+                    Some(change) => format!(
+                        "{said} Nothing changed since your read {since} ago; `bay merge {change} --wait` waits for it in one call."
+                    ),
+                    None => format!("{said} Nothing changed since your read {since} ago."),
+                }
+            }
+            _ => said,
+        };
         // G754: a change bay opened from an author's newer revision names the one it follows.
         let follow_up = self.detail.as_ref().map(|detail| &detail["follow_up"]);
         match follow_up
@@ -1650,6 +1664,20 @@ impl BayResult {
             Decision::Landed => "Saved and checked; it is now on main.".to_owned(),
             Decision::Queued if self.waiting_for.as_deref() == Some("remote") => {
                 "Saved here; it is sent and checked once main can be reached.".to_owned()
+            }
+            // G776: a watch that ended before the outcome names the next step, never a poll.
+            Decision::Queued
+                if detail.is_some_and(|detail| detail["observation_timeout_s"].is_u64()) =>
+            {
+                let change = self.change.as_deref().unwrap_or("<change>");
+                format!(
+                    "Still under way after {}; nothing for you to do. `bay merge {change} --wait` waits again in one call, or leave it: you are told when it merges or needs you.",
+                    waited(
+                        detail
+                            .and_then(|detail| detail["observation_timeout_s"].as_u64())
+                            .unwrap_or_default()
+                    )
+                )
             }
             Decision::Queued => match (
                 detail.and_then(|detail| detail["place"].as_u64()),
@@ -2135,6 +2163,29 @@ fn change_say(result: &BayResult) -> Option<String> {
     if !op["lease"].is_null() {
         return Some(format!("{id} is being checked now."));
     }
+    // G776: a change held until others merge names the first one not on main yet, and what
+    // holds that one.
+    if op["outcome"]
+        .as_str()
+        .is_none_or(|outcome| outcome == Reason::DependencyPending.code())
+        && let Some(first) = op["after"]
+            .as_array()
+            .and_then(|after| after.iter().find(|dep| dep["state"] != "landed"))
+    {
+        let dep = plain(first["change"].as_str().unwrap_or_default());
+        let actor = plain(first["actor"].as_str().unwrap_or("its author"));
+        return Some(match first["operation"].as_str() {
+            None => format!(
+                "{id} waits for {dep}, which is not submitted yet: {actor} must run bay merge for it."
+            ),
+            Some("blocked") => format!(
+                "{id} waits for {dep}, which stopped: {actor} must act on it, as bay status {dep} says."
+            ),
+            Some(_) => {
+                format!("{id} waits for {dep} to be added to main first; nothing for you to do.")
+            }
+        });
+    }
     let Some(outcome) = op["outcome"].as_str() else {
         return Some(no_outcome_say(id, op));
     };
@@ -2149,12 +2200,16 @@ fn change_say(result: &BayResult) -> Option<String> {
             paths.join(", ")
         ));
     }
+    // G776: waiting in line is not a task for the agent: the sentence says so, so nothing is
+    // read as owed or done.
     if outcome == Reason::Queued.code() {
         return Some(match op["place"].as_u64() {
             Some(place) => format!(
-                "{id} waits in line at place {place}; bay checks it and adds it to main in its turn."
+                "{id} waits in line at place {place}; nothing for you to do: bay adds it to main in its turn and tells you."
             ),
-            None => format!("{id} waits in line; bay checks it and adds it to main in its turn."),
+            None => format!(
+                "{id} waits in line; nothing for you to do: bay adds it to main in its turn and tells you."
+            ),
         });
     }
     if out_of_tries(op) {

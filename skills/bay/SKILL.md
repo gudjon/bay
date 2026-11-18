@@ -62,8 +62,9 @@ notes on views, overlaps and questions: read `commands.md` in this skill when yo
 
 ## Wait without polling
 
-- **Wait without polling.** To hear when a change merges, run `bay merge <change> --wait` (it does not submit it
-  again) or let `[plugin.wake]` wake the session. Never loop on `bay status`: its answer can be a minute old.
+- **Wait without polling.** To hear when a change merges, run `bay merge <change> --wait` as a background task
+  (it does not submit it again, and you are woken when it returns), or let `[plugin.wake]` wake the session.
+  Never read `bay status` again and again: each read is a turn, and one that finds nothing new says so.
 
 ## Read the result
 

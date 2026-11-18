@@ -320,6 +320,18 @@ pub fn land(
     observe: Option<Duration>,
     abandon: Option<Option<&str>>,
 ) -> BayResult {
+    // G776 (a fleet finding, 2026-11-17: `bay merge --wait=90` returned after 151 s, its watch
+    // timed from after the fetch, the submit and the start of the run): `--wait=<s>` bounds the
+    // whole command, from here.
+    let until = observe.map(|timeout| Instant::now() + timeout);
+    // In a test build, `BAY_TEST_LAND_DELAY_MS` stands for a slow fetch and submit on a loaded box.
+    if crate::version::TEST_HOOKS
+        && let Some(ms) = std::env::var("BAY_TEST_LAND_DELAY_MS")
+            .ok()
+            .and_then(|text| text.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
     let repo = match Repo::open_fetched(dir) {
         Ok(repo) => repo,
         Err(error) => return error.into_result(),
@@ -342,7 +354,14 @@ pub fn land(
             break;
         }
         result = match observe.filter(|_| wait) {
-            Some(timeout) => observe_land(&repo, dir, &id, &step, timeout),
+            Some(timeout) => observe_land(
+                &repo,
+                dir,
+                &id,
+                &step,
+                until.unwrap_or_else(Instant::now),
+                timeout,
+            ),
             None if wait => wait_land(&repo, &id, &step),
             None => submit_land(&repo, &id, &step, false),
         };
@@ -467,6 +486,7 @@ fn observe_land(
     dir: &Path,
     id: &str,
     step: &Step,
+    until: Instant,
     timeout: Duration,
 ) -> Result<BayResult, String> {
     let submitted = submit_land(repo, id, step, false)?;
@@ -491,15 +511,15 @@ fn observe_land(
         run.spawn()
             .map_err(|error| format!("the run could not be started: {error}"))?,
     );
-    let started = Instant::now();
     let chain = Chain::new(&repo.git);
+    let watch = Instant::now();
     // G752 (a fleet finding, 2026-11-16: a `merge --wait=7200` ran 61,303 Git commands, a
     // `rev-parse` and a `cat-file` five times a second, and nineteen such waits ended in fifteen
     // minutes on one box at load 70): the chain's head is read once a second, and its record only
     // when the head moved.
     let mut seen: Option<String> = None;
-    while started.elapsed() < timeout {
-        std::thread::sleep(Duration::from_secs(1).min(timeout));
+    while let Some(left) = until.checked_duration_since(Instant::now()) {
+        std::thread::sleep(Duration::from_secs(1).min(left));
         let Ok(Some(head)) = chain.head(id) else {
             continue;
         };
@@ -527,6 +547,8 @@ fn observe_land(
     result.waiting_for = Some("executor".to_owned());
     Ok(result.with_detail(json!({
         "observation_timeout_s": timeout.as_secs(),
+        // G776: how long this command watched, the rest of its wait spent submitting.
+        "watched_s": watch.elapsed().as_secs(),
         "the run continues": true,
     })))
 }

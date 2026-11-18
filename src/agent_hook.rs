@@ -824,12 +824,65 @@ fn pre_tool(product: Product, input: &str, dir: &Path) -> Outcome {
         Call::Edit(targets) => pre_tool_write(product, input, dir, &value, targets),
         Call::Shell(_) | Call::Other => shell_deny(product, "tool.before", input, dir),
     };
+    if let Call::Shell(command) = &call
+        && unknown.is_none()
+        && outcome.exit == 0
+        && outcome.stdout.is_empty()
+        && let Some(told) = poll_notice(product, input, dir, command)
+    {
+        return told;
+    }
     match unknown {
         Some(unreadable) if outcome.exit == 0 => {
             claims_unknown(product, input, dir, &unreadable, &outcome)
         }
         _ => outcome,
     }
+}
+
+/// G776: the line a session gets when it runs a loop over `bay status`.
+const POLL_LINE: &str = "bay: each `bay status` in a loop costs a turn. Run `bay merge <change> --wait` as a background task instead: it returns when the change merges or needs you, and you are woken then.\n";
+
+/// G776: whether `command` reads `bay status` in a loop: `bay status` beside a loop or a wait
+/// (`until`, `while`, `for`, `sleep`, `watch`).
+fn polls_status(command: &str) -> bool {
+    let words: Vec<&str> = command
+        .split(|c: char| c.is_whitespace() || ";&|()`$".contains(c))
+        .filter(|word| !word.is_empty())
+        .collect();
+    let reads = words
+        .windows(2)
+        .any(|pair| pair[0].rsplit('/').next() == Some("bay") && pair[1] == "status");
+    reads
+        && words
+            .iter()
+            .any(|word| matches!(*word, "until" | "while" | "for" | "sleep" | "watch"))
+}
+
+/// G776: a shell call that reads `bay status` in a loop is allowed, with one line saying that a
+/// wait in one call is cheaper, at most once an hour and within the session's notice budget.
+fn poll_notice(product: Product, input: &str, dir: &Path, command: &str) -> Option<Outcome> {
+    if !polls_status(command) {
+        return None;
+    }
+    let payload = Payload::parse(product, "tool.before", input, dir)?;
+    let session = payload.session.as_ref()?;
+    let repo = crate::repo::Repo::open(&payload.cwd).ok()?;
+    let state = crate::session::state_dir(&repo, session);
+    if !crate::notice::poll_once(&state, POLL_LINE, repo.config.notice_budget()) {
+        return None;
+    }
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": POLL_LINE,
+        },
+    });
+    Some(Outcome {
+        exit: 0,
+        stdout: format!("{output}\n"),
+        stderr: POLL_LINE.to_owned(),
+    })
 }
 
 /// `bay hook talk-wait` (G54): poll this actor's talks for at most an hour, on the poll schedule;

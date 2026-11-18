@@ -95,10 +95,18 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
     } else {
         arriving(repo, &in_line, now, &mut unread)?
     };
+    // G776 (a fleet finding, 2026-11-17: the line read "the longest has waited 171 minutes"
+    // while no place had waited 12): a change held until another merges (`--after`) waits for
+    // that change, not for the line, so its wait is not the line's.
     let oldest = places
         .iter()
         .map(|place| now.saturating_sub(place.joined))
-        .chain(arriving.iter().filter_map(|row| row["waited_s"].as_u64()))
+        .chain(
+            arriving
+                .iter()
+                .filter(|row| row["held_by"].as_array().is_none_or(Vec::is_empty))
+                .filter_map(|row| row["waited_s"].as_u64()),
+        )
         .max();
     Ok(json!({
         "schema": SCHEMA,
@@ -159,6 +167,7 @@ fn arriving(
         unread.push(json!({"change": change, "why": why}));
     }
     let fresh = records(repo, &changes);
+    let chain = Chain::new(&repo.git);
     let mut waiting: Vec<(&ChangeRecord, &Operation)> = Vec::new();
     for (change, request) in &requests {
         let Some(record) = fresh.iter().find(|record| &record.id == change) else {
@@ -198,6 +207,11 @@ fn arriving(
                 "paths": crate::inputs::paths(&record.declared_inputs),
                 "fixes": record.fixes,
                 "after": record.after,
+                "outcome": op.outcome,
+                // G776: the changes it names that are not on main yet here, which hold it.
+                "held_by": record.after.iter().filter(|change| {
+                    chain.read(change).map_or(true, |(_, named)| named.state != ChangeState::Landed)
+                }).collect::<Vec<_>>(),
                 "requested_at": at.map(crate::clock::rfc3339_of),
                 "waited_s": at.map(|at| now.saturating_sub(at)),
             });
@@ -368,7 +382,7 @@ pub fn schema() -> Value {
                     "type": "object",
                     "required": [
                         "change", "op_id", "intent", "actor", "paths", "fixes", "after",
-                        "requested_at", "waited_s",
+                        "outcome", "held_by", "requested_at", "waited_s",
                     ],
                     "additionalProperties": false,
                     "properties": {
@@ -379,6 +393,8 @@ pub fn schema() -> Value {
                         "paths": strings.clone(),
                         "fixes": maybe(string.clone()),
                         "after": strings.clone(),
+                        "outcome": maybe(string.clone()),
+                        "held_by": strings.clone(),
                         "requested_at": maybe(string.clone()),
                         "waited_s": maybe(count.clone()),
                     },

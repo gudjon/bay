@@ -133,6 +133,8 @@ struct Cursor {
     /// G287: the session was told that no executor is live while operations wait, and that
     /// state has not changed since.
     no_executor: bool,
+    /// G776: when the session was last told that a loop over `bay status` costs a turn a read.
+    poll_told_s: Option<u64>,
 }
 
 /// Whose notices a hook gives: the view's change, if the session is in a view, and the
@@ -1142,6 +1144,30 @@ fn red_line(change: &str, event: &Value) -> String {
     .collect();
     out.push('\n');
     out
+}
+
+/// G776 (a measurement, 2026-11-17: 61 agent sessions read `bay status` 12,452 times in a day, 1,090
+/// of those inside a shell loop, each read a turn of the model): tells the session at `state_dir`
+/// `line` about polling, at most once an hour and within its notice budget of `budget` bytes.
+/// Whether it was told; nothing is told when the cursor cannot be written, so it never repeats.
+#[must_use]
+pub fn poll_once(state_dir: &Path, line: &str, budget: u64) -> bool {
+    let mut cursor = read(state_dir).unwrap_or_default();
+    let now = now_s();
+    if cursor
+        .poll_told_s
+        .is_some_and(|told| now >= told && now - told < WINDOW_S)
+    {
+        return false;
+    }
+    open_window(&mut cursor, now);
+    let bytes = line.len() as u64;
+    if cursor.bytes.saturating_add(bytes) > budget {
+        return false;
+    }
+    cursor.bytes += bytes;
+    cursor.poll_told_s = Some(now);
+    write(state_dir, &cursor).is_ok()
 }
 
 #[cfg(test)]
