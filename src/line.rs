@@ -500,9 +500,19 @@ impl Line {
                 Some((name.strip_prefix(CHANGES)?.to_owned(), oid.to_owned()))
             })
             .collect();
+        // A change whose record here has ended is no place and no arrival: its moved head (a
+        // retention cut, say) is not this read's to settle. A store far behind would otherwise
+        // settle every ended change once, one by one (a measured first read: 1,400, 153 s).
+        let ended: BTreeSet<String> = Chain::new(git)
+            .read_all()
+            .ok()?
+            .into_iter()
+            .filter(|held| crate::status::ended(held.record.state))
+            .map(|held| held.id)
+            .collect();
         let mut current = BTreeSet::new();
         let mut moved = Vec::new();
-        for change in &requested {
+        for change in requested.iter().filter(|change| !ended.contains(*change)) {
             match heads.get(change) {
                 Some(head) if locals.get(change) == Some(head) => {
                     current.insert(change.clone());
