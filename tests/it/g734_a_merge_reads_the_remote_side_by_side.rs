@@ -68,7 +68,11 @@ fn a_merge_reads_the_remote_in_four_waves() {
         String::from_utf8_lossy(&out.stdout)
     );
 
-    // THEN its remote calls make four waves: trunk, the reads side by side, the push, the queue
+    // THEN its remote calls make four waves: trunk, the reads side by side, the push, the queue.
+    // Waves are judged by time: on a loaded box a fast read can end before its sibling's thread
+    // starts, splitting one wave in two, so one split is allowed; reads one after another make
+    // seven.
     let text = std::fs::read_to_string(&trace).expect("the trace was written");
-    assert_eq!(waves(&text), 4, "{text}");
+    let made = waves(&text);
+    assert!((4..=5).contains(&made), "{made} waves: {text}");
 }
