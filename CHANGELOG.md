@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.102
+
+- A store bay fetches into keeps its refs packed, so a fetch never walks thousands of loose refs.
+- An ended change's view is freed after its window; its unsaved work is kept under `refs/bay/view-kept/`.
+
 ## 0.6.101
 
 - A status read that repeats an unchanged answer says so once, and how to wait in one call.
