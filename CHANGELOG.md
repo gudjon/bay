@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.104
+
+- Runners keep their lease on a ref of its own, so a change's history no longer grows with every heartbeat.
+- A host running bay's hook takes this release before its runners: older hooks refuse the lease ref.
+- A merge-time range's high end is now the 95th percentile, so fewer changes land later than it says.
+
 ## 0.6.103
 
 - bay status says when each live change reaches main, from its draft on, with a range and speedups.
