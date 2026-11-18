@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.103
+
+- bay status says when each live change reaches main, from its draft on, with a range and speedups.
+- The estimate's accuracy shows in the flow's recent section; each check environment shows its waiting changes, runners and check times.
+- A draft says what its agent did last: edit, check, commit, command, idle or waiting on you.
+
 ## 0.6.102
 
 - A store bay fetches into keeps its refs packed, so a fetch never walks thousands of loose refs.
