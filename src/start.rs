@@ -1397,6 +1397,23 @@ fn fetch_from(repo: &Repo, remote: &str, reference: &str, full: &str) -> Result<
     })
 }
 
+/// The paths and the named inputs `request` declares, in that order (§ 3.1).
+fn declared_inputs(request: &StartRequest) -> Vec<DeclaredInput> {
+    request
+        .paths
+        .iter()
+        .cloned()
+        .map(DeclaredInput::Path)
+        .chain(
+            request
+                .inputs
+                .iter()
+                .cloned()
+                .map(|input| DeclaredInput::Named { input }),
+        )
+        .collect()
+}
+
 /// Creates the change and its claim in one atomic push (§ 4), so a crash never leaves a claim
 /// without a change. Returns `None` when another start claimed the generation first. A change
 /// that takes in an outside branch (G268) starts from its draft rather than from `base`.
@@ -1413,19 +1430,7 @@ fn create(
 ) -> Result<Option<BayResult>, String> {
     let id = new_change_id().map_err(|error| error.to_string())?;
     let intent_ref = claim.intent_ref();
-    let declared_inputs = request
-        .paths
-        .iter()
-        .cloned()
-        .map(DeclaredInput::Path)
-        .chain(
-            request
-                .inputs
-                .iter()
-                .cloned()
-                .map(|input| DeclaredInput::Named { input }),
-        )
-        .collect();
+    let declared_inputs = declared_inputs(request);
     let mut record = ChangeRecord {
         schema: RECORD_SCHEMA.to_owned(),
         id: id.clone(),
@@ -1455,6 +1460,7 @@ fn create(
         lane: request.lane.clone(),
         from: taken_in.and_then(|taken_in| taken_in.from.clone()),
         after: dedup(&request.after),
+        started_at: Some(crate::live::unix_now()),
     };
     let draft = taken_in.map_or(base, |taken_in| taken_in.draft.as_str());
     // § 8: the view is of `base`, so what the actor reads there is what it observed.

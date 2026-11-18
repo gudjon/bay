@@ -291,6 +291,11 @@ pub struct ChangeRecord {
     /// trailer per change. Written at start.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub after: Vec<String>,
+    /// G786: when `bay start` opened the change, in Unix seconds on the clock of the machine that
+    /// started it, so a draft's age is read, never walked from its history. Written once at
+    /// start, never moved; absent in a record written before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
 }
 
 /// The branch made outside bay a change took in (`bay start --from`, G268): the ref as the

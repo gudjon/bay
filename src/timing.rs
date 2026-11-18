@@ -38,6 +38,7 @@ use crate::git::Git;
 /// The timing fields a terminal record may carry, as `bay status` copies them onto the
 /// operation row.
 pub const FIELDS: &[&str] = &[
+    "started_at",
     "submitted_at",
     "queued_at",
     "head_at",

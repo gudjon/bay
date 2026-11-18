@@ -264,6 +264,41 @@ pub struct Payload {
     pub permission_mode: Option<String>,
     /// G707: the step's tool calls were all of tools that write no file ([`READ_ONLY_TOOLS`]).
     pub reads_only: bool,
+    /// G786b: the shell commands the step's calls ran ([`shell_commands`]), only to say what the
+    /// step did; never recorded.
+    pub shell: Vec<String>,
+}
+
+/// G786b: the most shell commands of one step that are read, and the most bytes of each.
+const SHELL_KEPT: usize = 8;
+const SHELL_BYTES: usize = 1024;
+
+/// G786b: the `tool_input.command` of each shell call (`tool_name: "Bash"`, the shell's shape in
+/// both products' recordings) of a post-tool payload: a batch's `tool_calls`, or one call. At
+/// most [`SHELL_KEPT`], each cut to [`SHELL_BYTES`] at a character's edge.
+fn shell_commands(event: Event, value: &Value) -> Vec<String> {
+    let calls: Vec<&Value> = match event {
+        Event::PostToolBatch => value["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .collect(),
+        Event::PostToolUse => vec![value],
+        _ => Vec::new(),
+    };
+    calls
+        .into_iter()
+        .filter(|call| call["tool_name"] == "Bash")
+        .filter_map(|call| call["tool_input"]["command"].as_str())
+        .take(SHELL_KEPT)
+        .map(|command| {
+            let mut end = command.len().min(SHELL_BYTES);
+            while !command.is_char_boundary(end) {
+                end -= 1;
+            }
+            command[..end].to_owned()
+        })
+        .collect()
 }
 
 /// G707 (a measurement, 2026-11-12: the view's status took 1.4 s on a large tree at every tool
@@ -321,6 +356,7 @@ impl Payload {
             stop_hook_active: value["stop_hook_active"].as_bool(),
             edited: product.edited(event, &value),
             reads_only: reads_only(&value),
+            shell: shell_commands(event, &value),
             permission_mode: value["permission_mode"]
                 .as_str()
                 .filter(|mode| {

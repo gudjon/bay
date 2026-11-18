@@ -2132,6 +2132,45 @@ fn no_live_runner(detail: &Value) -> bool {
 /// The sentence of a status read of one change, from that change's own row (fleet findings,
 /// 2026-10-27: four seats read "Done; nothing else is needed" for a change still in line).
 fn change_say(result: &BayResult) -> Option<String> {
+    let said = change_state_say(result)?;
+    let row = &result.detail.as_ref()?["changes"][0];
+    Some(match eta_say(row) {
+        Some(eta) => format!("{said} {eta}"),
+        None => said,
+    })
+}
+
+/// G786: when a live change is on main, in plain words, from its estimate: "On dev in about
+/// 12 min (4 min–30 min)." The branch is named as it is called; the first way to bring it sooner
+/// follows.
+fn eta_say(row: &Value) -> Option<String> {
+    use crate::eta::plain_span;
+    let eta = &row["eta"];
+    let left = &eta["remaining_s"];
+    let (low, likely, high) = (
+        left["low"].as_u64()?,
+        left["likely"].as_u64()?,
+        left["high"].as_u64()?,
+    );
+    let main = eta["main"].as_str().unwrap_or("main");
+    let mut said = if high < 60 {
+        format!("On {main} within a minute.")
+    } else {
+        format!(
+            "On {main} in about {} ({}–{}).",
+            plain_span(likely),
+            plain_span(low),
+            plain_span(high)
+        )
+    };
+    if let Some(first) = eta["speedups"][0]["what"].as_str() {
+        said.push(' ');
+        said.push_str(first);
+    }
+    Some(said)
+}
+
+fn change_state_say(result: &BayResult) -> Option<String> {
     let id = result.change.as_deref()?;
     let [row] = result
         .detail

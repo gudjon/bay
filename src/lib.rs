@@ -29,6 +29,7 @@ pub mod disk;
 pub mod doctor;
 pub mod durable;
 pub mod enrol;
+pub mod eta;
 pub mod evidence;
 pub mod executor;
 pub mod facts;

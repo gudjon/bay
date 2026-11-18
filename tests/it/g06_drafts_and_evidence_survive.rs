@@ -50,6 +50,7 @@ fn record(id: &str, base: &str) -> ChangeRecord {
         lane: None,
         from: None,
         after: Vec::new(),
+        started_at: None,
     }
 }
 

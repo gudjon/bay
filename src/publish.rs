@@ -9828,6 +9828,10 @@ fn write_terminal(
     if let Some(batch) = attempt.and_then(|attempt| attempt.batch.as_ref()) {
         record["batch"] = json!(batch);
     }
+    // G786: when the change was started, so its draft's time outlives the change's record.
+    if let Some(started_at) = ctx.record.started_at {
+        record["started_at"] = json!(started_at);
+    }
     // ROADMAP § 3: queue wait and check time, from the commit times of the chain's own states.
     if let Some(fields) = record.as_object_mut() {
         fields.extend(crate::timing::of(&ctx.repo.git, &ctx.head, op, outcome));

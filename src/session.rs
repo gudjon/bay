@@ -266,7 +266,7 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
         "event": event.record_name(),
         "heartbeat": true,
     });
-    payload_fields(&mut line, payload, &state_dir);
+    payload_fields(&mut line, payload, &state_dir, &repo);
     if let Some(state) = payload.state_after() {
         line["state"] = Value::from(state);
     }
@@ -323,6 +323,160 @@ fn record_line(payload: &Payload, extra: &serde_json::Map<String, Value>) -> Opt
     Some(recorded)
 }
 
+/// G786b (owner, 2026-11-18: a draft is estimated by what it is doing, and flagged when idle):
+/// what one step did, in one word, from the step's own calls: `edit` (an edit tool wrote a
+/// file), `check` (a shell command ran a check the policy on main declares, by its `command`),
+/// `commit` (`git commit`), `bay` (a bay command), `command` (any other shell command), `read`
+/// (only tools that write nothing) or `working`. The first that applies, in that order. The policy
+/// is read only for a step that ran a shell command other than bay's: one Git call.
+fn activity(repo: &Repo, payload: &Payload) -> Option<&'static str> {
+    if !payload.ends_step() {
+        return None;
+    }
+    if !payload.edited.is_empty() {
+        return Some("edit");
+    }
+    let runs: Vec<String> = payload
+        .shell
+        .iter()
+        .flat_map(|command| runs_of(command))
+        .collect();
+    if runs.is_empty() {
+        return Some(if payload.reads_only {
+            "read"
+        } else {
+            "working"
+        });
+    }
+    let word = |run: &str, at: usize| run.split_whitespace().nth(at).map(str::to_owned);
+    let is_bay =
+        |run: &String| word(run, 0).is_some_and(|first| first == "bay" || first.ends_with("/bay"));
+    if !runs.iter().all(is_bay) {
+        let checks = declared_checks(repo);
+        if runs
+            .iter()
+            .any(|run| checks.iter().any(|check| runs_check(run, check)))
+        {
+            return Some("check");
+        }
+    }
+    if runs.iter().any(|run| {
+        word(run, 0).as_deref() == Some("git") && word(run, 1).as_deref() == Some("commit")
+    }) {
+        return Some("commit");
+    }
+    Some(if runs.iter().any(is_bay) {
+        "bay"
+    } else {
+        "command"
+    })
+}
+
+/// G786b: each command a shell line runs, split at `&&`, `||`, `;`, `|` and new lines, each
+/// without its leading `NAME=value` settings and `./`.
+fn runs_of(command: &str) -> Vec<String> {
+    command
+        .split(['\n', ';', '|', '&'])
+        .map(|run| {
+            let words: Vec<&str> = run
+                .split_whitespace()
+                .skip_while(|word| word.contains('=') && !word.starts_with('-'))
+                .collect();
+            words.join(" ").trim_start_matches("./").to_owned()
+        })
+        .filter(|run| !run.is_empty())
+        .collect()
+}
+
+/// G786b: whether `run` runs `check`, a declared check command: the command itself, with more
+/// arguments, or a shorter form of it of two words or more.
+fn runs_check(run: &str, check: &str) -> bool {
+    run == check
+        || run.starts_with(&format!("{check} "))
+        || (run.contains(' ') && check.starts_with(&format!("{run} ")))
+}
+
+/// G786b: the `command` of each `[[check]]` the policy on main declares, each without its
+/// leading `./`; none when it cannot be read.
+fn declared_checks(repo: &Repo) -> Vec<String> {
+    #[derive(serde::Deserialize)]
+    struct Declared {
+        #[serde(default)]
+        check: Vec<Check>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Check {
+        #[serde(default)]
+        command: String,
+    }
+    let Ok(Some(text)) = repo
+        .git
+        .file_at(&repo.trunk_tracking_ref(), crate::policy::POLICY_PATH)
+    else {
+        return Vec::new();
+    };
+    toml::from_str::<Declared>(&text)
+        .map(|declared| {
+            declared
+                .check
+                .into_iter()
+                .map(|check| check.command.trim().trim_start_matches("./").to_owned())
+                .filter(|command| !command.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// How much of the end of a session's work record [`last_activity`] reads.
+const TAIL_BYTES: u64 = 64 * 1024;
+
+/// G786b: what the session that holds change `record` (its actor's session) did last, read from
+/// the end of that session's work record with no Git call: `{at, kind, age_s, in_view}`. `kind`
+/// is the step's [`activity`], else the session's state then (`working`, `idle`, `waiting` on a
+/// person, `ended`); `waiting_for` names what it waits for; `in_view` says whether that line was
+/// in the change's own view, else the session was busy elsewhere. `None` when the session left no
+/// record here.
+#[must_use]
+pub fn last_activity(repo: &Repo, record: &ChangeRecord, now: u64) -> Option<Value> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let session = SessionId::parse(&record.actor.session)?;
+    let path = repo
+        .common_dir
+        .join("bay")
+        .join("sessions")
+        .join(format!("{}.jsonl", session.as_str()));
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(length.saturating_sub(TAIL_BYTES)))
+        .ok()?;
+    let mut tail = Vec::new();
+    file.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    text.lines().rev().find_map(|line| {
+        let line: Value = serde_json::from_str(line).ok()?;
+        let kind = line["activity"].as_str().or_else(|| {
+            match (line["state"].as_str(), line["event"].as_str()) {
+                (Some(state), _) if state.starts_with("blocked") => Some("working"),
+                (Some(state @ ("working" | "idle" | "waiting" | "ended")), _) => Some(state),
+                (None, Some("subagent_start" | "subagent_stop")) => Some("working"),
+                _ => None,
+            }
+        })?;
+        let at = line["at"].as_str()?;
+        let age = crate::clock::unix_of(at).map(|at| now.saturating_sub(at));
+        let mut out = serde_json::json!({
+            "at": at,
+            "kind": kind,
+            "age_s": age,
+            "in_view": line["change"] == record.id.as_str(),
+        });
+        if let Some(what) = line["waiting_for"]["kind"].as_str() {
+            out["waiting_for"] = Value::from(what);
+        }
+        Some(out)
+    })
+}
+
 /// The hook's own state of `session`: `<git-common-dir>/bay/session-state/<session>`.
 pub(crate) fn state_dir(repo: &Repo, session: &SessionId) -> PathBuf {
     repo.common_dir
@@ -332,8 +486,12 @@ pub(crate) fn state_dir(repo: &Repo, session: &SessionId) -> PathBuf {
 }
 
 /// The fields of the line that come from the payload: a subagent's `agent`, and the product's
-/// `permission_mode` (G153); and when the session started (`started`, G166).
-fn payload_fields(line: &mut Value, payload: &Payload, state_dir: &Path) {
+/// `permission_mode` (G153); when the session started (`started`, G166); and what a step did
+/// (`activity`, G786b).
+fn payload_fields(line: &mut Value, payload: &Payload, state_dir: &Path, repo: &Repo) {
+    if let Some(kind) = activity(repo, payload) {
+        line["activity"] = Value::from(kind);
+    }
     if let Some(agent) = &payload.agent {
         line["agent"] = Value::from(agent.as_str());
     }

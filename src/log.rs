@@ -467,6 +467,24 @@ pub fn published_of(git: &Git, changes: &BTreeSet<&str>) -> Result<Vec<Value>, S
         .collect())
 }
 
+/// G786: the published terminal records of every change, from every executor log this
+/// repository holds, published at or after `since` (Unix seconds). It reads the logs as
+/// [`records_for`] does, once per state of the logs, so a status that described a change has
+/// already paid for it.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn published_since(git: &Git, since: u64) -> Result<Vec<Value>, String> {
+    every_record(git, &|record| {
+        record["schema"] != EVENT_SCHEMA
+            && record["outcome"] == "published"
+            && record["published_at"]
+                .as_u64()
+                .is_some_and(|at| at >= since)
+    })
+}
+
 /// Every terminal record for change `id`, from every executor log this repository holds.
 ///
 /// # Errors

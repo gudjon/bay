@@ -283,6 +283,7 @@ pub fn cached(
     let chains = Chain::new(&repo.git)
         .read_all()
         .map_err(|error| error.message())?;
+    let shared = Shared::default();
     let mut changes = Vec::new();
     for held in chains {
         let (id, record) = (held.id.as_str(), held.record);
@@ -294,7 +295,14 @@ pub fn cached(
             .map(|(_, receipt)| receipt)
             .filter(|receipt| receipt.change == id)
             .collect();
-        changes.push(describe(repo, &record, &trunk, &unsynced, &Read::Cached)?);
+        changes.push(describe(
+            repo,
+            &record,
+            &trunk,
+            &unsynced,
+            &Read::Cached,
+            &shared,
+        )?);
     }
     let mut result = BayResult::ok(json!({"changes": changes, "trunk": trunk}));
     result.freshness = Some(Freshness {
@@ -659,6 +667,7 @@ fn shown_changes(
     let threads = described.len().clamp(1, LEFTOVER_THREADS);
     let per = described.len().div_ceil(threads).max(1);
     let pending = &pending;
+    let shared = &Shared::default();
     let rows: Vec<Result<Value, String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = described
             .chunks(per)
@@ -671,7 +680,7 @@ fn shown_changes(
                                 .map(|(_, receipt)| receipt)
                                 .filter(|receipt| receipt.change == record.id)
                                 .collect();
-                            describe(repo, record, trunk, &unsynced, read)
+                            describe(repo, record, trunk, &unsynced, read, shared)
                         })
                         .collect::<Vec<_>>()
                 })
@@ -2611,53 +2620,148 @@ fn receipt_state(
 }
 
 /// G755 (owner, 2026-11-16: busy people want to know at once when their change is on main):
-/// an operation in the line names its place, how many live places are ahead of it, and how
-/// long the line takes to reach it at the pace main measured: the changes that landed on main
-/// in the last two and the last eight hours. The faster pace gives the low end, the slower the
-/// high end, each with its window and count; with no landing in a window there is no estimate,
-/// never a guess. Read from this store's queue refs and main, with no call to the remote.
-fn line_of(repo: &Repo, trunk: &str, op_id: &str) -> Option<Value> {
-    let places = crate::queue::Queue::live_here(repo).ok()?;
+/// an operation in the line names its place and how many live places are ahead of it, read from
+/// this store's queue refs with no call to the remote. When the line reaches it is the change's
+/// `eta` (G786), which replaced the pace of main this row once gave: that range held 6% of the
+/// outcomes on a busy store.
+fn line_of(places: &[crate::queue::Place], op_id: &str) -> Option<Value> {
     let at = places.iter().position(|place| place.entry.op_id == op_id)?;
-    let ahead = at;
-    let rates: Vec<(u64, u64)> = [LINE_SHORT_S, LINE_LONG_S]
-        .iter()
-        .filter_map(|window| {
-            let since = format!("--since={window} seconds ago");
-            let count = repo
-                .git
-                .run(&["rev-list", "--count", "--first-parent", &since, trunk])
-                .ok()?
-                .trim()
-                .parse::<u64>()
-                .ok()?;
-            Some((*window, count))
-        })
-        .collect();
-    // Whole seconds: the line reaches this place after `ahead + 1` landings, one per
-    // `window / count` seconds at that window's pace.
-    let reach: Vec<u64> = rates
-        .iter()
-        .filter(|(_, count)| *count > 0)
-        .map(|(window, count)| (ahead as u64 + 1) * window / count)
-        .collect();
-    let eta = match (reach.iter().min(), reach.iter().max()) {
-        (Some(low), Some(high)) => json!({"low_s": low, "high_s": high}),
-        _ => Value::Null,
-    };
-    let basis: Vec<Value> = rates
-        .iter()
-        .map(|(window, count)| {
-            json!({"window_s": window, "merged": count, "per_hour": (count * 3600 + window / 2) / window})
-        })
-        .collect();
     Some(json!({
         "place": at + 1,
-        "ahead": ahead,
+        "ahead": at,
         "of": places.len(),
-        "eta": eta,
-        "basis": basis,
     }))
+}
+
+/// What one read learns once for every change it describes (G772: a read whose Git calls grow
+/// with the live changes is a defect): the line as this store holds it, and what the landings
+/// of the estimate's window say (G786). Each is read when a change first needs it.
+#[derive(Default)]
+struct Shared {
+    places: std::sync::OnceLock<Option<Vec<crate::queue::Place>>>,
+    past: std::sync::OnceLock<Option<crate::eta::Past>>,
+}
+
+impl Shared {
+    fn places(&self, repo: &Repo) -> Option<&[crate::queue::Place]> {
+        self.places
+            .get_or_init(|| crate::queue::Queue::live_here(repo).ok())
+            .as_deref()
+    }
+
+    fn past(&self, repo: &Repo, now: u64) -> Option<&crate::eta::Past> {
+        self.past
+            .get_or_init(|| {
+                // The line's cases count the places ahead of each when it joined, so the
+                // landings before the window are read too: one window more.
+                let since = now.saturating_sub(2 * crate::eta::WINDOW_S);
+                let records = crate::log::published_since(&repo.git, since).ok()?;
+                Some(crate::eta::Past::of(&records, now))
+            })
+            .as_ref()
+    }
+}
+
+/// How long a draft's agent is idle before its estimate says so.
+const IDLE_SAID_S: u64 = 5 * 60;
+
+/// G786: the estimate of when live change `record` is on main ([`crate::eta`]), from the stage
+/// it is in: a draft counts from its start; a sent operation from its request (`elapsed_s`); one
+/// in line by the places ahead of it (`operation.line`); one a runner holds from its claim
+/// (`claimed_s`). A draft or a sent change joins the whole line. An operation that stopped, or
+/// waits for a person's yes, has no estimate until someone acts. It names `main`, the branch's
+/// own name, and `speedups`: what would bring it sooner, each with the seconds it would save
+/// (null when no case measures it).
+fn eta_of(
+    repo: &Repo,
+    record: &ChangeRecord,
+    operation: &Value,
+    activity: Option<&Value>,
+    shared: &Shared,
+    now: u64,
+) -> Value {
+    use crate::change::OpState;
+    use crate::eta::{Live, Stage};
+    let op = record.operations.last();
+    if let Some(op) = op.filter(|op| {
+        op.state == OpState::Blocked
+            && (crate::publish::awaits_approval(op) || !crate::publish::asked_again(op))
+    }) {
+        let why = if crate::publish::awaits_approval(op) {
+            "it waits for a person's yes"
+        } else {
+            "it stopped: next_step says who acts"
+        };
+        return json!({"stage": "stopped", "main": repo.trunk(), "on_main_at": null, "why": why});
+    }
+    let line_length = shared.places(repo).map_or(0, <[_]>::len) as u64;
+    let under_way = op.is_some_and(|op| !op.state.is_terminal());
+    let live = match op {
+        Some(op) if under_way && op.owner.is_some() => Live {
+            stage: Stage::AtHead,
+            elapsed_s: operation["claimed_s"].as_u64(),
+            ahead: 0,
+        },
+        Some(_) if under_way && operation["line"].is_object() => Live {
+            stage: Stage::InLine,
+            elapsed_s: Some(0),
+            ahead: operation["line"]["ahead"].as_u64().unwrap_or(0),
+        },
+        Some(_) if under_way => Live {
+            stage: Stage::Sent,
+            elapsed_s: operation["elapsed_s"].as_u64(),
+            ahead: line_length,
+        },
+        _ => Live {
+            stage: Stage::Draft,
+            elapsed_s: record.started_at.map(|at| now.saturating_sub(at)),
+            ahead: line_length,
+        },
+    };
+    let Some(past) = shared.past(repo, now) else {
+        return json!({
+            "stage": live.stage.name(),
+            "main": repo.trunk(),
+            "on_main_at": null,
+            "why": "the landings of the last hours could not be read",
+        });
+    };
+    let mut eta = crate::eta::estimate(past, &live, now);
+    eta["main"] = json!(repo.trunk());
+    eta["speedups"] = json!(speedups(&live, &eta, activity));
+    eta
+}
+
+/// G786: what would bring a change sooner, said where its agent can act on it. A draft whose
+/// agent has been idle, or waits on a person, for [`IDLE_SAID_S`] or more would save what
+/// remains of its draft by being sent now.
+fn speedups(live: &crate::eta::Live, eta: &Value, activity: Option<&Value>) -> Vec<Value> {
+    let mut out = Vec::new();
+    if live.stage == crate::eta::Stage::Draft
+        && let Some(activity) = activity
+        && let Some(age) = activity["age_s"].as_u64().filter(|age| *age >= IDLE_SAID_S)
+    {
+        let span = crate::eta::plain_span(age);
+        let what = match activity["kind"].as_str() {
+            Some("waiting") => Some(format!(
+                "Your agent has waited on you for {span} with this change not sent: answer it, or send the change with `bay merge`."
+            )),
+            Some("idle") => Some(format!(
+                "Your agent has been idle for {span} with this change not sent: send it with `bay merge`, or tell your agent to go on."
+            )),
+            Some("ended") => Some(format!(
+                "The session that holds this change ended {span} ago with it not sent: send it with `bay merge`, or pick it up with `bay start`."
+            )),
+            _ => None,
+        };
+        if let Some(what) = what {
+            out.push(json!({
+                "what": what,
+                "saves_s": eta["stages"][0]["remaining_s"]["likely"],
+            }));
+        }
+    }
+    out
 }
 
 /// What an operation under way says beyond its state: what it waits on ([`waiting`]), its place
@@ -2665,13 +2769,16 @@ fn line_of(repo: &Repo, trunk: &str, op_id: &str) -> Option<Value> {
 /// claimed it (G757, `claimed_s`).
 fn under_way(
     repo: &Repo,
-    trunk: &str,
+    shared: &Shared,
     change: &str,
     op: &crate::change::Operation,
     operation: &mut Value,
 ) {
     waiting(op, operation);
-    operation["line"] = line_of(repo, trunk, &op.op_id).unwrap_or(Value::Null);
+    operation["line"] = shared
+        .places(repo)
+        .and_then(|places| line_of(places, &op.op_id))
+        .unwrap_or(Value::Null);
     if op.owner.is_some() {
         operation["claimed_s"] =
             claimed_s(repo, change, &op.op_id).map_or(Value::Null, |s| json!(s));
@@ -2700,10 +2807,6 @@ fn claimed_s(repo: &Repo, change: &str, op_id: &str) -> Option<u64> {
         .ok()?;
     Some(crate::live::unix_now().saturating_sub(at))
 }
-
-/// G755: the windows a line's pace is measured over.
-const LINE_SHORT_S: u64 = 2 * 3600;
-const LINE_LONG_S: u64 = 8 * 3600;
 
 /// G776 (a fleet finding, 2026-11-17: a change waited 171 minutes on another, and its status said
 /// only that it waits): each change `record` names in `after`, under an operation under way, read from this machine's records with no
@@ -2745,6 +2848,7 @@ fn describe(
     trunk: &str,
     unsynced: &[&Receipt],
     read: &Read,
+    shared: &Shared,
 ) -> Result<Value, String> {
     let found = scan(&repo.git, &record.base_first, trunk, &record.id)?;
     let landed = found.publications.first();
@@ -2796,7 +2900,7 @@ fn describe(
             operation["next"] = json!(next);
         }
         if !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked {
-            under_way(repo, trunk, &record.id, op, &mut operation);
+            under_way(repo, shared, &record.id, op, &mut operation);
         }
         held_by(op, &mut operation);
         // G776: a change held until others merge (`--after`) names each one and where it stands.
@@ -2815,7 +2919,7 @@ fn describe(
     {
         operation["approval"] = approval;
     }
-    Ok(json!({
+    let row = json!({
         "change": record.id,
         "intent": record.intent.reference,
         "lane": record.lane,
@@ -2850,5 +2954,33 @@ fn describe(
             "recovery": receipt.recovery, "at": receipt.at, "age_s": receipts::age_s(receipt), "synced": false,
             "why": crate::result::unknown_why(Some(&receipt.detail)),
         }))).collect::<Vec<_>>(),
-    }))
+    });
+    Ok(live_fields(repo, record, landed, read, shared, row))
+}
+
+/// G786: change `record`'s `row` with when it was started and, when it is live and will land
+/// (not `landed`, ended or in a sandbox lane), what its agent did last and, on a full read, when
+/// it is on main.
+fn live_fields(
+    repo: &Repo,
+    record: &ChangeRecord,
+    landed: Option<&crate::publish::Found>,
+    read: &Read,
+    shared: &Shared,
+    mut row: Value,
+) -> Value {
+    row["started_at"] = json!(record.started_at);
+    let lands = landed.is_none() && !ended(record.state) && record.lane.is_none();
+    let now = crate::live::unix_now();
+    let activity = lands
+        .then(|| crate::session::last_activity(repo, record, now))
+        .flatten();
+    if lands && matches!(read, Read::Full { .. }) {
+        let operation = row["operation"].clone();
+        row["eta"] = eta_of(repo, record, &operation, activity.as_ref(), shared, now);
+    } else {
+        row["eta"] = Value::Null;
+    }
+    row["last_activity"] = json!(activity);
+    row
 }

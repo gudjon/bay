@@ -254,6 +254,10 @@ const RECENT_S: u64 = 6 * 3600;
 /// (`rework_s`), and of the time from the last claim to main (`final_s`); each part's share of
 /// the summed time, in whole percent; and the rework by cause. Null when none landed; a record
 /// written before G759 counts in `landed` and `total_s` only.
+///
+/// G786c (owner, 2026-11-18: the estimate's accuracy is visible, so it improves): `estimates`,
+/// how well the estimate of when a change is on main ([`crate::eta`]) held for these landings,
+/// replayed from the landings before each ([`crate::eta::held`]).
 fn lately(published: &[Value], now: u64) -> Value {
     let since = now.saturating_sub(RECENT_S);
     let records: Vec<&Value> = published
@@ -302,8 +306,20 @@ fn lately(published: &[Value], now: u64) -> Value {
             .sum()
     };
     let landed = records.len() as u64;
+    // The replay reads the window before each landing, and the line before that.
+    let reach = since.saturating_sub(2 * crate::eta::WINDOW_S);
+    let replayed: Vec<Value> = published
+        .iter()
+        .filter(|record| {
+            record["published_at"]
+                .as_u64()
+                .is_some_and(|at| at >= reach)
+        })
+        .cloned()
+        .collect();
     json!({
         "window_s": RECENT_S,
+        "estimates": crate::eta::held(&replayed, since),
         "landed": landed,
         "per_hour": (landed * 3600 + RECENT_S / 2) / RECENT_S,
         "total_s": spread(&mut total, "landed"),
