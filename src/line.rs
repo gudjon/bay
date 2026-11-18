@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::change::{
     Chain, ChangeRecord, ChangeState, OpState, Operation, RECORD_FILE, change_ref,
 };
-use crate::names::REQUESTS;
+use crate::names::{CHANGES, REQUESTS};
 use crate::queue::{Place, Queue};
 use crate::repo::Repo;
 use crate::result::BayResult;
@@ -46,7 +46,14 @@ pub fn queue(dir: &Path, from_store: bool) -> BayResult {
 /// `from_store` reads this machine's copy of the line and of its changes, with no call to the
 /// remote, and says so in `from_store`; how old that copy is, `freshness` names.
 fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
-    let places = if from_store {
+    let mut unread: Vec<Value> = Vec::new();
+    // G785: a live read asks the remote twice: one listing, one fetch of what moved.
+    let line = if from_store {
+        None
+    } else {
+        Line::read(repo, &mut unread)
+    };
+    let places = if from_store || line.is_some() {
         Queue::live_here(repo)?
     } else {
         Queue::live(repo)?
@@ -58,14 +65,23 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
         .collect();
     ids.sort();
     ids.dedup();
-    let mut unread: Vec<Value> = if from_store {
-        Vec::new()
-    } else {
-        repo.remote_chains(&ids)
-            .into_iter()
-            .map(|(change, why)| json!({"change": change, "why": why}))
-            .collect()
-    };
+    if !from_store {
+        // A place whose chain the one fetch did not settle (no request listed for it, or no
+        // listing at all) is fetched as before.
+        let rest: Vec<String> = match &line {
+            Some(line) => ids
+                .iter()
+                .filter(|change| !line.settled.contains(*change))
+                .cloned()
+                .collect(),
+            None => ids.clone(),
+        };
+        unread.extend(
+            repo.remote_chains(&rest)
+                .into_iter()
+                .map(|(change, why)| json!({"change": change, "why": why})),
+        );
+    }
     let records = records(repo, &ids);
     let now = crate::live::unix_now();
     let rows: Vec<Value> = places
@@ -93,7 +109,7 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
     let arriving = if from_store {
         Vec::new()
     } else {
-        arriving(repo, &in_line, now, &mut unread)?
+        arriving(repo, &in_line, line.as_ref(), now, &mut unread)?
     };
     // G776 (a fleet finding, 2026-11-17: the line read "the longest has waited 171 minutes"
     // while no place had waited 12): a change held until another merges (`--after`) waits for
@@ -129,18 +145,22 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
 fn arriving(
     repo: &Repo,
     placed: &BTreeSet<&str>,
+    line: Option<&Line>,
     now: u64,
     unread: &mut Vec<Value>,
 ) -> Result<Vec<Value>, String> {
-    let listed = repo
-        .git
-        .run(&["ls-remote", repo.remote(), &format!("{REQUESTS}*")])
-        .map_err(|error| {
-            format!(
-                "the remote's merge requests could not be listed: {}",
-                error.message()
-            )
-        })?;
+    let listed = match line {
+        Some(line) => line.requests.clone(),
+        None => repo
+            .git
+            .run(&["ls-remote", repo.remote(), &format!("{REQUESTS}*")])
+            .map_err(|error| {
+                format!(
+                    "the remote's merge requests could not be listed: {}",
+                    error.message()
+                )
+            })?,
+    };
     let held: BTreeMap<String, ChangeRecord> = Chain::new(&repo.git)
         .read_all()
         .map_err(|error| error.message())?
@@ -163,7 +183,17 @@ fn arriving(
         return Ok(Vec::new());
     }
     let changes: Vec<String> = requests.iter().map(|(change, _)| change.clone()).collect();
-    for (change, why) in repo.remote_chains(&changes) {
+    // G785: the listing's one fetch settled every requested chain that moved; the rest are
+    // current here already. Only one it could not settle is fetched again.
+    let unsettled: Vec<String> = match line {
+        Some(line) => changes
+            .iter()
+            .filter(|change| !line.settled.contains(*change))
+            .cloned()
+            .collect(),
+        None => changes.clone(),
+    };
+    for (change, why) in repo.remote_chains(&unsettled) {
         unread.push(json!({"change": change, "why": why}));
     }
     let fresh = records(repo, &changes);
@@ -411,4 +441,99 @@ pub fn schema() -> Value {
             },
         },
     })
+}
+
+/// G785 (a measurement, 2026-11-18: a live `bay queue` asked the remote five times: the line's
+/// refs, three batches of its changes' chains and the list of merge requests, 8.9 s of 10 s on
+/// the wire): the line read in two round trips. One `ls-remote` lists the line, the merge
+/// requests and every change's chain head; one fetch then brings the line's refs and only the
+/// chains of requested changes whose head on the remote is not this store's, settled as
+/// [`Repo::remote_chains`] settles them. A chain at its remote head needs no fetch.
+pub(crate) struct Line {
+    /// The listing's merge requests, as `ls-remote` prints them.
+    requests: String,
+    /// The changes whose chains this read settled or found current: no fetch is owed for them.
+    settled: BTreeSet<String>,
+}
+
+/// The most chains the one fetch brings; a store far behind fetches the rest in batches.
+const MOVED_IN_ONE_FETCH: usize = 400;
+
+impl Line {
+    /// Lists and fetches the line; `None` when the listing or the fetch failed, and the read
+    /// then asks as it did before.
+    fn read(repo: &Repo, unread: &mut Vec<Value>) -> Option<Self> {
+        let git = &repo.git;
+        let queue = crate::names::QUEUE;
+        let done = crate::names::QUEUE_DONE;
+        let listed = git
+            .run(&[
+                "ls-remote",
+                repo.remote(),
+                &format!("{queue}*"),
+                &format!("{done}*"),
+                &format!("{REQUESTS}*"),
+                &format!("{CHANGES}*"),
+            ])
+            .ok()?;
+        let mut requests = String::new();
+        let mut requested: BTreeSet<String> = BTreeSet::new();
+        let mut heads: BTreeMap<String, String> = BTreeMap::new();
+        for line in listed.lines() {
+            let Some((oid, name)) = line.split_once('\t') else {
+                continue;
+            };
+            if let Some(change) = name.strip_prefix(REQUESTS) {
+                requests.push_str(line);
+                requests.push('\n');
+                requested.insert(change.to_owned());
+            } else if let Some(change) = name.strip_prefix(CHANGES) {
+                heads.insert(change.to_owned(), oid.to_owned());
+            }
+        }
+        let locals: BTreeMap<String, String> = git
+            .run(&["for-each-ref", "--format=%(objectname) %(refname)", CHANGES])
+            .ok()?
+            .lines()
+            .filter_map(|line| {
+                let (oid, name) = line.split_once(' ')?;
+                Some((name.strip_prefix(CHANGES)?.to_owned(), oid.to_owned()))
+            })
+            .collect();
+        let mut current = BTreeSet::new();
+        let mut moved = Vec::new();
+        for change in &requested {
+            match heads.get(change) {
+                Some(head) if locals.get(change) == Some(head) => {
+                    current.insert(change.clone());
+                }
+                Some(_) => moved.push(change.clone()),
+                None => {}
+            }
+        }
+        let (now, later) = moved.split_at(moved.len().min(MOVED_IN_ONE_FETCH));
+        let scratch = crate::scratch::own(crate::names::FETCH);
+        let specs: Vec<String> = crate::queue::refspecs()
+            .into_iter()
+            .chain(
+                now.iter()
+                    .map(|change| format!("+{}:{scratch}{change}", change_ref(change))),
+            )
+            .collect();
+        let mut args = vec!["fetch", "-q", "--no-tags", "--prune", repo.remote()];
+        args.extend(specs.iter().map(String::as_str));
+        git.run(&args).ok()?;
+        crate::queue::fetched_now(&repo.common_dir);
+        repo.settle_fetched(now);
+        unread.extend(
+            repo.remote_chains(later)
+                .into_iter()
+                .map(|(change, why)| json!({"change": change, "why": why})),
+        );
+        current.extend(moved);
+        Some(Self {
+            requests,
+            settled: current,
+        })
+    }
 }

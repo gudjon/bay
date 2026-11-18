@@ -1051,7 +1051,7 @@ impl Repo {
     /// in one `cat-file` each and the fetched refs deleted in one transaction; a chain already
     /// at its remote head is not touched (a fleet finding, 2026-10-31: three git processes a
     /// change, about 2 s a status of 48 changes). A read that fails settles one by one.
-    fn settle_fetched(&self, changes: &[String]) {
+    pub(crate) fn settle_fetched(&self, changes: &[String]) {
         let git = &self.git;
         let fetched: Vec<String> = changes
             .iter()
