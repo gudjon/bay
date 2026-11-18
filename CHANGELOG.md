@@ -6,6 +6,9 @@
 - `bay merge --wait` keeps its time limit and says what to do when it returns still waiting.
 - A change waiting on `--after` names what it waits for; `bay queue` no longer counts it as waiting.
 - A saved status answer counts as current while no ref has moved, with no age and no refresh.
+- A runner's visit to a change that only waits fetches and pushes nothing of its own.
+- bay's store of saved answers stays within 256 MB.
+- `bay waiting` fetches only what it lacks and keeps no scratch refs; `bay doctor` names crowded ref namespaces.
 
 ## 0.6.100
 
