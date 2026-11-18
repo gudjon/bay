@@ -188,7 +188,7 @@ fn arriving(
     let unsettled: Vec<String> = match line {
         Some(line) => changes
             .iter()
-            .filter(|change| !line.settled.contains(*change))
+            .filter(|change| !line.settled.contains(*change) && !line.ended.contains(*change))
             .cloned()
             .collect(),
         None => changes.clone(),
@@ -454,6 +454,10 @@ pub(crate) struct Line {
     requests: String,
     /// The changes whose chains this read settled or found current: no fetch is owed for them.
     settled: BTreeSet<String>,
+    /// The changes whose record here has ended: no arrival, so the arrivals fetch none of them
+    /// (a retention cut leaves their old request unanswered in the record). A place is never
+    /// judged by this: a place whose record here ended is fetched.
+    ended: BTreeSet<String>,
 }
 
 /// The most chains the one fetch brings; a store far behind fetches the rest in batches.
@@ -544,6 +548,7 @@ impl Line {
         Some(Self {
             requests,
             settled: current,
+            ended,
         })
     }
 }
