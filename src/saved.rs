@@ -425,9 +425,10 @@ pub fn from_store(dir: &Path, change: Option<&str>) -> Option<(BayResult, bool)>
     // G778b: an answer whose refs and views stand as they were is the answer now, while it is
     // younger than what the clock judges in it allows ([`SAVED_MAX_S`]): served as current, with
     // no read again.
+    // A sweep that brought nothing moves no ref, only its own record: what it brought, it wrote
+    // as refs, which the stamp sees.
     let current = age <= SAVED_MAX_S
         && !saved["quick"].is_null()
-        && saved["swept_at"] == json!(swept_at(&common))
         && serde_json::from_value::<Vec<String>>(saved["views"].clone())
             .is_ok_and(|views| saved["quick"] == quick(&common, &views));
     let stands = current || age < refresh_after_s();

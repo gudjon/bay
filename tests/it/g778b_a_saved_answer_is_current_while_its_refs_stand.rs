@@ -42,6 +42,17 @@ fn read_now(test_box: &TestBox, view: &Path, id: &str) -> Value {
     answer
 }
 
+/// Waits until no sweep and no read again of `repo`'s store runs: each may move refs, or save.
+fn settled(repo: &Path) {
+    support::sweeps_ended(repo);
+    let until = std::time::Instant::now() + Duration::from_secs(120);
+    while std::time::Instant::now() < until && saved(repo).1 {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // The read again may have swept the store in its turn.
+    support::sweeps_ended(repo);
+}
+
 /// The times the saved answers of `repo`'s store were saved at, and whether a read again holds
 /// its lock now.
 fn saved(repo: &Path) -> (Vec<u64>, bool) {
@@ -71,10 +82,11 @@ fn an_answer_whose_refs_stand_is_current_and_one_after_a_move_is_read_again() {
     let (repo, id, view) = store(&test_box);
     // GIVEN the answer saved once the store settled: the first read's own fetch moves refs, and
     // the reads after it are read again until one is saved from a store that stands
-    let until = std::time::Instant::now() + Duration::from_secs(60);
+    let until = std::time::Instant::now() + Duration::from_secs(120);
+    settled(&repo);
     let mut again = read_now(&test_box, &view, &id);
     while again["detail"]["current"] != true && std::time::Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(1500));
+        settled(&repo);
         again = read_now(&test_box, &view, &id);
     }
     let before = saved(&repo).0;
