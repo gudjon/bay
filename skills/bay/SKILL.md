@@ -34,7 +34,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Submit the change | `bay merge` (returns at once; a runner checks and merges it) |
 | Wait for the outcome here | `bay merge --wait` (`--wait=<seconds>`: watch that long, then return; the run goes on) |
 | Submit a change from outside its view | `bay merge <change>` |
-| Pick a change up again: bring in newer main and see what moved | `bay start <change>`. When it remade an unfinished view, `detail.unsaved_kept` names where its unsaved files were kept: copy them back, then `bay merge`. A view of a change that ended a retention window ago is freed with its unsaved work kept: `git checkout refs/bay/view-kept/<change> -- <path>` brings a file back |
+| Pick a change up again: bring in newer main and see what moved | `bay start <change>`. When it remade an unfinished view, `detail.unsaved_kept` names where its unsaved files were kept: copy them back, then `bay merge`. A view of a change that ended a retention window ago is freed with its unsaved work kept: `git checkout refs/bay/view-kept/<change> -- <path>` brings a file back, and its loose ignored files such as `.env` are under `.git/bay/view-kept/<change>/` |
 | Fix a change that already merged | `bay start <intent> --fixes <change>` (the merge names it in a `Fixes:` trailer) |
 | Merge a change only after another change merged | `bay start <intent> --paths <paths> --after <change>` (repeatable; submit it now, it merges once each one merged) |
 | Give the change up, so another agent may adopt it | `bay abandon [<change>] [--why "<reason>"]` (default: the view's change; say why, e.g. where the work merged) |

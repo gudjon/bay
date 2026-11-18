@@ -367,6 +367,7 @@ fn release_set_aside(repo: &Repo, now: u64, ended: &dyn Fn(&str) -> Option<Ended
             }
             let path = entry.path();
             if path.is_dir()
+                && kept_loose_aside(repo, &name, &path)
                 && saved_aside(repo, &name, &path).is_some()
                 && remove_tree(&path).is_ok()
             {
@@ -375,6 +376,96 @@ fn release_set_aside(repo: &Repo, now: u64, ended: &dyn Fn(&str) -> Option<Ended
         }
     }
     released
+}
+
+/// G784: where the loose ignored files of the view or copy `name` are kept once it goes:
+/// `<common>/bay/view-kept/<name>/`, a folder only this account reads.
+fn loose_home(repo: &Repo, name: &str) -> PathBuf {
+    repo.common_dir.join("bay").join("view-kept").join(name)
+}
+
+/// G784 (owner ruling, 2026-11-18, with G639's rule kept): copies each loose ignored file under
+/// `root` (an ignored path that is a file, not in an ignored directory, such as an `.env`) to
+/// `home`, at its own relative path and with its own mode, and reads each copy back byte for
+/// byte. Such a file is no build output: it may hold a secret, so it is never written into a
+/// Git object, and it outlives the view. Ignored directories are build output and are not kept.
+/// `git` and `envs` name the work tree and its index. Whether every such file is kept; one that
+/// cannot be copied, or a copy that differs, keeps the view.
+fn kept_loose_ignored(git: &Git, envs: &[(&str, &str)], root: &Path, home: &Path) -> bool {
+    let Ok(listed) = git.run_with(
+        &[
+            "--no-optional-locks",
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+            "-z",
+        ],
+        envs,
+        None,
+    ) else {
+        return false;
+    };
+    let files: Vec<&str> = listed
+        .split('\0')
+        .filter(|entry| !entry.is_empty() && !entry.ends_with('/'))
+        .collect();
+    if files.is_empty() {
+        return true;
+    }
+    if std::fs::create_dir_all(home).is_err() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if std::fs::set_permissions(home, std::fs::Permissions::from_mode(0o700)).is_err() {
+            return false;
+        }
+    }
+    files.iter().all(|file| {
+        let from = root.join(file);
+        let to = home.join(file);
+        if !from.is_file() {
+            // A link, or anything else no copy can stand for, keeps the view.
+            return false;
+        }
+        let Ok(bytes) = std::fs::read(&from) else {
+            return false;
+        };
+        if let Ok(earlier) = std::fs::read(&to) {
+            // A file kept before at the same path is never overwritten by another one.
+            return earlier == bytes;
+        }
+        to.parent()
+            .is_some_and(|parent| std::fs::create_dir_all(parent).is_ok())
+            && std::fs::copy(&from, &to).is_ok()
+            && std::fs::read(&to).is_ok_and(|copied| copied == bytes)
+    })
+}
+
+/// [`kept_loose_ignored`] for the copy `name` set aside at `path`, read through an empty index
+/// of bay's own.
+fn kept_loose_aside(repo: &Repo, name: &str, path: &Path) -> bool {
+    let git = Git::new(path);
+    let common = repo.common_dir.display().to_string();
+    let tree_dir = path.display().to_string();
+    let index = repo
+        .common_dir
+        .join("bay")
+        .join(format!("aside-loose-{}.index", std::process::id()));
+    let _ = std::fs::remove_file(&index);
+    let index_text = index.display().to_string();
+    let envs = [
+        ("GIT_DIR", common.as_str()),
+        ("GIT_WORK_TREE", tree_dir.as_str()),
+        ("GIT_INDEX_FILE", index_text.as_str()),
+    ];
+    let kept = git.run_with(&["read-tree", "--empty"], &envs, None).is_ok()
+        && kept_loose_ignored(&git, &envs, path, &loose_home(repo, name));
+    let _ = std::fs::remove_file(&index);
+    kept
 }
 
 /// [`release_set_aside`]'s save of the copy `name` at `path`: its files through an index of
@@ -575,7 +666,9 @@ fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
             let now = unix_now();
             let until = if now < due {
                 due
-            } else if saved_work(repo, id, &path).is_some() {
+            } else if kept_loose_ignored(&Git::new(&path), &[], &path, &loose_home(repo, id))
+                && saved_work(repo, id, &path).is_some()
+            {
                 remove_worktree(repo, &path).map_err(GitError::Spawn)?;
                 unregister(repo, &path);
                 return match std::fs::remove_file(journal_path(repo, id)) {
