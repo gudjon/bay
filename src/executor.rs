@@ -438,7 +438,7 @@ pub fn live_versions() -> Vec<String> {
 
 /// `kill -0`: success, or a refusal to signal (EPERM), means the process exists. On Windows,
 /// `tasklist` lists the process by its id (its CSV row holds `"<pid>"`).
-fn alive(pid: u32) -> bool {
+pub(crate) fn alive(pid: u32) -> bool {
     if cfg!(windows) {
         let mut probe = Command::new("tasklist");
         probe.args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"]);

@@ -999,7 +999,7 @@ impl Repo {
         {
             return Ok(head);
         }
-        let fetched = format!("{}{change}", crate::names::FETCH);
+        let fetched = format!("{}{change}", crate::scratch::own(crate::names::FETCH));
         git.run(&[
             "fetch",
             "-q",
@@ -1027,7 +1027,7 @@ impl Repo {
                     format!(
                         "+{}:{}{change}",
                         crate::change::change_ref(change),
-                        crate::names::FETCH
+                        crate::scratch::own(crate::names::FETCH)
                     )
                 })
                 .collect();
@@ -1055,7 +1055,7 @@ impl Repo {
         let git = &self.git;
         let fetched: Vec<String> = changes
             .iter()
-            .map(|change| format!("{}{change}", crate::names::FETCH))
+            .map(|change| format!("{}{change}", crate::scratch::own(crate::names::FETCH)))
             .collect();
         let chains: Vec<String> = changes
             .iter()

@@ -183,7 +183,10 @@ fn run(dir: &Path, request: &Record) -> Result<BayResult, String> {
 fn refresh_own(repo: &Repo, name: &str) -> Result<(), String> {
     let git = &repo.git;
     let own = evidence::notes_ref(name);
-    let fetched = format!("{}{name}", crate::names::FETCH_EVIDENCE);
+    let fetched = format!(
+        "{}{name}",
+        crate::scratch::own(crate::names::FETCH_EVIDENCE)
+    );
     let got = git.run(&[
         "fetch",
         "-q",

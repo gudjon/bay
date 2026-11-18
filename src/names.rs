@@ -51,16 +51,18 @@ pub const FLEET_EXECUTOR: &str = "refs/bay/fleet-executor/";
 /// `refs/bay/target/<name>`: `bay status`'s copy of the remote's promotion target refs
 /// (NEW-5, `crate::target`), local only.
 pub const TARGET: &str = "refs/bay/target/";
-/// `refs/bay/fetch/<Change-Id>`: a fetched remote chain, local only.
+/// `refs/bay/fetch/<pid>/<Change-Id>`: a fetched remote chain, local only, deleted once read
+/// (G781: under the process that wrote it, so `crate::scratch::prune` can tell a leftover).
 pub const FETCH: &str = "refs/bay/fetch/";
 /// `refs/bay/kept/<Change-Id>/<sha>`: a local chain head the remote's chain moved apart from,
 /// set aside before the chain ref moves to the remote's head (G294), local only.
 pub const KEPT: &str = "refs/bay/kept/";
-/// `refs/bay/fetch-evidence/<writer>`: the remote's copy of this machine's own evidence notes
-/// ref, local only, while `bay evidence record` compares the two.
+/// `refs/bay/fetch-evidence/<pid>/<writer>`: the remote's copy of this machine's own evidence
+/// notes ref, local only, while `bay evidence record` compares the two (G781: per process).
 pub const FETCH_EVIDENCE: &str = "refs/bay/fetch-evidence/";
-/// `refs/bay/fetch-waiting/<Change-Id>`: `bay waiting`'s and `bay approve`'s copy of the
-/// remote's change chains (G280), local only, pruned to the remote's on each read.
+/// `refs/bay/fetch-waiting/<pid>/<Change-Id>`: `bay waiting`'s and `bay approve`'s copy of a
+/// remote change chain this store lacks (G280), local only, deleted before the read returns
+/// (G781).
 pub const FETCH_WAITING: &str = "refs/bay/fetch-waiting/";
 /// `refs/bay/census/heads/<branch>`: `bay status --branches`'s copy of the remote's branches,
 /// local only, removed when the census ends.

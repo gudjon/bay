@@ -320,6 +320,8 @@ fn warm_history(repo: &Repo, result: &mut BayResult) {
 /// half-written packs (G595) and the views of ended changes (G97). Returns the views released.
 fn reclaim(repo: &Repo, dir: &Path) -> Vec<String> {
     crate::executor::sweep_tmp_packs(repo);
+    // G781: bay's scratch refs a process that has ended left behind.
+    crate::scratch::prune(&repo.git);
     release_ended(repo, dir)
 }
 
@@ -1367,7 +1369,7 @@ enum Resolved {
 /// The commit the remote's `full` holds, fetched into a ref of bay's own that is deleted once
 /// read.
 fn fetch_from(repo: &Repo, remote: &str, reference: &str, full: &str) -> Result<String, String> {
-    let fetched = format!("{}from-{}", crate::names::FETCH, std::process::id());
+    let fetched = format!("{}from", crate::scratch::own(crate::names::FETCH));
     let commit = repo
         .git
         .run(&[

@@ -404,22 +404,18 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
     if !left_behind.is_empty() {
         notes.push(&left_note);
     }
-    // G762: how many packs the store holds; past the limit, bay's runner pass or status sweep
-    // compacts it, at most every half hour.
-    let packs = git
-        .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .ok()
-        .map(|common| crate::packs::count(std::path::Path::new(common.trim())));
-    let pack_note = format!(
-        "{} packs: past {}, bay compacts the store in the background (git repack --geometric)",
-        packs.unwrap_or(0),
-        crate::packs::PACK_LIMIT
-    );
-    if packs.is_some_and(|packs| packs > crate::packs::PACK_LIMIT) {
-        notes.push(&pack_note);
+    let (packs, pack_note) = packs_row(git);
+    if let Some(note) = &pack_note {
+        notes.push(note);
+    }
+    let (refs, crowded, refs_note) = refs_row(git);
+    if let Some(note) = &refs_note {
+        notes.push(note);
     }
     json!({"name": "store",
         "packs": packs,
+        "refs": refs,
+        "refs_crowded": crowded,
         "state": if notes.is_empty() { "green" } else { "advisory" },
         "promisor_remote": promisor.then_some(remote),
         "filter": filter,
@@ -455,6 +451,55 @@ fn gc_log_row(git: &Git, report: &mut Report) {
         "recovery": "read the file, fix what it names, then remove it",
     }));
 }
+
+/// G762: how many packs the store holds, and past [`crate::packs::PACK_LIMIT`] a note: bay's
+/// runner pass or status sweep compacts it, at most every half hour.
+fn packs_row(git: &Git) -> (Option<usize>, Option<String>) {
+    let packs = git
+        .run(&["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .ok()
+        .map(|common| crate::packs::count(std::path::Path::new(common.trim())));
+    let note = packs
+        .filter(|packs| *packs > crate::packs::PACK_LIMIT)
+        .map(|packs| {
+            format!(
+                "{packs} packs: past {}, bay compacts the store in the background (git repack --geometric)",
+                crate::packs::PACK_LIMIT
+            )
+        });
+    (packs, note)
+}
+
+/// G781 (a measurement, 2026-11-18: 119,575 local refs made each fetch of one store walk them
+/// for about 20 s before it asked the remote): how many refs the store holds, the namespaces
+/// past [`REFS_NAMED`], bay's own and others', and past [`REFS_SLOW`] a note that says what
+/// they cost, so an owner sees what slows each fetch.
+fn refs_row(git: &Git) -> (Option<usize>, Vec<Value>, Option<String>) {
+    let Some((total, by)) = crate::scratch::census(git) else {
+        return (None, Vec::new(), None);
+    };
+    let mut big: Vec<(&String, &usize)> = by.iter().filter(|(_, n)| **n >= REFS_NAMED).collect();
+    big.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    let note = (total >= REFS_SLOW).then(|| {
+        format!(
+            "{total} local refs, and every fetch reads them all first; the most: {}",
+            big.iter()
+                .map(|(name, n)| format!("{name} {n}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    let crowded = big
+        .iter()
+        .map(|(name, n)| json!({"namespace": name, "refs": n}))
+        .collect();
+    (Some(total), crowded, note)
+}
+
+/// G781: a namespace with this many local refs is named in the store row.
+const REFS_NAMED: usize = 5_000;
+/// G781: past this many local refs, the store row says every fetch reads them all first.
+const REFS_SLOW: usize = 50_000;
 
 /// The most packs a store holds before doctor says its maintenance is not keeping up.
 const PACKS_MOST: usize = 300;

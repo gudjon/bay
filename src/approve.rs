@@ -25,11 +25,13 @@
 //! `bay.approverKey`, and there is no flag that names someone else. Every refusal names its
 //! reason and the recovery.
 //!
-//! The chains are read as the remote holds them (a land adopts the remote's chain too), copied
-//! under [`crate::names::FETCH_WAITING`], never into this machine's own change refs; a change
-//! the remote lacks is read from this machine's.
+//! The chains are read as the remote holds them (a land adopts the remote's chain too): their
+//! heads listed, the ones missing here fetched under this process's scratch refs
+//! ([`crate::names::FETCH_WAITING`]) and deleted at once, never into this machine's own change
+//! refs; a change the remote lacks is read from this machine's.
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -138,69 +140,44 @@ fn synchronize(repo: &Repo) -> Result<(), String> {
 
 /// The change records to judge, as the remote holds them: every change, or only `only`. A
 /// change the remote lacks is read from this machine's own chain.
+///
+/// G781 (a measurement, 2026-11-18: this read copied every chain on the remote into
+/// `refs/bay/fetch-waiting/` and kept the copies, 6,942 refs on one store, and every later fetch
+/// of that store walked them): the remote's heads are listed in one call, only those this store
+/// does not hold are fetched, under this process's own scratch refs, and those refs are deleted
+/// before the read returns. No copy is kept between runs.
 fn records(repo: &Repo, only: Option<&str>) -> Result<Vec<ChangeRecord>, String> {
     let git = &repo.git;
-    let refspec = only.map_or_else(
-        || format!("+{CHANGES_PREFIX}*:{FETCH_WAITING}*"),
-        |id| format!("+{}:{FETCH_WAITING}{id}", change_ref(id)),
-    );
-    match only {
-        // Every chain: the copy is pruned to the remote's, so a chain gone there is gone here.
-        None => {
-            git.run(&[
-                "fetch",
-                "-q",
-                "--no-tags",
-                "--prune",
-                repo.remote(),
-                &refspec,
-            ])
-            .map_err(|error| {
-                format!(
-                    "the changes on {} could not be read: {}",
-                    repo.remote(),
-                    error.message()
-                )
-            })?;
-        }
-        // One chain: a change the remote lacks is no fault; this machine's chain is read.
-        Some(id) => {
-            if git
-                .run(&["fetch", "-q", "--no-tags", repo.remote(), &refspec])
-                .is_err()
-            {
-                let _ = git.run(&["update-ref", "-d", &format!("{FETCH_WAITING}{id}")]);
-            }
-        }
-    }
-    let chain = Chain::new(git);
-    let pattern = only.map_or_else(
-        || FETCH_WAITING.to_owned(),
-        |id| format!("{FETCH_WAITING}{id}"),
-    );
+    crate::scratch::prune(git);
+    let pattern = only.map_or_else(|| format!("{CHANGES_PREFIX}*"), change_ref);
     let listed = git
-        .run(&[
-            "for-each-ref",
-            "--format=%(objectname) %(refname)",
-            &pattern,
-        ])
-        .map_err(|error| error.message())?;
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    let heads: Vec<(&str, &str)> = listed
+        .run(&["ls-remote", repo.remote(), &pattern])
+        .map_err(|error| {
+            format!(
+                "the changes on {} could not be read: {}",
+                repo.remote(),
+                error.message()
+            )
+        })?;
+    let remote: Vec<(String, String)> = listed
         .lines()
         .filter_map(|line| {
-            let (head, name) = line.split_once(' ')?;
-            let id = name.trim_start_matches(FETCH_WAITING);
-            only.is_none_or(|only| only == id).then_some((head, id))
+            let (head, name) = line.split_once('\t')?;
+            let id = name.strip_prefix(CHANGES_PREFIX)?;
+            only.is_none_or(|only| only == id)
+                .then(|| (id.to_owned(), head.to_owned()))
         })
         .collect();
+    fetch_missing(repo, &remote);
+    let chain = Chain::new(git);
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
     // G645: every record in one read, never a git call per change.
-    let names: Vec<&str> = heads.iter().map(|(head, _)| *head).collect();
+    let names: Vec<&str> = remote.iter().map(|(_, head)| head.as_str()).collect();
     let read = chain.records_at(&names).map_err(|error| error.message())?;
-    for ((_, id), record) in heads.iter().zip(read) {
+    for ((id, _), record) in remote.iter().zip(read) {
         if let Some(record) = record {
-            seen.insert((*id).to_owned());
+            seen.insert(id.clone());
             out.push(record);
         }
     }
@@ -219,6 +196,45 @@ fn records(repo: &Repo, only: Option<&str>) -> Result<Vec<ChangeRecord>, String>
         }
     }
     Ok(out)
+}
+
+/// Brings here the chain heads of `remote` (change, head) this store does not hold: one fetch
+/// per 200 of them into this process's scratch refs, which are deleted at once. A head that
+/// cannot be fetched is left unread, and its change is read from this store's own chain.
+fn fetch_missing(repo: &Repo, remote: &[(String, String)]) {
+    let git = &repo.git;
+    let heads: Vec<String> = remote.iter().map(|(_, head)| head.clone()).collect();
+    let Ok(held) = git.object_ids(&heads) else {
+        return;
+    };
+    let missing: Vec<&String> = remote
+        .iter()
+        .zip(held)
+        .filter(|(_, held)| held.is_none())
+        .map(|((id, _), _)| id)
+        .collect();
+    let own = crate::scratch::own(FETCH_WAITING);
+    for batch in missing.chunks(200) {
+        let specs: Vec<String> = batch
+            .iter()
+            .map(|id| format!("+{}:{own}{id}", change_ref(id)))
+            .collect();
+        let mut args = vec!["fetch", "-q", "--no-tags", repo.remote()];
+        args.extend(specs.iter().map(String::as_str));
+        let _ = git.run(&args);
+    }
+    if missing.is_empty() {
+        return;
+    }
+    if let Ok(left) = git.run(&["for-each-ref", "--format=%(objectname) %(refname)", &own]) {
+        let mut deletes = String::new();
+        for (target, name) in left.lines().filter_map(|line| line.split_once(' ')) {
+            let _ = writeln!(deletes, "delete {name} {target}");
+        }
+        if !deletes.is_empty() {
+            let _ = git.run_with(&["update-ref", "--stdin"], &[], Some(deletes.as_bytes()));
+        }
+    }
 }
 
 /// `record` when its last operation is held for an approval, read as `bay status` reads it.

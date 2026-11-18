@@ -75,6 +75,7 @@ pub mod run;
 pub mod runtime;
 pub mod save;
 pub mod saved;
+pub mod scratch;
 pub mod service;
 pub mod session;
 pub mod setup;
