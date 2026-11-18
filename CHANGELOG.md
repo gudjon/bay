@@ -4,6 +4,7 @@
 
 - A store bay fetches into keeps its refs packed, so a fetch never walks thousands of loose refs.
 - An ended change's view is freed after its window; its unsaved work is kept under `refs/bay/view-kept/`.
+- A live `bay queue` asks the remote twice, not five times.
 
 ## 0.6.101
 
