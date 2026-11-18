@@ -70,7 +70,9 @@ fn journal(test_box: &TestBox, repo: &Path, id: &str) -> PathBuf {
 #[test]
 fn a_landed_view_is_released_and_every_view_with_work_or_in_use_is_kept() {
     let test_box = TestBox::new();
-    let repo = seeded(&test_box, 0);
+    // An hour's window: a view with work is kept within it; past it, G784 saves the work to a
+    // ref and frees the view. A clean landed view goes at once all the same.
+    let repo = seeded(&test_box, 3600);
 
     // Every change starts before any lands: each `start` releases what has ended by then.
     let (clean, clean_view) = start_with(&test_box, &repo, "clean");

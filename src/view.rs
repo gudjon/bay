@@ -327,7 +327,7 @@ pub fn release_ended(
     ended: &dyn Fn(&str) -> Option<Ended>,
 ) -> Vec<String> {
     let now = unix_now();
-    all(repo)
+    let mut released: Vec<String> = all(repo)
         .into_iter()
         .filter(|id| {
             ended(id).is_some_and(|change| {
@@ -335,7 +335,89 @@ pub fn release_ended(
                     && release(repo, id, &change).unwrap_or(false)
             })
         })
-        .collect()
+        .collect();
+    released.extend(release_set_aside(repo, now, ended));
+    released
+}
+
+/// G784: the copies `bay start` set aside as unsaved (`<id>.unsaved-<unix seconds>`, see
+/// [`discard`]) whose change has ended and which are a retention window old: each one's files,
+/// those its ignore rules do not match, are saved in one commit of bay's own under the local ref
+/// `refs/bay/view-kept/<id>.unsaved-<unix seconds>`, read back, and the copy goes. A copy whose
+/// save cannot be verified stays. Returns the copies' names released.
+fn release_set_aside(repo: &Repo, now: u64, ended: &dyn Fn(&str) -> Option<Ended>) -> Vec<String> {
+    let window = repo.config.retention_window().as_secs();
+    let mut released = Vec::new();
+    for dir in repo.views_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Some(name) = entry.file_name().into_string().ok() else {
+                continue;
+            };
+            let Some((id, at)) = name.split_once(".unsaved-") else {
+                continue;
+            };
+            let Ok(at) = at.parse::<u64>() else {
+                continue;
+            };
+            if now.saturating_sub(at) < window || ended(id).is_none() {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir()
+                && saved_aside(repo, &name, &path).is_some()
+                && remove_tree(&path).is_ok()
+            {
+                released.push(name);
+            }
+        }
+    }
+    released
+}
+
+/// [`release_set_aside`]'s save of the copy `name` at `path`: its files through an index of
+/// bay's own, in a commit with no parent but a commit kept under its ref before.
+fn saved_aside(repo: &Repo, name: &str, path: &Path) -> Option<String> {
+    let git = Git::new(path).writing_tree();
+    let common = repo.common_dir.display().to_string();
+    let tree_dir = path.display().to_string();
+    let more = [
+        ("GIT_DIR", common.as_str()),
+        ("GIT_WORK_TREE", tree_dir.as_str()),
+    ];
+    let index = repo
+        .common_dir
+        .join("bay")
+        .join(format!("aside-save-{}.index", std::process::id()));
+    let _ = std::fs::remove_file(&index);
+    let index_text = index.display().to_string();
+    let mut empty = vec![("GIT_INDEX_FILE", index_text.as_str())];
+    empty.extend_from_slice(&more);
+    let saved = git
+        .run_with(&["read-tree", "--empty"], &empty, None)
+        .ok()
+        .and_then(|_| save_tree(&git, &index, &more));
+    let _ = std::fs::remove_file(&index);
+    let tree = saved?;
+    let kept = format!("{}{name}", crate::names::VIEW_KEPT);
+    let earlier = repo.git.run(&["rev-parse", "--verify", "-q", &kept]).ok();
+    let mut args = vec!["commit-tree", tree.as_str()];
+    if let Some(earlier) = &earlier {
+        args.extend(["-p", earlier.trim()]);
+    }
+    let message = format!("bay: the files set aside as {name}, saved before they were freed");
+    args.extend(["-m", message.as_str()]);
+    let commit = repo
+        .git
+        .run_with(&args, crate::change::RECORD_IDENTITY, None)
+        .ok()?;
+    let old = earlier.unwrap_or_default();
+    repo.git
+        .run(&["update-ref", &kept, commit.trim(), old.trim()])
+        .ok()?;
+    Some(commit)
 }
 
 /// G665: the views [`release_ended`] would release, removing nothing. `in_time` stops the reading
@@ -394,7 +476,7 @@ fn standing(repo: &Repo, id: &str, ended: &Ended) -> Result<Standing, GitError> 
         Err(error) => Err(GitError::Spawn(error)),
         Ok(_) => {
             if let Some(key) = holds_newer_key(&path, ended)
-                && crate::facts::get(&repo.common_dir, &key).is_some()
+                && kept_until(repo, &key).is_some_and(|until| unix_now() < until)
             {
                 return Ok(Standing::HoldsNewerKept);
             }
@@ -430,8 +512,10 @@ fn holds_newer_at(path: &Path, head: &str) -> Option<[u8; 32]> {
     let stamp = stamp(path)?;
     let view = path.display().to_string();
     // G769: a verdict cached before a view holding only bay's own commit could go is not read.
+    // G784: nor one cached before a view's unsaved work could be saved and the view freed; a
+    // verdict now holds the time until which it stands.
     Some(crate::facts::key(
-        "view-release-3",
+        "view-release-4",
         "holds-newer",
         &[&view, head, &stamp],
         None,
@@ -443,8 +527,19 @@ fn holds_newer_at(path: &Path, head: &str) -> Option<[u8; 32]> {
 #[must_use]
 pub fn kept_holding_newer(repo: &Repo, id: &str, head: &str) -> bool {
     holds_newer_at(&repo.view_path(id), head)
-        .is_some_and(|key| crate::facts::get(&repo.common_dir, &key).is_some())
+        .and_then(|key| kept_until(repo, &key))
+        .is_some_and(|until| unix_now() < until)
 }
+
+/// G784: the Unix second until which a "holds something newer" verdict under `key` stands: the
+/// time its view's unsaved work is due to be saved, or the next try after a save that failed.
+fn kept_until(repo: &Repo, key: &[u8; 32]) -> Option<u64> {
+    let kept = crate::facts::get(&repo.common_dir, key)?;
+    std::str::from_utf8(&kept).ok()?.trim().parse().ok()
+}
+
+/// G784: how often a view whose unsaved work could not be saved is tried again.
+const SAVE_RETRY_S: u64 = 86_400;
 
 /// Releases the view of ended change `id` when it holds nothing newer; whether it did.
 fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
@@ -468,9 +563,33 @@ fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
                     _ => Ok(true),
                 };
             }
-            // G743: kept as judged, under the view's stamp after its cleaning.
+            // G784 (owner ruling, 2026-11-18: "save then free"): once its change ended a
+            // retention window ago, the view's unsaved work is saved to a local ref and the
+            // view goes. A save that cannot be verified keeps the view, tried again a day on.
+            let due = ended.at_unix.saturating_add(
+                ended
+                    .window
+                    .unwrap_or_else(|| repo.config.retention_window())
+                    .as_secs(),
+            );
+            let now = unix_now();
+            let until = if now < due {
+                due
+            } else if saved_work(repo, id, &path).is_some() {
+                remove_worktree(repo, &path).map_err(GitError::Spawn)?;
+                unregister(repo, &path);
+                return match std::fs::remove_file(journal_path(repo, id)) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        Err(GitError::Spawn(error))
+                    }
+                    _ => Ok(true),
+                };
+            } else {
+                now + SAVE_RETRY_S
+            };
+            // G743: kept as judged, under the view's stamp after its cleaning, until `until`.
             if let Some(key) = holds_newer_key(&path, ended) {
-                crate::facts::put(&repo.common_dir, &key, b"1");
+                crate::facts::put(&repo.common_dir, &key, until.to_string().as_bytes());
             }
             return Ok(false);
         }
@@ -520,6 +639,71 @@ fn committed_only(repo: &Repo, id: &str, path: &Path) -> bool {
     }
     let kept = format!("{}{id}", crate::names::VIEW_KEPT);
     repo.git.run(&["update-ref", &kept, head.trim()]).is_ok()
+}
+
+/// G784 (owner ruling, 2026-11-18: "save then free"; a Mac held about 4 GB in views of ended
+/// changes kept only for their unsaved work): saves the work the view at `path` holds, its
+/// tracked edits and its untracked files, in one commit of bay's own whose parent is the view's
+/// `HEAD`, under the local ref `refs/bay/view-kept/<id>` (a ref kept there before stays a parent,
+/// so no history of it is lost). Files the view's ignore rules match are not saved: they are
+/// build output a later build makes again. The commit is built through an index of bay's own, a
+/// copy of the view's, so the view's index is never written and a sparse view saves only what it
+/// checks out. The save is read back before it counts: every file of the view must match the
+/// saved index, and no file may be left out of it. The commit, or `None` when any step fails.
+fn saved_work(repo: &Repo, id: &str, path: &Path) -> Option<String> {
+    let git = Git::new(path).writing_tree();
+    let own = git.run(&["rev-parse", "--git-path", "index"]).ok()?;
+    let own = path.join(own.trim());
+    let head = git.run(&["rev-parse", "--verify", "HEAD"]).ok()?;
+    let kept = format!("{}{id}", crate::names::VIEW_KEPT);
+    let index = repo
+        .common_dir
+        .join("bay")
+        .join(format!("view-save-{}.index", std::process::id()));
+    let saved = std::fs::copy(&own, &index)
+        .ok()
+        .and_then(|_| save_tree(&git, &index, &[]));
+    let _ = std::fs::remove_file(&index);
+    let tree = saved?;
+    let earlier = repo.git.run(&["rev-parse", "--verify", "-q", &kept]).ok();
+    let mut args = vec!["commit-tree", tree.as_str(), "-p", head.trim()];
+    if let Some(earlier) = &earlier {
+        args.extend(["-p", earlier.trim()]);
+    }
+    let message = format!("bay: the unsaved work of view {id}, saved before the view was freed");
+    args.extend(["-m", message.as_str()]);
+    let commit = repo
+        .git
+        .run_with(&args, crate::change::RECORD_IDENTITY, None)
+        .ok()?;
+    // Create-only, or move from exactly the ref read: a ref another process moved meanwhile
+    // keeps this view.
+    let old = earlier.unwrap_or_default();
+    repo.git
+        .run(&["update-ref", &kept, commit.trim(), old.trim()])
+        .ok()?;
+    Some(commit)
+}
+
+/// [`saved_work`]'s tree: every file of the view `git` reads, through the index `index`, and
+/// whether that index then holds the view whole. `None` when a file differs from it or is left
+/// out of it, or when Git fails.
+fn save_tree(git: &Git, index: &Path, more: &[(&str, &str)]) -> Option<String> {
+    let index_text = index.display().to_string();
+    let mut envs = vec![("GIT_INDEX_FILE", index_text.as_str())];
+    envs.extend_from_slice(more);
+    let envs = envs.as_slice();
+    git.run_with(&["add", "-A"], envs, None).ok()?;
+    let (code, _, _) = git
+        .run_status_with(&["--no-optional-locks", "diff-files", "--quiet"], envs)
+        .ok()?;
+    let left_out = git
+        .run_with(&["ls-files", "--others", "--exclude-standard"], envs, None)
+        .ok()?;
+    if code != 0 || !left_out.trim().is_empty() {
+        return None;
+    }
+    git.run_with(&["write-tree"], envs, None).ok()
 }
 
 /// G646: removes the worktree at `path`, which holds nothing to keep. A build tool may leave
