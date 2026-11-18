@@ -91,10 +91,19 @@ fn last_line(repo: &Path, session: &str) -> Value {
 
 fn seeded(test_box: &TestBox) -> std::path::PathBuf {
     let repo = test_box.repo_any("repo");
+    // A session drops out of the map a takeover window after its last row: the harness's
+    // two-second lease makes that four seconds, which a loaded box spends between the hook and
+    // the map (g354). A minute keeps the rows this test reads.
     test_box.seed_with_check(
         &repo,
         &[("src/a.rs", "fn a() {}\n")],
-        &[(".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned())],
+        &[
+            (".bay/policy.toml".to_owned(), UNCHECKED_POLICY.to_owned()),
+            (
+                ".bay/config.toml".to_owned(),
+                "[runner]\ntakeover_s = 60\n".to_owned(),
+            ),
+        ],
     );
     repo
 }
