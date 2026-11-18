@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.101
+
+- A status read that repeats an unchanged answer says so once, and how to wait in one call.
+- `bay merge --wait` keeps its time limit and says what to do when it returns still waiting.
+- A change waiting on `--after` names what it waits for; `bay queue` no longer counts it as waiting.
+- A saved status answer counts as current while no ref has moved, with no age and no refresh.
+
 ## 0.6.100
 
 - `bay start` asks the remote twice, one fetch and one push, instead of four or five times.
