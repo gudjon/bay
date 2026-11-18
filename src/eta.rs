@@ -19,7 +19,8 @@
 //! The stage a change is in is judged by survival: of the past cases that lasted at least as
 //! long as this one has so far, what remained of them. Each later stage is its spread, the
 //! line's its per-place spread times the places ahead now. Low, likely and high are the 10th,
-//! 50th and 90th percentiles, summed over the stages left. A measurement (2026-11-18, 1,270
+//! 50th and 95th percentiles, summed over the stages left (the 95th since a day live: with the
+//! 90th, 20–24% of outcomes came later than the range and 8% earlier). A measurement (2026-11-18, 1,270
 //! changes in line on a busy store, each predicted from the eight hours before it): this range
 //! held 85% of the outcomes, 7% came earlier and 8% later; the two pace windows before it held
 //! 6%. A stage with fewer than [`MIN_CASES`] cases has no estimate, and then the whole has none:
@@ -68,7 +69,7 @@ impl Stage {
     }
 }
 
-/// A time to come in seconds: the 10th, 50th and 90th percentile.
+/// A time to come in seconds: the 10th, 50th and 95th percentile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Range {
     pub low: u64,
@@ -103,6 +104,9 @@ impl Range {
     }
 }
 
+/// The percentile a range's high end takes: late misses outnumbered early ones at the 90th.
+const HIGH_PERCENT: usize = 95;
+
 /// The `percent`th percentile of `sorted` (ascending, not empty), by nearest rank.
 fn percentile(sorted: &[u64], percent: usize) -> u64 {
     let rank = (sorted.len() * percent).div_ceil(100).max(1);
@@ -118,7 +122,7 @@ fn spread(mut values: Vec<u64>) -> Option<Range> {
     Some(Range {
         low: percentile(&values, 10),
         likely: percentile(&values, 50),
-        high: percentile(&values, 90),
+        high: percentile(&values, HIGH_PERCENT),
     })
 }
 
