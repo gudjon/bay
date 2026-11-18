@@ -442,6 +442,98 @@ fn accuracy(judged: &[(Range, u64)]) -> Value {
     })
 }
 
+/// G786d (a fleet finding, 2026-11-18: changes waited 67 minutes for the one runner of a check
+/// environment, and nothing said how many waited or what it cost): the environments of the
+/// pre-merge checks a change declaring `record`'s paths may wake, by the policy's globs alone
+/// ([`crate::policy::Policy::pre_merge`]), each declared path read as a file or a folder; every
+/// environment for a change to the whole tree. A check a person answers (an approval) runs on no
+/// runner and needs none. In name order.
+#[must_use]
+pub fn environments_of(
+    policy: &crate::policy::Policy,
+    record: &crate::change::ChangeRecord,
+) -> Vec<String> {
+    if policy.unchecked {
+        return Vec::new();
+    }
+    let declared: Vec<crate::policy::DeclaredPath> = record
+        .declared_inputs
+        .iter()
+        .filter_map(|input| match input {
+            crate::inputs::DeclaredInput::Path(path) => Some(crate::policy::DeclaredPath {
+                path: path.clone(),
+                is_file: false,
+            }),
+            crate::inputs::DeclaredInput::Named { .. } => None,
+        })
+        .collect();
+    let mut out: Vec<String> = policy
+        .pre_merge(&declared)
+        .into_iter()
+        .filter(|(entry, _, _)| {
+            let id = crate::evidence::CheckId::new(&entry.id, &entry.environment);
+            policy.check(&id).is_some_and(|check| !check.is_approval())
+        })
+        .map(|(entry, _, _)| entry.environment)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// G786d: how long each check ran, by environment, over the last attempt of each landing of
+/// `records` published in the [`WINDOW_S`] up to `now`: `(environment, check) → seconds`, each
+/// run rounded to the second.
+#[must_use]
+pub fn check_runs(
+    records: &[Value],
+    now: u64,
+) -> std::collections::BTreeMap<(String, String), Vec<u64>> {
+    let since = now.saturating_sub(WINDOW_S);
+    let mut out: std::collections::BTreeMap<(String, String), Vec<u64>> =
+        std::collections::BTreeMap::new();
+    for record in records.iter().filter(|record| {
+        record["published_at"]
+            .as_u64()
+            .is_some_and(|at| at >= since && at <= now)
+    }) {
+        let runs = record["checks"]
+            .as_array()
+            .and_then(|attempts| attempts.last())
+            .and_then(|attempt| attempt["runs"].as_array());
+        for run in runs.into_iter().flatten() {
+            let (Some(check), Some(environment), Some(seconds)) = (
+                run["check"].as_str(),
+                run["environment"].as_str(),
+                run["seconds"].as_f64(),
+            ) else {
+                continue;
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let seconds = seconds.max(0.0).round() as u64;
+            out.entry((environment.to_owned(), check.to_owned()))
+                .or_default()
+                .push(seconds);
+        }
+    }
+    out
+}
+
+/// G786d: `{p50_s, p90_s, runs}` of `runs`; null when there are none.
+#[must_use]
+pub fn run_spread(runs: &[u64]) -> Value {
+    if runs.is_empty() {
+        return Value::Null;
+    }
+    let mut sorted = runs.to_vec();
+    sorted.sort_unstable();
+    json!({
+        "p50_s": percentile(&sorted, 50),
+        "p90_s": percentile(&sorted, 90),
+        "runs": sorted.len(),
+    })
+}
+
 /// G786: a span of seconds in plain words: `40 s`, `12 min`, `2 h 10 min`.
 #[must_use]
 pub fn plain_span(secs: u64) -> String {

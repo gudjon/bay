@@ -283,7 +283,7 @@ pub fn cached(
     let chains = Chain::new(&repo.git)
         .read_all()
         .map_err(|error| error.message())?;
-    let shared = Shared::default();
+    let shared = Shared::at(&trunk);
     let mut changes = Vec::new();
     for held in chains {
         let (id, record) = (held.id.as_str(), held.record);
@@ -667,7 +667,7 @@ fn shown_changes(
     let threads = described.len().clamp(1, LEFTOVER_THREADS);
     let per = described.len().div_ceil(threads).max(1);
     let pending = &pending;
-    let shared = &Shared::default();
+    let shared = &Shared::at(trunk);
     let rows: Vec<Result<Value, String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = described
             .chunks(per)
@@ -2638,11 +2638,28 @@ fn line_of(places: &[crate::queue::Place], op_id: &str) -> Option<Value> {
 /// of the estimate's window say (G786). Each is read when a change first needs it.
 #[derive(Default)]
 struct Shared {
+    /// The trunk commit the read judges at.
+    trunk: String,
     places: std::sync::OnceLock<Option<Vec<crate::queue::Place>>>,
     past: std::sync::OnceLock<Option<crate::eta::Past>>,
+    runners: std::sync::OnceLock<Option<Vec<Value>>>,
 }
 
 impl Shared {
+    fn at(trunk: &str) -> Self {
+        Self {
+            trunk: trunk.to_owned(),
+            ..Self::default()
+        }
+    }
+
+    /// G786d: the runners' presences as this store last fetched them ([`crate::fleet::executors`]).
+    fn runners(&self, repo: &Repo) -> Option<&[Value]> {
+        self.runners
+            .get_or_init(|| crate::fleet::executors(repo).ok().flatten())
+            .as_deref()
+    }
+
     fn places(&self, repo: &Repo) -> Option<&[crate::queue::Place]> {
         self.places
             .get_or_init(|| crate::queue::Queue::live_here(repo).ok())
@@ -2728,8 +2745,58 @@ fn eta_of(
     };
     let mut eta = crate::eta::estimate(past, &live, now);
     eta["main"] = json!(repo.trunk());
-    eta["speedups"] = json!(speedups(&live, &eta, activity));
+    // G786d: the check environments it may wait for, and how many live runners serve each.
+    let runners = shared.runners(repo);
+    let needs: Vec<(String, Option<u64>)> = crate::policy::load_at(&repo.git, &shared.trunk)
+        .ok()
+        .flatten()
+        .map(|policy| crate::eta::environments_of(&policy, record))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|name| {
+            let live = runners.map(|rows| crate::flow::serving(rows, &name).0);
+            (name, live)
+        })
+        .collect();
+    eta["environments"] = needs
+        .iter()
+        .map(|(name, live)| json!({"environment": name, "runners": live}))
+        .collect();
+    let mut speedups = speedups(&live, &eta, activity);
+    speedups.extend(thin_environments(&live, &needs, runners));
+    eta["speedups"] = json!(speedups);
     eta
+}
+
+/// G786d: a change not yet held that may wait for checks in an environment no live runner
+/// serves, or only one while others run elsewhere, is told so: more runners there let it go
+/// sooner. No case measures by how much, so `saves_s` is null.
+fn thin_environments(
+    live: &crate::eta::Live,
+    needs: &[(String, Option<u64>)],
+    runners: Option<&[Value]>,
+) -> Vec<Value> {
+    if live.stage == crate::eta::Stage::AtHead {
+        return Vec::new();
+    }
+    let all = runners.map_or(0, |rows| {
+        rows.iter()
+            .filter(|row| row["readable"] == true && row["stale"] == false)
+            .count()
+    });
+    needs
+        .iter()
+        .filter_map(|(name, serving)| match serving {
+            Some(0) => Some(format!(
+                "Your change waits for checks in {name}, which no live runner serves: start a runner that serves it."
+            )),
+            Some(1) if all > 1 => Some(format!(
+                "Your change waits for checks in {name}, which only one runner serves: a second runner for it lets changes there go sooner."
+            )),
+            _ => None,
+        })
+        .map(|what| json!({"what": what, "saves_s": null}))
+        .collect()
 }
 
 /// G786: what would bring a change sooner, said where its agent can act on it. A draft whose

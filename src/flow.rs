@@ -168,6 +168,7 @@ pub fn flow(repo: &Repo, trunk: &str) -> Result<Value, String> {
         "queue_wait_s": queue_wait(&published),
         "check_time_s": check_time(&published),
         "recent": lately(&published, now),
+        "environments": environments(repo, trunk, &chains, &published, now),
         "oldest_live": oldest_live,
         "waiting_approval": {
             "count": review.waiting,
@@ -175,6 +176,112 @@ pub fn flow(repo: &Repo, trunk: &str) -> Result<Value, String> {
             "age_s": review.age_s,
         },
     }))
+}
+
+/// G786d (a fleet finding, 2026-11-18: changes waited 67 minutes for the one runner of a check
+/// environment): `environments` of [`flow`], one row for each environment a check of the policy
+/// at `trunk` runs in (a person's approval runs in none), in name order:
+/// - `checks`: each check there and how long it ran (`p50_s`, `p90_s`, `runs`) at the last
+///   attempt of the landings of the estimate's window ([`crate::eta::WINDOW_S`]); null when none
+///   ran;
+/// - `runners`: `{live, busy}`, the live runners that serve it, and how many hold a change now;
+///   null when this store recorded no fetch of the runners' presence;
+/// - `waiting`: the places in line whose change may wake a check there
+///   ([`crate::eta::environments_of`]);
+/// - `adds_s`: what it adds to one change, the slowest of its checks' `p50_s`; null when none ran;
+/// - `clears_in_s`: how long its runners take to check every change waiting for it, `waiting`
+///   times `adds_s` shared by the live runners; null with no live runner or no `adds_s`.
+///
+/// Empty when the policy has no check or cannot be read.
+fn environments(
+    repo: &Repo,
+    trunk: &str,
+    chains: &[HeldChain],
+    published: &[Value],
+    now: u64,
+) -> Vec<Value> {
+    let Ok(Some(policy)) = crate::policy::load_at(&repo.git, trunk) else {
+        return Vec::new();
+    };
+    let mut names: Vec<&str> = policy
+        .checks
+        .iter()
+        .filter(|check| !check.is_approval())
+        .map(|check| check.environment.as_str())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    if names.is_empty() {
+        return Vec::new();
+    }
+    let runs = crate::eta::check_runs(published, now);
+    let runners = crate::fleet::executors(repo).ok().flatten();
+    let places = crate::queue::Queue::live_here(repo).unwrap_or_default();
+    let records: HashMap<&str, &crate::change::ChangeRecord> = chains
+        .iter()
+        .map(|held| (held.id.as_str(), &held.record))
+        .collect();
+    let waits: Vec<Vec<String>> = places
+        .iter()
+        .filter_map(|place| records.get(place.entry.change.as_str()))
+        .map(|record| crate::eta::environments_of(&policy, record))
+        .collect();
+    names
+        .into_iter()
+        .map(|name| {
+            let checks: Vec<Value> = policy
+                .checks
+                .iter()
+                .filter(|check| check.environment == name && !check.is_approval())
+                .map(|check| {
+                    let spread = runs
+                        .get(&(name.to_owned(), check.id.clone()))
+                        .map_or(Value::Null, |runs| crate::eta::run_spread(runs));
+                    json!({"check": check.id, "ran": spread})
+                })
+                .collect();
+            let adds = checks
+                .iter()
+                .filter_map(|check| check["ran"]["p50_s"].as_u64())
+                .max();
+            let serving = runners.as_ref().map(|rows| serving(rows, name));
+            let waiting = waits
+                .iter()
+                .filter(|needs| needs.iter().any(|need| need == name))
+                .count() as u64;
+            let clears = serving
+                .filter(|(live, _)| *live > 0)
+                .zip(adds)
+                .map(|((live, _), adds)| (waiting * adds).div_ceil(live));
+            json!({
+                "environment": name,
+                "checks": checks,
+                "runners": serving.map(|(live, busy)| json!({"live": live, "busy": busy})),
+                "waiting": waiting,
+                "adds_s": adds,
+                "clears_in_s": clears,
+            })
+        })
+        .collect()
+}
+
+/// G786d: how many of the runner rows `rows` ([`crate::fleet::executors`]) are live and serve
+/// `environment`, and how many of those hold a change now. A live runner that declares nothing
+/// serves every environment, as `crate::presence` reads it.
+#[must_use]
+pub fn serving(rows: &[Value], environment: &str) -> (u64, u64) {
+    let live: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["readable"] == true && row["stale"] == false)
+        .filter(|row| {
+            row["environments"]["source"] == "default"
+                || row["environments"]["declared"]
+                    .as_array()
+                    .is_some_and(|declared| declared.iter().any(|served| served == environment))
+        })
+        .collect();
+    let busy = live.iter().filter(|row| !row["holding"].is_null()).count();
+    (live.len() as u64, busy as u64)
 }
 
 /// `by_actor` of [`flow`]: each actor's live changes, in name order, beside the WIP limit of the
