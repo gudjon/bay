@@ -186,7 +186,7 @@ fn a_drained_runner_stops_between_operations_once_its_post_pieces_end() {
     let file = PathBuf::from(asked["detail"]["drain"]["path"].as_str().unwrap());
     assert!(file.exists(), "{asked}");
     assert!(
-        file.starts_with(executor.join(".git").join("bay")),
+        file.starts_with(executor.join(".git").join("bay").canonicalize().unwrap()),
         "{asked}"
     );
     assert!(

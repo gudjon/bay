@@ -80,7 +80,7 @@ pub fn host_under(check: &Check, trust: Trust) -> Held {
     let go = test_box.path().join("go");
     let first = if check.hold_first {
         format!(
-            "if [ \"$n\" -eq 1 ]; then : > '{}'; until [ -e '{}' ]; do sleep 0.05; done; fi",
+            "if [ \"$n\" -eq 1 ]; then : > '{}'; until [ -e '{}' ] || ! kill -0 $PPID 2>/dev/null; do sleep 0.05; done; fi",
             waiting.display(),
             go.display()
         )
@@ -89,7 +89,7 @@ pub fn host_under(check: &Check, trust: Trust) -> Held {
     };
     // Any run the test marks (`Held::hold_run`) waits too, until the test lets it go.
     let waits = format!(
-        "{first}; if [ -e '{dir}/hold-'\"$n\" ]; then : > '{dir}/held-'\"$n\"; until [ -e '{dir}/go-'\"$n\" ]; do sleep 0.05; done; fi",
+        "{first}; if [ -e '{dir}/hold-'\"$n\" ]; then : > '{dir}/held-'\"$n\"; until [ -e '{dir}/go-'\"$n\" ] || ! kill -0 $PPID 2>/dev/null; do sleep 0.05; done; fi",
         dir = test_box.path().display()
     );
     // The test side of the check (G62): it logs the run, may hold it, and answers its number.

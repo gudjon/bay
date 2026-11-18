@@ -50,7 +50,7 @@ fn setup() -> Held {
         "exec 3>&1 >/dev/null\n\
          echo \"$tree\" >> '{runs}'; n=$(wc -l < '{runs}' | tr -d ' '); \
          if [ \"$n\" -le 2 ]; then ( cd '{mover}' && git pull -q --rebase && echo \"$n\" > docs/move-$n.md && git add docs && git -c user.name=t -c user.email=t@t commit -q -m \"move $n\" && git push -q origin main ); fi; \
-         if [ \"$n\" -eq 3 ]; then : > '{held}'; until [ -e '{go}' ]; do sleep 0.05; done; fi\n\
+         if [ \"$n\" -eq 3 ]; then : > '{held}'; until [ -e '{go}' ] || ! kill -0 $PPID 2>/dev/null; do sleep 0.05; done; fi\n\
          echo \"$n\" >&3",
         runs = runs.display(),
         mover = mover.display(),

@@ -114,7 +114,7 @@ fn a_post_check_of_one_environment_records_while_one_of_another_runs() {
     let started = test_box.path().join("slow-started");
     let go = test_box.path().join("slow-go");
     let hold = test_box.relay(&format!(
-        "touch '{}'; until [ -e '{}' ]; do sleep 0.05; done",
+        "touch '{}'; until [ -e '{}' ] || ! kill -0 $PPID 2>/dev/null; do sleep 0.05; done",
         started.display(),
         go.display()
     ));

@@ -147,7 +147,7 @@ fn install_newer(installed: &Path) {
 /// line to `started` and waits for `go`.
 fn seed(test_box: &TestBox, repo: &Path, started: &Path, go: &Path) {
     let hold = test_box.relay(&format!(
-        "echo x >> '{}'; until [ -e '{}' ]; do sleep 0.05; done",
+        "echo x >> '{}'; until [ -e '{}' ] || ! kill -0 $PPID 2>/dev/null; do sleep 0.05; done",
         started.display(),
         go.display()
     ));
