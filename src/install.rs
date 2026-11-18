@@ -142,9 +142,9 @@ fn run(dir: &Path, machine: bool, trunk: &Trunk) -> Result<BayResult, String> {
             detail["unrelated_hooks_unchanged"] = json!(before == after);
             // G320: entries that differ from the committed file reach no other clone until the
             // change that commits them lands; the result says so.
-            let unlanded = git
-                .run(&["status", "--porcelain", "--", &path.display().to_string()])
-                .is_ok_and(|out| !out.trim().is_empty());
+            let shown = path.display().to_string();
+            let read = ["--no-optional-locks", "status", "--porcelain", "--", &shown];
+            let unlanded = git.run(&read).is_ok_and(|out| !out.trim().is_empty());
             if unlanded {
                 detail["hooks_to_land"] = json!(true);
                 detail["next"] = json!(format!(

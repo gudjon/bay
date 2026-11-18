@@ -181,6 +181,71 @@ fn held(dir: &Path) -> Value {
     json!(rows)
 }
 
+/// G778b: the ref stores whose folders a quick stamp walks, under the common directory, two
+/// levels deep: a loose ref is written by a rename into its own folder, which moves that folder's
+/// time, so a ref of `refs/bay/talk/<actor>/<id>` moves `refs/bay/talk/<actor>`.
+const QUICK_ROOTS: [&str; 5] = [
+    "refs/bay",
+    "refs/notes",
+    "refs/remotes",
+    "refs/heads",
+    "refs/tags",
+];
+
+/// G778b: the quick stamp of the store at `common` and of the views at `views`: the files every
+/// ref writer rewrites (`packed-refs`, the reftable's table list, `HEAD`), the ref folders of
+/// [`QUICK_ROOTS`] two levels deep but the presence ones ([`UNSTAMPED`]), and each view's own stamp
+/// (`crate::view::stamp`: its index, its `HEAD` and its root). A few hundred `stat`s: the cost of
+/// knowing a saved answer still stands, where [`stamp`] walks every ref folder for seconds.
+fn quick(common: &Path, views: &[String]) -> Value {
+    let mut marks: Vec<Value> = ["packed-refs", "reftable/tables.list", "HEAD", "refs"]
+        .iter()
+        .map(|path| json!([path, mark(&common.join(path))]))
+        .collect();
+    for root in QUICK_ROOTS {
+        let mut dirs = vec![(root.to_owned(), 0)];
+        while let Some((dir, depth)) = dirs.pop() {
+            marks.push(json!([dir, mark(&common.join(&dir))]));
+            if depth == 2 {
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(common.join(&dir)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = format!("{dir}/{}", entry.file_name().to_string_lossy());
+                let presence = UNSTAMPED
+                    .iter()
+                    .any(|space| space.strip_suffix('/') == Some(path.as_str()));
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) && !presence {
+                    dirs.push((path, depth + 1));
+                }
+            }
+        }
+    }
+    marks.sort_by_key(ToString::to_string);
+    for view in views {
+        marks.push(json!([view, crate::view::stamp(Path::new(view))]));
+    }
+    Value::from(marks)
+}
+
+/// G778b: the views a saved `detail` names, whose own files its answer judged.
+fn views_of(detail: &Value) -> Vec<String> {
+    let mut views: Vec<String> = detail["changes"]
+        .as_array()
+        .map(|changes| {
+            changes
+                .iter()
+                .filter_map(|row| row["view"].as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    views.sort();
+    views.dedup();
+    views
+}
+
 /// The sweep record's time, which a saved answer was built after.
 fn swept_at(common: &Path) -> Option<String> {
     crate::sweep::last(common).map(|(at, _)| at)
@@ -200,6 +265,8 @@ pub struct Before {
     paths: Vec<String>,
     stamp: Vec<Value>,
     swept_at: Option<String>,
+    /// G778b: the quick stamp of the store's refs before the answer was built.
+    quick: Value,
 }
 
 impl Before {
@@ -216,6 +283,7 @@ impl Before {
         let stamp = stamp(&common, &paths);
         Some(Self {
             root,
+            quick: quick(&common, &[]),
             swept_at: swept_at(&common),
             common,
             change: change.map(str::to_owned),
@@ -242,6 +310,11 @@ impl Before {
         if let Some(detail) = detail.as_object_mut() {
             detail.remove("talk_accept");
         }
+        // G778b: a quick stamp only when no ref moved while the answer was built; the views it
+        // names are stamped now, after it judged them.
+        let views = views_of(&detail);
+        let quick_now = quick(&self.common, &[]);
+        let current = (quick_now == self.quick).then(|| quick(&self.common, &views));
         let saved = json!({
             "bay": crate::version::BAY,
             "root": self.root,
@@ -252,6 +325,8 @@ impl Before {
             "stamp": self.stamp,
             "change": result.change,
             "stale": stale,
+            "quick": current,
+            "views": views,
             "freshness": result.freshness.as_ref().map(|fresh| json!({
                 "trunk": fresh.trunk,
                 "fetched_at": fresh.fetched_at,
@@ -347,9 +422,18 @@ pub fn from_store(dir: &Path, change: Option<&str>) -> Option<(BayResult, bool)>
     }
     let (root, common) = checkout(dir)?;
     let (mut saved, age) = read(&common, &root, change)?;
-    let stands = age < refresh_after_s();
+    // G778b: an answer whose refs and views stand as they were is the answer now, while it is
+    // younger than what the clock judges in it allows ([`SAVED_MAX_S`]): served as current, with
+    // no read again.
+    let current = age <= SAVED_MAX_S
+        && !saved["quick"].is_null()
+        && saved["swept_at"] == json!(swept_at(&common))
+        && serde_json::from_value::<Vec<String>>(saved["views"].clone())
+            .is_ok_and(|views| saved["quick"] == quick(&common, &views));
+    let stands = current || age < refresh_after_s();
     let mut detail = saved["detail"].take();
     detail["from_store"] = json!(true);
+    detail["current"] = json!(current);
     detail["age_s"] = json!(age);
     detail["saved_s"] = json!(age);
     if let Some((_, unix)) = crate::sweep::last(&common)

@@ -1611,6 +1611,7 @@ impl BayResult {
             Some(detail)
                 if detail.get("schema").is_none()
                     && detail["from_store"] == true
+                    && detail["current"] != true
                     && detail["age_s"].as_u64().is_some_and(|age| age >= 60) =>
             {
                 format!(

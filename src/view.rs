@@ -495,6 +495,7 @@ fn committed_only(repo: &Repo, id: &str, path: &Path) -> bool {
     let git = Git::new(path);
     let clean = git
         .run(&[
+            "--no-optional-locks",
             "status",
             "--porcelain",
             "--ignored",
