@@ -46,6 +46,7 @@ pub mod ids;
 pub mod inputs;
 pub mod install;
 pub mod lane;
+pub mod lease;
 pub mod limits;
 pub mod line;
 pub mod lineage;

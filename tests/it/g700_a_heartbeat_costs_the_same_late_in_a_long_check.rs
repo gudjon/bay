@@ -2,12 +2,13 @@
 //! and 3,400 `cat-file` calls). Each heartbeat of a running check read every state of the
 //! change's chain to find its newest draft, and each beat adds a state, so a long check's beats
 //! cost its square. A beat reads the head state alone: the chain's states read per beat stay
-//! constant however long the check runs.
+//! constant however long the check runs. G787: a beat replaces the holder's lease ref and
+//! reads no state of the chain at all.
 //!
 //! Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file (G171).
 //!
-//! Guard to mutate: in `src/publish.rs` `heartbeat`, `latest_draft` (back to `drafts`, a walk
-//! of every state).
+//! Guard to mutate: in `src/lease.rs` `Holding::beat`, a walk of chain states each beat (five
+//! `rev-list --parents -n 1` reads of `refs/bay/changes/<id>` per beat fail it).
 
 #![cfg(unix)]
 
@@ -36,7 +37,7 @@ fn a_heartbeat_costs_the_same_late_in_a_long_check() {
     );
     assert_eq!(code, 0, "{queued}");
 
-    // GIVEN a runner whose check runs for a while, beating its change's chain each second
+    // GIVEN a runner whose check runs for a while, beating its lease each second
     let executor = test_box.clone_of(&remote, "executor");
     let trace = test_box.path().join("trace.jsonl");
     let (code, ran) = result_json(
@@ -65,10 +66,7 @@ fn a_heartbeat_costs_the_same_late_in_a_long_check() {
     let beats = lines
         .iter()
         .filter(|line| {
-            line["sub"] == "push"
-                && args(line)
-                    .iter()
-                    .any(|arg| arg.contains("refs/bay/changes/"))
+            line["sub"] == "push" && args(line).iter().any(|arg| arg.contains("refs/bay/lease/"))
         })
         .count();
     let states_read = lines
@@ -76,7 +74,7 @@ fn a_heartbeat_costs_the_same_late_in_a_long_check() {
         .filter(|line| line["sub"] == "rev-list" && args(line).iter().any(|arg| arg == "--parents"))
         .count();
 
-    // THEN it read a few states per beat, not the whole chain each time
+    // THEN it read a few states per beat at most, not the whole chain each time
     assert!(beats >= 10, "only {beats} beats");
     assert!(
         states_read <= 2 * beats + 20,

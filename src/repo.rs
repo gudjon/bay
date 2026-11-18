@@ -986,13 +986,17 @@ impl Repo {
     pub fn remote_chain(&self, change: &str) -> Result<String, GitError> {
         let git = &self.git;
         let name = crate::change::change_ref(change);
+        // G787: the holder's lease comes in the same round trip, pruned (`crate::lease`).
+        let lease = crate::lease::refspec_of(change);
         if git
             .run(&[
                 "fetch",
                 "-q",
+                "--prune",
                 "--no-tags",
                 self.remote(),
                 &format!("{name}:{name}"),
+                &lease,
             ])
             .is_ok()
             && let Some(head) = git.ref_target(&name)?
@@ -1003,9 +1007,11 @@ impl Repo {
         git.run(&[
             "fetch",
             "-q",
+            "--prune",
             "--no-tags",
             self.remote(),
             &format!("+{name}:{fetched}"),
+            &lease,
         ])?;
         let remote = git.run(&["rev-parse", "--verify", &fetched])?;
         let _ = git.run(&["update-ref", "-d", &fetched, &remote]);
@@ -1021,7 +1027,7 @@ impl Repo {
         let git = &self.git;
         let mut unread = Vec::new();
         for batch in changes.chunks(200) {
-            let specs: Vec<String> = batch
+            let mut specs: Vec<String> = batch
                 .iter()
                 .map(|change| {
                     format!(
@@ -1031,7 +1037,9 @@ impl Repo {
                     )
                 })
                 .collect();
-            let mut args = vec!["fetch", "-q", "--no-tags", self.remote()];
+            // G787: the leases come in the same round trip, pruned (`crate::lease`).
+            specs.push(crate::lease::refspec());
+            let mut args = vec!["fetch", "-q", "--prune", "--no-tags", self.remote()];
             args.extend(specs.iter().map(String::as_str));
             if git.run(&args).is_err() {
                 for change in batch {

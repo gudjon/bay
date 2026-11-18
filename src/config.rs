@@ -388,10 +388,11 @@ pub struct Executor {
     pub submission_timeout_s: Option<u64>,
     /// The pre-publication execution budget, from the start of the checks.
     pub execution_budget_s: Option<u64>,
-    /// The executor lease (§ 9a): an owner whose chain head does not change for this long, on
-    /// an observer's monotonic clock, may be replaced. Default 60.
+    /// The executor lease (§ 9a): an owner whose chain head and lease (G787) do not change for
+    /// this long, on an observer's monotonic clock, may be replaced. Default 60.
     pub lease_s: Option<u64>,
-    /// How often an owner renews its lease with a heartbeat commit. Default 10.
+    /// How often an owner beats its lease while a check runs (`refs/bay/lease/<change>`,
+    /// G787). Default 10.
     pub heartbeat_s: Option<u64>,
     /// The takeover window for adopting another actor's idle change: longer than the lease.
     /// Default twice the lease.

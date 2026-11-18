@@ -825,6 +825,8 @@ impl Plan {
         refspecs.extend(crate::fleet::refspecs());
         // G765: the line too, so a store's copy of it is no older than its last sweep.
         refspecs.extend(crate::queue::refspecs());
+        // G787: and the holders' leases, which say whether an operation's holder is alive.
+        refspecs.push(crate::lease::refspec());
         // Each target is asked by its name as a prefix, so one the remote no longer holds fails
         // no sweep: it is named as a prune of its copy. A ref that shares the prefix is never
         // taken.
@@ -1237,6 +1239,8 @@ fn settle_swept(
         // G765: the line, places and releases alike, pruned as the remote prunes them.
         crate::names::QUEUE,
         crate::names::QUEUE_DONE,
+        // G787: the leases, which their holders replace in place and delete at release.
+        crate::names::LEASE,
     ] {
         updates.extend(swept.taken(prefix, |_, _| true));
     }
@@ -2046,7 +2050,8 @@ fn live_inputs(
 }
 
 /// A one-off status cannot watch a lease; it reports a suspected expiry from the age of the
-/// chain head and never claims (§ 9a).
+/// holder's newest sign of life, its chain head or its last beat of its lease (G787), and never
+/// claims (§ 9a).
 fn lease(
     repo: &Repo,
     record: &ChangeRecord,
@@ -2072,6 +2077,7 @@ fn lease(
         ])
         .ok()
         .and_then(|time| time.trim().parse::<u64>().ok())
+        .map(|time| time.max(crate::lease::beat_at(&repo.git, &record.id, op).unwrap_or(0)))
         .map(|time| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

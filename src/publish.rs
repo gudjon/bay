@@ -754,9 +754,8 @@ struct Ctx<'a> {
     /// The head this process's first write not yet on the remote went on; `None` once every
     /// write it made is pushed or withdrawn. [`Ctx::take_back`] takes those writes off the
     /// local chain ref, and only those, at every re-read of the remote chain and when the
-    /// context ends, whichever path wrote them: claims and state saves alike (G294). A
-    /// heartbeat takes its own back at once ([`heartbeat`]). Any other local work the remote
-    /// lacks is kept (G289).
+    /// context ends, whichever path wrote them: claims and state saves alike (G294). Any other
+    /// local work the remote lacks is kept (G289).
     unpushed_from: Option<String>,
     /// The epoch this process claimed, when it acts as the executor.
     my_epoch: u64,
@@ -764,8 +763,9 @@ struct Ctx<'a> {
     repair: Option<String>,
     /// Whether the remote answered this run's fetch.
     online: bool,
-    /// The chain head the last heartbeat pushed, while a check runs (§ 9a).
-    beat_pushed: std::cell::RefCell<Option<String>>,
+    /// G787: the lease this process beats while it holds the operation it claimed, released
+    /// when the context ends ([`heartbeat`], `crate::lease`).
+    lease: std::cell::RefCell<Option<crate::lease::Holding>>,
     /// B2: the last valid policy this operation was judged by, because main's own is invalid;
     /// every result of the operation names it.
     policy_used: std::cell::RefCell<Option<serde_json::Value>>,
@@ -830,7 +830,7 @@ impl<'a> Ctx<'a> {
             my_epoch: 0,
             repair: None,
             online: true,
-            beat_pushed: std::cell::RefCell::new(None),
+            lease: std::cell::RefCell::new(None),
             policy_used: std::cell::RefCell::new(None),
             deferred: std::cell::RefCell::new(Vec::new()),
             retries_here: 0,
@@ -1244,6 +1244,10 @@ impl<'a> Ctx<'a> {
 impl Drop for Ctx<'_> {
     fn drop(&mut self) {
         self.take_back();
+        // G787: the holder's visit ends, and its lease with it.
+        if let Some(mut lease) = self.lease.get_mut().take() {
+            lease.release(self.repo);
+        }
     }
 }
 
@@ -2904,12 +2908,6 @@ fn bisect_batch(
         }
         search.record(prefix, refusal.is_none());
         checks.push(json!({"members": prefix, "tree": tip.tree, "verdict": verdict}));
-    }
-    // Heartbeats moved the head's chain while the checks ran; continue from the last one.
-    if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
-        ctx.head.clone_from(&beat);
-        ctx.pushed_head = Some(beat);
-        ctx.unpushed_from = None;
     }
     push_evidence(ctx.repo, &ctx.producer()?.0)?;
     Ok(Some((search, checks)))
@@ -4793,6 +4791,9 @@ fn claim(
             }
             if ctx.push_chain() {
                 ctx.my_epoch = epoch;
+                *ctx.lease.get_mut() = Some(crate::lease::Holding::new(crate::lease::Lease::new(
+                    &id, op_id, epoch, &name,
+                )));
                 return Ok(None);
             }
             // The claim never reached the remote: it leaves this box's chain ref too, so no
@@ -6772,12 +6773,6 @@ fn build_and_check(
         &inputs::request_inputs(&judged),
     )?;
     let refusal = judged_outcome(ctx, op_id, &candidate_id, refusal, &judged);
-    // Heartbeats moved the chain while the check ran; continue from the last one pushed.
-    if let Some(beat) = ctx.beat_pushed.borrow_mut().take() {
-        ctx.head.clone_from(&beat);
-        ctx.pushed_head = Some(beat);
-        ctx.unpushed_from = None;
-    }
     let refusal = match refusal {
         Some(waiting) if waiting.reason == Some(Reason::CheckUnavailable) => {
             return wait_for_worker(ctx, op_id, revision, waiting).map(Err);
@@ -8378,63 +8373,31 @@ pub(crate) fn landed_markers(
     Ok(markers)
 }
 
-/// Renews the executor's lease while a check runs (§ 9a): one heartbeat commit on the chain,
-/// signed by the executor, pushed under the lease of the head this executor last pushed. A
-/// push that fails means the chain moved (a takeover); the persist step then finds out.
+/// Renews the executor's lease while a check runs (§ 9a). G787 (owner ruling 2026-11-18): one
+/// beat of its lease ref (`crate::lease`), signed by the executor and pushed alone by
+/// compare-and-swap, never a commit on the change's history: the history moves only on real
+/// state. A beat that fails means another holder took over; the persist step finds out.
 fn heartbeat(ctx: &Ctx, op_id: &str) {
     if ctx.ahead_of_turn {
         return;
     }
-    let git = &ctx.repo.git;
-    let mut chain = Chain::new(git);
-    chain.sign_with(ctx.executor_signer().ok().flatten());
-    let Ok(Some(head)) = chain.head(&ctx.id) else {
-        return;
-    };
-    let expected = ctx
-        .beat_pushed
-        .borrow()
-        .clone()
-        .or_else(|| ctx.pushed_head.clone());
-    if expected.as_deref() != Some(head.as_str()) {
-        return;
-    }
-    // G700: the newest draft, read from the head state alone; a walk of every draft grew with
-    // each beat, so a long check's beats cost its square.
-    let (Ok(record), Ok(draft)) = (chain.record_at(&head), chain.latest_draft(&ctx.id)) else {
-        return;
-    };
-    let Ok(beat) = chain.append(
-        &head,
-        &record,
-        &draft,
-        &format!("heartbeat {op_id} epoch {}", ctx.my_epoch),
-    ) else {
-        return;
-    };
-    let name = change_ref(&ctx.id);
-    let pushed = git
-        .run(&[
-            "push",
-            "-q",
-            &format!("--force-with-lease={name}:{head}"),
-            ctx.repo.remote(),
-            &format!("{beat}:{name}"),
-        ])
-        .is_ok();
-    if pushed {
-        *ctx.beat_pushed.borrow_mut() = Some(beat);
-    } else {
-        let _ = git.run(&["update-ref", &name, &head, &beat]);
+    let signer = ctx.executor_signer().ok().flatten();
+    if let Some(lease) = ctx
+        .lease
+        .borrow_mut()
+        .as_mut()
+        .filter(|lease| lease.of(op_id))
+    {
+        lease.beat(ctx.repo, signer.as_ref());
     }
 }
 
 /// G679 (a fleet finding, 2026-11-08: twice in one hour a change's own `bay merge` claimed its
 /// operation, recorded its check and stopped, and both runners watched the dead claim for the
-/// full 450 s lease, running nothing else): how long a holder's chain may stay quiet before its
-/// claim is taken over. A runner holds the configured lease, which covers its longest quiet
+/// full 450 s lease, running nothing else): how long a holder's chain and lease may stay quiet
+/// before its claim is taken over. A runner holds the configured lease, which covers its longest quiet
 /// step. A change's own run, whose owner is bay's default name for a clone that is no runner,
-/// holds six heartbeats: it beats its chain while its check runs, and its other steps are
+/// holds six heartbeats: it beats its lease while its check runs, and its other steps are
 /// short. Taking over a live one costs a repeated check, never a second landing: the claim
 /// raises the epoch, and a holder whose epoch moved never publishes (§ 9a).
 #[must_use]
@@ -8447,8 +8410,9 @@ pub fn holder_lease(config: &crate::config::Config, owner: Option<&str>) -> Dura
     }
 }
 
-/// G696: a looping runner's sightings of the chains other runners hold, by change: the head it
-/// saw and when it first saw it. `None` until the runner loops ([`watch_leases_across_passes`]).
+/// G696: a looping runner's sightings of the chains other runners hold, by change: the head and
+/// lease it saw ([`crate::lease::watched`]) and when it first saw them. `None` until the runner
+/// loops ([`watch_leases_across_passes`]).
 static SIGHTINGS: std::sync::Mutex<Option<std::collections::HashMap<String, (String, Instant)>>> =
     std::sync::Mutex::new(None);
 
@@ -8462,32 +8426,36 @@ pub fn watch_leases_across_passes() {
 }
 
 /// Watches an operation another executor holds for `lease` on this process's monotonic
-/// clock, from its own first sighting (§ 9a). Returns whether the lease expired: the chain head
-/// never changed. Any change means the owner is alive.
+/// clock, from its own first sighting (§ 9a). Returns whether the lease expired: neither the
+/// chain head nor the holder's lease ref changed (G787, [`crate::lease::watched`]). Any change
+/// means the owner is alive.
 ///
 /// G696 (a fleet finding, 2026-11-11: every runner but the head's holder spent 20 to 35 s of
 /// each pass, and up to 30 fetches, watching the holder's chain until its next heartbeat). A
 /// looping runner's pass never waits here: it notes when it first saw this head and judges the
 /// lease against that on each later pass. Any other caller watches as before.
 fn lease_expired(ctx: &mut Ctx, lease: Duration) -> bool {
+    let watched = |ctx: &Ctx| crate::lease::watched(&ctx.repo.git, &ctx.id, &ctx.head);
     if ctx.visit == Visit::Pass
         && let Ok(mut sightings) = SIGHTINGS.lock()
         && let Some(seen) = sightings.as_mut()
     {
         let now = Instant::now();
+        let sighted = watched(ctx);
         let sighting = seen
             .entry(ctx.id.clone())
-            .or_insert_with(|| (ctx.head.clone(), now));
-        if sighting.0 != ctx.head {
-            *sighting = (ctx.head.clone(), now);
+            .or_insert_with(|| (sighted.clone(), now));
+        if sighting.0 != sighted {
+            *sighting = (sighted, now);
         }
         return sighting.1.elapsed() >= lease;
     }
-    let first = ctx.head.clone();
+    let first = watched(ctx);
     let seen = Instant::now();
     // G749 (a fleet finding, 2026-11-16: each `merge --wait` behind a held operation fetched its
     // chain five times a second, about 3,000 to 7,700 Git commands a wait, while the holder moves
-    // it once a heartbeat): the chain is read again once a heartbeat, never faster.
+    // it once a heartbeat): the chain and its lease are read again once a heartbeat, never
+    // faster, in one fetch ([`Repo::remote_chain`]).
     let every = ctx
         .repo
         .config
@@ -8496,7 +8464,7 @@ fn lease_expired(ctx: &mut Ctx, lease: Duration) -> bool {
         .min(lease);
     while seen.elapsed() < lease {
         std::thread::sleep(every);
-        if ctx.refetch().is_ok() && ctx.head != first {
+        if ctx.refetch().is_ok() && watched(ctx) != first {
             return false;
         }
     }

@@ -7,7 +7,8 @@
 //! the commit time of a commit bay signed. The times are ordered, and the queue wait and the
 //! check time fit in the total. `bay status <change>` shows the same timing on its operation row.
 //! Reading the timing costs a constant number of `git` spawns, however many heartbeats the
-//! chain holds: one walk of the chain's subjects, never one read per state.
+//! chain holds: one walk of the chain's subjects, never one read per state. A runner beats its
+//! lease ref since G787, but a history an older bay beat keeps its heartbeat states.
 
 // The check moves trunk with a shell script, so this runs on Unix only.
 #![cfg(unix)]
@@ -154,6 +155,35 @@ fn log_spawns(test_box: &TestBox, dir: &Path, name: &str) -> (usize, Value) {
     (logs, result)
 }
 
+/// Heartbeats as a bay before G787 wrote them: `count` states on change `id`'s history at the
+/// remote, each its head's record again under a `heartbeat <op_id>` subject, on the same draft.
+fn older_beats(test_box: &TestBox, repo: &Path, id: &str, op_id: &str, count: usize) {
+    let chain = format!("refs/bay/changes/{id}");
+    test_box.git_ok(
+        repo,
+        &["fetch", "-q", "origin", &format!("+{chain}:{chain}")],
+    );
+    let mut head = test_box.git_ok(repo, &["rev-parse", &chain]);
+    let tree = test_box.git_ok(repo, &["rev-parse", &format!("{head}^{{tree}}")]);
+    let draft = test_box.git_ok(repo, &["rev-parse", &format!("{head}^2")]);
+    for _ in 0..count {
+        head = test_box.git_ok(
+            repo,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &head,
+                "-p",
+                &draft,
+                "-m",
+                &format!("heartbeat {op_id} epoch 1"),
+            ],
+        );
+    }
+    test_box.git_ok(repo, &["push", "-q", "origin", &format!("{head}:{chain}")]);
+}
+
 /// The heartbeat states on change `id`'s chain at the remote.
 fn heartbeats(test_box: &TestBox, remote: &Path, id: &str) -> usize {
     test_box
@@ -176,21 +206,10 @@ fn the_timing_costs_the_same_spawns_however_many_heartbeats() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
-    let runs = test_box.path().join("runs");
-    // The second run checks for eight seconds: with the one-second heartbeat the box seeds,
-    // its chain holds several heartbeats more than the first's, even on a loaded box whose
-    // heartbeat pushes take a second or more.
-    let relayed = test_box.relay(&format!(
-        "exec 3>&1 >/dev/null\n\
-         echo x >> '{runs}'; n=$(wc -l < '{runs}' | tr -d ' '); \
-         if [ \"$n\" -ge 2 ]; then sleep 8; fi\n\
-         echo \"$n\" >&3",
-        runs = runs.display(),
-    ));
     test_box.seed_with_check(
         &repo,
         &[("src/a.rs", "fn a() {}\n")],
-        &check_files(&format!("n=$({relayed})\n"), &passing_result(1), 1, 60),
+        &check_files("true", &passing_result(1), 1, 60),
     );
     let executor = test_box.clone_of(&remote, "executor");
 
@@ -207,6 +226,11 @@ fn the_timing_costs_the_same_spawns_however_many_heartbeats() {
         .unwrap();
         let (code, submitted) = result_json(test_box.bay(&view).arg("merge"));
         assert_eq!(code, 0, "{submitted}");
+        // The second change's history holds twenty heartbeats an older bay wrote.
+        if name == "slow" {
+            let op_id = submitted["op_id"].as_str().unwrap();
+            older_beats(&test_box, &repo, &id, op_id, 20);
+        }
         let (logs, result) = log_spawns(&test_box, &executor, name);
         assert_eq!(result["detail"]["ran"][0]["decision"], "merged", "{result}");
         spawns.push(logs);
@@ -214,7 +238,7 @@ fn the_timing_costs_the_same_spawns_however_many_heartbeats() {
     }
     assert!(
         beats[1] >= beats[0] + 3,
-        "the slow check made heartbeats: {beats:?}"
+        "the older bay's heartbeats are on the history: {beats:?}"
     );
     // A walk that read each chain state would spawn one more `git log` per heartbeat.
     assert!(

@@ -86,13 +86,21 @@ fn a_killed_owner_is_replaced_after_its_lease_by_a_supervisor_that_waited_a_full
         );
     }
 
-    // A claims and starts the check; it renews its lease with heartbeats; then it dies.
+    // A claims and starts the check; it renews its lease with heartbeats (G787: on its lease
+    // ref); then it dies.
     let mut owner = supervisor(&test_box, &a, true);
     wait_for("A's check", Duration::from_secs(30), || started.exists());
     wait_for("a heartbeat", Duration::from_secs(10), || {
-        test_box
-            .git_bare(&remote, &["log", "--format=%s", &chain])
-            .contains("heartbeat")
+        !test_box
+            .git_bare(
+                &remote,
+                &[
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    &format!("refs/bay/lease/{id}"),
+                ],
+            )
+            .is_empty()
     });
     owner.kill().unwrap();
     let _ = owner.wait();

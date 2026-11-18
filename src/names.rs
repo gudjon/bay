@@ -20,6 +20,9 @@ pub const CHANGES: &str = "refs/bay/changes/";
 pub const REQUESTS: &str = "refs/bay/requests/";
 /// `refs/bay/landed/<Change-Id>`: a change's landing marker.
 pub const LANDED: &str = "refs/bay/landed/";
+/// `refs/bay/lease/<Change-Id>`: the lease a runner beats while it checks the change's
+/// operation, replaced in place (G787, `crate::lease`).
+pub const LEASE: &str = "refs/bay/lease/";
 /// `refs/bay/intent/<hash>/<generation>`: an intent claim.
 pub const INTENT: &str = "refs/bay/intent/";
 /// `refs/bay/landed-intent/<hash>/<generation>`: a landed intent claim.
@@ -133,7 +136,7 @@ pub fn bay_ref(name: &str) -> Result<(), String> {
     }
     let parts: Vec<&str> = rest.split('/').collect();
     match parts.as_slice() {
-        ["changes" | "requests" | "landed", id] => {
+        ["changes" | "requests" | "landed" | "lease", id] => {
             if crate::ids::is_change_id(id) {
                 Ok(())
             } else {

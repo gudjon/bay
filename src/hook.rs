@@ -8,8 +8,8 @@
 //! Judged here: bay ref names (the fixed alphabet), trunk publications, the landed marker,
 //! change chains (agent, executor and registry signatures; adoption; no deletion; the
 //! retention cut), requests, evidence notes, executor logs, the registry, queue reservations
-//! and releases, intent claims, the landed intent, live summary refs, talks (`crate::talk`), and
-//! marker compaction into the shard indexes (`crate::compact`): a compacted name is never created
+//! and releases, intent claims, the landed intent, live summary refs, runner presences, holders'
+//! leases (`crate::lease`), talks (`crate::talk`), and marker compaction into the shard indexes (`crate::compact`): a compacted name is never created
 //! again, a marker is deleted only by its compaction, and a shard index only appends.
 //!
 //! N-21: when the policy at the host's trunk tip, before the push, says `[policy] signing =
@@ -259,6 +259,8 @@ pub fn pre_receive(git: &Git, input: &str) -> Result<(), String> {
             judge.live(update, machine)
         } else if let Some(executor) = name.strip_prefix(crate::presence::PRESENCE_PREFIX) {
             judge.presence(update, executor)
+        } else if let Some(change) = name.strip_prefix(crate::lease::LEASE_PREFIX) {
+            judge.lease(update, change)
         } else if let Some(talk) = name.strip_prefix(crate::talk::TALK_PREFIX) {
             judge.talk(update, talk)
         } else if name.starts_with(crate::names::LOCKS) {
@@ -1556,6 +1558,74 @@ impl Judge<'_> {
             })?;
         if record["executor"] != executor {
             return Err(format!("{} names another runner", update.new));
+        }
+        Ok(())
+    }
+
+    /// G787: a holder's lease (`crate::lease`). Its deletion is its release, taken as a lock's
+    /// is. Otherwise it is one parentless commit whose tree is `lease.json` alone, at most
+    /// [`crate::lease::LEASE_MAX_BYTES`], a `bay.lease/1` record of this change signed by the
+    /// runner key of the holder it names, and the change's history after this push names that
+    /// holder as the holder of that operation at that epoch. So only the holder beats it in
+    /// place, and a holder taken over beats it no more.
+    fn lease(&self, update: &Update, change: &str) -> Result<(), String> {
+        if is_zero(&update.new) {
+            return Ok(());
+        }
+        let parents = self
+            .git
+            .run(&["show", "-s", "--format=%P", &update.new])
+            .map_err(|error| message(&error))?;
+        let tree = self
+            .git
+            .run(&["ls-tree", "-l", &update.new])
+            .map_err(|error| message(&error))?;
+        if !parents.trim().is_empty()
+            || !one_small_file(
+                &tree,
+                crate::lease::LEASE_FILE,
+                crate::lease::LEASE_MAX_BYTES,
+            )
+        {
+            return Err(format!(
+                "{} must be a parentless commit holding {} alone, at most {} bytes",
+                update.new,
+                crate::lease::LEASE_FILE,
+                crate::lease::LEASE_MAX_BYTES
+            ));
+        }
+        let lease = crate::lease::read(self.git, &update.new)?
+            .filter(|lease| lease.change == change)
+            .ok_or_else(|| {
+                format!(
+                    "{} holds no {} of change {change}",
+                    update.new,
+                    crate::lease::LEASE_SCHEMA
+                )
+            })?;
+        match self.signer(&update.new, &[KeyClass::Runner])? {
+            Some((_, principal)) if principal == lease.holder => {}
+            _ => {
+                return Err(format!(
+                    "{} is not signed by runner {}",
+                    update.new, lease.holder
+                ));
+            }
+        }
+        let held = match self.after(&format!("{}{change}", crate::names::CHANGES))? {
+            Some(head) => Chain::new(self.git)
+                .record_at(&head)
+                .map_err(|error| error.message())?
+                .operations
+                .iter()
+                .any(|op| lease.holds(op)),
+            None => false,
+        };
+        if !held {
+            return Err(format!(
+                "{} is not the lease of the holder the history names: no operation {} held by {} at epoch {}",
+                update.new, lease.op_id, lease.holder, lease.epoch
+            ));
         }
         Ok(())
     }

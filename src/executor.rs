@@ -474,7 +474,8 @@ struct Seen {
 /// An error is a release the remote refused or did not take; the next pass tries it again.
 /// What it read of the queue goes to `seen`.
 /// A queue head as this supervisor watches it for its progress deadline: when it first saw it
-/// as head, the head of its change's chain then, and when that chain last moved.
+/// as head, the head of its change's chain and its holder's lease then
+/// ([`crate::lease::watched`]), and when either last moved.
 struct HeadSighting {
     first: Instant,
     chain: Option<String>,
@@ -532,9 +533,13 @@ fn deadlines(
         seen.after = Some(queue);
         return Ok(());
     }
-    // G740: past the deadline, the head's chain is read to see whether its owner still moves it.
-    // The first read starts the watch: the head then has one lease to show it moves.
-    let chain = repo.remote_chain(&head.change).ok();
+    // G740: past the deadline, the head's chain is read to see whether its owner still moves it,
+    // or its lease (G787), which comes in the same fetch. The first read starts the watch: the
+    // head then has one lease to show it moves.
+    let chain = repo
+        .remote_chain(&head.change)
+        .ok()
+        .map(|chain| crate::lease::watched(&repo.git, &head.change, &chain));
     if chain.is_some() && chain != sighting.chain {
         sighting.moved = Instant::now();
         sighting.chain = chain;
@@ -1531,9 +1536,10 @@ fn place_arrival(repo: &Repo, change: &str, request: &str, holding: &str) -> Opt
 }
 
 /// The queue head's (change, operation) when nobody holds it, or its holder stopped writing its
-/// chain for two leases, so this runner takes it between two other operations; `None` when there is no head,
-/// it is `just` the operation this runner ran, or its chain moved within that time (a live holder
-/// heartbeats it while a check runs).
+/// chain and beating its lease for two leases, so this runner takes it between two other
+/// operations; `None` when there is no head, it is `just` the operation this runner ran, or its
+/// chain or its lease moved within that time (a live holder beats its lease while a check runs,
+/// G787).
 ///
 /// A head whose operation already ended is released here and now, never run (a fleet finding,
 /// 2026-10-26: a superseded operation of an abandoned change held the head for five hours, and
@@ -1576,13 +1582,12 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
         .ok()?
         .parse::<u64>()
         .ok()?;
-    let idle = crate::live::unix_now().saturating_sub(written);
+    let op = record.operations.iter().find(|op| op.op_id == head.op_id);
+    // G787: the holder's last beat of its lease, which the chain read brought.
+    let beat = op.and_then(|op| crate::lease::beat_at(&repo.git, &head.change, op));
+    let idle = crate::live::unix_now().saturating_sub(written.max(beat.unwrap_or(0)));
     // G679: a change's own run that stopped holds a short lease, not a runner's.
-    let owner = record
-        .operations
-        .iter()
-        .find(|op| op.op_id == head.op_id)
-        .and_then(|op| op.owner.as_deref());
+    let owner = op.and_then(|op| op.owner.as_deref());
     let lease = crate::publish::holder_lease(&repo.config, owner).as_secs();
     (idle > lease * 2).then_some((head.change, head.op_id))
 }
