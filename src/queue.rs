@@ -131,6 +131,59 @@ fn fetch(repo: &Repo) {
     }
 }
 
+/// The head of `listed`, a line's refs: the lowest reservation with no release, by its place
+/// and its reservation's commit.
+fn head_of(listed: impl Iterator<Item = (u64, String, bool)>) -> Option<(u64, String)> {
+    let mut reserved = BTreeMap::new();
+    let mut released = BTreeSet::new();
+    for (seq, commit, release) in listed {
+        if release {
+            released.insert(seq);
+        } else {
+            reserved.insert(seq, commit);
+        }
+    }
+    reserved
+        .into_iter()
+        .find(|(seq, _)| !released.contains(seq))
+}
+
+/// G788 (a fleet measurement, 2026-11-18: the next change in line was claimed p50 58 to 79 s
+/// after a publish freed the head, as each runner learned of it only on its next pass): the
+/// line's head as the remote holds it now, when it is not the head this store last read: a
+/// publish or another release freed the head, or a newer revision took its place. One
+/// `ls-remote` of the line's refs, and nothing fetched. `None` while the two agree, the line
+/// on the remote is empty, or the remote cannot be read; and with no call to the remote while
+/// the line this store read is empty: a line forms only behind work a runner already runs, so
+/// a runner with no line asks the remote nothing more than before.
+#[must_use]
+pub fn moved_head(repo: &Repo) -> Option<(u64, String)> {
+    let here = head_of(
+        list(&repo.git)
+            .ok()?
+            .into_iter()
+            .map(|one| (one.seq, one.commit, one.release)),
+    )?;
+    let listed = repo
+        .git
+        .run(&[
+            "ls-remote",
+            repo.remote(),
+            &format!("{QUEUE_PREFIX}*"),
+            &format!("{DONE_PREFIX}*"),
+        ])
+        .ok()?;
+    let remote = head_of(listed.lines().filter_map(|line| {
+        let (commit, name) = line.split_once('\t')?;
+        let (release, seq) = match name.strip_prefix(QUEUE_PREFIX) {
+            Some(seq) => (false, seq),
+            None => (true, name.strip_prefix(DONE_PREFIX)?),
+        };
+        Some((seq.parse().ok()?, commit.to_owned(), release))
+    }))?;
+    (here != remote).then_some(remote)
+}
+
 /// G765: the refspecs of the line, for a fetch that brings it with other refs.
 #[must_use]
 pub fn refspecs() -> [String; 2] {

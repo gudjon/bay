@@ -2675,6 +2675,24 @@ fn say_commit_keyed(
     Ok(())
 }
 
+/// G788 (a fleet finding, 2026-11-18: 20 of 55 batch plans in 12 hours passed over one to three
+/// places "not read here"): [`throughput::read_line`] of `entries`, after one fetch of the
+/// chains of those this store cannot read yet, such as a place another runner took after this
+/// pass fetched the chains. A batch, and a check of the next one ahead, passes over only what
+/// the remote cannot give, so the head and every runner that checks ahead plan alike.
+fn read_line_fetched<'a>(
+    repo: &Repo,
+    entries: &[&'a crate::queue::Entry],
+) -> (Vec<throughput::Queued>, Vec<&'a crate::queue::Entry>) {
+    let (line, unread) = throughput::read_line(&repo.git, entries.iter().copied());
+    if unread.is_empty() {
+        return (line, unread);
+    }
+    let changes: Vec<String> = unread.iter().map(|entry| entry.change.clone()).collect();
+    let _ = repo.remote_chains(&changes);
+    throughput::read_line(&repo.git, entries.iter().copied())
+}
+
 /// G712 (a fleet finding, 2026-11-13: a code change's batch took in two notes changes, each
 /// merged from its own place by G703 while the batch was checked, and the batch was cut and
 /// checked again twice, 189 s and 370 s lost; changes behind it waited 16 to 35 minutes): a
@@ -2752,7 +2770,7 @@ fn batch_plan(
         fails_on: Vec::new(),
     };
     let waiting = queue.behind(at);
-    let (mut behind, unread) = throughput::read_line(git, waiting.iter().copied());
+    let (mut behind, unread) = read_line_fetched(repo, &waiting);
     pass_over_passing(ctx, &queue, trunk, &mut behind)?;
     let by_lane = repo.config.footprint_lanes();
     let (mut members, mut stopped, mut stopped_at) = throughput::plan_batch(
@@ -4468,13 +4486,12 @@ fn speculate_batch(
     }
     // G581: a place whose operation does not read here is passed over, never the end of the
     // line checked ahead; the batch decision names it.
-    let (line, _) = throughput::read_line(
-        git,
-        queue
-            .entries
-            .values()
-            .filter(|entry| !queue.released.contains(&entry.seq)),
-    );
+    let places: Vec<&crate::queue::Entry> = queue
+        .entries
+        .values()
+        .filter(|entry| !queue.released.contains(&entry.seq))
+        .collect();
+    let (line, _) = read_line_fetched(repo, &places);
     let mut base = trunk.to_owned();
     let mut covered = 0;
     let mut at = 0;

@@ -95,6 +95,8 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     if !once {
         publish::watch_leases_across_passes();
     }
+    // G788: the line's head a wait between passes last ended for.
+    let mut woke = None;
     loop {
         // Each pass reads the config at the trunk tip it fetched (ruling: config location),
         // so a config that landed since the last pass governs this one.
@@ -181,7 +183,34 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         // A looping supervisor never reaches the end of `main`: a pass that fetched trunk
         // leaves the coordination cache now (`crate::coord`).
         crate::coord::after_command();
-        std::thread::sleep(interval);
+        wait_for_line(&repo, interval, &mut woke);
+    }
+}
+
+/// G788: how often a runner asks the remote whether the line's head moved
+/// ([`crate::queue::moved_head`]): between passes, and between a pass's operations.
+const LINE_PROBE: Duration = Duration::from_secs(2);
+
+/// G788 (a fleet measurement, 2026-11-18: the next change in line was claimed p50 58 to 79 s
+/// after a publish freed the head, and four claims in five were another runner's, which learned
+/// of it only on its next pass): the wait between passes is `interval`, or less once the line's
+/// head on the remote is one this store has not read: the next pass starts at once and visits
+/// it. `woke` is the head a wait already ended for, so a head the next pass could not read ends
+/// no second wait.
+fn wait_for_line(repo: &Repo, interval: Duration, woke: &mut Option<(u64, String)>) {
+    let began = Instant::now();
+    loop {
+        if let Some(head) = crate::queue::moved_head(repo)
+            && woke.as_ref() != Some(&head)
+        {
+            *woke = Some(head);
+            return;
+        }
+        let left = interval.saturating_sub(began.elapsed());
+        if left.is_zero() {
+            return;
+        }
+        std::thread::sleep(left.min(LINE_PROBE));
     }
 }
 
@@ -778,6 +807,8 @@ fn pass(
     let reach = within_reach(repo, &queue);
     let began = std::time::Instant::now();
     let bound = pass_bound();
+    // G788: when this pass last asked the remote whether the line's head moved.
+    let mut probed = began;
     // The heads this pass took between its operations: the loop, which reads the chains as the
     // pass began, never runs one of them again.
     let mut taken: HashSet<String> = HashSet::new();
@@ -816,10 +847,26 @@ fn pass(
             ran.push(run_op(repo, id, &op_id, depth, beat, notes, &mut arrivals));
             parked.note(repo, &ran[ran.len() - 1]);
             forget_if_moved(repo, &ran);
+            // G788: a head that moved on the remote since this pass read the line (another
+            // runner's publish freed it) is read afresh, so it is taken below, in this pass. An
+            // operation that just answered it waits behind another head is taken too, once it
+            // is the head itself; a head that just yielded its turn (G380) is not. A landing read
+            // the line afresh itself (G680).
+            if probed.elapsed() >= LINE_PROBE && ran[ran.len() - 1]["decision"] != "merged" {
+                probed = Instant::now();
+                if crate::queue::moved_head(repo).is_some() {
+                    repo.forget_reads();
+                }
+            }
+            let waited = ran.last().is_some_and(|row| {
+                row["reason"].as_str() == Some(Reason::Queued.code())
+                    && row["detail"]["head"].as_str() != Some(op_id.as_str())
+            });
             // F13 (2026-10-25, again 2026-10-26: a runner hung holding the head 19 minutes):
             // between operations, a head whose holder stopped writing is taken now, not at the
             // next pass's start an hour later.
-            if let Some((head_id, head_op)) = abandoned_head(repo, &op_id) {
+            if let Some((head_id, head_op)) = abandoned_head(repo, if waited { "" } else { &op_id })
+            {
                 ran.push(run_op(
                     repo,
                     &head_id,

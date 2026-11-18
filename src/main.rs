@@ -657,7 +657,7 @@ enum RunnerAction {
         /// Make one pass and exit
         #[arg(long)]
         once: bool,
-        /// Seconds between passes
+        /// Seconds between passes, at most: the next starts at once when the line's head moves
         #[arg(long, default_value = "10")]
         interval_s: u64,
     },
