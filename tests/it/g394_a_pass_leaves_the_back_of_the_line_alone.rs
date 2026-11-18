@@ -16,7 +16,9 @@ use support::queued::{Check, OTHER_PRODUCER, finished, host};
 #[test]
 fn a_pass_leaves_changes_far_back_in_the_line_alone() {
     let held = host(&Check {
-        config: "[runner]\nahead = 0\n",
+        // A takeover window of a minute: under load, the harness's four seconds pass while
+        // the held head's runner still holds it, and the other runner takes the head over.
+        config: "[runner]\nahead = 0\ntakeover_s = 60\n",
         policy: None,
         seed: &[("src/a.rs", "fn a() {}\n")],
         hold_first: true,
