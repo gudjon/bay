@@ -2,12 +2,14 @@
 //! changes kept only for the unsaved work in them). A view of an ended change past its
 //! retention window that holds unsaved work — a tracked edit, an untracked file — has that work
 //! saved in one commit of bay's own under the local ref `refs/bay/view-kept/<change>`, read
-//! back, and then goes. Files its ignore rules match are build output and are not saved. A view
-//! whose save cannot be read back stays, a live change's view stays, and a copy `bay start` set
-//! aside as unsaved goes the same way under `refs/bay/view-kept/<change>.unsaved-<seconds>`.
+//! back, and then goes. Ignored directories are build output and are not saved; a loose ignored
+//! file, such as an `.env`, is copied byte for byte to `.git/bay/view-kept/<change>/` and never
+//! into a Git object. A view whose save cannot be read back stays, a live change's view stays,
+//! and a copy `bay start` set aside as unsaved goes the same way under
+//! `refs/bay/view-kept/<change>.unsaved-<seconds>`.
 //!
-//! Guard to mutate: in `src/view.rs` `release`, make the save-then-free branch never save
-//! (`saved_work` answering `None`), and the merged change's view stays.
+//! Guards to mutate: in `src/view.rs`, make `saved_work` answer `None`, and the merged change's
+//! view stays; make `kept_loose_ignored` answer `true` without copying, and the `.env` is lost.
 
 #![cfg(unix)]
 
@@ -24,7 +26,7 @@ fn seeded(test_box: &TestBox) -> PathBuf {
         ".bay/config.toml".to_owned(),
         "[retention]\nwindow_s = 0\n".to_owned(),
     ));
-    files.push((".gitignore".to_owned(), "build/\n".to_owned()));
+    files.push((".gitignore".to_owned(), "build/\n.env\n".to_owned()));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     repo
 }
@@ -63,12 +65,15 @@ fn an_ended_views_edits_and_new_files_are_kept_under_a_ref_and_the_view_goes() {
     std::fs::write(done_view.join("src/notes.txt"), "mine\n").unwrap();
     std::fs::create_dir_all(done_view.join("src/build")).unwrap();
     std::fs::write(done_view.join("src/build/out.bin"), "regenerable\n").unwrap();
+    // AND a loose ignored file that is no build output: it may hold a secret
+    std::fs::write(done_view.join(".env"), "TOKEN=secret\n").unwrap();
     // AND a copy an earlier start set aside as unsaved, long ago: a whole view, its ignore
     // rules with it
     let home = done_view.parent().unwrap().to_path_buf();
     let aside = home.join(format!("{done}.unsaved-1000"));
     std::fs::create_dir_all(aside.join("build")).unwrap();
-    std::fs::write(aside.join(".gitignore"), "build/\n").unwrap();
+    std::fs::write(aside.join(".gitignore"), "build/\n.env\n").unwrap();
+    std::fs::write(aside.join(".env"), "ASIDE=secret\n").unwrap();
     std::fs::write(aside.join("kept.txt"), "set aside\n").unwrap();
     std::fs::write(aside.join("build/x"), "regenerable\n").unwrap();
     // AND a live change with an edit of its own
@@ -100,6 +105,25 @@ fn an_ended_views_edits_and_new_files_are_kept_under_a_ref_and_the_view_goes() {
         vec![".gitignore".to_owned(), "kept.txt".to_owned()],
         "{aside_paths:?}"
     );
+    // AND each loose ignored file is kept, byte for byte, in a folder only this account reads,
+    // and in no ref
+    let common = repo.join(".git").join("bay").join("view-kept");
+    let env = std::fs::read(common.join(&done).join(".env")).unwrap();
+    assert_eq!(env, b"TOKEN=secret\n");
+    let aside_env =
+        std::fs::read(common.join(format!("{done}.unsaved-1000")).join(".env")).unwrap();
+    assert_eq!(aside_env, b"ASIDE=secret\n");
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(common.join(&done)).unwrap().permissions(),
+    );
+    assert_eq!(mode & 0o777, 0o700, "the kept folder is readable by others");
+    for rev in [kept.clone(), format!("{kept}.unsaved-1000")] {
+        let listed = paths(&test_box, &repo, &rev);
+        assert!(
+            !listed.contains(&".env".to_owned()),
+            "{rev} holds .env: {listed:?}"
+        );
+    }
     // AND the live change's view stays, untouched
     assert!(
         live_view.join("src/live.rs").exists(),
