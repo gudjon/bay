@@ -177,12 +177,13 @@ fn the_timing_costs_the_same_spawns_however_many_heartbeats() {
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
     let runs = test_box.path().join("runs");
-    // The second run checks for five seconds: with the one-second heartbeat the box seeds,
-    // its chain holds several heartbeats more than the first's.
+    // The second run checks for eight seconds: with the one-second heartbeat the box seeds,
+    // its chain holds several heartbeats more than the first's, even on a loaded box whose
+    // heartbeat pushes take a second or more.
     let relayed = test_box.relay(&format!(
         "exec 3>&1 >/dev/null\n\
          echo x >> '{runs}'; n=$(wc -l < '{runs}' | tr -d ' '); \
-         if [ \"$n\" -ge 2 ]; then sleep 5; fi\n\
+         if [ \"$n\" -ge 2 ]; then sleep 8; fi\n\
          echo \"$n\" >&3",
         runs = runs.display(),
     ));
