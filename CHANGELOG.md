@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.105
+
+- A runner takes the next change in line within seconds of a landing, not at its next pass.
+- A batch includes changes that joined the line after its pass first read it.
+- `--interval-s` is now the longest a waiting runner sleeps between passes.
+
 ## 0.6.104
 
 - Runners keep their lease on a ref of its own, so a change's history no longer grows with every heartbeat.
