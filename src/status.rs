@@ -2728,6 +2728,7 @@ fn after_here(
                 json!({
                     "change": change,
                     "state": record.state,
+                    "submitted": op.is_some_and(|op| !op.state.is_terminal()),
                     "operation": op.map(|op| op.state),
                     "outcome": op.and_then(|op| op.outcome.clone()),
                     "actor": record.actor.name,

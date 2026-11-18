@@ -1253,7 +1253,7 @@ impl Reason {
                 "Run `bay start` again with `--from <commit>`: `detail.local` takes this repository's branch, `detail.remote` the remote's. Or push yours first."
             }
             Self::DependencyPending => {
-                "Wait: it merges once each `--after` change merges, each named in its status's `operation.after`; one not submitted needs `bay merge`."
+                "Wait: it merges once each `--after` change merges. One with `submitted: false` (in `detail.pending`, or its status's `operation.after`) needs `bay merge`."
             }
             Self::DependencyAbandoned => {
                 "Run `bay abandon`, then `bay start <intent> --new` without that `--after`; or restart the dropped change."

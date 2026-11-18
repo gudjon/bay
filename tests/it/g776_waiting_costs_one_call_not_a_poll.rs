@@ -199,6 +199,7 @@ fn a_change_held_by_another_names_it_and_its_wait_is_not_the_lines() {
     let after = &read["detail"]["changes"][0]["operation"]["after"];
     assert_eq!(after[0]["change"], a.as_str(), "{read}");
     assert!(after[0]["operation"].is_null(), "{read}");
+    assert_eq!(after[0]["submitted"], false, "{read}");
     let say = read["say"].as_str().unwrap();
     assert!(say.contains("which is not submitted yet"), "{say}");
     // AND the line's longest wait does not count B, which waits for A, not for the line
