@@ -30,12 +30,12 @@ fn a_write_makes_room_in_its_directory_by_the_answers_read_least_lately() {
     support::sweeps_ended(&repo);
     // GIVEN every directory of answers full to its share with answers last read a day ago
     let answers = repo.join(".git/bay/answers");
-    let day_ago = SystemTime::now() - Duration::from_secs(86_400);
+    let day_ago = SystemTime::now() - Duration::from_hours(24);
     for byte in 0..=255_u8 {
         let dir = answers.join(format!("{byte:02x}"));
         std::fs::create_dir_all(&dir).unwrap();
         for n in 0..2 {
-            let file = dir.join(format!("{:062}", n));
+            let file = dir.join(format!("{n:062}"));
             std::fs::write(&file, vec![b'o'; (SHARE / 2) as usize]).unwrap();
             std::fs::File::options()
                 .write(true)
