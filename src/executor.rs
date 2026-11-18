@@ -465,6 +465,8 @@ struct Seen {
     after: Option<Queue>,
     /// G694: when the fetch that read `after` began.
     read_at: Option<Instant>,
+    /// G779: the queue head's change and the chain head its release check read from the remote.
+    head_chain: Option<(String, String)>,
 }
 
 /// Releases a queue head that made no progress within its deadline, measured from this
@@ -501,7 +503,7 @@ fn deadlines(
     seen.before = Some(queue.clone());
     // Heads whose operation already reached an outcome release at once, one after another.
     while let Some(head) = queue.head().cloned()
-        && let Some(reason) = finished_head(repo, &head)
+        && let Some(reason) = finished_head(repo, &head, seen)
     {
         let record = repo
             .remote_record(&head.change)
@@ -554,10 +556,12 @@ fn deadlines(
 /// operations, and an expired op id is never run again (§ 5, § 9a), so its place is finished
 /// too and is released with the change's state. Returns the release reason, the operation's
 /// outcome, or `None` while the operation can still run (or its chain cannot be read).
-fn finished_head(repo: &Repo, head: &crate::queue::Entry) -> Option<String> {
+fn finished_head(repo: &Repo, head: &crate::queue::Entry, seen: &mut Seen) -> Option<String> {
     // The remote's record, never moving this store's chain back (G289).
-    let record = repo.remote_record(&head.change).ok()?.record;
-    finished(&record, head)
+    let remote = repo.remote_record(&head.change).ok()?;
+    // G779: the pass's first visit reuses this read of the head's chain.
+    seen.head_chain = Some((head.change.clone(), remote.head));
+    finished(&remote.record, head)
 }
 
 /// [`finished_head`] on `record`, the head's change as the remote has it.
@@ -692,6 +696,10 @@ fn pass(
     let repo: &Repo = shared;
     // G438: this pass's visits share what it reads from the remote.
     repo.share_reads(true);
+    // G779: and the head's chain the deadlines read, not fetched again by the first visit.
+    if let Some((change, head)) = &seen.head_chain {
+        repo.note_chain(change, head);
+    }
     // G694: the queue the deadlines left is the pass's shared read of it, not fetched again
     // for the first visit.
     if seen.after.is_some()

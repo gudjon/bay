@@ -174,7 +174,7 @@ pub struct Repo {
 /// G438 (a fleet finding, 2026-10-28): a runner's pass visits every waiting change, and each
 /// visit fetched main, the registry and the queue, and the queue head's chain three times, 10 to
 /// 20 s of network a visit only to find that nothing moved. While a pass shares its reads
-/// ([`Repo::share_reads`]), a visit reuses what the pass read within [`READ_REUSE`]; a visit
+/// ([`Repo::share_reads`]), a visit reuses what the pass read within [`PASS_READS`] (G779); a visit
 /// whose operation may run reads again first, and an operation that moved anything clears them.
 ///
 /// S1 (bay 0.6.0): the reads are the pass's thread's own. A runner places new changes on its
@@ -204,8 +204,31 @@ impl Reads {
     }
 }
 
-/// How long a shared read stands for a fetch (G438).
+/// How long a shared read stands for a fetch before work is spent on it (G438): a pre-check run
+/// ahead of its turn reads main again past it ([`Repo::shared_read_stale`]).
 pub const READ_REUSE: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// G779 (a fleet finding, 2026-11-18: a runner's visits to changes that only wait in line took
+/// 15 to 83 s each, four to eight fetches and up to five pushes, because at load one visit
+/// outlasted [`READ_REUSE`] and the next fetched main, the queue, the registry and the head's
+/// chain again): how long a shared read stands for a visit that only answers that its change
+/// waits. As long as a pass starts operations: a visit that may claim reads again before it
+/// claims (G438), and a landing forgets the reads, so only a waiting answer, read again next
+/// pass, rests on it.
+pub const PASS_READS: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// [`READ_REUSE`], or in a test build `BAY_TEST_READ_FRESH_MS`: a test whose visits must
+/// outlast it without waiting sets it to 0.
+fn read_fresh() -> std::time::Duration {
+    if crate::version::TEST_HOOKS
+        && let Some(ms) = std::env::var("BAY_TEST_READ_FRESH_MS")
+            .ok()
+            .and_then(|ms| ms.parse().ok())
+    {
+        return std::time::Duration::from_millis(ms);
+    }
+    READ_REUSE
+}
 
 /// The remote state a pass shares between its visits (G438).
 #[derive(Clone, Copy)]
@@ -486,7 +509,7 @@ impl Repo {
     }
 
     /// G438: from now on (`on`) a visit may reuse what this process read from the remote within
-    /// [`READ_REUSE`]; what was read before is forgotten either way.
+    /// [`PASS_READS`] (G779); what was read before is forgotten either way.
     pub fn share_reads(&self, on: bool) {
         if let Ok(mut reads) = self.reads.lock() {
             *reads = Reads {
@@ -517,6 +540,58 @@ impl Repo {
         self.reads
             .lock()
             .is_ok_and(|mut reads| reads.mine() && std::mem::take(&mut reads.reused))
+    }
+
+    /// G779: whether this pass's shared read of `what` is older than [`READ_REUSE`], so work
+    /// spent on it (a pre-check ahead of its turn) reads it again first. `false` when the reads
+    /// are not shared with this thread or `what` was never read.
+    #[must_use]
+    pub fn shared_read_stale(&self, what: Shared) -> bool {
+        let Ok(reads) = self.reads.lock() else {
+            return false;
+        };
+        if !reads.mine() {
+            return false;
+        }
+        let stamp = match what {
+            Shared::Trunk => reads.trunk,
+            Shared::Registry => reads.registry,
+            Shared::Queue => reads.queue,
+        };
+        stamp.is_some_and(|at| at.elapsed() >= read_fresh())
+    }
+
+    /// G779: before work is spent on main as this pass read it: whether main still stands
+    /// there. A shared read of main older than [`READ_REUSE`] is read again (and stands for
+    /// the pass from now); a fresher one, or reads not shared, is taken as it is.
+    ///
+    /// # Errors
+    ///
+    /// The fetch fails, or the tracking ref cannot be read.
+    pub fn trunk_still(&self, trunk: &str) -> Result<bool, GitError> {
+        if !self.shared_read_stale(Shared::Trunk) {
+            return Ok(true);
+        }
+        let tip = self.fetch_trunk()?;
+        if let Ok(mut reads) = self.reads.lock()
+            && reads.mine()
+        {
+            reads.trunk = Some(std::time::Instant::now());
+        }
+        Ok(tip == trunk)
+    }
+
+    /// G779: `head`, the chain head of `change` this process read from the remote just now, is
+    /// the pass's shared read of it, so the pass's first visit does not fetch it again.
+    pub fn note_chain(&self, change: &str, head: &str) {
+        if let Ok(mut reads) = self.reads.lock()
+            && reads.mine()
+        {
+            reads.chains.insert(
+                change.to_owned(),
+                (std::time::Instant::now(), head.to_owned()),
+            );
+        }
     }
 
     /// G694: a visit begins now: what it reads from here on is its own, and only a read made
@@ -590,7 +665,7 @@ impl Repo {
             Shared::Queue => &mut reads.queue,
         };
         if let Some(at) = *stamp
-            && at.elapsed() < READ_REUSE
+            && at.elapsed() < PASS_READS
         {
             // G694: a read the visit made itself is its own, not a shared one.
             if reads.visit.is_none_or(|visit| at < visit) {
@@ -602,7 +677,7 @@ impl Repo {
         false
     }
 
-    /// [`Repo::fetch_trunk`], or the tracking ref the pass read within [`READ_REUSE`] (G438).
+    /// [`Repo::fetch_trunk`], or the tracking ref the pass read within [`PASS_READS`] (G438, G779).
     ///
     /// # Errors
     ///
@@ -616,14 +691,14 @@ impl Repo {
         self.fetch_trunk()
     }
 
-    /// [`Repo::fetch_registry`], unless the pass read it within [`READ_REUSE`] (G438).
+    /// [`Repo::fetch_registry`], unless the pass read it within [`PASS_READS`] (G438, G779).
     pub fn read_registry(&self) {
         if !self.reuses(Shared::Registry) {
             self.fetch_registry();
         }
     }
 
-    /// [`Repo::remote_chain`], or the head the pass read within [`READ_REUSE`] (G438).
+    /// [`Repo::remote_chain`], or the head the pass read within [`PASS_READS`] (G438, G779).
     ///
     /// # Errors
     ///
@@ -632,7 +707,7 @@ impl Repo {
         if let Ok(mut reads) = self.reads.lock()
             && reads.mine()
             && let Some((at, head)) = reads.chains.get(change).cloned()
-            && at.elapsed() < READ_REUSE
+            && at.elapsed() < PASS_READS
         {
             if reads.visit.is_none_or(|visit| at < visit) {
                 reads.reused = true;

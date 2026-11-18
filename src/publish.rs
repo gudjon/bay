@@ -4381,6 +4381,10 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
     if policy.unchecked || ctx.op(op_id).prechecks.iter().any(done) {
         return Ok(None);
     }
+    // G779: a check is spent only on main as it stands now; a moved main is read next pass.
+    if !repo.trunk_still(trunk).map_err(|error| error.message())? {
+        return Ok(None);
+    }
     let candidate_id = format!("pre-{op_id}-{}", now_ms());
     let facts = change_facts(ctx, &revision);
     ctx.ahead_of_turn = true;
@@ -4506,6 +4510,10 @@ fn speculate_batch(
                 return Ok(None);
             }
             let (commit, tree) = (last.commit.clone(), last.tree.clone());
+            // G779: a check is spent only on main as it stands now; a moved main is read next pass.
+            if !repo.trunk_still(trunk).map_err(|error| error.message())? {
+                return Ok(None);
+            }
             return checked_ahead(ctx, op_id, &base, &commit, &tree, members.len()).map(Some);
         }
         let last_seq = last.seq;

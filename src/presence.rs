@@ -123,7 +123,7 @@ impl Beat {
             outcome: None,
         };
         let done = std::sync::atomic::AtomicBool::new(false);
-        std::thread::scope(|scope| {
+        let out = std::thread::scope(|scope| {
             scope.spawn(|| {
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(250));
@@ -136,7 +136,14 @@ impl Beat {
             let out = work();
             done.store(true, std::sync::atomic::Ordering::SeqCst);
             out
-        })
+        });
+        // G779: a beat the thread made is this executor's last write, so the next operation's
+        // beat waits its heartbeat from it rather than pushing again at once.
+        if ticker.outcome.is_some() {
+            self.last = ticker.last;
+            self.outcome = ticker.outcome;
+        }
+        out
     }
 
     /// Writes this executor's presence and pushes it, unless the last write is less than one

@@ -240,7 +240,7 @@ impl Queue {
     }
 
     /// [`Queue::read`], or the queue refs this store holds when the pass read them within
-    /// [`crate::repo::READ_REUSE`] (G438).
+    /// [`crate::repo::PASS_READS`] (G438, G779).
     ///
     /// # Errors
     ///
