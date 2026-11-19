@@ -7039,7 +7039,10 @@ fn build_and_check(
         }
         anchor(&ctx.repo.git, op_id, &tree)?;
 
-        let candidate_id = format!("{op_id}.{}", ctx.op(op_id).attempts.len() + 1);
+        // G796: a candidate whose checks main's move stopped is never persisted, yet its id
+        // named its scratch and its records: the next candidate of the visit takes the next id.
+        let made = ctx.op(op_id).attempts.len() + ctx.stopped_trees.len();
+        let candidate_id = format!("{op_id}.{}", made + 1);
         let request_id = ctx.op(op_id).request_id.clone().unwrap_or_default();
         // N-21: an unsigned landing (no registry, or `signing = "approvals"`) names none.
         let registry_id = ctx

@@ -86,6 +86,18 @@ fn a_check_main_moved_past_stops_and_the_head_lands_on_the_new_main() {
         "merged",
         "the head did not land in the visit that stopped its check: {ran}"
     );
+    // The candidate built again is a new candidate: the stopped one named its scratch and its
+    // records.
+    let candidate = held.test_box.git_bare(
+        &held.remote,
+        &[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Candidate-Id,valueonly)",
+            "main",
+        ],
+    );
+    assert_eq!(candidate.trim(), format!("{slow}.1.2"), "{ran}");
 
     // Two runs: the stopped one on the old base, and the one the head landed on, on the new
     // main. The stopped run keeps no record.
