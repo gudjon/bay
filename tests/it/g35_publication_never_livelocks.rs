@@ -773,11 +773,18 @@ fn places_within(span: std::time::Duration) -> usize {
     places
 }
 
-/// A trunk whose check moves trunk from another clone on its first four runs, and whose adapter answers `unavailable` while `marker` exists (`INTERFACES` § 3),
-/// under the scaled lease ([`outage_config`]). Returns it and the marker.
+/// A trunk whose check moves trunk from another clone on each run while `<box>/moving` exists,
+/// and whose adapter answers `unavailable` while `marker` exists (`INTERFACES` § 3), under the
+/// scaled lease ([`outage_config`]). Returns it and the marker; `moving` exists.
+///
+/// A gate finding (2026-11-19): the check moved trunk on its first four runs only. A runner that
+/// sees trunk move while a check runs stops it and builds again in its visit (G796), so on a slow
+/// box the pass before the outage ran a fifth check, with trunk still, and landed the head.
 fn setup_outage() -> (Queued, PathBuf) {
     let test_box = TestBox::new();
     let marker = test_box.path().join("outage");
+    let moving = test_box.path().join("moving");
+    std::fs::write(&moving, "").unwrap();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
     let runs = test_box.path().join("runs");
@@ -790,9 +797,10 @@ fn setup_outage() -> (Queued, PathBuf) {
             &test_box,
             &format!(
                 "echo \"$tree\" >> '{runs}'; n=$(wc -l < '{runs}' | tr -d ' '); \
-                 if [ \"$n\" -le 4 ]; then ( cd '{other}' && git pull -q --rebase && echo \"$n\" > docs/move-$n.md && git add docs && git -c user.name=t -c user.email=t@t commit -q -m \"move $n\" && git push -q origin main ); fi",
+                 if [ -e '{moving}' ]; then ( cd '{other}' && git pull -q --rebase && echo \"$n\" > docs/move-$n.md && git add docs && git -c user.name=t -c user.email=t@t commit -q -m \"move $n\" && git push -q origin main ); fi",
                 runs = runs.display(),
                 other = other.display(),
+                moving = moving.display(),
             ),
         ),
     );
@@ -855,15 +863,19 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
         "refs/bay/queue/1\nrefs/bay/queue/2\nrefs/bay/queue/3",
         "all three hold a place before the outage"
     );
-    // The head is taken again between the runner's operations, so main moves under it on
-    // each of its runs in the pass (`executor::abandoned_head`).
-    assert_eq!(runs(&queued), 4);
+    // The head is taken again between the runner's operations, so main moves under it on each of
+    // its runs in the pass (`executor::abandoned_head`); a run whose move the runner sees during
+    // the check is built again in its visit (G796), one run more there.
+    let before = runs(&queued);
+    assert!(before >= 4, "{before} runs before the outage");
 
     // The outage: the executor keeps making passes, its agents gone, under the scaled deadline.
+    // Trunk stops moving under the checks: once the workers return, the runs land.
     queued
         .test_box
         .commit_config(&queued.repo, &outage_config(true));
     std::fs::write(&marker, "down").unwrap();
+    std::fs::remove_file(queued.test_box.path().join("moving")).unwrap();
     let mut looping = queued
         .test_box
         .bay_process(&executor)
@@ -899,7 +911,11 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
         reservations <= 3 * places_within(outage),
         "{reservations} reservations in {outage:?}: {refs}"
     );
-    assert_eq!(runs(&queued), 4, "no check ran to an answer in the outage");
+    assert_eq!(
+        runs(&queued),
+        before,
+        "no check ran to an answer in the outage"
+    );
 
     // The workers return: further passes land all three, each once. A pass that began before
     // the unscaled config landed may meet trunk moved under its head's check: that head checks
