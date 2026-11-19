@@ -183,7 +183,12 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         // A looping supervisor never reaches the end of `main`: a pass that fetched trunk
         // leaves the coordination cache now (`crate::coord`).
         crate::coord::after_command();
-        wait_for_line(&repo, interval, &mut woke);
+        // G380, G789: a head that yielded its turn, which no operation after it took again,
+        // runs in the next pass, at once: a pass that took the head before it read the chains
+        // visits no change that landed meanwhile, which used to take it again.
+        if !ends_yielded(&ran) {
+            wait_for_line(&repo, interval, &mut woke);
+        }
     }
 }
 
@@ -698,8 +703,17 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 /// One pass: every operation that is neither terminal nor blocked runs to an outcome, and
 /// one blocked `APPROVAL_PENDING` is asked again (G284, [`publish::awaits_approval`]). With a
 /// runner to watch, it stops between operations once the runner is leaving ([`leaving`]). Before the
-/// first operation, and after each landing, the entries behind the queue's head are probed
-/// for a conflict with trunk (G177); what each probe noted goes to `notes`.
+/// pass's own visits, and after each landing once the head it freed is taken, the entries behind
+/// the queue's head are probed for a conflict with trunk (G177); what each probe noted goes to
+/// `notes`.
+///
+/// G789 (a fleet measurement, 2026-11-18, at load 70 to 100: a pass woken by a publish spent
+/// about 25 s on its setup, its fetches, sweeps, presence and reads of every chain, before it
+/// visited the new head; a runner that landed spent p50 24 s on what followed its landing before
+/// it took the next): the queue's head, when it is free to take ([`abandoned_head`]), is visited
+/// first, and so is each head its landing frees, on what a head's visit reads itself: main and
+/// the config, the queue and the head's chain as [`deadlines`] read them, and the evidence notes
+/// its red gate judges main by. The rest of the setup follows them.
 ///
 /// G200b: a pass costs what its live work costs, not what its history holds. It reads every
 /// chain in one batch and the queue as [`deadlines`] left it in `seen`; a closed chain costs a
@@ -745,6 +759,50 @@ fn pass(
     // the post records. Only the post work fetched them, at a pass's end, so a box that runs no
     // post check judged a red main green and landed on it. The pass reads them before any visit.
     repo.fetch_evidence(&Keys::load(&repo.git));
+    let began = std::time::Instant::now();
+    let bound = pass_bound();
+    let chain = Chain::new(&repo.git);
+    let mut ran = Vec::new();
+    // The heads this pass took first or between its operations: the loop, which reads the
+    // chains as the pass began, never runs one of them again.
+    let mut taken: HashSet<String> = HashSet::new();
+    // G789: the head first, and each head a landing frees, before the rest of the setup; while
+    // one runs, the beat's thread does beside it what the pass did before its visits
+    // ([`Arrivals::first`]). The first take's visit begins with the deadline check's reads of the
+    // queue and the head's chain, which it reads by. G585: a repair this store holds keeps its
+    // turn before every other change.
+    let mut arrivals: Option<Arrivals> = None;
+    let mut just = String::new();
+    let mut took = seen.read_at.unwrap_or_else(Instant::now);
+    while !(leaving(watch) && post.idle())
+        && (ran.is_empty() || began.elapsed() < bound)
+        && let Some((head_id, head_op)) = abandoned_head(repo, &just)
+        && !taken.contains(&head_op)
+    {
+        if arrivals.is_none() {
+            let local = local_records(&chain);
+            if local.iter().any(repairs) {
+                break;
+            }
+            arrivals = Some(Arrivals::first(repo, &local, parked));
+        }
+        let Some(arrivals) = arrivals.as_mut() else {
+            break;
+        };
+        taken.insert(head_op.clone());
+        let depth = Queue::read_shared(repo).map_or(0, |queue| live_depth(&queue));
+        let visit = (head_id.as_str(), head_op.as_str());
+        let rows = run_op(repo, visit, Some(took), depth, beat, arrivals);
+        record_rows(repo, rows, (&mut ran, &mut taken, parked));
+        just = head_op;
+        took = Instant::now();
+    }
+    // The places those heads freed are counted in the line as read from here on, and the probe
+    // below tells the line of their landings.
+    let first = ran.len();
+    if let Some(arrivals) = arrivals.as_mut() {
+        arrivals.owed = false;
+    }
     let _ = receipts::sync(repo);
     sweep_check_scratch(repo);
     sweep_tmp_packs(repo);
@@ -760,12 +818,12 @@ fn pass(
         eprintln!("bay runner: {change} could not be read from the remote: {why}");
         unread.insert(change);
     }
-    let chain = Chain::new(&repo.git);
     let mut chains = chain.read_all().map_err(|error| error.message())?;
     parked.keep(&chains, &unread);
+    // G789: as the heads taken first left it, read again only when one of them moved it.
     let queue = match seen.after {
-        Some(queue) => queue,
-        None => Queue::read(repo)?,
+        Some(queue) if first == 0 => queue,
+        _ => Queue::read_shared(repo)?,
     };
     // G750: a `QUEUED` wait is visited again once the line's head or main moved.
     let trunk = repo
@@ -779,20 +837,21 @@ fn pass(
     );
     in_pass_order(&mut chains, &queue);
     let records: Vec<ChangeRecord> = chains.iter().map(|held| held.record.clone()).collect();
-    let mut arrivals = Arrivals::new(&records);
+    let mut arrivals = match arrivals {
+        Some(mut arrivals) => {
+            arrivals.know(&records);
+            arrivals
+        }
+        None => Arrivals::new(&records),
+    };
     sweep_ended(repo, &queue, &records);
     let holding = records
         .iter()
         .flat_map(|record| record.operations.iter().filter(|op| record.waits(op)))
         .next()
         .map(|op| op.op_id.as_str());
-    let depth = queue
-        .entries
-        .keys()
-        .filter(|seq| !queue.released.contains(seq))
-        .count();
+    let depth = live_depth(&queue);
     beat.publish(repo, holding, depth);
-    let mut ran = Vec::new();
     // An event a past run lost between the chain and the log is written now (G9), and a log
     // record whose push failed is pushed again.
     let mut recovered = match publish::recover_events(repo, &records) {
@@ -805,13 +864,8 @@ fn pass(
     notes.extend(red_owners(repo));
     let due = publish::retention_due(repo, &chains);
     let reach = within_reach(repo, &queue);
-    let began = std::time::Instant::now();
-    let bound = pass_bound();
     // G788: when this pass last asked the remote whether the line's head moved.
-    let mut probed = began;
-    // The heads this pass took between its operations: the loop, which reads the chains as the
-    // pass began, never runs one of them again.
-    let mut taken: HashSet<String> = HashSet::new();
+    let mut probed = Instant::now();
     for record in &records {
         let id = record.id.as_str();
         let queued: Vec<String> = record
@@ -824,7 +878,7 @@ fn pass(
             .filter(|_| !record.ended())
             // G750: a repair is never parked: a red main, which no stand names, frees it.
             .filter(|op| !parked.holds(&op.op_id) || names_a_repair(record))
-            .filter(|op| runs(op) && (names_a_repair(record) || reach(op, freed(&ran))))
+            .filter(|op| runs(op) && (names_a_repair(record) || reach(op, freed(&ran[first..]))))
             .filter(|op| !taken.contains(&op.op_id))
             .map(|op| op.op_id.clone())
             .collect();
@@ -842,11 +896,11 @@ fn pass(
             if leaving(watch) && post.idle() {
                 ran.extend(recovered.take());
                 ran.append(&mut arrivals.rows);
+                notes.append(&mut arrivals.notes);
                 return Ok(ran);
             }
-            ran.push(run_op(repo, id, &op_id, depth, beat, notes, &mut arrivals));
-            parked.note(repo, &ran[ran.len() - 1]);
-            forget_if_moved(repo, &ran);
+            let rows = run_op(repo, (id, &op_id), None, depth, beat, &mut arrivals);
+            record_rows(repo, rows, (&mut ran, &mut taken, parked));
             // G788: a head that moved on the remote since this pass read the line (another
             // runner's publish freed it) is read afresh, so it is taken below, in this pass. An
             // operation that just answered it waits behind another head is taken too, once it
@@ -864,21 +918,20 @@ fn pass(
             });
             // F13 (2026-10-25, again 2026-10-26: a runner hung holding the head 19 minutes):
             // between operations, a head whose holder stopped writing is taken now, not at the
-            // next pass's start an hour later.
+            // next pass's start an hour later. G789: its visit begins with the take's reads.
+            let took = Instant::now();
             if let Some((head_id, head_op)) = abandoned_head(repo, if waited { "" } else { &op_id })
             {
-                ran.push(run_op(
-                    repo,
-                    &head_id,
-                    &head_op,
-                    depth,
-                    beat,
-                    notes,
-                    &mut arrivals,
-                ));
-                parked.note(repo, &ran[ran.len() - 1]);
-                forget_if_moved(repo, &ran);
+                let visit = (head_id.as_str(), head_op.as_str());
+                let rows = run_op(repo, visit, Some(took), depth, beat, &mut arrivals);
+                record_rows(repo, rows, (&mut ran, &mut taken, parked));
                 taken.insert(head_op);
+            }
+            // G177, G789: a landing whose probe no operation beside it made probes now.
+            if std::mem::take(&mut arrivals.owed)
+                && let Ok(queue) = Queue::read_shared(repo)
+            {
+                notes.extend(early_conflicts(repo, &queue));
             }
         }
     }
@@ -912,7 +965,61 @@ fn pass(
     }
     advanced.extend(advance(repo));
     ran.append(&mut arrivals.rows);
+    notes.append(&mut arrivals.notes);
     Ok(ran)
+}
+
+/// Puts `rows`, a visit's ([`run_op`]), in the pass's `ran`, each noted in `parked`; the members
+/// of a batch it landed are `taken`, never visited again in the pass (G789).
+fn record_rows(
+    repo: &Repo,
+    rows: Vec<Value>,
+    (ran, taken, parked): (&mut Vec<Value>, &mut HashSet<String>, &mut Parked),
+) {
+    for (index, row) in rows.into_iter().enumerate() {
+        if index > 0
+            && let Some(op_id) = row["op_id"].as_str()
+        {
+            taken.insert(op_id.to_owned());
+        }
+        parked.note(repo, &row);
+        ran.push(row);
+    }
+    forget_if_moved(repo, ran);
+}
+
+/// Whether a head's last visit in `ran`, a pass's rows, yielded its turn (F11, G380): the pass
+/// went on to the other changes, and the next pass runs it again.
+fn ends_yielded(ran: &[Value]) -> bool {
+    ran.iter()
+        .filter(|row| row["detail"]["yielded"] == true)
+        .any(|row| {
+            ran.iter()
+                .rev()
+                .find(|last| last["op_id"] == row["op_id"])
+                .is_some_and(|last| last["detail"]["yielded"] == true)
+        })
+}
+
+/// The live places of `queue`: the depth a runner's presence names.
+fn live_depth(queue: &Queue) -> usize {
+    queue
+        .entries
+        .keys()
+        .filter(|seq| !queue.released.contains(seq))
+        .count()
+}
+
+/// G789: this store's own chains, as the last fetch left them, read without asking the remote:
+/// what a head taken before the pass reads every chain places arrivals by.
+fn local_records(chain: &Chain) -> Vec<HeldChain> {
+    chain.read_all().unwrap_or_default()
+}
+
+/// Whether `held` is a change that names one it fixes, reverts or supersedes, with an operation
+/// to run: G585, it runs before every other change, so no head is taken ahead of it.
+fn repairs(held: &HeldChain) -> bool {
+    !held.record.ended() && names_a_repair(&held.record) && held.record.operations.iter().any(runs)
 }
 
 /// After the queue's work, never ahead of it: the runner's own post checks on main's tip, then
@@ -1330,18 +1437,18 @@ fn op_line(op_id: &str, result: &BayResult) -> String {
 }
 
 /// Runs operation `op_id` of change `id` under this runner's beat, and returns its row of the
-/// pass. Its outcome is one journal line (stderr) and, when it merged, the early conflicts it
-/// makes for the changes behind it (G177). While it runs, `arrivals` places what is submitted
-/// meanwhile (S1).
+/// pass, then one for each other member of a batch it landed ([`publish::members_landed`],
+/// G789), which the pass visits no more. Each outcome is one journal line (stderr). While it
+/// runs, `arrivals` places what is submitted meanwhile (S1). `took` is when this runner began
+/// to read for its take of the queue's head, when that is what it runs ([`publish::execute`]).
 fn run_op(
     repo: &Repo,
-    id: &str,
-    op_id: &str,
+    (id, op_id): (&str, &str),
+    took: Option<Instant>,
     depth: usize,
     beat: &mut crate::presence::Beat,
-    notes: &mut Vec<Value>,
     arrivals: &mut Arrivals,
-) -> Value {
+) -> Vec<Value> {
     // A pass carries the whole queue, so it can run long: its presence beats before each
     // operation and once a heartbeat during it, naming it, never only at the pass's start, so a
     // busy runner never reads as gone.
@@ -1350,27 +1457,47 @@ fn run_op(
     let _ = crate::git::take_times(0);
     let mut placing = || arrivals.step(repo, op_id);
     let result = beat.during(repo, op_id, depth, &mut placing, || {
-        publish::execute(repo, id, op_id, &step).unwrap_or_else(BayResult::failed)
+        publish::execute(repo, id, op_id, &step, took).unwrap_or_else(BayResult::failed)
     });
     // E21: what follows the operation (its receipt, the conflicts it tells the line of) is its
     // own step, never the last one the operation set. The receipt names that last one.
     let last = step.get();
     step.set("record");
     let result = receipted(repo, id, last, result).with_op(op_id.to_owned());
-    // Trunk moved: what waits behind the new head hears of a conflict now (G177). BACKLOG 92:
-    // what the pass read before the landing is forgotten here ([`forget_if_moved`]), and this
-    // fresh read of the queue is the one the abandoned-head check after it shares.
+    // BACKLOG 92: what the pass read before the landing is forgotten here ([`forget_if_moved`]),
+    // so the abandoned-head check after it reads the queue afresh. G177, G789: main moved, so
+    // the changes behind the new head hear of a conflict now, beside the next operation, never
+    // ahead of it ([`Arrivals::step`]).
     if result.decision == Decision::Landed {
         repo.forget_reads();
-        if let Ok(queue) = Queue::read_shared(repo) {
-            notes.extend(early_conflicts(repo, &queue));
-        }
+        arrivals.owed = true;
     }
     eprintln!(
         "bay runner: {}",
         journal_line(repo, id, op_id, &result, &step, began)
     );
-    row(id, op_id, &result)
+    let mut rows = vec![row(id, op_id, &result)];
+    for (change, member, landed) in publish::members_landed() {
+        let landed = landed.with_op(member.clone());
+        eprintln!(
+            "bay runner: {}, in {op_id}'s batch",
+            named(repo, &change, &member, op_line(&member, &landed))
+        );
+        rows.push(row(&change, &member, &landed));
+    }
+    rows
+}
+
+/// `line`, a journal line of operation `op_id` of change `id`, naming the change by its intent
+/// too, after the operation id a reader's tools find first (owner ruling 2026-10-27).
+fn named(repo: &Repo, id: &str, op_id: &str, line: String) -> String {
+    match crate::change::Chain::new(&repo.git).read(id) {
+        Ok((_, record)) if !record.intent.reference.trim().is_empty() => {
+            let intent: String = record.intent.reference.chars().take(60).collect();
+            line.replacen(op_id, &format!("{op_id} [{intent}]"), 1)
+        }
+        _ => line,
+    }
 }
 
 /// The pass's row of `result`, the outcome of operation `op_id` of change `id`.
@@ -1398,16 +1525,7 @@ fn journal_line(
     // without the refs: what each pass did with each change, and why.
     // A fleet finding (2026-10-27): batches landed every ten minutes on a check of under two,
     // and no record said where the rest went. Each line names how long its operation took.
-    // Owner ruling 2026-10-27: a line names the change by its intent too, after the operation
-    // id a reader's tools find first.
-    let line = op_line(op_id, result);
-    let line = match crate::change::Chain::new(&repo.git).read(id) {
-        Ok((_, record)) if !record.intent.reference.trim().is_empty() => {
-            let intent: String = record.intent.reference.chars().take(60).collect();
-            line.replacen(op_id, &format!("{op_id} [{intent}]"), 1)
-        }
-        _ => line,
-    };
+    let line = named(repo, id, op_id, op_line(op_id, result));
     // A fleet finding (2026-10-27): a merge took five to eight minutes on a loaded box, and the
     // line did not say where; it names each step of a second or more.
     let steps: Vec<String> = step
@@ -1442,6 +1560,9 @@ const GIT_TIMES_SHOWN: usize = 6;
 /// written as a pass writes it. It never claims, checks or publishes, and it never visits the
 /// change whose operation the pass runs. A visit that finds the operation may run now (the
 /// head, or no live queue) leaves it to the next pass.
+///
+/// G789: the same thread probes the line for conflicts (G177) that a landing owes, beside the
+/// operation that follows the landing, so the probe never stands before the next head.
 struct Arrivals {
     /// Each change the pass read, with its latest land request; `None` for a change that ended,
     /// which no request runs again. A request visited since is recorded here too.
@@ -1452,33 +1573,96 @@ struct Arrivals {
     listed: Instant,
     /// One row per visit, for the pass's result.
     rows: Vec<Value>,
+    /// G789: main moved under the line since it was last probed for conflicts.
+    owed: bool,
+    /// What the probes noted, for the pass's notes.
+    notes: Vec<Value>,
 }
 
 impl Arrivals {
     /// What the pass read: `records`, its chains. Nothing is listed for a heartbeat.
     fn new(records: &[ChangeRecord]) -> Self {
-        let seen = records
-            .iter()
-            .map(|record| {
-                let latest = record
-                    .operations
-                    .iter()
-                    .rev()
-                    .find_map(|op| op.request_id.clone());
-                (record.id.clone(), latest.filter(|_| !record.ended()))
-            })
-            .collect();
         Self {
-            seen,
+            seen: Self::latest(records).collect(),
             pending: std::collections::VecDeque::new(),
             listed: Instant::now(),
             rows: Vec::new(),
+            owed: false,
+            notes: Vec::new(),
         }
     }
 
-    /// One step beside the work on `holding`: once a heartbeat it lists the new requests, and
-    /// it visits at most one, so the work never waits on more than one visit when it ends.
+    /// G789: the arrivals of a pass that takes its head before it reads every chain, by
+    /// `chains`, this store's own as the last pass left them. Beside that head's operation the
+    /// beat's thread does what the pass did before its visits: it probes the line for conflicts
+    /// (G177); it places each operation of `chains` that holds no place, released from the line
+    /// or never placed, oldest first, none of them parked (BACKLOG 157, G750), as the pass's
+    /// order put them before the head. The remote's new land requests it lists once a heartbeat,
+    /// as ever (G680: one listing a pass).
+    fn first(repo: &Repo, chains: &[HeldChain], parked: &Parked) -> Self {
+        let records: Vec<ChangeRecord> = chains.iter().map(|held| held.record.clone()).collect();
+        let mut arrivals = Self::new(&records);
+        arrivals.owed = true;
+        let queue = Queue::local(&repo.git).unwrap_or_default();
+        let mut placeless: Vec<(u64, String, String)> = chains
+            .iter()
+            .filter(|held| {
+                !held.record.ended()
+                    && held.record.lane.is_none()
+                    && queue.of_change(&held.id).is_none()
+            })
+            .filter_map(|held| {
+                let op = held
+                    .record
+                    .operations
+                    .iter()
+                    .rev()
+                    .find(|op| runs(op) && !parked.holds(&op.op_id))?;
+                Some((held.committed, held.id.clone(), op.request_id.clone()?))
+            })
+            .collect();
+        placeless.sort();
+        arrivals.pending = placeless
+            .into_iter()
+            .map(|(_, change, request)| (change, request))
+            .collect();
+        arrivals
+    }
+
+    /// G789: `records`, the chains the pass read once its heads taken first ran, which this
+    /// store's own chains stood for until then. The requests are listed a heartbeat after that
+    /// read, as when the pass made its arrivals there (G680: the pass's setup listed them).
+    fn know(&mut self, records: &[ChangeRecord]) {
+        self.seen.extend(Self::latest(records));
+        self.listed = Instant::now();
+    }
+
+    /// Each change of `records` with its latest land request; `None` for one that ended.
+    fn latest(records: &[ChangeRecord]) -> impl Iterator<Item = (String, Option<String>)> + '_ {
+        records.iter().map(|record| {
+            let latest = record
+                .operations
+                .iter()
+                .rev()
+                .find_map(|op| op.request_id.clone());
+            (record.id.clone(), latest.filter(|_| !record.ended()))
+        })
+    }
+
+    /// One step beside the work on `holding`: a probe owed first, on the line as this store last
+    /// read it and the chains of the places it probes as the remote holds them now; then once a
+    /// heartbeat it lists the new requests, and it visits at most one, so the work never waits on
+    /// more than one visit when it ends.
     fn step(&mut self, repo: &Repo, holding: &str) {
+        if std::mem::take(&mut self.owed) {
+            if let Ok(queue) = Queue::local(&repo.git) {
+                let changes: Vec<String> =
+                    probed(&queue).map(|entry| entry.change.clone()).collect();
+                let _ = repo.remote_chains(&changes);
+                self.notes.extend(early_conflicts(repo, &queue));
+            }
+            return;
+        }
         if self.pending.is_empty() {
             if self.listed.elapsed() < repo.config.heartbeat() {
                 return;
@@ -1918,13 +2102,7 @@ fn early_conflicts(repo: &Repo, queue: &Queue) -> Vec<Value> {
     };
     let chain = Chain::new(&repo.git);
     let mut notes = Vec::new();
-    let behind = queue
-        .entries
-        .values()
-        .filter(|entry| !queue.released.contains(&entry.seq))
-        .skip(1)
-        .take(EARLY_PROBES);
-    for entry in behind {
+    for entry in probed(queue) {
         let Ok((_, record)) = chain.read(&entry.change) else {
             continue;
         };
@@ -1960,6 +2138,19 @@ fn early_conflicts(repo: &Repo, queue: &Queue) -> Vec<Value> {
         }
     }
     notes
+}
+
+/// The places [`early_conflicts`] probes: up to [`EARLY_PROBES`] live ones behind the head. G760,
+/// G789: never a member of the batch this runner lands, whose chain its claims and persists
+/// write, as the probe may run beside it.
+fn probed(queue: &Queue) -> impl Iterator<Item = &crate::queue::Entry> {
+    queue
+        .entries
+        .values()
+        .filter(|entry| !queue.released.contains(&entry.seq))
+        .skip(1)
+        .filter(|entry| !publish::in_running_batch(&entry.change))
+        .take(EARLY_PROBES)
 }
 
 /// The conflict of `revision` with `trunk`, `None` when it merges cleanly; an error is a git

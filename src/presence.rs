@@ -88,9 +88,13 @@ impl Beat {
     }
 
     /// Beats every heartbeat on a thread of its own while `work` runs, so a runner in one long
-    /// check never reads as gone (the 0.5.1 acceptance finding): `self` beats first, as before
-    /// an operation, and the thread's copy beats once a heartbeat after that until `work` ends.
-    /// `beside` runs on that thread too ([`Self::meanwhile`]).
+    /// check never reads as gone (the 0.5.1 acceptance finding): the thread beats first, as
+    /// `work` begins, when a heartbeat passed since the last beat, and once a heartbeat after
+    /// that until `work` ends. `beside` runs on that thread too ([`Self::meanwhile`]).
+    ///
+    /// G789 (a fleet measurement, 2026-11-18: a push is 3 to 8 s at load): the first beat goes
+    /// beside `work`, never ahead of it, so a runner that takes the next head after a landing
+    /// starts its visit at once.
     pub fn during<T>(
         &mut self,
         repo: &Repo,
@@ -99,8 +103,7 @@ impl Beat {
         beside: &mut (dyn FnMut() + Send),
         work: impl FnOnce() -> T,
     ) -> T {
-        self.publish(repo, Some(holding), queue_depth);
-        self.meanwhile(repo, holding, queue_depth, beside, work)
+        self.beating(repo, (holding, queue_depth), true, beside, work)
     }
 
     /// Beats once a heartbeat on a thread of its own while `work` runs, never before it, so work
@@ -116,15 +119,35 @@ impl Beat {
         beside: &mut (dyn FnMut() + Send),
         work: impl FnOnce() -> T,
     ) -> T {
+        self.beating(repo, (holding, queue_depth), false, beside, work)
+    }
+
+    /// [`Self::during`] (`first`: the thread beats as `work` begins, when one is due) and
+    /// [`Self::meanwhile`] (it beats only once a heartbeat has passed since `work` began).
+    fn beating<T>(
+        &mut self,
+        repo: &Repo,
+        (holding, queue_depth): (&str, usize),
+        first: bool,
+        beside: &mut (dyn FnMut() + Send),
+        work: impl FnOnce() -> T,
+    ) -> T {
         let mut ticker = Self {
             git: self.git.clone(),
             interval_s: self.interval_s,
-            last: Some(Instant::now()),
+            last: if first {
+                self.last
+            } else {
+                Some(Instant::now())
+            },
             outcome: None,
         };
         let done = std::sync::atomic::AtomicBool::new(false);
         let out = std::thread::scope(|scope| {
             scope.spawn(|| {
+                if first {
+                    ticker.publish(repo, Some(holding), queue_depth);
+                }
                 while !done.load(std::sync::atomic::Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(250));
                     ticker.publish(repo, Some(holding), queue_depth);

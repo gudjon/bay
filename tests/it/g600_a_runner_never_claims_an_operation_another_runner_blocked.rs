@@ -50,7 +50,8 @@ fn state(held: &Held, id: &str, op: &str) -> Value {
 /// holds.
 fn visit(clone: &Path, id: &str, op: &str) -> Value {
     let repo = bay::repo::Repo::open(clone).unwrap();
-    let visited = bay::publish::execute(&repo, id, op, &bay::publish::Step::new("read")).unwrap();
+    let visited =
+        bay::publish::execute(&repo, id, op, &bay::publish::Step::new("read"), None).unwrap();
     serde_json::from_str(&visited.to_json().unwrap()).unwrap()
 }
 

@@ -594,13 +594,14 @@ impl Repo {
         }
     }
 
-    /// G694: a visit begins now: what it reads from here on is its own, and only a read made
-    /// before it marks the visit as using a shared one.
-    pub fn begin_visit(&self) {
+    /// G694: a visit begins at `at` (now, or G789 the take of the head it visits): what it
+    /// read from then on is its own, and only a read made before it marks the visit as using a
+    /// shared one.
+    pub fn begin_visit(&self, at: std::time::Instant) {
         if let Ok(mut reads) = self.reads.lock()
             && reads.mine()
         {
-            reads.visit = Some(std::time::Instant::now());
+            reads.visit = Some(at);
             reads.reused = false;
         }
     }

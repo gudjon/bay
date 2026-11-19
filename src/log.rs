@@ -61,10 +61,33 @@ pub fn append(
     signer: Option<&Signer>,
     record: &Value,
 ) -> Result<String, String> {
+    append_riding(repo, executor, signer, record, |refspec| {
+        repo.git
+            .run(&["push", "-q", repo.remote(), refspec])
+            .is_ok()
+    })
+}
+
+/// G789: [`append`], whose push is `push`'s, given the log's refspec: a caller that pushes
+/// other refs too carries the record in its own atomic push, one round trip, not two. When
+/// `push` says the remote refused the log, the record is taken back and written again on the
+/// remote's tip, as [`append`] does.
+///
+/// # Errors
+///
+/// As [`append`].
+pub fn append_riding(
+    repo: &Repo,
+    executor: &str,
+    signer: Option<&Signer>,
+    record: &Value,
+    push: impl FnOnce(&str) -> bool,
+) -> Result<String, String> {
     let git = &repo.git;
     let name = log_ref(executor);
-    let (commit, parent, pushed) = write_and_push(repo, &name, signer, record)?;
-    if pushed {
+    let (commit, parent) = write(repo, &name, signer, record)?;
+    let refspec = format!("{name}:{name}");
+    if push(&refspec) {
         return Ok(commit);
     }
     let back = match &parent {
@@ -84,17 +107,18 @@ pub fn append(
         repo.remote(),
         &format!("{name}:{name}"),
     ]);
-    write_and_push(repo, &name, signer, record).map(|(commit, _, _)| commit)
+    let (commit, _) = write(repo, &name, signer, record)?;
+    let _ = git.run(&["push", "-q", repo.remote(), &refspec]);
+    Ok(commit)
 }
 
-/// Writes `record` on log `name`'s local tip and pushes it: the commit, the tip it went on, and
-/// whether the remote took it.
-fn write_and_push(
+/// Writes `record` on log `name`'s local tip: the commit, and the tip it went on.
+fn write(
     repo: &Repo,
     name: &str,
     signer: Option<&Signer>,
     record: &Value,
-) -> Result<(String, Option<String>, bool), String> {
+) -> Result<(String, Option<String>), String> {
     let git = &repo.git;
     let mut json = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
     json.push('\n');
@@ -162,10 +186,7 @@ fn write_and_push(
     };
     git.run_with(&["update-ref", "--stdin"], &[], Some(update.as_bytes()))
         .map_err(|error| error.message())?;
-    let pushed = git
-        .run(&["push", "-q", repo.remote(), &format!("{name}:{name}")])
-        .is_ok();
-    Ok((commit, parent, pushed))
+    Ok((commit, parent))
 }
 
 /// Appends the `bay.event/1` record `event` to this executor's log unless a log already holds

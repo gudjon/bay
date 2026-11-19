@@ -200,7 +200,7 @@ fn an_operation_superseded_while_its_change_holds_no_place_never_takes_one() {
     // A pass fetches the chains before it visits their operations.
     exec.fetch_chains().unwrap();
     let visited =
-        bay::publish::execute(&exec, &two, &old, &bay::publish::Step::new("read")).unwrap();
+        bay::publish::execute(&exec, &two, &old, &bay::publish::Step::new("read"), None).unwrap();
     let visited = visited.to_json().unwrap();
     let queue = bay::queue::Queue::read(&exec).unwrap();
     assert_eq!(

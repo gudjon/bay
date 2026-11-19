@@ -51,6 +51,16 @@ fn a_document_waits_for_a_head_that_main_moved_under() {
         "the first document waited behind a head main had not moved under: {pass}"
     );
     held.go();
+    // The head's push is refused: main moved under it, so it yields its pass (G380), and the
+    // runner's next pass checks it again.
+    let yielded = finished(runner_a);
+    assert!(
+        yielded["detail"]["ran"]
+            .as_array()
+            .is_some_and(|rows| rows.iter().any(|row| row["detail"]["yielded"] == true)),
+        "the head did not yield when main moved under it: {yielded}"
+    );
+    let runner_a = held.spawn(&a);
     held.wait_held_run(2);
     let second = held.queue_with("second", &["docs"], &[("docs/second.md", "second\n")]);
     let pass = held.pass(&b);

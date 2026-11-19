@@ -91,7 +91,7 @@ fn the_outcome_is_explained_after_retention_and_gc() {
     // A retry of the expired op id is refused as ambiguous.
     let opened = bay::repo::Repo::open(&executor).unwrap();
     let step = bay::publish::Step::new("read");
-    let retry = bay::publish::execute(&opened, &id, &format!("{id}.1"), &step).unwrap();
+    let retry = bay::publish::execute(&opened, &id, &format!("{id}.1"), &step, None).unwrap();
     assert_eq!(retry.decision, bay::result::Decision::Failed);
     assert!(retry.to_json().unwrap().contains("ambiguous"));
 

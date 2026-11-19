@@ -1090,6 +1090,46 @@ impl<'a> Ctx<'a> {
         Ok(self.push_chain())
     }
 
+    /// G789: [`Ctx::push_chain`], carrying this executor's log with `record` written on it in the
+    /// same atomic push: a landing's own record and its terminal record take one round trip, not
+    /// two. A refused push falls back to the order it stands for: the chain alone, then the log
+    /// ([`crate::log::append_riding`]). A batch member's chain waits for its batch's push.
+    ///
+    /// # Errors
+    ///
+    /// The record cannot be written on the local log.
+    fn push_chain_with_record(&mut self, record: &serde_json::Value) -> Result<(), String> {
+        let repo = self.repo;
+        let executor = self.executor_name();
+        let signer = self.executor_signer().ok().flatten();
+        if self.push_mode != PushMode::Now {
+            self.push_chain();
+            return crate::log::append(repo, &executor, signer.as_ref(), record).map(|_| ());
+        }
+        crate::log::append_riding(repo, &executor, signer.as_ref(), record, |log| {
+            let name = change_ref(&self.id);
+            let lease = self
+                .pushed_head
+                .as_ref()
+                .map(|expected| format!("--force-with-lease={name}:{expected}"));
+            let mut args = vec!["push", "-q", "--atomic"];
+            if let Some(lease) = &lease {
+                args.push(lease);
+            }
+            let chain = format!("{}:{name}", self.head);
+            args.extend([repo.remote(), chain.as_str(), log]);
+            if repo.git.run(&args).is_ok() {
+                self.pushed_head = Some(self.head.clone());
+                self.unpushed_from = None;
+                self.catch_up_local();
+                return true;
+            }
+            self.push_chain();
+            repo.git.run(&["push", "-q", repo.remote(), log]).is_ok()
+        })
+        .map(|_| ())
+    }
+
     /// Pushes the chain and moves `refs/bay/requests/<id>` to `request` in one atomic push
     /// (§ 10a). The requests ref always names the latest land request. Like
     /// [`Ctx::push_chain`] it pushes this process's own objects, never the local refs.
@@ -1744,16 +1784,24 @@ fn with_progress(git: &Git, op: &Operation, mut result: BayResult) -> BayResult 
     result
 }
 
-/// The executor's part: runs operation `op_id` of change `id` to a stated outcome.
+/// The executor's part: runs operation `op_id` of change `id` to a stated outcome. The visit
+/// began at `began`: now, or G789 when the runner began to read for its take of the queue's
+/// head, so what that take read (the queue, the head's chain) is the visit's own.
 ///
 /// # Errors
 ///
 /// A fault of bay's own; refusals are results.
-pub fn execute(repo: &Repo, id: &str, op_id: &str, step: &Step) -> Result<BayResult, String> {
+pub fn execute(
+    repo: &Repo,
+    id: &str,
+    op_id: &str,
+    step: &Step,
+    began: Option<std::time::Instant>,
+) -> Result<BayResult, String> {
     // G438: a visit runs on the pass's shared reads; one whose operation may run reads afresh
     // and starts again, so a head never claims or builds on what an earlier visit read. G694:
     // it reads again only what was read before it began.
-    repo.begin_visit();
+    repo.begin_visit(began.unwrap_or_else(std::time::Instant::now));
     // An approval the first try re-armed is the second's too: the chain no longer says it.
     let mut approved = None;
     match execute_once(repo, id, op_id, step, Visit::Pass, &mut approved) {
@@ -2425,6 +2473,23 @@ pub fn in_running_batch(change: &str) -> bool {
     BATCHED.lock().is_ok_and(|batched| batched.contains(change))
 }
 
+/// G789: the landings of the members a batch landed beside its head, as [`land_batch`] derived
+/// them: (change, operation, outcome).
+static MEMBERS_LANDED: std::sync::Mutex<Vec<(String, String, BayResult)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// G789: the landings of the members of the batches this process landed since the last call, so
+/// a runner names each in its pass and journal without a visit. A pass that takes the head
+/// before it reads the chains finds the members ended; one that read them before used to visit
+/// each again, only to find it on main (on one fleet a visit took p50 16 s, 2026-11-18).
+#[must_use]
+pub fn members_landed() -> Vec<(String, String, BayResult)> {
+    MEMBERS_LANDED
+        .lock()
+        .map(|mut landings| std::mem::take(&mut *landings))
+        .unwrap_or_default()
+}
+
 /// G760: the members of a batch, registered in [`BATCHED`] while it lands.
 struct Batched(Vec<String>);
 
@@ -2750,7 +2815,9 @@ fn batch_plan(
         eprintln!("bay runner: {op_id} no batch: {why}");
         return Ok(None);
     }
-    let queue = crate::queue::Queue::local(git)?;
+    // G789: the line as the remote holds it now. The head's visit may stand on the queue its
+    // take read, and a place that joined since is in the batch.
+    let queue = crate::queue::Queue::read(repo)?;
     // G554 (a fleet finding, 2026-10-29: a change that needed no check ran from its own place
     // while the head checked, and planned a batch of ten from the line behind it; the two
     // batches claimed the same members, one landed, and the other gave every member back): a
@@ -3143,7 +3210,12 @@ fn land_batch<'a>(
         let other = &mut others[index - 1];
         other.pushed_landing = Some(built[index].commit.clone());
         // A landing whose record could not be written now is derived from trunk on a later run.
-        let _ = derive_landed(other, &member.op_id, &member.revision, &built[index].commit);
+        if let Ok(landed) =
+            derive_landed(other, &member.op_id, &member.revision, &built[index].commit)
+            && let Ok(mut landings) = MEMBERS_LANDED.lock()
+        {
+            landings.push((member.change.clone(), member.op_id.clone(), landed));
+        }
         other.tell_deferred();
     }
     ctx.pushed_landing = Some(built[0].commit.clone());
@@ -9124,8 +9196,14 @@ fn derive_landed(
     if view::journal(ctx.repo, &ctx.id).is_some() {
         view::set_journal(ctx.repo, &ctx.id, view::Journal::Published)?;
     }
-    ctx.push_chain();
-    write_terminal(ctx, op_id, "published", Some(commit))?;
+    // G789: the terminal record rides in the chain's push, one round trip ahead of the next
+    // head's take, not two.
+    match terminal_record(ctx, op_id, "published", Some(commit))? {
+        Some(record) => ctx.push_chain_with_record(&record)?,
+        None => {
+            ctx.push_chain();
+        }
+    }
     let mut result = landed_result(
         &ctx.id,
         Some(op_id),
@@ -9846,6 +9924,20 @@ fn write_terminal(
     outcome: &str,
     published: Option<&str>,
 ) -> Result<(), String> {
+    let Some(record) = terminal_record(ctx, op_id, outcome, published)? else {
+        return Ok(());
+    };
+    let signer = ctx.executor_signer().ok().flatten();
+    crate::log::append(ctx.repo, &ctx.executor_name(), signer.as_ref(), &record).map(|_| ())
+}
+
+/// [`write_terminal`]'s record, or `None` when a log holds it already.
+fn terminal_record(
+    ctx: &Ctx,
+    op_id: &str,
+    outcome: &str,
+    published: Option<&str>,
+) -> Result<Option<serde_json::Value>, String> {
     let executor = ctx.executor_name();
     // BACKLOG 99: after this process's own push landed the operation, no runner can hold its
     // terminal record (that push would have been refused), so no log is fetched to look for one.
@@ -9856,7 +9948,7 @@ fn write_terminal(
             .iter()
             .any(|record| record["op_id"] == op_id && record["outcome"] == outcome)
         {
-            return Ok(());
+            return Ok(None);
         }
     }
     let op = ctx.op(op_id);
@@ -9907,8 +9999,7 @@ fn write_terminal(
             Err(why) => record["not_required_unread"] = json!(why),
         }
     }
-    let signer = ctx.executor_signer().ok().flatten();
-    crate::log::append(ctx.repo, &executor, signer.as_ref(), &record).map(|_| ())
+    Ok(Some(record))
 }
 
 /// Why landed `commit` was never checked (the missing-policy and unchecked-base rulings), or
