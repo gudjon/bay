@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.111
+
+- A runner passes over a head it cannot serve, or one another runner holds, without fetching main.
+
 ## 0.6.110
 
 - A change a red post check routes waits in its place for a runner that serves it.
