@@ -66,8 +66,10 @@ fn a_head_in_its_check_is_passed_three_times_and_no_more() {
             "[[check]]\nid = \"{id}\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check {id}\"\nadapter = [\"scripts/bay-check\"]\nwhen_paths = [{globs}]\nfootprint = \"observed\"\nexpected_minimum = 1\ntimeout_s = 180\n"
         )
     };
+    // Unsigned records may stand for a run (G318), so the head's record carries across a
+    // change that reads none of it: G796 lets its check run on as such changes land.
     let policy = format!(
-        "revision = 1\n\n{}\n{}",
+        "revision = 1\n\n[policy]\nreuse_unsigned = true\n\n{}\n{}",
         check("code", "\"src/**\""),
         check("notes", "\"notes/**\"")
     );

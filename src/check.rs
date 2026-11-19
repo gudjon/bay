@@ -411,6 +411,55 @@ pub struct Limits {
     /// N-17: how many of the candidate's checks run at once (`[runner] parallel_checks`):
     /// 1 runs them one after another, as every run but a candidate's does.
     pub parallel: usize,
+    /// G796: what stops the run's checks once main moved past the candidate's base; `None`
+    /// for a run nothing stops.
+    pub halt: Option<std::sync::Arc<Halt>>,
+}
+
+/// G796 (a fleet measurement, 2026-11-19: in one day 124 heads ran 5.5 h of checks on
+/// candidates main had already moved past, and learned it only when their merging push was
+/// refused): what stops a candidate's checks once main moved past its base. Its runner says so
+/// ([`Halt::stop_all_but`]) and names the checks a candidate on the new main would carry
+/// (`crate::throughput`): those finish and are kept. Every other running check is stopped,
+/// its adapter's whole group killed, and keeps no record; no check starts after the move.
+#[derive(Debug, Default)]
+pub struct Halt {
+    moved: std::sync::atomic::AtomicBool,
+    carried: std::sync::Mutex<Vec<CheckId>>,
+}
+
+impl Halt {
+    /// Main moved: every check of the run but those of `carried` stops.
+    pub fn stop_all_but(&self, carried: Vec<CheckId>) {
+        if let Ok(mut kept) = self.carried.lock() {
+            *kept = carried;
+        }
+        self.moved.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether main moved: no check starts any more.
+    #[must_use]
+    pub fn moved(&self) -> bool {
+        self.moved.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether the check `entry` stops: main moved, and its record would not be carried.
+    fn stops(&self, entry: &CheckEntry) -> bool {
+        self.moved()
+            && self.carried.lock().map_or(true, |kept| {
+                !kept.contains(&CheckId::new(&entry.id, &entry.environment))
+            })
+    }
+}
+
+/// Whether `limits` stop the check `entry` (G796).
+fn stopped(limits: &Limits, entry: &CheckEntry) -> bool {
+    limits.halt.as_deref().is_some_and(|halt| halt.stops(entry))
+}
+
+/// Whether `limits` start no further check (G796).
+fn halted(limits: &Limits) -> bool {
+    limits.halt.as_deref().is_some_and(Halt::moved)
 }
 
 /// N-3: the base a check with `baseline = "base"` is judged against: the trunk commit the
@@ -977,6 +1026,9 @@ impl Judged {
 pub struct Ran {
     pub records: Vec<EvidenceRecord>,
     pub unavailable: Option<(String, String)>,
+    /// G796: main moved past the candidate's base while its checks ran ([`Halt`]), and a check
+    /// it required has no record kept: it stopped, or never started.
+    pub stopped: bool,
 }
 
 /// The adapter's answer that it could not reach a worker for the check (`INTERFACES` § 3):
@@ -1066,8 +1118,20 @@ pub fn run_all(
         return Ok(Ran {
             records,
             unavailable: None,
+            stopped: false,
         });
     }
+    // G796: the run stopped when main's move left one of these with no record kept.
+    let all: Vec<CheckId> = required
+        .iter()
+        .map(|(_, entry)| CheckId::new(&entry.id, &entry.environment))
+        .collect();
+    let stopped = |records: &[EvidenceRecord]| {
+        halted(limits)
+            && all
+                .iter()
+                .any(|id| !records.iter().any(|record| record.check == *id))
+    };
     // The request's `base`, `change` and `messages`, read once for every check of the run, and
     // only read by them.
     let told = about(git, candidate)?;
@@ -1090,12 +1154,14 @@ pub fn run_all(
         let unavailable = run_serial(shared, (index, entry), hooks, (&mut records, &mut on_base))?;
         if let Some(reason) = unavailable {
             return Ok(Ran {
+                stopped: stopped(&records),
                 records,
                 unavailable: Some((entry.environment.clone(), reason)),
             });
         }
         if ended_by_failure(&records) {
             return Ok(Ran {
+                stopped: stopped(&records),
                 records,
                 unavailable: None,
             });
@@ -1115,6 +1181,7 @@ pub fn run_all(
         )?
     {
         return Ok(Ran {
+            stopped: stopped(&records),
             records,
             unavailable: Some(unavailable),
         });
@@ -1131,12 +1198,14 @@ pub fn run_all(
         };
         if let Some(reason) = unavailable {
             return Ok(Ran {
+                stopped: stopped(&records),
                 records,
                 unavailable: Some((entry.environment.clone(), reason)),
             });
         }
     }
     Ok(Ran {
+        stopped: stopped(&records),
         records,
         unavailable: None,
     })
@@ -1167,6 +1236,8 @@ struct Slot {
     runs: Vec<EvidenceRecord>,
     unavailable: Option<String>,
     exchanges: Vec<Exchange>,
+    /// G796: main moved and the check stopped, or never started: none of its runs is kept.
+    stopped: bool,
 }
 
 /// N-17: the check `entry`, the `index`th of `policy`, with its reruns, as one thread runs it:
@@ -1190,8 +1261,13 @@ fn run_in_slot(shared: Shared, (index, entry): (usize, &CheckEntry)) -> Result<S
     };
     let (mut runs, mut unavailable) = (Vec::new(), None);
     let mut failed: Vec<String> = Vec::new();
+    // G796: a check main's move stops never starts, nor is any of its runs kept.
+    let mut stops = halted(shared.limits);
     // Flake-aware retry, as [`run_serial`]: every rerun stays in this check's own slot.
     for run in 0..=entry.retry_on_failure {
+        if stops {
+            break;
+        }
         let asked = retry_of(shared.candidate, &failed, run);
         let (mut judged, ran) = run_once(
             shared.git,
@@ -1202,6 +1278,10 @@ fn run_in_slot(shared: Shared, (index, entry): (usize, &CheckEntry)) -> Result<S
             (index, entry),
             (shared.work_dir, shared.started, shared.about),
         )?;
+        if stopped(shared.limits, entry) {
+            stops = true;
+            break;
+        }
         if let Some(reason) = judged.unavailable.take() {
             unavailable = Some(reason);
             break;
@@ -1227,6 +1307,7 @@ fn run_in_slot(shared: Shared, (index, entry): (usize, &CheckEntry)) -> Result<S
         runs,
         unavailable,
         exchanges,
+        stopped: stops,
     })
 }
 
@@ -1268,7 +1349,7 @@ fn run_parallel(
         let (mut active, mut stop) = (0_usize, false);
         let mut last_beat = Instant::now();
         loop {
-            while !stop && active < width {
+            while !stop && active < width && !halted(shared.limits) {
                 let Some((position, &(index, entry))) = queue.next() else {
                     break;
                 };
@@ -1366,6 +1447,9 @@ fn keep_slot(
             seen(exchange);
         }
     }
+    if slot.stopped {
+        return Ok(None);
+    }
     for record in slot.runs {
         keep_record(shared, (index, entry), record, hooks, records)?;
     }
@@ -1435,6 +1519,10 @@ fn run_serial(
     // Every run is its own record, so a failure and a later pass combine to `flaky`. A rerun
     // asks again for the units the run before failed ([`retry_of`]).
     let mut failed: Vec<String> = Vec::new();
+    // G796: no check starts once main moved.
+    if halted(limits) {
+        return Ok(None);
+    }
     for run in 0..=entry.retry_on_failure {
         let asked = retry_of(candidate, &failed, run);
         let (mut judged, ran) = run_once(
@@ -1446,6 +1534,10 @@ fn run_serial(
             (index, entry),
             (work_dir, started, told),
         )?;
+        // G796: a check main's move stopped keeps no record.
+        if stopped(limits, entry) {
+            return Ok(None);
+        }
         if let Some(reason) = judged.unavailable.take() {
             return Ok(Some(reason));
         }
@@ -1590,6 +1682,15 @@ fn run_once(
     (work_dir, started, about): (&Path, Instant, &serde_json::Map<String, serde_json::Value>),
 ) -> Result<(Judged, Instant), String> {
     let budget = limits.budget;
+    // G796: a check main's move stopped is not materialized; its caller keeps no record of it.
+    let stop = || stopped(limits, entry);
+    if stop() {
+        let why = "main moved past the candidate's base".to_owned();
+        return Ok((
+            Judged::without_units(Verdict::Unknown, Some(why)),
+            Instant::now(),
+        ));
+    }
     let dir = work_dir.join(format!("check-{index}"));
     let _ = remove_tree(&dir);
     let tree_dir = dir.join("candidate");
@@ -1629,6 +1730,7 @@ fn run_once(
         about,
         history: history.as_ref(),
         paths_tree: kept.as_deref(),
+        stop: &stop,
     };
     // Items 1 and 2: a check whose footprint is observed has its tree armed before it runs.
     let armed = (not_run.is_none() && entry.footprint == crate::policy::FootprintMode::Observed)
@@ -2065,6 +2167,8 @@ struct Place<'a> {
     /// The tree of the candidate kept to what the check's tree holds, for a check whose tree
     /// is not the whole candidate's ([`paths_tree`]).
     paths_tree: Option<&'a str>,
+    /// G796: whether main's move stopped the check: its adapter is killed.
+    stop: &'a dyn Fn() -> bool,
 }
 
 /// The `bay.check.request/1` bay sends for `entry` on `candidate` (`INTERFACES` § 3). Fields
@@ -2229,7 +2333,7 @@ fn run_one(
         .env("PATH", crate::platform::search_path(&entry.path))
         // `policy::load_at` refuses an `env` name of the baseline, so none overrides it.
         .envs(declared);
-    let (output, stderr) = match exchange(hooks, cmd, &request, timeout, heartbeat) {
+    let (output, stderr) = match exchange(hooks, cmd, &request, (timeout, heartbeat), place.stop) {
         Ok(output) => output,
         Err(why) => return Judged::without_units(Verdict::Unknown, Some(why)),
     };
@@ -2272,16 +2376,16 @@ fn exchange(
     hooks: &mut Hooks,
     cmd: Command,
     request: &serde_json::Value,
-    timeout: Duration,
-    heartbeat: Option<Duration>,
+    (timeout, heartbeat): (Duration, Option<Duration>),
+    stop: &dyn Fn() -> bool,
 ) -> Result<(Vec<u8>, String), String> {
     let started = Instant::now();
     let ran = run_with_timeout(
         cmd,
         &request.to_string(),
         timeout,
-        &mut *hooks.beat,
-        heartbeat,
+        (&mut *hooks.beat, heartbeat),
+        stop,
     );
     if let Some(seen) = hooks.seen.as_deref_mut() {
         seen(&Exchange::new(request, &ran, started.elapsed(), timeout));
@@ -2590,16 +2694,16 @@ fn run_with_timeout(
     cmd: Command,
     input: &str,
     timeout: Duration,
-    beat: &mut dyn FnMut(),
-    heartbeat: Option<Duration>,
+    beat: (&mut dyn FnMut(), Option<Duration>),
+    stop: &dyn Fn() -> bool,
 ) -> Result<(ExitStatus, Vec<u8>, String), String> {
-    let ran = crate::run::bounded(
+    let ran = crate::run::bounded_until(
         cmd,
         Some(input.as_bytes()),
         timeout,
         crate::run::Streams::Captured,
         beat,
-        heartbeat,
+        stop,
     )
     .map_err(|fault| match fault {
         crate::run::Fault::Spawn(error) => format!("the check did not start: {error}"),
@@ -3102,6 +3206,7 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
                 sandbox,
                 baseline: None,
                 parallel: 1,
+                halt: None,
             };
             let mut keep = |_: &mut EvidenceRecord| Ok(());
             let mut records = run_all(

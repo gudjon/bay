@@ -142,6 +142,7 @@ fn run_with(
         sandbox: Sandbox::judge("none", Ok(true)),
         baseline: None,
         parallel: 1,
+        halt: None,
     };
     let mut keep = |_: &mut EvidenceRecord| Ok(());
     let mut records = run_all(

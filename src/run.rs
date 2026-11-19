@@ -162,6 +162,8 @@ pub enum Fault {
     /// It exited, and a child it left behind held its output open even after its group was
     /// killed.
     LeftOpen,
+    /// G796: its caller stopped it ([`bounded_until`]); its whole group was killed.
+    Stopped,
 }
 
 impl std::fmt::Display for Fault {
@@ -171,6 +173,7 @@ impl std::fmt::Display for Fault {
             Self::Wait(error) => write!(f, "{error}"),
             Self::Timeout(bound) => write!(f, "it timed out after {}s", bound.as_secs()),
             Self::LeftOpen => f.write_str("a child it left behind held its output open"),
+            Self::Stopped => f.write_str("it was stopped"),
         }
     }
 }
@@ -197,12 +200,29 @@ pub fn captured(cmd: Command, input: Option<&[u8]>, timeout: Duration) -> Result
 /// The adapter did not start, waiting on it failed, it ran past `timeout`, or a child it left
 /// behind held its output open ([`Fault`]).
 pub fn bounded(
-    mut cmd: Command,
+    cmd: Command,
     input: Option<&[u8]>,
     timeout: Duration,
     streams: Streams,
     beat: &mut dyn FnMut(),
     heartbeat: Option<Duration>,
+) -> Result<Ran, Fault> {
+    bounded_until(cmd, input, timeout, streams, (beat, heartbeat), &|| false)
+}
+
+/// [`bounded`], and stopped once `stop` says so: asked as often as the process is, its whole
+/// group is then killed (G796: a check whose candidate main moved past).
+///
+/// # Errors
+///
+/// As [`bounded`], and [`Fault::Stopped`].
+pub fn bounded_until(
+    mut cmd: Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+    streams: Streams,
+    (beat, heartbeat): (&mut dyn FnMut(), Option<Duration>),
+    stop: &dyn Fn() -> bool,
 ) -> Result<Ran, Fault> {
     #[cfg(unix)]
     {
@@ -266,6 +286,10 @@ pub fn bounded(
         if started.elapsed() >= timeout {
             kill(group, &mut child);
             return Err(Fault::Timeout(timeout));
+        }
+        if stop() {
+            kill(group, &mut child);
+            return Err(Fault::Stopped);
         }
         std::thread::sleep(Duration::from_millis(20));
     };

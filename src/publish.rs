@@ -790,6 +790,20 @@ struct Ctx<'a> {
     approved: Option<String>,
     /// Who makes this visit, which says how far it goes.
     visit: Visit,
+    /// G796: the move of main that stopped this visit's last check ([`run_policy`]), until
+    /// [`after_stopped_check`] builds again on it.
+    stopped: std::cell::RefCell<Option<Stopped>>,
+    /// G796: the trees of this visit's candidates whose checks a move of main stopped: a check
+    /// that finished there carries onto a later candidate ([`carry_over`]).
+    stopped_trees: Vec<String>,
+}
+
+/// G796: main moved past the base of a candidate while its checks ran.
+struct Stopped {
+    /// Main's tip once it moved.
+    main: String,
+    /// The candidate's tree.
+    tree: String,
 }
 
 /// Who makes a visit of an operation ([`Ctx::visit`]).
@@ -838,6 +852,8 @@ impl<'a> Ctx<'a> {
             pushed_landing: None,
             approved: None,
             visit: Visit::Own,
+            stopped: std::cell::RefCell::new(None),
+            stopped_trees: Vec::new(),
         })
     }
 
@@ -2366,8 +2382,23 @@ fn run_attempts(
             {
                 return Ok(landed);
             }
+            // G796: a batch, or a candidate, whose checks main's move stopped.
+            if ctx.stopped.borrow().is_some() {
+                if let Some(result) = after_stopped_check(ctx, op_id, &revision, &mut trunk, seq)? {
+                    return Ok(result);
+                }
+                continue;
+            }
             match build_and_check(ctx, op_id, &revision, &trunk, approved)? {
                 Ok(attempt) => attempt,
+                Err(_) if ctx.stopped.borrow().is_some() => {
+                    if let Some(result) =
+                        after_stopped_check(ctx, op_id, &revision, &mut trunk, seq)?
+                    {
+                        return Ok(result);
+                    }
+                    continue;
+                }
                 Err(refusal) if ctx.record.lane.is_some() => {
                     return lane_never_lands(ctx, op_id, &revision, Some(refusal));
                 }
@@ -2985,9 +3016,11 @@ fn bisect_batch(
             trunk,
             &[],
         )?;
-        if refusal
-            .as_ref()
-            .is_some_and(|refusal| refusal.reason == Some(Reason::CheckUnavailable))
+        // G796: a batch main's move stopped is no batch; its head builds again on the new main.
+        if ctx.stopped.borrow().is_some()
+            || refusal
+                .as_ref()
+                .is_some_and(|refusal| refusal.reason == Some(Reason::CheckUnavailable))
         {
             return Ok(None);
         }
@@ -3055,7 +3088,13 @@ fn join_or_cut<'a>(
     };
     ctx.step.set("join");
     if again < 2 {
-        give_back(others, landing, "the cut batch did not pass its check");
+        // G796: main's move stopped the cut batch's check.
+        let cause = if ctx.stopped.borrow().is_some() {
+            "main moved under the batch"
+        } else {
+            "the cut batch did not pass its check"
+        };
+        give_back(others, landing, cause);
         return Ok(None);
     }
     let mut past = others.split_off(again - 1);
@@ -3635,6 +3674,7 @@ fn after_refused_push(
         base: &attempt.base,
         trunk,
         held,
+        stopped: false,
     };
     after_trunk_moved(ctx, op_id, revision, seq, &moved)
 }
@@ -3850,6 +3890,8 @@ struct Moved<'a> {
     trunk: &'a str,
     /// The hook refused the push because the publication queue is held.
     held: bool,
+    /// G796: the runner saw the move while the candidate was checked, and stopped its checks.
+    stopped: bool,
 }
 
 /// What a refused publishing push leads to: a place in the queue, or `None` to rebuild on the
@@ -3876,8 +3918,9 @@ fn after_trunk_moved(
         // merges in three hours, one ran a check after the move, and 7,301 s were that wait):
         // a head no pre-merge check covers on the new main is built again and published in
         // this visit, at most [`PASSES_PER_ENTRY`] times; a head a check must run for yields.
+        // G796: so is a head whose check the move stopped, which lost no finished work.
         if ctx.op(op_id).trunk_moved <= PASSES_PER_ENTRY
-            && needs_no_check(&ctx.repo.git, moved.trunk, revision)?
+            && (moved.stopped || needs_no_check(&ctx.repo.git, moved.trunk, revision)?)
         {
             return Ok(None);
         }
@@ -3888,6 +3931,131 @@ fn after_trunk_moved(
         return enqueue(ctx, op_id, revision, Reason::Queued).map(Some);
     }
     Ok(None)
+}
+
+/// G796 (a fleet measurement, 2026-11-19: in one day 124 heads ran 5.5 h of checks on
+/// candidates main had already moved past, learning it only when the merging push was refused;
+/// one 4-minute check went on 224 s after a change that passed its head landed 28 s into it):
+/// one beat's look at main, while a candidate merged onto `trunk` is checked. One `ls-remote`
+/// of main; only once it moved, one fetch of main, which reads what the move changed. Then every
+/// check stops but those whose record a candidate on the new main carries ([`carried_across`]),
+/// and the new tip is returned. `None` while main stands, once the checks already stopped, or
+/// when the remote cannot be read.
+fn watch_main(
+    ctx: &Ctx,
+    (policy, reusing): (&policy::Policy, bool),
+    trunk: &str,
+    halt: &check::Halt,
+) -> Option<String> {
+    if halt.moved() {
+        return None;
+    }
+    let main = format!("refs/heads/{}", ctx.repo.trunk());
+    let listed = ctx
+        .repo
+        .git
+        .run(&["ls-remote", ctx.repo.remote(), &main])
+        .ok()?;
+    let tip = listed
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find_map(|(tip, name)| (name == main).then_some(tip))?;
+    if tip == trunk {
+        return None;
+    }
+    let now = ctx.repo.refetch_trunk().ok().filter(|now| now != trunk)?;
+    // A main that was not built on the candidate's base changed everything it reads.
+    let changed = ctx
+        .repo
+        .git
+        .is_ancestor(trunk, &now)
+        .unwrap_or(false)
+        .then(|| check::changed_paths(&ctx.repo.git, trunk, &now).ok())
+        .flatten();
+    let carried = match changed {
+        Some(changed) if reusing => carried_across(ctx, policy, &changed),
+        _ => Vec::new(),
+    };
+    halt.stop_all_but(carried);
+    Some(now)
+}
+
+/// G796: the checks of `policy` whose record on a candidate a move of main changing `changed`
+/// may leave standing: a candidate on the new main carries it byte for byte ([`carry_over`]). A
+/// check that is keyed by its commit is never carried; one with an observed footprint may be,
+/// unless the move changes a path G703 predicts it reads (its `paths`, or `when_paths`), and one
+/// that declares neither is read only once it ends, so it runs on; one with a declared read set
+/// is when footprint lanes are on and the move changes none of it.
+fn carried_across(
+    ctx: &Ctx,
+    policy: &policy::Policy,
+    changed: &[String],
+) -> Vec<evidence::CheckId> {
+    let moved = throughput::Footprint::Globs(changed.to_vec());
+    policy
+        .checks
+        .iter()
+        .filter(|entry| {
+            let reads = match entry.footprint {
+                policy::FootprintMode::Observed => Some(
+                    entry
+                        .paths
+                        .as_deref()
+                        .or(entry.when_paths.as_deref())
+                        .unwrap_or_default(),
+                ),
+                policy::FootprintMode::Declared if ctx.repo.config.footprint_lanes() => {
+                    entry.read_set()
+                }
+                _ => None,
+            };
+            !entry.commit_keyed()
+                && reads.is_some_and(|reads| {
+                    !throughput::Footprint::Globs(reads.to_vec()).overlaps(&moved)
+                })
+        })
+        .map(|entry| evidence::CheckId::new(&entry.id, &entry.environment))
+        .collect()
+}
+
+/// G796: after main's move stopped the checks of a candidate (or of a head's batch) of
+/// `op_id`, what follows, as for a merging push main's move refused ([`after_trunk_moved`]):
+/// `None` builds again on the new main, now `trunk`, in this visit; a head builds again at most
+/// [`PASSES_PER_ENTRY`] times, as it lost no finished work, then yields. One that builds again
+/// from its place records the move on its chain. The checks that finished on the stopped
+/// candidate carry onto the next one when their reads stand.
+fn after_stopped_check(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &mut String,
+    seq: &mut Option<u64>,
+) -> Result<Option<BayResult>, String> {
+    let Some(stopped) = ctx.stopped.take() else {
+        return Ok(None);
+    };
+    ctx.stopped_trees.push(stopped.tree);
+    let base = std::mem::replace(trunk, stopped.main);
+    ctx.record.observed_remote.clone_from(trunk);
+    let moved = Moved {
+        base: &base,
+        trunk,
+        held: false,
+        stopped: true,
+    };
+    let next = after_trunk_moved(ctx, op_id, revision, seq, &moved)?;
+    // G552, G577, G791: an operation that builds again from its place says on its chain that
+    // main moved under it, so the changes that could pass it wait now, never one per check.
+    if next.is_none()
+        && let Some(at) = *seq
+    {
+        let short = trunk.get(..10).unwrap_or(trunk);
+        let message = format!("main moved under {op_id} at {at}: built again on {short}");
+        if ctx.save_cas(revision, None, &message)? {
+            ctx.push_chain();
+        }
+    }
+    Ok(next)
 }
 
 /// F11 (a fleet finding, 2026-10-25: one head rebuilt twelve times in one pass while main moved
@@ -6908,6 +7076,12 @@ fn build_and_check(
         trunk,
         &inputs::request_inputs(&judged),
     )?;
+    // G796: main moved while the candidate was checked; nothing of it is persisted.
+    if ctx.stopped.borrow().is_some()
+        && let Some(stopped) = refusal
+    {
+        return Ok(Err(stopped));
+    }
     let refusal = judged_outcome(ctx, op_id, &candidate_id, refusal, &judged);
     let refusal = match refusal {
         Some(waiting) if waiting.reason == Some(Reason::CheckUnavailable) => {
@@ -7634,6 +7808,25 @@ fn run_policy(
     };
     ctx.step.set("check");
     let baseline = baseline_of(ctx, policy, trunk, &base_tree)?;
+    // G796: main's move stops the checks of a candidate that can land: never a lane change's,
+    // which never lands, nor a check ahead of its turn, which judges a predicted base.
+    let halt = (ctx.record.lane.is_none() && !ctx.ahead_of_turn)
+        .then(|| std::sync::Arc::new(check::Halt::default()));
+    let reusing = ctx.repo.config.evidence_reuse() && ctx.reuse_trusted(trunk) && inputs.is_empty();
+    let moved_to: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    let mut beat = || {
+        heartbeat(ctx, op_id);
+        if let Some(halt) = &halt
+            && let Some(now) = watch_main(ctx, (policy, reusing), trunk, halt)
+        {
+            eprintln!(
+                "bay runner: {} main moved to {} while {candidate_id} was checked: its checks stop, and it is built again",
+                ctx.id,
+                now.get(..10).unwrap_or(&now)
+            );
+            *moved_to.borrow_mut() = Some(now);
+        }
+    };
     let mut run = |finished: Vec<evidence::CheckId>| {
         check::run_all(
             git,
@@ -7663,10 +7856,11 @@ fn run_policy(
                 sandbox: check::Sandbox::here().reading(git),
                 baseline: baseline.clone(),
                 parallel: ctx.repo.config.parallel_checks(),
+                halt: halt.clone(),
             },
             &mut check::Hooks {
                 keep: &mut keep,
-                beat: &mut || heartbeat(ctx, op_id),
+                beat: &mut beat,
                 seen: None,
             },
         )
@@ -7674,6 +7868,7 @@ fn run_policy(
     let check::Ran {
         mut records,
         unavailable: mut outage,
+        mut stopped,
     } = run(finished.clone())?;
     // G638: a failure a carried waiver answers ended the run before the checks after it; they
     // run now, as they would after a waiver of this exact candidate (`finished_checks`).
@@ -7702,9 +7897,22 @@ fn run_policy(
             let again = run(done)?;
             records.extend(again.records);
             outage = again.unavailable;
+            stopped = again.stopped;
         }
     }
     let _ = std::fs::remove_dir_all(&scratch);
+    // G796: a run main's move stopped is no verdict: the visit builds again on the new main.
+    if stopped && let Some(main) = moved_to.take() {
+        *ctx.stopped.borrow_mut() = Some(Stopped {
+            main,
+            tree: tree.to_owned(),
+        });
+        let mut waiting = BayResult::new(Decision::Queued)
+            .with_change(ctx.id.clone())
+            .with_op(op_id);
+        waiting.waiting_for = Some("executor".to_owned());
+        return Ok(("unknown", Some(waiting)));
+    }
     // The adapter reached no worker for a check: nothing was observed, so it is no verdict.
     if let Some((environment, reason)) = outage {
         return Ok((
@@ -8751,6 +8959,9 @@ fn carry_over(
         // moved. Its record then answers the culprit here when the read set is the same in
         // both bases, instead of a run alone that repeats it.
         .chain(std::iter::once(judged.tree))
+        // G796: a candidate of this visit whose checks main's move stopped; the checks it
+        // carries finished there.
+        .chain(ctx.stopped_trees.iter().map(String::as_str))
         .collect();
     let observed = entry.footprint == policy::FootprintMode::Observed;
     let declared = throughput::stamp(git, entry, judged.tree, judged.base_tree);
