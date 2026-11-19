@@ -1952,6 +1952,13 @@ fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<Ba
     if op.state.is_terminal() || op.state == OpState::Blocked {
         return Ok(None);
     }
+    // G800: the line says its place was released `published`: it landed since the pass read its
+    // chain, so neither the routing nor the lease below speaks for it any more.
+    if crate::queue::Queue::read_shared(ctx.repo)
+        .is_ok_and(|queue| queue.released_as(op_id, "published"))
+    {
+        return landed_elsewhere(ctx, op_id);
+    }
     let me = ctx.executor_name();
     let others = op.owner.as_deref().is_none_or(|owner| owner != me);
     let held = op.owner.is_some()
@@ -1989,6 +1996,10 @@ fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<Ba
     if ctx.refetch().is_err() {
         return Ok(None);
     }
+    // G800: one that landed since is answered from that chain.
+    if let Some(landed) = landed_on_chain(ctx, op_id)? {
+        return Ok(Some(landed));
+    }
     let still = ctx.find_op(op_id).is_some_and(|op| {
         op.owner.as_deref().is_some_and(|owner| owner != me)
             && matches!(op.state, OpState::Running | OpState::Checked)
@@ -2012,6 +2023,55 @@ fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<Ba
         "owner": op.owner,
         "epoch": op.epoch,
     }))))
+}
+
+/// G800 (a fleet measurement, 2026-11-19: in 28 h one box's two runners made 524 visits to an
+/// operation another runner had claimed and landed a median 59 s earlier, 10,353 s in all;
+/// each fetched main and the registry, scanned main for the landing, fetched the logs twice for
+/// a terminal record the landing runner had written, and pushed a chain it had not changed):
+/// the result of a visit to `op_id`, whose queue place the line released `published`, read from
+/// the change's own chain alone. Its landing commit links the published commit, so one fetch
+/// brings what the landing row is derived from: the same row as a scan of main finds
+/// ([`derive_landed`]), marked `existing`, with no terminal record and no push of its own. `None`
+/// sends the visit the long way: under a registry that signs landings, whose scan verifies the
+/// publication's signature, or when the chain does not say the operation published.
+fn landed_elsewhere(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
+    if ctx.refetch().is_err() {
+        return Ok(None);
+    }
+    landed_on_chain(ctx, op_id)
+}
+
+/// G800: [`landed_elsewhere`]'s answer from the change's chain as this visit just read it:
+/// `None` under a registry that signs landings, or when the chain does not say `op_id`
+/// published, with its commit in this store.
+fn landed_on_chain(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
+    ctx.registry = Registry::current(&ctx.repo.git)?;
+    if ctx.signing().is_some() {
+        return Ok(None);
+    }
+    let Some(op) = ctx.find_op(op_id) else {
+        return Ok(None);
+    };
+    let Some(commit) = op
+        .attempts
+        .last()
+        .map(|attempt| attempt.commit.clone())
+        .filter(|_| op.state == OpState::Published && ctx.record.state == ChangeState::Landed)
+    else {
+        return Ok(None);
+    };
+    if ctx
+        .repo
+        .git
+        .run(&["cat-file", "-e", &format!("{commit}^{{commit}}")])
+        .is_err()
+    {
+        return Ok(None);
+    }
+    let revision = op.revision.clone();
+    // The landing runner recorded it, its terminal record and its wake: this visit writes none.
+    Ok(Some(existing(landing_row(ctx, op_id, &revision, &commit))))
 }
 
 /// G307: asks the wake adapter, once, to wake the author of `ctx`'s change for operation
@@ -9578,6 +9638,12 @@ fn derive_landed(
             ctx.push_chain();
         }
     }
+    Ok(landing_row(ctx, op_id, revision, commit))
+}
+
+/// The result of `op_id`'s landing of `commit`, recorded on the change's chain: what a landing
+/// says, derived from the chain, main's policy and the evidence ([`derive_landed`]).
+fn landing_row(ctx: &Ctx, op_id: &str, revision: &str, commit: &str) -> BayResult {
     let mut result = landed_result(
         &ctx.id,
         Some(op_id),
@@ -9658,7 +9724,7 @@ fn derive_landed(
             detail.insert(key.to_owned(), value);
         }
     }
-    Ok(result)
+    result
 }
 
 /// G292: the approvals the landed candidate of `op_id` stands on that an approver gave an
