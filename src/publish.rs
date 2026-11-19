@@ -8279,6 +8279,12 @@ fn wait_for_worker(
 /// chosen to run checks without one runs no check (ruling R14), so it serves no environment.
 /// Before, `bay merge --wait` on such a box claimed the operation, every check was
 /// `infra_failure`, and the operation stayed blocked with no place, which no runner takes.
+///
+/// G797 (a fleet measurement, 2026-11-19: while main was red on two post checks, runners that
+/// served neither environment claimed five changes on their paths, found no worker, and
+/// released their places; each rejoined the back of the line and waited up to 17 minutes for a
+/// claim): the red post checks this change runs before its merge (G677, [`red_gate`], which
+/// the queue gate asked first) are required of it here as well.
 fn served_elsewhere(
     ctx: &Ctx,
     op_id: &str,
@@ -8286,9 +8292,13 @@ fn served_elsewhere(
     trunk: &str,
 ) -> Result<Option<BayResult>, String> {
     let git = &ctx.repo.git;
-    let Some(policies) = judging_policies(git, revision, trunk) else {
+    let Some(mut policies) = judging_policies(git, revision, trunk) else {
         return Ok(None);
     };
+    // The policy at trunk is the one a candidate's red checks run under (`check_candidate`).
+    if let Some(at_trunk) = policies.first_mut() {
+        *at_trunk = at_trunk.judging_red(&ctx.red_checks);
+    }
     let served = check::Served::read(git);
     let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
         return Ok(None);
@@ -8405,9 +8415,15 @@ fn policy_unread_here(ctx: &Ctx, op_id: &str, trunk: &str) -> Option<BayResult> 
 }
 
 /// An operation waiting for a worker (§ 6, § 7) is passed over with nothing written while this
-/// box does not serve what it waits for, and, after an adapter's `unavailable` answer, until
-/// its rejoin gap has passed ([`rejoin_gap`]). Writing nothing is what lets the lease of the
-/// executor that recorded the wait lapse, so an executor that serves it takes it over (§ 9a).
+/// box does not serve what it waits for, and, after an adapter's `unavailable` answer, by the
+/// runner whose worker gave it until its rejoin gap has passed ([`rejoin_gap`]). Writing
+/// nothing is what lets the lease of the executor that recorded the wait lapse, so an executor
+/// that serves it takes it over (§ 9a).
+///
+/// G797 (a fleet finding, 2026-11-19: on a shared test box a check not started within 120 s was
+/// answered `unavailable`, and the change waited out the gap on every runner): the answer is
+/// about that runner's worker, so another runner that serves the environments takes the
+/// operation at once.
 fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Option<BayResult> {
     let op = ctx.op(op_id);
     let waiting = op.unavailable.as_ref()?;
@@ -8426,7 +8442,8 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Opti
                 .as_ref()
                 .is_none_or(|still| still.contains(environment))
     });
-    let early = waiting.adapter.is_some() && {
+    let answered_here = op.owner.as_deref() == Some(ctx.executor_name().as_str());
+    let early = waiting.adapter.is_some() && answered_here && {
         let gap = rejoin_gap(ctx.repo.config.lease(), waiting.repeats);
         now_ms()
             < waiting
@@ -8445,7 +8462,9 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Opti
 }
 
 /// The environments the policies that judge `revision`'s change run checks in (G431, G579);
-/// `None` when that cannot be read.
+/// `None` when that cannot be read. G797: a post check the change wakes counts too: while main
+/// is red on it, the change runs it before its merge (G677), and only a box that serves it
+/// takes the change.
 fn required_environments(ctx: &Ctx, revision: &str, trunk: &str) -> Option<Vec<String>> {
     let git = &ctx.repo.git;
     let policies = judging_policies(git, revision, trunk)?;
@@ -8455,10 +8474,12 @@ fn required_environments(ctx: &Ctx, revision: &str, trunk: &str) -> Option<Vec<S
         policies
             .iter()
             .flat_map(|policy| {
-                policy
-                    .checks
-                    .iter()
-                    .filter(|entry| policy.runs(entry, &changed))
+                policy.checks.iter().filter(|entry| {
+                    policy.runs(entry, &changed)
+                        || (entry.stage == policy::Stage::Post
+                            && !entry.is_approval()
+                            && policy.unwoken(entry, &changed).is_none())
+                })
             })
             .map(|entry| entry.environment.clone())
             .collect(),
