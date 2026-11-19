@@ -1818,6 +1818,7 @@ pub fn execute(
     // and starts again, so a head never claims or builds on what an earlier visit read. G694:
     // it reads again only what was read before it began.
     repo.begin_visit(began.unwrap_or_else(std::time::Instant::now));
+    kill_point("visit-begins");
     // An approval the first try re-armed is the second's too: the chain no longer says it.
     let mut approved = None;
     match execute_once(repo, id, op_id, step, Visit::Pass, &mut approved) {
@@ -1940,9 +1941,9 @@ fn execute_once(
 ///   in an environment this box does not serve while a live runner's does: left to that runner,
 ///   unclaimed and in its place, as [`served_elsewhere`] leaves it after the queue gate. A change
 ///   only main's red routes elsewhere is still judged there (G797).
-/// - A head another runner holds, whose lease this looping runner saw beat within the lease
-///   (G696): held, as the claim would find it. One that the holder gave back since the pass read
-///   it is taken between operations (`crate::executor`), which reads its chain afresh.
+/// - A head another runner holds, on its chain read again as the claim reads it, whose lease
+///   this looping runner saw beat within the lease (G696): held, as the claim would find it,
+///   with no fetch of main, red judgement or gate.
 fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
     if ctx.visit != Visit::Pass || ctx.record.lane.is_some() || ctx.record.ended() {
         return Ok(None);
@@ -1978,6 +1979,22 @@ fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<Ba
         }
     }
     if !(held && watches_leases_across_passes()) {
+        return Ok(None);
+    }
+    // As the claim does, the lease is judged on the chain as the remote holds it now: the pass
+    // read it before the holder went on, and a change's own run holds a lease of a few
+    // heartbeats (G679) and records its wait for a worker as soon as it finds none, which no
+    // lease then holds against a box that serves it (a gate finding, 2026-11-19: on a stale read
+    // a looping runner answered such a wait held, and never took it).
+    if ctx.refetch().is_err() {
+        return Ok(None);
+    }
+    let still = ctx.find_op(op_id).is_some_and(|op| {
+        op.owner.as_deref().is_some_and(|owner| owner != me)
+            && matches!(op.state, OpState::Running | OpState::Checked)
+            && op.unavailable.is_none()
+    });
+    if !still {
         return Ok(None);
     }
     ctx.registry = Registry::current(&ctx.repo.git)?;

@@ -5,13 +5,13 @@
 //! already answers ends before it reads anything again:
 //! - the queue's head whose checks this box does not serve, while a live runner's box does, is
 //!   left to that runner, unclaimed, with no fetch of main of its own;
-//! - a head another runner holds, whose lease this looping runner saw beat, is held, with no
-//!   read of its chain beyond its pass's own.
+//! - a head another runner holds, whose lease this looping runner saw beat, is held: its chain is
+//!   read again, as the claim reads it (G799b), and the registry and the line are not.
 //!
 //! Guards to mutate, in `src/publish.rs` `settled_by_what_the_pass_read`: answer `None` for the
 //! head (the visit fetches main, judges its red, and only then leaves the head); skip the held
-//! branch (each visit reads the held head's chain again, and the line, before its claim finds
-//! the lease held).
+//! branch (each visit fetches the registry, and reads the line again, before its claim finds the
+//! lease held).
 
 #![cfg(unix)]
 
@@ -139,8 +139,8 @@ fn a_head_this_box_cannot_serve_is_left_with_no_fetch_of_main() {
 }
 
 /// How often the process that wrote first to the trace at `path` fetched anything, fetched the
-/// chain of change `id` alone, and fetched every chain (once a pass).
-fn traced(path: &Path, id: &str) -> (usize, usize, usize) {
+/// registry, and fetched every chain (once a pass).
+fn traced(path: &Path) -> (usize, usize, usize) {
     let text = std::fs::read_to_string(path).unwrap_or_default();
     let lines: Vec<Value> = text
         .lines()
@@ -152,15 +152,15 @@ fn traced(path: &Path, id: &str) -> (usize, usize, usize) {
         .filter(|line| Some(&line["pid"]) == pid.as_ref() && line["sub"] == "fetch")
         .map(|line| line["args"].to_string())
         .collect();
-    let chain = fetches
+    let registry = fetches
         .iter()
-        .filter(|args| args.contains(&format!("refs/bay/changes/{id}:")))
+        .filter(|args| args.contains("refs/bay/registry"))
         .count();
     let passes = fetches
         .iter()
         .filter(|args| args.contains("refs/bay/changes/*"))
         .count();
-    (fetches.len(), chain, passes)
+    (fetches.len(), registry, passes)
 }
 
 #[test]
@@ -210,17 +210,17 @@ fn a_looping_runner_reads_main_no_more_for_a_head_another_runner_holds() {
     line.go();
     let _ = support::queued::finished(holder);
 
-    // THEN each of its visits to the line head found it line with no read of its own
-    let (fetches, chain, passes) = traced(&trace, &head);
+    // THEN each of its visits to the held head found it held without the reads the claim makes
+    let (fetches, registry, passes) = traced(&trace);
     assert!(fetches > 0, "runner B fetched nothing");
     let seen = visits();
     let lines = std::fs::read_to_string(&journal).unwrap_or_default();
     assert!(
         seen >= 3,
-        "runner B visited the line head {seen} times: {lines}"
+        "runner B visited the held head {seen} times: {lines}"
     );
     assert!(
-        chain <= passes,
-        "runner B read the line head's chain {chain} times in {passes} passes"
+        registry < seen,
+        "runner B fetched the registry {registry} times in {passes} passes, for {seen} visits to the held head"
     );
 }
