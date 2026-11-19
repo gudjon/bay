@@ -180,9 +180,17 @@ impl Footprint {
 
     /// The bytes under `root` not already counted by this footprint.
     pub fn bytes(&mut self, root: &Path) -> u64 {
+        self.bytes_except(root, &[])
+    }
+
+    /// [`Self::bytes`], leaving out every path in `skip` and what is under it.
+    pub fn bytes_except(&mut self, root: &Path, skip: &[PathBuf]) -> u64 {
         let mut total = 0;
         let mut stack = vec![root.to_path_buf()];
         while let Some(path) = stack.pop() {
+            if skip.iter().any(|skipped| skipped == &path) {
+                continue;
+            }
             let Ok(meta) = std::fs::symlink_metadata(&path) else {
                 continue;
             };
@@ -218,15 +226,25 @@ pub const LARGE_VIEW_BYTES: u64 = 1 << 30;
 
 /// G792: bay's footprint on this box for the repository at `common_dir`: its object store, bay's
 /// own state beside it, and each of its views (`views`: change id and path), largest first.
-/// Each root is measured on its own thread, so a file linked into two roots counts in both.
+/// Each root is measured on its own thread, so a file linked into two roots counts in both. A
+/// view kept inside bay's state (an older bay's place for views) counts as a view only.
 #[must_use]
 pub fn footprint(common_dir: &Path, views: &[(String, PathBuf)]) -> Value {
     let mut roots: Vec<PathBuf> = vec![common_dir.join("objects"), common_dir.join("bay")];
     roots.extend(views.iter().map(|(_, path)| path.clone()));
+    let view_paths: Vec<PathBuf> = views.iter().map(|(_, path)| path.clone()).collect();
     let sizes: Vec<u64> = std::thread::scope(|scope| {
         let handles: Vec<_> = roots
             .iter()
-            .map(|root| scope.spawn(move || Footprint::new().bytes(root)))
+            .enumerate()
+            .map(|(index, root)| {
+                let skip = if index == 1 {
+                    view_paths.as_slice()
+                } else {
+                    &[]
+                };
+                scope.spawn(move || Footprint::new().bytes_except(root, skip))
+            })
             .collect();
         handles
             .into_iter()
