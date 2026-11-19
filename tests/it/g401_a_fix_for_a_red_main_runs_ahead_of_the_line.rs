@@ -109,9 +109,13 @@ fn a_change_that_fixes_the_red_publishes_while_the_head_still_runs() {
         merged.contains(&fix),
         "the fix waited behind the line: {pass}"
     );
+    // G796: the head's runner sees the fix move main during its check, stops it, and lands the
+    // head on a check of the new main: after the fix, never before it.
+    // The landings are listed newest first.
+    let at = |id: &String| merged.iter().position(|landed| landed == id);
     assert!(
-        !merged.contains(&slow),
-        "the head was still running: {merged:?}"
+        at(&slow).is_none_or(|slow| at(&fix).is_some_and(|fix| fix > slow)),
+        "the fix did not land ahead of the head: {merged:?}"
     );
     held.go_run(head_run);
     let _ = finished(runner_a);

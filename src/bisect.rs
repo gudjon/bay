@@ -1115,6 +1115,7 @@ fn run_at(
             // Bisection asks whether each commit fails, whole: no base excuses a failure.
             baseline: None,
             parallel: 1,
+            halt: None,
         },
         &mut check::Hooks {
             keep: &mut keep,

@@ -5,7 +5,9 @@
 //!
 //! The head waited (on the red, before G677; here in a check another runner holds), so G552 held
 //! nothing: its push was never refused. The repair runs from its own place behind it, and each
-//! document that landed during its check moved main under it again.
+//! document that landed during its check moved main under it again. G796: the head's check, which
+//! reads none of what a document changes, runs on when main moves (a candidate on the new main
+//! carries it); the repair's stops, and the repair checks again in the same visit.
 //!
 //! Guard to mutate, in `src/publish.rs`: `repair_moved_under` returning `false` (the second
 //! document lands while the repair checks again).
@@ -81,13 +83,24 @@ fn a_document_waits_for_a_repair_that_main_moved_under() {
         .into_iter()
         .find(|(path, _)| path == ".bay/policy.toml")
         .map(|(_, text)| {
-            let text = text.replacen("timeout_s", "when_paths = [\"src/**\"]\ntimeout_s", 1);
-            format!("{text}{POST}")
+            // The repair's check on src/repair.rs, and the head's on src/waits.rs, observed:
+            // a document's move leaves its record standing, so it runs on (G796).
+            let repair = text.replacen("timeout_s", "when_paths = [\"src/repair*\"]\ntimeout_s", 1);
+            let head = text
+                .split_once("[[check]]")
+                .map(|(_, check)| check.replacen("\"tests\"", "\"waits\"", 1))
+                .unwrap()
+                .replacen(
+                    "timeout_s",
+                    "when_paths = [\"src/waits*\"]\nfootprint = \"observed\"\ntimeout_s",
+                    1,
+                );
+            format!("{repair}\n[[check]]{head}{POST}\n[policy]\nreuse_unsigned = true\n")
         })
         .unwrap();
     let held = host_under(
         &Check {
-            config: "[runner]\nlease_s = 30\nheartbeat_s = 1\nahead = 4\n",
+            config: "[policy]\nevidence_reuse = \"exact-inputs\"\n\n[runner]\nlease_s = 30\nheartbeat_s = 1\nahead = 4\n",
             policy: Some(&policy),
             seed: &[
                 ("src/a.rs", "fn a() {}\n"),
@@ -129,6 +142,7 @@ fn a_document_waits_for_a_repair_that_main_moved_under() {
     held.wait_held();
     let fix = repair(&held, &broke);
     held.hold_run(2);
+    held.hold_run(3);
     let runner_a = held.spawn(&a);
     held.wait_held_run(2);
     std::thread::sleep(Duration::from_secs(1));
@@ -140,16 +154,13 @@ fn a_document_waits_for_a_repair_that_main_moved_under() {
         on_main(&held, &first),
         "the first document waited for a repair main had not moved under: {pass}"
     );
-    held.go_run(2);
-    // The repair's push found main moved: it gave its claim back and kept its place.
-    let ran = finished(runner_a);
+    // G796: the repair's runner sees main move during its first check, stops it, and checks the
+    // repair again on the new main in the same visit.
+    held.wait_held_run(3);
     assert!(
         !on_main(&held, &fix),
-        "the repair landed on its first check: {ran}"
+        "the repair landed on its first check"
     );
-    held.hold_run(3);
-    let runner_a = held.spawn(&a);
-    held.wait_held_run(3);
 
     // THEN a second document keeps its place while the repair checks again.
     let second = held.queue_with("second", &["docs"], &[("docs/second.md", "second\n")]);
@@ -171,6 +182,7 @@ fn a_document_waits_for_a_repair_that_main_moved_under() {
         on_main(&held, &second),
         "the second document never landed: {pass}"
     );
+    held.go_run(2);
     held.go();
     let _ = finished(runner_c);
 }

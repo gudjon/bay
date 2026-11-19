@@ -4,7 +4,9 @@
 //!
 //! G403 runs such a change from its own place while the head still runs. Each landing moved main
 //! under the head, its push was refused, and it checked again, so the head paid one check per
-//! change that passed it. Now one move costs the head one check.
+//! change that passed it. Now one move costs the head one check. G796: the head sees the move
+//! during its check, stops it, and checks again in the same visit; its chain says main moved
+//! under it, so the second document waits.
 //!
 //! Guard to mutate, in `src/publish.rs`: `main_moved_under` returning `false` (the second document
 //! lands while the head checks again).
@@ -50,17 +52,8 @@ fn a_document_waits_for_a_head_that_main_moved_under() {
             .contains(&first),
         "the first document waited behind a head main had not moved under: {pass}"
     );
-    held.go();
-    // The head's push is refused: main moved under it, so it yields its pass (G380), and the
-    // runner's next pass checks it again.
-    let yielded = finished(runner_a);
-    assert!(
-        yielded["detail"]["ran"]
-            .as_array()
-            .is_some_and(|rows| rows.iter().any(|row| row["detail"]["yielded"] == true)),
-        "the head did not yield when main moved under it: {yielded}"
-    );
-    let runner_a = held.spawn(&a);
+    // G796: the head's runner sees main move during its check, stops it, and checks the head
+    // again on the new main in the same visit.
     held.wait_held_run(2);
     let second = held.queue_with("second", &["docs"], &[("docs/second.md", "second\n")]);
     let pass = held.pass(&b);
@@ -77,6 +70,7 @@ fn a_document_waits_for_a_head_that_main_moved_under() {
         held.test_box.trunk_change_ids(&held.remote).contains(&slow),
         "the head did not land on its second check: {ran}"
     );
+    assert_eq!(held.requests().len(), 2, "{:?}", held.requests());
     let pass = held.pass(&b);
     assert!(
         held.test_box
@@ -84,4 +78,6 @@ fn a_document_waits_for_a_head_that_main_moved_under() {
             .contains(&second),
         "the second document never landed: {pass}"
     );
+    // The first run, which the runner stopped, waits on the test's side until now.
+    held.go();
 }
