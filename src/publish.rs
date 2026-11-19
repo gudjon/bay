@@ -1873,6 +1873,11 @@ fn execute_once(
         }
         return Err(format!("change {id} has no operation {op_id}"));
     }
+    // G799: what the pass already read answers a visit that could do nothing, before it reads
+    // main again.
+    if let Some(answer) = settled_by_what_the_pass_read(&mut ctx, op_id)? {
+        return Ok(answer);
+    }
     let trunk = match ctx.fetch_trunk()? {
         Ok(trunk) => trunk,
         Err(refusal) => return Ok(refusal),
@@ -1923,6 +1928,73 @@ fn execute_once(
     // convenience, never the outcome: one that cannot be recorded changes nothing here.
     let _ = landed_wake(&ctx, op_id, &result);
     Ok(result)
+}
+
+/// G799 (a fleet measurement, 2026-11-19: in 28 h one box's two runners spent 5,882 s on 434
+/// visits to a head another runner held, and 19,118 s on 1,542 visits to a head that waited for
+/// a runner of another environment; each fetched main, judged main's red, and read the chain
+/// again before it found what its pass had already read): a runner's visit that this store's
+/// reads already answer ends before it reads main. `None` when they do not.
+///
+/// - The queue's head, waiting or held, whose checks under the policy at this store's main run
+///   in an environment this box does not serve while a live runner's does: left to that runner,
+///   unclaimed and in its place, as [`served_elsewhere`] leaves it after the queue gate. A change
+///   only main's red routes elsewhere is still judged there (G797).
+/// - A head another runner holds, whose lease this looping runner saw beat within the lease
+///   (G696): held, as the claim would find it. One that the holder gave back since the pass read
+///   it is taken between operations (`crate::executor`), which reads its chain afresh.
+fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
+    if ctx.visit != Visit::Pass || ctx.record.lane.is_some() || ctx.record.ended() {
+        return Ok(None);
+    }
+    let op = ctx.op(op_id);
+    if op.state.is_terminal() || op.state == OpState::Blocked {
+        return Ok(None);
+    }
+    let me = ctx.executor_name();
+    let others = op.owner.as_deref().is_none_or(|owner| owner != me);
+    let held = op.owner.is_some()
+        && others
+        && matches!(op.state, OpState::Running | OpState::Checked)
+        && op.unavailable.is_none();
+    let waits = op.owner.is_none();
+    // The head this box cannot serve is left as the gates would leave it, held or not.
+    if (waits || held)
+        && let Some(trunk) = crate::queue::Queue::read_shared(ctx.repo)
+            .ok()
+            .and_then(|queue| queue.head().map(|head| head.op_id == op_id))
+            .filter(|head| *head)
+            .and_then(|_| {
+                ctx.repo
+                    .git
+                    .ref_target(&ctx.repo.trunk_tracking_ref())
+                    .ok()
+                    .flatten()
+            })
+    {
+        let revision = ctx.op(op_id).revision.clone();
+        if let Some(left) = served_elsewhere(ctx, op_id, &revision, &trunk)? {
+            return Ok(Some(left));
+        }
+    }
+    if !(held && watches_leases_across_passes()) {
+        return Ok(None);
+    }
+    ctx.registry = Registry::current(&ctx.repo.git)?;
+    let quiet = holder_lease(&ctx.repo.config, ctx.op(op_id).owner.as_deref());
+    if holder_revoked(ctx, op_id)? || lease_expired(ctx, quiet) {
+        return Ok(None);
+    }
+    let op = ctx.op(op_id);
+    let mut result = BayResult::new(Decision::Ok)
+        .with_change(ctx.id.clone())
+        .with_op(op_id);
+    result.state = Some("running".to_owned());
+    Ok(Some(result.with_detail(json!({
+        "lease": "held",
+        "owner": op.owner,
+        "epoch": op.epoch,
+    }))))
 }
 
 /// G307: asks the wake adapter, once, to wake the author of `ctx`'s change for operation
@@ -8828,6 +8900,11 @@ pub fn holder_lease(config: &crate::config::Config, owner: Option<&str>) -> Dura
 /// loops ([`watch_leases_across_passes`]).
 static SIGHTINGS: std::sync::Mutex<Option<std::collections::HashMap<String, (String, Instant)>>> =
     std::sync::Mutex::new(None);
+
+/// G799: whether this process is a looping runner, which watches leases across its passes.
+fn watches_leases_across_passes() -> bool {
+    SIGHTINGS.lock().is_ok_and(|sightings| sightings.is_some())
+}
 
 /// G696: this process is a looping runner; a held lease is watched across its passes.
 pub fn watch_leases_across_passes() {
