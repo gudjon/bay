@@ -3953,8 +3953,10 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
         && (repairs
             || (needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
                 && !main_moved_under(ctx.repo, &head)
+                && !head_check_long(ctx.repo, &head)
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?)
             || (passes_unread(ctx, &queue, entry.seq, trunk, &ctx.op(op_id).revision)?
+                && !head_check_long(ctx.repo, &head)
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?))
     {
         return unless_red(ctx, op_id, trunk, Gate::Head(entry.seq));
@@ -4118,6 +4120,51 @@ fn unless_red(ctx: &mut Ctx, op_id: &str, trunk: &str, gate: Gate) -> Result<Gat
     let revision = ctx.op(op_id).revision.clone();
     red_gate(ctx, &revision, trunk)?;
     Ok(gate)
+}
+
+/// G791: how long the line's head may have been checked before no change passes it any more: a
+/// change that lands past it then costs it at most this much work done again.
+pub const PASSER_HOLD_S: u64 = 120;
+
+/// G791 (owner ruling 2026-11-19, "hold passers on long checks"; fleet findings: overnight 21 of
+/// 207 landings were checked again because main moved, nearly all 10-minute heads checked two
+/// to four times while changes that passed them landed; the next morning one 18-minute head
+/// ran three times, and 13 changes waited behind it): whether the queue's `head` is under a long
+/// check, read from its change chain as this box last fetched it. It is when its operation runs
+/// and has run for [`PASSER_HOLD_S`] or longer since its claim (the chain's newest commit:
+/// beats keep their own ref, G787), or main already moved under it once. A change that could
+/// pass the head (G552, G703) then waits its turn and lands right after it, so the head's
+/// checked result stays the one it merges. A repair of a red main still runs from its place.
+fn head_check_long(repo: &Repo, head: &crate::queue::Entry) -> bool {
+    let chain = Chain::new(&repo.git);
+    let Ok((tip, record)) = chain.read(&head.change) else {
+        return false;
+    };
+    let Some(op) = record.operations.iter().find(|op| op.op_id == head.op_id) else {
+        return false;
+    };
+    if !matches!(op.state, OpState::Running | OpState::Checked) {
+        return false;
+    }
+    if op.trunk_moved > 0 {
+        return true;
+    }
+    // A test build reads the window from the clone's `bay.testPasserHoldS`, so a test need not
+    // wait two minutes.
+    let hold = TEST_HOOKS
+        .then(|| {
+            repo.git
+                .run(&["config", "--get", "bay.testPasserHoldS"])
+                .ok()
+        })
+        .flatten()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .unwrap_or(PASSER_HOLD_S);
+    repo.git
+        .run(&["log", "-1", "--format=%ct", &tip])
+        .ok()
+        .and_then(|at| at.trim().parse::<u64>().ok())
+        .is_some_and(|at| crate::live::unix_now().saturating_sub(at) >= hold)
 }
 
 /// G552 (a fleet finding, 2026-10-29: one head yielded "main moved" pass after pass while
