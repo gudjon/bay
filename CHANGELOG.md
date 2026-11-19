@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.109
+
+- A runner stops a check as soon as main moves under it, and builds the change again.
+- A start removes a day-old folder in the views directory that no view owns.
+- A start prunes kept files no check tree links any more.
+
 ## 0.6.108
 
 - After a landing, the next change in line starts with fewer Git calls and round trips.
