@@ -95,7 +95,9 @@ fn a_check_one_runners_worker_could_not_start_is_taken_by_another_at_once() {
     // THEN it takes the change at once, and it lands
     let claimed = claims(&test_box, &remote, &id);
     assert!(
-        claimed.last().is_some_and(|claim| claim.contains("by exec-b")),
+        claimed
+            .last()
+            .is_some_and(|claim| claim.contains("by exec-b")),
         "runner B waited out the gap of runner A's worker: {claimed:?} {pass}"
     );
     assert!(
