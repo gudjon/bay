@@ -341,7 +341,14 @@ fn the_host_takes_a_fix_named_by_its_check_past_a_head_in_its_check() {
         trunk.contains(&fix),
         "the host refused the fix past a head in its check: {pass}"
     );
-    assert!(!trunk.contains(&ahead), "{first}");
+    // G796: the head's runner sees the fix move main during its check, stops it, and may land
+    // the head on a check of the new main before this read: after the fix, never before it. The
+    // landings are listed newest first.
+    let at = |id: &String| trunk.iter().position(|landed| landed == id);
+    assert!(
+        at(&ahead).is_none_or(|ahead| at(&fix).is_some_and(|fix| fix > ahead)),
+        "the head landed ahead of the fix: {trunk:?} {first}"
+    );
 }
 
 #[test]
