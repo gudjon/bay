@@ -4,6 +4,10 @@
 //! hook stops); the agent resumes, so its base moves past R1's landing; E2's landing of R2 is
 //! refused `CHANGE_ALREADY_MERGED` because the scan starts at `base_first`; `status` shows the
 //! change landed, never open.
+//!
+//! G790: the change's own record ends as landed too, so no reader counts it live and no later
+//! visit refuses it again (a fleet finding: one such record stayed `ready` for three weeks and
+//! gathered 133 refusal receipts).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -86,5 +90,34 @@ fn the_scan_from_base_first_finds_the_earlier_landing() {
     assert_eq!(
         status["detail"]["changes"][0]["state"], "merged",
         "{status}"
+    );
+
+    // G790: the record on the remote ends as landed, with R1's operation published.
+    let record: serde_json::Value = serde_json::from_str(&test_box.git_bare(
+        &remote,
+        &["show", &format!("refs/bay/changes/{id}:change.json")],
+    ))
+    .unwrap();
+    assert_eq!(record["state"], "landed", "{record}");
+    let r1 = record["operations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|op| op["op_id"] == format!("{id}.1"))
+        .unwrap_or_else(|| panic!("no R1 operation: {record}"));
+    assert_eq!(r1["state"], "published", "{record}");
+
+    // A later visit refuses nothing more: the change has ended, so no runner takes it again.
+    let again = test_box.bay_ok(&e2, &["runner", "run", "--once"]);
+    let receipts = record["receipts"].as_array().map_or(0, Vec::len);
+    let after: serde_json::Value = serde_json::from_str(&test_box.git_bare(
+        &remote,
+        &["show", &format!("refs/bay/changes/{id}:change.json")],
+    ))
+    .unwrap();
+    assert_eq!(
+        after["receipts"].as_array().map_or(0, Vec::len),
+        receipts,
+        "{again}"
     );
 }

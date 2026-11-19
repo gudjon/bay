@@ -9027,6 +9027,30 @@ fn scanned(ctx: &mut Ctx, trunk: &str, revision: &str) -> Result<Option<BayResul
         )?;
         ctx.push_chain();
     }
+    // G790 (a fleet finding, 2026-11-19): another revision of the change is on trunk, so the
+    // change has ended, but its record stayed `ready`. Every reader counted it live, and each
+    // later visit refused it again and wrote one more receipt (133 on one change in three
+    // weeks). The record ends as landed, with the revision that did land published.
+    if ctx.record.state.is_live() {
+        ctx.record.state = ChangeState::Landed;
+        if let Some(op_id) = ctx
+            .record
+            .operations
+            .iter()
+            .find(|op| op.revision == publication.revision)
+            .map(|op| op.op_id.clone())
+        {
+            let op = ctx.op_mut(&op_id);
+            op.state = OpState::Published;
+            op.outcome = None;
+        }
+        ctx.save(
+            revision,
+            Some(&publication.commit),
+            &format!("landed {}: an earlier revision is on main", ctx.id),
+        )?;
+        ctx.push_chain();
+    }
     Ok(Some(
         BayResult::blocked(Reason::ChangeAlreadyLanded)
             .with_change(ctx.id.clone())
