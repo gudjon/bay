@@ -6,14 +6,16 @@
 //! answer back beside it. The check waits for the answer, so whatever the test does happens
 //! while the check runs, as it did when the check acted itself.
 //!
-//! A request is `$HOME/.bay-relay/<n>/q/` (`script`, `req`, `commit`, `tree`, `args`), made
-//! whole by a rename; the answer is `<n>/r/` (`status`, `out`), also made whole by a rename.
+//! A request is `$HOME/.bay-relay/<pid>.<n>/q/` (`script`, `req`, `commit`, `tree`, `args`),
+//! made whole by a rename; the answer is `<pid>.<n>/r/` (`status`, `out`), also made whole by a
+//! rename. `<pid>` is the asking shell's, so no later check names a request as an earlier one
+//! did: a check of the same candidate gets the same scratch path again.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -23,18 +25,18 @@ use std::time::Duration;
 /// the check's stderr: bay reads that for a path outside the sandbox.
 pub const FUNCTION: &str = r#"bay_relay() {
   _r="$HOME/.bay-relay"; mkdir -p "$_r" 2>/dev/null; _n=0
-  until mkdir "$_r/$_n" 2>/dev/null; do _n=$((_n + 1)); done
-  _q="$_r/$_n/q.tmp"; mkdir "$_q" 2>/dev/null
+  until mkdir "$_r/$$.$_n" 2>/dev/null; do _n=$((_n + 1)); done
+  _d="$_r/$$.$_n"; _q="$_d/q.tmp"; mkdir "$_q" 2>/dev/null
   cat > "$_q/script"
   printf '%s' "${req-}" > "$_q/req"; printf '%s' "${commit-}" > "$_q/commit"
   printf '%s' "${tree-}" > "$_q/tree"
   : > "$_q/args"; for _a in "$@"; do printf '%s\n' "$_a" >> "$_q/args"; done
-  mv "$_q" "$_r/$_n/q" 2>/dev/null
+  mv "$_q" "$_d/q" 2>/dev/null
   _i=0
-  until [ -e "$_r/$_n/r" ]; do
+  until [ -e "$_d/r" ]; do
     sleep 0.01; _i=$((_i + 1)); [ "$_i" -lt 12000 ] || return 125
   done
-  cat "$_r/$_n/r/out"; return "$(cat "$_r/$_n/r/status")"
+  cat "$_d/r/out"; return "$(cat "$_d/r/status")"
 }
 "#;
 
@@ -58,28 +60,21 @@ impl Watcher {
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = Arc::clone(&stop);
         let env = Arc::new(env);
-        let in_flight = Arc::new(Mutex::new(HashSet::new()));
         let thread = std::thread::spawn(move || {
+            // Every request served or being served, by its name, which no later request takes:
+            // each is served once. A second serve would run the check's shell twice: a doubled
+            // run log line, a second trunk move. A test finding (2026-11-19, batch tests under
+            // load): a request listed before its answer was served again after it, while its
+            // check, which had read the answer, was having its scratch removed; the second
+            // serve read what was left of the request and logged a run with no request in it.
+            let mut served = HashSet::new();
             while !stopped.load(Ordering::SeqCst) {
                 for request in requests(&root) {
-                    if !in_flight.lock().unwrap().insert(request.clone()) {
+                    if !served.insert(request.clone()) {
                         continue;
                     }
-                    // The list was read before this insert, and a request served since then
-                    // has left `in_flight` already: its answer is renamed into place first, so
-                    // one that is answered (or gone with its scratch) is not served twice. A
-                    // second serve would run the check's shell twice: a doubled run log line,
-                    // a second trunk move.
-                    if request.join("r").exists() || !request.join("q").is_dir() {
-                        in_flight.lock().unwrap().remove(&request);
-                        continue;
-                    }
-                    let (root, env, in_flight) =
-                        (root.clone(), Arc::clone(&env), Arc::clone(&in_flight));
-                    std::thread::spawn(move || {
-                        serve(&root, &env, &request);
-                        in_flight.lock().unwrap().remove(&request);
-                    });
+                    let (root, env) = (root.clone(), Arc::clone(&env));
+                    std::thread::spawn(move || serve(&root, &env, &request));
                 }
                 std::thread::sleep(Duration::from_millis(10));
             }
@@ -154,9 +149,18 @@ fn requests(root: &Path) -> Vec<PathBuf> {
 
 fn serve(root: &Path, env: &[(String, String)], request: &Path) {
     let q = request.join("q");
-    let read = |name: &str| std::fs::read_to_string(q.join(name)).unwrap_or_default();
-    let script = read("script");
-    let args: Vec<String> = read("args").lines().map(str::to_owned).collect();
+    let read = |name: &str| std::fs::read_to_string(q.join(name));
+    // A request read in part is never run: its check is gone with its scratch.
+    let (Ok(script), Ok(args), Ok(req), Ok(commit), Ok(tree)) = (
+        read("script"),
+        read("args"),
+        read("req"),
+        read("commit"),
+        read("tree"),
+    ) else {
+        return;
+    };
+    let args: Vec<String> = args.lines().map(str::to_owned).collect();
     let out = Command::new("sh")
         .arg("-c")
         .arg(&script)
@@ -165,9 +169,9 @@ fn serve(root: &Path, env: &[(String, String)], request: &Path) {
         .current_dir(root)
         .env_clear()
         .envs(env.iter().map(|(name, value)| (name, value)))
-        .env("req", read("req"))
-        .env("commit", read("commit"))
-        .env("tree", read("tree"))
+        .env("req", req)
+        .env("commit", commit)
+        .env("tree", tree)
         .stdin(Stdio::null())
         .output();
     let (status, stdout) = match out {
