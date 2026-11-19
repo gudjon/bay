@@ -1945,7 +1945,7 @@ fn execute_once(
 ///   this looping runner saw beat within the lease (G696): held, as the claim would find it,
 ///   with no fetch of main, red judgement or gate.
 fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
-    if ctx.visit != Visit::Pass || ctx.record.lane.is_some() || ctx.record.ended() {
+    if ctx.visit == Visit::Own || ctx.record.lane.is_some() || ctx.record.ended() {
         return Ok(None);
     }
     let op = ctx.op(op_id);
@@ -1953,11 +1953,15 @@ fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<Ba
         return Ok(None);
     }
     // G800: the line says its place was released `published`: it landed since the pass read its
-    // chain, so neither the routing nor the lease below speaks for it any more.
+    // chain, so neither the routing nor the lease below speaks for it any more. A visit that only
+    // places (S1) asks too: the line no longer holds a place for it, and it would take another.
     if crate::queue::Queue::read_shared(ctx.repo)
         .is_ok_and(|queue| queue.released_as(op_id, "published"))
     {
         return landed_elsewhere(ctx, op_id);
+    }
+    if ctx.visit != Visit::Pass {
+        return Ok(None);
     }
     let me = ctx.executor_name();
     let others = op.owner.as_deref().is_none_or(|owner| owner != me);
@@ -1997,7 +2001,7 @@ fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<Ba
         return Ok(None);
     }
     // G800: one that landed since is answered from that chain.
-    if let Some(landed) = landed_on_chain(ctx, op_id)? {
+    if let Some(landed) = landed_on_chain(ctx, op_id, false)? {
         return Ok(Some(landed));
     }
     let still = ctx.find_op(op_id).is_some_and(|op| {
@@ -2039,13 +2043,21 @@ fn landed_elsewhere(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, Str
     if ctx.refetch().is_err() {
         return Ok(None);
     }
-    landed_on_chain(ctx, op_id)
+    landed_on_chain(ctx, op_id, true)
 }
 
 /// G800: [`landed_elsewhere`]'s answer from the change's chain as this visit just read it:
 /// `None` under a registry that signs landings, or when the chain does not say `op_id`
-/// published, with its commit in this store.
-fn landed_on_chain(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, String> {
+/// published, with its commit in this store. When the line `released` its place `published`,
+/// in the push that moved main, the operation published its checked candidate, though its
+/// landing runner may not have recorded so on the chain yet (a test finding, 2026-11-19: a
+/// visit in that window read the chain as checked, found main as the pass first read it, and
+/// placed the landed operation in line again): a chain that says it checked is enough.
+fn landed_on_chain(
+    ctx: &mut Ctx,
+    op_id: &str,
+    released: bool,
+) -> Result<Option<BayResult>, String> {
     ctx.registry = Registry::current(&ctx.repo.git)?;
     if ctx.signing().is_some() {
         return Ok(None);
@@ -2057,7 +2069,10 @@ fn landed_on_chain(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, Stri
         .attempts
         .last()
         .map(|attempt| attempt.commit.clone())
-        .filter(|_| op.state == OpState::Published && ctx.record.state == ChangeState::Landed)
+        .filter(|_| {
+            (op.state == OpState::Published && ctx.record.state == ChangeState::Landed)
+                || (released && op.state == OpState::Checked)
+        })
     else {
         return Ok(None);
     };
