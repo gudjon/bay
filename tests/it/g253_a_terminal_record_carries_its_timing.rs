@@ -80,10 +80,12 @@ fn a_queued_landing_records_its_queue_wait_and_check_time() {
     assert!(head_at <= published_at, "{terminal}");
     assert!(terminal.get("ended_at").is_none(), "{terminal}");
 
-    // Three attempts: two refused by trunk moving, the third published as the head.
-    assert_eq!(terminal["attempts"], 3, "{terminal}");
+    // Up to three attempts: two refused by trunk moving, the third published as the head. A
+    // runner that sees trunk move while a check runs stops it and builds again (G796), and a
+    // stopped candidate is no attempt: on a slow box one of the two may be one.
     let checks = terminal["checks"].as_array().unwrap();
-    assert_eq!(checks.len(), 3, "{terminal}");
+    assert!((1..=3).contains(&checks.len()), "{terminal}");
+    assert_eq!(terminal["attempts"], checks.len(), "{terminal}");
     let mut seconds = 0;
     for attempt in checks {
         let started = at(attempt, "started_at");
@@ -95,7 +97,7 @@ fn a_queued_landing_records_its_queue_wait_and_check_time() {
         seconds += finished - started;
     }
     // The published candidate's row names its evidence, with the worker time bay measured.
-    let last = &checks[2];
+    let last = checks.last().unwrap();
     let run = &last["runs"][0];
     assert_eq!(run["check"], "tests", "{last}");
     assert_eq!(run["verdict"], "pass", "{last}");
