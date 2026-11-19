@@ -328,13 +328,7 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
     let remote = config.remote();
     let promisor = get(&format!("remote.{remote}.promisor")).is_some_and(|value| value == "true");
     let filter = get(&format!("remote.{remote}.partialclonefilter"));
-    let views = git
-        .run(&["worktree", "list", "--porcelain"])
-        .map_or(0, |out| {
-            out.lines()
-                .filter(|line| line.starts_with("worktree ") && line.contains("/bay/views/"))
-                .count()
-        });
+    let (views, disk, large) = views_disk(git);
     let populated = !info.bare
         && git
             .run(&["ls-files", "-t"])
@@ -404,6 +398,14 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
     if !left_behind.is_empty() {
         notes.push(&left_note);
     }
+    let large_note = format!(
+        "views over {}, most often build output or installed packages: {}",
+        crate::disk::plain_bytes(crate::disk::LARGE_VIEW_BYTES),
+        large.join(", ")
+    );
+    if !large.is_empty() {
+        notes.push(&large_note);
+    }
     let (packs, pack_note) = packs_row(git);
     if let Some(note) = &pack_note {
         notes.push(note);
@@ -422,6 +424,7 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
         "ref_format": info.ref_format,
         "views": views,
         "views_left_behind": left_behind,
+        "disk": disk,
         "work_tree": if info.bare { "none" } else if populated { "populated" } else { "empty" },
         "maintenance_strategy": get("maintenance.strategy"),
         "auto_maintenance": auto,
@@ -429,6 +432,54 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
         "commit_graph": graph.detail(),
         "fetch_writes_commit_graph": fetch_writes,
         "notes": notes})
+}
+
+/// G792: the views of this store, bay's footprint on the box (store, state, each view largest
+/// first) and the views over [`crate::disk::LARGE_VIEW_BYTES`], each named with its size.
+fn views_disk(git: &Git) -> (usize, Option<Value>, Vec<String>) {
+    let view_paths: Vec<(String, std::path::PathBuf)> =
+        git.run(&["worktree", "list", "--porcelain"]).map_or_else(
+            |_| Vec::new(),
+            |out| {
+                out.lines()
+                    .filter_map(|line| line.strip_prefix("worktree "))
+                    .filter(|path| path.contains("/bay/views/"))
+                    .map(|path| {
+                        let path = std::path::PathBuf::from(path);
+                        let change = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        (change, path)
+                    })
+                    .collect()
+            },
+        );
+    let views = view_paths.len();
+    // G792: bay's footprint on this box, the views largest first.
+    let disk = git
+        .common_dir()
+        .ok()
+        .map(|common| crate::disk::footprint(std::path::Path::new(&common), &view_paths));
+    let large: Vec<String> = disk
+        .as_ref()
+        .and_then(|disk| disk["views"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|view| {
+            view["bytes"]
+                .as_u64()
+                .is_some_and(|bytes| bytes >= crate::disk::LARGE_VIEW_BYTES)
+        })
+        .map(|view| {
+            format!(
+                "{} ({})",
+                view["change"].as_str().unwrap_or_default(),
+                crate::disk::plain_bytes(view["bytes"].as_u64().unwrap_or_default())
+            )
+        })
+        .collect();
+    (views, disk, large)
 }
 
 /// G265 (N-13): a `gc.log` in the repository's common dir, present only when it is there. Git

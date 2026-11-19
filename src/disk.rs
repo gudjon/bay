@@ -154,6 +154,127 @@ fn available_kib(text: &str) -> Option<u64> {
     words.get(capacity - 1)?.parse().ok()
 }
 
+/// G792 (owner, 2026-11-19: "lower disk space all over, and bay plays a role"): the bytes `paths`
+/// take on disk, each file counted once however many links reach it (a hardlinked install is
+/// one copy), never following a symbolic link. Unix counts allocated blocks; elsewhere, file
+/// lengths. An unreadable entry counts as nothing.
+pub struct Footprint {
+    #[cfg(unix)]
+    seen: std::collections::HashSet<(u64, u64)>,
+}
+
+impl Default for Footprint {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Footprint {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            #[cfg(unix)]
+            seen: std::collections::HashSet::new(),
+        }
+    }
+
+    /// The bytes under `root` not already counted by this footprint.
+    pub fn bytes(&mut self, root: &Path) -> u64 {
+        let mut total = 0;
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if meta.is_dir() {
+                if let Ok(entries) = std::fs::read_dir(&path) {
+                    stack.extend(entries.flatten().map(|entry| entry.path()));
+                }
+            } else if meta.is_file() {
+                total += self.counted(&meta);
+            }
+        }
+        total
+    }
+
+    #[cfg(unix)]
+    fn counted(&mut self, meta: &std::fs::Metadata) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        if meta.nlink() > 1 && !self.seen.insert((meta.dev(), meta.ino())) {
+            return 0;
+        }
+        meta.blocks() * 512
+    }
+
+    #[cfg(not(unix))]
+    fn counted(&mut self, meta: &std::fs::Metadata) -> u64 {
+        meta.len()
+    }
+}
+
+/// G792: a view this large holds more than a change's edits, most often build output or
+/// installed packages; doctor names it so a person or steward can free it.
+pub const LARGE_VIEW_BYTES: u64 = 1 << 30;
+
+/// G792: bay's footprint on this box for the repository at `common_dir`: its object store, bay's
+/// own state beside it, and each of its views (`views`: change id and path), largest first.
+/// Each root is measured on its own thread, so a file linked into two roots counts in both.
+#[must_use]
+pub fn footprint(common_dir: &Path, views: &[(String, PathBuf)]) -> Value {
+    let mut roots: Vec<PathBuf> = vec![common_dir.join("objects"), common_dir.join("bay")];
+    roots.extend(views.iter().map(|(_, path)| path.clone()));
+    let sizes: Vec<u64> = std::thread::scope(|scope| {
+        let handles: Vec<_> = roots
+            .iter()
+            .map(|root| scope.spawn(move || Footprint::new().bytes(root)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap_or(0))
+            .collect()
+    });
+    let (store, state) = (sizes[0], sizes[1]);
+    let mut rows: Vec<(String, PathBuf, u64)> = views
+        .iter()
+        .zip(&sizes[2..])
+        .map(|((change, path), bytes)| (change.clone(), path.clone(), *bytes))
+        .collect();
+    rows.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    let views_bytes: u64 = rows.iter().map(|row| row.2).sum();
+    json!({
+        "store_bytes": store,
+        "state_bytes": state,
+        "views_bytes": views_bytes,
+        "total_bytes": store + state + views_bytes,
+        "views": rows
+            .iter()
+            .map(|(change, path, bytes)| json!({
+                "change": change,
+                "path": path.display().to_string(),
+                "bytes": bytes,
+            }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// `bytes` in plain words: `512 B`, `3.4 KiB`, `6.4 GiB`.
+#[must_use]
+pub fn plain_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    #[allow(clippy::cast_precision_loss)]
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit + 1 < UNITS.len() {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
