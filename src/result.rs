@@ -2210,7 +2210,14 @@ fn change_state_say(result: &BayResult) -> Option<String> {
         .is_none_or(|outcome| outcome == Reason::DependencyPending.code())
         && let Some(first) = op["after"]
             .as_array()
-            .and_then(|after| after.iter().find(|dep| dep["state"] != "landed"))
+            // G793 (a fleet finding, 2026-11-19): a change that ended `no_effect` is met, its
+            // work already on main; the sentence said the dependent still waited for it, and its
+            // author gave the dependent up.
+            .and_then(|after| {
+                after
+                    .iter()
+                    .find(|dep| dep["state"] != "landed" && dep["met"] != true)
+            })
     {
         let dep = plain(first["change"].as_str().unwrap_or_default());
         let actor = plain(first["actor"].as_str().unwrap_or("its author"));
@@ -2593,6 +2600,23 @@ mod tests {
         );
         let plain = Reason::UpdateUnavailable.say(Some(&json!({"why": "offline"})));
         assert!(plain.contains("Try again later"), "{plain}");
+    }
+
+    #[test]
+    fn a_change_after_one_whose_work_was_already_on_main_waits_for_nothing() {
+        // G793: the dependency ended `no_effect`; the dependent is in line, not waiting on it.
+        let said = |after: serde_json::Value| {
+            let mut result = BayResult::ok(json!({"changes": [{"change": "aaaa1111",
+                "state": "ready", "operation": {"lease": null, "outcome": null,
+                "state": "admitted", "after": after}}]}));
+            result.change = Some("aaaa1111".to_owned());
+            result.say()
+        };
+        let met = said(json!([{"change": "bbbb2222", "state": "no_effect", "met": true}]));
+        assert!(!met.contains("waits for bbbb2222"), "{met}");
+        let pending = said(json!([{"change": "bbbb2222", "state": "ready",
+            "operation": "admitted"}]));
+        assert!(pending.contains("waits for bbbb2222"), "{pending}");
     }
 
     #[test]
