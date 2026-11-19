@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.110
+
+- A change a red post check routes waits in its place for a runner that serves it.
+- A busy worker's change keeps its place for another runner, after two hand-offs it rejoins the back.
+
 ## 0.6.109
 
 - A runner stops a check as soon as main moves under it, and builds the change again.
