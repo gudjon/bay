@@ -291,6 +291,22 @@ impl Store {
     }
 }
 
+/// G798 (a measurement, 2026-11-19: a Mac's store kept 2.9 GB of files no tree linked, all of a
+/// check's tree, since the prune runs only when a check makes a tree and none had run since): the
+/// prune of the repository's kept files, at most once per [`PRUNE_EVERY`] as a check's is, for a
+/// `bay start` on a machine whose checks may not run again soon. Nothing when the store is absent.
+#[cfg(unix)]
+pub fn prune_kept(common_dir: &Path) {
+    let dir = common_dir.join("bay").join("blobs");
+    if dir.is_dir() {
+        Store { dir }.prune();
+    }
+}
+
+/// [`prune_kept`] where files are not kept: nothing.
+#[cfg(not(unix))]
+pub fn prune_kept(_common_dir: &Path) {}
+
 /// Whether the kept file at `entry` still holds `blob` as it was kept: a read-only file of
 /// `size` bytes at [`KEPT_AT`], executable exactly when `blob` is.
 #[cfg(unix)]

@@ -322,6 +322,8 @@ fn reclaim(repo: &Repo, dir: &Path) -> Vec<String> {
     crate::executor::sweep_tmp_packs(repo);
     // G781: bay's scratch refs a process that has ended left behind.
     crate::scratch::prune(&repo.git);
+    // G798: the kept files no tree links, on the same hourly rule as a check's prune.
+    crate::materialize::prune_kept(&repo.common_dir);
     let mut released = release_ended(repo, dir);
     released.extend(view::sweep_orphans(repo));
     released
