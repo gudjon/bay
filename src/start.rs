@@ -322,7 +322,9 @@ fn reclaim(repo: &Repo, dir: &Path) -> Vec<String> {
     crate::executor::sweep_tmp_packs(repo);
     // G781: bay's scratch refs a process that has ended left behind.
     crate::scratch::prune(&repo.git);
-    release_ended(repo, dir)
+    let mut released = release_ended(repo, dir);
+    released.extend(view::sweep_orphans(repo));
+    released
 }
 
 /// G97: before a new change, release this machine's views of ended changes past the retention
@@ -378,12 +380,15 @@ pub(crate) fn would_release(
 ) -> (Vec<String>, bool) {
     let chain = Chain::new(&repo.git);
     let in_use = views_in_use(repo, dir);
-    view::would_release(
+    let (mut free, whole) = view::would_release(
         repo,
         std::time::Duration::ZERO,
         &|id| ended_view(repo, &chain, &in_use, id),
         in_time,
-    )
+    );
+    // G795: and the day-old folders no view owns.
+    free.extend(view::orphans(repo, false));
+    (free, whole)
 }
 
 /// The view `dir` stands in, and the view of each live session on this machine.

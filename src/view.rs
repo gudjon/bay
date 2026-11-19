@@ -340,6 +340,74 @@ pub fn release_ended(
     released
 }
 
+/// G795: how long a folder in the views directory with no journal waits before a start removes
+/// it: long enough that a view a start is making now, before its journal, is never one.
+const ORPHAN_AGE_S: u64 = 24 * 3600;
+
+/// G795 (a fleet finding, 2026-11-19: a folder held 6.4 GB of build output for six days in a
+/// repository's views directory, where a build still running in a view had written it again
+/// after the view's change ended and the view was removed; no journal named it and Git had no
+/// worktree there, so nothing ever removed it). A start removes each folder in this repository's
+/// views directories that no journal names, that is no worktree Git knows, and that nothing
+/// touched for [`ORPHAN_AGE_S`]. Copies set aside as unsaved (`<id>.unsaved-…`) keep G784's
+/// rule. Returns the folders removed.
+pub fn sweep_orphans(repo: &Repo) -> Vec<String> {
+    orphans(repo, true)
+}
+
+/// G795: the folders [`sweep_orphans`] removes; with `remove` false, only named (doctor's
+/// storage row says what the next start frees).
+pub fn orphans(repo: &Repo, remove: bool) -> Vec<String> {
+    let registered: Vec<PathBuf> = repo
+        .git
+        .run(&["worktree", "list", "--porcelain"])
+        .map(|out| {
+            out.lines()
+                .filter_map(|line| line.strip_prefix("worktree "))
+                .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| PathBuf::from(path)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let now = unix_now();
+    let mut removed = Vec::new();
+    for dir in repo.views_dirs() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(name) = entry.file_name().into_string() else {
+                continue;
+            };
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if !meta.is_dir()
+                || name.contains(".unsaved-")
+                || dir.join(format!("{name}.journal")).exists()
+            {
+                continue;
+            }
+            let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if registered.iter().any(|known| known == &real) {
+                continue;
+            }
+            let touched = meta
+                .modified()
+                .ok()
+                .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(now, |at| at.as_secs());
+            if now.saturating_sub(touched) < ORPHAN_AGE_S {
+                continue;
+            }
+            if !remove || remove_tree(&path).is_ok() {
+                removed.push(name);
+            }
+        }
+    }
+    removed
+}
+
 /// G784: the copies `bay start` set aside as unsaved (`<id>.unsaved-<unix seconds>`, see
 /// [`discard`]) whose change has ended and which are a retention window old: each one's files,
 /// those its ignore rules do not match, are saved in one commit of bay's own under the local ref
