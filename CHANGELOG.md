@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.107
+
+- A change waits behind a head checked for two minutes, so the head is not checked again.
+- `bay doctor` names bay's disk use: the store, its state and each view, largest first.
+- A change after one whose work was already on main no longer says it waits for it.
+
 ## 0.6.106
 
 - A change whose earlier revision already landed now ends as landed, so it no longer counts as live.
