@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.108
+
+- After a landing, the next change in line starts with fewer Git calls and round trips.
+- A landing records its change and its log in one push.
+- `bay doctor` counts a view kept inside bay's own folder once.
+
 ## 0.6.107
 
 - A change waits behind a head checked for two minutes, so the head is not checked again.
