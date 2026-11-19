@@ -17,8 +17,8 @@ use serde_json::json;
 
 use crate::canonical::digest;
 use crate::change::{
-    Attempt, Chain, ChainError, ChangeRecord, ChangeState, HeldChain, OpState, Operation, Precheck,
-    Unavailable, change_ref, freeze_draft,
+    Attempt, Chain, ChainError, ChangeRecord, ChangeState, HeldChain, KeptPlace, OpState,
+    Operation, Precheck, Unavailable, change_ref, freeze_draft,
 };
 use crate::check::{self, Candidate};
 use crate::evidence::{self, Combined};
@@ -2248,12 +2248,13 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     // its key can sign no release, and the place stays with the operation, which the executor
     // that takes it over publishes as the head (§ 10a).
     // F11: nor a head that gave its pass back: it keeps its place for a later pass.
+    // G797: nor one that keeps its place for another runner ([`keeps_place`]).
     let given_up = outcome.as_ref().is_ok_and(|result| {
         result.reason == Some(Reason::RegistryChanged)
             || result
                 .detail
                 .as_ref()
-                .is_some_and(|detail| detail["yielded"] == true)
+                .is_some_and(|detail| detail["yielded"] == true || detail["kept"].is_u64())
     });
     // BACKLOG 99: a landing of this process's own push released the place in that push.
     if let Some(at) = seq
@@ -5842,6 +5843,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         policy_changed: 0,
         publish_retries: 0,
         mid_publish_releases: Vec::new(),
+        kept: None,
         unavailable: None,
         early_conflict: None,
         undoes: None,
@@ -8243,7 +8245,11 @@ fn wait_for_worker(
         .filter_map(|environment| environment.as_str().map(str::to_owned))
         .collect();
     let adapter = detail["unavailable"].as_str().map(str::to_owned);
+    let kept = adapter
+        .as_ref()
+        .and_then(|_| keeps_place(ctx, op_id, &environments));
     let op = ctx.op_mut(op_id);
+    op.kept.clone_from(&kept);
     // The gap doubles only while the adapter's answer repeats.
     let repeats = match (&op.unavailable, &adapter) {
         (Some(before), Some(_)) if before.adapter.is_some() => before.repeats.saturating_add(1),
@@ -8256,16 +8262,55 @@ fn wait_for_worker(
         at_ms: now_ms(),
         repeats,
     });
-    ctx.save(
-        revision,
-        None,
-        &format!(
+    let kept_at = kept.as_ref().map(|kept| kept.place);
+    let message = match kept_at {
+        Some(place) => format!(
+            "unavailable {op_id}: no worker for {}; it keeps place {place} for another runner",
+            environments.join(", ")
+        ),
+        None => format!(
             "unavailable {op_id}: no worker for {}",
             environments.join(", ")
         ),
-    )?;
+    };
+    ctx.save(revision, None, &message)?;
     ctx.push_chain();
+    let mut waiting = waiting;
+    if let (Some(place), Some(detail)) = (kept_at, waiting.detail.as_mut()) {
+        detail["kept"] = json!(place);
+    }
     Ok(waiting)
+}
+
+/// G797: how many times a place is kept for another runner before it is released (owner ruling
+/// 2026-11-19, "keep place, bounded": two hand-offs between runners, or one lease of waiting).
+const HANDOFFS: u32 = 2;
+
+/// G797 (owner ruling 2026-11-19, "keep place, bounded"; a fleet finding the same day: on a
+/// shared test box a check not started within 120 s was answered `unavailable`, and its change
+/// went to the back of the line): after this runner's worker answered `unavailable` for
+/// `environments`, the place `op_id` keeps in line so that another live runner that serves them
+/// takes it there at once: `None` (it is released, as before) when it holds no place, no other
+/// live runner serves them, or it was kept there [`HANDOFFS`] times or for one lease already,
+/// so a busy box never holds the line.
+fn keeps_place(ctx: &Ctx, op_id: &str, environments: &[String]) -> Option<KeptPlace> {
+    let place = crate::queue::Queue::read(ctx.repo).ok()?.of(op_id)?.seq;
+    let now = now_ms();
+    let (since_ms, handoffs) = ctx
+        .op(op_id)
+        .kept
+        .as_ref()
+        .filter(|kept| kept.place == place)
+        .map_or((now, 0), |kept| (kept.since_ms, kept.handoffs));
+    let lease = u64::try_from(ctx.repo.config.lease().as_millis()).unwrap_or(u64::MAX);
+    (handoffs < HANDOFFS
+        && now.saturating_sub(since_ms) < lease
+        && live_runner_serving(ctx, environments))
+    .then_some(KeptPlace {
+        place,
+        since_ms,
+        handoffs: handoffs + 1,
+    })
 }
 
 /// A fleet finding (2026-10-26): a runner whose box does not serve an environment a check of

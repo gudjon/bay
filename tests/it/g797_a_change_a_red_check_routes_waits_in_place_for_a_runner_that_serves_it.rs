@@ -137,8 +137,11 @@ fn a_change_a_red_check_routes_waits_in_place_for_a_runner_that_serves_it() {
     );
     answer(&held, &broad, "product_failure");
 
-    // AND runner B is live: its presence names `post-env`
-    let pass = held.pass(&b);
+    // AND runner B is live: its presence names `post-env`, with a cadence of five minutes, so it
+    // reads as live however slowly this box runs the test
+    let pass = held
+        .test_box
+        .bay_ok(&b, &["runner", "run", "--once", "--interval-s", "300"]);
     assert!(
         pass["detail"]["presence"]["pushed"] == true,
         "runner B published no presence: {pass}"

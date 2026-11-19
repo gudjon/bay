@@ -458,6 +458,11 @@ pub struct Operation {
     /// what no worker answered for. Cleared once a check of it runs to an answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unavailable: Option<Unavailable>,
+    /// G797 (owner ruling 2026-11-19, "keep place, bounded"): the queue place this operation
+    /// kept when a runner's worker answered `unavailable`, so another runner that serves it
+    /// takes it there. A claim clears `unavailable`, so the bound is kept here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kept: Option<KeptPlace>,
     /// Set while the operation waits behind the queue's head and its revision does not merge
     /// onto trunk (G177): what the executor's early probe found. The operation keeps its
     /// place; its own merge, once it is head, still decides.
@@ -510,6 +515,17 @@ pub struct Undone {
     /// G671: the same for each other merged change the refusal found.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub also: Vec<Undone>,
+}
+
+/// G797: a queue place an operation kept after a runner's worker answered `unavailable`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptPlace {
+    /// The place.
+    pub place: u64,
+    /// When the first such answer at this place came, in Unix milliseconds.
+    pub since_ms: u64,
+    /// How often it was kept there: each time another runner may take it.
+    pub handoffs: u32,
 }
 
 /// Why an operation waits for a worker, and since when (`DESIGN` § 6, § 7).

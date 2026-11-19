@@ -1794,15 +1794,20 @@ fn abandoned_head(repo: &Repo, just: &str) -> Option<(String, String)> {
     }
     // A head nobody holds (one that yielded because main moved, or gave its claim back) is
     // taken now, never left to a later pass (a fleet finding, 2026-10-26: a yielded head waited
-    // twenty minutes while all three runners pre-checked changes behind it).
+    // twenty minutes while all three runners pre-checked changes behind it). G797: so is one that
+    // kept its place after another runner's worker answered `unavailable`: it holds no lease.
+    let me = crate::signing::Keys::load(&repo.git).executor_name;
     if record
         .operations
         .iter()
         .find(|op| op.op_id == head.op_id)
         .is_some_and(|op| {
             runs(op)
-                && op.owner.is_none()
-                && matches!(op.state, OpState::Submitted | OpState::Admitted)
+                && ((op.owner.is_none()
+                    && matches!(op.state, OpState::Submitted | OpState::Admitted))
+                    || (op.unavailable.is_some()
+                        && op.kept.as_ref().is_some_and(|kept| kept.place == head.seq)
+                        && op.owner.as_deref() != Some(me.as_str())))
         })
     {
         return Some((head.change, head.op_id));
