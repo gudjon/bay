@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.106
+
+- A change whose earlier revision already landed now ends as landed, so it no longer counts as live.
+
 ## 0.6.105
 
 - A runner takes the next change in line within seconds of a landing, not at its next pass.
