@@ -61,16 +61,19 @@ impl Watcher {
         let stopped = Arc::clone(&stop);
         let env = Arc::new(env);
         let thread = std::thread::spawn(move || {
-            // Every request served or being served, by its name, which no later request takes:
-            // each is served once. A second serve would run the check's shell twice: a doubled
-            // run log line, a second trunk move. A test finding (2026-11-19, batch tests under
-            // load): a request listed before its answer was served again after it, while its
-            // check, which had read the answer, was having its scratch removed; the second
-            // serve read what was left of the request and logged a run with no request in it.
+            // Every request served or being served, by its identity ([`identity`]): each is
+            // served once. A second serve would run the check's shell twice: a doubled run log
+            // line, a second trunk move. A test finding (2026-11-19, batch tests under load): a
+            // request listed before its answer was served again after it, while its check,
+            // which had read the answer, was having its scratch removed; the second serve read
+            // what was left of the request and logged a run with no request in it.
             let mut served = HashSet::new();
             while !stopped.load(Ordering::SeqCst) {
                 for request in requests(&root) {
-                    if !served.insert(request.clone()) {
+                    let Some(identity) = identity(&request) else {
+                        continue;
+                    };
+                    if !served.insert(identity) {
                         continue;
                     }
                     let (root, env) = (root.clone(), Arc::clone(&env));
@@ -93,6 +96,21 @@ impl Drop for Watcher {
             let _ = thread.join();
         }
     }
+}
+
+/// A request's identity: its path, and its `q` directory's inode and modification time. A gate
+/// finding (2026-11-19, Linux): a check's sandbox runs it in a process namespace of its own, so
+/// its shell's pid, which names the request, repeats, and a check run again in the same scratch
+/// (a rerun of a flaky check, a candidate built again) asked under the path of a request served
+/// before. Keyed by its path alone, it was never served, and the check waited out the relay.
+/// `None` once the request is gone.
+fn identity(request: &Path) -> Option<(PathBuf, u64, std::time::SystemTime)> {
+    let meta = std::fs::metadata(request.join("q")).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((request.to_path_buf(), inode, meta.modified().ok()?))
 }
 
 /// The git dirs under `root` that hold bay's state: a bare repository or a `.git`, at most a
