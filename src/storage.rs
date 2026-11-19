@@ -32,6 +32,11 @@ fn budget() -> Duration {
 
 /// The bytes under `dir`, links not followed, and whether it read them all by `deadline`.
 fn size_of(dir: &Path, deadline: Instant) -> (u64, bool) {
+    size_except(dir, &[], deadline)
+}
+
+/// [`size_of`], leaving out each folder in `skip` and what is under it.
+fn size_except(dir: &Path, skip: &[std::path::PathBuf], deadline: Instant) -> (u64, bool) {
     let mut bytes = 0;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(next) = stack.pop() {
@@ -46,6 +51,9 @@ fn size_of(dir: &Path, deadline: Instant) -> (u64, bool) {
                 continue;
             };
             if meta.is_dir() {
+                if skip.iter().any(|folder| folder == &entry.path()) {
+                    continue;
+                }
                 stack.push(entry.path());
             } else {
                 bytes += meta.len();
@@ -134,7 +142,11 @@ pub fn row(git: &Git, dir: &Path) -> Value {
     // is null, never 0.
     let scratch = crate::check::scratch_root(&repo.common_dir).ok();
     let (scratch_bytes, scratch_whole) = scratch.map_or((0, true), |root| size_of(&root, deadline));
-    let (bay_bytes, bay_whole) = size_of(&repo.common_dir.join("bay"), deadline);
+    // G794 (a measurement, 2026-11-19: one clone's bay folder held 1.1 GB of views an older bay
+    // made there, counted in `bay_bytes` and again in `views`): the views kept in bay's folder
+    // count as views only.
+    let (bay_bytes, bay_whole) =
+        size_except(&repo.common_dir.join("bay"), &repo.views_dirs(), deadline);
     whole &= scratch_whole && bay_whole;
 
     let ids = crate::view::all(&repo);
