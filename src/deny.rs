@@ -9,7 +9,9 @@
 //! also found in the script of a shell's `-c` (`bash -c '…'`, `sh -lc "…"`), read with the same
 //! tokenizer, and in a shell wrapper inside that one. bay never evaluates a shell: no
 //! expansion, no aliases, no `eval`. A script nested deeper than [`MAX_DEPTH`] is not read, and
-//! is denied when it mentions Git (fail closed).
+//! is denied when it mentions Git (fail closed). G810: the tokenizer reads quotes, escapes and
+//! heredocs as a shell does, so Git named in a quoted argument or a heredoc's body is data, and
+//! a command substitution's script (`$(…)`, `` `…` ``) is judged as the commands it runs.
 //!
 //! NEW-4: in the view of a change of no lane, the shapes that copy a sandbox lane's work into
 //! the view are denied too ([`denied_lane`]): `git merge` and `git cherry-pick` of a lane ref,
@@ -237,41 +239,338 @@ fn shell_scripts(words: &[String]) -> Vec<(&'static str, &str)> {
     scripts
 }
 
-/// Splits a command line at `&&`, `||`, `;`, `|` and newlines into words, honouring simple
-/// single and double quotes.
+/// Splits a command line at `&&`, `||`, `;`, `|` and newlines into words, as a shell reads them
+/// (G810): single quotes hold everything; double quotes hold everything but a backslash before
+/// `$`, `` ` ``, `"`, `\\` or a newline; outside quotes a backslash makes a shell's syntax
+/// character literal (the shell's `'it'\\''s'` for an apostrophe in a quoted text,
+/// [`escapes`]), and before a newline continues the line. A heredoc's body is the command's data, never commands. Each command
+/// substitution (`$(…)` or `` `…` ``, unquoted, in double quotes or in an unquoted heredoc's
+/// body) stays in its word as data, and its script's simple commands follow the line's: a
+/// shell runs them. A substitution nested deeper than [`MAX_SUBSTITUTIONS`] is read word by
+/// word, so a shape in it is still found (fail closed).
 fn simple_commands(command: &str) -> Vec<Vec<String>> {
+    simple_commands_at(command, 0)
+}
+
+/// How many command substitutions deep [`simple_commands`] reads a script as a shell would.
+const MAX_SUBSTITUTIONS: usize = 4;
+
+fn simple_commands_at(command: &str, depth: usize) -> Vec<Vec<String>> {
+    if depth > MAX_SUBSTITUTIONS {
+        return vec![command.split_whitespace().map(str::to_owned).collect()];
+    }
+    let (mut commands, scripts) = tokenize(command);
+    for script in scripts {
+        commands.extend(simple_commands_at(&script, depth + 1));
+    }
+    commands
+}
+
+/// Whether a backslash outside quotes makes `next` literal: a character a shell would otherwise
+/// read as syntax. Before any other, as in a Windows path, the backslash stays.
+fn escapes(next: char) -> bool {
+    next.is_whitespace()
+        || matches!(
+            next,
+            '\'' | '"'
+                | '\\'
+                | '$'
+                | '`'
+                | ';'
+                | '|'
+                | '&'
+                | '<'
+                | '>'
+                | '('
+                | ')'
+                | '#'
+                | '*'
+                | '?'
+        )
+}
+
+/// A heredoc whose body follows the line that names it: its delimiter, whether that was quoted
+/// (the body is then never expanded), and whether leading tabs are stripped (`<<-`).
+struct Heredoc {
+    delimiter: String,
+    quoted: bool,
+    tabs: bool,
+}
+
+/// The simple commands of `command`, and the scripts of the command substitutions in it.
+fn tokenize(command: &str) -> (Vec<Vec<String>>, Vec<String>) {
+    let chars: Vec<char> = command.chars().collect();
     let mut commands = Vec::new();
+    let mut scripts = Vec::new();
     let mut words: Vec<String> = Vec::new();
     let mut word = String::new();
-    let mut quote: Option<char> = None;
-    let mut chars = command.chars().peekable();
+    let mut heredocs: Vec<Heredoc> = Vec::new();
     let flush_word = |word: &mut String, words: &mut Vec<String>| {
         if !word.is_empty() {
             words.push(std::mem::take(word));
         }
     };
-    while let Some(ch) = chars.next() {
-        match (quote, ch) {
-            (Some(open), close) if open == close => quote = None,
-            (None, '\'' | '"') => quote = Some(ch),
-            (None, ';' | '\n' | '|' | '&') => {
-                if matches!(ch, '|' | '&') && chars.peek() == Some(&ch) {
-                    chars.next();
+    let flush_command = |words: &mut Vec<String>, commands: &mut Vec<Vec<String>>| {
+        if !words.is_empty() {
+            commands.push(std::mem::take(words));
+        }
+    };
+    let mut at = 0;
+    while at < chars.len() {
+        let ch = chars[at];
+        match ch {
+            '\\' => {
+                match chars.get(at + 1) {
+                    Some('\n') => {}
+                    Some(&next) if escapes(next) => word.push(next),
+                    // A Windows path's separator (`C:\\Git\\cmd\\git`), as a Windows shell reads
+                    // it: a shape there is still found.
+                    Some(&next) => {
+                        word.push(ch);
+                        word.push(next);
+                    }
+                    None => word.push(ch),
+                }
+                at += 2;
+            }
+            '\'' => {
+                let close = chars[at + 1..]
+                    .iter()
+                    .position(|&c| c == '\'')
+                    .map_or(chars.len(), |end| at + 1 + end);
+                word.extend(&chars[at + 1..close]);
+                at = close + 1;
+            }
+            '"' => {
+                at = double_quoted(&chars, at + 1, &mut word, &mut scripts);
+            }
+            '$' if chars.get(at + 1) == Some(&'(') => {
+                let (script, end) = substitution(&chars, at + 2);
+                word.extend(&chars[at..end.min(chars.len())]);
+                scripts.push(script);
+                at = end;
+            }
+            '`' => {
+                let (script, end) = backticks(&chars, at + 1);
+                word.extend(&chars[at..end.min(chars.len())]);
+                scripts.push(script);
+                at = end;
+            }
+            '<' if chars.get(at + 1) == Some(&'<') && chars.get(at + 2) != Some(&'<') => {
+                flush_word(&mut word, &mut words);
+                let (heredoc, end) = heredoc_operator(&chars, at + 2);
+                words.push("<<".to_owned());
+                words.push(heredoc.delimiter.clone());
+                heredocs.push(heredoc);
+                at = end;
+            }
+            ';' | '\n' | '|' | '&' => {
+                if matches!(ch, '|' | '&') && chars.get(at + 1) == Some(&ch) {
+                    at += 1;
                 }
                 flush_word(&mut word, &mut words);
-                if !words.is_empty() {
-                    commands.push(std::mem::take(&mut words));
+                flush_command(&mut words, &mut commands);
+                at += 1;
+                if ch == '\n' {
+                    for heredoc in heredocs.drain(..) {
+                        at = heredoc_body(&chars, at, &heredoc, &mut scripts);
+                    }
                 }
             }
-            (None, space) if space.is_whitespace() => flush_word(&mut word, &mut words),
-            (_, other) => word.push(other),
+            space if space.is_whitespace() => {
+                flush_word(&mut word, &mut words);
+                at += 1;
+            }
+            other => {
+                word.push(other);
+                at += 1;
+            }
         }
     }
     flush_word(&mut word, &mut words);
-    if !words.is_empty() {
-        commands.push(words);
+    flush_command(&mut words, &mut commands);
+    (commands, scripts)
+}
+
+/// Reads a double-quoted text from `at`, just past its opening quote, into `word`; its command
+/// substitutions go to `scripts`. Returns where reading goes on, past the closing quote.
+fn double_quoted(
+    chars: &[char],
+    mut at: usize,
+    word: &mut String,
+    scripts: &mut Vec<String>,
+) -> usize {
+    while at < chars.len() {
+        match chars[at] {
+            '"' => return at + 1,
+            '\\' => {
+                match chars.get(at + 1) {
+                    Some('\n') => {}
+                    Some(&next @ ('$' | '`' | '"' | '\\')) => word.push(next),
+                    Some(&next) => {
+                        word.push('\\');
+                        word.push(next);
+                    }
+                    None => word.push('\\'),
+                }
+                at += 2;
+            }
+            '$' if chars.get(at + 1) == Some(&'(') => {
+                let (script, end) = substitution(chars, at + 2);
+                word.extend(&chars[at..end.min(chars.len())]);
+                scripts.push(script);
+                at = end;
+            }
+            '`' => {
+                let (script, end) = backticks(chars, at + 1);
+                word.extend(&chars[at..end.min(chars.len())]);
+                scripts.push(script);
+                at = end;
+            }
+            other => {
+                word.push(other);
+                at += 1;
+            }
+        }
     }
-    commands
+    at
+}
+
+/// The script of a `$(…)` whose text starts at `at`, just past `$(`, and where reading goes on,
+/// past its closing `)`: parentheses nest, and quotes and escapes inside it hold theirs.
+fn substitution(chars: &[char], mut at: usize) -> (String, usize) {
+    let start = at;
+    let mut depth = 1;
+    while at < chars.len() {
+        match chars[at] {
+            '\\' => at += 1,
+            '\'' => {
+                at += chars[at + 1..]
+                    .iter()
+                    .position(|&c| c == '\'')
+                    .map_or(chars.len(), |end| end + 1);
+            }
+            '"' => {
+                let mut inner = String::new();
+                let mut ignored = Vec::new();
+                at = double_quoted(chars, at + 1, &mut inner, &mut ignored) - 1;
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return (chars[start..at].iter().collect(), at + 1);
+                }
+            }
+            _ => {}
+        }
+        at += 1;
+    }
+    (
+        chars[start.min(chars.len())..].iter().collect(),
+        chars.len(),
+    )
+}
+
+/// The script of a `` `…` `` whose text starts at `at`, just past its opening backtick, and
+/// where reading goes on, past the closing one.
+fn backticks(chars: &[char], mut at: usize) -> (String, usize) {
+    let mut script = String::new();
+    while at < chars.len() {
+        match chars[at] {
+            '`' => return (script, at + 1),
+            '\\' => {
+                if let Some(&next) = chars.get(at + 1) {
+                    script.push(next);
+                }
+                at += 2;
+            }
+            other => {
+                script.push(other);
+                at += 1;
+            }
+        }
+    }
+    (script, at)
+}
+
+/// The heredoc a `<<` names, its text starting at `at`, just past `<<`, and where reading goes
+/// on, past its delimiter word.
+fn heredoc_operator(chars: &[char], mut at: usize) -> (Heredoc, usize) {
+    let tabs = chars.get(at) == Some(&'-');
+    if tabs {
+        at += 1;
+    }
+    while chars.get(at).is_some_and(|c| *c == ' ' || *c == '\t') {
+        at += 1;
+    }
+    let mut delimiter = String::new();
+    let mut quoted = false;
+    while let Some(&c) = chars.get(at) {
+        match c {
+            '\'' | '"' => {
+                quoted = true;
+                let close = chars[at + 1..]
+                    .iter()
+                    .position(|&end| end == c)
+                    .map_or(chars.len(), |end| at + 1 + end);
+                delimiter.extend(&chars[at + 1..close.min(chars.len())]);
+                at = close + 1;
+            }
+            '\\' => {
+                quoted = true;
+                if let Some(&next) = chars.get(at + 1) {
+                    delimiter.push(next);
+                }
+                at += 2;
+            }
+            c if c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | ')') => break,
+            c => {
+                delimiter.push(c);
+                at += 1;
+            }
+        }
+    }
+    (
+        Heredoc {
+            delimiter,
+            quoted,
+            tabs,
+        },
+        at,
+    )
+}
+
+/// Skips `heredoc`'s body, from `at`, the start of the line after the one that named it, to
+/// past its delimiter's line; an unquoted body's command substitutions go to `scripts`.
+fn heredoc_body(
+    chars: &[char],
+    mut at: usize,
+    heredoc: &Heredoc,
+    scripts: &mut Vec<String>,
+) -> usize {
+    while at < chars.len() {
+        let end = chars[at..]
+            .iter()
+            .position(|&c| c == '\n')
+            .map_or(chars.len(), |end| at + end);
+        let line: String = chars[at..end].iter().collect();
+        let text = if heredoc.tabs {
+            line.trim_start_matches('\t')
+        } else {
+            line.as_str()
+        };
+        if text == heredoc.delimiter {
+            return (end + 1).min(chars.len());
+        }
+        if !heredoc.quoted {
+            // `$` and `` ` `` expand in the body as in a double-quoted text that never closes.
+            let text: Vec<char> = line.chars().filter(|&c| c != '"').collect();
+            double_quoted(&text, 0, &mut String::new(), scripts);
+        }
+        at = end + 1;
+    }
+    chars.len()
 }
 
 /// The command a word runs: its base name, after the last `/` or `\`, without an extension a
@@ -1040,6 +1339,41 @@ mod tests {
 
     /// Plan W1: a Windows shell runs Git as `git`, `git.exe` or `git.cmd`, by any case and by a
     /// path with either separator. Each is the same Git, so each shape is denied as `git` is.
+    /// G810 (a fleet finding, 2026-11-20: a message's text, quoted as a shell quotes an
+    /// apostrophe, was read as a command and the call refused; in Code Mode a refusal stops the
+    /// program partway): the guard reads a line as a shell does. Git named in a quoted argument or
+    /// a heredoc's body is data; Git a command substitution runs is a command.
+    #[test]
+    fn a_quoted_mention_runs_and_a_substitution_is_judged() {
+        for command in [
+            "hc send t31 'it'\\''s fine: never git reset --hard here'",
+            "hc send t31 \"never run \\\"git reset --hard\\\" here\"",
+            "hc send t31 \"$(cat <<'EOF'\nsay \"hi\"\ngit reset --hard is denied\nEOF\n)\"",
+            "cat <<EOF > notes.md\ngit push --force origin main\nEOF\ngit status",
+            "cat <<-'X'\n\tgit clean -fd\n\tX\nls",
+        ] {
+            assert!(
+                denied(command, "main", Some("topic")).is_none(),
+                "{command}"
+            );
+        }
+        for command in [
+            "echo $(git reset --hard)",
+            "echo \"$(git reset --hard)\"",
+            "echo `git clean -fd`",
+            "x=$(echo $(git push -f))",
+            "cat <<EOF\n$(git reset --hard)\nEOF",
+            "hc send t31 'it'\\''s done' && git reset --hard",
+            "cd x && git reset --hard",
+            "git reset \\\n  --hard",
+        ] {
+            assert!(
+                denied(command, "main", Some("topic")).is_some(),
+                "{command}"
+            );
+        }
+    }
+
     #[test]
     fn git_exe_is_git() {
         for command in [
