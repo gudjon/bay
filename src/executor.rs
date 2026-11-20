@@ -1294,26 +1294,46 @@ pub(crate) fn tmp_pack_is_stale(entry: &std::fs::DirEntry) -> bool {
 /// under the queue's head and main's rules (its policy and red post checks, which name the
 /// environments that serve it), while a presence that serves it, as each pass's fetch of the
 /// chains brings it, stays live. A move of main that changes neither leaves it parked.
+///
+/// G805 (a fleet measurement, 2026-11-20: one box's runner answered 101 times an hour, 2.9 s
+/// each, that another runner held one of two heads, a visit every 37 s while the holder's chain
+/// stood still): an operation another runner holds is parked under its own chain, while its
+/// holder's lease, as each pass's fetch of the chains brings it, moves within a lease (G696). It
+/// is visited again once its chain moved, or once the lease stood a lease, when that visit
+/// takes it over as before.
 #[derive(Default)]
 struct Parked(
     HashMap<String, Vec<(String, String)>>,
     HashMap<String, Stand>,
 );
 
-/// G750: what a `QUEUED` answer was given under: the queue's head operation and what it read of
-/// main, and until when it holds. G801: for an operation left to another runner, the
-/// environments it was left for, by which each pass renews `until` from the presences it read.
+/// What an answer was given under, and until when it holds.
 struct Stand {
-    head: Option<String>,
-    main: Main,
+    under: Under,
     until: Instant,
-    left: Option<Vec<String>>,
 }
 
-impl Stand {
-    /// A stand under the queue's head and main as this store reads them now, held until `until`.
-    /// `None` when main's rules cannot be read.
-    fn now(repo: &Repo, until: Instant, left: Option<Vec<String>>) -> Option<Self> {
+/// What a parked answer read that ends its stand once it moves, beside the operation's chain.
+enum Under {
+    /// G750: a `QUEUED` answer: the queue's head operation and main's commit.
+    Queued { head: Option<String>, main: Main },
+    /// G801: a leave to another runner: the queue's head operation and main's rules, and the
+    /// environments it was left for, by which each pass renews the stand from the presences.
+    Left {
+        head: Option<String>,
+        main: Main,
+        environments: Vec<String>,
+    },
+    /// G805: an operation another runner holds, of `change`: each pass judges the stand right
+    /// after its fetch brought the holder's lease, as a visit would judge it then ([`held_until`]),
+    /// and it holds for the rest of the pass. It reads neither the line nor main.
+    Held { change: String, owner: String },
+}
+
+impl Under {
+    /// The queue's head operation and what of main the answer read, as this store reads them
+    /// now; `None` when main's rules cannot be read.
+    fn line(repo: &Repo, leave: bool) -> Option<(Option<String>, Main)> {
         let head = Queue::read_shared(repo)
             .ok()
             .and_then(|queue| queue.head().map(|entry| entry.op_id.clone()));
@@ -1322,12 +1342,15 @@ impl Stand {
             .ref_target(&repo.trunk_tracking_ref())
             .ok()
             .flatten();
-        Some(Self {
-            head,
-            main: Main::at(repo, trunk.as_deref(), left.is_some())?,
-            until,
-            left,
-        })
+        Some((head, Main::at(repo, trunk.as_deref(), leave)?))
+    }
+
+    /// The queue's head operation this answer was given under, when it read the line.
+    fn head(&self) -> Option<&str> {
+        match self {
+            Self::Queued { head, .. } | Self::Left { head, .. } => head.as_deref(),
+            Self::Held { .. } => None,
+        }
     }
 }
 
@@ -1389,11 +1412,18 @@ impl Parked {
     /// G750: keeps only the stands answered under the queue head `head` and main at `trunk`,
     /// while they hold; the waits of any other stand end. G801: a stand of an operation left to
     /// another runner holds under main's rules at `trunk`, as long as a presence this store
-    /// holds serves it, as this pass's fetch of the chains brought them.
+    /// holds serves it, as this pass's fetch of the chains brought them. G805: a stand of an
+    /// operation another runner holds, as long as that runner's lease moves.
     fn keep_stands(&mut self, repo: &Repo, head: Option<&str>, trunk: Option<&str>) {
         for stand in self.1.values_mut() {
-            if let Some(environments) = &stand.left {
-                stand.until = serving_until(repo, environments).unwrap_or_else(Instant::now);
+            match &stand.under {
+                Under::Left { environments, .. } => {
+                    stand.until = serving_until(repo, environments).unwrap_or_else(Instant::now);
+                }
+                Under::Held { change, owner } => {
+                    stand.until = held_until(repo, change, owner).unwrap_or_else(Instant::now);
+                }
+                Under::Queued { .. } => {}
             }
         }
         let now = Instant::now();
@@ -1402,21 +1432,23 @@ impl Parked {
         let rules = self
             .1
             .values()
-            .any(|stand| stand.left.is_some() && now < stand.until)
+            .any(|stand| matches!(stand.under, Under::Left { .. }) && now < stand.until)
             .then(|| Main::at(repo, trunk, true))
             .flatten();
         let gone: Vec<String> = self
             .1
             .iter()
             .filter(|(_, stand)| {
-                let main = if stand.left.is_some() {
-                    &rules
-                } else {
-                    &commit
+                let moved = match &stand.under {
+                    Under::Queued { main, .. } => {
+                        stand.under.head() != head || commit.as_ref() != Some(main)
+                    }
+                    Under::Left { main, .. } => {
+                        stand.under.head() != head || rules.as_ref() != Some(main)
+                    }
+                    Under::Held { .. } => false,
                 };
-                stand.head.as_deref() != head
-                    || main.as_ref() != Some(&stand.main)
-                    || stand.until <= now
+                moved || stand.until <= now
             })
             .map(|(op_id, _)| op_id.clone())
             .collect();
@@ -1441,10 +1473,9 @@ impl Parked {
     /// once it is the head itself: its `QUEUED` stand named another head.
     fn left_as_head(&self, op_id: &str) -> bool {
         self.holds(op_id)
-            && self
-                .1
-                .get(op_id)
-                .is_some_and(|stand| stand.head.as_deref() == Some(op_id))
+            && self.1.get(op_id).is_some_and(|stand| {
+                matches!(stand.under, Under::Left { .. }) && stand.under.head() == Some(op_id)
+            })
     }
 
     /// Notes `row`, a visit's: a wait on changes not submitted or stopped (G604) is parked with
@@ -1461,9 +1492,12 @@ impl Parked {
         let queued = row["decision"].as_str() == Some("queued")
             && row["reason"].as_str() == Some(Reason::Queued.code());
         let left = left_until(repo, row);
+        let held = holder_answered(row);
         let own = Chain::new(&repo.git).head(change).ok().flatten();
         self.1.remove(op_id);
-        let Some(own) = own.filter(|_| !waits.is_empty() || queued || left.is_some()) else {
+        let Some(own) =
+            own.filter(|_| !waits.is_empty() || queued || left.is_some() || held.is_some())
+        else {
             self.0.remove(op_id);
             return;
         };
@@ -1471,13 +1505,32 @@ impl Parked {
         read.extend(waits.into_iter().map(|wait| (wait.change, wait.head)));
         self.0.insert(op_id.to_owned(), read);
         let stand = if queued {
-            Stand::now(repo, Instant::now() + STAND_KEPT, None)
+            Under::line(repo, false)
                 // A head that yielded keeps its place and runs next pass: never parked.
-                .filter(|stand| {
-                    stand.head.as_deref() != Some(op_id) && row["detail"]["yielded"] != true
+                .filter(|(head, _)| {
+                    head.as_deref() != Some(op_id) && row["detail"]["yielded"] != true
+                })
+                .map(|(head, main)| Stand {
+                    under: Under::Queued { head, main },
+                    until: Instant::now() + STAND_KEPT,
                 })
         } else if let Some((environments, until)) = left {
-            Stand::now(repo, until, Some(environments))
+            Under::line(repo, true).map(|(head, main)| Stand {
+                under: Under::Left {
+                    head,
+                    main,
+                    environments,
+                },
+                until,
+            })
+        } else if let Some(owner) = held {
+            held_until(repo, change, &owner).map(|until| Stand {
+                under: Under::Held {
+                    change: change.to_owned(),
+                    owner,
+                },
+                until,
+            })
         } else {
             return;
         };
@@ -1510,6 +1563,30 @@ fn left_until(repo: &Repo, row: &Value) -> Option<(Vec<String>, Instant)> {
         .collect();
     let until = serving_until(repo, &environments)?;
     Some((environments, until))
+}
+
+/// G805: the holder `row`, a visit's, answered holds its operation (`detail.lease` `held`, and
+/// its `owner`); `None` for any other row.
+fn holder_answered(row: &Value) -> Option<String> {
+    (row["decision"].as_str() == Some("ok") && row["detail"]["lease"].as_str() == Some("held"))
+        .then(|| row["detail"]["owner"].as_str().map(str::to_owned))
+        .flatten()
+}
+
+/// G805: until when a stand of an operation of `change` that `owner` holds holds: the rest of
+/// this pass, [`PASS_BOUND`], while the holder counts as alive by the rule a visit judges it by
+/// now (G696, [`publish::sighted`]): this runner first saw the change's chain and lease, as this
+/// store holds them, as they are, less than a lease ago. Each pass's fetch of the chains brings
+/// the leases, so a holder that beats stays alive; once one that stopped stood a lease, the pass
+/// that judges it visits the operation and takes it over, as a visit every pass did. A pass is
+/// judged right after its fetch, not later in it: a lease's beat between two fetches is unseen
+/// until the next. `None` when it is not alive, this process does not loop, or the store holds
+/// no chain of `change`.
+fn held_until(repo: &Repo, change: &str, owner: &str) -> Option<Instant> {
+    let head = Chain::new(&repo.git).head(change).ok().flatten()?;
+    let seen = publish::sighted(&repo.git, change, &head)?;
+    (seen.elapsed() < publish::holder_lease(&repo.config, Some(owner)))
+        .then(|| Instant::now() + PASS_BOUND)
 }
 
 /// G801: until when another runner's presence this store holds serves every one of

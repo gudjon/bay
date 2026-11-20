@@ -6,7 +6,8 @@
 //! - the queue's head whose checks this box does not serve, while a live runner's box does, is
 //!   left to that runner, unclaimed, with no fetch of main of its own;
 //! - a head another runner holds, whose lease this looping runner saw beat, is held: its chain is
-//!   read again, as the claim reads it (G799b), and the registry and the line are not.
+//!   read again, as the claim reads it (G799b), and the registry and the line are not. G805 then
+//!   visits it no more while that lease moves, so the case reads its one visit.
 //!
 //! Guards to mutate, in `src/publish.rs` `settled_by_what_the_pass_read`: answer `None` for the
 //! head (the visit fetches main, judges its red, and only then leaves the head); skip the held
@@ -202,7 +203,9 @@ fn a_looping_runner_reads_main_no_more_for_a_head_another_runner_holds() {
             .filter(|line| line.contains(&format!("{head}.1")) && line.contains("] ok ("))
             .count()
     };
-    while visits() < 3 && began.elapsed() < std::time::Duration::from_secs(90) {
+    while (visits() < 1 || traced(&trace).2 < 3)
+        && began.elapsed() < std::time::Duration::from_secs(90)
+    {
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
     let _ = looping.kill();
@@ -210,14 +213,14 @@ fn a_looping_runner_reads_main_no_more_for_a_head_another_runner_holds() {
     line.go();
     let _ = support::queued::finished(holder);
 
-    // THEN each of its visits to the held head found it held without the reads the claim makes
+    // THEN its visit to the held head found it held without the reads the claim makes
     let (fetches, registry, passes) = traced(&trace);
     assert!(fetches > 0, "runner B fetched nothing");
     let seen = visits();
     let lines = std::fs::read_to_string(&journal).unwrap_or_default();
     assert!(
-        seen >= 3,
-        "runner B visited the held head {seen} times: {lines}"
+        seen >= 1 && passes >= 3,
+        "runner B visited the held head {seen} times in {passes} passes: {lines}"
     );
     assert!(
         registry < seen,

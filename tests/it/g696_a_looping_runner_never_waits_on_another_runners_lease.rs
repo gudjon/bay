@@ -3,6 +3,8 @@
 //! looping runner that visits an operation another runner holds notes when it first saw the
 //! holder's chain and judges the lease against that on its later passes; its pass never waits
 //! for the holder to write. A `--once` pass, which has no later pass, still watches the lease.
+//! (G805 then parks the held operation while its holder's lease moves, so the looping runner
+//! visits it once and passes on.)
 //!
 //! Guard to mutate: in `src/executor.rs` `run`, the `watch_leases_across_passes` call (each pass
 //! of the looping runner waits inside its visit until the holder writes).
@@ -69,9 +71,11 @@ fn a_looping_runner_never_waits_on_another_runners_lease() {
     // WHEN another runner loops for a while
     let watcher = executor(&test_box, &remote, "exec-b");
     let journal = test_box.path().join("exec-b.log");
+    let trace = test_box.path().join("exec-b.trace");
     let mut looping = test_box
         .bay_process(&watcher)
         .args(["runner", "run", "--interval-s", "1"])
+        .env("BAY_TEST_GIT_TRACE", &trace)
         .stdout(Stdio::null())
         .stderr(std::fs::File::create(&journal).unwrap())
         .spawn()
@@ -82,11 +86,20 @@ fn a_looping_runner_never_waits_on_another_runners_lease() {
     let _ = held.kill();
     let _ = held.wait();
 
-    // THEN it visited the held operation on pass after pass, never waiting inside one
+    // THEN it visited the held operation and went on to pass after pass, never waiting inside
+    // the visit (each pass fetches every chain once)
     let text = std::fs::read_to_string(&journal).unwrap();
     let visits = text
         .lines()
         .filter(|line| line.starts_with(&format!("bay runner: {id}.1 ")))
         .count();
-    assert!(visits >= 2, "{visits} visits in 12 s:\n{text}");
+    let passes = std::fs::read_to_string(&trace)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains("\"fetch\"") && line.contains("refs/bay/changes/*"))
+        .count();
+    assert!(
+        visits >= 1 && passes >= 2,
+        "{visits} visits in {passes} passes in 12 s:\n{text}"
+    );
 }

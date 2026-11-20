@@ -1152,7 +1152,10 @@ impl Repo {
     /// G801: the same fetch brings every runner's presence, forced, as each is one parentless
     /// commit: a head this runner left to another live runner stays left while that runner's
     /// presence, as each pass reads it, stays live, with no fetch of its own. Git updates the
-    /// presences even when it refuses a chain.
+    /// presences even when it refuses a chain. G805: and every lease, forced, so an operation
+    /// another runner holds stays held while its lease moves, with no visit of its own. The fetch
+    /// prunes nothing, as it must keep the chains: a lease its holder released stays here, and
+    /// stands still, as a holder's that stopped beating does, until a pruned fetch.
     ///
     /// # Errors
     ///
@@ -1167,6 +1170,7 @@ impl Repo {
             self.remote(),
             &format!("{prefix}*:{prefix}*"),
             &format!("+{presence}*:{presence}*"),
+            &crate::lease::refspec(),
         ]) else {
             return Ok(Vec::new());
         };

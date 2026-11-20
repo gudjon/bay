@@ -9034,6 +9034,25 @@ pub fn watch_leases_across_passes() {
     }
 }
 
+/// G696: this looping runner's sighting of the holder of `change`, whose history is at `head`:
+/// its history and lease as this store holds them ([`crate::lease::watched`]), noted, and when
+/// it first saw them as they are. A holder whose sighting stood a lease is one whose lease
+/// expired. G805: each pass renews it for an operation it holds from the leases the pass
+/// fetched, with no visit. `None` when this process does not loop.
+pub fn sighted(git: &Git, change: &str, head: &str) -> Option<Instant> {
+    let mut sightings = SIGHTINGS.lock().ok()?;
+    let seen = sightings.as_mut()?;
+    let now = Instant::now();
+    let watched = crate::lease::watched(git, change, head);
+    let sighting = seen
+        .entry(change.to_owned())
+        .or_insert_with(|| (watched.clone(), now));
+    if sighting.0 != watched {
+        *sighting = (watched, now);
+    }
+    Some(sighting.1)
+}
+
 /// Watches an operation another executor holds for `lease` on this process's monotonic
 /// clock, from its own first sighting (§ 9a). Returns whether the lease expired: neither the
 /// chain head nor the holder's lease ref changed (G787, [`crate::lease::watched`]). Any change
@@ -9046,18 +9065,9 @@ pub fn watch_leases_across_passes() {
 fn lease_expired(ctx: &mut Ctx, lease: Duration) -> bool {
     let watched = |ctx: &Ctx| crate::lease::watched(&ctx.repo.git, &ctx.id, &ctx.head);
     if ctx.visit == Visit::Pass
-        && let Ok(mut sightings) = SIGHTINGS.lock()
-        && let Some(seen) = sightings.as_mut()
+        && let Some(seen) = sighted(&ctx.repo.git, &ctx.id, &ctx.head)
     {
-        let now = Instant::now();
-        let sighted = watched(ctx);
-        let sighting = seen
-            .entry(ctx.id.clone())
-            .or_insert_with(|| (sighted.clone(), now));
-        if sighting.0 != sighted {
-            *sighting = (sighted, now);
-        }
-        return sighting.1.elapsed() >= lease;
+        return seen.elapsed() >= lease;
     }
     let first = watched(ctx);
     let seen = Instant::now();
