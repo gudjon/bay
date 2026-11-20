@@ -2079,7 +2079,7 @@ fn execute_once(
     }
     // G307: a landing this pass reached wakes the change's author once. A wake is a
     // convenience, never the outcome: one that cannot be recorded changes nothing here.
-    let _ = landed_wake(&ctx, op_id, &result);
+    let _ = landed_wake(&ctx, op_id, result.decision);
     Ok(result)
 }
 
@@ -2320,9 +2320,10 @@ fn wake_author(
 /// keyed by the operation and its outcome: one landing is one wake, however often a pass sees
 /// it, and a log that already holds it is never asked again. Without a `[plugin.wake] command`
 /// nothing is asked and nothing is written. The notify adapter is not told: the landing is
-/// on trunk, and a wake is no outcome of its own.
-fn landed_wake(ctx: &Ctx, op_id: &str, result: &BayResult) -> Result<(), String> {
-    if result.decision != Decision::Landed || !crate::talk::wake::configured(ctx.repo) {
+/// on trunk, and a wake is no outcome of its own. G825: each member of a merged batch is woken
+/// so too, by its own context ([`land_batch`]).
+fn landed_wake(ctx: &Ctx, op_id: &str, decision: Decision) -> Result<(), String> {
+    if decision != Decision::Landed || !crate::talk::wake::configured(ctx.repo) {
         return Ok(());
     }
     let id = digest(&json!({"op_id": op_id, "outcome": "landed"}))?;
@@ -3639,26 +3640,34 @@ fn land_batch<'a>(
     answer.map_err(|error| format!("batch {id} was refused: {error}"))?;
     kill_point("after-publish");
     drop(anchors);
+    let mut merged = Vec::new();
     for (index, member) in members.iter().enumerate().skip(1) {
         let other = &mut others[index - 1];
         other.pushed_landing = Some(built[index].commit.clone());
         // A landing whose record could not be written now is derived from trunk on a later run.
         if let Ok(landed) =
             derive_landed(other, &member.op_id, &member.revision, &built[index].commit)
-            && let Ok(mut landings) = MEMBERS_LANDED.lock()
         {
-            landings.push((member.change.clone(), member.op_id.clone(), landed));
+            merged.push((index, landed.decision));
+            if let Ok(mut landings) = MEMBERS_LANDED.lock() {
+                landings.push((member.change.clone(), member.op_id.clone(), landed));
+            }
         }
         other.tell_deferred();
     }
     ctx.pushed_landing = Some(built[0].commit.clone());
-    derive_landed(
+    let head = derive_landed(
         ctx,
         &members[0].op_id,
         &members[0].revision,
         &built[0].commit,
-    )
-    .map(Some)
+    );
+    // G825: each other member's author is woken once, as the head's is in `execute` (G307),
+    // after every record is written, so a slow adapter holds no record back.
+    for (index, decision) in merged {
+        let _ = landed_wake(&others[index - 1], &members[index].op_id, decision);
+    }
+    head.map(Some)
 }
 
 /// Step 5 for a batch: each member's candidate linked into its own chain as checked, with the

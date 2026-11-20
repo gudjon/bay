@@ -603,9 +603,11 @@ impl TestBox {
             std::fs::create_dir_all(full.parent().unwrap()).unwrap();
             std::fs::write(&full, text).unwrap();
         }
-        let script = repo.join("scripts/bay-check");
-        if script.exists() {
-            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for script in ["scripts/bay-check", "scripts/bay-wake"] {
+            let script = repo.join(script);
+            if script.exists() {
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
         }
         self.git_ok(repo, &["add", "--all"]);
         self.git_ok(repo, &["commit", "-q", "-m", "trunk"]);
