@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.113
+
+- A runner does not revisit a head another live runner serves until that runner or main's rules change.
+- On macOS a check runs the developer tools' git, so a check that uses git works in the sandbox.
+- A runner moving to a new binary leaves no exited git child behind.
+
 ## 0.6.112
 
 - A runner reports a change another runner merged from that change's record, with one fetch and no push.
