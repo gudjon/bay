@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.118
+
+- A machine whose own check gives no answer hands the change to a live runner instead of blocking it.
+- A start removes session records untouched for the retention window, with their state folders.
+
 ## 0.6.117
 
 - The agent hook refuses a call only on purpose: a hook that fails or hangs lets it go on.
