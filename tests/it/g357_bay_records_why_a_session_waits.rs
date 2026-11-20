@@ -136,7 +136,8 @@ fn install_writes_a_record_only_group_for_the_question_tools() {
         .iter()
         .find(|group| runs(group, "tool.before"))
         .unwrap_or_else(|| panic!("the pre-tool group is gone: {settings}"));
-    assert_eq!(before["hooks"][0]["onFailure"], "block", "{before}");
+    // The pre-tool hook fails open on its own faults (G810, the G158 ruling of 2026-11-20).
+    assert_eq!(before["hooks"][0]["onFailure"], "continue", "{before}");
 }
 
 #[test]
