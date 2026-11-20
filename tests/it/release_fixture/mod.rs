@@ -23,6 +23,9 @@ pub struct Build {
     pub install_fails: bool,
     /// The archive's name (default this platform's).
     pub archive: Option<String>,
+    /// Run as anything else, the binary stays the process it was started as (`exec sleep`)
+    /// instead of exiting, so a test reads what that process holds (G803).
+    pub lingers: bool,
 }
 
 pub struct Fixture {
@@ -221,8 +224,13 @@ impl Fixture {
                 "echo \"$*\" > \"$HOME/installed-{tag}\"; echo '{{\"schema\":\"bay.result/1\",\"decision\":\"ok\"}}'; exit 0"
             )
         };
+        let ends = if build.lingers {
+            "exec sleep 120"
+        } else {
+            "exit 1"
+        };
         let script = format!(
-            "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    --version) echo \"{prints}\"; exit 0 ;;\n    --help) exit 0 ;;\n    install) {install} ;;\n  esac\ndone\necho \"$*\" >> \"$HOME/ran-{tag}\"\nexit 1\n"
+            "#!/bin/sh\nfor a in \"$@\"; do\n  case \"$a\" in\n    --version) echo \"{prints}\"; exit 0 ;;\n    --help) exit 0 ;;\n    install) {install} ;;\n  esac\ndone\necho \"$*\" >> \"$HOME/ran-{tag}\"\n{ends}\n"
         );
         let binary = stage.join("bay");
         let _ = std::fs::remove_file(&binary);

@@ -283,7 +283,8 @@ const MOVES: bool = cfg!(unix);
 
 /// Execs the binary `result` moves to (`detail.reexec.path`, from [`run`]) with this process's
 /// arguments, once the result is written: the executor's next pass runs on the new version,
-/// under the same pid and supervisor. Returns only when it cannot; this process then exits
+/// under the same pid and supervisor. Its open readers end first (G803), so it leaves no child
+/// the new binary would never wait for. Returns only when it cannot; this process then exits
 /// cleanly, and its supervisor starts it again.
 pub fn reexec(result: &BayResult) {
     let Some(path) = result
@@ -297,6 +298,8 @@ pub fn reexec(result: &BayResult) {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
+        // G803: the exec keeps this process's children, and the new binary waits for none of them.
+        crate::git::close_open_readers();
         let error = Command::new(path).args(std::env::args_os().skip(1)).exec();
         eprintln!("bay runner: cannot start {path}: {error}");
     }

@@ -210,6 +210,21 @@ type OpenReaders = std::collections::HashMap<PathBuf, std::sync::Arc<Mutex<Optio
 static OPEN_READERS: std::sync::LazyLock<Mutex<OpenReaders>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+/// G803 (a fleet finding, 2026-11-20: a runner held 36 exited `git` children, one for each new
+/// binary it had moved to in six days): ends every open reader of this process and waits for
+/// it. A runner calls it before it execs a new binary ([`crate::executor::reexec`]): the exec
+/// keeps the process and its children but no destructor runs, so each reader, its pipes closed,
+/// exits as a child the new binary never waits for.
+pub fn close_open_readers() {
+    let slots: Vec<_> =
+        std::mem::take(&mut *OPEN_READERS.lock().unwrap_or_else(PoisonError::into_inner))
+            .into_values()
+            .collect();
+    for slot in slots {
+        drop(slot.lock().unwrap_or_else(PoisonError::into_inner).take());
+    }
+}
+
 /// G719: in a test build, `BAY_TEST_OPEN_READER=off` reads every batch by a process of its own.
 fn open_reader_off() -> bool {
     crate::version::TEST_HOOKS
