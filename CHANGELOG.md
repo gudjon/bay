@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.112
+
+- A runner reports a change another runner merged from that change's record, with one fetch and no push.
+- A candidate built again after a stopped check never reuses an earlier candidate's number.
+
 ## 0.6.111
 
 - A runner passes over a head it cannot serve, or one another runner holds, without fetching main.
