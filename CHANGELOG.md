@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.124
+
+- A session is not told of a refused or failed operation its change has since merged past.
+
 ## 0.6.123
 
 - A red post check is told by one live runner that serves its environment, not by each.
