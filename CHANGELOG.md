@@ -5,6 +5,8 @@
 - A runner started under a live runner's producer name is refused before it claims any change.
 - A runner revisits a waiting change that names a repair only once main holds a red it answers.
 - A change on a red check's paths runs the red's failed units too, so skipping them never clears it.
+- A plain `bay merge --wait` handed to the runners ends at the progress deadline, or when its repository is gone.
+- A change waiting for environments no live runner serves together says so, and says to tell the user.
 
 ## 0.6.118
 
