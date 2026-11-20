@@ -8833,6 +8833,12 @@ fn keeps_place(ctx: &Ctx, op_id: &str, environments: &[String]) -> Option<KeptPl
 /// released their places; each rejoined the back of the line and waited up to 17 minutes for a
 /// claim): the red post checks this change runs before its merge (G677, [`red_gate`], which
 /// the queue gate asked first) are required of it here as well.
+///
+/// G819 (a fleet finding, 2026-11-20: for 14 minutes nothing merged while the head needed two
+/// environments no live runner served together; each runner served one, found the other served
+/// elsewhere, and left the head to that runner, which did the same): the other runner must serve
+/// every environment the head needs, not only those this machine lacks, since one runner runs them
+/// all. When none does, this runner takes it, finds no worker, and the head leaves the line.
 fn served_elsewhere(
     ctx: &Ctx,
     op_id: &str,
@@ -8864,6 +8870,10 @@ fn served_elsewhere(
         .collect();
     required.sort_unstable();
     required.dedup();
+    let whole: Vec<String> = required
+        .iter()
+        .map(|environment| (*environment).to_owned())
+        .collect();
     // The sandbox is probed only when this box would run a check here.
     let unsandboxed = required
         .iter()
@@ -8878,7 +8888,7 @@ fn served_elsewhere(
     if missing.is_empty() {
         return Ok(None);
     }
-    if !live_runner_serving(ctx, &missing) {
+    if !live_runner_serving(ctx, &whole) {
         return Ok(None);
     }
     let mut waiting = unavailable(ctx, op_id, &missing, None);
