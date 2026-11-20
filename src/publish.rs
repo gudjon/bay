@@ -1492,6 +1492,22 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     }
     let agent = ctx.agent_signer()?;
     ctx.chain.sign_with(agent);
+    // G820 (a fleet finding, 2026-11-20): bay removes a merged change's view once it ends, and a
+    // wait asked again after that read the gone view as a step left half done. With no view to
+    // read, the record answers: the change's landing, as for G727.
+    if ctx.record.state == ChangeState::Landed
+        && !view::journal(repo, id).is_some_and(view::Journal::is_complete)
+        && let Some((op_id, revision)) = ctx
+            .record
+            .operations
+            .iter()
+            .rev()
+            .find(|op| op.state == OpState::Published)
+            .map(|op| (op.op_id.clone(), op.revision.clone()))
+        && let Some(commit) = published_commit(&ctx.record).map(str::to_owned)
+    {
+        return derive_landed(&mut ctx, &op_id, &revision, &commit);
+    }
 
     step.set("freeze");
     stand_on_view_base(&mut ctx, &trunk);
