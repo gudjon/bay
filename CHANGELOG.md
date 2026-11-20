@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.122
+
+- A newer revision waiting when its change merges ends, and says `bay merge` in the view sends it next.
+- The `--wait` help says a live runner takes a merge whose environments this checkout does not all serve.
+
 ## 0.6.121
 
 - `bay merge --wait` asked again after a merged change's view is removed answers merged, not `VIEW_INCOMPLETE`.
