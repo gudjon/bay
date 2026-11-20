@@ -4,6 +4,7 @@
 
 - A red post check is told by one live runner that serves its environment, not by each.
 - A culprit a bisection pins after its suspects were told is told it broke the check.
+- Another runner takes a post check from its owner a timeout after the tip merged, not after its last answer.
 
 ## 0.6.122
 
