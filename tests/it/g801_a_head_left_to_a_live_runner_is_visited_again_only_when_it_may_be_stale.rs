@@ -3,15 +3,19 @@
 //! of every presence; a head was visited again a median 61 s after the last). A looping runner
 //! that left the queue's head to another live runner, whose box serves its checks, does not
 //! visit it again, nor fetch any presence for it, while that runner's presence, as each pass's
-//! fetch of the chains brings it, stays live, the head's chain stays as it was, and neither the
-//! line's head nor main moved; once no presence that serves it is live, it visits the head
-//! again.
+//! fetch of the chains brings it, stays live, the head's chain stays as it was, the line's head
+//! did not move, and main's rules did not change: its policy and its red post checks, which name
+//! the checks the head needs and so the boxes that serve it. A move of main that changes neither
+//! leaves the head left. Once no presence that serves it is live, or main's policy changed, it
+//! visits the head again.
 //!
 //! Guards to mutate, in `src/executor.rs`: `left_until` answering `None` (each pass visits the
 //! head again, and fetches every presence); `Parked::holds` and `keep_stands` ignoring a stand's
 //! time (the head is never visited again after the runner it was left to stops); `keep_stands`
 //! not renewing a stand (the head is visited again when the presence it was first left under
-//! may read stale, though that runner beats).
+//! may read stale, though that runner beats); `Main::at` reading main's commit for a leave too
+//! (the head is visited again each time main moves); `Main::at` reading no policy (the head is
+//! not visited again once main's policy changed).
 
 #![cfg(unix)]
 
@@ -131,6 +135,40 @@ fn skew_for(test_box: &TestBox, remote: &Path, left_s: u64) -> u64 {
     cadence * 3 + 30 - left_s
 }
 
+/// Moves main from a clone named `name`: `edit` changes its files, which one commit records.
+/// Returns main's new commit.
+fn move_main(test_box: &TestBox, remote: &Path, name: &str, edit: impl FnOnce(&Path)) -> String {
+    let clone = test_box.clone_of(remote, name);
+    edit(&clone);
+    test_box.git_ok(&clone, &["add", "-A"]);
+    test_box.git_ok(
+        &clone,
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-q",
+            "-m",
+            name,
+        ],
+    );
+    test_box.git_ok(&clone, &["push", "-q", "origin", "HEAD:main"]);
+    test_box
+        .git_ok(&clone, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned()
+}
+
+/// Whether the runner's store in `clone` read main at `tip`.
+fn read_main(test_box: &TestBox, clone: &Path, tip: &str) -> bool {
+    test_box
+        .git_ok(clone, &["rev-parse", "refs/remotes/origin/main"])
+        .trim()
+        == tip
+}
+
 /// Waits until `done` holds, at most `within`.
 fn until(within: Duration, what: &str, mut done: impl FnMut() -> bool) {
     let began = Instant::now();
@@ -221,4 +259,71 @@ fn a_head_left_to_a_runner_that_beats_is_not_visited_again_past_its_first_window
     let (visits, passes) = seen(&test_box, "a", &op);
     let journal = std::fs::read_to_string(test_box.path().join("a-journal")).unwrap_or_default();
     assert_eq!(visits, 1, "{visits} visits in {passes} passes: {journal}");
+}
+
+#[test]
+fn a_head_left_to_a_live_runner_is_not_visited_again_when_main_moves_under_the_same_rules() {
+    let (test_box, remote, op, other) = line();
+    // GIVEN a looping runner that left the head to the live runner
+    let mut child = looping(&test_box, &other, "a", 0);
+    until(
+        Duration::from_secs(60),
+        "the runner never left the head to the live runner",
+        || seen(&test_box, "a", &op).0 >= 1,
+    );
+    // WHEN main moves twice, changing neither its policy nor its red post checks, and the
+    // runner reads each move
+    for n in 1..=2 {
+        let tip = move_main(&test_box, &remote, &format!("mover-{n}"), |clone| {
+            std::fs::write(clone.join(format!("moved-{n}.md")), "moved\n").unwrap();
+        });
+        until(
+            Duration::from_secs(60),
+            "the runner never read main's move",
+            || read_main(&test_box, &other, &tip),
+        );
+        let passes = seen(&test_box, "a", &op).1;
+        until(
+            Duration::from_secs(60),
+            "the runner did not pass twice after it read main's move",
+            || seen(&test_box, "a", &op).1 >= passes + 2,
+        );
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    // THEN it visited the head once
+    let (visits, passes) = seen(&test_box, "a", &op);
+    let journal = std::fs::read_to_string(test_box.path().join("a-journal")).unwrap_or_default();
+    assert_eq!(visits, 1, "{visits} visits in {passes} passes: {journal}");
+}
+
+#[test]
+fn a_head_left_to_a_live_runner_is_visited_again_once_mains_policy_changed() {
+    let (test_box, remote, op, other) = line();
+    // GIVEN a looping runner that left the head to the live runner
+    let mut child = looping(&test_box, &other, "a", 0);
+    until(
+        Duration::from_secs(60),
+        "the runner never left the head to the live runner",
+        || seen(&test_box, "a", &op).0 >= 1,
+    );
+    // WHEN main's policy changes
+    let tip = move_main(&test_box, &remote, "mover", |clone| {
+        let policy = clone.join(".bay/policy.toml");
+        let text = std::fs::read_to_string(&policy).unwrap();
+        std::fs::write(&policy, text.replacen("revision = 1", "revision = 2", 1)).unwrap();
+    });
+    // THEN once the runner reads it, it visits the head again
+    until(
+        Duration::from_secs(60),
+        "the runner never read main's move",
+        || read_main(&test_box, &other, &tip),
+    );
+    until(
+        Duration::from_secs(60),
+        "the runner never visited the head again",
+        || seen(&test_box, "a", &op).0 >= 2,
+    );
+    let _ = child.kill();
+    let _ = child.wait();
 }
