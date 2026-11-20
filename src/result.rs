@@ -1635,6 +1635,13 @@ impl BayResult {
             }
             _ => said,
         };
+        // G811: this machine could not run the check, so a runner did.
+        let said = match self.detail.as_ref() {
+            Some(detail) if detail["checked_elsewhere"].is_object() => {
+                format!("{said} A runner ran the check, as this machine could not.")
+            }
+            _ => said,
+        };
         // G754: a change bay opened from an author's newer revision names the one it follows.
         let follow_up = self.detail.as_ref().map(|detail| &detail["follow_up"]);
         match follow_up

@@ -53,7 +53,9 @@ What you do decides the speed for every agent:
 
 Signals to read: `detail.batch.stopped` says why a batch ended; `detail.warnings` names `wake_failing` when no
 session is being told of its refusals; `waiting_for` says what a queued change waits for. A `CHECK_UNKNOWN`
-names why the check gave no answer in `say`, and `bay status` shows it as the receipt's `why`.
+names why the check gave no answer in `say`, and `bay status` shows it as the receipt's `why`. When a check gives
+your own `bay merge --wait` no answer on this machine and a live runner serves it, that runner checks it instead:
+the wait goes on, and `detail.checked_elsewhere` names the hand-over. A check that failed is never handed over.
 
 A repository's maintainer sets it up for speed in `.bay/` (details under "Set up a repository"):
 

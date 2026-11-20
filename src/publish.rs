@@ -392,6 +392,21 @@ pub fn land(
 fn wait_land(repo: &Repo, id: &str, step: &Step) -> Result<BayResult, String> {
     loop {
         let result = submit_land(repo, id, step, true)?;
+        // G811: this machine handed the operation to the runners: the wait goes on until a
+        // runner's outcome, which is reported, never run again here. The run a watching
+        // `merge --wait=<s>` started ends at once: its watcher reports ([`observe_land`]).
+        if std::env::var_os(OBSERVED_RUN).is_none()
+            && result.reason == Some(Reason::CheckUnavailable)
+            && result
+                .detail
+                .as_ref()
+                .is_some_and(|detail| detail["machine"].is_string())
+            && let Some(op_id) = result.op_id.clone()
+        {
+            watch_until_done(repo, id, &op_id, None);
+            return submit_land(repo, id, step, false)
+                .map(|result| checked_elsewhere(repo, id, &op_id, result));
+        }
         if !not_taken(&result) {
             return Ok(result);
         }
@@ -409,6 +424,10 @@ fn wait_land(repo: &Repo, id: &str, step: &Step) -> Result<BayResult, String> {
         std::thread::sleep(Duration::from_millis(200));
     }
 }
+
+/// G811: set on the run a watching `merge --wait=<s>` starts ([`observe_land`]): its watcher
+/// reports the outcome, so the run never watches the chain itself.
+const OBSERVED_RUN: &str = "BAY_OBSERVED_RUN";
 
 /// Whether `result` is a claim this process did not take (§ 9a): another process holds the
 /// operation (`lease: held`), or a race moved it on (`superseded`). Neither is the
@@ -502,6 +521,7 @@ fn observe_land(
     run.arg("-C")
         .arg(dir)
         .args(["merge", "--wait", id])
+        .env(OBSERVED_RUN, "1")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -511,34 +531,11 @@ fn observe_land(
         run.spawn()
             .map_err(|error| format!("the run could not be started: {error}"))?,
     );
-    let chain = Chain::new(&repo.git);
     let watch = Instant::now();
-    // G752 (a fleet finding, 2026-11-16: a `merge --wait=7200` ran 61,303 Git commands, a
-    // `rev-parse` and a `cat-file` five times a second, and nineteen such waits ended in fifteen
-    // minutes on one box at load 70): the chain's head is read once a second, and its record only
-    // when the head moved.
-    let mut seen: Option<String> = None;
-    while let Some(left) = until.checked_duration_since(Instant::now()) {
-        std::thread::sleep(Duration::from_secs(1).min(left));
-        let Ok(Some(head)) = chain.head(id) else {
-            continue;
-        };
-        if seen.as_deref() == Some(head.as_str()) {
-            continue;
-        }
-        let Ok(record) = chain.record_at(&head) else {
-            continue;
-        };
-        seen = Some(head);
-        let done = record
-            .operations
-            .iter()
-            .find(|op| op.op_id == op_id)
-            .is_some_and(|op| op.state.is_terminal() || op.state == OpState::Blocked);
-        if done {
-            // The outcome is in the chain; reading it again returns the same result the run did.
-            return submit_land(repo, id, step, false);
-        }
+    if watch_until_done(repo, id, &op_id, Some(until)) {
+        // The outcome is in the chain; reading it again returns the same result the run did.
+        return submit_land(repo, id, step, false)
+            .map(|result| checked_elsewhere(repo, id, &op_id, result));
     }
     let mut result = BayResult::new(Decision::Queued)
         .with_change(id)
@@ -551,6 +548,78 @@ fn observe_land(
         "watched_s": watch.elapsed().as_secs(),
         "the run continues": true,
     })))
+}
+
+/// Watches change `id`'s chain until operation `op_id` reached its outcome (or was blocked), at
+/// most `until`: whether it did. G752 (a fleet finding, 2026-11-16: a `merge --wait=7200` ran
+/// 61,303 Git commands, a `rev-parse` and a `cat-file` five times a second, and nineteen such
+/// waits ended in fifteen minutes on one box at load 70): the chain's head is read once a second,
+/// and its record only when the head moved.
+///
+/// G811: once the operation names this machine as one that handed it to the runners, no process
+/// here writes its chain again: the chain is read from the remote, once a heartbeat (G749).
+fn watch_until_done(repo: &Repo, id: &str, op_id: &str, until: Option<Instant>) -> bool {
+    let chain = Chain::new(&repo.git);
+    let machine = crate::live::machine(&repo.git).ok();
+    let mut seen: Option<String> = None;
+    let mut handed = false;
+    loop {
+        let every = if handed {
+            repo.config.heartbeat().max(Duration::from_secs(1))
+        } else {
+            Duration::from_secs(1)
+        };
+        let pause = match until.map(|until| until.checked_duration_since(Instant::now())) {
+            Some(None) => return false,
+            Some(Some(left)) => every.min(left),
+            None => every,
+        };
+        std::thread::sleep(pause);
+        if handed {
+            let _ = repo.remote_chain(id);
+        }
+        let Ok(Some(head)) = chain.head(id) else {
+            continue;
+        };
+        if seen.as_deref() == Some(head.as_str()) {
+            continue;
+        }
+        let Ok(record) = chain.record_at(&head) else {
+            continue;
+        };
+        seen = Some(head);
+        let Some(op) = record.operations.iter().find(|op| op.op_id == op_id) else {
+            continue;
+        };
+        if op.state.is_terminal() || op.state == OpState::Blocked {
+            return true;
+        }
+        handed = machine
+            .as_ref()
+            .is_some_and(|machine| op.unable.contains(machine));
+    }
+}
+
+/// G811: `result`, the outcome of operation `op_id` of change `id`, naming
+/// `detail.checked_elsewhere` when this machine handed the operation to the runners because its
+/// check gave no answer here: a runner checked it.
+fn checked_elsewhere(repo: &Repo, id: &str, op_id: &str, mut result: BayResult) -> BayResult {
+    let Ok(machine) = crate::live::machine(&repo.git) else {
+        return result;
+    };
+    let handed = Chain::new(&repo.git).read(id).is_ok_and(|(_, record)| {
+        record
+            .operations
+            .iter()
+            .any(|op| op.op_id == op_id && op.unable.contains(&machine))
+    });
+    if handed {
+        let detail = result.detail.get_or_insert_with(|| json!({}));
+        if let Some(detail) = detail.as_object_mut() {
+            detail.insert("checked_elsewhere".to_owned(), json!({"machine": machine}));
+        }
+    }
+    result
 }
 
 /// Writes the receipt for a failed or blocked result before it is returned (§ 9): outside
@@ -6094,6 +6163,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         publish_retries: 0,
         mid_publish_releases: Vec::new(),
         kept: None,
+        unable: Vec::new(),
         unavailable: None,
         early_conflict: None,
         undoes: None,
@@ -7339,6 +7409,10 @@ fn build_and_check(
         Some(waiting) if waiting.reason == Some(Reason::CheckUnavailable) => {
             return wait_for_worker(ctx, op_id, revision, waiting).map(Err);
         }
+        Some(unknown) => match handed_to_runners(ctx, op_id, &unknown, trunk) {
+            Some(waiting) => return wait_for_worker(ctx, op_id, revision, waiting).map(Err),
+            None => Some(unknown),
+        },
         refusal => refusal,
     };
 
@@ -8517,6 +8591,7 @@ fn wait_for_worker(
         .filter_map(|environment| environment.as_str().map(str::to_owned))
         .collect();
     let adapter = detail["unavailable"].as_str().map(str::to_owned);
+    let machine = detail["machine"].as_str().map(str::to_owned);
     let kept = adapter
         .as_ref()
         .and_then(|_| keeps_place(ctx, op_id, &environments));
@@ -8528,6 +8603,11 @@ fn wait_for_worker(
         _ => 0,
     };
     op.outcome = Some(Reason::CheckUnavailable.code().to_owned());
+    if let Some(machine) = &machine
+        && !op.unable.contains(machine)
+    {
+        op.unable.push(machine.clone());
+    }
     op.unavailable = Some(Unavailable {
         environments: environments.clone(),
         adapter,
@@ -8535,15 +8615,15 @@ fn wait_for_worker(
         repeats,
     });
     let kept_at = kept.as_ref().map(|kept| kept.place);
+    let worker = match &machine {
+        Some(machine) => format!("{machine} could not run {}", environments.join(", ")),
+        None => format!("no worker for {}", environments.join(", ")),
+    };
     let message = match kept_at {
-        Some(place) => format!(
-            "unavailable {op_id}: no worker for {}; it keeps place {place} for another runner",
-            environments.join(", ")
-        ),
-        None => format!(
-            "unavailable {op_id}: no worker for {}",
-            environments.join(", ")
-        ),
+        Some(place) => {
+            format!("unavailable {op_id}: {worker}; it keeps place {place} for another runner")
+        }
+        None => format!("unavailable {op_id}: {worker}"),
     };
     ctx.save(revision, None, &message)?;
     ctx.push_chain();
@@ -8552,6 +8632,73 @@ fn wait_for_worker(
         detail["kept"] = json!(place);
     }
     Ok(waiting)
+}
+
+/// G811 (a fleet measurement, 2026-11-20: in 3.5 days on one repository 11 changes an agent's own
+/// `bay merge --wait` claimed were blocked `CHECK_UNKNOWN` because the check adapter gave no
+/// answer on the agent's machine, each waiting a median 700 s for a person to send it again
+/// before a runner checked it; 146 own runs checked and landed at once): an own run whose check
+/// gave no answer on this machine (no result, the adapter's crash or its time, an infrastructure
+/// failure) hands the operation to the runners, as a runner's worker that cannot start it does
+/// (G797b), once per machine, while a live runner serves its environments. A runner checks it
+/// again: unknown never passes. `None` for any other refusal, a machine that handed it back
+/// already, or no live runner that serves it: blocked, as before.
+fn handed_to_runners(
+    ctx: &Ctx,
+    op_id: &str,
+    refusal: &BayResult,
+    trunk: &str,
+) -> Option<BayResult> {
+    if ctx.visit != Visit::Own || refusal.reason != Some(Reason::CheckUnknown) {
+        return None;
+    }
+    // Every gap is one the adapter gave this machine no judged answer for: no result, its
+    // crash or its time (`unknown`, with why and no units), or an infrastructure failure.
+    let rows = refusal.detail.as_ref()?["checks"].as_array()?;
+    let own_fault = !rows.is_empty()
+        && rows.iter().all(|row| {
+            matches!(row["verdict"].as_str(), Some("unknown" | "infra_failure"))
+                && row["why"].as_str().is_some_and(|why| !why.is_empty())
+                && row["reasons"].as_array().is_none_or(Vec::is_empty)
+        });
+    if !own_fault {
+        return None;
+    }
+    let machine = crate::live::machine(&ctx.repo.git).ok()?;
+    if ctx.op(op_id).unable.contains(&machine) {
+        return None;
+    }
+    let policy = policy::load_at(&ctx.repo.git, trunk).ok()??;
+    let mut environments: Vec<String> = rows
+        .iter()
+        .filter_map(|row| row["check"].as_str())
+        .flat_map(|id| {
+            policy
+                .checks
+                .iter()
+                .filter(move |entry| entry.id == id)
+                .map(|entry| entry.environment.clone())
+        })
+        .collect();
+    environments.sort();
+    environments.dedup();
+    if environments.is_empty() || !live_runner_serving(ctx, &environments) {
+        return None;
+    }
+    let why = rows
+        .iter()
+        .find_map(|row| row["why"].as_str())
+        .unwrap_or("its check gave no answer");
+    let mut waiting = unavailable(
+        ctx,
+        op_id,
+        &environments,
+        Some(&format!("this machine ({machine}) could not run it: {why}")),
+    );
+    if let Some(detail) = waiting.detail.as_mut() {
+        detail["machine"] = json!(machine);
+    }
+    Some(waiting)
 }
 
 /// G797: how many times a place is kept for another runner before it is released (owner ruling
