@@ -182,7 +182,8 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
    whole tree, so no change is checked beside another. Each runner is its own check slot: more runners give more early checks. When
    `bay status` `detail.flow` shows queue wait well above check time over the week, add a runner or one of these;
    `operation.timing` of the slowest changes names the checks that took longest.
-   A check reads `turn` in its request (`head` or `ahead`), so a busy worker can serve the head first.
+   A check reads `turn` in its request: `head` or `ahead` for a queued change, so a busy worker can serve the
+   head first; `post`, `bisect` or `warm` for a run after merge, so a bisect step can keep the whole suite.
    A slow check that reads the whole tree can run after merge instead of on every change:
    `stage = "post"` in its `[[check]]`, and `[runner] post = true` in `.bay/config.toml`. The runner then runs it
    once on main's newest tip, and with `bisect_post = true` a red result names the merge that broke it.

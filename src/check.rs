@@ -46,10 +46,11 @@ pub struct Candidate<'a> {
     /// The version of each named input the candidate is checked under, `<kind>:<name>@<version>`
     /// (`INTERFACES` § 3): the request's `inputs`.
     pub inputs: &'a [String],
-    /// A runner's run of a queued change: `"head"` for the queue head's own run, `"ahead"` for
-    /// a pre-check of an entry behind it (`crate::throughput`), so an adapter can give the head
-    /// a worker first (a batch is the head's run). `None` for every other run (a bisection, a
-    /// post check of main, a test of the adapter): the request then has no `turn`.
+    /// Which run this is: `"head"` for the queue head's own run, `"ahead"` for a pre-check of an
+    /// entry behind it (`crate::throughput`), so an adapter can give the head a worker first (a
+    /// batch is the head's run); `"post"` for a post check's run on main's tip, `"bisect"` for a
+    /// step of a red's bisection and `"warm"` for a warm run (`crate::bisect`, G821). `None`
+    /// for a test of the adapter: the request then has no `turn`.
     pub turn: Option<&'static str>,
     /// G540: a red post check's run on main's tip names the units that failed in the red's
     /// newest failing record, sorted: the request's `rerun`. Empty for every other run, and the

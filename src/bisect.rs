@@ -1022,7 +1022,7 @@ fn run_at(
     repo: &Repo,
     keys: &Keys,
     writer: &Writer,
-    (id, why): (&CheckId, (&str, Value)),
+    (id, why): (&CheckId, (&'static str, Value)),
     (commit, since, rerun): (&str, Option<&str>, &[String]),
 ) -> Result<Result<Answer, String>, String> {
     let (field, body) = why;
@@ -1117,7 +1117,9 @@ fn run_at(
             id: &candidate_id,
             policy_provenance: crate::policy::Provenance::Bay,
             inputs: &[],
-            turn: None,
+            // G821 (a fleet finding, 2026-11-19): an adapter that picks tests by changed paths
+            // keeps its whole suite for a bisect step, whose range is not the one it judges.
+            turn: Some(field),
             rerun,
             retry: 0,
         },

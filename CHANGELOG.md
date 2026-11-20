@@ -3,6 +3,7 @@
 ## 0.6.121
 
 - `bay merge --wait` asked again after a merged change's view is removed answers merged, not `VIEW_INCOMPLETE`.
+- A post, bisect or warm run names itself in its check request's `turn`.
 
 ## 0.6.120
 
