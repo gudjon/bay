@@ -9,6 +9,9 @@
 //! empty range since that answer still wakes it: only this guard stops the run.) The `elsewhere`
 //! chain in `bisect::last_runs`; drop it and the second box's run on the next tip asks about every
 //! landing since the span's start, not since the first box's answer.
+//!
+//! The first box owns `suite` by G822's rule, so the second box runs it on the next tip only once
+//! the first box reads gone: that pass reads the clock an hour on.
 
 // Each case runs shell scripts (adapters), so these run on Unix only.
 #![cfg(unix)]
@@ -28,9 +31,15 @@ fn land(test_box: &TestBox, repo: &Path, dir: &str, path: &str) {
     assert_eq!(code, 0, "{landed}");
 }
 
-/// One runner pass: the post check it ran, or `""`.
-fn ran_post(test_box: &TestBox, repo: &Path) -> String {
-    let ran = test_box.bay_ok(repo, &["runner", "run", "--once"]);
+/// One runner pass with the reader's clock `skew_s` ahead: the post check it ran, or `""`.
+fn ran_post(test_box: &TestBox, repo: &Path, skew_s: u64) -> String {
+    let (code, ran) = result_json(
+        test_box
+            .bay(repo)
+            .args(["runner", "run", "--once"])
+            .env("BAY_TEST_PRESENCE_CLOCK_SKEW_S", skew_s.to_string()),
+    );
+    assert_eq!(code, 0, "{ran}");
     ran["detail"]["ran"]
         .as_array()
         .into_iter()
@@ -73,16 +82,16 @@ fn a_post_check_another_box_answered_on_the_tip_runs_once() {
     test_box.git_ok(&other, &["config", "bay.producerName", "other-checks"]);
 
     land(&test_box, &repo, "src", "src/s0.rs");
-    assert_eq!(ran_post(&test_box, &repo), "suite");
+    assert_eq!(ran_post(&test_box, &repo, 0), "suite");
     assert_eq!(
-        ran_post(&test_box, &other),
+        ran_post(&test_box, &other, 0),
         "",
         "the other box ran a check the first one had answered on this tip"
     );
     land(&test_box, &repo, "src", "src/s1.rs");
-    assert_eq!(ran_post(&test_box, &other), "suite");
+    assert_eq!(ran_post(&test_box, &other, 3600), "suite");
     assert_eq!(
-        ran_post(&test_box, &repo),
+        ran_post(&test_box, &repo, 0),
         "",
         "the first box ran a check the other one had answered on this tip"
     );

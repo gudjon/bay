@@ -199,11 +199,24 @@ fn serves_a_post_check(
     served: &check::Served,
     taken: &BTreeSet<String>,
 ) -> bool {
-    policy.checks.iter().any(|entry| {
-        entry.stage == crate::policy::Stage::Post
-            && served.serves(&entry.environment)
-            && !taken.contains(&entry.environment)
-    })
+    !post_checks(policy, served, taken).is_empty()
+}
+
+/// `policy`'s post checks whose environment this box serves and none of `taken` names.
+fn post_checks<'a>(
+    policy: &'a crate::policy::Policy,
+    served: &check::Served,
+    taken: &BTreeSet<String>,
+) -> Vec<&'a crate::policy::CheckEntry> {
+    policy
+        .checks
+        .iter()
+        .filter(|entry| {
+            entry.stage == crate::policy::Stage::Post
+                && served.serves(&entry.environment)
+                && !taken.contains(&entry.environment)
+        })
+        .collect()
 }
 
 /// BACKLOG 113 (G444): whether this box serves the environment of at least one post check of
@@ -219,8 +232,9 @@ pub(crate) fn serves_post_work(git: &Git, commit: &str) -> bool {
 
 /// The runner's own post checks (`[runner] post`): after its queue's work, each post check of the
 /// policy at main's newest tip's first parent runs once on that tip when this box serves its
-/// environment, holds no record of it there yet, and no other producer answered it there
-/// ([`answered_elsewhere`], G625). One run answers every landing since the last run's tip: a pass,
+/// environment, holds no record of it there yet, no other producer answered it there
+/// ([`answered_elsewhere`], G625), and no other live runner runs it ([`left_to`], G822). One run
+/// answers every landing since the last run's tip: a pass,
 /// or a red the red judgement (`crate::red`) ranges and `[runner] bisect_post` narrows. A red check
 /// runs again on each new tip (G492), and its request names `rerun`: the units that failed in its
 /// newest failing record (G540). One piece for each environment none of `taken` names: its first
@@ -242,12 +256,13 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
     // spent 140-166 s of every pass here, fetching evidence and judging main in full, and a new
     // change waited for that pass to end before any runner visited it): a box that can run none
     // of the policy's post checks, or whose every such environment runs a piece, reads nothing.
-    if !serves_a_post_check(&policy, &served, taken) {
+    let entries = post_checks(&policy, &served, taken);
+    if entries.is_empty() {
         return Ok((Vec::new(), Vec::new()));
     }
     let keys = Keys::load(git);
     repo.fetch_registry();
-    repo.fetch_evidence(&keys);
+    repo.fetch_evidence_with(&keys, &[crate::presence::refspec()]);
     let registry = Registry::current(git)?;
     let tree = tree_of(git, &tip)?;
     let writer = Writer::of(git, &keys, registry.as_ref())?;
@@ -266,19 +281,12 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
         reds.iter()
             .find(|red| red.check == entry.id && red.environment == entry.environment)
     };
-    let entries: Vec<&crate::policy::CheckEntry> = policy
-        .checks
-        .iter()
-        .filter(|entry| {
-            entry.stage == crate::policy::Stage::Post
-                && served.serves(&entry.environment)
-                && !taken.contains(&entry.environment)
-        })
-        .collect();
     let trust = (registry.as_ref(), &writer, &policy);
     let (entries, ran) = in_turn(git, trust, &tip, entries, &reds);
     let here = (tip.as_str(), evidence::records_for(git, &tree)?);
     let elsewhere = answered_elsewhere(git, trust, &entries, here)?;
+    let live = crate::presence::live(git);
+    let now = crate::presence::reader_now();
     let mut pieces: Vec<Piece> = Vec::new();
     for entry in entries {
         if pieces
@@ -289,6 +297,10 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
         }
         let id = CheckId::new(&entry.id, &entry.environment);
         if writer.records(git, &tree, &id)? > 0 || elsewhere.contains(&id) {
+            continue;
+        }
+        let last = ran.get(&(entry.id.clone(), entry.environment.clone()));
+        if left_to(entry, (&keys.executor_name, &live), last, now).is_some() {
             continue;
         }
         // BACKLOG 117: a check no worker answered here lately waits, and this pass runs the
@@ -330,12 +342,10 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
                         |passed| Ok(passed.landing.clone()),
                     )?,
             },
-            None => ran
-                .get(&(entry.id.clone(), entry.environment.clone()))
-                .map_or_else(
-                    || span_start(git, &tip),
-                    |ago| rev(git, &format!("{tip}~{ago}")),
-                )?,
+            None => last.map_or_else(
+                || span_start(git, &tip),
+                |last| rev(git, &format!("{tip}~{}", last.ago)),
+            )?,
         };
         if red_of(entry).is_none()
             && policy
@@ -375,7 +385,7 @@ fn in_turn<'a>(
     reds: &[Red],
 ) -> (
     Vec<&'a crate::policy::CheckEntry>,
-    std::collections::HashMap<(String, String), usize>,
+    std::collections::HashMap<(String, String), LastRun>,
 ) {
     // A fleet finding (2026-10-27, 0.5.29): with one post check a pass and main moving every few
     // minutes, each new tip began again at the policy's first post check, and the later ones never
@@ -411,8 +421,7 @@ fn in_turn<'a>(
             .any(|(check, environment)| *check == entry.id && *environment == entry.environment);
         let ago = ran
             .get(&(entry.id.clone(), entry.environment.clone()))
-            .copied()
-            .unwrap_or(usize::MAX);
+            .map_or(usize::MAX, |last| last.ago);
         let starved = !is_red && ago >= starved_at;
         (!starved, !is_red, std::cmp::Reverse(ago), !pending)
     });
@@ -531,7 +540,7 @@ fn last_runs(
     trust: (Option<&Registry>, &Writer, &crate::policy::Policy),
     tip: &str,
     entries: &[&crate::policy::CheckEntry],
-) -> std::collections::HashMap<(String, String), usize> {
+) -> std::collections::HashMap<(String, String), LastRun> {
     let span = RAN_SPAN.to_string();
     let mut ran = std::collections::HashMap::new();
     let Ok(line) = git.run(&["log", "--first-parent", "-n", &span, "--format=%H %T", tip]) else {
@@ -553,6 +562,11 @@ fn last_runs(
             })
             .map(|record| record.check.clone())
             .collect();
+        let times: Vec<(CheckId, u64)> = records
+            .iter()
+            .filter(|record| record.kind == evidence::KIND_CHECK)
+            .filter_map(|record| Some((record.check.clone(), crate::clock::unix_of(&record.at)?)))
+            .collect();
         let elsewhere =
             answered_elsewhere(git, trust, entries, (*commit, records)).unwrap_or_default();
         for check in own.into_iter().chain(elsewhere) {
@@ -560,11 +574,77 @@ fn last_runs(
                 .iter()
                 .any(|entry| check == CheckId::new(&entry.id, &entry.environment))
             {
-                ran.entry((check.id, check.environment)).or_insert(ago);
+                let at = times
+                    .iter()
+                    .filter(|(answered, _)| *answered == check)
+                    .map(|(_, at)| *at)
+                    .max();
+                ran.entry((check.id, check.environment))
+                    .or_insert(LastRun { ago, at });
             }
         }
     }
     ran
+}
+
+/// Where a check was last answered on main's line ([`last_runs`]).
+#[derive(Clone, Copy, Debug)]
+struct LastRun {
+    /// How many landings back from the tip.
+    ago: usize,
+    /// G822: when the newest record of the check there was written, in Unix seconds.
+    at: Option<u64>,
+}
+
+/// G822 (a fleet finding, 2026-11-19: three runners served one environment, and each ran each
+/// post check on the same tip within seconds of the others, before any had recorded the answer
+/// [`answered_elsewhere`] reads; in a day, 23.0 of 49.1 post runner-hours were second and third
+/// runs of one check on one tip): the other live runner that runs `entry` on main's tip, if one
+/// does, so `me` does not. Of the runners whose presence reads live now ([`crate::presence::live`])
+/// and serves the check's environment, and whose producer the check lists when it lists any,
+/// `me` among them, the check goes to the one whose name weighs most with it ([`weight`],
+/// rendezvous hashing): it stays with one runner while that runner stays live, and only the checks
+/// of a runner that leaves move.
+///
+/// `None`, so `me` runs it, when no runner answered the check on main's newest [`RAN_SPAN`]
+/// landings (`last`), or its newest answer is older than one of its own timeouts: a runner that
+/// reads live and does not run the check (its worker busy or down, say) leaves it to the others
+/// after that long.
+fn left_to(
+    entry: &crate::policy::CheckEntry,
+    (me, live): (&str, &[Value]),
+    last: Option<&LastRun>,
+    now: u64,
+) -> Option<String> {
+    let at = last?.at?;
+    if now.saturating_sub(at) >= entry.timeout_s {
+        return None;
+    }
+    let listed = |record: &Value| {
+        entry.producers.as_ref().is_none_or(|producers| {
+            record["producer"]
+                .as_str()
+                .is_some_and(|producer| producers.iter().any(|it| it == producer))
+        })
+    };
+    let owner = live
+        .iter()
+        .filter(|record| crate::presence::serves(record, &entry.environment) && listed(record))
+        .filter_map(|record| record["executor"].as_str())
+        .chain([me])
+        .max_by_key(|runner| (weight(entry, runner), *runner))?;
+    (owner != me).then(|| owner.to_owned())
+}
+
+/// G822: `runner`'s rendezvous weight for `entry`: the first eight bytes of the SHA-256 of the
+/// check, its environment and the runner's name, so every runner, of any version that has it,
+/// weighs the same.
+fn weight(entry: &crate::policy::CheckEntry, runner: &str) -> u64 {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{}\0{}\0{runner}", entry.id, entry.environment));
+    let mut first = [0_u8; 8];
+    first.copy_from_slice(&digest[..8]);
+    u64::from_be_bytes(first)
 }
 
 /// G625 (E87, a fleet finding, 2026-11-01: two runner boxes served one environment, and each
@@ -572,8 +652,9 @@ fn last_runs(
 /// 36 of them after the other box had recorded its answer): the checks of `entries` that another
 /// producer's `records` on `commit`'s tree already answer, as the red judgment counts them (the
 /// producers a check lists, verified under the registry, this policy's manifest, and `commit`
-/// for a commit-keyed check), with a verdict that is not unknown. Two boxes that start one run
-/// together both run it: only a record already there answers.
+/// for a commit-keyed check), with a verdict that is not unknown. Only a record already there
+/// answers, so two runners that start one run together would both run it: G822 ([`left_to`])
+/// leaves each check to one of them.
 ///
 /// # Errors
 ///

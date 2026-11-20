@@ -306,15 +306,38 @@ pub fn serving_until(git: &Git, me: &str, environments: &[String]) -> Option<u64
         .filter(|(name, _)| *name != me)
         .filter_map(|(_, commit)| record_at(git, commit).ok().flatten())
         .filter(|record| {
-            let declared = record["environments"]["declared"].as_array();
-            record["environments"]["source"] == "default"
-                || environments.iter().all(|environment| {
-                    declared.is_some_and(|all| all.iter().any(|it| it == environment.as_str()))
-                })
+            environments
+                .iter()
+                .all(|environment| serves(record, environment))
         })
         .filter_map(|record| live_until(&record))
         .filter(|until| *until >= now)
         .max()
+}
+
+/// Whether presence `record` serves `environment`: it declares it, or declares none and so serves
+/// every one.
+#[must_use]
+pub fn serves(record: &Value, environment: &str) -> bool {
+    record["environments"]["source"] == "default"
+        || record["environments"]["declared"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|it| it == environment))
+}
+
+/// G822: every presence this store holds that reads live now by [`serving_until`]'s strict rule,
+/// read once, for a reader that judges several checks against them.
+#[must_use]
+pub fn live(git: &Git) -> Vec<Value> {
+    let Ok(listed) = git.run(&["for-each-ref", "--format=%(objectname)", PRESENCE_PREFIX]) else {
+        return Vec::new();
+    };
+    let now = reader_now();
+    listed
+        .lines()
+        .filter_map(|commit| record_at(git, commit).ok().flatten())
+        .filter(|record| live_until(record).is_some_and(|until| until >= now))
+        .collect()
 }
 
 /// Until when, in Unix seconds, `record` stays live under [`serving_until`]'s strict rule.

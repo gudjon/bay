@@ -1075,6 +1075,12 @@ impl Repo {
     /// remote copy this machine did not write is a collision its push reports. Best effort:
     /// offline, the local records are what this machine can see.
     pub fn fetch_evidence(&self, keys: &crate::signing::Keys) {
+        self.fetch_evidence_with(keys, &[]);
+    }
+
+    /// [`Repo::fetch_evidence`], with the refs of `more` (forced refspecs) in the same fetch: G822,
+    /// a runner's post pass reads the presences with the notes, at no second round trip.
+    pub fn fetch_evidence_with(&self, keys: &crate::signing::Keys, more: &[String]) {
         // A fleet finding (2026-10-27): listing the remote's notes refs first cost a second round
         // trip on every fetch, and a status read fetched them twice. One fetch of the pattern,
         // this machine's own refs excluded, reads the same refs.
@@ -1086,6 +1092,7 @@ impl Repo {
         let prefix = crate::evidence::EVIDENCE_PREFIX;
         let every = format!("+{prefix}*:{prefix}*");
         let mut args = vec!["fetch", "-q", "--no-tags", self.remote(), every.as_str()];
+        args.extend(more.iter().map(String::as_str));
         args.extend(own.iter().map(String::as_str));
         let _ = self.git.run(&args);
     }

@@ -4,6 +4,7 @@
 
 - `bay merge --wait` asked again after a merged change's view is removed answers merged, not `VIEW_INCOMPLETE`.
 - A post, bisect or warm run names itself in its check request's `turn`.
+- A post check runs on one live runner that serves its environment, not on each.
 
 ## 0.6.120
 

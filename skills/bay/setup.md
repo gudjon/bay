@@ -187,6 +187,8 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
    A slow check that reads the whole tree can run after merge instead of on every change:
    `stage = "post"` in its `[[check]]`, and `[runner] post = true` in `.bay/config.toml`. The runner then runs it
    once on main's newest tip, and with `bisect_post = true` a red result names the merge that broke it.
+   Of the live runners that serve its environment, one runs it; another takes over when that runner
+   stops, or gives no answer within the check's `timeout_s`.
    The post checks of different environments run side by side, one at a time in each; a runner moves
    to a new bay binary only once they end. While it is red, its request names `rerun`: the units that
    failed last. The check's command runs them too, and lists in `plan.gone` each one it no longer has;
