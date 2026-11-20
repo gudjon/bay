@@ -5,6 +5,7 @@
 - The agent hook refuses a call only on purpose: a hook that fails or hangs lets it go on.
 - The agent hook judges a tool call without starting Git, in tens of milliseconds.
 - The shell guard reads quotes and heredocs as a shell does, and judges command substitutions.
+- A runner answers a change merged when the line released it published, though its record still says checked.
 
 ## 0.6.116
 
