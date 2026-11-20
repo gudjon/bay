@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.119
+
+- A runner started under a live runner's producer name is refused before it claims any change.
+- A runner revisits a waiting change that names a repair only once main holds a red it answers.
+- A change on a red check's paths runs the red's failed units too, so skipping them never clears it.
+
 ## 0.6.118
 
 - A machine whose own check gives no answer hands the change to a live runner instead of blocking it.
