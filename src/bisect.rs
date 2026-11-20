@@ -287,6 +287,10 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
     let elsewhere = answered_elsewhere(git, trust, &entries, here)?;
     let live = crate::presence::live(git);
     let now = crate::presence::reader_now();
+    let landed = git
+        .run(&["log", "-1", "--format=%ct", &tip])
+        .ok()
+        .and_then(|time| time.trim().parse::<u64>().ok());
     let mut pieces: Vec<Piece> = Vec::new();
     for entry in entries {
         if pieces
@@ -300,7 +304,7 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
             continue;
         }
         let last = ran.get(&(entry.id.clone(), entry.environment.clone()));
-        if left_to(entry, (&keys.executor_name, &live), last, now).is_some() {
+        if left_to(entry, (&keys.executor_name, &live), last, (landed, now)).is_some() {
             continue;
         }
         // BACKLOG 117: a check no worker answered here lately waits, and this pass runs the
@@ -607,17 +611,23 @@ struct LastRun {
 /// of a runner that leaves move.
 ///
 /// `None`, so `me` runs it, when no runner answered the check on main's newest [`RAN_SPAN`]
-/// landings (`last`), or its newest answer is older than one of its own timeouts: a runner that
-/// reads live and does not run the check (its worker busy or down, say) leaves it to the others
-/// after that long.
+/// landings (`last`), or one of the check's own timeouts has passed since both its newest answer
+/// and main's tip (`landed`, the tip's commit time): a runner that reads live and does not run
+/// the check (its worker busy or down, say) leaves it to the others after that long.
+///
+/// G829 (a fleet finding, 2026-11-20: a check last answered 14 min before a new tip landed ran
+/// on the tip on both runners of its environment, 4 min after it landed, under a 15 min timeout):
+/// the timeout counted from the check's newest answer alone, so once that answer was older than
+/// the timeout when a runner came to the tip, every runner ran the check there. It counts from
+/// the tip's landing too, the first moment the check's owner could run it on the tip.
 fn left_to(
     entry: &crate::policy::CheckEntry,
     (me, live): (&str, &[Value]),
     last: Option<&LastRun>,
-    now: u64,
+    (landed, now): (Option<u64>, u64),
 ) -> Option<String> {
     let at = last?.at?;
-    if now.saturating_sub(at) >= entry.timeout_s {
+    if now.saturating_sub(at.max(landed.unwrap_or(0))) >= entry.timeout_s {
         return None;
     }
     let listed = |record: &Value| {
