@@ -97,12 +97,14 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     }
     // G788: the line's head a wait between passes last ended for.
     let mut woke = None;
+    // G807: whether this runner published its presence: a pass has begun.
+    let mut started = false;
     loop {
         // Each pass reads the config at the trunk tip it fetched (ruling: config location),
         // so a config that landed since the last pass governs this one.
-        let repo = match Repo::open_fetched(dir) {
-            Ok(repo) => Arc::new(repo),
-            Err(error) => match ends(error.into_result(), retries, dir, interval) {
+        let repo = match open_pass(dir, &mut started) {
+            Ok(repo) => repo,
+            Err(error) => match ends(*error, retries, dir, interval) {
                 Some(result) => return result,
                 None => continue,
             },
@@ -190,6 +192,43 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             wait_for_line(&repo, interval, &mut woke);
         }
     }
+}
+
+/// G807 (a fleet finding, 2026-11-20: a second runner started under another live runner's
+/// `bay.producerName`, and in 100 minutes claimed eleven heads, each released after a fault only
+/// when its evidence push collided with the other's, two of them after a full 16-minute check): a
+/// runner whose producer a live presence names under another runner name is refused before its
+/// pass, so it publishes no presence and claims nothing. At its start any such presence refuses
+/// it, and its first pass first fetches them. Once it has run a pass, only a runner whose name
+/// sorts before its own refuses it (the presences its last pass fetched), so of two that started
+/// at once, before either read the other, one goes on.
+/// Opens the repository for a pass, fetched; `started` once a pass may run.
+fn open_pass(dir: &Path, started: &mut bool) -> Result<Arc<Repo>, Box<BayResult>> {
+    let repo = Repo::open_fetched(dir).map_err(|error| Box::new(error.into_result()))?;
+    if let Some(refused) = producer_shared(&repo, *started) {
+        return Err(Box::new(refused));
+    }
+    *started = true;
+    Ok(Arc::new(repo))
+}
+
+fn producer_shared(repo: &Repo, started: bool) -> Option<BayResult> {
+    let keys = Keys::load(&repo.git);
+    let producer = crate::presence::named_producer(&keys)?;
+    if !started {
+        crate::presence::fetch(repo);
+    }
+    let (runner, machine) = crate::presence::sharing(&repo.git, &keys.executor_name, producer)
+        .into_iter()
+        .find(|(runner, _)| !started || *runner < keys.executor_name)?;
+    Some(
+        BayResult::blocked(Reason::ProducerShared).with_detail(json!({
+            "producer": producer,
+            "runner": keys.executor_name,
+            "shared_with": {"runner": runner, "machine": machine},
+            "recovery": "give each runner its own bay.producerName",
+        })),
+    )
 }
 
 /// G788: how often a runner asks the remote whether the line's head moved

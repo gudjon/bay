@@ -161,7 +161,8 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
    is never a pass; the merge names it in `coverage_gaps`. Without a registry no waiver counts.
    A small team with no runner host sets `[policy] signing = "approvals"`: only approvals are
    signed, and no machine needs a `runner`, `producer` or `agent` key. Each clone takes its own
-   producer name (`local-<id>` in its git config); set `bay.producerName` only to choose one.
+   producer name (`local-<id>` in its git config); set `bay.producerName` only to choose one. Two
+   runners never share one: a runner started under a live runner's is refused `PRODUCER_SHARED`.
    There, and with no registry, evidence reuse and batching stay off unless the policy also says
    `[policy] reuse_unsigned = true`. Results still name their trust: `unsigned` or `approvals`.
    To keep changes small, add `[limits]` with `max_file_mib`, `max_files` or `max_added_lines`

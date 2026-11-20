@@ -88,7 +88,10 @@ const FLAGS: usize = 95;
 ///   the work went to merge under the other seat's change, found only later; it is refused first.
 /// - 0.6.40, one reason fewer (`MAIN_RED`, G677): a change on a red main runs the red check before
 ///   its merge instead of waiting, so the wait and its reason are gone.
-const REASONS: usize = 62;
+/// - 0.6.118, one reason (`PRODUCER_SHARED`, G807): a runner started under a live runner's
+///   producer name ran each check it took, up to 16 minutes, before its evidence collided; it is
+///   refused at start, naming the other runner.
+const REASONS: usize = 63;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.
