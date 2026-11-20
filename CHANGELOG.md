@@ -2,6 +2,7 @@
 
 ## 0.6.114
 
+- `bay update` lists what each newer release brings and names the next steps to run.
 - A red batch lands its first passing part at once, and the members after it go back to the line.
 - A batch's search records each part's checks as it finishes, so a stopped runner loses none.
 
