@@ -9994,11 +9994,16 @@ fn derive_landed(
     revision: &str,
     commit: &str,
 ) -> Result<BayResult, String> {
-    if ctx.op(op_id).state != OpState::Published || ctx.record.state != ChangeState::Landed {
+    let behind = under_way_beside(ctx, op_id);
+    if ctx.op(op_id).state != OpState::Published
+        || ctx.record.state != ChangeState::Landed
+        || !behind.is_empty()
+    {
         ctx.record.state = ChangeState::Landed;
         let op = ctx.op_mut(op_id);
         op.state = OpState::Published;
         op.outcome = None;
+        end_behind(ctx, &behind);
         ctx.save(revision, Some(commit), &format!("landed {op_id}"))?;
     }
     if view::journal(ctx.repo, &ctx.id).is_some() {
@@ -10012,7 +10017,47 @@ fn derive_landed(
             ctx.push_chain();
         }
     }
+    tell_behind(ctx, &behind, revision, commit);
     Ok(landing_row(ctx, op_id, revision, commit))
+}
+
+/// G823 (a fleet finding, 2026-11-20: a batch merged a member's checked revision while its
+/// author's newer revision waited with no place in line, and status said it waited its turn):
+/// the operations of the change other than `op_id` that are still under way when `op_id` merges.
+fn under_way_beside(ctx: &Ctx, op_id: &str) -> Vec<String> {
+    ctx.record
+        .operations
+        .iter()
+        .filter(|op| op.op_id != op_id && op.state.next().is_some())
+        .map(|op| op.op_id.clone())
+        .collect()
+}
+
+/// G823: each operation in `behind` ends `CHANGE_ALREADY_MERGED` with the merge of another
+/// revision, as G421 ends one at its visit. Its author's next `bay merge` in the view sends the
+/// edits it holds since the merged revision as the next change ([`carry`], [`follow_up`]).
+fn end_behind(ctx: &mut Ctx, behind: &[String]) {
+    for id in behind {
+        let op = ctx.op_mut(id);
+        op.state = OpState::Blocked;
+        op.outcome = Some(Reason::ChangeAlreadyLanded.code().to_owned());
+        op.unavailable = None;
+    }
+}
+
+/// G823: the event of each operation [`end_behind`] ended, which wakes its author once (G307).
+/// No session waits on it: the merge that ended it was another operation's.
+fn tell_behind(ctx: &Ctx, behind: &[String], revision: &str, commit: &str) {
+    for id in behind {
+        let result = BayResult::blocked(Reason::ChangeAlreadyLanded)
+            .with_change(ctx.id.clone())
+            .with_op(id.clone())
+            .with_detail(json!({"landed": commit, "landed_revision": revision}));
+        if let Ok(Some(event)) = outcome_event(ctx, id, &result) {
+            // A lost notice is never retried: `bay status --since` reads the event from the log.
+            let _ = crate::notify::notify(ctx.repo, &event);
+        }
+    }
 }
 
 /// The result of `op_id`'s landing of `commit`, recorded on the change's chain: what a landing
