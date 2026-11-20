@@ -611,8 +611,13 @@ pub struct Sandbox {
     pub refusal: Option<String>,
     /// G285: the box's read-only paths for checks (`bay.checkReadPath`), absolute. Box facts:
     /// they never enter the definition digest, and each record of a sandboxed run lists them
-    /// ([`SANDBOX_READ`]). Empty until [`Sandbox::reading`] reads them.
+    /// ([`SANDBOX_READ`]). The developer tools ([`Sandbox::tools`]) until [`Sandbox::reading`]
+    /// adds the box's.
     pub read: Vec<PathBuf>,
+    /// On macOS, the active developer directory's `usr`, whose programs the `/usr/bin` shims
+    /// (`git`, `make`, `cc`, …) start ([`developer_tools`]): readable in the sandbox, and its
+    /// `bin` ahead of `/usr/bin` on a check's `PATH` ([`check_path`]).
+    pub tools: Option<PathBuf>,
 }
 
 impl Sandbox {
@@ -641,10 +646,15 @@ impl Sandbox {
         } else {
             None
         };
+        // A shim never runs in the sandbox: it reads the developer directory, Xcode's own
+        // files and its license, and starts `xcodebuild` (a Mac finding, 2026-11-19: every
+        // `git` in a check answered that no developer tools were found).
+        let tools = (kind == "sandbox-exec").then(developer_tools).flatten();
         Self {
             kind,
             refusal,
-            read: Vec::new(),
+            read: tools.iter().cloned().collect(),
+            tools,
         }
     }
 
@@ -653,7 +663,7 @@ impl Sandbox {
     #[must_use]
     pub fn reading(mut self, git: &Git) -> Self {
         match read_paths(git) {
-            Ok(paths) => self.read = paths,
+            Ok(paths) => self.read.extend(paths),
             Err(why) => {
                 self.refusal.get_or_insert(why);
             }
@@ -662,13 +672,48 @@ impl Sandbox {
     }
 }
 
+/// On macOS, the active developer directory's `usr` (`xcode-select -p`), when it holds a `bin`:
+/// the programs the `/usr/bin` shims start. Read once a process; `None` elsewhere, or with no
+/// developer tools.
+fn developer_tools() -> Option<PathBuf> {
+    static TOOLS: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    TOOLS
+        .get_or_init(|| {
+            if !cfg!(target_os = "macos") {
+                return None;
+            }
+            let mut select = Command::new("/usr/bin/xcode-select");
+            select.arg("-p");
+            let ran = crate::run::captured(select, None, Duration::from_secs(10))
+                .ok()
+                .filter(|ran| ran.status.success())?;
+            let usr = PathBuf::from(String::from_utf8_lossy(&ran.stdout).trim()).join("usr");
+            usr.join("bin").is_dir().then_some(usr)
+        })
+        .clone()
+}
+
+/// A check's `PATH`: the policy's `path`, with the developer tools' `bin` ([`Sandbox::tools`])
+/// just ahead of `/usr/bin`, where the shims that start them are: inside the sandbox each name
+/// finds the program its shim would start outside it.
+fn check_path(path: &[String], tools: Option<&Path>) -> String {
+    let mut dirs = path.to_vec();
+    if let Some(bin) = tools.map(|tools| tools.join("bin"))
+        && let Some(at) = dirs.iter().position(|dir| dir == "/usr/bin")
+    {
+        dirs.insert(at, bin.display().to_string());
+    }
+    crate::platform::search_path(&dirs)
+}
+
 /// G285: the box's read-only paths for checks: Git config, multi-valued, global or for one
 /// clone, read in the clone that runs the check, as [`ENVIRONMENT_KEY`] is. A repository never
 /// declares one. Each value is an absolute path, or starts with `~/` for the box's `HOME`.
 pub const READ_PATH_KEY: &str = "bay.checkReadPath";
 
-/// G285: the record field, next to `sandbox`, that lists the box's read paths of a sandboxed
-/// run. Kept in [`EvidenceRecord::unknown`], so a record without it reads as before.
+/// G285: the record field, next to `sandbox`, that lists the read paths of a sandboxed run: the
+/// box's, and on macOS the developer tools ([`Sandbox::tools`]). Kept in
+/// [`EvidenceRecord::unknown`], so a record without it reads as before.
 pub const SANDBOX_READ: &str = "sandbox_read";
 
 /// G285: `value` of [`READ_PATH_KEY`] as a path: a leading `~/` (or `~` alone) is `home`.
@@ -1731,6 +1776,7 @@ fn run_once(
         history: history.as_ref(),
         paths_tree: kept.as_deref(),
         stop: &stop,
+        tools: limits.sandbox.tools.as_deref(),
     };
     // Items 1 and 2: a check whose footprint is observed has its tree armed before it runs.
     let armed = (not_run.is_none() && entry.footprint == crate::policy::FootprintMode::Observed)
@@ -1775,8 +1821,8 @@ fn run_once(
 
 /// The evidence record of run `run` of the check `entry`, the `index`th of `policy`, judged
 /// `judged` on `candidate` by `producer` in a run that started at `ran` under `sandbox`. A
-/// sandboxed run lists the box's read paths in [`SANDBOX_READ`] (G285); with no sandbox
-/// nothing is read-only, so it lists none.
+/// sandboxed run lists its read paths in [`SANDBOX_READ`] (G285); with no sandbox nothing is
+/// read-only, so it lists none.
 fn evidence(
     candidate: &Candidate,
     producer: &str,
@@ -2169,6 +2215,8 @@ struct Place<'a> {
     paths_tree: Option<&'a str>,
     /// G796: whether main's move stopped the check: its adapter is killed.
     stop: &'a dyn Fn() -> bool,
+    /// The developer tools on macOS ([`Sandbox::tools`]).
+    tools: Option<&'a Path>,
 }
 
 /// The `bay.check.request/1` bay sends for `entry` on `candidate` (`INTERFACES` § 3). Fields
@@ -2330,7 +2378,7 @@ fn run_one(
         .env("LANG", "C.UTF-8")
         // The policy states `path` or takes its stated default, so `PATH` is always set: a
         // shell never falls back to a search path no policy names.
-        .env("PATH", crate::platform::search_path(&entry.path))
+        .env("PATH", check_path(&entry.path, place.tools))
         // `policy::load_at` refuses an `env` name of the baseline, so none overrides it.
         .envs(declared);
     let (output, stderr) = match exchange(hooks, cmd, &request, (timeout, heartbeat), place.stop) {
@@ -2953,7 +3001,22 @@ fn make_writable(dir: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{NO_SANDBOX, Sandbox};
+    use super::{NO_SANDBOX, Sandbox, check_path};
+
+    /// On macOS the developer tools' `bin` goes just ahead of `/usr/bin`, where the shims that
+    /// start them are; a path without `/usr/bin`, or no tools, is the policy's own.
+    #[test]
+    fn the_developer_tools_come_just_ahead_of_the_shims() {
+        let path = ["/usr/local/bin", "/usr/bin", "/bin"].map(str::to_owned);
+        let tools = std::path::Path::new("/Developer/usr");
+        assert_eq!(
+            check_path(&path, Some(tools)),
+            "/usr/local/bin:/Developer/usr/bin:/usr/bin:/bin"
+        );
+        assert_eq!(check_path(&path, None), "/usr/local/bin:/usr/bin:/bin");
+        let without = ["/opt/bin", "/bin"].map(str::to_owned);
+        assert_eq!(check_path(&without, Some(tools)), "/opt/bin:/bin");
+    }
 
     thread_local! {
         /// Set by a test that needs a bound smaller than one second: then a second of

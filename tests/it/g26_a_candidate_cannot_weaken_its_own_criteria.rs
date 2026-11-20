@@ -11,7 +11,10 @@
 //! restores a passing trunk and an agent-signed repair is refused; an adapter that reads an
 //! unlisted file fails with `infra_failure`; a policy that lands while a candidate is checked
 //! makes it `POLICY_CHANGED` and rechecked, and releases a queue head without counting toward any
-//! limit. Fewer tests than `expected_minimum` is G3.
+//! limit. A check sees a fixed baseline and the variables its policy declares, and its `PATH` is
+//! the policy's `path`; on macOS the developer tools' `bin` goes just ahead of `/usr/bin`, whose
+//! shims (`git`, `make`, `cc`) cannot start them in the sandbox. Fewer tests than
+//! `expected_minimum` is G3.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -552,11 +555,12 @@ fn land_with_environment(
 #[test]
 fn a_check_sees_only_the_fixed_baseline_and_its_declared_variables() {
     let home = std::env::var("HOME").unwrap_or_default();
+    let path = support::check_path(&["/usr/bin", "/bin"]);
     // Each failed condition exits without a result, so the check is unknown, never a pass.
     let before = format!(
         "[ -z \"$UNDECLARED_VAR\" ] || {{ echo inherited UNDECLARED_VAR >&2; exit 3; }}\n\
          [ \"$DECLARED_VAR\" = declared ] || {{ echo no DECLARED_VAR >&2; exit 3; }}\n\
-         [ \"$PATH\" = /usr/bin:/bin ] || {{ echo PATH is $PATH >&2; exit 3; }}\n\
+         [ \"$PATH\" = '{path}' ] || {{ echo PATH is $PATH >&2; exit 3; }}\n\
          [ \"$LANG\" = C.UTF-8 ] || {{ echo LANG is $LANG >&2; exit 3; }}\n\
          [ -n \"$HOME\" ] && [ \"$HOME\" != '{home}' ] && touch \"$HOME/written\" || {{ echo HOME is $HOME >&2; exit 3; }}\n\
          [ -n \"$TMPDIR\" ] && touch \"$TMPDIR/written\" || {{ echo TMPDIR is $TMPDIR >&2; exit 3; }}"
@@ -591,9 +595,10 @@ fn a_relative_path_entry_makes_the_policy_invalid() {
 fn a_check_without_path_runs_under_the_stated_default_path() {
     // An absent `path` takes its stated default, so no shell falls back to a search path the
     // policy does not name.
+    let path = support::check_path(&["/usr/bin", "/bin"]);
     let (code, result) = land_with_environment(
         "",
-        "[ \"$PATH\" = /usr/bin:/bin ] || { echo PATH is $PATH >&2; exit 3; }",
+        &format!("[ \"$PATH\" = '{path}' ] || {{ echo PATH is $PATH >&2; exit 3; }}"),
         &[],
     );
     assert_eq!(code, 0, "{result}");

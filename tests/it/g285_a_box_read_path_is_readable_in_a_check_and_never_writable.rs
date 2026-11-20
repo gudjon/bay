@@ -7,8 +7,10 @@
 //! Without the setting the path is outside the allow-list, so the read fails as it always did
 //! (G62). A relative value refuses the check, and its record names the value. The paths are box
 //! facts: they never enter the definition digest, and the record of a sandboxed run lists them
-//! in `sandbox_read`, next to `sandbox`. `bay doctor` lists them in its `check-read-paths` row,
-//! and a path that does not exist is degraded.
+//! in `sandbox_read`, next to `sandbox`. On macOS a sandboxed check also reads the developer
+//! tools (`xcode-select -p`'s `usr`), so every record there lists them in `sandbox_read`, with
+//! or without the setting. `bay doctor` lists the box's read paths in its `check-read-paths`
+//! row, and a path that does not exist is degraded.
 //!
 //! A read path that overlaps the checks' scratch root refuses the check, as one over the
 //! repository does.
@@ -146,7 +148,18 @@ fn without_the_setting_the_read_fails_as_before() {
     let (code, blocked) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 10, "the check read outside its allow-list: {blocked}");
     assert_eq!(blocked["reason"], "CHECK_FAILED", "{blocked}");
-    assert!(!records(&test_box, &repo).contains("\"sandbox_read\""));
+    // The record lists no read path of the box's; on macOS only the developer tools.
+    let records = records(&test_box, &repo);
+    let listed = serde_json::to_string(&store.display().to_string()).unwrap();
+    assert!(!records.contains(&listed), "{records}");
+    match support::developer_tools() {
+        Some(tools) => assert!(
+            records.contains("\"sandbox_read\"")
+                && records.contains(&serde_json::to_string(&tools).unwrap()),
+            "the record does not list the developer tools {tools}: {records}"
+        ),
+        None => assert!(!records.contains("\"sandbox_read\""), "{records}"),
+    }
 }
 
 #[test]

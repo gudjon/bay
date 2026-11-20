@@ -1017,6 +1017,33 @@ pub fn sandbox() -> Option<&'static str> {
     usable.then_some("bwrap")
 }
 
+/// On macOS, the active developer directory's `usr` (`xcode-select -p`), when it holds a `bin`:
+/// what a sandboxed check reads there and runs ahead of the `/usr/bin` shims. `None` elsewhere.
+pub fn developer_tools() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = StdCommand::new("/usr/bin/xcode-select")
+        .arg("-p")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    let usr = Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("usr");
+    usr.join("bin").is_dir().then(|| usr.display().to_string())
+}
+
+/// A check's `PATH` under a policy whose `path` is `dirs`: on macOS the developer tools' `bin`
+/// goes just ahead of `/usr/bin`.
+pub fn check_path(dirs: &[&str]) -> String {
+    let mut dirs: Vec<String> = dirs.iter().map(|dir| (*dir).to_owned()).collect();
+    if let Some(tools) = developer_tools()
+        && let Some(at) = dirs.iter().position(|dir| dir == "/usr/bin")
+    {
+        dirs.insert(at, format!("{tools}/bin"));
+    }
+    dirs.join(":")
+}
+
 /// Whether this machine's filesystem moves an access time on a read, by bay's own probe
 /// (`bay::check::observe::arm`): a check's observed reads are seen only there. On macOS, where
 /// APFS can leave access times frozen, a case that needs them skips, saying why; elsewhere it

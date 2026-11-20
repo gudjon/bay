@@ -491,8 +491,10 @@ pub struct CheckEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fixtures: Vec<String>,
     /// Absolute directories: the check's `PATH` (ruling 8b). Absent, it takes its stated
-    /// default, [`DEFAULT_PATH`], so the search path is always one the policy names. Always
-    /// present in the definition digest.
+    /// default, [`DEFAULT_PATH`], so the search path is always one the policy names, but for one
+    /// box fact: on macOS the developer tools' `bin` goes just ahead of `/usr/bin`, whose shims
+    /// cannot start them in the sandbox ([`crate::check::Sandbox::tools`]). Always present in the
+    /// definition digest.
     #[serde(default = "default_path")]
     pub path: Vec<String>,
     /// The only variables passed from the executor's environment, by name. The names enter
