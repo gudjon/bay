@@ -19,23 +19,16 @@ use std::path::PathBuf;
 
 use support::{TestBox, check_files, passing_result, result_json};
 
-/// A repository whose check moves main on its first three runs, `batch` set or not, two
-/// changes submitted for the runner, and the runner's passes until both land (at most eight).
-/// Returns the box, the remote, the changes and every pass's `detail.ran`.
+/// A repository whose main moves just before each of the runner's first three merging pushes,
+/// `batch` set or not, two changes submitted for the runner, and the runner's passes until both
+/// land (at most eight). Returns the box, the remote, the changes and every pass's `detail.ran`.
 fn moving_main(batch: bool) -> (TestBox, PathBuf, Vec<String>, Vec<serde_json::Value>) {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
     let other = test_box.path().join("other");
-    let count = test_box.path().join("runs");
-    // Each of the first three check runs moves main from another clone before it answers.
-    let moves = test_box.relay(&format!(
-        "exec >/dev/null 2>&1; echo run >> '{count}'; n=$(wc -l < '{count}' | tr -d ' '); \
-         if [ \"$n\" -le 3 ]; then ( cd '{other}' && git pull -q --rebase && echo \"$n\" > docs/move-$n.md && git add docs && git -c user.name=t -c user.email=t@t commit -q -m \"move $n\" && git push -q origin main ); fi",
-        count = count.display(),
-        other = other.display()
-    ));
-    let mut files = check_files(&moves, &passing_result(1), 1, 60);
+    let count = test_box.path().join("pushes");
+    let mut files = check_files("true", &passing_result(1), 1, 60);
     for (path, text) in &mut files {
         if path == ".bay/policy.toml" {
             text.push_str("\n[policy]\nreuse_unsigned = true\n");
@@ -66,6 +59,26 @@ fn moving_main(batch: bool) -> (TestBox, PathBuf, Vec<String>, Vec<serde_json::V
         ids.push(started["change"].as_str().unwrap().to_owned());
     }
     let runner = test_box.clone_of(&remote, "runner");
+    // Main moves from another clone in the runner's `pre-push` hook, on each of its first three
+    // pushes to main: after the check answered, so the runner never sees the move while it
+    // checks (G796), and the merging push is refused by a moved main.
+    let hook = runner.join(".git/hooks/pre-push");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\n\
+             grep -q ' refs/heads/main ' || exit 0\n\
+             echo push >> '{count}'; n=$(wc -l < '{count}' | tr -d ' ')\n\
+             [ \"$n\" -le 3 ] || exit 0\n\
+             unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX\n\
+             ( cd '{other}' && git pull -q --rebase && echo \"$n\" > docs/move-$n.md && git add docs && git -c user.name=t -c user.email=t@t commit -q -m \"move $n\" && git push -q origin main ) >/dev/null 2>&1\n\
+             exit 0\n",
+            count = count.display(),
+            other = other.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let mut passes = Vec::new();
     for _ in 0..8 {
         let (code, ran) = result_json(test_box.bay(&runner).args(["runner", "run", "--once"]));
