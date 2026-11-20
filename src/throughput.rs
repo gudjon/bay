@@ -127,12 +127,14 @@
 //! that batch's tip (`detail.batch`), so its evidence is named as what it is.
 //!
 //! On a failure it bisects over prefixes on the same trunk tip ([`Bisect`]): every prefix is a
-//! tree on that tip, so a prefix checked once is never run again (exact reuse). It finds the
-//! largest passing prefix `p` and the first failing member `p + 1`, the culprit. When `p` is two
-//! or more, the prefix lands as a batch; the culprit's chain notes the batch, and it runs alone
-//! when it is head, judged by its own candidate. When `p` is one or zero, nothing lands as a
-//! batch: the head runs its ordinary path, and its prefix's records are its own candidate's
-//! tree on its own base, so it lands or fails on them with no new run.
+//! tree on that tip, so a prefix checked once is never run again (exact reuse). It halves the
+//! batch until a prefix `p` passes (G802): that prefix lands at once, and the members past it go
+//! back to the line, where the next head's batch reads the records the search left on their
+//! trees. When the prefix that failed last is `p + 1`, that member is the culprit: its chain
+//! notes the batch, and it runs alone when it is head, judged by its own candidate. When `p` is
+//! two or more, the prefix lands as a batch; when it is one or zero, nothing lands as a batch:
+//! the head runs its ordinary path, and its prefix's records are its own candidate's tree on its
+//! own base, so it lands or fails on them with no new run.
 //!
 //! Every operation still reaches a stated outcome through its own chain: members that landed
 //! derive it from trunk, the culprit and the members behind it keep their places.
@@ -1193,9 +1195,16 @@ pub fn plan_batch(
     Ok((members, stopped, stopped_at))
 }
 
-/// The search for a batch's largest passing prefix on one trunk tip: the whole batch first,
-/// then, once a prefix failed, halving the range between the largest prefix known to pass and
-/// the smallest known to fail. Every prefix is a tree on that one tip, so none is run twice.
+/// The search for a batch's passing prefix on one trunk tip: the whole batch first, then, once it
+/// failed, halving the failing prefix until one passes. Every prefix is a tree on that one tip,
+/// so none is run twice.
+///
+/// G802 (a fleet measurement, 2026-11-20: in 8.6 days one line's two runners bisected 28 red
+/// batches to their largest passing prefix, one check after another, the line's head held 10.3 h
+/// in all; five found a passing prefix of four to seven members and landed none of it, lost to the
+/// head's deadline or to a member that left before the push): the first passing prefix ends the
+/// search and lands at once. The members past it go back to the line, and the next head's batch
+/// reads what the search recorded on their trees.
 #[derive(Clone, Copy, Debug)]
 pub struct Bisect {
     size: usize,
@@ -1218,9 +1227,7 @@ impl Bisect {
     pub const fn next_prefix(&self) -> Option<usize> {
         match self.failed {
             None if self.passed < self.size => Some(self.size),
-            Some(failed) if failed - self.passed > 1 => {
-                Some(self.passed + (failed - self.passed) / 2)
-            }
+            Some(failed) if self.passed == 0 && failed > 1 => Some(failed / 2),
             _ => None,
         }
     }
@@ -1240,12 +1247,13 @@ impl Bisect {
         self.passed
     }
 
-    /// The first member that fails (1 for the head), once a prefix failed.
+    /// The first member that fails (1 for the head), once the search narrowed to it: the
+    /// smallest failing prefix is one past the largest that passed.
     #[must_use]
     pub const fn culprit(&self) -> Option<usize> {
         match self.failed {
-            Some(_) => Some(self.passed + 1),
-            None => None,
+            Some(failed) if failed == self.passed + 1 => Some(failed),
+            _ => None,
         }
     }
 }
@@ -1620,7 +1628,7 @@ mod tests {
     }
 
     /// A batch of `size` whose first failing member is `culprit` (none: all pass), searched:
-    /// the prefixes checked, and the largest passing prefix found.
+    /// the prefixes checked, the passing prefix found, and the culprit when the search named it.
     fn search(size: usize, culprit: Option<usize>) -> (Vec<usize>, usize, Option<usize>) {
         let mut bisect = Bisect::new(size);
         let mut checked = Vec::new();
@@ -1631,23 +1639,23 @@ mod tests {
         (checked, bisect.passed(), bisect.culprit())
     }
 
-    /// The whole batch is checked first; a failure halves the range until the first failing
-    /// member is found, each prefix checked at most once.
+    /// The whole batch is checked first; a failure halves the failing prefix until one passes,
+    /// which ends the search (G802), each prefix checked at most once. The culprit is named only
+    /// when the search narrowed to it.
     #[test]
-    fn a_bisection_finds_the_first_failing_member_in_logarithmic_checks() {
+    fn a_bisection_ends_at_its_first_passing_prefix_in_logarithmic_checks() {
         assert_eq!(search(8, None), (vec![8], 8, None));
         assert_eq!(search(4, Some(2)), (vec![4, 2, 1], 1, Some(2)));
         assert_eq!(search(4, Some(1)), (vec![4, 2, 1], 0, Some(1)));
-        assert_eq!(search(8, Some(8)), (vec![8, 4, 6, 7], 7, Some(8)));
+        assert_eq!(search(8, Some(8)), (vec![8, 4], 4, None));
+        assert_eq!(search(6, Some(6)), (vec![6, 3], 3, None));
         assert_eq!(search(2, Some(2)), (vec![2, 1], 1, Some(2)));
         for size in 2..=16 {
             for culprit in 1..=size {
                 let (checked, passed, found) = search(size, Some(culprit));
-                assert_eq!(
-                    (passed, found),
-                    (culprit - 1, Some(culprit)),
-                    "{size} {culprit}"
-                );
+                assert!(passed < culprit, "{size} {culprit}: {checked:?}");
+                assert_eq!(passed == 0, culprit == 1, "{size} {culprit}: {checked:?}");
+                assert!(found.is_none_or(|found| found == culprit), "{checked:?}");
                 let mut unique = checked.clone();
                 unique.sort_unstable();
                 unique.dedup();

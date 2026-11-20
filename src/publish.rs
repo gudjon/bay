@@ -3156,8 +3156,10 @@ fn lane_failure_rate(
 }
 
 /// Checks the batch `members` on `trunk` as the head's (heartbeats and producer), the whole
-/// first and then the bisection's prefixes, each its predicted tip, and pushes the evidence.
-/// Returns the search and what each check found; `None` when no worker answered.
+/// first and then the bisection's prefixes, each its predicted tip, and pushes each one's
+/// evidence as it finishes (G802), so a runner that stops mid-search keeps what it checked. A
+/// prefix whose tree a search before this one already failed ([`failed_before`]) fails with no
+/// run. Returns the search and what each check found; `None` when no worker answered.
 fn bisect_batch(
     ctx: &mut Ctx,
     op_id: &str,
@@ -3168,8 +3170,14 @@ fn bisect_batch(
 ) -> Result<Option<(throughput::Bisect, Vec<serde_json::Value>)>, String> {
     let mut search = throughput::Bisect::new(members.len());
     let mut checks = Vec::new();
+    ctx.repo.fetch_evidence_once(&ctx.keys);
     while let Some(prefix) = search.next_prefix() {
         let tip = &members[prefix - 1];
+        if failed_before(ctx, policy, &tip.tree)? {
+            search.record(prefix, false);
+            checks.push(json!({"members": prefix, "tree": tip.tree, "verdict": "product_failure"}));
+            continue;
+        }
         let (verdict, refusal) = run_policy(
             ctx,
             op_id,
@@ -3191,9 +3199,29 @@ fn bisect_batch(
         }
         search.record(prefix, refusal.is_none());
         checks.push(json!({"members": prefix, "tree": tip.tree, "verdict": verdict}));
+        push_evidence(ctx.repo, &ctx.producer()?.0)?;
     }
-    push_evidence(ctx.repo, &ctx.producer()?.0)?;
     Ok(Some((search, checks)))
+}
+
+/// G802: whether a check `policy` requires already failed on `tree`, on any base, in a record
+/// the policy counts: a batch's prefix that a search before this one found red, whose members
+/// came back to the line once the prefix before them landed. Only a pass lands, so a failure read
+/// here, never run again, lets nothing land that was not checked.
+fn failed_before(ctx: &Ctx, policy: &policy::Policy, tree: &str) -> Result<bool, String> {
+    let git = &ctx.repo.git;
+    let counted = policy.answering(evidence::counted(
+        git,
+        evidence::records_for(git, tree)?,
+        ctx.registry.as_ref(),
+    )?);
+    Ok(counted.iter().any(|record| {
+        record.kind == evidence::KIND_CHECK
+            && record.verdict == evidence::Verdict::ProductFailure
+            && record.manifest_digest == policy.manifest_digest
+            && record.policy_revision == policy.revision
+            && policy.check(&record.check).is_some()
+    }))
 }
 
 /// E59 (a fleet finding, 2026-10-30): the members of the checked prefix `landing` behind the
