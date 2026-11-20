@@ -2321,8 +2321,21 @@ fn update_say(result: &BayResult) -> Option<String> {
         .and_then(Value::as_str)
         .map(|newest| format!(" Run bay update again to reach {newest}."))
         .unwrap_or_default();
+    // G806: an update says what it brought and closes the loop: the guide on this computer
+    // follows once `bay install --machine` runs, and doctor names a hook a repository now lacks.
+    let brought = detail
+        .get("changes")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let what = match brought {
+        0 => String::new(),
+        1 => " Read what it brings in detail.changes.".to_owned(),
+        n => format!(" Read what its {n} releases bring in detail.changes."),
+    };
     Some(if updated {
-        format!("Updated bay from {installed} to {target}.{next}{pin}")
+        format!(
+            "Updated bay from {installed} to {target}.{what} Run bay install --machine, so the guide on this computer follows, then bay doctor in each repository: it names any hook its settings now lack. Runners here move to {target} between operations.{next}{pin}"
+        )
     } else if detail.get("due") == Some(&Value::Bool(true)) {
         format!("bay {target} is ready to install; this computer runs {installed}.{pin}")
     } else {
@@ -2718,7 +2731,14 @@ mod tests {
         let say = |detail: serde_json::Value| BayResult::ok(detail).say();
         let replaced = json!({"installed": "0.6.16", "target": "0.6.17", "pinned": null,
             "updated": true});
-        assert_eq!(say(replaced), "Updated bay from 0.6.16 to 0.6.17.");
+        assert_eq!(
+            say(replaced),
+            "Updated bay from 0.6.16 to 0.6.17. Run bay install --machine, so the guide on this computer follows, then bay doctor in each repository: it names any hook its settings now lack. Runners here move to 0.6.17 between operations."
+        );
+        // G806: what it brought is named, with where to read it.
+        let brought = json!({"installed": "0.6.16", "target": "0.6.17", "pinned": null,
+            "updated": true, "changes": [{"version": "0.6.17", "notes": ["a"]}]});
+        assert!(say(brought).contains("Read what it brings in detail.changes."));
         let newest = json!({"installed": "0.6.17", "target": "0.6.17", "pinned": "0.5.35",
             "updated": false, "due": false});
         assert_eq!(
@@ -2735,7 +2755,7 @@ mod tests {
             "updated": true, "newest": "0.6.17", "stepped": true});
         assert_eq!(
             say(stepped),
-            "Updated bay from 0.6.10 to 0.6.12. Run bay update again to reach 0.6.17."
+            "Updated bay from 0.6.10 to 0.6.12. Run bay install --machine, so the guide on this computer follows, then bay doctor in each repository: it names any hook its settings now lack. Runners here move to 0.6.12 between operations. Run bay update again to reach 0.6.17."
         );
     }
 

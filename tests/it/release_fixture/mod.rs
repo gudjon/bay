@@ -284,9 +284,19 @@ impl Fixture {
     /// As [`Fixture::list`], with `(tag, prerelease, built)`: a release that is not `built`
     /// lists only another platform's archive, so it has no build for this one.
     pub fn list_with(&self, releases: &[(&str, bool, bool)]) {
-        for (index, &(tag, pre, built)) in releases.iter().enumerate() {
+        let noted: Vec<(&str, bool, bool, &str)> = releases
+            .iter()
+            .map(|&(tag, pre, built)| (tag, pre, built, ""))
+            .collect();
+        self.list_noted(&noted);
+    }
+
+    /// As [`Fixture::list_with`], with each release's notes as its `body`, the way the release
+    /// script publishes its CHANGELOG section (G806).
+    pub fn list_noted(&self, releases: &[(&str, bool, bool, &str)]) {
+        for (index, &(tag, pre, built, body)) in releases.iter().enumerate() {
             let page = serde_json::json!([{"tag_name": format!("v{tag}"), "prerelease": pre,
-                "draft": false, "assets": self.assets(tag, built)}]);
+                "draft": false, "body": body, "assets": self.assets(tag, built)}]);
             std::fs::write(
                 self.path()
                     .join(format!("release/releases-{}.json", index + 1)),

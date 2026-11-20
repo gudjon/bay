@@ -403,6 +403,9 @@ impl Plan {
     fn detail(&self, updated: bool) -> Value {
         let mut detail = json!({"installed": BAY, "target": self.target, "pinned": self.pin,
             "updated": updated});
+        if compare(&self.target, BAY) == Ordering::Greater {
+            detail["changes"] = changes_to(&self.target);
+        }
         if let Some(newest) = self
             .newest
             .as_ref()
@@ -591,6 +594,29 @@ fn resolve(source: &Source, pin: Option<String>, version: Option<String>) -> Res
 
 /// The newest release that has a build for this platform, and the older ones, newest first,
 /// that are still newer than this bay (G242's steps).
+/// G806: the notes of each release newer than this bay, as the release list read them.
+static NOTES: std::sync::Mutex<Vec<(String, Vec<String>)>> = std::sync::Mutex::new(Vec::new());
+
+/// G806 (owner, 2026-11-20: "after each bay update … a proper call to action … so that this
+/// will be a proper closed loop"): each release this update brings past the installed bay, up to
+/// `target`, newest first, with its notes, as `{version, notes}`.
+fn changes_to(target: &str) -> Value {
+    let mut changes: Vec<(String, Vec<String>)> = NOTES
+        .lock()
+        .map(|kept| kept.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(version, _)| compare(version, target) != Ordering::Greater)
+        .collect();
+    changes.sort_by(|a, b| compare(&b.0, &a.0));
+    Value::Array(
+        changes
+            .into_iter()
+            .map(|(version, notes)| json!({"version": version, "notes": notes}))
+            .collect(),
+    )
+}
+
 fn list_newest(source: &Source) -> Result<(String, Vec<String>), String> {
     let platform = platform().ok_or_else(|| "no release build for this platform".to_owned())?;
     let archive = archive_name(&platform);
@@ -614,6 +640,13 @@ fn list_newest(source: &Source) -> Result<(String, Vec<String>), String> {
         }
         Err(why) => return Err(why),
     };
+    if let Ok(mut kept) = NOTES.lock() {
+        *kept = releases
+            .iter()
+            .filter(|release| compare(&release.version, BAY) == Ordering::Greater)
+            .map(|release| (release.version.clone(), release.notes.clone()))
+            .collect();
+    }
     let mut versions: Vec<String> = releases
         .into_iter()
         .filter(built)
@@ -692,6 +725,8 @@ pub fn pin_allows(pin: &str, version: &str) -> bool {
 struct Release {
     version: String,
     assets: Vec<String>,
+    /// The release's notes: its CHANGELOG section, one line per `- ` item (G806).
+    notes: Vec<String>,
 }
 
 /// The published releases, read page by page until `enough` holds for what was read or the
@@ -723,9 +758,17 @@ fn release_list(
                         .flatten()
                         .filter_map(|asset| asset["name"].as_str().map(str::to_owned))
                         .collect();
+                    let notes = release["body"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .lines()
+                        .filter_map(|line| line.trim().strip_prefix("- "))
+                        .map(str::to_owned)
+                        .collect();
                     valid(version).then(|| Release {
                         version: version.to_owned(),
                         assets,
+                        notes,
                     })
                 }),
         );
