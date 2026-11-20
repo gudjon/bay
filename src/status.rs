@@ -2532,13 +2532,20 @@ fn held_by(op: &crate::change::Operation, operation: &mut Value) {
 }
 
 /// What an operation under way waits on, besides its place: § 7, a worker for the
-/// environments no worker answered for; G177, a conflict with trunk the executor found while
+/// environments no worker answered for, and whether a live runner serves them all together
+/// (G817); G177, a conflict with trunk the executor found while
 /// the operation waits behind the queue's head, as `MERGE_CONFLICT` with its paths, so its
 /// agent can refresh before the head reaches it.
-fn waiting(op: &crate::change::Operation, operation: &mut Value) {
+fn waiting(repo: &Repo, op: &crate::change::Operation, operation: &mut Value) {
     if let Some(unavailable) = &op.unavailable {
         operation["waiting_for"] = json!("worker");
         operation["environments"] = json!(unavailable.environments);
+        // G817 (a fleet finding, 2026-11-20): a change waited 2.6 hours for a worker that served
+        // both its environments while each live runner served one, and status said it was being
+        // checked. A runner takes such a change only when its box serves every one of them.
+        operation["served_together"] = json!(
+            crate::presence::serving_until(&repo.git, "", &unavailable.environments).is_some()
+        );
     }
     if let Some(conflict) = &op.early_conflict {
         let reason = Reason::MergeConflict;
@@ -2847,7 +2854,7 @@ fn under_way(
     op: &crate::change::Operation,
     operation: &mut Value,
 ) {
-    waiting(op, operation);
+    waiting(repo, op, operation);
     operation["line"] = shared
         .places(repo)
         .and_then(|places| line_of(places, &op.op_id))

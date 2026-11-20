@@ -315,7 +315,7 @@ pub fn verdict(
 }
 
 /// "a", "a and b", "a, b and c".
-fn and_list<'a>(words: impl Iterator<Item = &'a str>) -> String {
+pub(crate) fn and_list<'a>(words: impl Iterator<Item = &'a str>) -> String {
     let words: Vec<&str> = words.collect();
     match words.split_last() {
         Some((last, [])) => (*last).to_owned(),

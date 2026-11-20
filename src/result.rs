@@ -1123,7 +1123,7 @@ impl Reason {
                 "Read the failing check in `detail`, repair the change in the view, then `bay merge` again."
             }
             Self::CheckUnavailable => {
-                "Wait: bay retries once a worker can run the check. If `bay status --all` shows no live runner, tell the user."
+                "Wait: a runner whose box serves every environment it needs takes it. If `bay status <change>` says no live runner does, tell the user."
             }
             Self::CheckUnknown => {
                 "A runner asks again once main moves, up to three times; it is never a pass. If it stays unknown, repair it, then `bay merge`."
@@ -1435,6 +1435,22 @@ impl Reason {
         {
             return format!(
                 "Not updated: GitHub limits reads until {at}. Try again then, or set GH_TOKEN."
+            );
+        }
+        // G817: a wait for a worker that no live runner serves whole names the environments and
+        // who acts.
+        if self == Self::CheckUnavailable
+            && detail.and_then(|detail| detail.get("served_together")) == Some(&Value::Bool(false))
+        {
+            let environments = crate::completion::and_list(
+                detail
+                    .and_then(|detail| detail["environments"].as_array())
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str),
+            );
+            return format!(
+                "Saved, but no live runner's box serves {environments} together, so its checks wait until one does: tell the user."
             );
         }
         // T7, T12: talk is off unless main's policy turns it on; the sentence names the line.
@@ -2184,6 +2200,30 @@ fn eta_say(row: &Value) -> Option<String> {
     Some(said)
 }
 
+/// G817: a change that waits for a worker says for which environments, and whether a live
+/// runner serves them together; its lease is the one that recorded the wait.
+fn worker_wait_say(id: &str, op: &Value) -> Option<String> {
+    if op["waiting_for"] != "worker" {
+        return None;
+    }
+    let environments = crate::completion::and_list(
+        op["environments"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str),
+    );
+    Some(if op["served_together"] == false {
+        format!(
+            "{id} waits for a runner whose box serves {environments} together, and no live runner does: tell the user."
+        )
+    } else {
+        format!(
+            "{id} waits for a runner whose box serves {environments}; a live one does, so it is taken without you."
+        )
+    })
+}
+
 fn change_state_say(result: &BayResult) -> Option<String> {
     let id = result.change.as_deref()?;
     let [row] = result
@@ -2213,6 +2253,9 @@ fn change_state_say(result: &BayResult) -> Option<String> {
         return Some(format!(
             "{id} is not submitted yet; run `bay merge` on it when it is ready."
         ));
+    }
+    if let Some(said) = worker_wait_say(id, op) {
+        return Some(said);
     }
     if !op["lease"].is_null() {
         return Some(format!("{id} is being checked now."));

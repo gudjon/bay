@@ -408,7 +408,7 @@ fn wait_land(repo: &Repo, id: &str, step: &Step) -> Result<BayResult, String> {
             let deadline = repo.config.progress_deadline();
             let watch = Instant::now();
             if !watch_until_done(repo, id, &op_id, watch + deadline) {
-                return Ok(still_running(id, op_id, deadline, watch));
+                return Ok(still_running(repo, id, op_id, deadline, watch));
             }
             return submit_land(repo, id, step, false)
                 .map(|result| checked_elsewhere(repo, id, &op_id, result));
@@ -543,24 +543,61 @@ fn observe_land(
         return submit_land(repo, id, step, false)
             .map(|result| checked_elsewhere(repo, id, &op_id, result));
     }
-    Ok(still_running(id, op_id, timeout, watch))
+    Ok(still_running(repo, id, op_id, timeout, watch))
 }
 
 /// The answer of a wait that ended, after watching since `watch` for at most `timeout`, before
 /// operation `op_id` of change `id` had its outcome (§ 9a): `queued`/`running`, and the run
-/// continues on its own.
-fn still_running(id: &str, op_id: String, timeout: Duration, watch: Instant) -> BayResult {
+/// continues on its own. G817: an operation that waits for a worker no live runner serves whole
+/// is answered `CHECK_UNAVAILABLE`, saying so, never "nothing for you to do".
+fn still_running(
+    repo: &Repo,
+    id: &str,
+    op_id: String,
+    timeout: Duration,
+    watch: Instant,
+) -> BayResult {
+    let mut detail = json!({
+        "observation_timeout_s": timeout.as_secs(),
+        // G776: how long this command watched, the rest of its wait spent submitting.
+        "watched_s": watch.elapsed().as_secs(),
+        "the run continues": true,
+    });
+    if let Some(environments) = unserved_whole(repo, id, &op_id) {
+        detail["environments"] = json!(environments);
+        detail["served_together"] = json!(false);
+        let mut result = BayResult::refused(Decision::Queued, Reason::CheckUnavailable)
+            .with_change(id)
+            .with_op(op_id);
+        result.waiting_for = Some("worker".to_owned());
+        return result.with_detail(detail);
+    }
     let mut result = BayResult::new(Decision::Queued)
         .with_change(id)
         .with_op(op_id);
     result.state = Some("running".to_owned());
     result.waiting_for = Some("executor".to_owned());
-    result.with_detail(json!({
-        "observation_timeout_s": timeout.as_secs(),
-        // G776: how long this command watched, the rest of its wait spent submitting.
-        "watched_s": watch.elapsed().as_secs(),
-        "the run continues": true,
-    }))
+    result.with_detail(detail)
+}
+
+/// G817: the environments operation `op_id` of change `id` waits for a worker for, when no box
+/// served them (no adapter answered) and no live runner, on the presences fetched now, serves
+/// them all together. A fetch that fails says nothing.
+fn unserved_whole(repo: &Repo, id: &str, op_id: &str) -> Option<Vec<String>> {
+    let (_, record) = Chain::new(&repo.git).read(id).ok()?;
+    let waiting = record
+        .operations
+        .iter()
+        .find(|op| op.op_id == op_id)?
+        .unavailable
+        .clone()?;
+    if waiting.adapter.is_some()
+        || !crate::presence::fetch(repo)
+        || crate::presence::serving_until(&repo.git, "", &waiting.environments).is_some()
+    {
+        return None;
+    }
+    Some(waiting.environments)
 }
 
 /// Watches change `id`'s chain until operation `op_id` reached its outcome (or was blocked), at
@@ -8663,6 +8700,20 @@ fn wait_for_worker(
     let mut waiting = waiting;
     if let (Some(place), Some(detail)) = (kept_at, waiting.detail.as_mut()) {
         detail["kept"] = json!(place);
+    }
+    // G817: a wait for environments this box does not serve says whether a live runner serves
+    // them all together: a runner takes it only then.
+    if waiting
+        .detail
+        .as_ref()
+        .is_some_and(|detail| detail["unavailable"].is_null())
+        && crate::presence::fetch(ctx.repo)
+    {
+        let me = crate::presence::presence_ref(&ctx.executor_name());
+        let together = crate::presence::serving_until(&ctx.repo.git, &me, &environments).is_some();
+        if let Some(detail) = waiting.detail.as_mut() {
+            detail["served_together"] = json!(together);
+        }
     }
     Ok(waiting)
 }
