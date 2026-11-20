@@ -2,7 +2,7 @@
 
 ## 0.6.116
 
-- A check's kept files stay a day after their last use, so the next check links them instead of writing them.
+- A check's kept files stay a day after last use, so the next check links them, not writes them.
 
 ## 0.6.115
 
