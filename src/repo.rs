@@ -28,6 +28,48 @@ pub const REMOTE_KEY: &str = "bay.remote";
 /// The remote when `bay.remote` is unset.
 pub const DEFAULT_REMOTE: &str = "origin";
 
+/// G810 (a measurement, 2026-11-20: `bay hook tool.before` took a median 148 ms on one box and
+/// 230 to 300 ms on a loaded Mac, nearly all of it the 5 to 7 Git processes that opened the
+/// repository): what [`Repo::open`] read, in `<common>/bay/opened.json`, for
+/// [`Repo::open_quick`]: the bootstrap, the config committed at the trunk tip, and each file
+/// those rest on with what it was then. A changed file, or any `GIT_CONFIG*` setting, opens the
+/// repository again.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Opened {
+    /// The environment that chose the config files read ([`config_environment`]).
+    environment: Vec<(String, Option<String>)>,
+    common_dir: PathBuf,
+    work_root: PathBuf,
+    remote: String,
+    trunk: String,
+    source: String,
+    config: String,
+    stamps: Vec<(PathBuf, Option<crate::git::FileStamp>)>,
+}
+
+/// The environment that chooses which config files Git reads: an [`Opened`] read under another
+/// rests on other files.
+fn config_environment() -> Vec<(String, Option<String>)> {
+    [
+        "GIT_CONFIG_GLOBAL",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_NOSYSTEM",
+        "HOME",
+        "XDG_CONFIG_HOME",
+    ]
+    .iter()
+    .map(|name| {
+        (
+            (*name).to_owned(),
+            std::env::var_os(name).map(|value| value.to_string_lossy().into_owned()),
+        )
+    })
+    .collect()
+}
+
+/// Where [`Opened`] is kept, under `<common>/bay`.
+const OPENED_FILE: &str = "opened.json";
+
 /// How the trunk was found before any file is read: the operator's choice in this repository's
 /// own git config, or the remote's default branch.
 #[derive(Clone, Debug)]
@@ -328,6 +370,132 @@ impl Repo {
     /// bootstrap or no config at the trunk tip (a message that starts `CONFIG_MISSING`).
     pub fn open(dir: &Path) -> Result<Self, String> {
         Self::open_with(dir, Fetch::Never).map_err(|error| error.message())
+    }
+
+    /// G810: [`Repo::open`] for `bay hook`, which judges each tool call and must answer within
+    /// a few tens of milliseconds: from what the last open read ([`Opened`]), with no Git
+    /// process, while every file it rests on is as it was; else [`Repo::open`], whose reads are
+    /// then kept for the next.
+    ///
+    /// # Errors
+    ///
+    /// As [`Repo::open`].
+    pub fn open_quick(dir: &Path) -> Result<Self, String> {
+        if let Some(repo) = Self::from_opened(dir) {
+            return Ok(repo);
+        }
+        let repo = Self::open(dir)?;
+        repo.keep_opened();
+        Ok(repo)
+    }
+
+    /// G810: [`Repo::open_known`] for `bay hook`, as [`Repo::open_quick`] is [`Repo::open`]'s.
+    ///
+    /// # Errors
+    ///
+    /// As [`Repo::open_known`].
+    pub fn open_known_quick(dir: &Path) -> Result<Self, (Option<PathBuf>, String)> {
+        if let Some(repo) = Self::from_opened(dir) {
+            return Ok(repo);
+        }
+        let repo = Self::open_known(dir)?;
+        repo.keep_opened();
+        Ok(repo)
+    }
+
+    /// The repository [`Opened`] records for `dir`, when every file it rests on is as it was.
+    fn from_opened(dir: &Path) -> Option<Self> {
+        // Config given in the environment itself rests on no file.
+        if ["GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
+        {
+            return None;
+        }
+        let common = Git::new(dir).common_dir_on_disk()?;
+        let text = std::fs::read_to_string(common.join("bay").join(OPENED_FILE)).ok()?;
+        let opened: Opened = serde_json::from_str(&text).ok()?;
+        if std::fs::canonicalize(&opened.common_dir).ok()? != common
+            || opened.environment != config_environment()
+            || opened
+                .stamps
+                .iter()
+                .any(|(path, stamp)| crate::git::file_stamp(path) != *stamp)
+        {
+            return None;
+        }
+        let mut config = Config::parse(&opened.config).ok()?;
+        config.trunk = Some(opened.trunk.clone());
+        config.remote = Some(opened.remote.clone());
+        Some(Self {
+            git: Git::new(&opened.common_dir),
+            opened_in: dir.to_path_buf(),
+            common_dir: opened.common_dir,
+            work_root: opened.work_root,
+            bootstrap: Bootstrap {
+                remote: opened.remote,
+                trunk: opened.trunk,
+                source: opened.source,
+            },
+            config,
+            fetched_at: Mutex::new(None),
+            prefetched: Mutex::new(None),
+            evidence_fetched: std::sync::atomic::AtomicBool::new(false),
+            prefetched_specs: Mutex::new(std::collections::HashSet::new()),
+            reads: Mutex::new(Reads::default()),
+        })
+    }
+
+    /// Keeps what this open read for [`Repo::open_quick`]: the config at the trunk tip, the
+    /// bootstrap, and what each file they rest on is now (the config files its read listed, and
+    /// the trunk's tracking ref: its loose file and `packed-refs`, or a reftable's table list).
+    /// Best effort: a record that cannot be written is opened again next time.
+    fn keep_opened(&self) {
+        let Ok(Some(tip)) = self
+            .git
+            .ref_target(&format!("{}^{{commit}}", self.bootstrap.tracking_ref()))
+        else {
+            return;
+        };
+        let Ok(Some(config)) = committed_config(&self.git, &tip) else {
+            return;
+        };
+        let Some(mut stamps) = self.git.config_stamps() else {
+            return;
+        };
+        let refs: Vec<PathBuf> = if self.common_dir.join("reftable").is_dir() {
+            vec![self.common_dir.join("reftable").join("tables.list")]
+        } else {
+            vec![
+                self.common_dir.join(self.bootstrap.tracking_ref()),
+                self.common_dir.join("packed-refs"),
+                self.common_dir
+                    .join(format!("refs/remotes/{}/HEAD", self.bootstrap.remote)),
+            ]
+        };
+        stamps.extend(
+            refs.into_iter()
+                .map(|path| (path.clone(), crate::git::file_stamp(&path))),
+        );
+        let opened = Opened {
+            environment: config_environment(),
+            common_dir: self.common_dir.clone(),
+            work_root: self.work_root.clone(),
+            remote: self.bootstrap.remote.clone(),
+            trunk: self.bootstrap.trunk.clone(),
+            source: self.bootstrap.source.clone(),
+            config,
+            stamps,
+        };
+        let dir = self.common_dir.join("bay");
+        let path = dir.join(OPENED_FILE);
+        let tmp = dir.join(format!("{OPENED_FILE}.{}", std::process::id()));
+        if let Ok(text) = serde_json::to_string(&opened)
+            && std::fs::create_dir_all(&dir).is_ok()
+            && std::fs::write(&tmp, text).is_ok()
+        {
+            let _ = crate::durable::rename(&tmp, &path);
+        }
     }
 
     /// [`Repo::open`] for a command that fetches trunk: it fetches first, then reads the

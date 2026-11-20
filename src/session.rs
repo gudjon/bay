@@ -156,8 +156,8 @@ fn bind_env(state_dir: &Path, session: &SessionId) {
 
 /// Appends one `bay.session/1` line for this hook event to
 /// `<git-common-dir>/bay/sessions/<session-id>.jsonl` (§ 11a), when the session runs in a
-/// repository. A silent `PreToolUse` appends nothing: it is the blocking path
-/// (`onFailure: "block"`), § 11a gives it only the refusal, and the same step's
+/// repository. A silent `PreToolUse` appends nothing: it is the blocking path (its deny
+/// exit), § 11a gives it only the refusal, and the same step's
 /// `PostToolBatch` records it; a refusal, a shell deny or a notice it gives is recorded
 /// ([`record_with`]).
 ///

@@ -5,8 +5,8 @@
 //! bare `bay hook tool.before` would deny every Edit, Write and Bash on a box without bay. bay's
 //! guarantee never rests on the client hook (land and the host hook judge again), and a box
 //! without bay runs no bay session to guard, so the entry bay installs exits 0 when `bay` does
-//! not resolve on `PATH`. Where bay resolves, the entry is bay's: a failing bay, or bay's deny,
-//! still denies. A re-install replaces the bare entry an earlier bay wrote, and doctor still
+//! not resolve on `PATH`. Where bay resolves, the entry is bay's: bay's deny (exit 2) still
+//! denies. A re-install replaces the bare entry an earlier bay wrote, and doctor still
 //! recognises both forms as bay's.
 
 // Each case runs shell scripts (the hook entry, a fake bay on PATH), so these run on Unix only.
@@ -160,7 +160,7 @@ fn every_event_entry_tests_for_bay_and_keeps_its_timeout_and_on_failure() {
     }
     let hook = &all["hooks"]["PreToolUse"][0]["hooks"][0];
     assert_eq!(hook["timeout"], 30, "{hook}");
-    assert_eq!(hook["onFailure"], "block", "{hook}");
+    assert_eq!(hook["onFailure"], "continue", "{hook}");
 }
 
 #[test]

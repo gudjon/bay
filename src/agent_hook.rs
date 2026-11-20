@@ -51,7 +51,7 @@ impl Product {
     pub fn configured(input: &str, dir: &Path) -> Self {
         let value: Value = serde_json::from_str(input).unwrap_or(Value::Null);
         let cwd = crate::session::hook_cwd(&value, dir);
-        match crate::repo::Repo::open(&cwd) {
+        match crate::repo::Repo::open_quick(&cwd) {
             Ok(repo) if repo.config.codex_adapter() => Self::Codex,
             _ => Self::Claude,
         }
@@ -409,6 +409,34 @@ pub struct Outcome {
 /// (G336), and what bay does after it reads and writes only this machine.
 pub const BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// G158 (owner ruling 2026-11-20, Code Mode): how long past its [`budget`] `bay hook` may take
+/// before it answers allow: well within the entry's timeout ([`PRE_TOOL_TIMEOUT_S`]), so a hook
+/// that hangs never reaches the product's timeout, which in Code Mode refuses the call.
+///
+/// [`PRE_TOOL_TIMEOUT_S`]: crate::agent_settings::PRE_TOOL_TIMEOUT_S
+pub const ANSWER_MARGIN: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// G158: in a test build, `BAY_TEST_HOOK_HANG` makes `bay hook` hang and `BAY_TEST_HOOK_PANIC`
+/// makes it panic, before it judges anything: a fault of bay's own.
+///
+/// # Panics
+///
+/// With `BAY_TEST_HOOK_PANIC` set, in a test build.
+pub fn test_fault() {
+    if !TEST_HOOKS {
+        return;
+    }
+    assert!(
+        std::env::var_os("BAY_TEST_HOOK_PANIC").is_none(),
+        "a test fault of bay hook"
+    );
+    if std::env::var_os("BAY_TEST_HOOK_HANG").is_some() {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(60));
+        }
+    }
+}
+
 /// The budget of `bay hook <event>`: [`BUDGET`], or in a test build `BAY_TEST_HOOK_BUDGET_S`.
 /// `None` for the two moments that wait for the remote on purpose, under an entry timeout of their
 /// own: `talk-wait` and `tool.ask`.
@@ -469,7 +497,7 @@ fn dispatch_as(product: Product, caller: &str, event: &str, input: &str, dir: &P
     if let Some(why) = misnamed_tool_call(event, input) {
         return invalid_payload(product, input, dir, &why, true);
     }
-    // `PreToolUse` is the blocking path (`onFailure: "block"`): § 11a gives it only the refusal,
+    // `PreToolUse` is the blocking path (its deny exit): § 11a gives it only the refusal,
     // and the same step's end (`PostToolBatch`, Codex's `PostToolUse`) records it.
     let mut recorded = crate::session::Recorded::default();
     let mut product_event = Event::Unprobed;
@@ -479,10 +507,15 @@ fn dispatch_as(product: Product, caller: &str, event: &str, input: &str, dir: &P
     }
     // BACKLOG 66 C: every hook names its session against the agent's process, so the agent's
     // own bay commands find it with no `BAY_SESSION` (`crate::agent_pid`).
-    if let Some(session) = parsed.as_ref().and_then(|payload| payload.session.as_ref())
-        && let Ok(common) = crate::git::Git::new(dir).common_dir()
-    {
-        crate::agent_pid::remember(Path::new(&common), session.as_str());
+    // G810: the common directory as the files say it, with no Git process where they do.
+    if let Some(session) = parsed.as_ref().and_then(|payload| payload.session.as_ref()) {
+        let here = crate::git::Git::new(dir);
+        if let Some(common) = here
+            .common_dir_on_disk()
+            .or_else(|| here.common_dir().ok().map(PathBuf::from))
+        {
+            crate::agent_pid::remember(&common, session.as_str());
+        }
     }
     if event == "tool.ask" {
         return ask(parsed.as_ref(), caller, input);
@@ -824,8 +857,10 @@ fn open_questions(dir: &Path) -> Vec<String> {
 /// terminal, or the session went on), so its open question talks close as `ended`. Takes them
 /// from the session's state, for the hook's poll to close ([`crate::hook_poll`]).
 fn take_questions(payload: &Payload) -> Vec<String> {
-    let (Some(session), Ok(repo)) = (&payload.session, crate::repo::Repo::open(&payload.cwd))
-    else {
+    let (Some(session), Ok(repo)) = (
+        &payload.session,
+        crate::repo::Repo::open_quick(&payload.cwd),
+    ) else {
         return Vec::new();
     };
     let dir = crate::session::state_dir(&repo, session);
@@ -903,7 +938,7 @@ fn poll_notice(product: Product, input: &str, dir: &Path, command: &str) -> Opti
     }
     let payload = Payload::parse(product, "tool.before", input, dir)?;
     let session = payload.session.as_ref()?;
-    let repo = crate::repo::Repo::open(&payload.cwd).ok()?;
+    let repo = crate::repo::Repo::open_quick(&payload.cwd).ok()?;
     let state = crate::session::state_dir(&repo, session);
     if !crate::notice::poll_once(&state, POLL_LINE, repo.config.notice_budget()) {
         return None;

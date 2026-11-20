@@ -1,5 +1,7 @@
 //! H4. Doctor has a row per configured agent product that says whether its hooks fail closed,
-//! that `Stop` cannot, and that the guarantee does not rest on the client hook.
+//! that `Stop` cannot, and that the guarantee does not rest on the client hook. Since G158's
+//! ruling (2026-11-20, Code Mode) bay's own entry fails open: a hook that fails or does not finish
+//! lets the call go on, and bay denies only on purpose.
 //!
 //! `DESIGN` § 15.2; the hook-standards analysis, item (e). The row is informational: it is red
 //! only where bay's entries are missing, which the `hooks` row already reports.
@@ -31,7 +33,7 @@ fn agent_hooks_rows(result: &Value) -> Vec<&Value> {
 }
 
 #[test]
-fn installed_claude_hooks_fail_closed_and_stop_cannot() {
+fn installed_claude_hooks_fail_open_and_stop_cannot() {
     let test_box = TestBox::new();
     let repo = claude_repo(&test_box);
     test_box.bay_ok(&repo, &["install"]);
@@ -42,8 +44,8 @@ fn installed_claude_hooks_fail_closed_and_stop_cannot() {
     let hooks = row(&result, "agent-hooks");
     assert_eq!(hooks["product"], "claude", "{hooks}");
     assert_eq!(hooks["state"], "green", "{hooks}");
-    assert_eq!(hooks["early_refusal"], "fail_closed", "{hooks}");
-    assert_eq!(hooks["pre_tool"]["on_failure"], "block", "{hooks}");
+    assert_eq!(hooks["early_refusal"], "fail_open", "{hooks}");
+    assert_eq!(hooks["pre_tool"]["on_failure"], "continue", "{hooks}");
     assert_eq!(hooks["stop"]["fails_closed"], false, "{hooks}");
     assert_eq!(
         hooks["guarantee"], "merge and main hook (G8, G23)",

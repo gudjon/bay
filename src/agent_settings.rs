@@ -57,9 +57,10 @@ const BAY_COMMAND_PREFIX: &str = "bay hook ";
 
 /// What bay's hook command runs before `bay hook <event>` (G169): on a box where `bay` does not
 /// resolve on `PATH` the entry exits 0, so a settings file tracked in the repository never
-/// turns `onFailure: "block"` into a deny of every tool on a box that runs no bay session.
-/// Where bay resolves, `exec` hands the entry to it, so its exit code, a hang and its timeout
-/// stay bay's and fail closed. POSIX sh: the product runs the command through its shell.
+/// turns an entry that cannot start into a deny of every tool on a box that runs no bay session.
+/// Where bay resolves, `exec` hands the entry to it, so its exit code and its deadline stay
+/// bay's (G158: it answers allow when it fails or hangs). POSIX sh: the product runs the command
+/// through its shell.
 pub const PRESENCE_GUARD: &str = "command -v bay >/dev/null 2>&1 || exit 0; exec ";
 
 /// What a bay entry does on a box without bay (G169): [`PRESENCE_GUARD`] exits 0, so the
@@ -264,12 +265,15 @@ pub fn entry_shape(event: &str, bay_event: &str) -> EntryShape {
         };
     }
     match event {
-        // § 11a: exec form with `onFailure: "block"`, probed on the installed version (ROADMAP § 4).
-        // G158: under `onFailure: "block"` a timeout denies (probe P2a); without one the
-        // product's default (600 s on 2.1.303, probe P2b) holds the agent on a hung bay.
+        // § 11a: exec form, probed on the installed version (ROADMAP § 4). G158 (owner ruling
+        // 2026-11-20, Code Mode): `onFailure: "continue"`, so a hook that fails or does not
+        // finish lets the call go on (in Code Mode a refusal stops the program partway); bay
+        // denies only on purpose, by exit 2, and main's guard (land and the host hook) judges
+        // every change. The timeout keeps a hung bay from holding the agent for the product's
+        // default (600 s on 2.1.303, probe P2b); bay answers within its own deadline first.
         "PreToolUse" => EntryShape {
             blocks: true,
-            on_failure: Some("block"),
+            on_failure: Some("continue"),
             timeout_s: Some(PRE_TOOL_TIMEOUT_S),
             matcher: Some(PRE_TOOL_MATCHER),
             rewakes: false,

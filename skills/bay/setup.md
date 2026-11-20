@@ -239,7 +239,8 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
 - **Its own merges, always:** what merges through bay is exactly what was checked.
 - **An agent's Git commands, only with the hook:** `[agent] product = "claude"` in `.bay/config.toml`, then
   `bay install`. The hook then refuses a push to main, a force push, `reset --hard` and the like, and an edit
-  or a `git commit` in another actor's view. Without it,
+  or a `git commit` in another actor's view. It refuses only on purpose: a hook that fails or does not finish
+  lets the call go on, and merge and main's host hook judge every change. Without it,
   `bay doctor`'s `hooks` row reads `off` and an agent can push main around bay.
 - **Everything that reaches main, only on a bay-hosted main** (`bay host`). On a forge such as GitHub, a merge
   made in its web page or API, and a script's push, never pass a local hook; protect main there so that only the

@@ -917,37 +917,7 @@ fn hooks_row(
             report.red(Reason::HooksMissing, Some("hooks missing"));
         }
     }
-    // G158: the entry's timeout bounds a hung hook; without it the product's default holds the
-    // agent first. Not red: the hook still fails closed when the default fires.
-    if let Some(timeout) = agent_settings::pre_tool_timeout(&settings) {
-        row["pre_tool_timeout_s"] = json!(timeout);
-        if timeout.is_none_or(|timeout| timeout > agent_settings::PRE_TOOL_TIMEOUT_S) {
-            row["timeout_note"] = json!(format!(
-                "bay's PreToolUse entry has no timeout of at most {} s, so a hung hook holds \
-                 the agent for the product's default before it denies; run install again",
-                agent_settings::PRE_TOOL_TIMEOUT_S
-            ));
-        }
-    }
-    // G169: an entry an earlier bay wrote has no presence test, so on a box of the fleet without
-    // bay it denies every tool. Not red: this box has bay, and the entry still fails closed here.
-    let outdated = agent_settings::outdated_claude_events(&settings);
-    if !outdated.is_empty() {
-        row["outdated"] = json!(outdated);
-        row["outdated_note"] = json!(
-            "these entries run bay without testing that it is installed, so on a box without bay \
-             they deny every tool; run install again"
-        );
-    }
-    // G324: an entry an older bay wrote under a name 0.3.0 no longer knows (H1, no aliases).
-    let renamed = agent_settings::renamed_claude_events(&settings);
-    if !renamed.is_empty() {
-        row["old_names"] = json!(renamed);
-        row["old_names_note"] = json!(
-            "these entries call bay hook under a name an older bay wrote, which this bay \
-             refuses; run install again"
-        );
-    }
+    drift_notes(&settings, &mut row);
     if let Some(recorded) = recorded_unrelated_digest(git)? {
         row["unrelated_hooks_unchanged"] =
             json!(recorded == agent_settings::unrelated_digest(&settings));
@@ -964,6 +934,54 @@ fn hooks_row(
         report,
     );
     Ok(())
+}
+
+/// The notes of `hooks_row` on bay's Claude entries an earlier bay wrote, each a reason to run
+/// install again: none is red.
+fn drift_notes(settings: &serde_json::Map<String, Value>, row: &mut Value) {
+    // G158: the entry's timeout bounds a hung hook; without it the product's default holds the
+    // agent first. Not red: bay answers within its own deadline first.
+    if let Some(timeout) = agent_settings::pre_tool_timeout(settings) {
+        row["pre_tool_timeout_s"] = json!(timeout);
+        if timeout.is_none_or(|timeout| timeout > agent_settings::PRE_TOOL_TIMEOUT_S) {
+            row["timeout_note"] = json!(format!(
+                "bay's PreToolUse entry has no timeout of at most {} s, so a hung hook holds \
+                 the agent for the product's default; run install again",
+                agent_settings::PRE_TOOL_TIMEOUT_S
+            ));
+        }
+    }
+    // G158 (owner ruling 2026-11-20, Code Mode): an entry an earlier bay wrote with
+    // `onFailure: "block"` refuses the call when the hook fails or does not finish, which in Code
+    // Mode stops the program partway. Not red: bay still denies only on purpose.
+    if agent_settings::claude_pre_tool_on_failure(settings)
+        .flatten()
+        .is_some_and(|on_failure| on_failure == "block")
+    {
+        row["on_failure_note"] = json!(
+            "bay's PreToolUse entry says onFailure block, so a hook that fails or does not \
+             finish refuses the call, and in Code Mode stops the program; run install again"
+        );
+    }
+    // G169: an entry an earlier bay wrote has no presence test, so on a box of the fleet without
+    // bay it denies every tool. Not red: this box has bay, and the entry still fails closed here.
+    let outdated = agent_settings::outdated_claude_events(settings);
+    if !outdated.is_empty() {
+        row["outdated"] = json!(outdated);
+        row["outdated_note"] = json!(
+            "these entries run bay without testing that it is installed, so on a box without bay \
+             they deny every tool; run install again"
+        );
+    }
+    // G324: an entry an older bay wrote under a name 0.3.0 no longer knows (H1, no aliases).
+    let renamed = agent_settings::renamed_claude_events(settings);
+    if !renamed.is_empty() {
+        row["old_names"] = json!(renamed);
+        row["old_names_note"] = json!(
+            "these entries call bay hook under a name an older bay wrote, which this bay \
+             refuses; run install again"
+        );
+    }
 }
 
 /// The `hooks` and `agent-hooks` rows of the Codex adapter (G308): bay's entries in

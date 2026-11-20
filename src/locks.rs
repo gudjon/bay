@@ -198,7 +198,7 @@ pub fn take_for(
         let Some((root, path)) = crate::claims::tree_path(&target) else {
             continue;
         };
-        let Ok(repo) = Repo::open_known(&root) else {
+        let Ok(repo) = Repo::open_known_quick(&root) else {
             continue;
         };
         let Ok(lockable) = lockable(&repo.git, &repo.trunk_tracking_ref(), &[path.as_str()]) else {

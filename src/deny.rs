@@ -931,41 +931,49 @@ pub fn judge_hook(event: &str, input: &str, dir: &std::path::Path) -> Option<Den
     let cwd = payload["cwd"]
         .as_str()
         .map_or_else(|| dir.to_path_buf(), std::path::PathBuf::from);
-    let current = crate::git::Git::new(&cwd)
-        .run(&["symbolic-ref", "--short", "-q", "HEAD"])
-        .ok();
+    // G810: the branch checked out matters to a push alone (a bare `git push` from trunk), so
+    // only a command that names one pays for its read.
+    let current = command
+        .contains("push")
+        .then(|| {
+            crate::git::Git::new(&cwd)
+                .run(&["symbolic-ref", "--short", "-q", "HEAD"])
+                .ok()
+        })
+        .flatten();
     // The trunk is the one every bay command uses (ruling: config location): the bootstrap of
     // this repository's own git config or its remote's default branch, never a file in the
-    // agent's work tree. Outside a repository a push fails anyway; `main` keeps the shape.
-    let denial = match crate::repo::Bootstrap::of(&cwd) {
-        None => denied(command, "main", current.as_deref()),
-        Some(Ok(bootstrap)) => denied_targets(
+    // agent's work tree. Outside a repository a push fails anyway; `main` keeps the shape. G810:
+    // as the last open of the repository read it, while nothing it rests on moved.
+    let denial = match crate::repo::Repo::open_quick(&cwd) {
+        Ok(repo) => denied_targets(
             command,
-            &bootstrap.trunk,
-            &target_refs(command, &cwd),
+            &repo.bootstrap.trunk,
+            &target_refs(command, &repo),
             current.as_deref(),
         ),
-        Some(Err(_)) => denied_with(command, Trunk::Unknown, &[], current.as_deref()),
+        Err(_) => match crate::repo::Bootstrap::of(&cwd) {
+            None => denied(command, "main", current.as_deref()),
+            Some(Ok(bootstrap)) => {
+                denied_targets(command, &bootstrap.trunk, &[], current.as_deref())
+            }
+            Some(Err(_)) => denied_with(command, Trunk::Unknown, &[], current.as_deref()),
+        },
     };
     denial.or_else(|| denied_lane(command, &view_lane_refs(command, &cwd)))
 }
 
-/// NEW-5: the refs of the `[[target]]`s the config at trunk declares, to judge `command` by in
-/// `cwd`: none unless it names `push`, and none when the config cannot be read (the trunk is
-/// still judged). Only such a command pays for the read.
-fn target_refs(command: &str, cwd: &std::path::Path) -> Vec<String> {
+/// NEW-5: the refs of the `[[target]]`s the config at trunk of `repo` declares, to judge
+/// `command` by: none unless it names `push`.
+fn target_refs(command: &str, repo: &crate::repo::Repo) -> Vec<String> {
     if !command.contains("push") {
         return Vec::new();
     }
-    crate::repo::Repo::open(cwd)
-        .map(|repo| {
-            repo.config
-                .targets
-                .iter()
-                .map(crate::config::Target::reference)
-                .collect()
-        })
-        .unwrap_or_default()
+    repo.config
+        .targets
+        .iter()
+        .map(crate::config::Target::reference)
+        .collect()
 }
 
 /// NEW-4: the lane ref patterns to judge `command` by in `cwd`: none unless it names one of the
@@ -978,7 +986,7 @@ fn view_lane_refs(command: &str, cwd: &std::path::Path) -> Vec<String> {
     {
         return Vec::new();
     }
-    let Ok(repo) = crate::repo::Repo::open(cwd) else {
+    let Ok(repo) = crate::repo::Repo::open_quick(cwd) else {
         return Vec::new();
     };
     if repo.config.lanes.is_empty() {

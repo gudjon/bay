@@ -244,7 +244,7 @@ pub fn judge(cwd: &Path, file: Option<&Path>, now: SystemTime) -> Verdict {
             .map_or_else(|| cwd.to_path_buf(), Path::to_path_buf),
         None => cwd.to_path_buf(),
     };
-    let repo = match Repo::open_known(&anchor) {
+    let repo = match Repo::open_known_quick(&anchor) {
         Ok(repo) => repo,
         // No repository holds the target, so no view does.
         Err((None, _)) => return Verdict::Allow,

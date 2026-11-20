@@ -71,9 +71,9 @@ struct Snapshot {
 
 /// What a config file was: its length, modification time and, on Unix, its inode (Git writes
 /// a config file by renaming a new one over it).
-type FileStamp = (u64, Option<std::time::SystemTime>, u64);
+pub(crate) type FileStamp = (u64, Option<std::time::SystemTime>, u64);
 
-fn file_stamp(path: &Path) -> Option<FileStamp> {
+pub(crate) fn file_stamp(path: &Path) -> Option<FileStamp> {
     let meta = std::fs::metadata(path).ok()?;
     #[cfg(unix)]
     let inode = std::os::unix::fs::MetadataExt::ino(&meta);
@@ -673,6 +673,17 @@ impl Git {
             }
         })?;
         Ok(Some(value.trim_end().to_owned()))
+    }
+
+    /// G810: each config file this handle's directory's config was read from, and the global
+    /// ones that may appear, with what each was then. `None` before a read of it.
+    pub(crate) fn config_stamps(&self) -> Option<Vec<(PathBuf, Option<FileStamp>)>> {
+        SNAPSHOTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&self.dir)?
+            .as_ref()
+            .map(|snapshot| snapshot.files.clone())
     }
 
     /// Lists the config Git reads here, with each entry's scope and file.
@@ -1968,6 +1979,31 @@ impl Git {
             current = dir.parent();
         }
         None
+    }
+
+    /// G810: the common directory of the repository Git's discovery finds from this handle's
+    /// directory, read from the files alone: the first `.git` up to a `GIT_CEILING_DIRECTORIES`
+    /// entry, a directory or a file naming one (`gitdir:`), and its `commondir`. `None` when the
+    /// files do not say plainly, or the environment names a repository (`GIT_DIR`,
+    /// `GIT_COMMON_DIR`): Git is asked then.
+    pub(crate) fn common_dir_on_disk(&self) -> Option<PathBuf> {
+        if std::env::var_os("GIT_DIR").is_some() || std::env::var_os("GIT_COMMON_DIR").is_some() {
+            return None;
+        }
+        let found = self.damaged_repository()?;
+        let dot = found.join(".git");
+        let git_dir = if dot.is_dir() {
+            dot
+        } else {
+            let text = std::fs::read_to_string(&dot).ok()?;
+            let named = text.strip_prefix("gitdir:")?.trim();
+            found.join(named)
+        };
+        let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+            Ok(text) => git_dir.join(text.trim()),
+            Err(_) => git_dir,
+        };
+        std::fs::canonicalize(common).ok()
     }
 
     /// The URL of `remote`, or `None` when no such remote is configured.

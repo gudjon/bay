@@ -67,7 +67,8 @@ fn fleet_due(repo: &Repo, event: &str) -> bool {
 /// within the hook's deadline. `questions` are the session's question talks to close as `ended`
 /// (dossier 63). With nothing due, nothing starts.
 pub fn start(dir: &Path, event: &str, questions: &[String]) {
-    let Ok(repo) = Repo::open(dir) else {
+    // G810: in the hook's own process, which answers before the tool call goes on.
+    let Ok(repo) = Repo::open_quick(dir) else {
         return;
     };
     let mut args = vec!["--json".to_owned(), "live".to_owned(), "poll".to_owned()];

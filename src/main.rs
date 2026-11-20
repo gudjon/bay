@@ -940,6 +940,51 @@ fn start_change(dir: &std::path::Path, command: Command) -> BayResult {
     )
 }
 
+/// `bay hook <event>`: the agent product's hook, which follows its exit protocol (INTERFACES § 1).
+fn hook(dir: &std::path::Path, event: String) -> ExitCode {
+    // BACKLOG 218: the hook ends its wait for the remote in time for the product to read
+    // what it says.
+    let budget = bay::agent_hook::budget(&event);
+    if let Some(budget) = budget {
+        bay::deadline::set(std::time::Instant::now() + budget);
+    }
+    // The agent hook follows the agent product's exit protocol (INTERFACES § 1): for
+    // Claude Code, exit 2 denies. The payload adapter decides (agent_hook.rs).
+    let mut input = String::new();
+    let _ = std::io::stdin().read_to_string(&mut input);
+    // G158 (owner ruling 2026-11-20, Code Mode): bay denies only on purpose. A fault of
+    // its own (a panic) or a hook that runs past its deadline answers allow, never the
+    // product's failure, which in Code Mode refuses the call; main's guard judges every
+    // change.
+    let Some(budget) = budget else {
+        let outcome = bay::agent_hook::dispatch(&event, &input, dir);
+        bay::live::after_event(dir, &input);
+        print!("{}", outcome.stdout);
+        eprint!("{}", outcome.stderr);
+        return ExitCode::from(outcome.exit);
+    };
+    std::panic::set_hook(Box::new(|_| {}));
+    let (send, answer) = std::sync::mpsc::channel();
+    let dir = dir.to_path_buf();
+    std::thread::spawn(move || {
+        let outcome = std::panic::catch_unwind(|| {
+            bay::agent_hook::test_fault();
+            let outcome = bay::agent_hook::dispatch(&event, &input, &dir);
+            bay::live::after_event(&dir, &input);
+            outcome
+        });
+        let _ = send.send(outcome);
+    });
+    if let Ok(Ok(outcome)) = answer.recv_timeout(budget + bay::agent_hook::ANSWER_MARGIN) {
+        print!("{}", outcome.stdout);
+        eprint!("{}", outcome.stderr);
+        return ExitCode::from(outcome.exit);
+    }
+    // Past the deadline the judging thread may still run: the process ends with the answer.
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    std::process::exit(0)
+}
+
 fn main() -> ExitCode {
     let cli = parse();
     if let Some(saved) = saved_listing(&cli) {
@@ -1028,22 +1073,7 @@ fn main() -> ExitCode {
         }
         Command::Plugin { action } => plugin(&cli.dir, action),
         Command::Help { command } => return help(&command, cli.json),
-        Command::Hook { event } => {
-            // BACKLOG 218: the hook ends its wait for the remote in time for the product to read
-            // what it says.
-            if let Some(budget) = bay::agent_hook::budget(&event) {
-                bay::deadline::set(std::time::Instant::now() + budget);
-            }
-            // The agent hook follows the agent product's exit protocol (INTERFACES § 1): for
-            // Claude Code, exit 2 denies. The payload adapter decides (agent_hook.rs).
-            let mut input = String::new();
-            let _ = std::io::stdin().read_to_string(&mut input);
-            let outcome = bay::agent_hook::dispatch(&event, &input, &cli.dir);
-            bay::live::after_event(&cli.dir, &input);
-            print!("{}", outcome.stdout);
-            eprint!("{}", outcome.stderr);
-            return ExitCode::from(outcome.exit);
-        }
+        Command::Hook { event } => return hook(&cli.dir, event),
     };
     // A command that fetched trunk leaves the coordination cache the `tool.before` hook reads
     // (`DESIGN` § 11); a hook never writes it.

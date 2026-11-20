@@ -581,7 +581,8 @@ pub fn push(dir: &Path) -> BayResult {
 pub fn after_event(dir: &Path, input: &str) {
     let payload: Value = serde_json::from_str(input).unwrap_or(Value::Null);
     let cwd = crate::session::hook_cwd(&payload, dir);
-    let Ok(repo) = Repo::open(&cwd) else {
+    // G810: in the hook's own process, before its answer is printed.
+    let Ok(repo) = Repo::open_quick(&cwd) else {
         return;
     };
     if !sessions_dir(&repo).is_dir() {
