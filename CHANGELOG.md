@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.123
+
+- A red post check is told by one live runner that serves its environment, not by each.
+- A culprit a bisection pins after its suspects were told is told it broke the check.
+
 ## 0.6.122
 
 - A newer revision waiting when its change merges ends, and says `bay merge` in the view sends it next.
