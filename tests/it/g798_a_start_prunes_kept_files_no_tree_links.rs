@@ -1,7 +1,8 @@
 //! G798 (a measurement, 2026-11-19: a Mac's store kept 2.9 GB of files that no tree linked, a
 //! whole check tree's worth, because the kept files are pruned only when a check makes a tree,
 //! and none had run there since). A start prunes them on the same hourly rule: a kept file no
-//! tree links goes, and one a tree still links stays.
+//! tree links goes, and one a tree still links stays. The test sets the age a
+//! file must be unused for (G812) to zero.
 //!
 //! Guard to mutate: in `src/start.rs` `reclaim`, drop the `prune_kept` call (the unlinked file
 //! stays).
@@ -10,7 +11,7 @@
 
 use crate::support;
 
-use support::{TestBox, check_files, passing_result};
+use support::{TestBox, check_files, passing_result, result_json};
 
 #[test]
 fn a_start_prunes_the_kept_files_no_tree_links() {
@@ -33,7 +34,13 @@ fn a_start_prunes_the_kept_files_no_tree_links() {
     std::fs::hard_link(&linked, tree.join("file")).unwrap();
 
     // WHEN a change starts
-    let started = test_box.bay_ok(&repo, &["start", "another", "--paths", "src", "--new"]);
+    let (code, started) = result_json(
+        test_box
+            .bay(&repo)
+            .args(["start", "another", "--paths", "src", "--new"])
+            .env("BAY_TEST_KEPT_UNUSED_S", "0"),
+    );
+    assert_eq!(code, 0, "{started}");
 
     // THEN the unlinked file is gone and the linked one stays
     assert!(

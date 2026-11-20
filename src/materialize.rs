@@ -165,6 +165,24 @@ const KEPT_AT: Duration = Duration::from_hours(262_968);
 #[cfg(unix)]
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
+/// G812 (a measurement, 2026-11-20: every one of a runner's 48,578 kept files, 3 GB, had been
+/// written within minutes, because the hourly prune removed each file no tree linked between two
+/// checks, and the next check wrote the whole tree again): a kept file goes only once no tree has
+/// linked it for this long. Making or removing a link sets the file's change time, so that time
+/// is its last use. The store then holds about one tree and a day's changed files.
+#[cfg(unix)]
+const UNUSED_FOR: Duration = Duration::from_hours(24);
+
+/// [`UNUSED_FOR`], or a test build's `BAY_TEST_KEPT_UNUSED_S`.
+#[cfg(unix)]
+fn unused_for() -> Duration {
+    crate::version::TEST_HOOKS
+        .then(|| std::env::var("BAY_TEST_KEPT_UNUSED_S").ok())
+        .flatten()
+        .and_then(|value| value.parse().ok())
+        .map_or(UNUSED_FOR, Duration::from_secs)
+}
+
 #[cfg(unix)]
 impl Store {
     /// The repository's store, made if it is absent; `None` when it cannot be.
@@ -260,7 +278,8 @@ impl Store {
         }
     }
 
-    /// At most once per [`PRUNE_EVERY`], removes every kept file no tree links any more.
+    /// At most once per [`PRUNE_EVERY`], removes every kept file no tree has linked for
+    /// [`unused_for`].
     fn prune(&self) {
         use std::os::unix::fs::MetadataExt as _;
         let marker = self.dir.join(".pruned");
@@ -275,15 +294,17 @@ impl Store {
         let Ok(shards) = std::fs::read_dir(&self.dir) else {
             return;
         };
+        let unused_since = crate::live::unix_now().saturating_sub(unused_for().as_secs());
         for shard in shards.flatten() {
             let Ok(files) = std::fs::read_dir(shard.path()) else {
                 continue;
             };
             for file in files.flatten() {
-                if file
-                    .metadata()
-                    .is_ok_and(|meta| meta.is_file() && meta.nlink() == 1)
-                {
+                if file.metadata().is_ok_and(|meta| {
+                    meta.is_file()
+                        && meta.nlink() == 1
+                        && u64::try_from(meta.ctime()).is_ok_and(|at| at <= unused_since)
+                }) {
                     let _ = std::fs::remove_file(file.path());
                 }
             }
