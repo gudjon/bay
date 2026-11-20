@@ -21,8 +21,8 @@ use support::{TestBox, check_files, passing_result, result_json};
 /// The post check `suite` on `src/**`, on the shared adapter with `suite` as its argument.
 const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check suite\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 60\nwhen_paths = [\"src/**\"]\n";
 
-struct Trunk {
-    test_box: TestBox,
+pub(crate) struct Trunk {
+    pub(crate) test_box: TestBox,
     repo: PathBuf,
     remote: PathBuf,
     suite_box: PathBuf,
@@ -32,6 +32,11 @@ struct Trunk {
 /// tree that holds `src/l3.rs`: the fourth landing breaks it. A runner elsewhere, `suite-1`,
 /// records the post answers it was asked for; `config` is `.bay/config.toml`.
 fn trunk(config: &str) -> Trunk {
+    trunk_with(config, &[])
+}
+
+/// [`trunk`], with `more` files on main.
+pub(crate) fn trunk_with(config: &str, more: &[(&str, &str)]) -> Trunk {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
@@ -48,6 +53,10 @@ fn trunk(config: &str) -> Trunk {
         }
     }
     files.push((".bay/config.toml".to_owned(), config.to_owned()));
+    files.extend(
+        more.iter()
+            .map(|(path, text)| ((*path).to_owned(), (*text).to_owned())),
+    );
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     let suite_box = test_box.clone_of(&remote, "suite-box");
     let key = fresh_key(&test_box, "suite-1");
@@ -81,7 +90,7 @@ impl Trunk {
 
     /// Five landings on `src/`, oldest first: `src/l0.rs` to `src/l4.rs`. The suite passed on
     /// the first and failed on the last, so the suspect range is the four after the first.
-    fn red_over_four(&self) -> Vec<(String, String)> {
+    pub(crate) fn red_over_four(&self) -> Vec<(String, String)> {
         let landings: Vec<(String, String)> =
             (0..5).map(|n| self.land(&format!("src/l{n}.rs"))).collect();
         self.suite(&landings[0].1, "pass");
@@ -107,12 +116,12 @@ impl Trunk {
         assert_eq!(code, 0, "{written}");
     }
 
-    fn red(&self) -> Value {
+    pub(crate) fn red(&self) -> Value {
         self.test_box.bay_ok(&self.repo, &["status"])["detail"]["red"].clone()
     }
 
     /// One executor pass on the trunk's box; its `bisect` report, when it made one.
-    fn executor_pass(&self) -> Option<Value> {
+    pub(crate) fn executor_pass(&self) -> Option<Value> {
         let ran = self
             .test_box
             .bay_ok(&self.repo, &["runner", "run", "--once"]);

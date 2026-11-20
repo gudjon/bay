@@ -27,6 +27,11 @@
 //! check's paths since it last passed, up to its first failure, once each, or to that failure
 //! when none was on its paths. The line says how many there were, and that none is a proven
 //! cause.
+//!
+//! G827 (a fleet finding, 2026-11-20: a bisection pinned the culprit of a red whose range was
+//! told, and the culprit was never told it broke the check, because its event's id was the one it
+//! had as a merge of the range): a culprit's event has its own id, so it is told once more, that
+//! it broke the check.
 
 use std::collections::BTreeSet;
 
@@ -332,7 +337,8 @@ fn failed_units(records: &[EvidenceRecord], id: &CheckId) -> Option<Vec<String>>
 /// The id of the `red_owner` event of `red`, owned by `owner`: one red, one event. A change told
 /// of units (G630) is told once per check too; its id is not the one it would have as the red's
 /// owner, so a later red that it owns is still told. A merge of a red's range (G634) owns the red:
-/// its id is the one it has as the red's owner.
+/// its id is the one it has as the red's owner. G827: a culprit is told that it broke the check,
+/// which its range's line did not say, so its id is its own.
 fn event_id(red: &Red, owner: &str, owns: &Owns) -> Result<String, String> {
     let mut fields = json!({
         "kind": KIND,
@@ -340,8 +346,10 @@ fn event_id(red: &Red, owner: &str, owns: &Owns) -> Result<String, String> {
         "environment": red.environment,
         "owner": owner,
     });
-    if matches!(owns, Owns::Units { .. }) {
-        fields["owns"] = json!("units");
+    match owns {
+        Owns::Units { .. } => fields["owns"] = json!("units"),
+        Owns::Red if red.culprit().is_some() => fields["owns"] = json!("culprit"),
+        Owns::Red | Owns::Range { .. } => {}
     }
     let id = digest(&fields)?;
     Ok(format!("evt_{}", &id.trim_start_matches("sha256:")[..20]))
