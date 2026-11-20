@@ -83,6 +83,7 @@
         "SANDBOX_ABSENT",
         "CHECK_ENV_UNSET",
         "RUNNER_KEY_MISSING",
+        "PRODUCER_SHARED",
         "KEY_EXPOSED",
         "UPDATE_UNAVAILABLE",
         "UPDATE_UNVERIFIED",

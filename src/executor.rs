@@ -202,9 +202,15 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
 /// it, and its first pass first fetches them. Once it has run a pass, only a runner whose name
 /// sorts before its own refuses it (the presences its last pass fetched), so of two that started
 /// at once, before either read the other, one goes on.
-/// Opens the repository for a pass, fetched; `started` once a pass may run.
+/// Opens the repository for a pass, fetched; `started` once a pass may run. The first pass's
+/// opening fetch also brings the presences (G775), so it asks the remote nothing more.
 fn open_pass(dir: &Path, started: &mut bool) -> Result<Arc<Repo>, Box<BayResult>> {
-    let repo = Repo::open_fetched(dir).map_err(|error| Box::new(error.into_result()))?;
+    let opened = if *started {
+        Repo::open_fetched(dir)
+    } else {
+        Repo::open_fetched_with(dir, &[crate::presence::refspec()])
+    };
+    let repo = opened.map_err(|error| Box::new(error.into_result()))?;
     if let Some(refused) = producer_shared(&repo, *started) {
         return Err(Box::new(refused));
     }
@@ -215,7 +221,7 @@ fn open_pass(dir: &Path, started: &mut bool) -> Result<Arc<Repo>, Box<BayResult>
 fn producer_shared(repo: &Repo, started: bool) -> Option<BayResult> {
     let keys = Keys::load(&repo.git);
     let producer = crate::presence::named_producer(&keys)?;
-    if !started {
+    if !started && !repo.take_prefetched(&crate::presence::refspec()) {
         crate::presence::fetch(repo);
     }
     let (runner, machine) = crate::presence::sharing(&repo.git, &keys.executor_name, producer)

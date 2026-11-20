@@ -376,14 +376,14 @@ pub fn sharing(git: &Git, executor: &str, producer: &str) -> Vec<(String, Option
 /// ([`Repo::fetch_chains`]): whether the fetch went.
 pub fn fetch(repo: &Repo) -> bool {
     repo.git
-        .run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            repo.remote(),
-            &format!("+{PRESENCE_PREFIX}*:{PRESENCE_PREFIX}*"),
-        ])
+        .run(&["fetch", "-q", "--no-tags", repo.remote(), &refspec()])
         .is_ok()
+}
+
+/// The refspec that brings every runner's presence, forced.
+#[must_use]
+pub fn refspec() -> String {
+    format!("+{PRESENCE_PREFIX}*:{PRESENCE_PREFIX}*")
 }
 
 /// The `presence.json` a presence commit carries; `None` where its tree holds none or one that
