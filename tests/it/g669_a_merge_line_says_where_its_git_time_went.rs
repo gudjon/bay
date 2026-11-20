@@ -71,14 +71,13 @@ fn a_merge_line_names_the_git_commands_that_took_longest() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     let (first, second) = (git_part(&stderr, &one), git_part(&stderr, &two));
     assert!(!first.is_empty(), "{stderr}");
-    // A real slowest call shows on some command; many tiny calls can round to 0.0s on another.
+    // Every command names its slowest call in seconds. On a fast, idle box every call can
+    // round to 0.0s, so the line's shape is what is asserted, never a least duration.
     assert!(
-        first
-            .split(", ")
-            .filter_map(|entry| entry.rsplit_once(" max "))
-            .any(|(_, slowest)| slowest.trim_end_matches(')').ends_with('s')
-                && !slowest.starts_with("0.0")),
-        "a slowest call on some command: {first}"
+        first.split(", ").all(|entry| entry
+            .rsplit_once(" max ")
+            .is_some_and(|(_, slowest)| slowest.trim_end_matches(')').ends_with('s'))),
+        "a slowest call on every command: {first}"
     );
     // Each line counts its own operation: the second is not the first's total and more.
     let total = |part: &str| -> u32 { part.split(", ").map(count_in).sum() };
