@@ -2,8 +2,8 @@
 //! been updated since the last update and to update main setups … a proper closed loop"). An
 //! update lists, in `detail.changes`, each release it brings past the installed bay with that
 //! release's notes, newest first, read from the release list it already reads; and its sentence
-//! tells the agent to read them, to run `bay install --machine`, and to read `bay doctor` in each
-//! repository, which names a hook its settings now lack. A check (`--check`)
+//! tells the agent to read them and to run `bay doctor` in each repository, which names a hook its
+//! settings now lack (the update itself already ran `bay install --machine`). A check (`--check`)
 //! lists the same changes before anything is installed.
 //!
 //! Guard to mutate: in `src/update.rs` `Plan::detail`, drop `changes` (the case's list is empty).
@@ -67,6 +67,5 @@ fn an_update_lists_each_release_it_brings_and_says_to_install_in_each_repository
     assert_eq!(changes[1]["version"], MIDDLE, "{result}");
     let say = result["say"].as_str().unwrap();
     assert!(say.contains("detail.changes"), "{say}");
-    assert!(say.contains("bay install --machine"), "{say}");
     assert!(say.contains("bay doctor"), "{say}");
 }

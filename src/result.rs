@@ -2321,8 +2321,9 @@ fn update_say(result: &BayResult) -> Option<String> {
         .and_then(Value::as_str)
         .map(|newest| format!(" Run bay update again to reach {newest}."))
         .unwrap_or_default();
-    // G806: an update says what it brought and closes the loop: the guide on this computer
-    // follows once `bay install --machine` runs, and doctor names a hook a repository now lacks.
+    // G806: an update says what it brought and closes the loop. The update already ran
+    // `bay install --machine` (a failure is a `failed` result naming it), so what is left is
+    // doctor in each repository, which names a hook its settings now lack.
     let brought = detail
         .get("changes")
         .and_then(Value::as_array)
@@ -2334,7 +2335,7 @@ fn update_say(result: &BayResult) -> Option<String> {
     };
     Some(if updated {
         format!(
-            "Updated bay from {installed} to {target}.{what} Run bay install --machine, so the guide on this computer follows, then bay doctor in each repository: it names any hook its settings now lack. Runners here move to {target} between operations.{next}{pin}"
+            "Updated bay from {installed} to {target}.{what} This computer's guide is updated too; run bay doctor in each repository, which names any hook its settings now lack. Runners here move to {target} between operations.{next}{pin}"
         )
     } else if detail.get("due") == Some(&Value::Bool(true)) {
         format!("bay {target} is ready to install; this computer runs {installed}.{pin}")
@@ -2733,7 +2734,7 @@ mod tests {
             "updated": true});
         assert_eq!(
             say(replaced),
-            "Updated bay from 0.6.16 to 0.6.17. Run bay install --machine, so the guide on this computer follows, then bay doctor in each repository: it names any hook its settings now lack. Runners here move to 0.6.17 between operations."
+            "Updated bay from 0.6.16 to 0.6.17. This computer's guide is updated too; run bay doctor in each repository, which names any hook its settings now lack. Runners here move to 0.6.17 between operations."
         );
         // G806: what it brought is named, with where to read it.
         let brought = json!({"installed": "0.6.16", "target": "0.6.17", "pinned": null,
@@ -2755,7 +2756,7 @@ mod tests {
             "updated": true, "newest": "0.6.17", "stepped": true});
         assert_eq!(
             say(stepped),
-            "Updated bay from 0.6.10 to 0.6.12. Run bay install --machine, so the guide on this computer follows, then bay doctor in each repository: it names any hook its settings now lack. Runners here move to 0.6.12 between operations. Run bay update again to reach 0.6.17."
+            "Updated bay from 0.6.10 to 0.6.12. This computer's guide is updated too; run bay doctor in each repository, which names any hook its settings now lack. Runners here move to 0.6.12 between operations. Run bay update again to reach 0.6.17."
         );
     }
 

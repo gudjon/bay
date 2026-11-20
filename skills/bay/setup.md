@@ -250,8 +250,8 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
 ## Roll bay's hooks out to many machines
 
 The order, learned in a fleet rollout:
-1. On every machine: `bay update` (its `detail.changes` lists what each newer release brings), then
-   `bay install --machine`. It writes only the bay program and its guide, in
+1. On every machine: `bay update` (its `detail.changes` lists what each newer release brings; it runs
+   `bay install --machine` itself). That writes only the bay program and its guide, in
    every Claude config directory it finds (`bay.claudeConfigDirs` names others). It never writes hook entries, a
    repository's settings or its Git config, so it is safe to run on a busy machine. A pin (`bay.updateVersion`) is the
    oldest version a machine runs: it follows every newer release, and an install by a bay below the pin or never
