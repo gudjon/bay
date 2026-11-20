@@ -282,6 +282,43 @@ pub fn last_push(common_dir: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// The latest time, in Unix seconds on the reader's clock ([`reader_now`]), until which a
+/// presence this store holds, other than `me` (a presence ref), stays live and serves every one
+/// of `environments` (one that declares none serves every one); `None` when none is live now.
+/// Live is strict: beaten within three of its cadences and half a minute, so a runner that
+/// stopped never holds a head for the hour its presence takes to read stale (a fleet finding,
+/// 2026-10-26).
+#[must_use]
+pub fn serving_until(git: &Git, me: &str, environments: &[String]) -> Option<u64> {
+    let listed = git
+        .run(&[
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            PRESENCE_PREFIX,
+        ])
+        .ok()?;
+    let now = reader_now();
+    listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, _)| *name != me)
+        .filter_map(|(_, commit)| record_at(git, commit).ok().flatten())
+        .filter(|record| {
+            let declared = record["environments"]["declared"].as_array();
+            record["environments"]["source"] == "default"
+                || environments.iter().all(|environment| {
+                    declared.is_some_and(|all| all.iter().any(|it| it == environment.as_str()))
+                })
+        })
+        .filter_map(|record| {
+            let cadence = record["cadence_s"].as_u64().unwrap_or(10);
+            let at = record["at"].as_str().and_then(crate::clock::unix_of)?;
+            Some(at.saturating_add(cadence * STALE_CADENCES + 30))
+        })
+        .filter(|until| *until >= now)
+        .max()
+}
+
 /// The `presence.json` a presence commit carries; `None` where its tree holds none or one that
 /// is not UTF-8 JSON.
 ///

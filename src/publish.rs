@@ -8572,9 +8572,7 @@ fn served_elsewhere(
 }
 
 /// Whether another runner's presence on the remote is live and declares every one of
-/// `environments` (one that declares none serves every one). Live is strict here: beaten within
-/// three of its cadences and half a minute, so a runner that stopped never holds a head for
-/// the hour its presence takes to read stale (a fleet finding, 2026-10-26).
+/// `environments` ([`crate::presence::serving_until`], on the presence refs fetched now).
 fn live_runner_serving(ctx: &Ctx, environments: &[String]) -> bool {
     let git = &ctx.repo.git;
     let prefix = crate::presence::PRESENCE_PREFIX;
@@ -8591,28 +8589,7 @@ fn live_runner_serving(ctx: &Ctx, environments: &[String]) -> bool {
         return false;
     }
     let me = crate::presence::presence_ref(&ctx.executor_name());
-    let Ok(listed) = git.run(&["for-each-ref", "--format=%(refname) %(objectname)", prefix]) else {
-        return false;
-    };
-    let now = crate::presence::reader_now();
-    listed
-        .lines()
-        .filter_map(|line| line.split_once(' '))
-        .filter(|(name, _)| *name != me)
-        .filter_map(|(_, commit)| crate::presence::record_at(git, commit).ok().flatten())
-        .any(|record| {
-            let cadence = record["cadence_s"].as_u64().unwrap_or(10);
-            let fresh = record["at"]
-                .as_str()
-                .and_then(crate::clock::unix_of)
-                .is_some_and(|at| now.saturating_sub(at) <= cadence * 3 + 30);
-            let declared = record["environments"]["declared"].as_array();
-            fresh
-                && (record["environments"]["source"] == "default"
-                    || environments.iter().all(|environment| {
-                        declared.is_some_and(|all| all.iter().any(|it| it == environment.as_str()))
-                    }))
-        })
+    crate::presence::serving_until(git, &me, environments).is_some()
 }
 
 /// BACKLOG 214 (a fleet finding, 2026-11-02: ftltlvo6): a change's own run (`bay merge --wait`)

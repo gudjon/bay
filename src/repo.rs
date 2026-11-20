@@ -1149,17 +1149,24 @@ impl Repo {
     /// or differ (G200b, G426). Returns each chain that could not be read, with Git's words
     /// (G434), so a change no pass can read is named, never silent.
     ///
+    /// G801: the same fetch brings every runner's presence, forced, as each is one parentless
+    /// commit: a head this runner left to another live runner stays left while that runner's
+    /// presence, as each pass reads it, stays live, with no fetch of its own. Git updates the
+    /// presences even when it refuses a chain.
+    ///
     /// # Errors
     ///
     /// The remote cannot be read.
     pub fn fetch_chains(&self) -> Result<Vec<(String, String)>, GitError> {
         let prefix = crate::change::CHANGES_PREFIX;
+        let presence = crate::presence::PRESENCE_PREFIX;
         let Err(refused) = self.git.run(&[
             "fetch",
             "-q",
             "--no-tags",
             self.remote(),
             &format!("{prefix}*:{prefix}*"),
+            &format!("+{presence}*:{presence}*"),
         ]) else {
             return Ok(Vec::new());
         };

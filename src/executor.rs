@@ -778,6 +778,7 @@ fn pass(
         && (ran.is_empty() || began.elapsed() < bound)
         && let Some((head_id, head_op)) = abandoned_head(repo, &just)
         && !taken.contains(&head_op)
+        && !parked.left_as_head(&head_op)
     {
         if arrivals.is_none() {
             let local = local_records(&chain);
@@ -832,6 +833,7 @@ fn pass(
         .ok()
         .flatten();
     parked.keep_stands(
+        repo,
         queue.head().map(|entry| entry.op_id.as_str()),
         trunk.as_deref(),
     );
@@ -920,7 +922,9 @@ fn pass(
             // between operations, a head whose holder stopped writing is taken now, not at the
             // next pass's start an hour later. G789: its visit begins with the take's reads.
             let took = Instant::now();
+            // G801: nor one this runner just left to another runner, while that one is live.
             if let Some((head_id, head_op)) = abandoned_head(repo, if waited { "" } else { &op_id })
+                && !parked.left_as_head(&head_op)
             {
                 let visit = (head_id.as_str(), head_op.as_str());
                 let rows = run_op(repo, visit, Some(took), depth, beat, &mut arrivals);
@@ -1279,6 +1283,13 @@ pub(crate) fn tmp_pack_is_stale(entry: &std::fs::DirEntry) -> bool {
 /// an operation answered `QUEUED` is parked too, with the queue's head operation and main's
 /// commit it was answered under. It is visited again once its own chain moved, the queue's
 /// head changed, main moved, or [`STAND_KEPT`] passed.
+///
+/// G801 (a fleet measurement, 2026-11-19: in 3 h one box's two runners made 122 visits to 25
+/// heads whose checks only another live runner's box serves, a median 5 s each, mostly a fetch
+/// of every presence; a head was visited again a median 61 s after the last, and between the
+/// operations of a pass too): an operation left to another live runner is parked the same way,
+/// under the queue's head and main, while a presence that serves it, as each pass's fetch of the
+/// chains brings it, stays live.
 #[derive(Default)]
 struct Parked(
     HashMap<String, Vec<(String, String)>>,
@@ -1286,11 +1297,33 @@ struct Parked(
 );
 
 /// G750: what a `QUEUED` answer was given under: the queue's head operation and main's commit,
-/// and when.
+/// and until when it holds. G801: for an operation left to another runner, the environments it
+/// was left for, by which each pass renews `until` from the presences it read.
 struct Stand {
     head: Option<String>,
     trunk: Option<String>,
-    at: std::time::Instant,
+    until: Instant,
+    left: Option<Vec<String>>,
+}
+
+impl Stand {
+    /// A stand under the queue's head and main as this store reads them now, held until `until`.
+    fn now(repo: &Repo, until: Instant, left: Option<Vec<String>>) -> Self {
+        let head = Queue::read_shared(repo)
+            .ok()
+            .and_then(|queue| queue.head().map(|entry| entry.op_id.clone()));
+        let trunk = repo
+            .git
+            .ref_target(&repo.trunk_tracking_ref())
+            .ok()
+            .flatten();
+        Self {
+            head,
+            trunk,
+            until,
+            left,
+        }
+    }
 }
 
 /// G750: the longest a `QUEUED` operation goes unvisited while nothing it was answered under
@@ -1314,16 +1347,24 @@ impl Parked {
         self.1.retain(|op_id, _| parked.contains_key(op_id));
     }
 
-    /// G750: keeps only the `QUEUED` stands answered under the queue head `head` and main at
-    /// `trunk`, within [`STAND_KEPT`]; the waits of any other stand end.
-    fn keep_stands(&mut self, head: Option<&str>, trunk: Option<&str>) {
+    /// G750: keeps only the stands answered under the queue head `head` and main at `trunk`,
+    /// while they hold; the waits of any other stand end. G801: a stand of an operation left to
+    /// another runner holds as long as a presence this store holds serves it, as this pass's
+    /// fetch of the chains brought them.
+    fn keep_stands(&mut self, repo: &Repo, head: Option<&str>, trunk: Option<&str>) {
+        for stand in self.1.values_mut() {
+            if let Some(environments) = &stand.left {
+                stand.until = serving_until(repo, environments).unwrap_or_else(Instant::now);
+            }
+        }
+        let now = Instant::now();
         let gone: Vec<String> = self
             .1
             .iter()
             .filter(|(_, stand)| {
                 stand.head.as_deref() != head
                     || stand.trunk.as_deref() != trunk
-                    || stand.at.elapsed() >= STAND_KEPT
+                    || stand.until <= now
             })
             .map(|(op_id, _)| op_id.clone())
             .collect();
@@ -1333,9 +1374,25 @@ impl Parked {
         }
     }
 
-    /// Whether `op_id` waits, and nothing it waits on moved.
+    /// Whether `op_id` waits, and nothing it waits on moved, within its stand's time: a head
+    /// left to another runner is visited again in the pass in which that runner may read stale.
     fn holds(&self, op_id: &str) -> bool {
         self.0.contains_key(op_id)
+            && self
+                .1
+                .get(op_id)
+                .is_none_or(|stand| Instant::now() < stand.until)
+    }
+
+    /// G801: whether `op_id`, the queue's head, was left to another runner while it was the
+    /// head, and nothing it was left under moved. A change that waited behind the head is taken
+    /// once it is the head itself: its `QUEUED` stand named another head.
+    fn left_as_head(&self, op_id: &str) -> bool {
+        self.holds(op_id)
+            && self
+                .1
+                .get(op_id)
+                .is_some_and(|stand| stand.head.as_deref() == Some(op_id))
     }
 
     /// Notes `row`, a visit's: a wait on changes not submitted or stopped (G604) is parked with
@@ -1351,9 +1408,10 @@ impl Parked {
         };
         let queued = row["decision"].as_str() == Some("queued")
             && row["reason"].as_str() == Some(Reason::Queued.code());
+        let left = left_until(repo, row);
         let own = Chain::new(&repo.git).head(change).ok().flatten();
         self.1.remove(op_id);
-        let Some(own) = own.filter(|_| !waits.is_empty() || queued) else {
+        let Some(own) = own.filter(|_| !waits.is_empty() || queued || left.is_some()) else {
             self.0.remove(op_id);
             return;
         };
@@ -1361,23 +1419,49 @@ impl Parked {
         read.extend(waits.into_iter().map(|wait| (wait.change, wait.head)));
         self.0.insert(op_id.to_owned(), read);
         if queued {
-            let head = crate::queue::Queue::read_shared(repo)
-                .ok()
-                .and_then(|queue| queue.head().map(|entry| entry.op_id.clone()));
-            let trunk = repo
-                .git
-                .ref_target(&repo.trunk_tracking_ref())
-                .ok()
-                .flatten();
+            let stand = Stand::now(repo, Instant::now() + STAND_KEPT, None);
             // A head that yielded keeps its place and runs next pass: never parked.
-            if head.as_deref() == Some(op_id) || row["detail"]["yielded"] == true {
+            if stand.head.as_deref() == Some(op_id) || row["detail"]["yielded"] == true {
                 self.0.remove(op_id);
                 return;
             }
-            let at = std::time::Instant::now();
-            self.1.insert(op_id.to_owned(), Stand { head, trunk, at });
+            self.1.insert(op_id.to_owned(), stand);
+        } else if let Some((environments, until)) = left {
+            self.1.insert(
+                op_id.to_owned(),
+                Stand::now(repo, until, Some(environments)),
+            );
         }
     }
+}
+
+/// G801: the environments `row`, a visit's, left its operation to another live runner for,
+/// and until when: a wait for a worker this box has none of (`CHECK_UNAVAILABLE`, with no
+/// adapter's reason), while a presence this store holds, as the visit just fetched it, serves
+/// them. `None` for any other row.
+fn left_until(repo: &Repo, row: &Value) -> Option<(Vec<String>, Instant)> {
+    if row["decision"].as_str() != Some("queued")
+        || row["reason"].as_str() != Some(Reason::CheckUnavailable.code())
+        || !row["detail"]["unavailable"].is_null()
+    {
+        return None;
+    }
+    let environments: Vec<String> = row["detail"]["environments"]
+        .as_array()?
+        .iter()
+        .filter_map(|environment| environment.as_str().map(str::to_owned))
+        .collect();
+    let until = serving_until(repo, &environments)?;
+    Some((environments, until))
+}
+
+/// G801: until when another runner's presence this store holds serves every one of
+/// `environments`, by the rule a visit judges it live by ([`crate::presence::serving_until`]).
+fn serving_until(repo: &Repo, environments: &[String]) -> Option<Instant> {
+    let me = crate::presence::presence_ref(&Keys::load(&repo.git).executor_name);
+    let until = crate::presence::serving_until(&repo.git, &me, environments)?;
+    let left = until.checked_sub(crate::presence::reader_now())?;
+    Instant::now().checked_add(Duration::from_secs(left))
 }
 
 /// How long a pass starts operations before it ends and the next reads every chain again.
