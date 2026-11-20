@@ -1492,6 +1492,9 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     }
     let agent = ctx.agent_signer()?;
     ctx.chain.sign_with(agent);
+    // G824: a release of the view under way in another process ends before the view is read, and
+    // none starts until this merge has read it.
+    let held = view::hold(repo, id);
     // G820 (a fleet finding, 2026-11-20): bay removes a merged change's view once it ends, and a
     // wait asked again after that read the gone view as a step left half done. With no view to
     // read, the record answers: the change's landing, as for G727.
@@ -1516,6 +1519,7 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
         Err(refusal) => return Ok(refusal),
     };
     observe_inputs(&mut ctx)?;
+    drop(held);
 
     if let Some(mut result) = scanned(&mut ctx, &trunk, &revision)? {
         // G754: main holds an earlier revision of this change; the author's newer one goes in

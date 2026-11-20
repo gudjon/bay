@@ -155,6 +155,40 @@ pub fn journal_path(repo: &Repo, id: &str) -> PathBuf {
     repo.view_home(id).join(format!("{id}.journal"))
 }
 
+/// G824: the lock of change `id`'s view, beside its journal: `<id>.lock`. A release holds it
+/// while it removes the view, and a merge while it reads the view, so neither reads the other's
+/// work half done.
+fn lock_path(repo: &Repo, id: &str) -> PathBuf {
+    repo.view_home(id).join(format!("{id}.lock"))
+}
+
+fn open_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+}
+
+/// G824 (a fleet finding, 2026-11-20: a `bay merge --wait` read its merged change's view as
+/// another session's `bay start` removed it, and answered that bay could not finish): holds the
+/// lock of change `id`'s view while a merge reads it, once a release under way has ended. `None`
+/// when the view has no journal, or the lock cannot be taken; the merge then reads as before.
+#[must_use]
+pub fn hold(repo: &Repo, id: &str) -> Option<std::fs::File> {
+    if !journal_path(repo, id).exists() {
+        return None;
+    }
+    let path = lock_path(repo, id);
+    let file = open_lock(&path).ok()?;
+    file.lock().ok()?;
+    // A release ended while this waited: the view is gone, and its lock is no longer needed.
+    if !journal_path(repo, id).exists() {
+        let _ = std::fs::remove_file(&path);
+    }
+    Some(file)
+}
+
 /// The view's journal state. A view with no journal is treated as incomplete.
 #[must_use]
 pub fn journal(repo: &Repo, id: &str) -> Option<Journal> {
@@ -700,8 +734,27 @@ fn kept_until(repo: &Repo, key: &[u8; 32]) -> Option<u64> {
 /// G784: how often a view whose unsaved work could not be saved is tried again.
 const SAVE_RETRY_S: u64 = 86_400;
 
-/// Releases the view of ended change `id` when it holds nothing newer; whether it did.
+/// Releases the view of ended change `id` when it holds nothing newer; whether it did. G824: a
+/// view whose lock a merge holds while it reads the view is left for the next start.
 fn release(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
+    let lock_path = lock_path(repo, id);
+    let lock = open_lock(&lock_path).map_err(GitError::Spawn)?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(false),
+        Err(std::fs::TryLockError::Error(error)) => return Err(GitError::Spawn(error)),
+    }
+    let released = release_held(repo, id, ended);
+    drop(lock);
+    // A merge that waited on the lock finds the journal gone, and removes the lock if it is first.
+    if matches!(released, Ok(true)) {
+        let _ = std::fs::remove_file(&lock_path);
+    }
+    released
+}
+
+/// [`release`] under the view's lock.
+fn release_held(repo: &Repo, id: &str, ended: &Ended) -> Result<bool, GitError> {
     let path = repo.view_path(id);
     match standing(repo, id, ended)? {
         Standing::Kept | Standing::HoldsNewerKept => return Ok(false),
