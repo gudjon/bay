@@ -1,0 +1,25 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "auto",
+ "effort": {
+  "level": "xhigh"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "ls src"
+ },
+ "tool_response": {
+  "stdout": "a.rs",
+  "stderr": "",
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": false
+ },
+ "tool_use_id": "repl_1402ce0a-3ccd-4b75-ad02-02175ada7288",
+ "duration_ms": 139
+}

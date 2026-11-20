@@ -501,6 +501,11 @@ fn payload_fields(line: &mut Value, payload: &Payload, state_dir: &Path, repo: &
     if let Some(started) = started(state_dir, &line["at"]) {
         line["started"] = Value::from(started);
     }
+    // G808: a step that ran code (Code Mode), so a reader can tell its time from a step's of
+    // single calls.
+    if payload.from_code {
+        line["from_code"] = Value::from(true);
+    }
 }
 
 /// The file in a session's state directory that holds the time of its first recorded event.

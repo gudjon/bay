@@ -264,6 +264,8 @@ pub struct Payload {
     pub permission_mode: Option<String>,
     /// G707: the step's tool calls were all of tools that write no file ([`READ_ONLY_TOOLS`]).
     pub reads_only: bool,
+    /// G808: the step ran code ([`CODE_TOOL`] among its tool calls): Claude Code's Code Mode.
+    pub from_code: bool,
     /// G786b: the shell commands the step's calls ran ([`shell_commands`]), only to say what the
     /// step did; never recorded.
     pub shell: Vec<String>,
@@ -314,6 +316,20 @@ const READ_ONLY_TOOLS: [&str; 7] = [
     "TodoWrite",
 ];
 
+/// G808: the tool that runs an agent's code in Claude Code's Code Mode (2.1.329, probed
+/// 2026-11-20): a step that ran code ends with one `PostToolBatch` whose `tool_calls` hold this
+/// call alone; the calls the code makes reach their own pre-tool hooks.
+const CODE_TOOL: &str = "REPL";
+
+/// G808: whether `value`'s tool calls (a batch's `tool_calls`) ran code ([`CODE_TOOL`]).
+fn from_code(value: &Value) -> bool {
+    value["tool_calls"].as_array().is_some_and(|calls| {
+        calls
+            .iter()
+            .any(|call| call["tool_name"].as_str() == Some(CODE_TOOL))
+    })
+}
+
 /// Whether `value`'s tool calls (a batch's `tool_calls`) are all of [`READ_ONLY_TOOLS`]; false
 /// when it names none.
 fn reads_only(value: &Value) -> bool {
@@ -356,6 +372,7 @@ impl Payload {
             stop_hook_active: value["stop_hook_active"].as_bool(),
             edited: product.edited(event, &value),
             reads_only: reads_only(&value),
+            from_code: from_code(&value),
             shell: shell_commands(event, &value),
             permission_mode: value["permission_mode"]
                 .as_str()

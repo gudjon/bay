@@ -1,0 +1,25 @@
+{
+ "session_id": "<redacted>",
+ "transcript_path": "<redacted>",
+ "cwd": "<redacted>",
+ "scratchpad_dir": "<redacted>",
+ "prompt_id": "<redacted>",
+ "permission_mode": "auto",
+ "effort": {
+  "level": "xhigh"
+ },
+ "hook_event_name": "PostToolUse",
+ "tool_name": "REPL",
+ "tool_input": {
+  "code": "const [a, b] = await Promise.all([$`ls src`.nothrow(), $`git status --short`.nothrow()]);\n({ls_src: a.output, git_status: b.output})",
+  "description": "List src and show git status"
+ },
+ "tool_response": {
+  "code": "const [a, b] = await Promise.all([$`ls src`.nothrow(), $`git status --short`.nothrow()]);\n({ls_src: a.output, git_status: b.output})",
+  "result": "ls_src:\na.rs\n\ngit_status:\n?? .claude/",
+  "stdout": "",
+  "stderr": ""
+ },
+ "tool_use_id": "toolu_01MXL9SJdn9e3mhhzJccXkzC",
+ "duration_ms": 846
+}
