@@ -66,6 +66,9 @@ run() {
 # ran the whole suite to fail on it). It records nothing: the test suite runs it too.
 echo "gate: changelog" >&2
 sh "$root/scripts/changelog-fits.sh"
+# The gate box keeps its build cache, and an incremental session no build touched in three days
+# is never read again: unpruned it held 47 GB of one gate box's 101 GB (2026-11-20).
+find "$root/target/debug/incremental" -mindepth 1 -maxdepth 1 -mtime +3 -exec rm -rf {} + 2>/dev/null || true
 run fmt cargo fmt --check
 run clippy sh -c 'test -z "$(cargo clippy -q --all-targets 2>&1 | grep -E "^(warning|error)")"'
 # The Windows target keeps compiling. Where that target is not installed the check does not
