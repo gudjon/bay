@@ -71,7 +71,9 @@ fn line() -> (Held, String, std::process::Child, PathBuf) {
 }
 
 /// Starts runner B in `clone` with `args`, held at the start of its first visit until
-/// `go` exists, its Git calls traced to `trace` and its journal to `journal`.
+/// `go` exists, its Git calls traced to `trace` and its journal to `journal`. `go` is B's own: the
+/// host's ([`Held::go`]) lets runner A's check go, and B's visit must not start with it (a gate
+/// finding, 2026-11-20: B's visit raced A's landing, and rightly answered the head held).
 fn held_runner(
     host: &Held,
     clone: &Path,
@@ -125,7 +127,7 @@ fn calls(trace: &Path) -> Vec<(String, String)> {
 fn a_revisit_of_a_landing_reads_its_chain_alone_and_answers_merged() {
     let (host, head, holder, b) = line();
     let dir = host.test_box.path();
-    let (go, trace, journal) = (dir.join("go"), dir.join("trace"), dir.join("journal"));
+    let (go, trace, journal) = (dir.join("b-go"), dir.join("trace"), dir.join("journal"));
     // GIVEN runner B's pass read the head's chain, and waits at its first visit
     let runner = held_runner(
         &host,
@@ -170,7 +172,7 @@ fn a_revisit_of_a_landing_reads_its_chain_alone_and_answers_merged() {
 fn a_looping_runner_never_answers_held_for_an_operation_that_landed() {
     let (host, head, holder, b) = line();
     let dir = host.test_box.path();
-    let (go, trace, journal) = (dir.join("go"), dir.join("trace"), dir.join("journal"));
+    let (go, trace, journal) = (dir.join("b-go"), dir.join("trace"), dir.join("journal"));
     // GIVEN a looping runner B whose pass read the head held by runner A, and waits at its first
     // visit
     let mut runner = held_runner(
