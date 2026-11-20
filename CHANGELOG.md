@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.114
+
+- A red batch lands its first passing part at once, and the members after it go back to the line.
+- A batch's search records each part's checks as it finishes, so a stopped runner loses none.
+
 ## 0.6.113
 
 - A runner does not revisit a head another live runner serves until that runner or main's rules change.
