@@ -322,8 +322,10 @@ struct EnrolArgs {
 #[derive(Args)]
 #[allow(clippy::option_option)]
 struct WaitArgs {
-    /// Run the merge here and return its outcome, instead of returning at once. With
-    /// SECONDS: watch it that long, then return while the run goes on
+    /// Return the merge's outcome, instead of returning at once. The merge runs here when this
+    /// checkout serves every environment its checks need; else a live runner that serves them all
+    /// takes it, and the wait reads its outcome. With SECONDS: watch it that long, then return
+    /// while the run goes on
     #[arg(long, value_name = "SECONDS", num_args = 0..=1, require_equals = true)]
     wait: Option<Option<u64>>,
 }
