@@ -86,9 +86,10 @@ fn a_timed_wait_and_the_status_say_no_live_runner_serves_it_whole() {
     let test_box = TestBox::new();
     // GIVEN a live runner for each of the two environments, and none for both
     let (repo, _remote) = setup(&test_box);
-    // WHEN a change sent with `bay merge --wait=5` waits for a worker for both
+    // WHEN a change sent with `bay merge --wait=15` waits for a worker for both (the wait reads
+    // what its run waits for when the window ends, and under load the run takes seconds to start)
     let (id, view) = test_box.start_and_edit(&repo);
-    let (_, sent) = result_json(test_box.bay(&view).args(["merge", "--wait=5"]));
+    let (_, sent) = result_json(test_box.bay(&view).args(["merge", "--wait=15"]));
     // THEN the wait and the status name them, say no live runner serves them together, and say
     // to tell the user
     assert_eq!(sent["reason"], "CHECK_UNAVAILABLE", "{sent}");

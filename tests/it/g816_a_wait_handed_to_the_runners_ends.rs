@@ -136,10 +136,26 @@ fn a_handed_over_wait_ends_when_its_repository_is_gone() {
     // The hand-over is on the remote before the wait starts to watch it.
     std::thread::sleep(Duration::from_secs(2));
     // WHEN the change's view and its repository are deleted
-    std::fs::remove_dir_all(&view).unwrap();
-    std::fs::remove_dir_all(&repo).unwrap();
+    remove(&view);
+    remove(&repo);
     // THEN the wait ends, and the run continues with the runners
     let result = ended_within(waiting, Duration::from_secs(60));
     assert_eq!(result["decision"], "queued", "{result}");
     assert_eq!(result["detail"]["the run continues"], true, "{result}");
+}
+
+/// Deletes `dir`, again while the wait's fetch still writes in it: the wait stops once it finds
+/// the repository gone.
+fn remove(dir: &Path) {
+    for _ in 0..100 {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(error) => panic!("{}: {error}", dir.display()),
+        }
+    }
+    panic!("{} kept being written for 10 s", dir.display());
 }
