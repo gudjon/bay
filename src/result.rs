@@ -1144,7 +1144,7 @@ impl Reason {
                 "Do nothing yet: bay's next pass reads main, then records the merge or queues it. Never report it merged; `bay status <change>` shows the outcome."
             }
             Self::ChangeAlreadyLanded => {
-                "The change already merged; do not retry it. Edits made in its view after the merged version go in by `bay merge` in the view, as the next change. For new work, run `bay start <intent>`."
+                "Do not retry: the change already merged. `bay merge` in its view sends later edits as the next change; `bay start <intent>` opens new work."
             }
             Self::ChangeSuperseded => {
                 "Read the change that took over in `detail`; work in it, or `bay start` again once it merges or is abandoned."
