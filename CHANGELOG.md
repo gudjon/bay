@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.120
+
+- A head needing environments no live runner serves together leaves the line, so the changes behind it merge.
+
 ## 0.6.119
 
 - A runner started under a live runner's producer name is refused before it claims any change.
