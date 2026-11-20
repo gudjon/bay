@@ -478,6 +478,47 @@ pub fn last_activity(repo: &Repo, record: &ChangeRecord, now: u64) -> Option<Val
 }
 
 /// The hook's own state of `session`: `<git-common-dir>/bay/session-state/<session>`.
+/// G813 (owner ruling, 2026-11-20; a measurement: one repository's 202 session records held
+/// 341 MB, 96 of them untouched for two weeks, and custody read every one in full): a session
+/// record no write has touched for the repository's retention window goes, with its session's
+/// state folder; a state folder whose record is gone goes once it is that old too. A live
+/// session writes its record at every event, so its record is never that old. Returns how many
+/// records went.
+pub fn prune_records(repo: &Repo) -> usize {
+    let window = repo.config.retention_window();
+    let old = |path: &Path| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age > window)
+    };
+    let bay = repo.common_dir.join("bay");
+    let records = bay.join("sessions");
+    let mut removed = 0;
+    for entry in std::fs::read_dir(&records).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "jsonl")
+            && old(&path)
+            && std::fs::remove_file(&path).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    for entry in std::fs::read_dir(bay.join("session-state"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let path = entry.path();
+        let record = records.join(format!("{}.jsonl", entry.file_name().to_string_lossy()));
+        if path.is_dir() && !record.exists() && old(&path) {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+    removed
+}
+
 pub(crate) fn state_dir(repo: &Repo, session: &SessionId) -> PathBuf {
     repo.common_dir
         .join("bay")

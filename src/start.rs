@@ -324,6 +324,8 @@ fn reclaim(repo: &Repo, dir: &Path) -> Vec<String> {
     crate::scratch::prune(&repo.git);
     // G798: the kept files no tree links, on the same hourly rule as a check's prune.
     crate::materialize::prune_kept(&repo.common_dir);
+    // G813: the session records and state folders no write touched for the retention window.
+    crate::session::prune_records(repo);
     let mut released = release_ended(repo, dir);
     released.extend(view::sweep_orphans(repo));
     released
