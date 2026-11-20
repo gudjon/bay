@@ -1123,7 +1123,7 @@ impl Reason {
                 "Read the failing check in `detail`, repair the change in the view, then `bay merge` again."
             }
             Self::CheckUnavailable => {
-                "Wait: a runner whose box serves every environment it needs takes it. If `bay status <change>` says no live runner does, tell the user."
+                "Wait: a runner whose machine serves every environment it needs takes it. If `bay status <change>` says no live runner does, tell the user."
             }
             Self::CheckUnknown => {
                 "A runner asks again once main moves, up to three times; it is never a pass. If it stays unknown, repair it, then `bay merge`."
@@ -1450,7 +1450,7 @@ impl Reason {
                     .filter_map(Value::as_str),
             );
             return format!(
-                "Saved, but no live runner's box serves {environments} together, so its checks wait until one does: tell the user."
+                "Saved, but no live runner's machine serves {environments} together, so its checks wait until one does: tell the user."
             );
         }
         // T7, T12: talk is off unless main's policy turns it on; the sentence names the line.
@@ -2215,11 +2215,11 @@ fn worker_wait_say(id: &str, op: &Value) -> Option<String> {
     );
     Some(if op["served_together"] == false {
         format!(
-            "{id} waits for a runner whose box serves {environments} together, and no live runner does: tell the user."
+            "{id} waits for a runner whose machine serves {environments} together, and no live runner does: tell the user."
         )
     } else {
         format!(
-            "{id} waits for a runner whose box serves {environments}; a live one does, so it is taken without you."
+            "{id} waits for a runner whose machine serves {environments}; a live one does, so it is taken without you."
         )
     })
 }

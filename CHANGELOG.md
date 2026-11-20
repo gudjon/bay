@@ -7,6 +7,7 @@
 - A change on a red check's paths runs the red's failed units too, so skipping them never clears it.
 - A plain `bay merge --wait` handed to the runners ends at the progress deadline, or when its repository is gone.
 - A change waiting for environments no live runner serves together says so, and says to tell the user.
+- A change waiting for a post check's environment is taken once main is green on that check.
 
 ## 0.6.118
 
