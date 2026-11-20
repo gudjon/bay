@@ -2000,6 +2000,13 @@ fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<Ba
     if ctx.refetch().is_err() {
         return Ok(None);
     }
+    // G809: one the chain still says checked, while the line released it `published`, landed:
+    // never held.
+    match after_release(ctx, op_id)? {
+        AfterRelease::Landed(landed) => return Ok(Some(*landed)),
+        AfterRelease::Unanswered => return Ok(None),
+        AfterRelease::Stands => {}
+    }
     // G800: one that landed since is answered from that chain.
     if let Some(landed) = landed_on_chain(ctx, op_id, false)? {
         return Ok(Some(landed));
@@ -2027,6 +2034,48 @@ fn settled_by_what_the_pass_read(ctx: &mut Ctx, op_id: &str) -> Result<Option<Ba
         "owner": op.owner,
         "epoch": op.epoch,
     }))))
+}
+
+/// G809: what the line says of an operation whose chain, as this visit just read it, says checked.
+enum AfterRelease {
+    /// The chain does not say checked, or the line has not released the place `published`.
+    Stands,
+    /// It landed: the landing row, as a scan of main finds it.
+    Landed(Box<BayResult>),
+    /// It landed, and nothing this visit read answers it yet.
+    Unanswered,
+}
+
+/// G809 (a finding, 2026-11-20: a landing pushes main and the line's `published` release first,
+/// and its chain's record after; a runner that read the chain between the two answered the landed
+/// head held, a lease long when the record's push failed): when `op_id`'s chain says checked, the
+/// line, read again in that window alone. Released `published`, it landed: answered from the
+/// chain ([`landed_on_chain`]), with main fetched once when the landing commit is not in this
+/// store yet, else by a scan of that main.
+fn after_release(ctx: &mut Ctx, op_id: &str) -> Result<AfterRelease, String> {
+    let checked = ctx
+        .find_op(op_id)
+        .is_some_and(|op| op.state == OpState::Checked);
+    if !checked
+        || !crate::queue::Queue::read(ctx.repo)
+            .is_ok_and(|queue| queue.released_as(op_id, "published"))
+    {
+        return Ok(AfterRelease::Stands);
+    }
+    if let Some(landed) = landed_on_chain(ctx, op_id, true)? {
+        return Ok(AfterRelease::Landed(Box::new(landed)));
+    }
+    let Ok(main) = ctx.repo.fetch_trunk() else {
+        return Ok(AfterRelease::Unanswered);
+    };
+    if let Some(landed) = landed_on_chain(ctx, op_id, true)? {
+        return Ok(AfterRelease::Landed(Box::new(landed)));
+    }
+    let revision = ctx.op(op_id).revision.clone();
+    Ok(match scanned(ctx, &main, &revision)? {
+        Some(landed) => AfterRelease::Landed(Box::new(existing(landed))),
+        None => AfterRelease::Unanswered,
+    })
 }
 
 /// G800 (a fleet measurement, 2026-11-19: in 28 h one box's two runners made 524 visits to an
@@ -5233,6 +5282,15 @@ fn claim(
         ctx.find_op(op_id).and_then(|op| op.owner.as_deref()),
     );
     ctx.claim_waited = held;
+    // G809: a held operation the chain says checked, while the line released it `published`,
+    // landed: never held, and never claimed again.
+    if held {
+        match after_release(ctx, op_id)? {
+            AfterRelease::Landed(landed) => return Ok(Some(*landed)),
+            AfterRelease::Unanswered => return Err(CHAIN_MOVED.to_owned()),
+            AfterRelease::Stands => {}
+        }
+    }
     if held && !holder_revoked(ctx, op_id)? && !lease_expired(ctx, quiet) {
         let mut result = BayResult::new(Decision::Ok).with_change(&id).with_op(op_id);
         result.state = Some("running".to_owned());
