@@ -4,6 +4,8 @@
 
 - A newer revision waiting when its change merges ends, and says `bay merge` in the view sends it next.
 - The `--wait` help says a live runner takes a merge whose environments this checkout does not all serve.
+- A merge waits while another session's start removes a merged change's view, then answers merged.
+- Each change a batch merges wakes its author once, not only the batch's first change.
 
 ## 0.6.121
 
