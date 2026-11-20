@@ -806,8 +806,9 @@ struct Ctx<'a> {
     /// The chain head this process last pushed: later pushes are leased on it, so a chain
     /// another executor moved is never overwritten.
     pushed_head: Option<String>,
-    /// G677: the red post checks this change's paths meet, run on its candidate before the merge.
-    red_checks: Vec<String>,
+    /// G677: the red post checks this change's paths meet, run on its candidate before the merge,
+    /// each with the units it failed on main, which that run asks again (G815).
+    red_checks: Vec<(evidence::CheckId, Vec<String>)>,
     /// G551, BACKLOG 92: the claim watched another holder's lease before it won, so main may
     /// have moved since this visit read it.
     claim_waited: bool,
@@ -889,6 +890,14 @@ enum Visit {
 }
 
 impl<'a> Ctx<'a> {
+    /// The ids of the red checks this change's candidate runs before its merge (G677).
+    fn red_ids(&self) -> Vec<String> {
+        self.red_checks
+            .iter()
+            .map(|(id, _)| id.id.clone())
+            .collect()
+    }
+
     fn load(repo: &'a Repo, step: &'a Step, id: &str) -> Result<Self, String> {
         let keys = Keys::load(&repo.git);
         keys.validate()?;
@@ -6558,7 +6567,13 @@ fn red_gate(ctx: &mut Ctx, revision: &str, trunk: &str) -> Result<(), String> {
     // G677 (owner ruling 2026-11-07, "merge unless worse"): the change never waits for main;
     // each red check on its paths runs on its candidate before the merge, judged against main,
     // and only a failure main does not have refuses it ([`policy::Policy::judging_red`]).
-    ctx.red_checks = blocking.iter().map(|red| red.check.clone()).collect();
+    // G815: that run asks again the units the red failed, as a post run on main does (G540):
+    // its record is the landing's, and a pass that ran none of them would answer the red.
+    let red_checks = blocking
+        .iter()
+        .map(|red| crate::bisect::red_units(git, ctx.registry.as_ref(), red))
+        .collect::<Result<Vec<_>, String>>()?;
+    ctx.red_checks = red_checks;
     Ok(())
 }
 
@@ -7841,7 +7856,7 @@ fn check_candidate(
         let Some(policy) = &base_policy else {
             return Ok(policy_missing(ctx, op_id, trunk));
         };
-        let policy = &policy.judging_red(&ctx.red_checks);
+        let policy = &policy.judging_red(&ctx.red_ids());
         let (verdict, refusal) = run(candidate_id, policy, base_from)?;
         return Ok((!policy.unchecked, verdict, refusal));
     }
@@ -7894,7 +7909,7 @@ fn check_candidate(
     if policy.unchecked {
         return Ok((false, UNCHECKED, None));
     }
-    let policy = &policy.judging_red(&ctx.red_checks);
+    let policy = &policy.judging_red(&ctx.red_ids());
     let (verdict, refusal) = run(candidate_id, policy, base_from)?;
     if refusal.is_some() {
         return Ok((true, verdict, refusal));
@@ -8202,6 +8217,7 @@ fn run_policy(
             &check::Limits {
                 budget: ctx.repo.config.execution_budget(),
                 finished,
+                asked: ctx.red_checks.clone(),
                 heartbeat: Some(ctx.repo.config.heartbeat()),
                 hidden: hidden_paths(ctx),
                 sandbox: check::Sandbox::here().reading(git),
@@ -8761,7 +8777,7 @@ fn served_elsewhere(
     };
     // The policy at trunk is the one a candidate's red checks run under (`check_candidate`).
     if let Some(at_trunk) = policies.first_mut() {
-        *at_trunk = at_trunk.judging_red(&ctx.red_checks);
+        *at_trunk = at_trunk.judging_red(&ctx.red_ids());
     }
     let served = check::Served::read(git);
     let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
@@ -9916,7 +9932,7 @@ fn landing_row(ctx: &Ctx, op_id: &str, revision: &str, commit: &str) -> BayResul
     if let Some(detail) = result.detail.as_mut()
         && !ctx.red_checks.is_empty()
     {
-        detail["red_checked"] = json!(ctx.red_checks);
+        detail["red_checked"] = json!(ctx.red_ids());
     }
     // A batch member names the batch whose tip was checked: its own tree was not checked alone.
     let batch = ctx

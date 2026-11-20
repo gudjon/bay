@@ -1044,6 +1044,7 @@ fn run_check(
     let limits = check::Limits {
         budget: None,
         finished: Vec::new(),
+        asked: Vec::new(),
         heartbeat: None,
         hidden: vec![work.to_path_buf(), git_dir.clone()],
         sandbox: sandbox.clone(),

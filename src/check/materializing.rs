@@ -137,6 +137,7 @@ fn run_with(
     let limits = Limits {
         budget,
         finished: Vec::new(),
+        asked: Vec::new(),
         heartbeat,
         hidden: Vec::new(),
         sandbox: Sandbox::judge("none", Ok(true)),

@@ -493,6 +493,22 @@ fn failing(
     })
 }
 
+/// G815: the units that failed in `red`'s newest failing record ([`failing`]): what a run of
+/// its check on a candidate before the merge asks again.
+///
+/// # Errors
+///
+/// As [`failing`].
+pub(crate) fn red_units(
+    git: &Git,
+    registry: Option<&Registry>,
+    red: &Red,
+) -> Result<(CheckId, Vec<String>), String> {
+    let id = CheckId::new(&red.check, &red.environment);
+    let units = failing(git, registry, red, &id)?.units;
+    Ok((id, units))
+}
+
 /// The strings of a JSON list; none for anything else.
 fn strings(value: Option<&Value>) -> Vec<String> {
     value
@@ -1109,6 +1125,7 @@ fn run_at(
         &check::Limits {
             budget: None,
             finished: Vec::new(),
+            asked: Vec::new(),
             heartbeat: None,
             hidden: check::hidden_for(repo, keys),
             sandbox: check::Sandbox::here().reading(git),

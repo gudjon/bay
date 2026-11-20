@@ -398,6 +398,9 @@ pub struct Limits {
     pub budget: Option<Duration>,
     /// Checks that already finished on this tree under this manifest; not run again.
     pub finished: Vec<CheckId>,
+    /// G815: the units each red check failed on main, asked again of this run of it and of
+    /// its base run (the request's `rerun`), so its pass answers the red only once they ran.
+    pub asked: Vec<(CheckId, Vec<String>)>,
     /// How often to call the heartbeat while a check runs.
     pub heartbeat: Option<Duration>,
     /// Directories the check may neither read nor write: the repository and every view in it.
@@ -1313,7 +1316,12 @@ fn run_in_slot(shared: Shared, (index, entry): (usize, &CheckEntry)) -> Result<S
         if stops {
             break;
         }
-        let asked = retry_of(shared.candidate, &failed, run);
+        let asked = retry_of(
+            shared.candidate,
+            asked_of(shared.limits, entry),
+            &failed,
+            run,
+        );
         let (mut judged, ran) = run_once(
             shared.git,
             shared.policy,
@@ -1569,7 +1577,7 @@ fn run_serial(
         return Ok(None);
     }
     for run in 0..=entry.retry_on_failure {
-        let asked = retry_of(candidate, &failed, run);
+        let asked = retry_of(candidate, asked_of(limits, entry), &failed, run);
         let (mut judged, ran) = run_once(
             git,
             policy,
@@ -1637,16 +1645,50 @@ fn run_serial(
 /// minutes): the candidate a check's `run`th run asks. A rerun after a failure that named its
 /// `failed` units asks again for those units alone, with `retry` its number, so a flake costs
 /// the units that failed, not the whole check. A first run, or a rerun after a failure that
-/// named no unit, asks what the candidate asks.
-fn retry_of<'a>(candidate: &Candidate<'a>, failed: &'a [String], run: u32) -> Candidate<'a> {
+/// named no unit, asks what the candidate asks, and again the units main's red failed, when
+/// the run asks any of this check (`asked`, G815).
+fn retry_of<'a>(
+    candidate: &Candidate<'a>,
+    asked: &'a [String],
+    failed: &'a [String],
+    run: u32,
+) -> Candidate<'a> {
     if run == 0 || failed.is_empty() {
-        return *candidate;
+        if asked.is_empty() {
+            return *candidate;
+        }
+        return Candidate {
+            rerun: asked,
+            ..*candidate
+        };
     }
     Candidate {
         rerun: failed,
         retry: run,
         ..*candidate
     }
+}
+
+/// G815: the units `limits` ask again of check `entry`: those main's red of it failed, or none.
+fn asked_of<'a>(limits: &'a Limits, entry: &CheckEntry) -> &'a [String] {
+    let id = CheckId::new(&entry.id, &entry.environment);
+    limits
+        .asked
+        .iter()
+        .find(|(check, _)| *check == id)
+        .map_or(&[], |(_, units)| units.as_slice())
+}
+
+/// G815: whether `record` answers each of `units`: as a unit it ran, or one its plan names gone.
+fn answers_units(record: &EvidenceRecord, units: &[String]) -> bool {
+    let gone = record
+        .unknown
+        .get(GONE)
+        .and_then(serde_json::Value::as_array);
+    units.iter().all(|id| {
+        record.units.iter().any(|unit| unit.id == *id)
+            || gone.is_some_and(|gone| gone.iter().any(|named| named.as_str() == Some(id)))
+    })
 }
 
 /// The ids of the units `record` failed, sorted and once each: what its check's next rerun asks.
@@ -1968,11 +2010,13 @@ fn base_answer(
     (work_dir, started): (&Path, Instant),
     (base, on_base): (&Baseline, &mut Vec<EvidenceRecord>),
 ) -> Result<Result<EvidenceRecord, String>, String> {
-    if let Some(found) = on_base
-        .iter()
-        .chain(&base.records)
-        .find(|record| answers_on_base(record, policy, candidate, entry, &base.commit))
-    {
+    // G815: the base answers the units main's red failed too, so a candidate that still fails
+    // them is judged no worse than main.
+    let asked = asked_of(limits, entry);
+    if let Some(found) = on_base.iter().chain(&base.records).find(|record| {
+        answers_on_base(record, policy, candidate, entry, &base.commit)
+            && answers_units(record, asked)
+    }) {
         return Ok(Ok(found.clone()));
     }
     // The base is checked as it was landed: against its own first parent, so an adapter that
@@ -2006,7 +2050,7 @@ fn base_answer(
         policy_provenance: candidate.policy_provenance,
         inputs: candidate.inputs,
         turn: None,
-        rerun: &[],
+        rerun: asked,
         retry: 0,
     };
     let (mut judged, ran) = run_once(
@@ -3264,6 +3308,7 @@ printf '{"schema":"bay.check.result/1","exercised":{"commit":"%s","tree":"%s"},"
             let limits = Limits {
                 budget: None,
                 finished: Vec::new(),
+                asked: Vec::new(),
                 heartbeat: None,
                 hidden: Vec::new(),
                 sandbox,
