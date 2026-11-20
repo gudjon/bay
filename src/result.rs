@@ -170,6 +170,7 @@ reasons! {
     // `bay doctor --role runner` (G63); not yet in INTERFACES § 8
     CheckEnvUnset => "CHECK_ENV_UNSET", ["read"], "after_setup", false;
     ExecutorKeyMissing => "RUNNER_KEY_MISSING", ["read"], "after_setup", false;
+    ProducerShared => "PRODUCER_SHARED", ["read"], "after_setup", false;
     // G145; not yet in INTERFACES § 8: a file-based release, producer, executor or registry key,
     // or a token beside it, that the account running agent sessions can read.
     KeyExposed => "KEY_EXPOSED", ["read"], "after_setup", false;
@@ -1209,6 +1210,9 @@ impl Reason {
             Self::ExecutorKeyMissing => {
                 "Tell the user to set and enroll the runner's `runner` and `producer` keys, then run `bay doctor --role runner` again."
             }
+            Self::ProducerShared => {
+                "Tell the user to give this runner its own `bay.producerName`, or stop the runner `detail` names, then start it again."
+            }
             Self::KeyExposed => {
                 "Tell the user to move the key `detail` names onto hardware, or out of the account agent sessions run as."
             }
@@ -1381,6 +1385,9 @@ impl Reason {
             }
             Self::ExecutorKeyMissing => {
                 "Nothing can be added from here: this checking machine has no key to sign with. Ask whoever runs it."
+            }
+            Self::ProducerShared => {
+                "Not started: this checking machine signs its results with the same name as another one that is running. Ask whoever runs it."
             }
             Self::KeyExposed => {
                 "At risk: a secret key here can be read by the assistant's account. Ask whoever runs bay to move it."
@@ -2901,7 +2908,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 62);
+        assert_eq!(Reason::ALL.len(), 63);
     }
 
     #[test]

@@ -4,7 +4,8 @@
 //! an idle executor writes nothing else to the remote. So each `bay runner run` pass publishes
 //! one small record of itself: one parentless commit whose tree is `presence.json` alone (schema
 //! `bay.executor/1`), replacing the ref's last one as a live summary does (`crate::live`). It
-//! names the executor, its machine (`bay.machine`, never a pid), its bay and Git versions, the
+//! names the executor, its machine (`bay.machine`, never a pid), the producer it writes evidence
+//! as (`bay.producerName`, when it names one: G807), its bay and Git versions, the
 //! check environments the box serves (`bay.checkEnvironment`), the time the pass began, the
 //! longest gap it leaves between two writes while idle (`cadence_s`), the operation the pass
 //! drives first, if any (`holding`), and the live queue depth it saw. Under a key registry it is
@@ -194,6 +195,7 @@ impl Beat {
             "schema": PRESENCE_SCHEMA,
             "executor": keys.executor_name,
             "machine": crate::live::machine(&repo.git).ok(),
+            "producer": named_producer(keys),
             "bay": crate::version::BAY,
             "git": self.git,
             "environments": {"source": served.source(), "declared": served.declared()},
@@ -310,13 +312,78 @@ pub fn serving_until(git: &Git, me: &str, environments: &[String]) -> Option<u64
                     declared.is_some_and(|all| all.iter().any(|it| it == environment.as_str()))
                 })
         })
-        .filter_map(|record| {
-            let cadence = record["cadence_s"].as_u64().unwrap_or(10);
-            let at = record["at"].as_str().and_then(crate::clock::unix_of)?;
-            Some(at.saturating_add(cadence * STALE_CADENCES + 30))
-        })
+        .filter_map(|record| live_until(&record))
         .filter(|until| *until >= now)
         .max()
+}
+
+/// Until when, in Unix seconds, `record` stays live under [`serving_until`]'s strict rule.
+fn live_until(record: &Value) -> Option<u64> {
+    let cadence = record["cadence_s"].as_u64().unwrap_or(10);
+    let at = record["at"].as_str().and_then(crate::clock::unix_of)?;
+    Some(at.saturating_add(cadence * STALE_CADENCES + 30))
+}
+
+/// The producer `keys` write evidence as, when this clone names one (`bay.producerName`). A
+/// clone that names none takes one of its own when it first writes evidence (G297), so it shares
+/// none.
+#[must_use]
+pub fn named_producer(keys: &Keys) -> Option<&str> {
+    Some(keys.producer_name.as_str()).filter(|name| *name != crate::signing::UNNAMED)
+}
+
+/// G807: each runner, other than `executor`, whose presence this store holds, live under
+/// [`serving_until`]'s strict rule, and names `producer`: its name and machine, sorted by name.
+#[must_use]
+pub fn sharing(git: &Git, executor: &str, producer: &str) -> Vec<(String, Option<String>)> {
+    let me = presence_ref(executor);
+    let Ok(listed) = git.run(&[
+        "for-each-ref",
+        "--format=%(refname) %(objectname)",
+        PRESENCE_PREFIX,
+    ]) else {
+        return Vec::new();
+    };
+    let commits: Vec<String> = listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(name, _)| *name != me)
+        .map(|(_, commit)| commit.to_owned())
+        .collect();
+    if commits.is_empty() {
+        return Vec::new();
+    }
+    // Two `cat-file` calls whatever the count, as [`rows`] reads them.
+    let Ok(reads) = crate::live::files_at(git, &commits, PRESENCE_FILE, PRESENCE_MAX_BYTES) else {
+        return Vec::new();
+    };
+    let now = reader_now();
+    let mut found: Vec<(String, Option<String>)> = reads
+        .into_iter()
+        .filter_map(|read| read.ok().flatten())
+        .filter(|record| record["producer"] == producer)
+        .filter(|record| live_until(record).is_some_and(|until| until >= now))
+        .filter_map(|record| {
+            let runner = record["executor"].as_str()?.to_owned();
+            (runner != executor).then(|| (runner, record["machine"].as_str().map(str::to_owned)))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Brings every runner's presence from the remote, forced, as the runner's pass does
+/// ([`Repo::fetch_chains`]): whether the fetch went.
+pub fn fetch(repo: &Repo) -> bool {
+    repo.git
+        .run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            repo.remote(),
+            &format!("+{PRESENCE_PREFIX}*:{PRESENCE_PREFIX}*"),
+        ])
+        .is_ok()
 }
 
 /// The `presence.json` a presence commit carries; `None` where its tree holds none or one that

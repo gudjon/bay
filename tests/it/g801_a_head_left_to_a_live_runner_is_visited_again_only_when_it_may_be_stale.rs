@@ -191,13 +191,14 @@ fn a_head_left_to_a_live_runner_is_not_visited_again_while_it_is_live() {
     );
     let _ = child.kill();
     let _ = child.wait();
-    // THEN it visited the head once, and fetched the presences once
+    // THEN it visited the head once, and fetched the presences once for it, besides the one
+    // fetch at its start that finds whether a live runner writes as its producer (G807)
     let (visits, passes) = seen(&test_box, "a", &op);
     let journal = std::fs::read_to_string(test_box.path().join("a-journal")).unwrap_or_default();
     assert_eq!(visits, 1, "{visits} visits in {passes} passes: {journal}");
     assert_eq!(
         fetches(&test_box, "a", "refs/bay/executor/*"),
-        1,
+        2,
         "the runner fetched the presences again: {journal}"
     );
 }

@@ -1451,7 +1451,40 @@ fn signing_row(git: &Git, report: &mut Report) {
 /// publications and the producer key that signs its evidence are set, and each one's name is
 /// enrolled in its class file. Without a registry the executor publishes unsigned: green. Under
 /// `[policy] signing = "approvals"` (N-21) neither key is needed: green.
+///
+/// G807: the row names a live runner whose presence names this runner's producer under its own
+/// runner name (`shared_with`), red: the two collide on one notes ref.
 fn executor_keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report) {
+    keys_row(git, keys, report);
+    let Some(producer) = crate::presence::named_producer(keys) else {
+        return;
+    };
+    let shared: Vec<Value> = crate::presence::sharing(git, &keys.executor_name, producer)
+        .into_iter()
+        .map(|(runner, machine)| json!({"runner": runner, "machine": machine}))
+        .collect();
+    let Some(row) = report
+        .rows
+        .iter_mut()
+        .rev()
+        .find(|row| row["name"] == "runner-keys")
+    else {
+        return;
+    };
+    if shared.is_empty() {
+        return;
+    }
+    row["state"] = json!("red");
+    row["producer_name"] = json!(producer);
+    row["shared_with"] = json!(shared);
+    row["recovery"] = json!("give each runner its own bay.producerName");
+    report.red(
+        Reason::ProducerShared,
+        Some("a live runner writes as this runner's producer"),
+    );
+}
+
+fn keys_row(git: &Git, keys: &crate::signing::Keys, report: &mut Report) {
     use crate::registry::{KeyClass, Registry};
     let registry = match Registry::current(git) {
         Ok(None) => {

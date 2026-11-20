@@ -127,7 +127,15 @@ fn one_producer_name_used_by_two_executors_is_a_collision() {
     std::fs::write(second.join("src/other.rs"), "fn other() {}\n").unwrap();
     let (code, _) = result_json(test_box.bay(&second).arg("merge"));
     assert_eq!(code, 0);
-    let ran = test_box.bay_ok(&two, &["runner", "run", "--once"]);
+    // G807: runner one's presence reads stale here, so runner two starts, and the collision is
+    // found where it always was, at its evidence push. A live one refuses it at start.
+    let (code, ran) = result_json(
+        test_box
+            .bay(&two)
+            .args(["runner", "run", "--once"])
+            .env("BAY_TEST_PRESENCE_CLOCK_SKEW_S", "3600"),
+    );
+    assert_eq!(code, 0, "{ran}");
     let result = &ran["detail"]["ran"][0];
     assert_eq!(result["decision"], "failed", "{ran}");
     assert!(

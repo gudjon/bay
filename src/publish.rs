@@ -8823,22 +8823,11 @@ fn served_elsewhere(
 /// Whether another runner's presence on the remote is live and declares every one of
 /// `environments` ([`crate::presence::serving_until`], on the presence refs fetched now).
 fn live_runner_serving(ctx: &Ctx, environments: &[String]) -> bool {
-    let git = &ctx.repo.git;
-    let prefix = crate::presence::PRESENCE_PREFIX;
-    if git
-        .run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            ctx.repo.remote(),
-            &format!("+{prefix}*:{prefix}*"),
-        ])
-        .is_err()
-    {
+    if !crate::presence::fetch(ctx.repo) {
         return false;
     }
     let me = crate::presence::presence_ref(&ctx.executor_name());
-    crate::presence::serving_until(git, &me, environments).is_some()
+    crate::presence::serving_until(&ctx.repo.git, &me, environments).is_some()
 }
 
 /// BACKLOG 214 (a fleet finding, 2026-11-02: ftltlvo6): a change's own run (`bay merge --wait`)
