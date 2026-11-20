@@ -403,7 +403,13 @@ fn wait_land(repo: &Repo, id: &str, step: &Step) -> Result<BayResult, String> {
                 .is_some_and(|detail| detail["machine"].is_string())
             && let Some(op_id) = result.op_id.clone()
         {
-            watch_until_done(repo, id, &op_id, None);
+            // G816: the watch ends at a queue head's progress deadline, or at once when the
+            // repository is gone, and then answers as `merge --wait=<s>` does: the run continues.
+            let deadline = repo.config.progress_deadline();
+            let watch = Instant::now();
+            if !watch_until_done(repo, id, &op_id, watch + deadline) {
+                return Ok(still_running(id, op_id, deadline, watch));
+            }
             return submit_land(repo, id, step, false)
                 .map(|result| checked_elsewhere(repo, id, &op_id, result));
         }
@@ -532,22 +538,29 @@ fn observe_land(
             .map_err(|error| format!("the run could not be started: {error}"))?,
     );
     let watch = Instant::now();
-    if watch_until_done(repo, id, &op_id, Some(until)) {
+    if watch_until_done(repo, id, &op_id, until) {
         // The outcome is in the chain; reading it again returns the same result the run did.
         return submit_land(repo, id, step, false)
             .map(|result| checked_elsewhere(repo, id, &op_id, result));
     }
+    Ok(still_running(id, op_id, timeout, watch))
+}
+
+/// The answer of a wait that ended, after watching since `watch` for at most `timeout`, before
+/// operation `op_id` of change `id` had its outcome (§ 9a): `queued`/`running`, and the run
+/// continues on its own.
+fn still_running(id: &str, op_id: String, timeout: Duration, watch: Instant) -> BayResult {
     let mut result = BayResult::new(Decision::Queued)
         .with_change(id)
         .with_op(op_id);
     result.state = Some("running".to_owned());
     result.waiting_for = Some("executor".to_owned());
-    Ok(result.with_detail(json!({
+    result.with_detail(json!({
         "observation_timeout_s": timeout.as_secs(),
         // G776: how long this command watched, the rest of its wait spent submitting.
         "watched_s": watch.elapsed().as_secs(),
         "the run continues": true,
-    })))
+    }))
 }
 
 /// Watches change `id`'s chain until operation `op_id` reached its outcome (or was blocked), at
@@ -558,9 +571,12 @@ fn observe_land(
 ///
 /// G811: once the operation names this machine as one that handed it to the runners, no process
 /// here writes its chain again: the chain is read from the remote, once a heartbeat (G749).
-fn watch_until_done(repo: &Repo, id: &str, op_id: &str, until: Option<Instant>) -> bool {
+///
+/// G816: a repository deleted under the watch can show no outcome: the watch ends at once.
+fn watch_until_done(repo: &Repo, id: &str, op_id: &str, until: Instant) -> bool {
     let chain = Chain::new(&repo.git);
     let machine = crate::live::machine(&repo.git).ok();
+    let common = repo.git.common_dir().ok().map(std::path::PathBuf::from);
     let mut seen: Option<String> = None;
     let mut handed = false;
     loop {
@@ -569,12 +585,13 @@ fn watch_until_done(repo: &Repo, id: &str, op_id: &str, until: Option<Instant>) 
         } else {
             Duration::from_secs(1)
         };
-        let pause = match until.map(|until| until.checked_duration_since(Instant::now())) {
-            Some(None) => return false,
-            Some(Some(left)) => every.min(left),
-            None => every,
+        let Some(left) = until.checked_duration_since(Instant::now()) else {
+            return false;
         };
-        std::thread::sleep(pause);
+        std::thread::sleep(every.min(left));
+        if !repo.git.dir().is_dir() || common.as_ref().is_some_and(|dir| !dir.is_dir()) {
+            return false;
+        }
         if handed {
             let _ = repo.remote_chain(id);
         }
