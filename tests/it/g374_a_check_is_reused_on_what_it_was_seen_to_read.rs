@@ -78,6 +78,9 @@ fn queue(head_touches_lib: bool) -> Held {
 
 #[test]
 fn a_record_whose_observed_reads_are_unchanged_is_carried() {
+    if !support::observes_reads(&support::TestBox::new()) {
+        return;
+    }
     let held = queue(false);
     let requests = held.requests();
     assert_eq!(requests.len(), 2, "carried, not rechecked: {requests:?}");

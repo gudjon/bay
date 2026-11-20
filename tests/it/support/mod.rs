@@ -1017,6 +1017,24 @@ pub fn sandbox() -> Option<&'static str> {
     usable.then_some("bwrap")
 }
 
+/// Whether this machine's filesystem moves an access time on a read, by bay's own probe
+/// (`bay::check::observe::arm`): a check's observed reads are seen only there. On macOS, where
+/// APFS can leave access times frozen, a case that needs them skips, saying why; elsewhere it
+/// runs, so the gate's Linux run never skips one unnoticed.
+#[must_use]
+pub fn observes_reads(test_box: &TestBox) -> bool {
+    let tree = test_box.path().join("observe-probe-tree");
+    let scratch = test_box.path().join("observe-probe-scratch");
+    std::fs::create_dir_all(&tree).unwrap();
+    std::fs::create_dir_all(&scratch).unwrap();
+    let observed = bay::check::observe::arm(&tree, &scratch).is_some();
+    if !observed && cfg!(target_os = "macos") {
+        eprintln!("skipped: a read on this filesystem leaves its access time as it was");
+        return false;
+    }
+    true
+}
+
 /// Runs a command and parses its stdout as the `bay.result/1` document.
 pub fn result_json(cmd: &mut Command) -> (i32, serde_json::Value) {
     let out = cmd.arg("--json").output().unwrap();

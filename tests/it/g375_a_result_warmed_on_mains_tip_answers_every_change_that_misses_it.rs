@@ -25,6 +25,9 @@ const POLICY: &str = "revision = 1\n\n[[check]]\nid = \"lint\"\nenvironment = \"
 
 #[test]
 fn a_change_that_misses_what_the_check_read_lands_on_the_warmed_result() {
+    if !support::observes_reads(&support::TestBox::new()) {
+        return;
+    }
     let held = host(&Check {
         config: CONFIG,
         policy: Some(POLICY),
