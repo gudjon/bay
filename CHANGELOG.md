@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.115
+
+- A runner does not revisit a head another runner holds while that runner's lease keeps beating.
+- `bay update` names only what is left after it: `bay doctor` in each repository.
+
 ## 0.6.114
 
 - `bay update` lists what each newer release brings and names the next steps to run.
