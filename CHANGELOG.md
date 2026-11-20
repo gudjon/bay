@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.116
+
+- A check's kept files stay a day after their last use, so the next check links them instead of writing them.
+
 ## 0.6.115
 
 - A runner does not revisit a head another runner holds while that runner's lease keeps beating.
