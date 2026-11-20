@@ -8976,24 +8976,42 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Opti
 }
 
 /// The environments the policies that judge `revision`'s change run checks in (G431, G579);
-/// `None` when that cannot be read. G797: a post check the change wakes counts too: while main
-/// is red on it, the change runs it before its merge (G677), and only a box that serves it
-/// takes the change.
+/// `None` when that cannot be read. G797: a post check main is red on counts too: the change
+/// runs it before its merge (G677), and only a box that serves it takes the change.
+///
+/// G818 (a fleet finding, 2026-11-20: a change waited for a box serving both its own checks'
+/// environment and a red post check's; main went green on that check, and the change waited
+/// on for hours, as every post check it woke counted, red or not): main's reds are read as
+/// `red_gate` reads them, and a post check counts only while main is red on it. Reds that
+/// cannot be read keep every environment the wait names.
 fn required_environments(ctx: &Ctx, revision: &str, trunk: &str) -> Option<Vec<String>> {
     let git = &ctx.repo.git;
-    let policies = judging_policies(git, revision, trunk)?;
+    let mut policies = judging_policies(git, revision, trunk)?;
     let base = git.run(&["merge-base", trunk, revision]).ok()?;
     let changed = check::changed_paths(git, &base, revision).ok()?;
+    let loaded = if ctx.registry.is_some() {
+        None
+    } else {
+        crate::registry::Registry::current(git).ok()?
+    };
+    let registry = ctx.registry.as_ref().or(loaded.as_ref());
+    let reds = crate::red::holding(git, trunk, registry).ok()?;
+    let red: Vec<String> = crate::red::blocking(&reds, &changed, &ctx.record.repair_names())
+        .iter()
+        .map(|red| red.check.clone())
+        .collect();
+    // The policy at trunk is the one a candidate's red checks run under (`check_candidate`).
+    if let Some(at_trunk) = policies.first_mut() {
+        *at_trunk = at_trunk.judging_red(&red);
+    }
     Some(
         policies
             .iter()
             .flat_map(|policy| {
-                policy.checks.iter().filter(|entry| {
-                    policy.runs(entry, &changed)
-                        || (entry.stage == policy::Stage::Post
-                            && !entry.is_approval()
-                            && policy.unwoken(entry, &changed).is_none())
-                })
+                policy
+                    .checks
+                    .iter()
+                    .filter(|entry| policy.runs(entry, &changed))
             })
             .map(|entry| entry.environment.clone())
             .collect(),
