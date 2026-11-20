@@ -881,8 +881,9 @@ fn pass(
             // A fleet finding (2026-10-27): an abandoned change's older operation was still
             // queued and run hours later. No operation of an ended change runs.
             .filter(|_| !record.ended())
-            // G750: a repair is never parked: a red main, which no stand names, frees it.
-            .filter(|op| !parked.holds(&op.op_id) || names_a_repair(record))
+            // G750, G814: a waiting change, a repair as any other, is visited again once what
+            // its stand read moved; a repair's stand also ends once main holds a red it answers.
+            .filter(|op| !parked.holds(&op.op_id))
             .filter(|op| runs(op) && (names_a_repair(record) || reach(op, freed(&ran[first..]))))
             .filter(|op| !taken.contains(&op.op_id))
             .map(|op| op.op_id.clone())
@@ -1301,6 +1302,12 @@ pub(crate) fn tmp_pack_is_stale(entry: &std::fs::DirEntry) -> bool {
 /// holder's lease, as each pass's fetch of the chains brings it, moves within a lease (G696). It
 /// is visited again once its chain moved, or once the lease stood a lease, when that visit
 /// takes it over as before.
+///
+/// G814 (a fleet measurement, 2026-11-20: two runners on one box visited each waiting change
+/// that names one it supersedes, fixes or reverts every pass, a visit every 100 s, 53 of 119
+/// visits in an hour from 8 of 31 waiting changes, while main held no red any of them
+/// answered): such a change answered `QUEUED` is parked as any other, with what it names; its
+/// stand also ends once main holds a red it answers, when it runs ahead of the line.
 #[derive(Default)]
 struct Parked(
     HashMap<String, Vec<(String, String)>>,
@@ -1315,8 +1322,14 @@ struct Stand {
 
 /// What a parked answer read that ends its stand once it moves, beside the operation's chain.
 enum Under {
-    /// G750: a `QUEUED` answer: the queue's head operation and main's commit.
-    Queued { head: Option<String>, main: Main },
+    /// G750: a `QUEUED` answer: the queue's head operation and main's commit. G814: what the
+    /// change names as repaired (its `Fixes:`, `Reverts:` and `Supersedes:`), by which each
+    /// pass ends the stand once main holds a red it answers.
+    Queued {
+        head: Option<String>,
+        main: Main,
+        repairs: Vec<String>,
+    },
     /// G801: a leave to another runner: the queue's head operation and main's rules, and the
     /// environments it was left for, by which each pass renews the stand from the presences.
     Left {
@@ -1388,6 +1401,16 @@ impl Main {
     }
 }
 
+/// G814: whether `reds`, main's holding checks, hold one a change naming `repairs` answers
+/// (`crate::red::Red::answered_by`); unread reds count as one, so the change is visited again.
+fn answered(reds: Option<&[crate::red::Red]>, repairs: &[String]) -> bool {
+    if repairs.is_empty() {
+        return false;
+    }
+    let names: Vec<&String> = repairs.iter().collect();
+    reds.is_none_or(|reds| reds.iter().any(|red| red.answered_by(&names)))
+}
+
 /// G750: the longest a `QUEUED` operation goes unvisited while nothing it was answered under
 /// moved: what no key names (a red main, a policy, a deadline) is read again within this.
 const STAND_KEPT: Duration = Duration::from_secs(600);
@@ -1428,6 +1451,16 @@ impl Parked {
         }
         let now = Instant::now();
         let commit = Main::at(repo, trunk, false);
+        // G814: main's reds are read only for a repair's stand; one that cannot be read ends it.
+        let reds = self
+            .1
+            .values()
+            .any(|stand| matches!(&stand.under, Under::Queued { repairs, .. } if !repairs.is_empty()))
+            .then(|| {
+                let registry = crate::registry::Registry::current(&repo.git).ok()?;
+                crate::red::holding(&repo.git, trunk?, registry.as_ref()).ok()
+            })
+            .flatten();
         // Main's rules are read only for a leave that still holds.
         let rules = self
             .1
@@ -1440,8 +1473,10 @@ impl Parked {
             .iter()
             .filter(|(_, stand)| {
                 let moved = match &stand.under {
-                    Under::Queued { main, .. } => {
-                        stand.under.head() != head || commit.as_ref() != Some(main)
+                    Under::Queued { main, repairs, .. } => {
+                        stand.under.head() != head
+                            || commit.as_ref() != Some(main)
+                            || answered(reds.as_deref(), repairs)
                     }
                     Under::Left { main, .. } => {
                         stand.under.head() != head || rules.as_ref() != Some(main)
@@ -1501,17 +1536,34 @@ impl Parked {
             self.0.remove(op_id);
             return;
         };
+        // G814: what a waiting change names as repaired, read from its record at the visit; a
+        // record that cannot be read parks nothing.
+        let repairs = queued
+            .then(|| Chain::new(&repo.git).record_at(&own).ok())
+            .flatten()
+            .map(|record| {
+                record
+                    .repair_names()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
         let mut read = vec![(change.to_owned(), own)];
         read.extend(waits.into_iter().map(|wait| (wait.change, wait.head)));
         self.0.insert(op_id.to_owned(), read);
         let stand = if queued {
             Under::line(repo, false)
+                .zip(repairs)
                 // A head that yielded keeps its place and runs next pass: never parked.
-                .filter(|(head, _)| {
+                .filter(|((head, _), _)| {
                     head.as_deref() != Some(op_id) && row["detail"]["yielded"] != true
                 })
-                .map(|(head, main)| Stand {
-                    under: Under::Queued { head, main },
+                .map(|((head, main), repairs)| Stand {
+                    under: Under::Queued {
+                        head,
+                        main,
+                        repairs,
+                    },
                     until: Instant::now() + STAND_KEPT,
                 })
         } else if let Some((environments, until)) = left {
