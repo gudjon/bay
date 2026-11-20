@@ -901,8 +901,18 @@ fn a_worker_outage_with_three_queued_operations_ends_with_all_three_landed() {
         reasons.len() >= 9 && reasons.iter().all(|reason| reason == "unavailable"),
         "every head was released as unavailable, three times each, none by its deadline: {reasons:?}"
     );
+    // Each waits for a worker. A read can land in the moment the change's own run claims it again,
+    // before that run records its wait anew, so the read is asked again for a bounded while.
     for id in &ids {
-        let status = queued.test_box.bay_ok(&queued.repo, &["status", id]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let status = loop {
+            let status = queued.test_box.bay_ok(&queued.repo, &["status", id]);
+            let op = &status["detail"]["changes"][0]["operation"];
+            if op["waiting_for"] == "worker" || std::time::Instant::now() >= deadline {
+                break status;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        };
         let op = &status["detail"]["changes"][0]["operation"];
         assert_eq!(op["waiting_for"], "worker", "{status}");
     }
