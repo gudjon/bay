@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.121
+
+- `bay merge --wait` asked again after a merged change's view is removed answers merged, not `VIEW_INCOMPLETE`.
+
 ## 0.6.120
 
 - A head needing environments no live runner serves together leaves the line, so the changes behind it merge.
