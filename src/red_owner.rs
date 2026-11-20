@@ -28,6 +28,11 @@
 //! when none was on its paths. The line says how many there were, and that none is a proven
 //! cause.
 //!
+//! G826 (a fleet finding, 2026-11-20: 95 of 557 `red_owner` events in eight days were written
+//! again by a second or third runner, each before it could read the first one's log, and each
+//! woke the session again): one runner tells a red, chosen as G822 chooses the runner of a post
+//! check, while its presence reads live.
+//!
 //! G827 (a fleet finding, 2026-11-20: a bisection pinned the culprit of a red whose range was
 //! told, and the culprit was never told it broke the check, because its event's id was the one it
 //! had as a merge of the range): a culprit's event has its own id, so it is told once more, that
@@ -74,9 +79,13 @@ fn told(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
         )?),
     };
     let chain = Chain::new(git);
+    let live = crate::presence::live(git);
     let mut notes = Vec::new();
     let mut written = BTreeSet::new();
     for red in &reds {
+        if teller(red, &keys.executor_name, &live) != keys.executor_name {
+            continue;
+        }
         // A fault reading the range leaves the red's own owner told.
         let mut owners = match range_owners(git, red) {
             Ok(Some(owners)) => owners,
@@ -106,6 +115,23 @@ fn told(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
         }
     }
     Ok(notes)
+}
+
+/// G826: the runner that tells `red`: of `me` and the runners whose presence reads live
+/// (`live`, [`crate::presence::live`]) and that serve the red's environment, the one whose name
+/// weighs most with the check and its environment, as the runner that runs a post check is
+/// chosen (G822, [`crate::bisect::rendezvous`]). Every runner names the same one; once its
+/// presence reads stale, the next one tells.
+fn teller<'a>(red: &Red, me: &'a str, live: &'a [Value]) -> &'a str {
+    live.iter()
+        .filter(|record| crate::presence::serves(record, &red.environment))
+        .filter_map(|record| record["executor"].as_str())
+        .chain([me])
+        .max_by_key(|runner| {
+            let weight = crate::bisect::rendezvous(&red.check, &red.environment, runner);
+            (weight, *runner)
+        })
+        .unwrap_or(me)
 }
 
 /// Writes the `red_owner` event `id` of `red` to `record`'s change, wakes its session once and

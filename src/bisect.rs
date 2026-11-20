@@ -640,8 +640,14 @@ fn left_to(
 /// check, its environment and the runner's name, so every runner, of any version that has it,
 /// weighs the same.
 fn weight(entry: &crate::policy::CheckEntry, runner: &str) -> u64 {
+    rendezvous(&entry.id, &entry.environment, runner)
+}
+
+/// [`weight`], by the check's id and environment: G826 elects the runner that tells a red of
+/// the check by it too (`crate::red_owner`).
+pub(crate) fn rendezvous(check: &str, environment: &str, runner: &str) -> u64 {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("{}\0{}\0{runner}", entry.id, entry.environment));
+    let digest = Sha256::digest(format!("{check}\0{environment}\0{runner}"));
     let mut first = [0_u8; 8];
     first.copy_from_slice(&digest[..8]);
     u64::from_be_bytes(first)

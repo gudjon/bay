@@ -25,7 +25,7 @@ use support::{EXECUTOR, TestBox, check_files, passing_result, result_json};
 
 /// A runner's weight for the post check `suite` in the environment `local`: the first eight
 /// bytes of the SHA-256 of the check, its environment and the runner's name.
-fn weight(runner: &str) -> u64 {
+pub(crate) fn weight(runner: &str) -> u64 {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(format!("suite\0local\0{runner}"));
     u64::from_be_bytes(digest[..8].try_into().unwrap())
@@ -71,7 +71,7 @@ fn two_runners(test_box: &TestBox, timeout_s: u64) -> (PathBuf, PathBuf, PathBuf
 }
 
 /// Lands a change that writes `path` in `dir`.
-fn land(test_box: &TestBox, repo: &Path, dir: &str, path: &str) {
+pub(crate) fn land(test_box: &TestBox, repo: &Path, dir: &str, path: &str) {
     let started = test_box.bay_ok(repo, &["start", path, "--paths", dir]);
     let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
     std::fs::write(view.join(path), format!("{path}\n")).unwrap();
@@ -80,7 +80,7 @@ fn land(test_box: &TestBox, repo: &Path, dir: &str, path: &str) {
 }
 
 /// One runner pass with the reader's clock `skew_s` ahead: the post check it ran, or `""`.
-fn ran_post(test_box: &TestBox, repo: &Path, skew_s: u64) -> String {
+pub(crate) fn ran_post(test_box: &TestBox, repo: &Path, skew_s: u64) -> String {
     let (code, ran) = result_json(
         test_box
             .bay(repo)
