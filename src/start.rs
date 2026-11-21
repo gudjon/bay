@@ -1052,6 +1052,61 @@ fn claim_unwon(
     ))
 }
 
+/// G843 (a fleet finding, 2026-11-21: a start's create push was refused, yet the remote held its
+/// chain and not its claim; the start then made a second change, and the first stayed open and
+/// empty): the remote holds this start's chain at `head`. The start claims for that chain as a
+/// resumed change does (BACKLOG 235): the generation it read while that one is free, else the
+/// next free one. `Some` names the claim the chain holds then. While another live change holds
+/// the intent's newest generation, the chain is ended as abandoned and `None` lets the start
+/// read the claims again: the intent keeps one live change, and no empty change stays open.
+fn claim_taken_chain(
+    repo: &Repo,
+    chain: &Chain,
+    head: &mut String,
+    record: &mut ChangeRecord,
+) -> Result<Option<String>, String> {
+    let id = record.id.clone();
+    let claimed = claim_unwon(repo, chain, head, record)?;
+    let waits_on = claimed
+        .as_ref()
+        .and_then(|claimed| claimed["waits_on"].as_str().map(str::to_owned));
+    let Some(holder) = waits_on else {
+        let claim = record
+            .claim
+            .as_ref()
+            .ok_or_else(|| format!("change {id} of a start holds no claim"))?;
+        return Ok(Some(claim.intent_ref()));
+    };
+    record.state = ChangeState::Abandoned;
+    let draft = newest_draft(chain, &id)?;
+    let ended = chain
+        .commit_on(
+            head,
+            record,
+            &draft,
+            &format!("abandon {id}: change {holder} holds its intent"),
+        )
+        .map_err(|error| error.message())?;
+    let name = change_ref(&id);
+    repo.git
+        .run(&[
+            "push",
+            "-q",
+            &format!("--force-with-lease={name}:{head}"),
+            repo.remote(),
+            &format!("{ended}:{name}"),
+        ])
+        .map_err(|error| {
+            format!(
+                "change {id} is on the remote without its claim and change {holder} holds its \
+                 intent, and it could not be ended: {}; bay abandon {id} ends it",
+                error.message()
+            )
+        })?;
+    let _ = repo.git.run(&["update-ref", &name, &ended, head]);
+    Ok(None)
+}
+
 /// G840: pushes `claimed` as change `id`'s chain with its claim `intent_ref`, in one atomic
 /// push whose claim is create-only (G198); only then does this store's chain, read at `before`,
 /// take it. A chain here that moved meanwhile is settled on the remote's (`Repo::settle_chain`),
@@ -1508,10 +1563,11 @@ fn create(
     record.observed_versions = inputs::observe(repo, &record, base);
     let mut chain = Chain::new(&repo.git);
     chain.sign_with(agent_signer(repo, &me.name)?);
-    let head = chain
+    let mut head = chain
         .create(&record, draft, &format!("start {intent}"))
         .map_err(|error| error.message())?;
     let name = change_ref(&id);
+    let mut intent_ref = intent_ref;
     // BACKLOG 235: a start that ends here leaves a chain whose claim the remote never took.
     if std::env::var("BAY_TEST_KILL_AT").is_ok_and(|at| at == "start-before-claim-push") {
         std::process::exit(137);
@@ -1529,20 +1585,30 @@ fn create(
         &format!("{name}:{name}"),
         &format!("{head}:{intent_ref}"),
     ]) {
-        let _ = repo.git.run(&["update-ref", "-d", &name, &head]);
-        if remote_has(repo, &intent_ref)? {
-            return Ok(None);
+        // G843 (a fleet finding, 2026-11-21: one start made two changes, and the first stayed
+        // open and empty): the host may take the chain of a create push it refused, without the
+        // claim. The start then claims for that chain, and never leaves it for a new one.
+        if crate::compact::remote_marker(repo, &name)?.as_deref() == Some(head.as_str()) {
+            match claim_taken_chain(repo, &chain, &mut head, &mut record)? {
+                Some(claimed) => intent_ref = claimed,
+                None => return Ok(None),
+            }
+        } else {
+            let _ = repo.git.run(&["update-ref", "-d", &name, &head]);
+            if remote_has(repo, &intent_ref)? {
+                return Ok(None);
+            }
+            // The remote's ref lock was held by a writer that has not committed yet: the claim
+            // is undecided, never a fault. Re-read the claims after a short wait.
+            if error.message().contains("cannot lock ref") {
+                std::thread::sleep(CLAIM_LOCK_WAIT);
+                return Ok(None);
+            }
+            return Err(format!(
+                "the change and its claim could not be pushed: {}",
+                error.message()
+            ));
         }
-        // The remote's ref lock was held by a writer that has not committed yet: the claim is
-        // undecided, never a fault. Re-read the claims after a short wait.
-        if error.message().contains("cannot lock ref") {
-            std::thread::sleep(CLAIM_LOCK_WAIT);
-            return Ok(None);
-        }
-        return Err(format!(
-            "the change and its claim could not be pushed: {}",
-            error.message()
-        ));
     }
     // The claim is the remote's now; its local copy is created, never moved (G198).
     let _ = repo.git.run(&["update-ref", &intent_ref, &head, ""]);
