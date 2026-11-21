@@ -1051,9 +1051,11 @@ impl Git {
         // W10: a host may refuse a push of bay's records for a moment of its own (a hosting
         // check it could not finish), and accept the same push a second later. Such a push is
         // tried again before it is called refused; a ref another writer moved is the caller's
-        // to read, so it is answered at once.
+        // to read, so it is answered at once. G847: so is a call that reached no host.
         for wait in HOST_RETRY_WAITS {
-            if output.status.success() || !host_refused(args, &output.stderr) {
+            if output.status.success()
+                || !(host_refused(args, &output.stderr) || host_unreached(args, &output.stderr))
+            {
                 break;
             }
             // BACKLOG 218: no retry this process's deadline would cut.
@@ -2389,7 +2391,8 @@ fn fetches_blobs(args: &[&str]) -> bool {
     args.first() == Some(&"fetch") && as_formatted(args).any(|word| word == "--no-filter")
 }
 
-/// W10: the waits before a push of bay's records the host refused is tried again.
+/// W10, G847: the waits before a push of bay's records the host refused, or a call that reached
+/// no host, is tried again.
 const HOST_RETRY_WAITS: [std::time::Duration; 2] = [
     std::time::Duration::from_secs(1),
     std::time::Duration::from_secs(3),
@@ -2405,6 +2408,40 @@ fn host_refused(args: &[&str], stderr: &[u8]) -> bool {
     let text = String::from_utf8_lossy(stderr);
     text.contains("[remote rejected]") && !ref_moved(&text)
 }
+
+/// G847 (a fleet finding, 2026-11-21: a runner's calls to its remote failed three times in one
+/// hour on a host name that did not resolve for a moment, and the change at the head of the
+/// line, whose check had passed, lost its place): whether a failed `git <args>` that talks to a
+/// remote reached no host ([`HOST_UNREACHED`]), so it sent nothing, or, for a call that is not a
+/// push, the host or the connection failed on the way ([`READ_FAULTS`]).
+fn host_unreached(args: &[&str], stderr: &[u8]) -> bool {
+    if !talks_to_remote(args) {
+        return false;
+    }
+    let text = String::from_utf8_lossy(stderr);
+    HOST_UNREACHED.iter().any(|words| text.contains(words))
+        || (command_of(args) != Some("push")
+            && READ_FAULTS.iter().any(|words| text.contains(words)))
+}
+
+/// G847: the words of a call to a remote that reached no host: its name did not resolve, or no
+/// connection opened.
+const HOST_UNREACHED: [&str; 4] = [
+    "Could not resolve host",
+    "Failed to connect to",
+    "Couldn't connect to server",
+    "ssh: connect to host",
+];
+
+/// G847: the words of a read from a remote that the host or the connection broke off: a server
+/// error, a reset or a cut connection. A push that says them may have reached the host, so it
+/// is not tried again.
+const READ_FAULTS: [&str; 4] = [
+    "The requested URL returned error: 50",
+    "Connection reset by peer",
+    "early EOF",
+    "unexpected disconnect",
+];
 
 /// The words of a push refused because a ref moved under it: a lease, a lock held by another
 /// writer, a fetch first.
@@ -2452,6 +2489,13 @@ fn bound_for(args: &[&str], timeout: std::time::Duration) -> std::time::Duration
 
 /// Whether `git <args>` talks to a remote: its command is a push, fetch, ls-remote, clone or pull.
 fn talks_to_remote(args: &[&str]) -> bool {
+    command_of(args)
+        .is_some_and(|command| matches!(command, "push" | "fetch" | "ls-remote" | "clone" | "pull"))
+}
+
+/// The command of `git <args>`: its first word that is not an option or the value of `-c` or
+/// `-C`.
+fn command_of<'a>(args: &[&'a str]) -> Option<&'a str> {
     let mut words = args.iter();
     while let Some(word) = words.next() {
         if *word == "-c" || *word == "-C" {
@@ -2461,9 +2505,9 @@ fn talks_to_remote(args: &[&str]) -> bool {
         if word.starts_with('-') {
             continue;
         }
-        return matches!(*word, "push" | "fetch" | "ls-remote" | "clone" | "pull");
+        return Some(word);
     }
-    false
+    None
 }
 
 /// A bare repository holds `HEAD` and `objects/` at its top and has no `.git`.
@@ -2644,12 +2688,68 @@ fn wait_until(
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        Git, GitError, LISTED_PATH_BYTES, batch_missing, bound_for, path_chunks, run_bounded_for,
-        tree_path,
+        Git, GitError, LISTED_PATH_BYTES, batch_missing, bound_for, host_unreached, path_chunks,
+        run_bounded_for, tree_path,
     };
     use crate::result::{GIT_CALL_TIMEOUT, GIT_NETWORK_TIMEOUT};
     use std::process::Command;
     use std::time::{Duration, Instant};
+
+    /// G847: a call to a remote whose host name did not resolve, or that opened no connection,
+    /// is tried again; a read also on a server error or a broken connection. A push that may
+    /// have reached the host, a local call, or a refusal is not.
+    #[test]
+    fn a_call_that_reached_no_host_is_tried_again() {
+        let unresolved: &[u8] = b"fatal: unable to access 'https://forge.invalid/r.git/': \
+            Could not resolve host: forge.invalid\n";
+        let refused: &[u8] = b"ssh: connect to host forge.invalid port 22: Connection refused\n";
+        let reset: &[u8] =
+            b"error: RPC failed; curl 56 Recv failure: Connection reset by peer\nfatal: early EOF\n";
+        assert!(host_unreached(&["fetch", "-q", "origin"], unresolved));
+        assert!(host_unreached(
+            &["push", "--atomic", "origin", "a:a"],
+            unresolved
+        ));
+        assert!(host_unreached(
+            &["-c", "protocol.version=2", "ls-remote", "origin"],
+            refused
+        ));
+        assert!(host_unreached(&["fetch", "origin"], reset));
+        assert!(!host_unreached(&["push", "origin", "a:a"], reset));
+        assert!(!host_unreached(&["status"], unresolved));
+        assert!(!host_unreached(&["-c", "push.x=1", "log"], unresolved));
+        assert!(!host_unreached(
+            &["fetch", "origin"],
+            b"fatal: couldn't find remote ref refs/heads/x\n"
+        ));
+    }
+
+    /// G847: the call itself is made again, twice, before its failure is answered.
+    #[test]
+    fn a_fetch_that_reached_no_host_is_made_three_times() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = Git::new(dir.path());
+        git.run(&["init", "-q"]).unwrap();
+        let tries = dir.path().join("tries");
+        let ssh = dir.path().join("ssh");
+        std::fs::write(
+            &ssh,
+            format!(
+                "#!/bin/sh\necho try >> '{}'\necho 'ssh: connect to host forge.invalid port 22: \
+                 Network is unreachable' >&2\nexit 255\n",
+                tries.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&ssh).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        std::fs::set_permissions(&ssh, permissions).unwrap();
+        let command = format!("core.sshCommand={}", ssh.display());
+        let failed = git.run(&["-c", &command, "ls-remote", "ssh://forge.invalid/r.git"]);
+        assert!(failed.is_err());
+        let made = std::fs::read_to_string(&tries).unwrap();
+        assert_eq!(made.lines().count(), 3, "{made}");
+    }
 
     /// A push to a forge with tens of thousands of refs outlasts the local bound (a fleet's
     /// `bay start`, 2026-10-25): every call that talks to a remote gets the network bound, and
