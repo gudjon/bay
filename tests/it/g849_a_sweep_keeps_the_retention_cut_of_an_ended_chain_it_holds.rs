@@ -75,15 +75,19 @@ fn a_sweep_keeps_the_retention_cut_of_an_ended_chain_this_store_holds() {
 
     // AND a runner on another machine that then cut its chain by retention
     let mut cut = landed.clone();
+    let mut last = Value::Null;
     for _ in 0..20 {
         std::thread::sleep(Duration::from_secs(1));
-        let _ = held.pass(&runner);
+        last = held.pass(&runner);
         cut = remote_head(&held, &change);
         if record_at(&held, &cut)["retention_cut"] == true {
             break;
         }
     }
-    assert_ne!(cut, landed, "the change was never cut");
+    assert_ne!(
+        cut, landed,
+        "the change was never cut; the last pass: {last}"
+    );
 
     // WHEN the store reads its status again
     status(&held, &reader);
