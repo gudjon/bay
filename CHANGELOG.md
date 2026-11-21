@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.135
+
+- A talk to an agent named as one of bay talk's own options that take an id (show, round, answer, backbrief) is refused, and nothing is sent.
+
 ## 0.6.134
 
 - A sweep never asks for this clone's own evidence notes, so notes not yet pushed are not downloaded again.
