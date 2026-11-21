@@ -4666,9 +4666,19 @@ fn passes_unread(
         if moves_under(ctx.repo, queue, entry) >= PASSES_PER_ENTRY {
             return Ok(false);
         }
-        let Some(theirs) = own_paths(git, trunk, &queued.revision)? else {
+        let Some(mut theirs) = own_paths(git, trunk, &queued.revision)? else {
             return Ok(false);
         };
+        // G846: an entry its holder checks in a batch reads what the whole batch changes.
+        let Some(batch) = batch_behind(ctx.repo, queue, entry) else {
+            return Ok(false);
+        };
+        for member in batch {
+            let Some(paths) = own_paths(git, trunk, &member.revision)? else {
+                return Ok(false);
+            };
+            theirs.extend(paths);
+        }
         let Some(reads) = predicted_reads(&policy, &theirs) else {
             return Ok(false);
         };
@@ -5204,7 +5214,11 @@ fn speculate_batch(
         // G845: the head's own batch is the one its holder checks, as its lease names it: a head
         // checked alone is a batch of one, whatever joined the line since. With no lease naming
         // one, it is the batch the head will plan.
-        let named = if first { held_batch(git, head) } else { None };
+        let named = if first {
+            held_batch(git, &head.change, &head.op_id)
+        } else {
+            None
+        };
         let (members, stopped, _) = if let Some(named) = named {
             let behind: Vec<throughput::Queued> = line[at + 1..]
                 .iter()
@@ -5255,13 +5269,35 @@ fn speculate_batch(
     Ok(None)
 }
 
-/// G845: the operations the holder of the line's `head` checks now, the head first, as its lease
-/// names them in this store (`crate::lease::batch_of`); `None` when no holder's lease names
-/// one.
-fn held_batch(git: &Git, head: &throughput::Queued) -> Option<Vec<String>> {
-    let (_, record) = Chain::new(git).read(&head.change).ok()?;
-    let op = record.operations.iter().find(|op| op.op_id == head.op_id)?;
-    crate::lease::batch_of(git, &head.change, op)
+/// G845: the operations the holder of operation `op_id` of `change` checks now, that one first,
+/// as its lease names them in this store (`crate::lease::batch_of`); `None` when no holder's
+/// lease names one.
+fn held_batch(git: &Git, change: &str, op_id: &str) -> Option<Vec<String>> {
+    let (_, record) = Chain::new(git).read(change).ok()?;
+    let op = record.operations.iter().find(|op| op.op_id == op_id)?;
+    crate::lease::batch_of(git, change, op)
+}
+
+/// G846 (a fleet finding, 2026-11-21: a code change passed a head whose own paths no check of
+/// the code change reads, but the head was checked in a batch of nine that held code changes;
+/// its landing stopped that batch's 18-minute check, and the next head was passed the same way):
+/// the live entries other than `entry` that its holder's check covers, as its lease names them
+/// (G845), read from `queue`: empty when no holder's lease names a batch, `None` when one of
+/// them cannot be read.
+fn batch_behind(
+    repo: &Repo,
+    queue: &crate::queue::Queue,
+    entry: &crate::queue::Entry,
+) -> Option<Vec<throughput::Queued>> {
+    let Some(members) = held_batch(&repo.git, &entry.change, &entry.op_id) else {
+        return Some(Vec::new());
+    };
+    members
+        .iter()
+        .skip(1)
+        .filter_map(|member| queue.of(member))
+        .map(|place| throughput::Queued::read(&repo.git, place))
+        .collect()
 }
 
 /// Checks the speculative batch led by `op_id`, of `size` members, whose combined tip is
