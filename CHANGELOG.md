@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.131
+
+- One start makes one change when the host refuses its push but keeps its chain.
+
 ## 0.6.130
 
 - A start claims its intent's next generation while a checkpoint of its view pushes its chain.
