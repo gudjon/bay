@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.127
+
+- A read of the line reads the record of an ended change cut by retention once, not on every read.
+
 ## 0.6.126
 
 - A read of the line reads the record of a merge request it found answered once, not on every read.
