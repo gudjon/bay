@@ -20,6 +20,13 @@
 //! is deleted, as a lock is. A claimer that never beat deletes an older holder's lease it finds,
 //! so a holder that died mid-check leaves its lease only until the next claim of the change.
 //!
+//! G845 (a fleet finding, 2026-11-21: a head was checked alone for 954 s while nine changes
+//! joined the line behind it, and the line's other runner checked nothing): a holder's lease also
+//! names the operations its check covers, its own first, and its own alone when it checks alone
+//! ([`Holding::checks`]). A runner that does not hold the head plans the next batch on the main
+//! that batch predicts ([`batch_of`]), not on a batch the head would form from the line as it
+//! stands now. A lease from a holder before G845 names none, and is read as before.
+//!
 //! A fetch that judges a holder's liveness brings the leases in the same round trip, pruned, so a
 //! store's copy is the remote's ([`refspec`], [`refspec_of`]). Under a key registry a beat is
 //! signed by the holder's runner key, and the host takes it only from the runner the history names
@@ -65,6 +72,10 @@ pub struct Lease {
     pub op_id: String,
     pub epoch: u64,
     pub holder: String,
+    /// G845: the operations the holder's check covers, its own first; its own alone when it
+    /// checks alone. `None` until it decides, and from a holder before G845.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<Vec<String>>,
 }
 
 impl Lease {
@@ -76,6 +87,7 @@ impl Lease {
             op_id: op_id.to_owned(),
             epoch,
             holder: holder.to_owned(),
+            batch: None,
         }
     }
 
@@ -125,6 +137,21 @@ pub fn tip(git: &Git, change: &str) -> Option<String> {
     git.ref_target(&lease_ref(change)).ok().flatten()
 }
 
+/// G845: the operations `op`'s current holder checks together, as its lease of `change` names
+/// them in this store: `op` first, and `op` alone when it checks alone. `None` when this store
+/// holds no lease of that holder, or the lease names none (a holder still planning, or one
+/// before G845).
+#[must_use]
+pub fn batch_of(git: &Git, change: &str, op: &Operation) -> Option<Vec<String>> {
+    let lease = read(git, &tip(git, change)?).ok().flatten()?;
+    if !lease.holds(op) {
+        return None;
+    }
+    lease
+        .batch
+        .filter(|members| members.first() == Some(&op.op_id))
+}
+
 /// What a watcher of `change`'s holder sees move (§ 9a): the history's `head` and the lease, as
 /// this store holds them. Either one moving shows the holder alive.
 #[must_use]
@@ -165,7 +192,8 @@ fn fetch(repo: &Repo, change: &str) {
 /// What a holder keeps between its beats, from its claim until its visit ends.
 pub struct Holding {
     lease: Lease,
-    /// The lease tree, written at the first beat: every beat of one claim holds the same record.
+    /// The lease tree, written at the first beat: every beat of one claim holds the same record,
+    /// until the holder names the batch it checks (G845).
     tree: Option<String>,
     /// The lease commit this holder last pushed.
     pushed: Option<String>,
@@ -188,6 +216,22 @@ impl Holding {
     #[must_use]
     pub fn of(&self, op_id: &str) -> bool {
         self.lease.op_id == op_id
+    }
+
+    /// G845: this holder's check covers `members` (operation ids, its own first), and its next
+    /// beat says so ([`batch_of`]). A record that would pass [`LEASE_MAX_BYTES`] names none.
+    pub fn checks(&mut self, members: Vec<String>) {
+        let mut lease = self.lease.clone();
+        lease.batch = Some(members);
+        let limit = usize::try_from(LEASE_MAX_BYTES).unwrap_or(usize::MAX);
+        // The record is written with a newline after it.
+        if serde_json::to_string_pretty(&lease).map_or(true, |text| text.len() >= limit) {
+            lease.batch = None;
+        }
+        if lease != self.lease {
+            self.lease = lease;
+            self.tree = None;
+        }
     }
 
     /// One beat: a new lease commit, pushed alone by compare-and-swap on the lease this store
@@ -315,7 +359,7 @@ impl Holding {
 
 #[cfg(test)]
 mod tests {
-    use super::Lease;
+    use super::{Holding, Lease};
 
     #[test]
     fn a_later_operation_or_epoch_is_a_later_holder() {
@@ -325,5 +369,25 @@ mod tests {
         assert!(!Lease::new("c", "c.2", 3, "a").after(&lease));
         assert!(!Lease::new("c", "c.1", 9, "b").after(&lease));
         assert!(!Lease::new("c", "c.10", 1, "b").after(&Lease::new("c", "c.11", 1, "a")));
+    }
+
+    #[test]
+    fn a_holder_names_its_batch_unless_the_record_would_be_too_long() {
+        let mut holding = Holding::new(Lease::new("c", "c.1", 1, "a"));
+        holding.checks(vec!["c.1".to_owned(), "d.1".to_owned()]);
+        assert_eq!(
+            holding.lease.batch,
+            Some(vec!["c.1".to_owned(), "d.1".to_owned()])
+        );
+        holding.checks((0..200).map(|n| format!("m{n:07}.1")).collect());
+        assert_eq!(holding.lease.batch, None);
+    }
+
+    #[test]
+    fn a_record_from_before_g845_reads_with_no_batch_and_writes_none() {
+        let text = r#"{"schema":"bay.lease/1","change":"c","op_id":"c.1","epoch":1,"holder":"a"}"#;
+        let lease: Lease = serde_json::from_str(text).unwrap();
+        assert_eq!(lease.batch, None);
+        assert!(!serde_json::to_string(&lease).unwrap().contains("batch"));
     }
 }

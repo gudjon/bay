@@ -2756,6 +2756,8 @@ fn run_attempts(
                 }
                 continue;
             }
+            // G845: the lease names this operation alone as what its check covers.
+            names_batch(ctx, op_id, vec![op_id.to_owned()]);
             match build_and_check(ctx, op_id, &revision, &trunk, approved)? {
                 Ok(attempt) => attempt,
                 Err(_) if ctx.stopped.borrow().is_some() => {
@@ -3380,6 +3382,9 @@ fn bisect_batch(
             checks.push(json!({"members": prefix, "tree": tip.tree, "verdict": "product_failure"}));
             continue;
         }
+        // G845: the lease names the members this check covers.
+        let covered = members[..prefix].iter().map(|member| member.op_id.clone());
+        names_batch(ctx, op_id, covered.collect());
         let (verdict, refusal) = run_policy(
             ctx,
             op_id,
@@ -5145,8 +5150,9 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
 /// while runners spent about half their time pre-checking single entries the batch would check
 /// again). From the trunk tip, the batches the heads will form are planned one after another,
 /// each on the tip the one before it predicts ([`throughput::plan_batch`], the very plan the
-/// head makes). When `op_id` leads one of them other than the first, the first being the head's
-/// own, that batch's combined tree is checked now on its predicted base, by this executor's
+/// head makes, footprint lanes included). When `op_id` leads one of them other than the first,
+/// the first being the head's own (G845: the one its holder's lease names, when a holder checks
+/// it), that batch's combined tree is checked now on its predicted base, by this executor's
 /// producer, as the head will check it (`bisect_batch`: a tip naming no change). When its turn
 /// comes and trunk is what was predicted, the head's plan is the same members on the same base,
 /// so its tree is the same, and exact reuse lands it with no new run. A miss is a record about
@@ -5182,6 +5188,9 @@ fn speculate_batch(
         .filter(|entry| !queue.released.contains(&entry.seq))
         .collect();
     let (line, _) = read_line_fetched(repo, &places);
+    // G845: with `[runner] footprint_lanes`, a batch ends at the first member out of its head's
+    // lane, as the head plans it (`batch_plan`); a batch planned past it is a tree no head forms.
+    let by_lane = repo.config.footprint_lanes();
     let mut base = trunk.to_owned();
     let mut covered = 0;
     let mut at = 0;
@@ -5192,15 +5201,28 @@ fn speculate_batch(
             at += 1;
             continue;
         }
-        let (members, stopped, _) = throughput::plan_batch(
-            git,
-            &at_trunk,
-            &base,
-            head,
-            &line[at + 1..],
-            batch_size(git, &queue, &at_trunk, bounds.max),
-            false,
-        )?;
+        // G845: the head's own batch is the one its holder checks, as its lease names it: a head
+        // checked alone is a batch of one, whatever joined the line since. With no lease naming
+        // one, it is the batch the head will plan.
+        let named = if first { held_batch(git, head) } else { None };
+        let (members, stopped, _) = if let Some(named) = named {
+            let behind: Vec<throughput::Queued> = line[at + 1..]
+                .iter()
+                .filter(|queued| named.contains(&queued.op_id))
+                .cloned()
+                .collect();
+            throughput::plan_batch(git, &at_trunk, &base, head, &behind, named.len(), by_lane)?
+        } else {
+            throughput::plan_batch(
+                git,
+                &at_trunk,
+                &base,
+                head,
+                &line[at + 1..],
+                batch_size(git, &queue, &at_trunk, bounds.max),
+                by_lane,
+            )?
+        };
         let Some(last) = members.last() else {
             // Its head does not fold onto the predicted tip: a policy change ends the
             // prediction; a conflict or no effect is predicted not to land.
@@ -5231,6 +5253,15 @@ fn speculate_batch(
             .map_or(line.len(), |position| position + 1);
     }
     Ok(None)
+}
+
+/// G845: the operations the holder of the line's `head` checks now, the head first, as its lease
+/// names them in this store (`crate::lease::batch_of`); `None` when no holder's lease names
+/// one.
+fn held_batch(git: &Git, head: &throughput::Queued) -> Option<Vec<String>> {
+    let (_, record) = Chain::new(git).read(&head.change).ok()?;
+    let op = record.operations.iter().find(|op| op.op_id == head.op_id)?;
+    crate::lease::batch_of(git, &head.change, op)
 }
 
 /// Checks the speculative batch led by `op_id`, of `size` members, whose combined tip is
@@ -9328,6 +9359,19 @@ fn heartbeat(ctx: &Ctx, op_id: &str) {
         .filter(|lease| lease.of(op_id))
     {
         lease.beat(ctx.repo, signer.as_ref());
+    }
+}
+
+/// G845: the holder's lease names `members` (operation ids, `op_id` first) as what its check of
+/// `op_id` covers (`crate::lease::Holding::checks`); its next beat says so.
+fn names_batch(ctx: &Ctx, op_id: &str, members: Vec<String>) {
+    if let Some(lease) = ctx
+        .lease
+        .borrow_mut()
+        .as_mut()
+        .filter(|lease| lease.of(op_id))
+    {
+        lease.checks(members);
     }
 }
 
