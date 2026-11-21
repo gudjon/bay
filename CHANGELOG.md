@@ -2,7 +2,7 @@
 
 ## 0.6.135
 
-- A talk to an agent named as one of bay talk's own options that take an id (show, round, answer, backbrief) is refused, and nothing is sent.
+- A talk to an agent named show, round, answer or backbrief is refused: those are bay talk's options.
 
 ## 0.6.134
 
