@@ -352,6 +352,7 @@ fn ask_of(body: &Value) -> Value {
 }
 
 fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
+    option_word(ask)?;
     let (repo, trust, sender) = open(dir)?;
     if !ask.to.is_empty() || ask.to_live {
         return super::round::fan_out(dir, &repo, &trust, &sender, ask);
@@ -375,6 +376,26 @@ fn send(dir: &Path, ask: &Ask) -> Result<BayResult, Stop> {
         detail["to_change"] = lander.to_json();
     }
     Ok(result)
+}
+
+/// G851: the words of `bay talk`'s own options that take an id. A recipient so named is that
+/// option without its dashes (`bay talk show <id>` read a talk in an older bay): sent, it is a
+/// talk that no agent acks, so nothing closes it.
+const OPTION_WORDS: [&str; 4] = ["show", "round", "answer", "backbrief"];
+
+/// G851: refuses a recipient named as one of [`OPTION_WORDS`], and names the option.
+fn option_word(ask: &Ask) -> Result<(), Refusal> {
+    let Some(word) = ask
+        .who
+        .iter()
+        .chain(&ask.to)
+        .find(|name| OPTION_WORDS.contains(&name.as_str()))
+    else {
+        return Ok(());
+    };
+    Err(Refusal::invalid(format!(
+        "`{word}` is bay talk's own option `--{word}`, not an agent: give `bay talk --{word} <id>`; nothing was sent"
+    )))
 }
 
 /// The `[talk]` table of the policy on main as this clone holds main: the default table with no
