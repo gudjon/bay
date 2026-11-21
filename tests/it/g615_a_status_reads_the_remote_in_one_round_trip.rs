@@ -12,8 +12,8 @@
 //! asks the remote many times; in `settle_swept`, sync the receipts with no sweep, and they list
 //! the remote again; in `settle_listed`, take a chain the remote's is not a fast-forward of as a
 //! plain update, and the chain ahead is moved back; in `settle_swept`, take no target move, and
-//! the copy the remote no longer holds is kept; take this store's own notes, and they are
-//! fetched over.
+//! the copy the remote no longer holds is kept; in `src/repo.rs` `evidence_refspecs`, ask for
+//! this store's own notes too, and they are fetched over.
 
 // The remote that refuses every push is a shell script, so these run on Unix only.
 #![cfg(unix)]

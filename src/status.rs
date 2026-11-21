@@ -861,10 +861,16 @@ impl Plan {
             CHANGES_PREFIX,
             crate::names::REQUESTS,
             crate::log::LOG_PREFIX,
-            evidence::EVIDENCE_PREFIX,
         ] {
             refspecs.push(format!("+{prefix}*:{prefix}*"));
         }
+        // G850: every other writer's evidence notes, never this store's own. Only this store
+        // writes those and no read takes them, and a copy here ahead of the remote's leaves the
+        // remote's tip named by no ref of this store: git could then judge it absent and bring
+        // the ref's whole history again on every sweep.
+        refspecs.extend(Repo::evidence_refspecs(&crate::signing::Keys::load(
+            &repo.git,
+        )));
         refspecs.extend(crate::fleet::refspecs());
         // G765: the line too, so a store's copy of it is no older than its last sweep.
         refspecs.extend(crate::queue::refspecs());
@@ -911,7 +917,8 @@ fn holds_named(repo: &Repo, named: Option<&str>) -> bool {
 /// - every executor's log, forced, but this executor's own only forward (A10,
 ///   [`crate::log::fetch`]);
 /// - the fleet refs and the locks, forced and pruned ([`crate::fleet::fetch`]);
-/// - every other writer's evidence notes, forced and never pruned ([`Repo::fetch_evidence`]);
+/// - every other writer's evidence notes, forced and never pruned, this store's own never
+///   asked for (G850, [`Repo::fetch_evidence`]);
 /// - each target's ref, its copy removed when the remote lacks it ([`crate::target::fetch`]),
 ///   and fetched as before when the config the trunk moved to names other targets;
 /// - the chains of every live change, of the change the read names, and of every other change
@@ -1296,11 +1303,6 @@ fn settle_swept(
     let tracking = first.trunk_tracking_ref();
     let keys = crate::signing::Keys::load(&first.git);
     let own_log = crate::log::log_ref(&keys.executor_name);
-    let own_notes: Vec<String> = keys
-        .own_names()
-        .into_iter()
-        .map(evidence::notes_ref)
-        .collect();
     let mut updates = swept.taken(&tracking, |name, _| name == tracking);
     updates.extend(swept.taken(crate::log::LOG_PREFIX, |name, found| {
         if name == own_log {
@@ -1324,9 +1326,9 @@ fn settle_swept(
         updates.extend(swept.taken(prefix, |_, _| true));
     }
     updates.extend(requested_chains(&first, swept));
-    updates.extend(swept.taken(evidence::EVIDENCE_PREFIX, |name, found| {
-        found.flag != '-' && !own_notes.iter().any(|own| own == name)
-    }));
+    // The sweep never asks for this store's own notes ([`Plan::of`]), so every move here is
+    // another writer's.
+    updates.extend(swept.taken(evidence::EVIDENCE_PREFIX, |_, found| found.flag != '-'));
     for (_, local) in targets {
         updates.extend(swept.taken(local, |name, _| name == local));
     }

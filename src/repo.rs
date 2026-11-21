@@ -1081,20 +1081,28 @@ impl Repo {
     /// [`Repo::fetch_evidence`], with the refs of `more` (forced refspecs) in the same fetch: G822,
     /// a runner's post pass reads the presences with the notes, at no second round trip.
     pub fn fetch_evidence_with(&self, keys: &crate::signing::Keys, more: &[String]) {
-        // A fleet finding (2026-10-27): listing the remote's notes refs first cost a second round
-        // trip on every fetch, and a status read fetched them twice. One fetch of the pattern,
-        // this machine's own refs excluded, reads the same refs.
-        let own: Vec<String> = keys
-            .own_names()
-            .into_iter()
-            .map(|name| format!("^{}", crate::evidence::notes_ref(name)))
-            .collect();
-        let prefix = crate::evidence::EVIDENCE_PREFIX;
-        let every = format!("+{prefix}*:{prefix}*");
-        let mut args = vec!["fetch", "-q", "--no-tags", self.remote(), every.as_str()];
+        let evidence = Self::evidence_refspecs(keys);
+        let mut args = vec!["fetch", "-q", "--no-tags", self.remote()];
+        args.extend(evidence.iter().map(String::as_str));
         args.extend(more.iter().map(String::as_str));
-        args.extend(own.iter().map(String::as_str));
         let _ = self.git.run(&args);
+    }
+
+    /// The refspecs of every other writer's evidence notes ([`Repo::fetch_evidence`]): one forced
+    /// pattern of them all, and an exclusion of each of `keys`' own names. A fleet finding
+    /// (2026-10-27): listing the remote's notes refs first cost a second round trip on every
+    /// fetch, and a status read fetched them twice. One fetch of the pattern, this machine's own
+    /// refs excluded, reads the same refs. A status sweep asks by the same refspecs (G850).
+    #[must_use]
+    pub fn evidence_refspecs(keys: &crate::signing::Keys) -> Vec<String> {
+        let prefix = crate::evidence::EVIDENCE_PREFIX;
+        std::iter::once(format!("+{prefix}*:{prefix}*"))
+            .chain(
+                keys.own_names()
+                    .into_iter()
+                    .map(|name| format!("^{}", crate::evidence::notes_ref(name))),
+            )
+            .collect()
     }
 
     /// [`Repo::fetch_evidence`], at most once in this process for this repository: a command that
