@@ -433,14 +433,15 @@ pub fn schema() -> Value {
         "description": "bay queue's detail: the live line, head first. Read-only; change the line with bay's verbs.",
         "type": "object",
         "required": [
-            "schema", "read_at", "depth", "oldest_wait_s", "places", "arriving", "unread",
-            "from_store", "age_s",
+            "schema", "read_at", "depth", "oldest_wait_s", "places", "arriving",
+            "arrivals_listed", "unread", "from_store", "age_s",
         ],
         "additionalProperties": false,
         "properties": {
             "schema": {"const": SCHEMA},
             "read_at": string,
             "from_store": {"type": "boolean"},
+            "arrivals_listed": {"type": "boolean"},
             "age_s": maybe(count.clone()),
             "depth": count,
             "oldest_wait_s": maybe(count.clone()),
