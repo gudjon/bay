@@ -772,6 +772,23 @@ impl<'a> Chain<'a> {
         self.append_linking(expected_head, record, draft, None, message)
     }
 
+    /// G840: the state commit [`Chain::append`] would write on `previous`, made without moving
+    /// the chain ref: for a commit the remote must take together with another ref before this
+    /// store's chain holds it.
+    ///
+    /// # Errors
+    ///
+    /// Git cannot write the commit.
+    pub fn commit_on(
+        &self,
+        previous: &str,
+        record: &ChangeRecord,
+        draft: &str,
+        message: &str,
+    ) -> Result<String, ChainError> {
+        self.state_commit(record, Some(previous), draft, None, message)
+    }
+
     /// [`Chain::append`], also linking `candidate` so it stays reachable before it is on trunk.
     ///
     /// # Errors

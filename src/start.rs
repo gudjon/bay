@@ -13,7 +13,7 @@ use crate::change::{
     Actor, Chain, ChangeRecord, ChangeState, Intent, IntentClaim, RECORD_SCHEMA, StartedFrom,
     actor_source, change_ref, commit_on, current_actor, freeze_draft, intent_hash,
 };
-use crate::git::Git;
+use crate::git::{Git, GitError};
 use crate::ids::{is_change_id, new_change_id};
 use crate::inputs::{self, DeclaredInput, InputName};
 use crate::merge::{Merge, merge_onto};
@@ -934,10 +934,12 @@ fn superseded_by_newer(id: &str, record: &ChangeRecord, newer: &(u64, String)) -
 /// A change has not won its generation when the remote's claim of it names another change, or
 /// none, or when another change merged it. Picked up, such a change claims its intent's next
 /// free generation: one atomic push of its chain and the new claim, which is create-only as a
-/// start's is (G198). While the intent's newest generation is another live change, it claims
-/// nothing, as an intent has one live change, and names that change; its merge is then refused
-/// `CHANGE_SUPERSEDED` once that change merges, and a start after that claims. Main is fetched
-/// first: a merge is read by its commit.
+/// start's is (G198). G840: the claim commit reaches this store's chain only once the remote
+/// holds it with its claim, and when the remote's chain moved on meanwhile (another push of the
+/// chain), the start reads it again and claims on it. While the intent's newest generation is
+/// another live change, it claims nothing, as an intent has one live change, and names that
+/// change; its merge is then refused `CHANGE_SUPERSEDED` once that change merges, and a start
+/// after that claims. Main is fetched first: a merge is read by its commit.
 /// `None` when the change won its generation, or has no claim; else what it claimed, or the
 /// live change it waits on.
 fn claim_unwon(
@@ -947,7 +949,9 @@ fn claim_unwon(
     record: &mut ChangeRecord,
 ) -> Result<Option<Value>, String> {
     let id = record.id.clone();
-    let name = change_ref(&id);
+    // The generation the change had not won, and who holds it, as first read: a chain read again
+    // from the remote (G840) may carry a claim this start made and could not finish.
+    let mut first: Option<(u64, Option<String>)> = None;
     for _ in 0..ADOPT_ATTEMPTS {
         let Some(claim) = record.claim.clone() else {
             return Ok(None);
@@ -964,6 +968,14 @@ fn claim_unwon(
         {
             return Ok(None);
         }
+        let (unwon, unwon_by) = first
+            .get_or_insert_with(|| {
+                (
+                    claim.generation,
+                    merged_by.clone().or_else(|| held_by.clone()),
+                )
+            })
+            .clone();
         if let Some((newest, change)) = claims.last_key_value()
             && *change != id
             && !remote_has(repo, &claim_of(&claim.hash, *newest).landed_ref())?
@@ -971,12 +983,12 @@ fn claim_unwon(
         {
             return Ok(Some(json!({
                 "generation": null,
-                "unwon": claim.generation,
-                "held_by": merged_by.or(held_by),
+                "unwon": unwon,
+                "held_by": unwon_by,
                 "waits_on": change,
-                "why": format!("change {id} never won generation {} of its intent, and \
+                "why": format!("change {id} never won generation {unwon} of its intent, and \
                     generation {newest} is live change {change}: it claims one once {change} \
-                    merges or ends", claim.generation),
+                    merges or ends"),
             })));
         }
         let generation = claims
@@ -986,12 +998,17 @@ fn claim_unwon(
                 (newest + 1).max(claim.generation)
             });
         let before = head.clone();
+        let mut claimed = before.clone();
         if generation != claim.generation {
             record.claim = Some(claim_of(&claim.hash, generation));
             let draft = newest_draft(chain, &id)?;
-            *head = chain
-                .append(
-                    head,
+            // G840 (a fleet finding, 2026-11-21: a start's claim commit reached the remote
+            // without its claim, pushed by the view's checkpoint as the start pushed both, and
+            // the start then failed): the claim commit is made beside the chain, and this store's
+            // chain takes it only once the remote holds it with its claim.
+            claimed = chain
+                .commit_on(
+                    &before,
                     record,
                     &draft,
                     &format!("claim generation {generation}"),
@@ -999,30 +1016,25 @@ fn claim_unwon(
                 .map_err(|error| error.message())?;
         }
         let intent_ref = claim_of(&claim.hash, generation).intent_ref();
-        let pushed = repo.git.run(&[
-            "push",
-            "-q",
-            "--atomic",
-            &format!("--force-with-lease={intent_ref}:"),
-            repo.remote(),
-            &format!("{name}:{name}"),
-            &format!("{head}:{intent_ref}"),
-        ]);
-        match pushed {
-            Ok(_) => {
-                // The claim is the remote's now; its local copy is created, never moved (G198).
-                let _ = repo.git.run(&["update-ref", &intent_ref, head, ""]);
+        match push_claim(repo, &id, &before, &claimed, &intent_ref)? {
+            Ok(()) => {
+                *head = claimed;
                 return Ok(Some(json!({
                     "generation": generation,
-                    "unwon": claim.generation,
-                    "held_by": merged_by.or(held_by),
+                    "unwon": unwon,
+                    "held_by": unwon_by,
                 })));
             }
             Err(error) => {
-                if *head != before {
-                    let _ = repo.git.run(&["update-ref", &name, &before, head]);
-                    *head = before;
-                    record.claim = Some(claim);
+                record.claim = Some(claim);
+                // G840: the remote's chain moved on from the one this start read (a checkpoint
+                // pushed a newer one): the start reads it again and claims on it.
+                let _ = repo.remote_chain(&id);
+                let (read_head, read) = chain.read(&id).map_err(|error| error.message())?;
+                if read_head != before {
+                    *head = read_head;
+                    *record = read;
+                    continue;
                 }
                 // Another start claimed that generation first: the claims are read again.
                 if !remote_has(repo, &intent_ref)? && !error.message().contains("cannot lock ref") {
@@ -1038,6 +1050,43 @@ fn claim_unwon(
     Err(format!(
         "change {id} could not claim a generation of its intent: newer starts claimed each one first"
     ))
+}
+
+/// G840: pushes `claimed` as change `id`'s chain with its claim `intent_ref`, in one atomic
+/// push whose claim is create-only (G198); only then does this store's chain, read at `before`,
+/// take it. A chain here that moved meanwhile is settled on the remote's (`Repo::settle_chain`),
+/// which sets aside what it held. The inner error is the refused push.
+fn push_claim(
+    repo: &Repo,
+    id: &str,
+    before: &str,
+    claimed: &str,
+    intent_ref: &str,
+) -> Result<Result<(), GitError>, String> {
+    let name = change_ref(id);
+    if let Err(refused) = repo.git.run(&[
+        "push",
+        "-q",
+        "--atomic",
+        &format!("--force-with-lease={intent_ref}:"),
+        repo.remote(),
+        &format!("{claimed}:{name}"),
+        &format!("{claimed}:{intent_ref}"),
+    ]) {
+        return Ok(Err(refused));
+    }
+    // The claim is the remote's now; its local copy is created, never moved (G198).
+    let _ = repo.git.run(&["update-ref", intent_ref, claimed, ""]);
+    if claimed != before
+        && repo
+            .git
+            .run(&["update-ref", &name, claimed, before])
+            .is_err()
+    {
+        repo.settle_chain(id, claimed)
+            .map_err(|error| error.message())?;
+    }
+    Ok(Ok(()))
 }
 
 /// Generation `generation` of the intent hashed `hash`.

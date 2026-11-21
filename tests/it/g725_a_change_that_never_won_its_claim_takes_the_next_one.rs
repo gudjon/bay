@@ -9,9 +9,18 @@
 //! change merges, its own merge is refused `CHANGE_SUPERSEDED` naming the merge and the start
 //! that recovers it, and that start claims.
 //!
+//! G840 (a fleet finding, 2026-11-21: a start's claim commit reached the remote without its
+//! claim, pushed by the view's checkpoint as the start pushed both, and the start then failed):
+//! a start claims the next generation while another push of its chain runs, whether that push
+//! sends the start's claim commit or a newer checkpoint, and this store's chain never holds the
+//! claim commit before the remote holds its claim.
+//!
 //! Guards to mutate: `src/start.rs` `claim_unwon` taking any claim the change's record names
 //! as won (the resumed change keeps its generation and is never merged); `src/publish.rs`
-//! `after_refused_push` reading no merge (the refusal says `CHANGE_ALREADY_MERGED`).
+//! `after_refused_push` reading no merge (the refusal says `CHANGE_ALREADY_MERGED`). G840:
+//! `claim_unwon` appending the claim commit to the chain before its push; not reading the
+//! remote's chain again after a refused push; naming the claim read again from the remote's
+//! chain as the generation the change never won.
 
 #![cfg(unix)]
 
@@ -176,4 +185,129 @@ fn a_change_whose_generation_another_change_merged_first_takes_the_next_one() {
     );
     merged(&test_box, &holder_view);
     assert_eq!(test_box.trunk_change_ids(&remote), vec![holder, orphan]);
+}
+
+/// G840: what a start of a change that never won its claim met while another push of its chain
+/// ran, and what that start answered.
+struct Raced {
+    test_box: TestBox,
+    repo: PathBuf,
+    remote: PathBuf,
+    orphan: String,
+    holder: String,
+    resumed: serde_json::Value,
+    /// What this store's chain held as the start pushed its claim.
+    held: String,
+    /// What the start pushed to the chain with its claim.
+    pushed: String,
+}
+
+/// G840: a change of `card` that never won its claim, whose holder merged, picked up again as
+/// another push of its chain runs. On the start's first push of its claim, `checkpoint` (shell:
+/// `g` runs git in the store, `$name` names the chain ref, `$claimed` what the start pushes to
+/// it, and `$seen` a file beside the store) runs, and the start's push then fails as a push that met the remote's ref lock.
+fn start_while_a_checkpoint_pushes(card: &str, checkpoint: &str) -> Raced {
+    let (test_box, repo, remote, orphan) = orphaned_start(card);
+    let (holder, holder_view) = start_with(&test_box, &repo, card, "src/holder.rs");
+    merged(&test_box, &holder_view);
+    let seen = test_box.path().join("claim-push");
+    test_box.wrap_git(&format!(
+        r#"case " $* " in
+  *" push "*" --atomic "*refs/bay/intent/*)
+    if [ ! -e '{seen}' ]; then
+      seen='{seen}'; first="$1"; second="$2"
+      g() {{ if [ "$first" = -C ]; then "$real" -C "$second" "$@"; else "$real" "$first" "$@"; fi; }}
+      for arg in "$@"; do
+        case "$arg" in *:refs/bay/changes/*) name="${{arg#*:}}"; claimed="${{arg%%:*}}" ;; esac
+      done
+      printf '%s %s' "$(g rev-parse "$name")" "$(g rev-parse "$claimed")" > "$seen"
+      {checkpoint}
+      echo "error: cannot lock ref '$name': is at a but expected b" >&2
+      exit 1
+    fi ;;
+esac"#,
+        seen = seen.display()
+    ));
+    let resumed = test_box.bay_ok(&repo, &["start", &orphan]);
+    let seen = std::fs::read_to_string(&seen).expect("the start pushed no claim");
+    let (held, pushed) = seen.split_once(' ').unwrap();
+    Raced {
+        held: held.to_owned(),
+        pushed: pushed.to_owned(),
+        test_box,
+        repo,
+        remote,
+        orphan,
+        holder,
+        resumed,
+    }
+}
+
+/// G840: the start claimed the next generation, naming the change that holds its first, and the
+/// remote holds that claim on the chain this store holds; this store's chain never held the
+/// claim commit before the remote held its claim.
+fn claimed_the_next_generation(raced: &Raced) {
+    assert_eq!(
+        raced.resumed["detail"]["claim"],
+        json!({"generation": 2, "unwon": 1, "held_by": raced.holder}),
+        "{}",
+        raced.resumed
+    );
+    assert_ne!(
+        raced.held, raced.pushed,
+        "this store's chain held the claim commit before the remote held its claim"
+    );
+    let claims = raced.test_box.git_bare(
+        &raced.remote,
+        &["for-each-ref", "--format=%(refname)", "refs/bay/intent/"],
+    );
+    assert_eq!(claims.lines().count(), 2, "{claims}");
+    let chain = format!("refs/bay/changes/{}", raced.orphan);
+    assert_eq!(
+        raced
+            .test_box
+            .git_bare(&raced.remote, &["rev-parse", &chain]),
+        raced.test_box.git_ok(&raced.repo, &["rev-parse", &chain]),
+    );
+}
+
+#[test]
+fn a_change_takes_the_next_generation_when_a_checkpoint_pushed_its_claim_commit_first() {
+    // GIVEN a checkpoint that pushes the commit the start pushes with its claim, holding the
+    // remote's ref lock as the start pushes both
+    // WHEN the change is picked up again
+    let raced = start_while_a_checkpoint_pushes("CARD-840", r#"g push -q origin "$claimed:$name""#);
+    // THEN it claims the next generation, on the commit the remote holds.
+    claimed_the_next_generation(&raced);
+}
+
+#[test]
+fn a_change_takes_the_next_generation_on_a_newer_checkpoint_pushed_as_it_claims() {
+    // GIVEN a checkpoint that writes a newer state of the chain and pushes it, holding the
+    // remote's ref lock as the start pushes its claim
+    // WHEN the change is picked up again
+    let raced = start_while_a_checkpoint_pushes(
+        "CARD-840-NEWER",
+        r#"before=$(g rev-parse "$name")
+      set -- $(g rev-list --parents -n 1 "$before")
+      draft=$2; [ $# -gt 2 ] && draft=$3
+      newer=$(g -c user.name=checkpoint -c user.email=checkpoint@example.invalid commit-tree "$before^{tree}" -p "$before" -p "$draft" -m checkpoint 2>"$seen.err")
+      g update-ref "$name" "$newer" "$before"
+      g push -q origin "$name:$name"
+      printf '%s' "$newer" > "$seen.newer""#,
+    );
+    // THEN it claims the next generation, on the newer checkpoint.
+    claimed_the_next_generation(&raced);
+    let newer = std::fs::read_to_string(raced.test_box.path().join("claim-push.newer")).unwrap();
+    let chain = format!("refs/bay/changes/{}", raced.orphan);
+    let head = raced.test_box.git_ok(&raced.repo, &["rev-parse", &chain]);
+    assert_eq!(
+        raced
+            .test_box
+            .git_ok(&raced.repo, &["merge-base", newer.trim(), head.trim()])
+            .trim(),
+        newer.trim(),
+        "the claim was not made on the newer checkpoint: {}",
+        std::fs::read_to_string(raced.test_box.path().join("claim-push.err")).unwrap_or_default()
+    );
 }
