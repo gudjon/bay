@@ -97,7 +97,10 @@ fn a_change_clear_of_the_head_but_not_of_its_batch_waits_for_the_batch() {
     for id in [&passer, &member] {
         assert_eq!(ran_for(&during, id)["decision"], "queued", "{during}");
     }
-    assert!(held.test_box.trunk_change_ids(&held.remote).is_empty());
+    assert_eq!(
+        held.test_box.trunk_change_ids(&held.remote),
+        Vec::<String>::new()
+    );
     // AND once the batch lands, it lands after it
     held.go();
     let first = finished(runner_a);
