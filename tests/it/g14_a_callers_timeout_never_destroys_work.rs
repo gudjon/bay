@@ -150,6 +150,10 @@ fn a_one_off_status_reports_a_suspected_lease_expiry_and_never_claims() {
         status["detail"]["changes"][0]["operation"]["lease"], "suspected expired",
         "{status}"
     );
+    // G839: the sentence never says a change is being checked while its lease looks expired.
+    let say = status["say"].as_str().unwrap_or_default();
+    assert!(say.contains("lease looks expired"), "{status}");
+    assert!(!say.contains("being checked now"), "{status}");
     assert_eq!(
         test_box.git_bare(&remote, &["rev-parse", &chain]),
         before,

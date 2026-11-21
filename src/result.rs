@@ -2242,6 +2242,37 @@ fn worker_wait_say(id: &str, op: &Value) -> Option<String> {
     })
 }
 
+/// G839: what a change whose runner's lease looks expired waits for. A live runner that serves
+/// its environments takes it over (§ 9a); with none, only the user can start one.
+fn expired_lease_say(id: &str, eta: &Value) -> String {
+    let rows = eta["environments"]
+        .as_array()
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let unserved = crate::completion::and_list(
+        rows.iter()
+            .filter(|row| row["runners"] == 0)
+            .filter_map(|row| row["environment"].as_str()),
+    );
+    if !unserved.is_empty() {
+        return format!(
+            "{id} is held by a runner whose lease looks expired, and no live runner serves {unserved}: tell the user."
+        );
+    }
+    if !rows.is_empty()
+        && rows
+            .iter()
+            .all(|row| row["runners"].as_u64().is_some_and(|live| live > 0))
+    {
+        return format!(
+            "{id} is held by a runner whose lease looks expired; a live runner takes it over without you."
+        );
+    }
+    format!(
+        "{id} is held by a runner whose lease looks expired; a live runner takes it over, and this read could not count the live runners."
+    )
+}
+
 fn change_state_say(result: &BayResult) -> Option<String> {
     let id = result.change.as_deref()?;
     let [row] = result
@@ -2275,8 +2306,12 @@ fn change_state_say(result: &BayResult) -> Option<String> {
     if let Some(said) = worker_wait_say(id, op) {
         return Some(said);
     }
-    if !op["lease"].is_null() {
-        return Some(format!("{id} is being checked now."));
+    // G839 (a fleet finding, 2026-11-21): a lease that looks expired is no check under way; the
+    // sentence said "being checked now" for six hours while no runner served the change.
+    match op["lease"].as_str() {
+        Some("suspected expired") => return Some(expired_lease_say(id, &row["eta"])),
+        Some(_) => return Some(format!("{id} is being checked now.")),
+        None => {}
     }
     // G776: a change held until others merge names the first one not on main yet, and what
     // holds that one.
@@ -2595,6 +2630,53 @@ mod tests {
     use super::{BayResult, Decision, Freshness, Reason, SCHEMA, plain, unplain};
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn a_change_whose_runner_lease_looks_expired_is_never_said_to_be_checked() {
+        let said = |lease: &str, eta: serde_json::Value| {
+            let mut result = BayResult::ok(json!({"changes": [{
+                "change": "abcd1234",
+                "intent": "Fix the parser",
+                "state": "ready",
+                "operation": {"lease": lease, "outcome": null},
+                "eta": eta,
+            }]}));
+            result.change = Some("abcd1234".to_owned());
+            result.say()
+        };
+        let held = said(
+            "held",
+            json!({"environments": [{"environment": "r", "runners": 1}]}),
+        );
+        assert!(held.contains("is being checked now."), "{held}");
+        let unserved = said(
+            "suspected expired",
+            json!({"environments": [{"environment": "r", "runners": 0}, {"environment": "py", "runners": 2}]}),
+        );
+        assert!(
+            unserved.contains("lease looks expired, and no live runner serves r: tell the user."),
+            "{unserved}"
+        );
+        let served = said(
+            "suspected expired",
+            json!({"environments": [{"environment": "r", "runners": 2}]}),
+        );
+        assert!(
+            served.contains("lease looks expired; a live runner takes it over without you."),
+            "{served}"
+        );
+        let unknown = said(
+            "suspected expired",
+            json!({"environments": [{"environment": "r", "runners": null}]}),
+        );
+        assert!(
+            unknown.contains("could not count the live runners."),
+            "{unknown}"
+        );
+        for say in [unserved, served, unknown] {
+            assert!(!say.contains("being checked now"), "{say}");
+        }
+    }
 
     #[test]
     fn a_status_answer_from_an_old_copy_says_how_old_it_is() {
