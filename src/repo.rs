@@ -331,6 +331,18 @@ fn missing_bootstrap(missing: &[String]) -> Value {
     })
 }
 
+/// G848: the fault of a store whose tracking ref `read` names `named`, a commit the store does
+/// not hold (its objects lost), with the opening fetch's error.
+fn lost_tip(read: &str, named: &str, fetch_error: Option<String>) -> String {
+    let message = format!(
+        "the store is damaged: {read} names {named}, a commit it does not hold; git fsck names what else it lacks"
+    );
+    match fetch_error {
+        Some(error) => format!("{message}; the fetch of main failed: {error}"),
+        None => message,
+    }
+}
+
 /// `fetched`: whether the tracking ref exists (a fetch of trunk, or a push, wrote it).
 fn missing_config(
     bootstrap: &Bootstrap,
@@ -610,6 +622,13 @@ impl Repo {
             have = tip_of(&git).map_err(known)?;
         }
         let Some(tip) = have else {
+            // G848: a ref that names a commit this store does not hold is a damaged store, never
+            // a project with no config. git reads the ref without its object.
+            if let Ok(named) = git.run(&["rev-parse", "--verify", "-q", &tracking])
+                && git.run(&["cat-file", "-e", &named]).is_err()
+            {
+                return Err(known(lost_tip(&tracking, &named, fetch_error)));
+            }
             return Err(OpenError::ConfigMissing(
                 common_dir.clone(),
                 missing_config(&bootstrap, &tracking, false, fetch_error),
