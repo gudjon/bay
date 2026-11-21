@@ -2,7 +2,9 @@
 //! `bay queue` and 15 s on `bay doctor` while `bay status --deadline 0` answered in 0.03 s).
 //! `bay queue --deadline 0` lists the line from this machine's copy, with no call to the
 //! remote, and says so; `bay doctor --deadline 0` probes nothing and answers with this
-//! machine's last verdict and its age, or says it holds none.
+//! machine's last verdict and its age, or says it holds none. Past the store's sweep window the
+//! read starts the sweep and leaves it running (G837): the remote calls are the sweep's, made by
+//! the process the read names, none by the read.
 //!
 //! Guards to mutate: in `src/line.rs` `queue`, read with `from_store` false, and the line's read
 //! calls the remote; in `src/main.rs`, run the probe for `--deadline 0`.
@@ -28,7 +30,7 @@ fn a_read_at_deadline_zero_answers_from_this_machine() {
     // GIVEN a remote that refuses every call, each one logged
     let calls = held.test_box.path().join("remote-calls");
     held.test_box.wrap_git(&format!(
-        "case \" $* \" in\n  *\" fetch \"*|*\" ls-remote \"*|*\" push \"*) echo \"$*\" >> '{}'; exit 1 ;;\nesac",
+        "case \" $* \" in\n  *\" fetch \"*|*\" ls-remote \"*|*\" push \"*) echo \"$PPID $*\" >> '{}'; exit 1 ;;\nesac",
         calls.display()
     ));
 
@@ -47,7 +49,22 @@ fn a_read_at_deadline_zero_answers_from_this_machine() {
         .map(|place| place["change"].as_str().unwrap())
         .collect();
     assert_eq!(ids, vec![one.as_str(), two.as_str()], "{line}");
-    assert!(!calls.exists(), "the read called the remote: {line}");
+    let sweep = detail["sweep"]["by"]["pid"].as_u64();
+    if let Some(pid) = sweep {
+        support::process_ended(pid);
+    }
+    let callers: Vec<String> = std::fs::read_to_string(&calls)
+        .unwrap_or_default()
+        .lines()
+        .map(|call| call.split(' ').next().unwrap_or_default().to_owned())
+        .collect();
+    assert!(
+        callers
+            .iter()
+            .all(|caller| Some(caller.as_str()) == sweep.map(|pid| pid.to_string()).as_deref()),
+        "the read called the remote: {callers:?} {line}"
+    );
+    let _ = std::fs::remove_file(&calls);
 
     // AND doctor at deadline zero says it holds no verdict, probing nothing
     let doctor = held

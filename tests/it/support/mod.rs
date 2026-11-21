@@ -1108,15 +1108,22 @@ pub fn sweeps_ended(repo: &Path) {
         .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
         .and_then(|held| held["pid"].as_u64());
     if let Some(pid) = pid {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while std::time::Instant::now() < deadline
-            && std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .stderr(std::process::Stdio::null())
-                .status()
-                .is_ok_and(|status| status.success())
-        {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+        process_ended(pid);
+    }
+}
+
+/// Waits until process `pid` has ended, for at most 120 s: a sweep a read started and left
+/// running (G710, G837) may not hold its lock yet when the read returns, so a test waits for the
+/// process the read names.
+pub fn process_ended(pid: u64) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    while std::time::Instant::now() < deadline
+        && std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }

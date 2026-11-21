@@ -219,11 +219,7 @@ pub fn saved_listing(dir: &Path, deadline: Duration) -> Option<BayResult> {
 /// read past its deadline does (G710), and says how old the answer's view of the remote is
 /// (`stale_read`), and since when the remote has not answered (G684).
 fn stale_saved(dir: &Path, common: &Path, saved: &mut BayResult) {
-    let sweep = match crate::sweeper::start(dir, None, Some(Instant::now())) {
-        Answer::Late(pid) => json!({"state": "started", "by": {"pid": pid}}),
-        Answer::Busy(running) => json!({"state": "running", "by": running}),
-        _ => json!({"state": "started"}),
-    };
+    let sweep = crate::sweeper::leave_running(dir);
     let Some(detail) = saved.detail.as_mut() else {
         return;
     };

@@ -19,7 +19,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// What the sweep a status read started answered (`bay sweep`, [`crate::status::sweep_child`]).
 pub enum Answer {
@@ -48,6 +48,17 @@ pub enum Answer {
     Unserved,
     /// The read cannot be answered: what it names is not here or on the remote.
     Failed(String),
+}
+
+/// Starts `bay sweep` on the repository at `dir` and leaves it running, for a read served from
+/// the store past its sweep's window (G710, G837): what the read says of the sweep.
+#[must_use]
+pub fn leave_running(dir: &Path) -> Value {
+    match start(dir, None, Some(Instant::now())) {
+        Answer::Late(pid) => json!({"state": "started", "by": {"pid": pid}}),
+        Answer::Busy(running) => json!({"state": "running", "by": running}),
+        _ => json!({"state": "started"}),
+    }
 }
 
 /// Starts `bay sweep [change]` on the repository at `dir` and waits for its answer until

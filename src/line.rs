@@ -8,8 +8,10 @@
 //! changes submitted that no runner has placed yet: with no runner running, they are the whole
 //! line. No landed change and no evidence is read, so a store with thousands of places in its
 //! history answers as fast as one with a few. It writes nothing but fetched copies of the
-//! remote's refs and the merge requests it found answered ([`crate::answered`]); a tool changes
-//! the line only through bay's own verbs (`bay merge`, `bay abandon`, `bay start <change>`).
+//! remote's refs and the merge requests it found answered ([`crate::answered`]); a store read
+//! past its sweep's window starts the status sweep, which refreshes the store's copy for every
+//! read after it. A tool changes the line only through bay's own verbs (`bay merge`,
+//! `bay abandon`, `bay start <change>`).
 //!
 //! `detail` is one `bay.queue/1` document ([`schema`], also in `bay help --json`).
 
@@ -36,7 +38,24 @@ pub fn queue(dir: &Path, from_store: bool) -> BayResult {
         Ok(repo) => repo,
         Err(error) => return BayResult::failed(error),
     };
-    let mut result = read(&repo, from_store).map_or_else(BayResult::failed, BayResult::ok);
+    let mut result = match read(&repo, from_store) {
+        Ok(mut detail) => {
+            // G837 (a fleet finding, 2026-11-21: a panel that read the line from the store every
+            // 15 s found its copy 106 s old, as only a status read swept the store): a store read
+            // past its last sweep's window starts the sweep once it has read, and leaves it
+            // running, as a store read of `bay status` does (G710); `sweep` says so, and is null
+            // when this read started none.
+            let closed = from_store
+                && !crate::sweep::open_by_time(&repo.common_dir, crate::live::unix_now());
+            detail["sweep"] = if closed {
+                crate::sweeper::leave_running(dir)
+            } else {
+                Value::Null
+            };
+            BayResult::ok(detail)
+        }
+        Err(error) => BayResult::failed(error),
+    };
     result.freshness = repo.freshness();
     result
 }
@@ -485,7 +504,7 @@ pub fn schema() -> Value {
         "type": "object",
         "required": [
             "schema", "read_at", "depth", "oldest_wait_s", "places", "arriving",
-            "arrivals_listed", "unread", "from_store", "age_s",
+            "arrivals_listed", "unread", "from_store", "age_s", "sweep",
         ],
         "additionalProperties": false,
         "properties": {
@@ -494,6 +513,15 @@ pub fn schema() -> Value {
             "from_store": {"type": "boolean"},
             "arrivals_listed": {"type": "boolean"},
             "age_s": maybe(count.clone()),
+            "sweep": maybe(json!({
+                "type": "object",
+                "required": ["state"],
+                "additionalProperties": false,
+                "properties": {
+                    "state": {"enum": ["started", "running"]},
+                    "by": {"type": "object"},
+                },
+            })),
             "depth": count,
             "oldest_wait_s": maybe(count.clone()),
             "places": {
