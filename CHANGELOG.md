@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.129
+
+- A read of a change whose runner's lease looks expired says so, and whether a live runner takes it over.
+
 ## 0.6.128
 
 - A read of the line from this machine's copy starts the sweep when the copy is past its window.
