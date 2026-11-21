@@ -3,6 +3,7 @@
 ## 0.6.124
 
 - A session is not told of a refused or failed operation its change has since merged past.
+- A read of the line at deadline zero lists the changes waiting for a runner, as last fetched here.
 
 ## 0.6.123
 
