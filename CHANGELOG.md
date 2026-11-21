@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.134
+
+- A sweep never asks for this clone's own evidence notes, so notes not yet pushed are not downloaded again.
+
 ## 0.6.133
 
 - A change passes the head only when no check of the head's batch reads it.
