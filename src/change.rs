@@ -874,6 +874,30 @@ impl<'a> Chain<'a> {
             .collect())
     }
 
+    /// Every chain's head, by change id, from one listing of the change refs.
+    #[must_use]
+    pub fn heads(&self) -> std::collections::HashMap<String, String> {
+        self.git
+            .run(&[
+                "for-each-ref",
+                "--format=%(objectname) %(refname)",
+                CHANGES_PREFIX,
+            ])
+            .map(|listed| {
+                listed
+                    .lines()
+                    .filter_map(|line| {
+                        let (head, name) = line.split_once(' ')?;
+                        Some((
+                            name.strip_prefix(CHANGES_PREFIX)?.to_owned(),
+                            head.to_owned(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// G200b: every chain this repository holds, in ref order, read by one `for-each-ref` and
     /// one `git cat-file --batch` of their records, however many chains there are. A record
     /// the batch cannot give is read by [`Chain::read`] on its own, and a chain that cannot be

@@ -7,9 +7,9 @@
 //! read in one `cat-file --batch`. A change is placed by a runner, so `arriving` lists the
 //! changes submitted that no runner has placed yet: with no runner running, they are the whole
 //! line. No landed change and no evidence is read, so a store with thousands of places in its
-//! history answers as fast as one with a few. It writes
-//! nothing but fetched copies of the remote's refs; a tool changes the line only through bay's
-//! own verbs (`bay merge`, `bay abandon`, `bay start <change>`).
+//! history answers as fast as one with a few. It writes nothing but fetched copies of the
+//! remote's refs and the merge requests it found answered ([`crate::answered`]); a tool changes
+//! the line only through bay's own verbs (`bay merge`, `bay abandon`, `bay start <change>`).
 //!
 //! `detail` is one `bay.queue/1` document ([`schema`], also in `bay help --json`).
 
@@ -225,24 +225,17 @@ fn arriving(
     unread: &mut Vec<Value>,
 ) -> Result<Vec<Value>, String> {
     let listed = requests_listed(repo, listing)?;
-    let held: BTreeMap<String, ChangeRecord> = Chain::new(&repo.git)
-        .read_all()
-        .map_err(|error| error.message())?
-        .into_iter()
-        .map(|held| (held.id, held.record))
-        .collect();
-    let requests: Vec<(String, String)> = listed
-        .lines()
-        .filter_map(|line| {
-            let (request, name) = line.split_once('\t')?;
-            let change = name.strip_prefix(REQUESTS)?;
-            (!placed.contains(change)).then(|| (change.to_owned(), request.to_owned()))
-        })
-        .filter(|(change, request)| {
-            held.get(change)
-                .is_none_or(|record| waits(record, request) != Some(false))
-        })
-        .collect();
+    let requests = unanswered(
+        repo,
+        listed
+            .lines()
+            .filter_map(|line| {
+                let (request, name) = line.split_once('\t')?;
+                let change = name.strip_prefix(REQUESTS)?;
+                (!placed.contains(change)).then(|| (change.to_owned(), request.to_owned()))
+            })
+            .collect(),
+    );
     if requests.is_empty() {
         return Ok(Vec::new());
     }
@@ -319,6 +312,54 @@ fn arriving(
         .collect();
     rows.sort_by_key(|(at, row)| (at.unwrap_or(u64::MAX), row["change"].to_string()));
     Ok(rows.into_iter().map(|(_, row)| row).collect())
+}
+
+/// The requests of `listed`, each `(change, request)`, that the record at their change's chain
+/// head here does not show answered. G835: the record of a pair an earlier read kept answered
+/// ([`crate::answered`]) is not read again; a change with no chain here is kept, for the read
+/// that follows to settle.
+fn unanswered(repo: &Repo, listed: Vec<(String, String)>) -> Vec<(String, String)> {
+    let chain = Chain::new(&repo.git);
+    let heads = chain.heads();
+    let store = repo.git.answer_store();
+    let kept = store
+        .as_deref()
+        .map(crate::answered::kept)
+        .unwrap_or_default();
+    let pair = |change: &str, request: &str| {
+        heads
+            .get(change)
+            .map(|head| (head.clone(), request.to_owned()))
+    };
+    let unknown: Vec<(&str, crate::answered::Pair)> = listed
+        .iter()
+        .filter_map(|(change, request)| Some((change.as_str(), pair(change, request)?)))
+        .filter(|(_, pair)| !kept.contains(pair))
+        .collect();
+    let at: Vec<&str> = unknown.iter().map(|(_, (head, _))| head.as_str()).collect();
+    let records = chain.records_at(&at).unwrap_or_default();
+    let answered: BTreeSet<&crate::answered::Pair> = unknown
+        .iter()
+        .zip(records)
+        .filter(|((change, (_, request)), record)| {
+            record
+                .as_ref()
+                .is_some_and(|record| record.id == *change && waits(record, request) == Some(false))
+        })
+        .map(|((_, pair), _)| pair)
+        .collect();
+    let keep: BTreeSet<crate::answered::Pair> = listed
+        .iter()
+        .filter_map(|(change, request)| pair(change, request))
+        .filter(|pair| kept.contains(pair) || answered.contains(pair))
+        .collect();
+    if let Some(store) = store.as_deref().filter(|_| keep != kept) {
+        crate::answered::keep(store, &keep);
+    }
+    listed
+        .into_iter()
+        .filter(|(change, request)| pair(change, request).is_none_or(|pair| !keep.contains(&pair)))
+        .collect()
 }
 
 /// The operation of `record` that carries merge request `request`.

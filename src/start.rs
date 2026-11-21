@@ -346,7 +346,7 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
     // its drafts and its end time, about 900 Git calls, before taking the kept judgement): one
     // listing names every chain's head, and a view kept as holding something newer at that head,
     // with nothing in it moved, is passed over before anything of it is read.
-    let heads = chain_heads(repo);
+    let heads = chain.heads();
     view::release_ended(repo, std::time::Duration::ZERO, &|id| {
         if heads
             .get(id)
@@ -356,23 +356,6 @@ fn release_ended(repo: &Repo, dir: &Path) -> Vec<String> {
         }
         ended_view(repo, &chain, &in_use, id)
     })
-}
-
-/// Every change chain's head, by change, from one listing of the change refs.
-fn chain_heads(repo: &Repo) -> std::collections::HashMap<String, String> {
-    let prefix = crate::change::CHANGES_PREFIX;
-    repo.git
-        .run(&["for-each-ref", "--format=%(objectname) %(refname)", prefix])
-        .map(|listed| {
-            listed
-                .lines()
-                .filter_map(|line| {
-                    let (head, name) = line.split_once(' ')?;
-                    Some((name.strip_prefix(prefix)?.to_owned(), head.to_owned()))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// G665: the views [`release_ended`] would release, removing nothing. `in_time` stops the reading
