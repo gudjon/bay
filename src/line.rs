@@ -105,11 +105,31 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
         .iter()
         .map(|place| place.entry.change.as_str())
         .collect();
-    // The arrivals are read from the remote's list of requests: none from the store alone.
-    let arriving = if from_store {
-        Vec::new()
+    // G830 (a fleet finding, 2026-11-20: a panel read of the line said "Nothing waits" while six
+    // changes had waited for a runner up to 64 min): a store read takes the arrivals from this
+    // store's copy of the remote's merge requests, as its last sweep left them, and none when no
+    // sweep ever ran here.
+    let swept = if from_store {
+        crate::sweep::last(&repo.common_dir).map(|(_, at)| at)
     } else {
-        arriving(repo, &in_line, line.as_ref(), now, &mut unread)?
+        None
+    };
+    let arriving = match (from_store, swept) {
+        (false, _) => arriving(
+            repo,
+            &in_line,
+            Listing::Live(line.as_ref()),
+            now,
+            &mut unread,
+        )?,
+        (true, Some(_)) => arriving(
+            repo,
+            &in_line,
+            Listing::Stored(&stored_requests(repo)?),
+            now,
+            &mut unread,
+        )?,
+        (true, None) => Vec::new(),
     };
     // G776 (a fleet finding, 2026-11-17: the line read "the longest has waited 171 minutes"
     // while no place had waited 12): a change held until another merges (`--after`) waits for
@@ -133,9 +153,60 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
         "arriving": arriving,
         "unread": unread,
         "from_store": from_store,
-        // G765: how old this store's copy of the line is; null when it never fetched it here.
-        "age_s": if from_store { crate::queue::fetched_age_s(&repo.common_dir).map_or(Value::Null, |age| json!(age)) } else { json!(0) },
+        "age_s": if from_store { store_age(repo, swept, now) } else { json!(0) },
     }))
+}
+
+/// G765: how old this store's copy of the line is; null when it never fetched it here. G830: its
+/// arrivals are as old as the store's last sweep, so the copy is no newer than that sweep.
+fn store_age(repo: &Repo, swept: Option<u64>, now: u64) -> Value {
+    crate::queue::fetched_age_s(&repo.common_dir).map_or(Value::Null, |age| {
+        json!(age.max(swept.map_or(0, |at| now.saturating_sub(at))))
+    })
+}
+
+/// G830: this store's copy of the remote's merge requests, printed as `ls-remote` prints them.
+fn stored_requests(repo: &Repo) -> Result<String, String> {
+    repo.git
+        .run(&[
+            "for-each-ref",
+            "--format=%(objectname)%09%(refname)",
+            REQUESTS,
+        ])
+        .map_err(|error| {
+            format!(
+                "this store's merge requests could not be listed: {}",
+                error.message()
+            )
+        })
+}
+
+/// Where the arrivals' list of merge requests comes from.
+#[derive(Clone, Copy)]
+enum Listing<'a> {
+    /// A live read: the line's one listing, or with none an `ls-remote` of its own; then one
+    /// fetch of each requested chain the listing did not settle.
+    Live(Option<&'a Line>),
+    /// A store read (G830): this store's copy of the requests, as `ls-remote` prints them, and
+    /// the chains it holds; nothing is fetched.
+    Stored(&'a str),
+}
+
+/// The listing of the merge requests `listing` names, as `ls-remote` prints it.
+fn requests_listed(repo: &Repo, listing: Listing<'_>) -> Result<String, String> {
+    match listing {
+        Listing::Stored(listed) => Ok(listed.to_owned()),
+        Listing::Live(Some(line)) => Ok(line.requests.clone()),
+        Listing::Live(None) => repo
+            .git
+            .run(&["ls-remote", repo.remote(), &format!("{REQUESTS}*")])
+            .map_err(|error| {
+                format!(
+                    "the remote's merge requests could not be listed: {}",
+                    error.message()
+                )
+            }),
+    }
 }
 
 /// The changes submitted that no runner has placed yet, oldest request first. One `ls-remote`
@@ -145,22 +216,11 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
 fn arriving(
     repo: &Repo,
     placed: &BTreeSet<&str>,
-    line: Option<&Line>,
+    listing: Listing<'_>,
     now: u64,
     unread: &mut Vec<Value>,
 ) -> Result<Vec<Value>, String> {
-    let listed = match line {
-        Some(line) => line.requests.clone(),
-        None => repo
-            .git
-            .run(&["ls-remote", repo.remote(), &format!("{REQUESTS}*")])
-            .map_err(|error| {
-                format!(
-                    "the remote's merge requests could not be listed: {}",
-                    error.message()
-                )
-            })?,
-    };
+    let listed = requests_listed(repo, listing)?;
     let held: BTreeMap<String, ChangeRecord> = Chain::new(&repo.git)
         .read_all()
         .map_err(|error| error.message())?
@@ -185,13 +245,14 @@ fn arriving(
     let changes: Vec<String> = requests.iter().map(|(change, _)| change.clone()).collect();
     // G785: the listing's one fetch settled every requested chain that moved; the rest are
     // current here already. Only one it could not settle is fetched again.
-    let unsettled: Vec<String> = match line {
-        Some(line) => changes
+    let unsettled: Vec<String> = match listing {
+        Listing::Stored(_) => Vec::new(),
+        Listing::Live(Some(line)) => changes
             .iter()
             .filter(|change| !line.settled.contains(*change) && !line.ended.contains(*change))
             .cloned()
             .collect(),
-        None => changes.clone(),
+        Listing::Live(None) => changes.clone(),
     };
     for (change, why) in repo.remote_chains(&unsettled) {
         unread.push(json!({"change": change, "why": why}));
@@ -201,6 +262,10 @@ fn arriving(
     let mut waiting: Vec<(&ChangeRecord, &Operation)> = Vec::new();
     for (change, request) in &requests {
         let Some(record) = fresh.iter().find(|record| &record.id == change) else {
+            // G830: a store read fetches no chain; one its last sweep did not keep is unread.
+            if matches!(listing, Listing::Stored(_)) {
+                unread.push(json!({"change": change, "why": "this store holds no chain of it"}));
+            }
             continue;
         };
         match waits(record, request) {

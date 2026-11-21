@@ -1207,6 +1207,39 @@ enum Unsettled {
     Failed(String),
 }
 
+/// G830 (a fleet finding, 2026-11-20: a store read of the line said "Nothing waits" while six
+/// changes had waited for a runner up to 64 min): the chain of each change the remote holds a
+/// merge request of after `swept` and this store lacks, so a store read of the line lists its
+/// arrivals. A chain this store holds moves by the rule of the chains it works on
+/// ([`settle_listed`]), so the read that learns a change ended still shows it ended.
+fn requested_chains(repo: &Repo, swept: &Swept) -> Vec<sweep::Update> {
+    let requests = crate::names::REQUESTS;
+    let held = repo
+        .git
+        .run(&["for-each-ref", "--format=%(refname)", requests])
+        .unwrap_or_default();
+    let mut requested: std::collections::BTreeSet<&str> = held
+        .lines()
+        .filter_map(|name| name.strip_prefix(requests))
+        .collect();
+    for (name, found) in swept.under(requests) {
+        let Some(id) = name.strip_prefix(requests) else {
+            continue;
+        };
+        if found.new.is_some() {
+            requested.insert(id);
+        } else {
+            requested.remove(id);
+        }
+    }
+    swept.taken(CHANGES_PREFIX, |name, found| {
+        found.flag == '*'
+            && name
+                .strip_prefix(CHANGES_PREFIX)
+                .is_some_and(|id| requested.contains(id))
+    })
+}
+
 /// The local half of [`fetch_swept`]: the moves `swept` found, each namespace by its rule.
 fn settle_swept(
     dir: &Path,
@@ -1241,9 +1274,12 @@ fn settle_swept(
         crate::names::QUEUE_DONE,
         // G787: the leases, which their holders replace in place and delete at release.
         crate::names::LEASE,
+        // G830: the merge requests, pruned as the remote prunes them.
+        crate::names::REQUESTS,
     ] {
         updates.extend(swept.taken(prefix, |_, _| true));
     }
+    updates.extend(requested_chains(&first, swept));
     updates.extend(swept.taken(evidence::EVIDENCE_PREFIX, |name, found| {
         found.flag != '-' && !own_notes.iter().any(|own| own == name)
     }));
