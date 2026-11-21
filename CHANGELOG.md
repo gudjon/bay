@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.125
+
+- A read of the line says whether it read the changes waiting for a runner.
+
 ## 0.6.124
 
 - A session is not told of a refused or failed operation its change has since merged past.
