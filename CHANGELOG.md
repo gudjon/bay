@@ -3,6 +3,7 @@
 ## 0.6.134
 
 - A sweep never asks for this clone's own evidence notes, so notes not yet pushed are not downloaded again.
+- A clone whose copy of main names a lost commit is reported damaged, not as bay not set up.
 
 ## 0.6.133
 
