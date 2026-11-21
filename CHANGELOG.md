@@ -4,6 +4,7 @@
 
 - A change passes the head only when no check of the head's batch reads it.
 - A call to the remote that reached no host is tried again after one and three seconds.
+- A sweep keeps the retention cut of an ended change, so it never fetches the same chain again.
 
 ## 0.6.132
 

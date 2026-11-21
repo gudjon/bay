@@ -386,7 +386,8 @@ fn live_ids(repo: &Repo) -> Result<Vec<String>, String> {
 /// [`Repo::remote_chain`]'s rule, and only a chain that moved is touched. A fast-forward, and a
 /// chain this store lacks, move by compare-and-swap in one transaction; a chain the remote's is
 /// not a fast-forward of (local work ahead, a chain apart, a retention cut) is settled as one git
-/// refused; one the remote lacks is kept.
+/// refused; one the remote lacks is kept. Every other chain this store holds that the sweep moved
+/// moves by the same rule ([`settle_held`], G849).
 fn settle_listed(
     repo: &Repo,
     chain: &Chain,
@@ -419,6 +420,7 @@ fn settle_listed(
             _ => {}
         }
     }
+    updates.extend(settle_held(repo, swept, &settled));
     sweep::apply(&repo.git, &updates);
     // A change named here but not local is read from the remote, which must hold it.
     if let [id] = ids.as_slice()
@@ -432,6 +434,51 @@ fn settle_listed(
         ));
     }
     Ok(ids)
+}
+
+/// G849 (a fleet finding, 2026-11-21: in a store no runner worked from, each sweep took about
+/// 80 s and brought about 148 MB, the same objects each time: the chains of 1315 ended changes
+/// that a runner on another machine had cut by retention). A sweep fetches every chain the remote
+/// moved, but moved only the chains of live changes, so the cut of an ended one was brought,
+/// never kept, and brought again by the next sweep. Each other chain this store holds now moves by
+/// [`Repo::settle_chain`]'s rule as well: a fast-forward, and a retention cut of that change (its
+/// records read in one batch), in the listing's one transaction; any other forced move as
+/// `settle_chain` settles it. A chain this store lacks is left to [`requested_chains`].
+fn settle_held(repo: &Repo, swept: &Swept, settled: &[String]) -> Vec<sweep::Update> {
+    let working: std::collections::BTreeSet<&str> = settled.iter().map(String::as_str).collect();
+    let mut updates = Vec::new();
+    let mut forced = Vec::new();
+    for (name, found) in swept.under(CHANGES_PREFIX) {
+        let Some(id) = name.strip_prefix(CHANGES_PREFIX) else {
+            continue;
+        };
+        if working.contains(id) {
+            continue;
+        }
+        match (found.flag, found.old.as_deref(), found.new.as_deref()) {
+            (' ', Some(_), Some(_)) => {
+                updates.push((name.to_owned(), found.old.clone(), found.new.clone()));
+            }
+            ('+', Some(old), Some(new)) => forced.push((id, old, new)),
+            _ => {}
+        }
+    }
+    if forced.is_empty() {
+        return updates;
+    }
+    let heads: Vec<&str> = forced.iter().map(|(_, _, new)| *new).collect();
+    let records = Chain::new(&repo.git).records_at(&heads).unwrap_or_default();
+    for (at, (id, old, new)) in forced.into_iter().enumerate() {
+        match records.get(at) {
+            Some(Some(record)) if record.retention_cut && record.id == id => {
+                updates.push((change_ref(id), Some(old.to_owned()), Some(new.to_owned())));
+            }
+            _ => {
+                let _ = repo.settle_chain(id, new);
+            }
+        }
+    }
+    updates
 }
 
 /// How many changes, and how many views, a listing describes; the rest are named in
@@ -867,7 +914,8 @@ fn holds_named(repo: &Repo, named: Option<&str>) -> bool {
 /// - every other writer's evidence notes, forced and never pruned ([`Repo::fetch_evidence`]);
 /// - each target's ref, its copy removed when the remote lacks it ([`crate::target::fetch`]),
 ///   and fetched as before when the config the trunk moved to names other targets;
-/// - the chains of every live change and of the change the read names ([`settle_listed`]),
+/// - the chains of every live change, of the change the read names, and of every other change
+///   this store holds ([`settle_listed`], G849),
 ///   after the receipts' sync, which reads the remote's chains and land requests from the same
 ///   sweep and writes none.
 ///
