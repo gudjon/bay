@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.132
+
+- A second runner checks the next batch while the head is checked alone, and keeps to its lane.
+
 ## 0.6.131
 
 - One start makes one change when the host refuses its push but keeps its chain.
