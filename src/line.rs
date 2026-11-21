@@ -151,6 +151,10 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
         "oldest_wait_s": oldest,
         "places": rows,
         "arriving": arriving,
+        // G831 (a fleet finding, 2026-11-21: a panel could not tell a store read that lists the
+        // arrivals from one of an older bay that lists none, and a store no sweep ever ran in
+        // said "Nothing waits"): whether `arriving` was read at all.
+        "arrivals_listed": !from_store || swept.is_some(),
         "unread": unread,
         "from_store": from_store,
         "age_s": if from_store { store_age(repo, swept, now) } else { json!(0) },

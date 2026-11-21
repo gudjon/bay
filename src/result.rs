@@ -1799,7 +1799,10 @@ fn queue_say(result: &BayResult) -> Option<String> {
         return None;
     }
     let said = line_say(detail);
-    if detail.get("from_store").and_then(Value::as_bool) != Some(true) {
+    // G831: a read that never read the remote says so in `said`, so no age follows it.
+    if detail.get("from_store").and_then(Value::as_bool) != Some(true)
+        || detail.get("arrivals_listed").and_then(Value::as_bool) == Some(false)
+    {
         return Some(said);
     }
     Some(match detail.get("age_s").and_then(Value::as_u64) {
@@ -1819,8 +1822,14 @@ fn line_say(detail: &Value) -> String {
     };
     let placed = count("places");
     let total = placed + count("arriving");
+    // G831: a store read that never read the arrivals says so, never "Nothing waits".
+    let listed = detail.get("arrivals_listed").and_then(Value::as_bool) != Some(false);
     if total == 0 {
-        return "Nothing waits to be added to main.".to_owned();
+        return if listed {
+            "Nothing waits to be added to main.".to_owned()
+        } else {
+            format!("No change holds a place in the line. {UNLISTED}")
+        };
     }
     let (subject, longest, them) = if total == 1 {
         ("One change waits".to_owned(), "it has", "it")
@@ -1833,11 +1842,20 @@ fn line_say(detail: &Value) -> String {
     } else {
         "to be added to main".to_owned()
     };
-    match detail.get("oldest_wait_s").and_then(Value::as_u64) {
+    let said = match detail.get("oldest_wait_s").and_then(Value::as_u64) {
         Some(secs) => format!("{subject} {object}; {longest} waited {}.", waited(secs)),
         None => format!("{subject} {object}."),
+    };
+    if listed {
+        said
+    } else {
+        format!("{said} {UNLISTED}")
     }
 }
+
+/// G831: what a store read of the line says when no sweep ever read the arrivals here.
+const UNLISTED: &str =
+    "Changes waiting for a runner are not known here: this machine has not read the remote yet.";
 
 /// How a sentence names the checks of `rows` (each a red row with a `check`).
 fn shown_checks(rows: &[&Value]) -> String {
