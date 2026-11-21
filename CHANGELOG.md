@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.128
+
+- A read of the line from this machine's copy starts the sweep when the copy is past its window.
+
 ## 0.6.127
 
 - A read of the line reads the record of an ended change cut by retention once, not on every read.
