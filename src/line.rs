@@ -265,12 +265,11 @@ fn arriving(
             }
             continue;
         };
-        match waits(record, request) {
-            Some(true) => waiting.extend(op_of(record, request).map(|op| (record, op))),
-            Some(false) => {}
-            // G597: the retention cut of an ended change keeps no operations, while the
-            // request ref it answered stays on the remote.
-            None if record.retention_cut && crate::status::ended(record.state) => {}
+        if passed_over(record, request) {
+            continue;
+        }
+        match op_of(record, request) {
+            Some(op) => waiting.push((record, op)),
             None => unread.push(json!({
                 "change": change,
                 "why": "its merge request is not in its record here",
@@ -344,7 +343,7 @@ fn unanswered(repo: &Repo, listed: Vec<(String, String)>) -> Vec<(String, String
         .filter(|((change, (_, request)), record)| {
             record
                 .as_ref()
-                .is_some_and(|record| record.id == *change && waits(record, request) == Some(false))
+                .is_some_and(|record| record.id == *change && passed_over(record, request))
         })
         .map(|((_, pair), _)| pair)
         .collect();
@@ -389,6 +388,17 @@ fn waits(record: &ChangeRecord, request: &str) -> Option<bool> {
     }
     let op = op_of(record, request)?;
     Some(!crate::status::ended(record.state) && op.state == OpState::Submitted)
+}
+
+/// Whether the line passes over `request` by `record`: its change waits for nothing.
+///
+/// G597 (2026-10-31): the retention cut of an ended change keeps none of its operations, while
+/// the request ref it answered stays on the remote; that change waits for nothing either.
+fn passed_over(record: &ChangeRecord, request: &str) -> bool {
+    match waits(record, request) {
+        Some(waits) => !waits,
+        None => record.retention_cut && crate::status::ended(record.state),
+    }
 }
 
 /// The committer time of each of `commits`, read in one `git show`.

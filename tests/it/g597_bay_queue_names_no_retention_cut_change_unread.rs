@@ -11,7 +11,7 @@
 //! ran it kept no land request, as the runner read it from a requests ref it never fetches. The
 //! host refused that cut, and every runner pass tried it again. The abandoned half asks for it.
 //!
-//! Guards to mutate: `src/line.rs`, `requests`: drop the `retention_cut` arm (each change is
+//! Guards to mutate: `src/line.rs`, `passed_over`: drop the `retention_cut` arm (each change is
 //! named unread); `src/publish.rs`, `abandoned_keeps`: drop the land request (the abandoned
 //! change is never cut).
 
