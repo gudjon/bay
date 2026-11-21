@@ -16,8 +16,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use serde_json::Value;
-use support::PRODUCER;
 use support::queued::{Check, Held, host};
+use support::{PRODUCER, result_json};
 
 /// The remote's head of the chain of `change`.
 fn remote_head(held: &Held, change: &str) -> String {
@@ -67,7 +67,16 @@ fn a_sweep_keeps_the_retention_cut_of_an_ended_chain_this_store_holds() {
     // GIVEN a store that read a change while it waited, then read it landed
     let change = held.queue("one", "src");
     status(&held, &reader);
-    let _ = held.pass(&runner);
+    // The landing pass is past its bound once it has run its one operation, so it makes no cut
+    // however long it takes under load: the cut comes in a later pass, after the store read the
+    // change landed.
+    let (code, landing) = result_json(
+        held.test_box
+            .bay(&runner)
+            .env("BAY_TEST_PASS_BOUND_S", "0")
+            .args(["runner", "run", "--once"]),
+    );
+    assert_eq!(code, 0, "{landing}");
     let landed = remote_head(&held, &change);
     assert_eq!(record_at(&held, &landed)["state"], "landed");
     status(&held, &reader);
