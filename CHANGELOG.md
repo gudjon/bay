@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.133
+
+- A change passes the head only when no check of the head's batch reads it.
+- A call to the remote that reached no host is tried again after one and three seconds.
+
 ## 0.6.132
 
 - A second runner checks the next batch while the head is checked alone, and keeps to its lane.
