@@ -38,7 +38,7 @@ What you do decides the speed for every agent:
   being checked and the batches checked ahead of it.
 - **Changes to `.bay/` go through bay** like any other change, in a change of their own; never by a pull request or
   a direct push. Keep a check's `adapter` files apart too: a change to the policy, `.gitattributes` or any check's
-  adapter file wakes every check, also a check that does not list the file, and runs each twice: as main has them
+  `adapter` file wakes every check, also a check that does not list the file, and runs each twice: as main has them
   and as it has them.
 - **A fix for a red main goes first.** `bay start <intent> --fixes <check>` (the red check), `--fixes <change>`
   (or `bay undo <change>`) runs ahead of the line. A change already open that turns out to be the fix is named
