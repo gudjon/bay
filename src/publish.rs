@@ -2248,7 +2248,30 @@ fn landed_elsewhere(ctx: &mut Ctx, op_id: &str) -> Result<Option<BayResult>, Str
     if ctx.refetch().is_err() {
         return Ok(None);
     }
+    // G863 (a fleet finding, 2026-11-22: a batch member's chain still said checked 3.7 h after its
+    // landing, and two runners visited it about once a minute each, about 320 visits, each
+    // answered from the chain with nothing written): a chain its landing runner left checked is
+    // recorded from main, the long way, as a visit under a registry that signs landings records it.
+    if chain_left_checked(ctx, op_id)
+        && let Ok(main) = ctx.repo.fetch_trunk()
+    {
+        let revision = ctx.op(op_id).revision.clone();
+        if let Some(landed) = scanned(ctx, &main, &revision)? {
+            return Ok(Some(existing(landed)));
+        }
+    }
     landed_on_chain(ctx, op_id, true)
+}
+
+/// G863: whether `op_id`'s chain, as this visit just read it, still says checked after its
+/// holder's chain and lease stood unmoved for a lease on this looping runner's watch
+/// ([`sighted`]): its landing runner stopped before it recorded the landing, and will not.
+fn chain_left_checked(ctx: &Ctx, op_id: &str) -> bool {
+    let Some(op) = ctx.find_op(op_id).filter(|op| op.state == OpState::Checked) else {
+        return false;
+    };
+    let lease = holder_lease(&ctx.repo.config, op.owner.as_deref());
+    sighted(&ctx.repo.git, &ctx.id, &ctx.head).is_some_and(|seen| seen.elapsed() >= lease)
 }
 
 /// G800: [`landed_elsewhere`]'s answer from the change's chain as this visit just read it:
