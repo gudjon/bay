@@ -23,7 +23,7 @@ const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage 
 
 pub(crate) struct Trunk {
     pub(crate) test_box: TestBox,
-    repo: PathBuf,
+    pub(crate) repo: PathBuf,
     remote: PathBuf,
     suite_box: PathBuf,
 }
@@ -75,7 +75,7 @@ pub(crate) fn trunk_with(config: &str, more: &[(&str, &str)]) -> Trunk {
 
 impl Trunk {
     /// Lands a change that writes `path`: its change id and its commit on trunk.
-    fn land(&self, path: &str) -> (String, String) {
+    pub(crate) fn land(&self, path: &str) -> (String, String) {
         let dir = Path::new(path).parent().unwrap().to_str().unwrap();
         let started = self
             .test_box
@@ -98,7 +98,7 @@ impl Trunk {
         landings
     }
 
-    fn suite(&self, landing: &str, verdict: &str) {
+    pub(crate) fn suite(&self, landing: &str, verdict: &str) {
         let (code, written) = result_json(self.test_box.bay(&self.suite_box).args([
             "evidence",
             "record",

@@ -26,6 +26,9 @@
 //!   and it owns the red. A pass makes that landing `flaky`, which decides nothing: the range
 //!   widens again, and no culprit is named.
 //! - At most ⌈log2(n)⌉ + 1 runs for a range of n landings.
+//! - G857: of the live runners that serve the check's environment, one bisects a red: the one
+//!   that runs the check on main's tip (G822). Another bisects it once that one's presence reads
+//!   stale, or no producer answered the check in the range for twice its timeout.
 //!
 //! Nothing is stored but the evidence: the culprit is judged from the records on each read.
 //!
@@ -630,6 +633,15 @@ fn left_to(
     if now.saturating_sub(at.max(landed.unwrap_or(0))) >= entry.timeout_s {
         return None;
     }
+    let owner = owner_of(entry, me, live);
+    (owner != me).then(|| owner.to_owned())
+}
+
+/// G822: the runner that runs `entry`: of `me` and the runners whose presence reads live
+/// (`live`) and serves the check's environment, and whose producer the check lists when it lists
+/// any, the one whose name weighs most with it ([`weight`]). G857 elects the runner that
+/// bisects a red of the check by it too ([`bisected_by`]).
+fn owner_of<'a>(entry: &crate::policy::CheckEntry, me: &'a str, live: &'a [Value]) -> &'a str {
     let listed = |record: &Value| {
         entry.producers.as_ref().is_none_or(|producers| {
             record["producer"]
@@ -637,13 +649,12 @@ fn left_to(
                 .is_some_and(|producer| producers.iter().any(|it| it == producer))
         })
     };
-    let owner = live
-        .iter()
+    live.iter()
         .filter(|record| crate::presence::serves(record, &entry.environment) && listed(record))
         .filter_map(|record| record["executor"].as_str())
         .chain([me])
-        .max_by_key(|runner| (weight(entry, runner), *runner))?;
-    (owner != me).then(|| owner.to_owned())
+        .max_by_key(|runner| (weight(entry, runner), *runner))
+        .unwrap_or(me)
 }
 
 /// G822: `runner`'s rendezvous weight for `entry`: the first eight bytes of the SHA-256 of the
@@ -804,13 +815,15 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
     let served = check::Served::read(git);
     // BACKLOG 113: a box that can run none of the policy's post checks finds no culprit, so it
     // judges nothing for them.
-    let post_work = match crate::policy::load_at(git, &trunk) {
-        Ok(Some(policy)) => serves_a_post_check(&policy, &served, taken),
+    let policy = match crate::policy::load_at(git, &trunk) {
+        Ok(Some(policy)) => policy,
         // An invalid policy has no post check to bisect, as the red judgement reads it.
-        Ok(None) | Err(crate::policy::LoadError::Invalid(_)) => false,
+        Ok(None) | Err(crate::policy::LoadError::Invalid(_)) => {
+            return Ok((Vec::new(), Vec::new()));
+        }
         Err(crate::policy::LoadError::Git(why)) => return Err(why),
     };
-    if !post_work {
+    if !serves_a_post_check(&policy, &served, taken) {
         return Ok((Vec::new(), Vec::new()));
     }
     let keys = Keys::load(git);
@@ -818,6 +831,8 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
     repo.fetch_evidence(&keys);
     let registry = Registry::current(git)?;
     let judgement = crate::red::judged(git, &trunk, registry.as_ref())?;
+    let live = crate::presence::live(git);
+    let now = crate::presence::reader_now();
     let mut rows = Vec::new();
     let mut reds: BTreeMap<String, Vec<Red>> = BTreeMap::new();
     for red in judgement.red {
@@ -847,7 +862,20 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
                 &[],
             ));
         } else if !taken.contains(&red.environment) {
-            reds.entry(red.environment.clone()).or_default().push(red);
+            let entry = policy
+                .checks
+                .iter()
+                .find(|entry| entry.id == red.check && entry.environment == red.environment);
+            match bisected_by(
+                git,
+                entry,
+                (&red, suspect),
+                (&keys.executor_name, &live),
+                now,
+            )? {
+                Some(owner) => rows.push(not_run(&red, &format!("runner {owner} bisects it"), &[])),
+                None => reds.entry(red.environment.clone()).or_default().push(red),
+            }
         }
     }
     let mut pieces = Vec::new();
@@ -861,6 +889,62 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
         });
     }
     Ok((rows, pieces))
+}
+
+/// G857 (a fleet finding, 2026-11-22: two runners that served one environment each ran the same
+/// bisect runs of a red post check, about 40 % of its bisect runs in an afternoon): the other live
+/// runner
+/// that bisects `red` (its `suspect` range), if one does, so `me` does not. It is the runner that
+/// runs the check on main's tip ([`owner_of`], G822), so one red is bisected on one box while that
+/// box reads live, and moves only when it leaves.
+///
+/// `None`, so `me` bisects, when the policy at main has no entry for the check, or no producer
+/// answered the check on a landing of the range or after it for twice its timeout: one timeout for
+/// the owner to come to it, one for its run. A runner that reads live and does not bisect (its
+/// worker busy with the queue, say) leaves the red to the others after that long.
+fn bisected_by(
+    git: &Git,
+    entry: Option<&crate::policy::CheckEntry>,
+    (red, suspect): (&Red, &Suspect),
+    (me, live): (&str, &[Value]),
+    now: u64,
+) -> Result<Option<String>, String> {
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let owner = owner_of(entry, me, live);
+    if owner == me {
+        return Ok(None);
+    }
+    let quiet = last_answered(git, red, suspect)?
+        .is_none_or(|at| now.saturating_sub(at) >= entry.timeout_s.saturating_mul(2));
+    Ok((!quiet).then(|| owner.to_owned()))
+}
+
+/// G857: when a producer last answered `red`'s check on a landing of its `suspect` range or
+/// after it, in Unix seconds: its bisect runs and its failures there.
+fn last_answered(git: &Git, red: &Red, suspect: &Suspect) -> Result<Option<u64>, String> {
+    let id = CheckId::new(&red.check, &red.environment);
+    let mut landings: Vec<&str> = suspect
+        .landings
+        .iter()
+        .chain(&suspect.failing)
+        .chain([&suspect.newest_failed])
+        .map(|mark| mark.landing.as_str())
+        .collect();
+    landings.sort_unstable();
+    landings.dedup();
+    let trees = landings
+        .iter()
+        .map(|landing| tree_of(git, landing))
+        .collect::<Result<Vec<String>, String>>()?;
+    let trees: Vec<&str> = trees.iter().map(String::as_str).collect();
+    Ok(evidence::records_for_many(git, &trees)?
+        .into_iter()
+        .flatten()
+        .filter(|record| record.kind == evidence::KIND_CHECK && record.check == id)
+        .filter_map(|record| crate::clock::unix_of(&record.at))
+        .max())
 }
 
 /// G627: whether the culprit of `suspect`, a range of one landing, stands on fewer than two
