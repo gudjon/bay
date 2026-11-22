@@ -6,7 +6,9 @@
 //! and the change records of those places, fetched in one batch ([`Repo::remote_chains`]) and
 //! read in one `cat-file --batch`. A change is placed by a runner, so `arriving` lists the
 //! changes submitted that no runner has placed yet: with no runner running, they are the whole
-//! line. No landed change and no evidence is read, so a store with thousands of places in its
+//! line. A change a runner took with no place, straight off an empty line, is `taken`: the
+//! holders' leases name it (G853). No landed change and no evidence is read, so a store with
+//! thousands of places in its
 //! history answers as fast as one with a few. It writes nothing but fetched copies of the
 //! remote's refs and the merge requests it found answered ([`crate::answered`]); a store read
 //! past its sweep's window starts the status sweep, which refreshes the store's copy for every
@@ -150,19 +152,8 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
         )?,
         (true, None) => Vec::new(),
     };
-    // G776 (a fleet finding, 2026-11-17: the line read "the longest has waited 171 minutes"
-    // while no place had waited 12): a change held until another merges (`--after`) waits for
-    // that change, not for the line, so its wait is not the line's.
-    let oldest = places
-        .iter()
-        .map(|place| now.saturating_sub(place.joined))
-        .chain(
-            arriving
-                .iter()
-                .filter(|row| row["held_by"].as_array().is_none_or(Vec::is_empty))
-                .filter_map(|row| row["waited_s"].as_u64()),
-        )
-        .max();
+    let taken = taken(repo, &in_line, now, &mut unread);
+    let oldest = oldest(&places, &arriving, &taken, now);
     Ok(json!({
         "schema": SCHEMA,
         "read_at": crate::clock::rfc3339_of(now),
@@ -170,6 +161,7 @@ fn read(repo: &Repo, from_store: bool) -> Result<Value, String> {
         "oldest_wait_s": oldest,
         "places": rows,
         "arriving": arriving,
+        "taken": taken,
         // G831 (a fleet finding, 2026-11-21: a panel could not tell a store read that lists the
         // arrivals from one of an older bay that lists none, and a store no sweep ever ran in
         // said "Nothing waits"): whether `arriving` was read at all.
@@ -464,6 +456,89 @@ fn records(repo: &Repo, ids: &[String]) -> Vec<ChangeRecord> {
         .collect()
 }
 
+/// G853 (a fleet finding, 2026-11-22: `bay queue` said "Nothing waits to be added to main." for
+/// 17 minutes while a runner checked a change it had taken off an empty line): the changes a
+/// runner checks under its lease with no place in the line, oldest request first, as this store's
+/// copy of the leases names them. A live read fetched them with the line; a store read has them as
+/// its last sweep left them. A lease counts only while the change's record here names its holder
+/// ([`crate::lease::Lease::holds`]), so a released or overtaken lease is never shown.
+fn taken(repo: &Repo, placed: &BTreeSet<&str>, now: u64, unread: &mut Vec<Value>) -> Vec<Value> {
+    let prefix = crate::lease::LEASE_PREFIX;
+    let listed = repo
+        .git
+        .run(&[
+            "for-each-ref",
+            "--format=%(objectname) %(committerdate:unix) %(refname)",
+            prefix,
+        ])
+        .unwrap_or_default();
+    let leases: Vec<(crate::lease::Lease, u64)> = listed
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, ' ');
+            let (commit, beat, name) = (fields.next()?, fields.next()?, fields.next()?);
+            let change = name.strip_prefix(prefix)?;
+            if placed.contains(change) {
+                return None;
+            }
+            let lease = crate::lease::read(&repo.git, commit).ok().flatten()?;
+            (lease.change == change).then_some((lease, beat.parse().ok()?))
+        })
+        .collect();
+    let ids: Vec<String> = leases
+        .iter()
+        .map(|(lease, _)| lease.change.clone())
+        .collect();
+    let records = records(repo, &ids);
+    let mut held: Vec<(&crate::lease::Lease, u64, &ChangeRecord, &Operation)> = Vec::new();
+    for (lease, beat) in &leases {
+        let Some(record) = records.iter().find(|record| record.id == lease.change) else {
+            unread.push(json!({
+                "change": lease.change,
+                "why": "a runner's lease names it, and its record is not here",
+            }));
+            continue;
+        };
+        let op = record.operations.iter().find(|op| op.op_id == lease.op_id);
+        if let Some(op) = op.filter(|op| lease.holds(op) && !crate::status::ended(record.state)) {
+            held.push((lease, *beat, record, op));
+        }
+    }
+    let times = commit_times(
+        repo,
+        &held
+            .iter()
+            .filter_map(|(_, _, _, op)| op.request_id.as_deref())
+            .collect::<Vec<_>>(),
+    );
+    let mut rows: Vec<(Option<u64>, Value)> = held
+        .into_iter()
+        .map(|(lease, beat, record, op)| {
+            let at = op
+                .request_id
+                .as_deref()
+                .and_then(|request| times.get(request).copied());
+            let row = json!({
+                "change": record.id,
+                "op_id": op.op_id,
+                "intent": record.intent.reference,
+                "actor": record.actor.name,
+                "paths": crate::inputs::paths(&record.declared_inputs),
+                "runner": lease.holder,
+                "state": op.state,
+                // G845: the operations its check covers, its own first; null while it plans.
+                "checks": lease.batch,
+                "beat_at": crate::clock::rfc3339_of(beat),
+                "requested_at": at.map(crate::clock::rfc3339_of),
+                "waited_s": at.map(|at| now.saturating_sub(at)),
+            });
+            (at, row)
+        })
+        .collect();
+    rows.sort_by_key(|(at, row)| (at.unwrap_or(u64::MAX), row["change"].to_string()));
+    rows.into_iter().map(|(_, row)| row).collect()
+}
+
 /// One place of the line: where it stands, the change and its operation as its record says.
 fn row(place: usize, at: &Place, record: Option<&ChangeRecord>, now: u64) -> Value {
     let entry = &at.entry;
@@ -490,6 +565,54 @@ fn row(place: usize, at: &Place, record: Option<&ChangeRecord>, now: u64) -> Val
     })
 }
 
+/// The longest wait of the line, in seconds: of its places, its arrivals and the changes runners
+/// took with no place. G776 (a fleet finding, 2026-11-17: the line read "the longest has waited
+/// 171 minutes" while no place had waited 12): a change held until another merges (`--after`)
+/// waits for that change, not for the line, so its wait is not the line's.
+fn oldest(places: &[Place], arriving: &[Value], taken: &[Value], now: u64) -> Option<u64> {
+    places
+        .iter()
+        .map(|place| now.saturating_sub(place.joined))
+        .chain(
+            arriving
+                .iter()
+                .filter(|row| row["held_by"].as_array().is_none_or(Vec::is_empty))
+                .filter_map(|row| row["waited_s"].as_u64()),
+        )
+        .chain(taken.iter().filter_map(|row| row["waited_s"].as_u64()))
+        .max()
+}
+
+/// The JSON Schema of a `taken` row of `bay.queue/1` (G853): a change a runner checks with no
+/// place in the line.
+fn taken_schema() -> Value {
+    let string = json!({"type": "string"});
+    let count = json!({"type": "integer", "minimum": 0});
+    let maybe = |kind: Value| json!({"anyOf": [kind, {"type": "null"}]});
+    let strings = json!({"type": "array", "items": string});
+    json!({
+        "type": "object",
+        "required": [
+            "change", "op_id", "intent", "actor", "paths", "runner", "state", "checks",
+            "beat_at", "requested_at", "waited_s",
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "change": string,
+            "op_id": string,
+            "intent": string,
+            "actor": string,
+            "paths": strings.clone(),
+            "runner": string,
+            "state": {"enum": ["running", "checked"]},
+            "checks": maybe(strings),
+            "beat_at": string,
+            "requested_at": maybe(string.clone()),
+            "waited_s": maybe(count),
+        },
+    })
+}
+
 /// The JSON Schema (draft 2020-12) of `bay.queue/1`, exported by `bay help --json`.
 #[must_use]
 pub fn schema() -> Value {
@@ -503,7 +626,7 @@ pub fn schema() -> Value {
         "description": "bay queue's detail: the live line, head first. Read-only; change the line with bay's verbs.",
         "type": "object",
         "required": [
-            "schema", "read_at", "depth", "oldest_wait_s", "places", "arriving",
+            "schema", "read_at", "depth", "oldest_wait_s", "places", "arriving", "taken",
             "arrivals_listed", "unread", "from_store", "age_s", "sweep",
         ],
         "additionalProperties": false,
@@ -579,6 +702,7 @@ pub fn schema() -> Value {
                     },
                 },
             },
+            "taken": {"type": "array", "items": taken_schema()},
             "unread": {
                 "type": "array",
                 "items": {
@@ -678,6 +802,8 @@ impl Line {
         let scratch = crate::scratch::own(crate::names::FETCH);
         let specs: Vec<String> = crate::queue::refspecs()
             .into_iter()
+            // G853: and the holders' leases, which name the changes a runner checks with no place.
+            .chain(std::iter::once(crate::lease::refspec()))
             .chain(
                 now.iter()
                     .map(|change| format!("+{}:{scratch}{change}", change_ref(change))),

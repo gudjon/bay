@@ -1442,6 +1442,7 @@ fn listing(
     let read = Read::Full {
         registry: crate::registry::Registry::current(&repo.git)?,
         ask_runtime: ids.len() == 1 && named,
+        copied: fetched_unix,
     };
     // A read of one change scans its own view only, never every view on the machine (a fleet
     // finding, 2026-10-26: 43 views cost a named status about 26 s).
@@ -2069,12 +2070,14 @@ fn cost(records: &[EvidenceRecord]) -> Value {
 
 /// How `describe` reads a change. The hook's path reads no evidence (its costs are `null`) and
 /// only the input cache; a full read counts evidence under the registry and runs providers,
-/// and asks the runtime adapter when `ask_runtime` (one named change).
+/// and asks the runtime adapter when `ask_runtime` (one named change). `copied`: when this
+/// store's copy of the remote was fetched, in Unix seconds, when the read knows it.
 enum Read {
     Cached,
     Full {
         registry: Option<crate::registry::Registry>,
         ask_runtime: bool,
+        copied: Option<u64>,
     },
 }
 
@@ -2133,12 +2136,16 @@ fn live_inputs(
 
 /// A one-off status cannot watch a lease; it reports a suspected expiry from the age of the
 /// holder's newest sign of life, its chain head or its last beat of its lease (G787), and never
-/// claims (§ 9a).
+/// claims (§ 9a). The age is judged at the time this store's copy was fetched, since the signs
+/// are that copy's (G854, a fleet finding, 2026-11-22: a read at 07:23:28 from a copy fetched at
+/// 07:20:02 said a lease looked expired that its holder had beaten at 07:23:15). A read that knows
+/// no time for its copy judges at the start of the store's last sweep, or else now.
 fn lease(
     repo: &Repo,
     record: &ChangeRecord,
     op: &crate::change::Operation,
     published: bool,
+    read: &Read,
 ) -> Value {
     if op.owner.is_none()
         || !matches!(
@@ -2160,12 +2167,7 @@ fn lease(
         .ok()
         .and_then(|time| time.trim().parse::<u64>().ok())
         .map(|time| time.max(crate::lease::beat_at(&repo.git, &record.id, op).unwrap_or(0)))
-        .map(|time| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |now| now.as_secs())
-                .saturating_sub(time)
-        });
+        .map(|time| copied(repo, read).saturating_sub(time));
     json!(
         if age.is_some_and(|age| age >= repo.config.lease().as_secs()) {
             "suspected expired"
@@ -2173,6 +2175,18 @@ fn lease(
             "held"
         }
     )
+}
+
+/// When the store's copy that `read` reads was fetched, in Unix seconds: the read's own time
+/// for it, or the start of the store's last sweep, or else now.
+fn copied(repo: &Repo, read: &Read) -> u64 {
+    match read {
+        Read::Full {
+            copied: Some(copied),
+            ..
+        } => *copied,
+        _ => sweep::last(&repo.common_dir).map_or_else(crate::live::unix_now, |(_, unix)| unix),
+    }
 }
 
 /// § 7: the completion dimensions, each from its own evidence, and the verdict of the profile
@@ -2226,6 +2240,7 @@ fn completion_dimensions(
     let Read::Full {
         registry,
         ask_runtime,
+        ..
     } = read
     else {
         return Ok(json!({
@@ -3034,7 +3049,7 @@ fn describe(
         let published = landed.is_some_and(|found| found.revision == op.revision);
         let record_state = receipt_state(record, unsynced, op, published);
         let reason = op.outcome.as_deref().and_then(Reason::from_code);
-        let lease = lease(repo, record, op, published);
+        let lease = lease(repo, record, op, published, read);
         let mut operation = json!({
             "lease": lease,
             "owner": op.owner,

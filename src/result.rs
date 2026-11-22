@@ -1821,7 +1821,9 @@ fn line_say(detail: &Value) -> String {
             .map_or(0, Vec::len)
     };
     let placed = count("places");
-    let total = placed + count("arriving");
+    // G853: a change a runner checks with no place in the line waits to be added to main too.
+    let taken = count("taken");
+    let total = placed + count("arriving") + taken;
     // G831: a store read that never read the arrivals says so, never "Nothing waits".
     let listed = detail.get("arrivals_listed").and_then(Value::as_bool) != Some(false);
     if total == 0 {
@@ -1836,8 +1838,8 @@ fn line_say(detail: &Value) -> String {
     } else {
         (format!("{total} changes wait"), "the longest has", "them")
     };
-    // A change no runner has placed waits for a runner, not for main.
-    let object = if placed == 0 {
+    // A change no runner has placed or taken waits for a runner, not for main.
+    let object = if placed == 0 && taken == 0 {
         format!("for a runner to take {them}")
     } else {
         "to be added to main".to_owned()
@@ -1845,6 +1847,12 @@ fn line_say(detail: &Value) -> String {
     let said = match detail.get("oldest_wait_s").and_then(Value::as_u64) {
         Some(secs) => format!("{subject} {object}; {longest} waited {}.", waited(secs)),
         None => format!("{subject} {object}."),
+    };
+    let said = match (taken, total) {
+        (0, _) => said,
+        (1, 1) => format!("{said} A runner checks it with no place in the line."),
+        (1, _) => format!("{said} A runner checks one of them with no place in the line."),
+        (taken, _) => format!("{said} Runners check {taken} of them with no place in the line."),
     };
     if listed {
         said
