@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.136
+
+- A change that could pass the head joins the head's batch when a check of that batch reads it.
+- The setup page says a change to any check's `adapter` file wakes every check.
+
 ## 0.6.135
 
 - A talk to an agent named show, round, answer or backbrief is refused: those are bay talk's options.
