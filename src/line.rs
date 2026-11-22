@@ -17,7 +17,7 @@
 //!
 //! `detail` is one `bay.queue/1` document ([`schema`], also in `bay help --json`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 use serde_json::{Value, json};
@@ -412,24 +412,12 @@ fn passed_over(record: &ChangeRecord, request: &str) -> bool {
     }
 }
 
-/// The committer time of each of `commits`, read in one `git show`.
-fn commit_times(repo: &Repo, commits: &[&str]) -> BTreeMap<String, u64> {
-    if commits.is_empty() {
-        return BTreeMap::new();
-    }
-    let mut args = vec!["show", "-s", "--format=%H %ct"];
-    args.extend(commits);
-    repo.git
-        .run(&args)
-        .map(|text| {
-            text.lines()
-                .filter_map(|line| {
-                    let (commit, at) = line.split_once(' ')?;
-                    Some((commit.to_owned(), at.trim().parse().ok()?))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// The committer time of each of `commits`, read in one `cat-file --batch`. G855: never by
+/// `git show`, which runs its diff on each commit; a request commit's tree differs from its
+/// parent's in every path the change touches, so one store read cost about 1 s and 400 MB.
+fn commit_times(repo: &Repo, commits: &[&str]) -> HashMap<String, u64> {
+    let commits: Vec<String> = commits.iter().map(|commit| (*commit).to_owned()).collect();
+    crate::flow::commit_times(&repo.git, &commits).unwrap_or_default()
 }
 
 /// The records of `ids`, read in one `cat-file --batch` of their chain heads; a record the

@@ -163,18 +163,16 @@ pub fn watched(git: &Git, change: &str, head: &str) -> String {
 }
 
 /// When `op`'s current holder last beat its lease of `change`, as this store holds it: the lease
-/// commit's time, in Unix seconds. `None` when this store holds no lease of that holder.
+/// commit's time, in Unix seconds, read from the commit object (G855: never by `git show`, which
+/// runs its diff). `None` when this store holds no lease of that holder.
 #[must_use]
 pub fn beat_at(git: &Git, change: &str, op: &Operation) -> Option<u64> {
     let tip = tip(git, change)?;
     if !read(git, &tip).ok().flatten()?.holds(op) {
         return None;
     }
-    git.run(&["show", "-s", "--format=%ct", &tip])
-        .ok()?
-        .trim()
-        .parse()
-        .ok()
+    let commit = git.objects(&[tip]).ok()?.pop()??;
+    crate::flow::committer_time(&String::from_utf8(commit).ok()?)
 }
 
 /// Brings `change`'s lease from the remote, pruned: the store then holds the remote's.
