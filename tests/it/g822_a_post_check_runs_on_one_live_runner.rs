@@ -32,8 +32,8 @@ pub(crate) fn weight(runner: &str) -> u64 {
 }
 
 /// Two runner clones of one remote that serve one environment, and the post check `suite` with
-/// `timeout_s`. Each runner writes its presence on the tests' 1 s cadence, so it reads live for
-/// 33 s.
+/// `timeout_s`. Each runner writes its presence with its 10 s cadence, so it reads live for a
+/// minute: three cadences and half a minute.
 /// Returns the clone that owns `suite`, the clone that does not, and the file each run of
 /// `suite` writes a line to.
 fn two_runners(test_box: &TestBox, timeout_s: u64) -> (PathBuf, PathBuf, PathBuf) {
