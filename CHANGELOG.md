@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.144
+
+- A change whose place a check with no clear answer released keeps its turn when it takes a place again.
+- The host refuses a place that names a rank no such release gives.
+
 ## 0.6.143
 
 - A runner checks alone, on main, a change behind the head that no planned batch check covers.
