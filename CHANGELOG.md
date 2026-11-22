@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.141
+
+- A failure already known from a reused or carried record ends the run before it starts: a batch's culprit is refused at once, and holds the head of the line for seconds, not for its other checks.
+
 ## 0.6.140
 
 - One live runner bisects a red post check, so two boxes never run the same bisect probes.
