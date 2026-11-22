@@ -8379,8 +8379,13 @@ fn run_policy(
     let changed = check::changed_paths(git, trunk, commit)?;
     // § 7: a required pair runs only on a box that declares its environment. A pair the box
     // does not serve, with no evidence yet, runs nothing here: it waits for a worker.
+    // G859: a failure that a record reused or carried in place of a run already answers (G713)
+    // ends the run before it starts, as a failure in the run ends it (owner ruling 2026-10-25).
+    // A fleet finding, 2026-11-22: a batch's culprit, refused on the bisection's carried record,
+    // held the head of the line 19 minutes while the checks after it ran.
+    let known = known_failures(policy, &reused, &changed, commit);
     let missing = check::unserved(policy, &changed, &finished, &check::Served::read(git));
-    if !missing.is_empty() {
+    if !missing.is_empty() && known.is_empty() {
         return Ok(("unknown", Some(unavailable(ctx, op_id, &missing, None))));
     }
     let mut keep = |record: &mut evidence::EvidenceRecord| -> Result<(), String> {
@@ -8454,10 +8459,22 @@ fn run_policy(
         mut records,
         unavailable: mut outage,
         mut stopped,
-    } = run(finished.clone())?;
+    } = if known.is_empty() {
+        run(finished.clone())?
+    } else {
+        check::Ran {
+            records: Vec::new(),
+            unavailable: None,
+            stopped: false,
+        }
+    };
     // G638: a failure a carried waiver answers ended the run before the checks after it; they
     // run now, as they would after a waiver of this exact candidate (`finished_checks`).
-    let failed: Vec<evidence::CheckId> = check::failed(&records).into_iter().cloned().collect();
+    let failed: Vec<evidence::CheckId> = check::failed(&records)
+        .into_iter()
+        .cloned()
+        .chain(known)
+        .collect();
     if outage.is_none() && change.is_some() && !failed.is_empty() {
         fetch_for_carry(ctx, policy, tree);
         let own = evidence::counted(
@@ -8477,6 +8494,10 @@ fn run_policy(
             .iter()
             .all(|id| waived.iter().any(|waiver| waiver.check == *id))
         {
+            // A check this box does not serve still waits for a worker (§ 7).
+            if !missing.is_empty() {
+                return Ok(("unknown", Some(unavailable(ctx, op_id, &missing, None))));
+            }
             let mut done = finished;
             done.extend(records.iter().map(|record| record.check.clone()));
             let again = run(done)?;
@@ -9802,6 +9823,31 @@ fn carry_over(
         }
     }
     Ok(carried)
+}
+
+/// G859: the checks the candidate runs whose records, reused or carried in place of a run,
+/// already answer `product_failure` (`evidence::combine`, as the judgement reads them): a
+/// failure known before the run starts. A check the candidate does not run (`Policy::runs`) is
+/// never one.
+fn known_failures(
+    policy: &policy::Policy,
+    reused: &[evidence::EvidenceRecord],
+    changed: &[String],
+    commit: &str,
+) -> Vec<evidence::CheckId> {
+    policy
+        .checks
+        .iter()
+        .filter(|entry| policy.runs(entry, changed))
+        .map(|entry| evidence::CheckId::new(&entry.id, &entry.environment))
+        .filter(|id| {
+            let subject = policy.commit_keyed(id).then_some(commit);
+            matches!(
+                evidence::combine(reused, id, &policy.manifest_digest, subject),
+                Combined::ProductFailure
+            )
+        })
+        .collect()
 }
 
 /// Whether evidence reuse applies to this judgement (G7): `[policy] evidence_reuse =
