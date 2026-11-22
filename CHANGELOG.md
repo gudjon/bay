@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.137
+
+- `bay queue` lists a change a runner checks with no place in the line under `taken`, and says so.
+- `bay status` judges a lease's age when its copy of the remote was fetched, not when it is read.
+
 ## 0.6.136
 
 - A change that could pass the head joins the head's batch when a check of that batch reads it.
