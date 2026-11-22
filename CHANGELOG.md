@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.143
+
+- A runner checks alone, on main, a change behind the head that no planned batch check covers.
+- A change that fails alone joins no batch: it runs alone at its turn, and its author is woken early.
+- A check ahead of its turn stops when the line's head has no runner, so a runner takes it.
+
 ## 0.6.142
 
 - A batch pushes its members' records and the log at once: three members take 8 pushes, not 11.
