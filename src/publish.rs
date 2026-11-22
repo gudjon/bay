@@ -875,6 +875,9 @@ struct Ctx<'a> {
     /// BACKLOG 92: the producer whose evidence notes go in the chain's next push, atomically, so
     /// the remote holds them by the time the chain names the candidate checked.
     evidence_rides: Option<String>,
+    /// G860: the executor whose log holds a terminal record that waits for the batch's one push
+    /// ([`push_owed`]).
+    owed_log: Option<String>,
     /// The head this process's first write not yet on the remote went on; `None` once every
     /// write it made is pushed or withdrawn. [`Ctx::take_back`] takes those writes off the
     /// local chain ref, and only those, at every re-read of the remote chain and when the
@@ -972,6 +975,7 @@ impl<'a> Ctx<'a> {
             membership: Membership::Alone,
             push_mode: PushMode::Now,
             evidence_rides: None,
+            owed_log: None,
             unpushed_from: None,
             my_epoch: 0,
             repair: None,
@@ -1250,9 +1254,12 @@ impl<'a> Ctx<'a> {
         let repo = self.repo;
         let executor = self.executor_name();
         let signer = self.executor_signer().ok().flatten();
+        // G860: a batch member's record waits for the batch's one push too ([`push_owed`]).
         if self.push_mode != PushMode::Now {
             self.push_chain();
-            return crate::log::append(repo, &executor, signer.as_ref(), record).map(|_| ());
+            crate::log::write_local(repo, &executor, signer.as_ref(), record)?;
+            self.owed_log = Some(executor);
+            return Ok(());
         }
         crate::log::append_riding(repo, &executor, signer.as_ref(), record, |log| {
             let name = change_ref(&self.id);
@@ -3701,7 +3708,13 @@ fn land_batch<'a>(
     answer.map_err(|error| format!("batch {id} was refused: {error}"))?;
     kill_point("after-publish");
     drop(anchors);
+    // G860: every member's landed record goes in one push ([`push_landed`]).
+    ctx.push_mode = PushMode::Defer;
+    for other in others.iter_mut() {
+        other.push_mode = PushMode::Defer;
+    }
     let mut merged = Vec::new();
+    let mut landings = Vec::new();
     for (index, member) in members.iter().enumerate().skip(1) {
         let other = &mut others[index - 1];
         other.pushed_landing = Some(built[index].commit.clone());
@@ -3710,11 +3723,8 @@ fn land_batch<'a>(
             derive_landed(other, &member.op_id, &member.revision, &built[index].commit)
         {
             merged.push((index, landed.decision));
-            if let Ok(mut landings) = MEMBERS_LANDED.lock() {
-                landings.push((member.change.clone(), member.op_id.clone(), landed));
-            }
+            landings.push((member.change.clone(), member.op_id.clone(), landed));
         }
-        other.tell_deferred();
     }
     ctx.pushed_landing = Some(built[0].commit.clone());
     let head = derive_landed(
@@ -3723,6 +3733,13 @@ fn land_batch<'a>(
         &members[0].revision,
         &built[0].commit,
     );
+    push_landed(ctx, others);
+    if let Ok(mut landed) = MEMBERS_LANDED.lock() {
+        landed.extend(landings);
+    }
+    for other in others.iter() {
+        other.tell_deferred();
+    }
     // G825: each other member's author is woken once, as the head's is in `execute` (G307),
     // after every record is written, so a slow adapter holds no record back.
     for (index, decision) in merged {
@@ -5779,6 +5796,20 @@ fn push_owed(owners: &mut [&mut Ctx]) -> Result<bool, String> {
             specs.push(format!("{notes}:{notes}"));
         }
     }
+    // G860: and this executor's log, with the terminal records the members wrote on it.
+    let mut logs: Vec<(String, String)> = Vec::new();
+    for &index in &owed {
+        let Some(executor) = &owners[index].owed_log else {
+            continue;
+        };
+        let log = crate::log::log_ref(executor);
+        if !logs.iter().any(|(name, _)| *name == log)
+            && let Some(tip) = repo.git.ref_target(&log).map_err(|error| error.message())?
+        {
+            specs.push(format!("{log}:{log}"));
+            logs.push((log, tip));
+        }
+    }
     let mut args: Vec<&str> = vec!["push", "-q", "--atomic"];
     args.extend(leases.iter().map(String::as_str));
     args.push(repo.remote());
@@ -5788,15 +5819,46 @@ fn push_owed(owners: &mut [&mut Ctx]) -> Result<bool, String> {
     if !pushed {
         return Ok(false);
     }
+    for (log, tip) in &logs {
+        crate::log::pushed(repo, log, tip);
+    }
     for &index in &owed {
         let owner = &mut *owners[index];
         owner.pushed_head = Some(owner.head.clone());
         owner.unpushed_from = None;
         owner.evidence_rides = None;
+        owner.owed_log = None;
         owner.push_mode = PushMode::Defer;
         owner.catch_up_local();
     }
     Ok(true)
+}
+
+/// G860 (a fleet measurement, 2026-11-22: a batch of three made one push of each member's landed
+/// record and terminal record after the publishing push, three round trips for one landing):
+/// every member's landed record, written while each context deferred its pushes, goes in one
+/// atomic push with the terminal records on this executor's log ([`push_owed`]). When the remote
+/// refuses it (another executor moved a member's chain), each chain is pushed alone, then the log,
+/// as each member's own push does when it goes alone ([`Ctx::push_chain_with_record`]).
+fn push_landed<'a>(ctx: &mut Ctx<'a>, others: &mut [Ctx<'a>]) {
+    let mut owners: Vec<&mut Ctx> = std::iter::once(&mut *ctx)
+        .chain(others.iter_mut())
+        .collect();
+    let pushed = matches!(push_owed(&mut owners), Ok(true));
+    let mut log_owed = None;
+    for owner in owners {
+        if !pushed && owner.push_mode == PushMode::Owed {
+            owner.push_mode = PushMode::Now;
+            owner.push_chain();
+        }
+        if let Some(executor) = owner.owed_log.take() {
+            log_owed = Some(executor);
+        }
+        owner.push_mode = PushMode::Now;
+    }
+    if let Some(executor) = log_owed {
+        crate::log::push(ctx.repo, &executor);
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

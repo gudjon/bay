@@ -6,6 +6,7 @@
 //! event is appended once, by id, and only then is the notify adapter told (ruling R6).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde_json::Value;
 
@@ -88,6 +89,7 @@ pub fn append_riding(
     let (commit, parent) = write(repo, &name, signer, record)?;
     let refspec = format!("{name}:{name}");
     if push(&refspec) {
+        pushed(repo, &name, &commit);
         return Ok(commit);
     }
     let back = match &parent {
@@ -108,8 +110,25 @@ pub fn append_riding(
         &format!("{name}:{name}"),
     ]);
     let (commit, _) = write(repo, &name, signer, record)?;
-    let _ = git.run(&["push", "-q", repo.remote(), &refspec]);
+    if git.run(&["push", "-q", repo.remote(), &refspec]).is_ok() {
+        pushed(repo, &name, &commit);
+    }
     Ok(commit)
+}
+
+/// G860: appends `record` to this executor's log on this box only: the caller's push carries it
+/// (`crate::publish`'s batch push), and a pass pushes a log the remote lacks ([`push`]).
+///
+/// # Errors
+///
+/// A git fault while writing locally.
+pub fn write_local(
+    repo: &Repo,
+    executor: &str,
+    signer: Option<&Signer>,
+    record: &Value,
+) -> Result<String, String> {
+    write(repo, &log_ref(executor), signer, record).map(|(commit, _)| commit)
 }
 
 /// Writes `record` on log `name`'s local tip: the commit, and the tip it went on.
@@ -237,13 +256,46 @@ pub fn held_events(git: &Git) -> Result<BTreeSet<String>, String> {
 
 /// Pushes this executor's log, best effort, so a record whose push failed reaches the remote
 /// without waiting for the next append.
+///
+/// G860 (a fleet measurement, 2026-11-22: every pass of a runner pushed its log, one round trip,
+/// when the remote already held each record on it): a log whose tip this process pushed is not
+/// pushed again. Only this executor writes its log, so the tip it pushed stays the remote's
+/// until it writes the next record, and that record's own push carries it.
 pub fn push(repo: &Repo, executor: &str) {
     let name = log_ref(executor);
-    if repo.git.ref_target(&name).ok().flatten().is_some() {
-        let _ = repo
-            .git
-            .run(&["push", "-q", repo.remote(), &format!("{name}:{name}")]);
+    let Some(tip) = repo.git.ref_target(&name).ok().flatten() else {
+        return;
+    };
+    if on_remote(repo, &name).as_deref() == Some(tip.as_str()) {
+        return;
     }
+    if repo
+        .git
+        .run(&["push", "-q", repo.remote(), &format!("{name}:{name}")])
+        .is_ok()
+    {
+        pushed(repo, &name, &tip);
+    }
+}
+
+/// G860: the tip of each log this process pushed, by repository and log ref.
+static PUSHED: std::sync::Mutex<BTreeMap<(PathBuf, String), String>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+/// G860: `tip` of log `name` reached the remote in a push of this process.
+pub fn pushed(repo: &Repo, name: &str, tip: &str) {
+    if let Ok(mut pushed) = PUSHED.lock() {
+        pushed.insert((repo.common_dir.clone(), name.to_owned()), tip.to_owned());
+    }
+}
+
+/// G860: the tip of log `name` this process last pushed, if it pushed one.
+fn on_remote(repo: &Repo, name: &str) -> Option<String> {
+    PUSHED
+        .lock()
+        .ok()?
+        .get(&(repo.common_dir.clone(), name.to_owned()))
+        .cloned()
 }
 
 /// The tip of every executor log this repository holds, by executor name.

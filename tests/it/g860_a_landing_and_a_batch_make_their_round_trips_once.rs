@@ -1,0 +1,108 @@
+//! G860 (a fleet measurement, 2026-11-22: one landing made 15 fetches and 7 pushes, and a batch
+//! of three 21 fetches and 11 pushes, about 1.5 s each on a hosted remote). Three of them asked
+//! the remote what it had just said:
+//!
+//! - a batch's members each pushed their landed record and terminal record after the publishing
+//!   push, one push a member: now one atomic push carries every member's record and the log;
+//! - each pass pushed this executor's log, when the remote already held its tip from the
+//!   landing's own push: now a log whose tip this process pushed is not pushed again;
+//! - the post work's stages each fetched main, the registry and the notes, milliseconds apart:
+//!   now a plan reads each once for all its stages.
+//!
+//! So one landing makes at most 14 fetches and 6 pushes, and a batch of three at most 20 fetches
+//! and 8 pushes. Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file
+//! (G171).
+//!
+//! Guards to mutate: in `src/publish.rs` `land_batch`, leave each member's push mode `Now` (two
+//! pushes more a batch of three); in `src/log.rs` `push`, drop the `on_remote` test (a push more
+//! a pass); in `src/bisect.rs` `Fresh::tip`, fetch main each time (a fetch more a pass).
+
+#![cfg(unix)]
+
+use std::path::Path;
+
+use crate::support;
+
+use support::PRODUCER;
+use support::queued::{Check, host, ran_for};
+use support::result_json;
+
+const CONFIG: &str = "[runner]\nlease_s = 450\nheartbeat_s = 10\nparallel_checks = 4\nahead = 16\npost = true\nbisect_post = true\nbatch = { min = 2, max = 24, max_failure_rate = 0.3 }\n";
+
+/// Two checks before the merge and one after it, as a fleet's policy has them.
+const POLICY: &str = "revision = 1\n\n[[check]]\nid = \"guards\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 120\nwhen_paths = [\"src/**\"]\n\n[[check]]\nid = \"records\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 120\nwhen_paths = [\"src/**\"]\n\n[[check]]\nid = \"slow\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 120\n";
+
+/// The calls of Git subcommand `sub` one pass made, read from its trace.
+fn calls(trace: &Path, sub: &str) -> Vec<String> {
+    std::fs::read_to_string(trace)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let call: serde_json::Value = serde_json::from_str(line).unwrap();
+            let args: Vec<&str> = call["args"]
+                .as_array()?
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect();
+            args.contains(&sub).then(|| args.join(" "))
+        })
+        .collect()
+}
+
+/// Asserts the pass traced in `trace` made at most `fetches` fetches, `pushes` pushes and one
+/// listing.
+fn within(trace: &Path, fetches: usize, pushes: usize) {
+    for (sub, most) in [("fetch", fetches), ("push", pushes), ("ls-remote", 1)] {
+        let made = calls(trace, sub);
+        assert!(
+            made.len() <= most,
+            "{} {sub}:\n{}",
+            made.len(),
+            made.join("\n")
+        );
+    }
+}
+
+#[test]
+fn a_landing_and_a_batch_of_three_make_their_round_trips_once() {
+    let held = host(&Check {
+        config: CONFIG,
+        policy: Some(POLICY),
+        seed: &[("src/a.rs", "fn a() {}\n")],
+        hold_first: false,
+        fails: "false",
+    });
+    let exec = held.executor("exec", PRODUCER);
+    // A first pass on its own, so the measured ones start from a runner that has run.
+    let first = held.queue("first", "src");
+    assert_eq!(ran_for(&held.pass(&exec), &first)["decision"], "merged");
+    let traced = |name: &str| {
+        let trace = held.test_box.path().join(name);
+        let (code, ran) = result_json(
+            held.test_box
+                .bay(&exec)
+                .env("BAY_TEST_GIT_TRACE", &trace)
+                .args(["runner", "run", "--once"]),
+        );
+        assert_eq!(code, 0, "{ran}");
+        (trace, ran)
+    };
+
+    // GIVEN one change waiting WHEN a pass lands it THEN 14 fetches and 6 pushes at most
+    let one = held.queue("one", "src");
+    let (trace, ran) = traced("one.jsonl");
+    assert_eq!(ran_for(&ran, &one)["decision"], "merged", "{ran}");
+    within(&trace, 14, 6);
+
+    // GIVEN three changes waiting WHEN a pass lands them in one batch THEN 20 fetches and 8
+    // pushes at most
+    let ids: Vec<String> = ["b1", "b2", "b3"]
+        .into_iter()
+        .map(|name| held.queue(name, "src"))
+        .collect();
+    let (trace, ran) = traced("three.jsonl");
+    for id in &ids {
+        assert_eq!(ran_for(&ran, id)["decision"], "merged", "{ran}");
+    }
+    within(&trace, 20, 8);
+}

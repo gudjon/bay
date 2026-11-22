@@ -162,7 +162,54 @@ impl Piece {
 type Planned = (Vec<Value>, Vec<Piece>);
 
 /// One stage of the post work, given the environments it may not plan a piece in.
-type Stage = fn(&Repo, &BTreeSet<String>) -> Result<Planned, String>;
+type Stage = fn(&Repo, &BTreeSet<String>, &mut Fresh) -> Result<Planned, String>;
+
+/// G860 (a fleet measurement, 2026-11-22: a runner's post pass fetched main twice, the registry
+/// and the evidence notes once a stage, milliseconds apart): what a plan read from the remote,
+/// read once for all its stages. Each stage reads main, the registry and the notes as the first
+/// stage that needed them fetched them.
+#[derive(Default)]
+struct Fresh {
+    tip: Option<String>,
+    registry: bool,
+    evidence: bool,
+    presences: bool,
+}
+
+impl Fresh {
+    /// Main's tip on the remote: fetched by the plan's first stage that reads it.
+    fn tip(&mut self, repo: &Repo) -> Result<String, String> {
+        if let Some(tip) = &self.tip {
+            return Ok(tip.clone());
+        }
+        let tip = repo.fetch_trunk().map_err(|error| error.message())?;
+        self.tip = Some(tip.clone());
+        Ok(tip)
+    }
+
+    /// The registry, fetched once for the plan.
+    fn registry(&mut self, repo: &Repo) {
+        if !std::mem::replace(&mut self.registry, true) {
+            repo.fetch_registry();
+        }
+    }
+
+    /// Every other writer's evidence notes, fetched once for the plan, and with `presences` the
+    /// runners' presences in the same fetch (G822).
+    fn evidence(&mut self, repo: &Repo, keys: &Keys, presences: bool) {
+        if self.evidence && (self.presences || !presences) {
+            return;
+        }
+        let more = if presences {
+            vec![crate::presence::refspec()]
+        } else {
+            Vec::new()
+        };
+        repo.fetch_evidence_with(keys, &more);
+        self.evidence = true;
+        self.presences |= presences;
+    }
+}
 
 /// #123: the post work this pass starts, after its queue's work, in the environments none of
 /// `busy` (the environments of the pieces still running) names. Its stages, in order: the
@@ -176,10 +223,11 @@ pub fn plan(repo: &Repo, busy: &BTreeSet<String>) -> Plan {
         rows: Vec::new(),
         pieces: Vec::new(),
     };
+    let mut fresh = Fresh::default();
     for (kind, stage) in stages {
         let mut taken = busy.clone();
         taken.extend(plan.pieces.iter().map(|piece| piece.environment.clone()));
-        match stage(repo, &taken) {
+        match stage(repo, &taken, &mut fresh) {
             Ok((rows, pieces)) => {
                 if !rows.is_empty() {
                     plan.rows.push((kind, Value::Array(rows)));
@@ -242,12 +290,12 @@ pub(crate) fn serves_post_work(git: &Git, commit: &str) -> bool {
 /// runs again on each new tip (G492), and its request names `rerun`: the units that failed in its
 /// newest failing record (G540). One piece for each environment none of `taken` names: its first
 /// check in the order [`in_turn`] gives.
-fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
+fn tips(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<Planned, String> {
     if !repo.config.post_tips() {
         return Ok((Vec::new(), Vec::new()));
     }
     let git = &repo.git;
-    let tip = repo.fetch_trunk().map_err(|error| error.message())?;
+    let tip = fresh.tip(repo)?;
     let Ok(base) = rev(git, &format!("{tip}^1")) else {
         return Ok((Vec::new(), Vec::new()));
     };
@@ -264,8 +312,8 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
         return Ok((Vec::new(), Vec::new()));
     }
     let keys = Keys::load(git);
-    repo.fetch_registry();
-    repo.fetch_evidence_with(&keys, &[crate::presence::refspec()]);
+    fresh.registry(repo);
+    fresh.evidence(repo, &keys, true);
     let registry = Registry::current(git)?;
     let tree = tree_of(git, &tip)?;
     let writer = Writer::of(git, &keys, registry.as_ref())?;
@@ -741,12 +789,12 @@ fn span_start(git: &Git, tip: &str) -> Result<String, String> {
 /// later candidate on that tip carries the record for every check whose observed reads its
 /// change does not touch, so a change runs only the checks it reaches. One piece for each
 /// environment none of `taken` names, with every such check of it.
-fn warm(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
+fn warm(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<Planned, String> {
     if !repo.config.warm() {
         return Ok((Vec::new(), Vec::new()));
     }
     let git = &repo.git;
-    let tip = repo.fetch_trunk().map_err(|error| error.message())?;
+    let tip = fresh.tip(repo)?;
     let Some(policy) = crate::policy::load_at(git, &tip).map_err(String::from)? else {
         return Ok((Vec::new(), Vec::new()));
     };
@@ -761,8 +809,8 @@ fn warm(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
         return Ok((Vec::new(), Vec::new()));
     }
     let keys = Keys::load(git);
-    repo.fetch_registry();
-    repo.fetch_evidence(&keys);
+    fresh.registry(repo);
+    fresh.evidence(repo, &keys, false);
     let registry = Registry::current(git)?;
     let tree = tree_of(git, &tip)?;
     let writer = Writer::of(git, &keys, registry.as_ref())?;
@@ -806,12 +854,12 @@ fn probes(landings: usize) -> usize {
 /// each red post check over more than one landing. One piece for each environment this box
 /// serves that none of `taken` names, with every such red check of it; a check that cannot be
 /// bisected here is its row.
-fn culprits(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
+fn culprits(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<Planned, String> {
     if !repo.config.bisect_post() {
         return Ok((Vec::new(), Vec::new()));
     }
     let git = &repo.git;
-    let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
+    let trunk = fresh.tip(repo)?;
     let served = check::Served::read(git);
     // BACKLOG 113: a box that can run none of the policy's post checks finds no culprit, so it
     // judges nothing for them.
@@ -827,8 +875,8 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
         return Ok((Vec::new(), Vec::new()));
     }
     let keys = Keys::load(git);
-    repo.fetch_registry();
-    repo.fetch_evidence(&keys);
+    fresh.registry(repo);
+    fresh.evidence(repo, &keys, false);
     let registry = Registry::current(git)?;
     let judgement = crate::red::judged(git, &trunk, registry.as_ref())?;
     let live = crate::presence::live(git);
