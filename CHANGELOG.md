@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.142
+
+- A batch pushes its members' records and the log at once: three members take 8 pushes, not 11.
+- The post work reads main, the registry and the evidence notes once for all its stages.
+
 ## 0.6.141
 
 - A batch's culprit is refused at once on its carried failure, and runs none of its other checks.
