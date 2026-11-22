@@ -6,9 +6,6 @@
 //! first the create fails and it tries the next one. The head is the lowest reservation with no
 //! release. The head publishes with one atomic push of trunk, its release and the landed
 //! marker; every other outcome of the head creates its release at once.
-//!
-//! G858: a head released because its check gave no clear answer takes its place back when it is
-//! re-armed ([`reopen`]), so a check that answered nothing once never sends it to the back.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -427,27 +424,6 @@ impl Queue {
             .count()
     }
 
-    /// G858: the place `op_id` last held, when it holds no live place and that place was released
-    /// because its check gave no clear answer (`CHECK_UNKNOWN`): the place it takes back once it
-    /// is re-armed ([`reopen`]).
-    #[must_use]
-    pub fn kept_place(&self, op_id: &str) -> Option<&Entry> {
-        if self.of(op_id).is_some() {
-            return None;
-        }
-        let last = self
-            .entries
-            .values()
-            .filter(|entry| entry.op_id == op_id)
-            .max_by_key(|entry| entry.seq)?;
-        self.release_reasons
-            .get(&last.seq)
-            .is_some_and(|reason| {
-                reason.eq_ignore_ascii_case(crate::result::Reason::CheckUnknown.code())
-            })
-            .then_some(last)
-    }
-
     /// Whether a place of `op_id` was released with `reason`.
     #[must_use]
     pub fn released_as(&self, op_id: &str, reason: &str) -> bool {
@@ -715,56 +691,6 @@ pub fn replace(
         .map_err(|error| error.message())
 }
 
-/// G858 (a fleet finding, 2026-11-22: a head whose check gave no clear answer was re-armed a
-/// minute later and joined at the back, behind 26 places, and waited 54 minutes): gives
-/// `entry`, a place [`Queue::kept_place`] names, back to its operation. One atomic push writes
-/// its reservation again and removes its release, each leased on the commit `queue` read, so
-/// a place someone moved meanwhile stays as it is. Says whether it did; when it did not, the
-/// operation joins at the back as before.
-///
-/// # Errors
-///
-/// A git fault.
-pub fn reopen(
-    repo: &Repo,
-    signer: Option<&Signer>,
-    queue: &Queue,
-    entry: &Entry,
-) -> Result<bool, String> {
-    let Some((release, _)) = queue.release_commits.get(&entry.seq) else {
-        return Ok(false);
-    };
-    let reservation = commit(
-        &repo.git,
-        signer,
-        "entry.json",
-        &json!({"op_id": entry.op_id, "change": entry.change}),
-        &format!("reopen {} for {}", entry.seq, entry.op_id),
-    )?;
-    let name = format!("{QUEUE_PREFIX}{}", entry.seq);
-    let done = format!("{DONE_PREFIX}{}", entry.seq);
-    let pushed = repo
-        .git
-        .run(&[
-            "push",
-            "-q",
-            "--atomic",
-            &format!("--force-with-lease={name}:{}", entry.commit),
-            &format!("--force-with-lease={done}:{release}"),
-            repo.remote(),
-            &format!("{reservation}:{name}"),
-            &format!(":{done}"),
-        ])
-        .is_ok();
-    if pushed {
-        let local = format!("update {name} {reservation}\ndelete {done} {release}\n");
-        let _ = repo
-            .git
-            .run_with(&["update-ref", "--stdin"], &[], Some(local.as_bytes()));
-    }
-    Ok(pushed)
-}
-
 /// The release commit for `seq`, to create in an atomic push (with a publication) or alone.
 ///
 /// # Errors
@@ -860,30 +786,5 @@ mod tests {
         assert_eq!(held.prunable(|_| true, 9).len(), 0);
         // With no head, every pair but the highest.
         assert_eq!(queue(3, 3).prunable(|_| true, 10), vec![1, 2]);
-    }
-
-    /// G858: an operation takes back only its last place, only while it holds none, and only
-    /// when that place was released because its check gave no clear answer.
-    #[test]
-    fn a_place_is_kept_only_when_its_check_gave_no_answer() {
-        let mut line = queue(3, 2);
-        line.release_reasons.insert(1, "check_unknown".to_owned());
-        line.release_reasons.insert(2, "published".to_owned());
-        assert_eq!(line.kept_place("c1.1").map(|entry| entry.seq), Some(1));
-        assert!(line.kept_place("c2.1").is_none(), "a published place");
-        assert!(line.kept_place("c3.1").is_none(), "a live place");
-        // A later place of the same operation, released otherwise, is the one judged.
-        line.entries.insert(
-            4,
-            Entry {
-                seq: 4,
-                commit: "r4".to_owned(),
-                op_id: "c1.1".to_owned(),
-                change: "c1".to_owned(),
-            },
-        );
-        line.released.insert(4);
-        line.release_reasons.insert(4, "deadline".to_owned());
-        assert!(line.kept_place("c1.1").is_none(), "its last place");
     }
 }
