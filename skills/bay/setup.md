@@ -7,7 +7,8 @@ bay exists to make merging faster than doing it by hand: you submit once, and th
 - **One line, checked in batches.** Runners take the change at the head of the line, together with the changes behind
   it that merge cleanly with it, and check them as one batch. A batch's size follows how often recent checks failed.
 - **Checked ahead.** While one batch is checked, other runners check the next batches on the main the batch ahead
-  will make. When a batch's turn comes and main is as predicted, it merges at once on that check.
+  will make. When a batch's turn comes and main is as predicted, it merges at once on that check. A change no
+  planned batch check covers is checked alone on main; one that fails there joins no batch, and its author hears at once.
 - **Placed at once.** A runner places a new change in line within seconds, even while it checks another.
 - **Unrelated changes pass.** A change whose files lie outside what the checks of every change ahead of it read
   is checked and merges while those checks still run; the changes it passed keep their results.

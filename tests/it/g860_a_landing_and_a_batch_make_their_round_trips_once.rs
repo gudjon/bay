@@ -13,6 +13,10 @@
 //! and 8 pushes. Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file
 //! (G171).
 //!
+//! The heartbeat is longer than a pass, so no beat falls inside one: a beat's presence push comes
+//! once a heartbeat, not once a landing (at `heartbeat_s = 1`, one landing made 10 pushes, 5 of
+//! them beats), and a pass slowed by a loaded box made more of them.
+//!
 //! Guards to mutate: in `src/publish.rs` `land_batch`, leave each member's push mode `Now` (two
 //! pushes more a batch of three); in `src/log.rs` `push`, drop the `on_remote` test (a push more
 //! a pass); in `src/bisect.rs` `Fresh::tip`, fetch main each time (a fetch more a pass).
@@ -27,7 +31,7 @@ use support::PRODUCER;
 use support::queued::{Check, host, ran_for};
 use support::result_json;
 
-const CONFIG: &str = "[runner]\nlease_s = 450\nheartbeat_s = 10\nparallel_checks = 4\nahead = 16\npost = true\nbisect_post = true\nbatch = { min = 2, max = 24, max_failure_rate = 0.3 }\n";
+const CONFIG: &str = "[runner]\nlease_s = 450\nheartbeat_s = 120\nparallel_checks = 4\nahead = 16\npost = true\nbisect_post = true\nbatch = { min = 2, max = 24, max_failure_rate = 0.3 }\n";
 
 /// Two checks before the merge and one after it, as a fleet's policy has them.
 const POLICY: &str = "revision = 1\n\n[[check]]\nid = \"guards\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 120\nwhen_paths = [\"src/**\"]\n\n[[check]]\nid = \"records\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 120\nwhen_paths = [\"src/**\"]\n\n[[check]]\nid = \"slow\"\nenvironment = \"local\"\nstage = \"post\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 120\n";

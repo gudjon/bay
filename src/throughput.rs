@@ -177,6 +177,8 @@ pub struct Queued {
     /// whose pre-check had failed went into a batch, turned it red and cost a bisection, and
     /// every pre-check behind it ran on a base that counted it as landed).
     pub fails_on: Vec<String>,
+    /// G861: what its newest screen found ([`screened`]).
+    pub screen: Option<bool>,
 }
 
 impl Queued {
@@ -218,6 +220,7 @@ impl Queued {
                 .filter(|precheck| precheck.verdict == PRODUCT_FAILURE)
                 .map(|precheck| precheck.base_tree.clone())
                 .collect(),
+            screen: screened(&op.prechecks),
         })
     }
 }
@@ -246,7 +249,24 @@ pub fn read_line<'a>(
 }
 
 /// A pre-check verdict that names a failure of the change itself, never of a check's machinery.
-const PRODUCT_FAILURE: &str = "product_failure";
+pub const PRODUCT_FAILURE: &str = "product_failure";
+
+/// G861: the verdict of a screen a runner runs now. Another runner reads it and leaves the
+/// operation to that one.
+pub const SCREENING: &str = "screening";
+
+/// G861: what the newest screen of `prechecks` found: `Some(true)` the operation passed alone on
+/// a trunk tip, `Some(false)` it failed there on its own (a product failure), `None` when it
+/// has no screen, or one that runs now or judged nothing.
+#[must_use]
+pub fn screened(prechecks: &[crate::change::Precheck]) -> Option<bool> {
+    let newest = prechecks.iter().rev().find(|precheck| precheck.screen)?;
+    match newest.verdict.as_str() {
+        "pass" => Some(true),
+        PRODUCT_FAILURE => Some(false),
+        _ => None,
+    }
+}
 
 /// What one queue entry does to a predicted base.
 pub enum Fold {
@@ -1130,6 +1150,17 @@ pub fn plan_batch(
         if !members.is_empty() && !queued.batchable {
             continue;
         }
+        // G861: an entry that failed on its own (its screen, alone on a trunk tip) is passed
+        // over, never batched: in a batch it turns the batch red and costs a bisection. As the
+        // head it forms no batch, and runs alone.
+        if queued.screen == Some(false) {
+            if members.is_empty() {
+                stopped = "screen";
+                stopped_at = Some(queued.change.clone());
+                break;
+            }
+            continue;
+        }
         let base = members
             .last()
             .map_or_else(|| trunk.to_owned(), |member| member.commit.clone());
@@ -1470,7 +1501,31 @@ mod tests {
             batchable: true,
             checked: None,
             fails_on,
+            screen: None,
         }
+    }
+
+    /// G861: a member whose screen failed is passed over, and a head whose screen failed forms
+    /// no batch; a screen that passed changes nothing.
+    #[test]
+    fn a_failed_screen_keeps_its_entry_out_of_a_batch() {
+        let (_dir, git, trunk, revisions) = three_on_a_base();
+        let policy = crate::policy::load_at(&git, &trunk).unwrap().unwrap();
+        let head = queued(1, &revisions[0], Vec::new());
+        let mut failed = queued(2, &revisions[1], Vec::new());
+        failed.screen = Some(false);
+        let mut passed = queued(3, &revisions[2], Vec::new());
+        passed.screen = Some(true);
+        let behind = [failed.clone(), passed];
+        let (members, ..) = plan_batch(&git, &policy, &trunk, &head, &behind, 8, false).unwrap();
+        let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
+        assert_eq!(seqs, [1, 3]);
+        let rest = [queued(3, &revisions[2], Vec::new())];
+        let (members, stopped, at) =
+            plan_batch(&git, &policy, &trunk, &failed, &rest, 8, false).unwrap();
+        assert!(members.is_empty());
+        assert_eq!(stopped, "screen");
+        assert_eq!(at.as_deref(), Some("change2"));
     }
 
     /// Measured on 0.5.20 (2026-10-27): batches ended at a member that may not join one. It is

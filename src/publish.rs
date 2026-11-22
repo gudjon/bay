@@ -923,6 +923,9 @@ struct Ctx<'a> {
     /// G796: the trees of this visit's candidates whose checks a move of main stopped: a check
     /// that finished there carries onto a later candidate ([`carry_over`]).
     stopped_trees: Vec<String>,
+    /// G861: this visit's last check ahead of its turn gave way to a head nobody runs
+    /// ([`HeadWatch`]): it is no verdict, and nothing of it is recorded.
+    yielded: std::cell::Cell<bool>,
 }
 
 /// G796: main moved past the base of a candidate while its checks ran.
@@ -990,6 +993,7 @@ impl<'a> Ctx<'a> {
             visit: Visit::Own,
             stopped: std::cell::RefCell::new(None),
             stopped_trees: Vec::new(),
+            yielded: std::cell::Cell::new(false),
         })
     }
 
@@ -3274,6 +3278,7 @@ fn batch_plan(
         batchable: true,
         checked: None,
         fails_on: Vec::new(),
+        screen: throughput::screened(&ctx.op(op_id).prechecks),
     };
     let waiting = queue.behind(at);
     let (mut behind, unread) = read_line_fetched(repo, &waiting);
@@ -4414,6 +4419,73 @@ fn after_trunk_moved(
     Ok(None)
 }
 
+/// G861: how often a check ahead of its turn asks the remote who holds the line's head.
+const HEAD_PROBE: Duration = Duration::from_secs(30);
+
+/// [`HEAD_PROBE`]; a test build honours `BAY_TEST_HEAD_PROBE_S`, a release build never does.
+fn head_probe() -> Duration {
+    if crate::version::TEST_HOOKS
+        && let Some(secs) = std::env::var("BAY_TEST_HEAD_PROBE_S")
+            .ok()
+            .and_then(|secs| secs.parse().ok())
+    {
+        return Duration::from_secs(secs);
+    }
+    HEAD_PROBE
+}
+
+/// G861 (BACKLOG 248, fix A; a fleet finding, 2026-10-26: a head nobody held waited twenty
+/// minutes while all three runners checked changes behind it): what a check ahead of its turn
+/// watches of the line, from its beat. Each [`HEAD_PROBE`] it makes one `ls-remote` of the line
+/// and the leases ([`crate::queue::remote_head_leased`]). When two probes in a row find a head
+/// other than the one the check began behind, with no lease on it, nobody runs that head: every
+/// check stops, and the runner takes the head between two operations (`crate::executor`). The
+/// check never gives way to the head it began behind: the pass took that one then, or left it to
+/// wait for what it waits for. Nor does it give way to its own change as the head: the check
+/// is that head's own, and its record lands it.
+struct HeadWatch {
+    own: String,
+    began: Option<u64>,
+    free: Option<u64>,
+    probed: Option<Instant>,
+}
+
+impl HeadWatch {
+    fn new(git: &Git, own: &str) -> Self {
+        Self {
+            own: own.to_owned(),
+            began: crate::queue::Queue::local(git)
+                .ok()
+                .and_then(|queue| queue.head().map(|head| head.seq)),
+            free: None,
+            probed: None,
+        }
+    }
+
+    /// The change of the head the check gives way to, once it stopped every check; `None` while
+    /// the check goes on.
+    fn gives_way(&mut self, repo: &Repo, halt: &check::Halt) -> Option<String> {
+        if halt.moved() || self.probed.is_some_and(|at| at.elapsed() < head_probe()) {
+            return None;
+        }
+        self.probed = Some(Instant::now());
+        let Some((seq, change, leased)) = crate::queue::remote_head_leased(repo) else {
+            self.free = None;
+            return None;
+        };
+        if leased || self.began == Some(seq) || change == self.own {
+            self.free = None;
+            return None;
+        }
+        if self.free != Some(seq) {
+            self.free = Some(seq);
+            return None;
+        }
+        halt.stop_all_but(Vec::new());
+        Some(change)
+    }
+}
+
 /// G796 (a fleet measurement, 2026-11-19: in one day 124 heads ran 5.5 h of checks on
 /// candidates main had already moved past, learning it only when the merging push was refused;
 /// one 4-minute check went on 224 s after a change that passed its head landed 28 s into it):
@@ -5136,9 +5208,14 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
     if !repo.config.evidence_reuse() || !inputs::names(&ctx.record.declared_inputs).is_empty() {
         return Ok(None);
     }
-    // With batching on, runners check whole batches ahead of their turn, never one entry.
+    // With batching on, runners check whole batches ahead of their turn, and screen alone an
+    // entry no planned check covers (G861).
     if repo.config.batch().is_some() {
-        return speculate_batch(ctx, op_id, trunk);
+        return match speculate_batch(ctx, op_id, trunk)? {
+            Ahead::Checked(checked) => Ok(Some(checked)),
+            Ahead::Leave => Ok(None),
+            Ahead::Open => screen(ctx, op_id, trunk),
+        };
     }
     let queue = crate::queue::Queue::local(git)?;
     let Some(place) = queue.of(op_id).map(|entry| entry.seq) else {
@@ -5205,39 +5282,47 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
         &[],
     );
     ctx.ahead_of_turn = false;
-    let (verdict, refusal) = ran?;
-    // No worker answered: nothing was observed, so nothing is recorded.
-    if refusal
-        .as_ref()
-        .is_some_and(|refusal| refusal.reason == Some(Reason::CheckUnavailable))
-    {
+    let Some(verdict) = observed(&ran?, ctx.yielded.take()) else {
         return Ok(None);
-    }
+    };
     push_evidence(repo, &ctx.producer()?.0)?;
-    let op = ctx.op_mut(op_id);
-    op.prechecks.push(Precheck {
+    let recorded = Precheck {
         base: base.clone(),
-        base_tree: base_tree.clone(),
-        tree: tree.clone(),
+        base_tree,
+        tree,
         verdict: verdict.to_owned(),
         at_ms: now_ms(),
-    });
-    let excess = op
-        .prechecks
-        .len()
-        .saturating_sub(throughput::PRECHECKS_KEPT);
-    if excess > 0 {
-        op.prechecks = op.prechecks.split_off(excess);
-    }
+        screen: false,
+    };
+    let shown = shown_precheck(kind, &recorded);
+    keep_precheck(ctx, op_id, recorded);
     ctx.save(&revision, None, &format!("prechecked {op_id} on {base}"))?;
     ctx.push_chain();
-    Ok(Some(json!({
-        "on": kind,
-        "base": base,
-        "base_tree": base_tree,
-        "tree": tree,
-        "verdict": verdict,
-    })))
+    Ok(Some(shown))
+}
+
+/// G861: the verdict a check ahead of its turn observed, `ran`: none when it gave way to a free
+/// head (`yielded`) or no worker answered it, so nothing is recorded.
+fn observed(
+    (verdict, refusal): &(&'static str, Option<BayResult>),
+    yielded: bool,
+) -> Option<&'static str> {
+    let unanswered = refusal
+        .as_ref()
+        .is_some_and(|refusal| refusal.reason == Some(Reason::CheckUnavailable));
+    (!yielded && !unanswered).then_some(*verdict)
+}
+
+/// The `detail.precheck` a pass shows of `precheck`, a check ahead of its turn `on` a
+/// predicted base, the tip, or alone (a screen).
+fn shown_precheck(on: &str, precheck: &Precheck) -> serde_json::Value {
+    json!({
+        "on": on,
+        "base": precheck.base,
+        "base_tree": precheck.base_tree,
+        "tree": precheck.tree,
+        "verdict": precheck.verdict,
+    })
 }
 
 /// Speculative batches (owner, 2026-10-27: "go for speculative batch pipelining"; a fleet
@@ -5251,29 +5336,28 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
 /// producer, as the head will check it (`bisect_batch`: a tip naming no change). When its turn
 /// comes and trunk is what was predicted, the head's plan is the same members on the same base,
 /// so its tree is the same, and exact reuse lands it with no new run. A miss is a record about
-/// another tree, never trusted. `None` when `op_id` leads no batch past the first, is a member
-/// that is not a batch's first, the batch is smaller than `[runner] batch` lets form, batching
-/// is off by the failure rate, the plan passes `[runner] ahead` entries, a policy change ends
-/// the prediction, or this tree on this base was checked already.
-fn speculate_batch(
-    ctx: &mut Ctx,
-    op_id: &str,
-    trunk: &str,
-) -> Result<Option<serde_json::Value>, String> {
+/// another tree, never trusted. A tree already checked on its base is not run again.
+///
+/// [`Ahead::Leave`] when a planned check covers `op_id` (the head's own batch, or a later one
+/// whose check did not fail), batching is off at this trunk, by a rule or by the failure rate, a
+/// policy change ends the prediction, or main moved. [`Ahead::Open`] when no planned check
+/// covers it (G861): the plan ends at `[runner] ahead` entries before it, it leads a batch
+/// smaller than `[runner] batch` lets form, or the check of its batch failed.
+fn speculate_batch(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Ahead, String> {
     let repo = ctx.repo;
     let git = &repo.git;
     let Some(bounds) = repo.config.batch() else {
-        return Ok(None);
+        return Ok(Ahead::Leave);
     };
     let Ok(Some(at_trunk)) = policy::load_at(git, trunk) else {
-        return Ok(None);
+        return Ok(Ahead::Leave);
     };
     if no_batch(ctx, &at_trunk, trunk).is_some() {
-        return Ok(None);
+        return Ok(Ahead::Leave);
     }
     let queue = crate::queue::Queue::local(git)?;
     if lane_failure_rate(git, &queue, &at_trunk, None) > bounds.max_failure_rate {
-        return Ok(None);
+        return Ok(Ahead::Leave);
     }
     // G581: a place whose operation does not read here is passed over, never the end of the
     // line checked ahead; the batch decision names it.
@@ -5326,21 +5410,35 @@ fn speculate_batch(
             // Its head does not fold onto the predicted tip: a policy change ends the
             // prediction; a conflict or no effect is predicted not to land.
             if stopped == "policy" {
-                return Ok(None);
+                return Ok(Ahead::Leave);
             }
             at += 1;
             continue;
         };
         if members.iter().any(|member| member.op_id == op_id) {
-            if first || members[0].op_id != op_id || members.len() < bounds.min.max(2) {
-                return Ok(None);
+            // The head's own batch: its holder checks it.
+            if first {
+                return Ok(Ahead::Leave);
+            }
+            // G861: a later batch whose check ahead of its turn failed covers none of its
+            // members. Each is screened alone, and the batch planned again passes over the one
+            // that fails on its own.
+            let leader = &members[0];
+            let base_tree = tree_of(git, &base)?;
+            let failed = batch_failed(ctx, (&leader.change, &leader.op_id), &base_tree, &last.tree);
+            if leader.op_id != op_id {
+                return Ok(if failed { Ahead::Open } else { Ahead::Leave });
+            }
+            if failed || members.len() < bounds.min.max(2) {
+                return Ok(Ahead::Open);
             }
             let (commit, tree) = (last.commit.clone(), last.tree.clone());
             // G779: a check is spent only on main as it stands now; a moved main is read next pass.
             if !repo.trunk_still(trunk).map_err(|error| error.message())? {
-                return Ok(None);
+                return Ok(Ahead::Leave);
             }
-            return checked_ahead(ctx, op_id, &base, &commit, &tree, members.len()).map(Some);
+            return checked_ahead(ctx, op_id, &base, &commit, &tree, members.len())
+                .map(Ahead::Checked);
         }
         let last_seq = last.seq;
         base.clone_from(&last.commit);
@@ -5351,7 +5449,196 @@ fn speculate_batch(
             .position(|queued| queued.seq == last_seq)
             .map_or(line.len(), |position| position + 1);
     }
-    Ok(None)
+    Ok(Ahead::Open)
+}
+
+/// G861: what [`speculate_batch`] finds for an operation that waits behind the head.
+enum Ahead {
+    /// It leads a batch past the head's, and that batch's check ahead of its turn ran, now or
+    /// before.
+    Checked(serde_json::Value),
+    /// A planned check covers it, or no check is worth making now.
+    Leave,
+    /// No planned check covers it: it is screened ([`screen`]).
+    Open,
+}
+
+/// G861: how long past `[runner] execution_budget_s` a screen's `screening` mark stands for the
+/// runner that wrote it. Past that, the runner is taken to have stopped, and another one screens
+/// the operation.
+const SCREEN_MARK_SLACK_MS: u64 = 10 * 60 * 1000;
+
+/// G861 (BACKLOG 248, fix A; a fleet measurement, 2026-11-20: 28 red batches were bisected one
+/// check after another, and the line's head was held 10.3 hours in all): an operation behind the
+/// head that no planned check covers is checked alone, merged onto the trunk tip, ahead of its
+/// turn. This is its screen. A change that fails on its own is then known before a batch holds
+/// it: [`throughput::plan_batch`] passes it over, and as the head it runs alone. Its author is
+/// woken while it waits ([`screen_failed_wake`]).
+///
+/// One runner screens an operation. The chain carries the runner's mark (`screening`) before the
+/// check starts, pushed by compare-and-swap. A runner that reads the mark leaves the operation
+/// alone, and a runner whose push of the mark loses leaves it too. A screen that gave way to a
+/// free head, or that no worker answered, takes its mark back and records nothing.
+///
+/// `None` when the operation is the head, the policy at the tip checks nothing or its records
+/// stand for no run there, its merge onto the tip conflicts or has no effect, it needs no screen
+/// now ([`screen_due`]), main moved, or another runner's write to the chain won.
+fn screen(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json::Value>, String> {
+    let repo = ctx.repo;
+    let git = &repo.git;
+    let queue = crate::queue::Queue::local(git)?;
+    if queue.head().is_none_or(|head| head.op_id == op_id) || !ctx.reuse_trusted(trunk) {
+        return Ok(None);
+    }
+    let Ok(Some(policy)) = policy::load_at(git, trunk) else {
+        return Ok(None);
+    };
+    if policy.unchecked {
+        return Ok(None);
+    }
+    let revision = ctx.op(op_id).revision.clone();
+    let throughput::Fold::Applied { commit, tree, .. } =
+        throughput::fold(git, &policy, trunk, &revision)?
+    else {
+        return Ok(None);
+    };
+    let base_tree = tree_of(git, trunk)?;
+    if !screen_due(
+        ctx.op(op_id),
+        &base_tree,
+        now_ms(),
+        screen_mark_stands(repo),
+    ) {
+        return Ok(None);
+    }
+    // G779: a check is spent only on main as it stands now; a moved main is read next pass.
+    if !repo.trunk_still(trunk).map_err(|error| error.message())? {
+        return Ok(None);
+    }
+    let marked = now_ms();
+    let screen_of = |verdict: &str, at_ms: u64| Precheck {
+        base: trunk.to_owned(),
+        base_tree: base_tree.clone(),
+        tree: tree.clone(),
+        verdict: verdict.to_owned(),
+        at_ms,
+        screen: true,
+    };
+    keep_precheck(ctx, op_id, screen_of(throughput::SCREENING, marked));
+    ctx.save(
+        &revision,
+        None,
+        &format!("screens {op_id} alone on {trunk}"),
+    )?;
+    if !ctx.push_chain() {
+        return Ok(None);
+    }
+    let candidate_id = format!("screen-{op_id}-{marked}");
+    let facts = change_facts(ctx, &revision);
+    ctx.ahead_of_turn = true;
+    let ran = run_policy(
+        ctx,
+        op_id,
+        &candidate_id,
+        (commit.as_str(), tree.as_str(), Some(&facts)),
+        trunk,
+        &policy,
+        trunk,
+        &[],
+    );
+    ctx.ahead_of_turn = false;
+    let yielded = ctx.yielded.take();
+    let verdict = ran.as_ref().ok().and_then(|ran| observed(ran, yielded));
+    let op = ctx.op_mut(op_id);
+    op.prechecks
+        .retain(|precheck| !(precheck.screen && precheck.at_ms == marked));
+    let Some(verdict) = verdict else {
+        // Nothing was observed: the mark is taken back, so a later pass screens it.
+        ctx.save(&revision, None, &format!("took back the screen of {op_id}"))?;
+        ctx.push_chain();
+        let why = match ran {
+            Err(error) => return Err(error),
+            Ok(_) if yielded => "it gave way to the head",
+            Ok(_) => "no worker answered",
+        };
+        return Ok(Some(json!({"on": "screen", "unchecked": why})));
+    };
+    push_evidence(repo, &ctx.producer()?.0)?;
+    let recorded = screen_of(verdict, now_ms());
+    let shown = shown_precheck("screen", &recorded);
+    keep_precheck(ctx, op_id, recorded);
+    ctx.save(
+        &revision,
+        None,
+        &format!("screened {op_id} alone on {trunk}: {verdict}"),
+    )?;
+    ctx.push_chain();
+    if verdict == throughput::PRODUCT_FAILURE
+        && let Err(why) = screen_failed_wake(ctx, op_id, &tree)
+    {
+        eprintln!("bay runner: {op_id} failed its screen, and its author was not woken: {why}");
+    }
+    Ok(Some(shown))
+}
+
+/// G861: how long a screen's `screening` mark stands: `[runner] execution_budget_s` and
+/// [`SCREEN_MARK_SLACK_MS`].
+fn screen_mark_stands(repo: &Repo) -> u64 {
+    let budget = repo.config.execution_budget().map_or(u64::MAX, |budget| {
+        u64::try_from(budget.as_millis()).unwrap_or(u64::MAX)
+    });
+    budget.saturating_add(SCREEN_MARK_SLACK_MS)
+}
+
+/// G861: whether operation `op` is screened on a trunk of `base_tree` now. An operation is
+/// screened once: a screen that passed or failed stands, and a runner's mark stands for
+/// `stands` milliseconds from `at_ms`. A screen that judged nothing (a check's machinery
+/// failed) is made again on another trunk, and one whose runner stopped is made again.
+fn screen_due(op: &Operation, base_tree: &str, now: u64, stands: u64) -> bool {
+    let Some(newest) = op.prechecks.iter().rev().find(|precheck| precheck.screen) else {
+        return true;
+    };
+    match newest.verdict.as_str() {
+        "pass" | throughput::PRODUCT_FAILURE => false,
+        throughput::SCREENING => now.saturating_sub(newest.at_ms) > stands,
+        _ => newest.base_tree != base_tree,
+    }
+}
+
+/// Records `precheck` on operation `op_id`, newest last, keeping
+/// [`throughput::PRECHECKS_KEPT`].
+fn keep_precheck(ctx: &mut Ctx, op_id: &str, precheck: Precheck) {
+    let op = ctx.op_mut(op_id);
+    op.prechecks.push(precheck);
+    let excess = op
+        .prechecks
+        .len()
+        .saturating_sub(throughput::PRECHECKS_KEPT);
+    if excess > 0 {
+        op.prechecks = op.prechecks.split_off(excess);
+    }
+}
+
+/// G861: whether the check ahead of its turn of the batch the operation `op_id` of `change`
+/// leads, `tree` on a base of `base_tree`, found a product failure, as the leader's chain here
+/// records it.
+fn batch_failed(ctx: &Ctx, (change, op_id): (&str, &str), base_tree: &str, tree: &str) -> bool {
+    let failed = |prechecks: &[Precheck]| {
+        prechecks.iter().any(|precheck| {
+            !precheck.screen
+                && precheck.base_tree == base_tree
+                && precheck.tree == tree
+                && precheck.verdict == throughput::PRODUCT_FAILURE
+        })
+    };
+    if change == ctx.id {
+        return ctx.find_op(op_id).is_some_and(|op| failed(&op.prechecks));
+    }
+    Chain::new(&ctx.repo.git)
+        .read(change)
+        .ok()
+        .and_then(|(_, record)| record.operations.into_iter().find(|op| op.op_id == op_id))
+        .is_some_and(|op| failed(&op.prechecks))
 }
 
 /// G845: the operations the holder of operation `op_id` of `change` checks now, that one first,
@@ -5421,6 +5708,9 @@ fn checked_ahead(
     );
     ctx.ahead_of_turn = false;
     let (verdict, refusal) = ran?;
+    if ctx.yielded.take() {
+        return Ok(json!({"on": "batch", "size": size, "unchecked": "it gave way to the head"}));
+    }
     if refusal
         .as_ref()
         .is_some_and(|refusal| refusal.reason == Some(Reason::CheckUnavailable))
@@ -5436,6 +5726,7 @@ fn checked_ahead(
         tree: tree.to_owned(),
         verdict: verdict.to_owned(),
         at_ms: now_ms(),
+        screen: false,
     });
     let excess = op
         .prechecks
@@ -5534,6 +5825,42 @@ fn early_conflict_wake(ctx: &Ctx, op_id: &str, paths: &[String]) -> Result<(), S
         "actor": ctx.record.actor,
         "wake": wake,
         "recurrence_key": format!("wake/{op_id}/early-conflict"),
+    });
+    let executor = ctx.executor_name();
+    let signer = ctx.executor_signer().ok().flatten();
+    crate::log::append(ctx.repo, &executor, signer.as_ref(), &event).map(|_| ())
+}
+
+/// G861: a screen that found a product failure wakes the change's author once for that tree, as
+/// an early conflict does (G649), so a session that left the change to the runners can repair it
+/// while it waits. The change keeps its place: it is refused only at its own turn. The answer is
+/// a `wake` event on this executor's log, whose id is the operation and the tree. Without a
+/// `[plugin.wake] command` nothing is asked and nothing is written.
+fn screen_failed_wake(ctx: &Ctx, op_id: &str, tree: &str) -> Result<(), String> {
+    if !crate::talk::wake::configured(ctx.repo) {
+        return Ok(());
+    }
+    let id = digest(&json!({"op_id": op_id, "outcome": "screen_failed", "tree": tree}))?;
+    let id = format!("evt_{}", &id.trim_start_matches("sha256:")[..20]);
+    crate::log::fetch(ctx.repo);
+    if crate::log::held_events(&ctx.repo.git)?.contains(&id) {
+        return Ok(());
+    }
+    let reason = Reason::CheckFailed;
+    let wake = wake_author(ctx, op_id, Decision::Queued, Some(reason));
+    let event = json!({
+        "schema": crate::log::EVENT_SCHEMA,
+        "id": id,
+        "at": crate::clock::now_rfc3339(),
+        "kind": "wake",
+        "change": ctx.id,
+        "op_id": op_id,
+        "decision": Decision::Queued.word(),
+        "reason": reason.code(),
+        "screen": {"tree": tree, "verdict": throughput::PRODUCT_FAILURE},
+        "actor": ctx.record.actor,
+        "wake": wake,
+        "recurrence_key": format!("wake/{op_id}/screen"),
     });
     let executor = ctx.executor_name();
     let signer = ctx.executor_signer().ok().flatten();
@@ -8460,16 +8787,32 @@ fn run_policy(
     ctx.step.set("check");
     let baseline = baseline_of(ctx, policy, trunk, &base_tree)?;
     // G796: main's move stops the checks of a candidate that can land: never a lane change's,
-    // which never lands, nor a check ahead of its turn, which judges a predicted base.
-    let halt = (ctx.record.lane.is_none() && !ctx.ahead_of_turn)
+    // which never lands, nor a check ahead of its turn, which judges a predicted base. G861: a
+    // check ahead of its turn stops when it gives way to a head nobody runs ([`HeadWatch`]).
+    let halt = ctx
+        .record
+        .lane
+        .is_none()
         .then(|| std::sync::Arc::new(check::Halt::default()));
     let reusing = ctx.repo.config.evidence_reuse() && ctx.reuse_trusted(trunk) && inputs.is_empty();
     let moved_to: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+    let mut line = ctx.ahead_of_turn.then(|| HeadWatch::new(git, &ctx.id));
     let mut beat = || {
         heartbeat(ctx, op_id);
-        if let Some(halt) = &halt
-            && let Some(now) = watch_main(ctx, (policy, reusing), trunk, halt)
-        {
+        let Some(halt) = &halt else {
+            return;
+        };
+        if let Some(line) = line.as_mut() {
+            if let Some(head) = line.gives_way(ctx.repo, halt) {
+                eprintln!(
+                    "bay runner: {} gives way to {head}, a head nobody runs, while {candidate_id} was checked ahead of its turn: its checks stop",
+                    ctx.id
+                );
+                ctx.yielded.set(true);
+            }
+            return;
+        }
+        if let Some(now) = watch_main(ctx, (policy, reusing), trunk, halt) {
             eprintln!(
                 "bay runner: {} main moved to {} while {candidate_id} was checked: its checks stop, and it is built again",
                 ctx.id,
@@ -8530,6 +8873,15 @@ fn run_policy(
             stopped: false,
         }
     };
+    // G861: a check that gave way to a head nobody runs is no verdict: nothing of it is recorded.
+    if stopped && ctx.yielded.get() {
+        let mut waiting = BayResult::new(Decision::Queued)
+            .with_change(ctx.id.clone())
+            .with_op(op_id);
+        waiting.waiting_for = Some("executor".to_owned());
+        return Ok(("unknown", Some(waiting)));
+    }
+    ctx.yielded.set(false);
     // G638: a failure a carried waiver answers ended the run before the checks after it; they
     // run now, as they would after a waiver of this exact candidate (`finished_checks`).
     let failed: Vec<evidence::CheckId> = check::failed(&records)

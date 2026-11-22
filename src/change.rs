@@ -497,6 +497,10 @@ pub struct Precheck {
     pub verdict: String,
     /// When it was recorded, in Unix milliseconds.
     pub at_ms: u64,
+    /// G861: a screen: the operation alone, merged onto the trunk tip, checked ahead of its turn
+    /// because no planned check covers it. Its verdict is `screening` while a runner runs it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub screen: bool,
 }
 
 /// A conflict between a queued operation's revision and trunk, found before it is head (G177).

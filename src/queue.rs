@@ -184,6 +184,45 @@ pub fn moved_head(repo: &Repo) -> Option<(u64, String)> {
     (here != remote).then_some(remote)
 }
 
+/// G861: the line's head as the remote holds it now, its change as this store's line names it,
+/// and whether the remote holds a lease on that change (`crate::lease`): one `ls-remote` of the
+/// line's refs and the leases, and nothing fetched. `None` when the remote cannot be read, its
+/// line is empty, or this store's line does not name its head.
+#[must_use]
+pub fn remote_head_leased(repo: &Repo) -> Option<(u64, String, bool)> {
+    let listed = repo
+        .git
+        .run(&[
+            "ls-remote",
+            repo.remote(),
+            &format!("{QUEUE_PREFIX}*"),
+            &format!("{DONE_PREFIX}*"),
+            &format!("{}*", crate::lease::LEASE_PREFIX),
+        ])
+        .ok()?;
+    let mut leased = BTreeSet::new();
+    let (seq, _) = head_of(listed.lines().filter_map(|line| {
+        let (commit, name) = line.split_once('\t')?;
+        if let Some(change) = name.strip_prefix(crate::lease::LEASE_PREFIX) {
+            leased.insert(change.to_owned());
+            return None;
+        }
+        let (release, seq) = match name.strip_prefix(QUEUE_PREFIX) {
+            Some(seq) => (false, seq),
+            None => (true, name.strip_prefix(DONE_PREFIX)?),
+        };
+        Some((seq.parse().ok()?, commit.to_owned(), release))
+    }))?;
+    let change = Queue::local(&repo.git)
+        .ok()?
+        .entries
+        .get(&seq)?
+        .change
+        .clone();
+    let held = leased.contains(&change);
+    Some((seq, change, held))
+}
+
 /// G765: the refspecs of the line, for a fetch that brings it with other refs.
 #[must_use]
 pub fn refspecs() -> [String; 2] {
