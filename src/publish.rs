@@ -1685,14 +1685,7 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
 fn place_in_line(repo: &Repo, op_id: &str) -> Option<serde_json::Value> {
     let queue = crate::queue::Queue::read(repo).ok()?;
     let mine = queue.of(op_id)?.seq;
-    let live: Vec<u64> = queue
-        .entries
-        .keys()
-        .copied()
-        .filter(|seq| !queue.released.contains(seq))
-        .collect();
-    let place = live.iter().filter(|seq| **seq <= mine).count();
-    Some(json!({"place": place, "in_line": live.len()}))
+    Some(json!({"place": queue.position(mine), "in_line": queue.line().len()}))
 }
 
 /// BACKLOG 67 item 9 (owner ruling 2026-10-24): the files this change edits that main changed

@@ -830,7 +830,7 @@ fn pass(
     {
         if arrivals.is_none() {
             let local = local_records(&chain);
-            if local.iter().any(repairs) {
+            if local.iter().any(repairs) || keeps_its_turn(repo, &local) {
                 break;
             }
             arrivals = Some(Arrivals::first(repo, &local, parked));
@@ -1073,6 +1073,33 @@ fn local_records(chain: &Chain) -> Vec<HeldChain> {
 /// to run: G585, it runs before every other change, so no head is taken ahead of it.
 fn repairs(held: &HeldChain) -> bool {
     !held.record.ended() && names_a_repair(&held.record) && held.record.operations.iter().any(runs)
+}
+
+/// G862: the rank `held` keeps in line: that of an operation a pass asks again
+/// ([`publish::asked_again`]) whose place a check with no clear answer released.
+fn kept_rank(held: &HeldChain, queue: &Queue) -> Option<(u64, u64)> {
+    held.record
+        .operations
+        .iter()
+        .filter(|op| publish::asked_again(op))
+        .filter_map(|op| queue.kept_rank(&op.op_id))
+        .min()
+}
+
+/// G862: whether `local` holds a change that keeps a rank ahead of the queue's head
+/// ([`kept_rank`]): it keeps its turn, so, as for a repair, no head is taken ahead of it.
+fn keeps_its_turn(repo: &Repo, local: &[HeldChain]) -> bool {
+    let Ok(queue) = Queue::read_shared(repo) else {
+        return false;
+    };
+    let head = queue
+        .head()
+        .map_or((u64::MAX, u64::MAX), crate::queue::Entry::key);
+    local
+        .iter()
+        .filter(|held| !held.record.ended())
+        .filter_map(|held| kept_rank(held, &queue))
+        .any(|kept| kept < head)
 }
 
 /// After the queue's work, never ahead of it: the runner's own post checks on main's tip, then
@@ -2220,17 +2247,26 @@ fn word_of_change(record: &ChangeRecord) -> String {
 /// twenty changes, waited 14 minutes while each pass ran out its bound first): a change that
 /// names one it fixes, reverts or supersedes goes before all of them.
 fn in_pass_order(chains: &mut [crate::change::HeldChain], queue: &Queue) {
-    let place = |id: &str| queue.of_change(id).map_or(u64::MAX, |entry| entry.seq);
+    // G862: queued changes go in line order, and one whose place a check with no clear answer
+    // released goes at the rank it keeps, so it is asked again, and takes its place again,
+    // before the places behind that rank.
+    let place = |held: &crate::change::HeldChain| {
+        queue
+            .of_change(&held.id)
+            .map(crate::queue::Entry::key)
+            .or_else(|| kept_rank(held, queue))
+            .unwrap_or((u64::MAX, u64::MAX))
+    };
     let rejoins = |held: &crate::change::HeldChain| {
         queue.of_change(&held.id).is_none() && held.record.operations.iter().any(runs)
     };
-    chains.sort_by_key(|held| {
+    chains.sort_by_cached_key(|held| {
         let at = if names_a_repair(&held.record) {
-            (0, 0)
+            (0, (0, 0))
         } else if rejoins(held) {
-            (1, 0)
+            (1, (0, 0))
         } else {
-            (2, place(&held.id))
+            (2, place(held))
         };
         (at, held.committed)
     });
@@ -2465,9 +2501,8 @@ fn early_conflicts(repo: &Repo, queue: &Queue) -> Vec<Value> {
 /// write, as the probe may run beside it.
 fn probed(queue: &Queue) -> impl Iterator<Item = &crate::queue::Entry> {
     queue
-        .entries
-        .values()
-        .filter(|entry| !queue.released.contains(&entry.seq))
+        .line()
+        .into_iter()
         .skip(1)
         .filter(|entry| !publish::in_running_batch(&entry.change))
         .take(EARLY_PROBES)
@@ -2687,6 +2722,7 @@ mod tests {
                 commit: String::new(),
                 op_id: "queued01.1".to_owned(),
                 change: "queued01".to_owned(),
+                rank: 7,
             },
         );
         let mut chains = vec![

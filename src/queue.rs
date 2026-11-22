@@ -3,9 +3,12 @@
 //! Each reservation is one create-only ref `refs/bay/queue/<seq>` whose commit names the
 //! operation; each release is one create-only ref `refs/bay/queue-done/<seq>`. The reservation
 //! ref is the sequence claim: a joiner creates the next number, and if another joiner took it
-//! first the create fails and it tries the next one. The head is the lowest reservation with no
-//! release. The head publishes with one atomic push of trunk, its release and the landed
-//! marker; every other outcome of the head creates its release at once.
+//! first the create fails and it tries the next one. The head is the first reservation with no
+//! release, in line order: by rank, then by number. A place's rank is its number, or, G862, for a
+//! place an operation takes again after a check with no clear answer released its last one, that
+//! place's rank, which the entry names and the host checks. The head publishes with one atomic
+//! push of trunk, its release and the landed marker; every other outcome of the head creates its
+//! release at once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -25,6 +28,10 @@ pub const DONE_PREFIX: &str = crate::names::QUEUE_DONE;
 /// nor `MERGE_RETRY_EXHAUSTED`.
 pub const UNAVAILABLE: &str = "unavailable";
 
+/// The release reason of a head whose check gave no clear answer (`CHECK_UNKNOWN`). G862: when
+/// its operation takes a place again, the place keeps the operation's rank.
+pub const UNKNOWN: &str = "check_unknown";
+
 /// One reservation's entry.
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -32,6 +39,18 @@ pub struct Entry {
     pub commit: String,
     pub op_id: String,
     pub change: String,
+    /// G862: where the place stands in line. It is the place's own number, or, for a place its
+    /// operation took again after a check that gave no clear answer released the last one, the
+    /// rank of that place (`rank` in its entry), so the operation keeps its turn.
+    pub rank: u64,
+}
+
+impl Entry {
+    /// The place's order in line (G862): by rank, then by number.
+    #[must_use]
+    pub const fn key(&self) -> (u64, u64) {
+        (self.rank, self.seq)
+    }
 }
 
 /// The queue as the remote holds it.
@@ -79,6 +98,10 @@ impl Listed {
             commit: self.commit.clone(),
             op_id: entry["op_id"].as_str().unwrap_or_default().to_owned(),
             change: entry["change"].as_str().unwrap_or_default().to_owned(),
+            rank: entry["rank"]
+                .as_u64()
+                .filter(|rank| *rank <= self.seq)
+                .unwrap_or(self.seq),
         }
     }
 }
@@ -131,9 +154,13 @@ fn fetch(repo: &Repo) {
     }
 }
 
-/// The head of `listed`, a line's refs: the lowest reservation with no release, by its place
-/// and its reservation's commit.
-fn head_of(listed: impl Iterator<Item = (u64, String, bool)>) -> Option<(u64, String)> {
+/// The head of `listed`, a line's refs: the first reservation with no release, by its place
+/// and its reservation's commit. G862: in line order, each place ranked as `places`, the live
+/// places this store read, rank it; a place this store has not read ranks as its number.
+fn head_of(
+    listed: impl Iterator<Item = (u64, String, bool)>,
+    places: &[Place],
+) -> Option<(u64, String)> {
     let mut reserved = BTreeMap::new();
     let mut released = BTreeSet::new();
     for (seq, commit, release) in listed {
@@ -143,9 +170,28 @@ fn head_of(listed: impl Iterator<Item = (u64, String, bool)>) -> Option<(u64, St
             reserved.insert(seq, commit);
         }
     }
+    let rank = |seq: u64, commit: &str| {
+        places
+            .iter()
+            .find(|place| place.entry.seq == seq && place.entry.commit == commit)
+            .map_or(seq, |place| place.entry.rank)
+    };
     reserved
         .into_iter()
-        .find(|(seq, _)| !released.contains(seq))
+        .filter(|(seq, _)| !released.contains(seq))
+        .min_by_key(|(seq, commit)| (rank(*seq, commit), *seq))
+}
+
+/// The line's refs in an `ls-remote` listing: (place, commit, whether it is a release).
+fn remote_line(listed: &str) -> impl Iterator<Item = (u64, String, bool)> + '_ {
+    listed.lines().filter_map(|line| {
+        let (commit, name) = line.split_once('\t')?;
+        let (release, seq) = match name.strip_prefix(QUEUE_PREFIX) {
+            Some(seq) => (false, seq),
+            None => (true, name.strip_prefix(DONE_PREFIX)?),
+        };
+        Some((seq.parse().ok()?, commit.to_owned(), release))
+    })
 }
 
 /// G788 (a fleet measurement, 2026-11-18: the next change in line was claimed p50 58 to 79 s
@@ -158,12 +204,10 @@ fn head_of(listed: impl Iterator<Item = (u64, String, bool)>) -> Option<(u64, St
 /// a runner with no line asks the remote nothing more than before.
 #[must_use]
 pub fn moved_head(repo: &Repo) -> Option<(u64, String)> {
-    let here = head_of(
-        list(&repo.git)
-            .ok()?
-            .into_iter()
-            .map(|one| (one.seq, one.commit, one.release)),
-    )?;
+    let places = Queue::live_here(repo).ok()?;
+    let here = places
+        .first()
+        .map(|place| (place.entry.seq, place.entry.commit.clone()))?;
     let listed = repo
         .git
         .run(&[
@@ -173,14 +217,7 @@ pub fn moved_head(repo: &Repo) -> Option<(u64, String)> {
             &format!("{DONE_PREFIX}*"),
         ])
         .ok()?;
-    let remote = head_of(listed.lines().filter_map(|line| {
-        let (commit, name) = line.split_once('\t')?;
-        let (release, seq) = match name.strip_prefix(QUEUE_PREFIX) {
-            Some(seq) => (false, seq),
-            None => (true, name.strip_prefix(DONE_PREFIX)?),
-        };
-        Some((seq.parse().ok()?, commit.to_owned(), release))
-    }))?;
+    let remote = head_of(remote_line(&listed), &places)?;
     (here != remote).then_some(remote)
 }
 
@@ -200,26 +237,23 @@ pub fn remote_head_leased(repo: &Repo) -> Option<(u64, String, bool)> {
             &format!("{}*", crate::lease::LEASE_PREFIX),
         ])
         .ok()?;
-    let mut leased = BTreeSet::new();
-    let (seq, _) = head_of(listed.lines().filter_map(|line| {
-        let (commit, name) = line.split_once('\t')?;
-        if let Some(change) = name.strip_prefix(crate::lease::LEASE_PREFIX) {
-            leased.insert(change.to_owned());
-            return None;
-        }
-        let (release, seq) = match name.strip_prefix(QUEUE_PREFIX) {
-            Some(seq) => (false, seq),
-            None => (true, name.strip_prefix(DONE_PREFIX)?),
-        };
-        Some((seq.parse().ok()?, commit.to_owned(), release))
-    }))?;
-    let change = Queue::local(&repo.git)
-        .ok()?
-        .entries
-        .get(&seq)?
+    let leased: BTreeSet<&str> = listed
+        .lines()
+        .filter_map(|line| {
+            line.split_once('\t')?
+                .1
+                .strip_prefix(crate::lease::LEASE_PREFIX)
+        })
+        .collect();
+    let places = Queue::live_here(repo).ok()?;
+    let (seq, _) = head_of(remote_line(&listed), &places)?;
+    let change = places
+        .iter()
+        .find(|place| place.entry.seq == seq)?
+        .entry
         .change
         .clone();
-    let held = leased.contains(&change);
+    let held = leased.contains(change.as_str());
     Some((seq, change, held))
 }
 
@@ -326,8 +360,9 @@ impl Queue {
                 joined: one.committed,
             });
         }
-        // `for-each-ref` lists by name, so place 10 comes before place 9.
-        places.sort_by_key(|place| place.entry.seq);
+        // `for-each-ref` lists by name, so place 10 comes before place 9; G862: and the line is
+        // in rank order.
+        places.sort_by_key(|place| place.entry.key());
         Ok(places)
     }
 
@@ -382,12 +417,50 @@ impl Queue {
         Ok(queue)
     }
 
-    /// The head: the lowest reservation without a release.
+    /// The head: the first reservation without a release, in line order (G862: by rank).
     #[must_use]
     pub fn head(&self) -> Option<&Entry> {
+        self.unreleased().min_by_key(|entry| entry.key())
+    }
+
+    /// The live reservations, in no order.
+    fn unreleased(&self) -> impl Iterator<Item = &Entry> + '_ {
         self.entries
             .values()
-            .find(|entry| !self.released.contains(&entry.seq))
+            .filter(|entry| !self.released.contains(&entry.seq))
+    }
+
+    /// The live reservations, head first (G862: by rank, then by number).
+    #[must_use]
+    pub fn line(&self) -> Vec<&Entry> {
+        let mut line: Vec<&Entry> = self.unreleased().collect();
+        line.sort_by_key(|entry| entry.key());
+        line
+    }
+
+    /// The order in line of place `seq`: its entry's, or its number's for a place not read.
+    fn key_of(&self, seq: u64) -> (u64, u64) {
+        self.entries.get(&seq).map_or((seq, seq), Entry::key)
+    }
+
+    /// G862: the rank a new place of `op_id` keeps, and the place it keeps it from: the rank of
+    /// the operation's last place, when a check that gave no clear answer released it
+    /// ([`UNKNOWN`]). A place released as a duplicate is no place the operation held. `None`
+    /// when its last place was released for another reason, or it had none: it joins at the back.
+    #[must_use]
+    pub fn kept_rank(&self, op_id: &str) -> Option<(u64, u64)> {
+        let last = self
+            .entries
+            .values()
+            .rev()
+            .filter(|entry| entry.op_id == op_id)
+            .find(|entry| {
+                self.release_reasons
+                    .get(&entry.seq)
+                    .is_some_and(|reason| reason != "duplicate")
+            })?;
+        (self.release_reasons.get(&last.seq).map(String::as_str) == Some(UNKNOWN))
+            .then_some((last.rank, last.seq))
     }
 
     /// The live reservation that names `op_id`.
@@ -409,19 +482,19 @@ impl Queue {
     /// The live reservations ahead of place `seq`, head first (`crate::throughput`).
     #[must_use]
     pub fn ahead_of(&self, seq: u64) -> Vec<&Entry> {
-        self.entries
-            .values()
-            .filter(|entry| entry.seq < seq && !self.released.contains(&entry.seq))
-            .collect()
+        let key = self.key_of(seq);
+        let mut line = self.line();
+        line.retain(|entry| entry.key() < key);
+        line
     }
 
     /// The live reservations behind place `seq`, nearest first (`crate::throughput`).
     #[must_use]
     pub fn behind(&self, seq: u64) -> Vec<&Entry> {
-        self.entries
-            .values()
-            .filter(|entry| entry.seq > seq && !self.released.contains(&entry.seq))
-            .collect()
+        let key = self.key_of(seq);
+        let mut line = self.line();
+        line.retain(|entry| entry.key() > key);
+        line
     }
 
     /// The released places, newest first, each with the reason its release names.
@@ -435,10 +508,8 @@ impl Queue {
     /// 1 for the head, 2 for the next, … among live reservations.
     #[must_use]
     pub fn position(&self, seq: u64) -> usize {
-        self.entries
-            .keys()
-            .filter(|key| **key <= seq && !self.released.contains(key))
-            .count()
+        let key = self.key_of(seq);
+        self.unreleased().filter(|entry| entry.key() <= key).count()
     }
 
     /// How many times `op_id` was released by a progress deadline, leaving out the places in
@@ -610,7 +681,9 @@ pub(crate) fn commit(
 }
 
 /// Joins the queue: creates the next reservation on the remote, trying the next number when
-/// another joiner took it. Returns the sequence number.
+/// another joiner took it. Returns the sequence number. G862: an operation whose last place a
+/// check that gave no clear answer released keeps that place's rank ([`Queue::kept_rank`], read
+/// from the queue refs this store holds): its entry names the rank and the place it follows.
 ///
 /// # Errors
 ///
@@ -621,11 +694,16 @@ pub fn join(
     op_id: &str,
     change: &str,
 ) -> Result<u64, String> {
+    let mut entry = json!({"op_id": op_id, "change": change});
+    if let Some((rank, after)) = Queue::local(&repo.git)?.kept_rank(op_id) {
+        entry["rank"] = json!(rank);
+        entry["after"] = json!(after);
+    }
     let reservation = commit(
         &repo.git,
         signer,
         "entry.json",
-        &json!({"op_id": op_id, "change": change}),
+        &entry,
         &format!("reserve {op_id}"),
     )?;
     for _ in 0..20 {
@@ -778,6 +856,9 @@ pub fn release(
         ])
         .is_ok()
     {
+        // G862: this store knows its own release at once, as `join` knows its own place, so a
+        // place taken again here keeps the rank the release gives.
+        let _ = repo.git.run(&["update-ref", &name, &release]);
         return Ok(());
     }
     // Released by someone else first: the queue moves on either way.
@@ -804,6 +885,7 @@ mod tests {
                     commit: format!("r{seq}"),
                     op_id: format!("c{seq}.1"),
                     change: format!("c{seq}"),
+                    rank: seq,
                 },
             );
             if seq <= released {
@@ -825,5 +907,39 @@ mod tests {
         assert_eq!(held.prunable(|_| true, 9).len(), 0);
         // With no head, every pair but the highest.
         assert_eq!(queue(3, 3).prunable(|_| true, 10), vec![1, 2]);
+    }
+
+    /// G862: an operation whose place a check that gave no clear answer released keeps that
+    /// place's rank when it takes a place again, and only then; a duplicate is no place it held.
+    #[test]
+    fn a_place_taken_again_after_no_clear_answer_keeps_its_rank() {
+        let mut held = queue(3, 1);
+        held.release_reasons.insert(1, super::UNKNOWN.to_owned());
+        assert_eq!(held.kept_rank("c1.1"), Some((1, 1)));
+        assert_eq!(held.kept_rank("c2.1"), None);
+        for (seq, rank) in [(4, 1), (5, 5)] {
+            held.entries.insert(
+                seq,
+                Entry {
+                    seq,
+                    commit: format!("r{seq}"),
+                    op_id: "c1.1".to_owned(),
+                    change: "c1".to_owned(),
+                    rank,
+                },
+            );
+        }
+        held.released.insert(5);
+        held.release_reasons.insert(5, "duplicate".to_owned());
+        assert_eq!(held.head().map(|head| head.seq), Some(4));
+        let line: Vec<u64> = held.line().iter().map(|entry| entry.seq).collect();
+        assert_eq!(line, vec![4, 2, 3]);
+        assert_eq!((held.position(4), held.position(2)), (1, 2));
+        let ahead: Vec<u64> = held.ahead_of(2).iter().map(|entry| entry.seq).collect();
+        assert_eq!(ahead, vec![4]);
+        let behind: Vec<u64> = held.behind(4).iter().map(|entry| entry.seq).collect();
+        assert_eq!(behind, vec![2, 3]);
+        held.release_reasons.insert(1, "deadline".to_owned());
+        assert_eq!(held.kept_rank("c1.1"), None);
     }
 }

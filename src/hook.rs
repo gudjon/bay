@@ -1957,7 +1957,7 @@ impl Judge<'_> {
                     "a new reservation must be above every existing one ({highest})"
                 ));
             }
-            return Ok(());
+            return self.kept_rank(update, &queue);
         }
         let old = queue.entries.get(&seq).ok_or("replaces no reservation")?;
         // A newer revision keeps its entry's place, the head's too (the trust-agents ruling,
@@ -1973,6 +1973,35 @@ impl Judge<'_> {
         if entry["change"] != old.change.as_str() || entry["replaces"] != old.op_id.as_str() {
             return Err(
                 "a reservation is replaced only by a newer operation of its own change".to_owned(),
+            );
+        }
+        Ok(())
+    }
+
+    /// G862: a new reservation that names a rank keeps the rank of its own operation's last
+    /// place, which a check that gave no clear answer released, and names that place
+    /// ([`crate::queue::Queue::kept_rank`]); any other names none, and joins at the back.
+    fn kept_rank(&self, update: &Update, queue: &crate::queue::Queue) -> Result<(), String> {
+        // A reservation whose commit holds no readable entry names no rank, as before G862.
+        let Some(entry) = self
+            .git
+            .run(&["cat-file", "blob", &format!("{}:entry.json", update.new)])
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        else {
+            return Ok(());
+        };
+        if entry.get("rank").is_none() && entry.get("after").is_none() {
+            return Ok(());
+        }
+        let kept = entry["op_id"]
+            .as_str()
+            .and_then(|op_id| queue.kept_rank(op_id))
+            .map(|(rank, after)| (Value::from(rank), Value::from(after)));
+        if kept != Some((entry["rank"].clone(), entry["after"].clone())) {
+            return Err(
+                "a reservation keeps only the rank of its own operation's place released as check_unknown"
+                    .to_owned(),
             );
         }
         Ok(())
