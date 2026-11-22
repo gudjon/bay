@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.138
+
+- `bay queue` reads its rows' request times with no diff, so a store read is fast again.
+
 ## 0.6.137
 
 - `bay queue` lists a change a runner checks with no place in the line under `taken`, and says so.
