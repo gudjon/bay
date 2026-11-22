@@ -285,9 +285,9 @@ impl Holding {
     /// G856: whether a beat is due: none went out yet, the record changed since the last one
     /// (G845's batch), or the last one is `every` old. A beat the remote refused is due again.
     fn due(&self, every: Duration) -> bool {
-        self.beaten.as_ref().is_none_or(|(at, tree)| {
-            self.tree.as_ref() != Some(tree) || at.elapsed() >= every
-        })
+        self.beaten
+            .as_ref()
+            .is_none_or(|(at, tree)| self.tree.as_ref() != Some(tree) || at.elapsed() >= every)
     }
 
     /// The lease commit of this beat: the record's tree, written once, and no parent.
