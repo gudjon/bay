@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.139
+
+- A runner beats a long lease an eighth of the lease apart, not each heartbeat: fewer pushes per check.
+
 ## 0.6.138
 
 - `bay queue` reads its rows' request times with no diff, so a store read is fast again.
