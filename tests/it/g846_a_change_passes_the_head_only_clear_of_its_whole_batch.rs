@@ -3,9 +3,10 @@
 //! behind the passer; the passer's landing stopped that batch's 18-minute check, which ran again,
 //! and the next head was passed the same way). A change runs from its own place past a head only
 //! when it is clear of what the head's whole check reads: the batch its holder's lease names
-//! (G845), not the head's own paths alone. Otherwise it waits, and lands right after the batch.
+//! (G845), not the head's own paths alone. Otherwise it waits: in the batch, when the batch's
+//! check reads it (G852), or right after the batch.
 //!
-//! Guard to mutate: in `src/publish.rs` `passes_unread`, the loop that adds the paths of
+//! Guard to mutate: in `src/publish.rs` `passes_unread`, the chain that adds the revisions of
 //! `batch_behind` to the entry's own (runner B runs the change from its own place while the
 //! batch is checked).
 
@@ -81,13 +82,21 @@ fn a_change_clear_of_the_head_but_not_of_its_batch_waits_for_the_batch() {
     let one = held.queue("one", "notes");
     let passer = held.queue("passer", "src");
     let member = held.queue("member", "src");
-    // AND runner A checks the notes change and the second code change as one batch, the first
-    // code change left out of it as one that passes the head (G712), and its check waits
+    // AND runner A checks the three as one batch, the first code change in it because the
+    // batch's code check reads it (G852), and its check waits
     let a = held.executor("exec-a", PRODUCER);
     let b = held.executor("exec-b", OTHER_PRODUCER);
     let runner_a = held.spawn(&a);
     held.wait_held();
-    wait_lease_names(&held, &one, &[format!("{one}.1"), format!("{member}.1")]);
+    wait_lease_names(
+        &held,
+        &one,
+        &[
+            format!("{one}.1"),
+            format!("{passer}.1"),
+            format!("{member}.1"),
+        ],
+    );
 
     // WHEN runner B makes a pass
     let during = held.pass(&b);
@@ -101,7 +110,7 @@ fn a_change_clear_of_the_head_but_not_of_its_batch_waits_for_the_batch() {
         held.test_box.trunk_change_ids(&held.remote),
         Vec::<String>::new()
     );
-    // AND once the batch lands, it lands after it
+    // AND it lands in the batch, in its place in the line
     held.go();
     let first = finished(runner_a);
     let mut after = Vec::new();
@@ -115,6 +124,6 @@ fn a_change_clear_of_the_head_but_not_of_its_batch_waits_for_the_batch() {
             .position(|landed| landed == id)
             .unwrap_or_else(|| panic!("{id} did not land: {first} {after:?}"))
     };
-    assert!(at(&passer) < at(&member), "{landed:?}");
+    assert!(at(&member) < at(&passer), "{landed:?}");
     assert!(at(&passer) < at(&one), "{landed:?}");
 }

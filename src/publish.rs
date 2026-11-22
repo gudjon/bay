@@ -3162,13 +3162,14 @@ fn read_line_fetched<'a>(
 /// merged from its own place by G703 while the batch was checked, and the batch was cut and
 /// checked again twice, 189 s and 370 s lost; changes behind it waited 16 to 35 minutes): a
 /// change that runs from its own place past this head joins no batch of it. It lands alone in
-/// seconds, and the batch's check stays the one that lands.
+/// seconds, and the batch's check stays the one that lands. Returns the places it passed over.
 fn pass_over_passing(
     ctx: &Ctx,
     queue: &crate::queue::Queue,
     trunk: &str,
     behind: &mut [throughput::Queued],
-) -> Result<(), String> {
+) -> Result<Vec<u64>, String> {
+    let mut passed = Vec::new();
     for queued in behind {
         if queued.live
             && queued.batchable
@@ -3176,9 +3177,40 @@ fn pass_over_passing(
             && !repair_moved_under(ctx, queue, trunk, &queued.op_id)?
         {
             queued.batchable = false;
+            passed.push(queued.seq);
         }
     }
-    Ok(())
+    Ok(passed)
+}
+
+/// G852 (a fleet finding, 2026-11-22: a code change was passed over as one that passes a head on
+/// notes, and the head's batch then took in three code changes from behind it; the batch's code
+/// check read it, so it could not pass that batch (G846), and it waited the whole batch out and
+/// was checked alone after it, 63 minutes in the line): joins the batch again each of
+/// `passers`, places of `behind` passed over by [`pass_over_passing`], that the check of the
+/// planned `members` reads. True when it readmits one, and the batch is planned again.
+fn readmit_read(
+    git: &Git,
+    policy: &policy::Policy,
+    trunk: &str,
+    members: &[throughput::Member],
+    behind: &mut [throughput::Queued],
+    passers: &mut Vec<u64>,
+) -> Result<bool, String> {
+    let mut readmitted = Vec::new();
+    for queued in behind.iter_mut() {
+        if !passers.contains(&queued.seq) {
+            continue;
+        }
+        let ours = own_paths(git, trunk, &queued.revision)?.unwrap_or_default();
+        let revisions = members.iter().map(|member| member.revision.as_str());
+        if !reads_none_of(git, policy, trunk, revisions, &ours)? {
+            queued.batchable = true;
+            readmitted.push(queued.seq);
+        }
+    }
+    passers.retain(|seq| !readmitted.contains(seq));
+    Ok(!readmitted.is_empty())
 }
 
 /// The batch the head `op_id` at place `at` would form on `trunk`, with the policy at
@@ -3238,17 +3270,17 @@ fn batch_plan(
     };
     let waiting = queue.behind(at);
     let (mut behind, unread) = read_line_fetched(repo, &waiting);
-    pass_over_passing(ctx, &queue, trunk, &mut behind)?;
+    let mut passers = pass_over_passing(ctx, &queue, trunk, &mut behind)?;
     let by_lane = repo.config.footprint_lanes();
-    let (mut members, mut stopped, mut stopped_at) = throughput::plan_batch(
-        git,
-        &policy,
-        trunk,
-        &head,
-        &behind,
-        batch_size(git, &queue, &policy, bounds.max),
-        by_lane,
-    )?;
+    let size = batch_size(git, &queue, &policy, bounds.max);
+    // G852: a passer the planned batch's check reads joins it, and the batch is planned again.
+    // Each round readmits one passer at least, so the rounds end.
+    let (mut members, mut stopped, mut stopped_at) = loop {
+        let planned = throughput::plan_batch(git, &policy, trunk, &head, &behind, size, by_lane)?;
+        if !readmit_read(git, &policy, trunk, &planned.0, &mut behind, &mut passers)? {
+            break planned;
+        }
+    };
     // G420, G560: a head whose diff wakes a pre-merge check keyed by its commit lands alone,
     // and the journal names the check.
     if stopped == "commit_keyed" {
@@ -3273,14 +3305,9 @@ fn batch_plan(
         }
         members.truncate(within);
     }
-    // R7: one journal line per batch decision, naming why the batch ended; G581: and each place
-    // passed over because its operation does not read here.
-    let passed_over = if unread.is_empty() {
-        String::new()
-    } else {
-        let changes: Vec<&str> = unread.iter().map(|entry| entry.change.as_str()).collect();
-        format!("; passed over, not read here: {}", changes.join(", "))
-    };
+    // R7: one journal line per batch decision, naming why the batch ended, and each place passed
+    // over.
+    let passed_over = passed_over_note(&unread, &behind, &passers);
     // G588: and the change the batch ended at, when one entry ended it.
     let at_change = stopped_at
         .as_deref()
@@ -3308,6 +3335,35 @@ fn batch_plan(
     }
     said("planned", stopped, &at_change);
     Ok(Some((policy, members, stopped, stopped_at)))
+}
+
+/// The batch line's note of the places passed over: G581, each whose operation does not read
+/// here; G852, each of `passers` that lands from its own place past the head.
+fn passed_over_note(
+    unread: &[&crate::queue::Entry],
+    behind: &[throughput::Queued],
+    passers: &[u64],
+) -> String {
+    let mut note = Vec::new();
+    if !unread.is_empty() {
+        let changes: Vec<&str> = unread.iter().map(|entry| entry.change.as_str()).collect();
+        note.push(format!(
+            "; passed over, not read here: {}",
+            changes.join(", ")
+        ));
+    }
+    let passing: Vec<&str> = behind
+        .iter()
+        .filter(|queued| passers.contains(&queued.seq))
+        .map(|queued| queued.change.as_str())
+        .collect();
+    if !passing.is_empty() {
+        note.push(format!(
+            "; passed over, lands from its own place: {}",
+            passing.join(", ")
+        ));
+    }
+    note.concat()
 }
 
 /// Why no batch forms on `trunk` under `policy`, whatever the change: an unchecked policy, or
@@ -4666,28 +4722,40 @@ fn passes_unread(
         if moves_under(ctx.repo, queue, entry) >= PASSES_PER_ENTRY {
             return Ok(false);
         }
-        let Some(mut theirs) = own_paths(git, trunk, &queued.revision)? else {
-            return Ok(false);
-        };
         // G846: an entry its holder checks in a batch reads what the whole batch changes.
         let Some(batch) = batch_behind(ctx.repo, queue, entry) else {
             return Ok(false);
         };
-        for member in batch {
-            let Some(paths) = own_paths(git, trunk, &member.revision)? else {
-                return Ok(false);
-            };
-            theirs.extend(paths);
-        }
-        let Some(reads) = predicted_reads(&policy, &theirs) else {
-            return Ok(false);
-        };
-        if throughput::Footprint::Globs(reads).overlaps(&throughput::Footprint::Globs(ours.clone()))
-        {
+        let revisions = std::iter::once(queued.revision.as_str())
+            .chain(batch.iter().map(|member| member.revision.as_str()));
+        if !reads_none_of(git, &policy, trunk, revisions, &ours)? {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// Whether the pre-merge checks of the changes at `revisions` on `trunk` read none of `ours`,
+/// as far as `policy` says (see [`passes_unread`]): false when one of them changes nothing or a
+/// `.bay/` path, or one of the checks may read anything.
+fn reads_none_of<'r>(
+    git: &Git,
+    policy: &policy::Policy,
+    trunk: &str,
+    revisions: impl IntoIterator<Item = &'r str>,
+    ours: &[String],
+) -> Result<bool, String> {
+    let mut theirs = Vec::new();
+    for revision in revisions {
+        let Some(paths) = own_paths(git, trunk, revision)? else {
+            return Ok(false);
+        };
+        theirs.extend(paths);
+    }
+    let Some(reads) = predicted_reads(policy, &theirs) else {
+        return Ok(false);
+    };
+    Ok(!throughput::Footprint::Globs(reads).overlaps(&throughput::Footprint::Globs(ours.to_vec())))
 }
 
 /// The paths `revision` changes from where it meets `trunk`; `None` when it changes none, or a
