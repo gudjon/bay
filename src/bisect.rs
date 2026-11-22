@@ -893,10 +893,9 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>) -> Result<Planned, String> {
 
 /// G857 (a fleet finding, 2026-11-22: two runners that served one environment each ran the same
 /// bisect runs of a red post check, about 40 % of its bisect runs in an afternoon): the other live
-/// runner
-/// that bisects `red` (its `suspect` range), if one does, so `me` does not. It is the runner that
-/// runs the check on main's tip ([`owner_of`], G822), so one red is bisected on one box while that
-/// box reads live, and moves only when it leaves.
+/// runner that bisects `red` (its `suspect` range), if one does, so `me` does not. It is the
+/// runner that runs the check on main's tip ([`owner_of`], G822), so one red is bisected on one
+/// box while that box reads live, and moves only when it leaves.
 ///
 /// `None`, so `me` bisects, when the policy at main has no entry for the check, or no producer
 /// answered the check on a landing of the range or after it for twice its timeout: one timeout for
