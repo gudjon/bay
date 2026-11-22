@@ -36,6 +36,9 @@ struct Two {
 fn two() -> Two {
     let trunk = trunk_with("[runner]\nbisect_post = true\n", &[]);
     let remote = trunk.test_box.path().join("repo-remote.git");
+    trunk
+        .test_box
+        .git_ok(&trunk.repo, &["config", "bay.runnerName", EXECUTOR]);
     let second = trunk.test_box.clone_of(&remote, "other");
     trunk
         .test_box

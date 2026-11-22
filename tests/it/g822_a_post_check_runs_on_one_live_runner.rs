@@ -60,6 +60,7 @@ fn two_runners(test_box: &TestBox, timeout_s: u64) -> (PathBuf, PathBuf, PathBuf
         "[runner]\npost = true\nbisect_post = false\n".to_owned(),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
+    test_box.git_ok(&repo, &["config", "bay.runnerName", EXECUTOR]);
     let other = test_box.clone_of(&remote, "other");
     test_box.git_ok(&other, &["config", "bay.runnerName", "other"]);
     test_box.git_ok(&other, &["config", "bay.producerName", "other-checks"]);
