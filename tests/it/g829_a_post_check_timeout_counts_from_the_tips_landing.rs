@@ -20,10 +20,12 @@ use support::{EXECUTOR, TestBox, check_files, passing_result, result_json};
 
 use crate::g822_a_post_check_runs_on_one_live_runner::{ran_post, weight};
 
-/// The check's timeout, and how far ahead of the clock the second tip's landing is dated: past
-/// the timeout, and inside the 33 s a runner's presence reads live.
-const TIMEOUT_S: u64 = 10;
-const AHEAD_S: u64 = 15;
+/// The check's timeout, and how far ahead of the clock the second tip's landing is dated: as far
+/// as the timeout, and well inside the minute a runner's presence reads live (three of its 10 s
+/// cadences and half a minute). The second landing and the next pass have the whole timeout to
+/// finish in, on a loaded box too (a 10 s one ran out in a full suite, 2026-11-22).
+const TIMEOUT_S: u64 = 25;
+const AHEAD_S: u64 = 25;
 
 /// Two runner clones of one remote that serve one environment, and the post check `suite` with
 /// a timeout of [`TIMEOUT_S`]. Returns the clone that owns `suite`, the clone that does not,
