@@ -2,7 +2,7 @@
 
 ## 0.6.141
 
-- A failure already known from a reused or carried record ends the run before it starts: a batch's culprit is refused at once, and holds the head of the line for seconds, not for its other checks.
+- A batch's culprit is refused at once on its carried failure, and runs none of its other checks.
 
 ## 0.6.140
 
