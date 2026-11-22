@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.140
+
+- One live runner bisects a red post check, so two boxes never run the same bisect probes.
+
 ## 0.6.139
 
 - A runner beats a long lease an eighth of the lease apart, not each heartbeat: fewer pushes per check.
