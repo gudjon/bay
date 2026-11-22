@@ -140,11 +140,12 @@ fn pushes(trace: &Path, prefix: &str) -> usize {
 
 #[test]
 fn a_check_that_beats_leaves_its_change_history_alone() {
-    // GIVEN a change whose check runs for eight seconds under a one-second heartbeat
+    // GIVEN a change whose check runs for eight seconds under a one-second heartbeat and a lease
+    // of eight heartbeats, which a holder beats each heartbeat (G856)
     let check_s = 8;
     let (test_box, remote, _, id) = submitted(
         |_| format!("sleep {check_s}"),
-        "[runner]\nlease_s = 30\nheartbeat_s = 1\n",
+        "[runner]\nlease_s = 8\nheartbeat_s = 1\n",
     );
     let holder = runner(&test_box, &remote, "exec-a");
     let trace = test_box.path().join("trace.jsonl");

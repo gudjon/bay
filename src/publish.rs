@@ -9450,11 +9450,13 @@ pub(crate) fn landed_markers(
 /// Renews the executor's lease while a check runs (§ 9a). G787 (owner ruling 2026-11-18): one
 /// beat of its lease ref (`crate::lease`), signed by the executor and pushed alone by
 /// compare-and-swap, never a commit on the change's history: the history moves only on real
-/// state. A beat that fails means another holder took over; the persist step finds out.
+/// state. A beat that fails means another holder took over; the persist step finds out. G856: a
+/// beat goes out only when one is due ([`beat_every`]).
 fn heartbeat(ctx: &Ctx, op_id: &str) {
     if ctx.ahead_of_turn {
         return;
     }
+    let every = beat_every(&ctx.repo.config, ctx.op(op_id).owner.as_deref());
     let signer = ctx.executor_signer().ok().flatten();
     if let Some(lease) = ctx
         .lease
@@ -9462,7 +9464,7 @@ fn heartbeat(ctx: &Ctx, op_id: &str) {
         .as_mut()
         .filter(|lease| lease.of(op_id))
     {
-        lease.beat(ctx.repo, signer.as_ref());
+        lease.beat(ctx.repo, signer.as_ref(), every);
     }
 }
 
@@ -9495,6 +9497,20 @@ pub fn holder_lease(config: &crate::config::Config, owner: Option<&str>) -> Dura
     } else {
         lease
     }
+}
+
+/// How many beats of a holder's lease fit in the lease a reader grants it (G856).
+const BEATS_PER_LEASE: u32 = 8;
+
+/// G856 (a fleet measurement, 2026-11-22: runners holding a 450 s lease pushed a beat each
+/// 10 s heartbeat of a check, a median 40 s, at about 5 s a push, for a lease no reader judges
+/// quiet before 450 s): how often a holder beats its lease while it checks. An eighth of the lease
+/// readers grant it ([`holder_lease`]), and never more often than once a heartbeat, so a lease
+/// under eight heartbeats (the default, 60 s at 10 s) is beaten each heartbeat as before. A
+/// record that changed (G845's batch) goes out at the next heartbeat whatever the time.
+#[must_use]
+pub fn beat_every(config: &crate::config::Config, owner: Option<&str>) -> Duration {
+    (holder_lease(config, owner) / BEATS_PER_LEASE).max(config.heartbeat())
 }
 
 /// G696: a looping runner's sightings of the chains other runners hold, by change: the head and

@@ -1,7 +1,8 @@
 //! A runner's lease on the operation it holds, `refs/bay/lease/<change>` (G787; owner ruling
 //! 2026-11-18, "own lease ref").
 //!
-//! A holder renews its lease once a heartbeat (`[runner] heartbeat_s`) while a check runs. Each
+//! A holder renews its lease while a check runs: at most once a heartbeat (`[runner] heartbeat_s`),
+//! and only when its record changed or its last beat is `crate::publish::beat_every` old (G856). Each
 //! beat used to be a commit on the change's history, pushed: on one fleet a change's history held
 //! about 4,300 of them, every store that fetched the history took them all, and an agent's own
 //! write to its change lost "fetch first" to a beat. A beat now replaces the lease ref in place:
@@ -31,6 +32,8 @@
 //! store's copy is the remote's ([`refspec`], [`refspec_of`]). Under a key registry a beat is
 //! signed by the holder's runner key, and the host takes it only from the runner the history names
 //! as the holder (`crate::hook`).
+
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -195,6 +198,8 @@ pub struct Holding {
     tree: Option<String>,
     /// The lease commit this holder last pushed.
     pushed: Option<String>,
+    /// G856: when this holder last pushed a beat, and the lease tree that beat carried.
+    beaten: Option<(Instant, String)>,
     /// A later holder's lease stands: this holder beats no more.
     lost: bool,
 }
@@ -206,6 +211,7 @@ impl Holding {
             lease,
             tree: None,
             pushed: None,
+            beaten: None,
             lost: false,
         }
     }
@@ -235,9 +241,10 @@ impl Holding {
     /// One beat: a new lease commit, pushed alone by compare-and-swap on the lease this store
     /// holds. A lease of a later holder there means this holder was taken over: it beats no
     /// more. A push the remote refused brings the remote's lease, for the next beat to judge.
-    /// Best effort: a holder that lost its claim learns it from the history (§ 9a).
-    pub fn beat(&mut self, repo: &Repo, signer: Option<&Signer>) {
-        if self.lost {
+    /// Best effort: a holder that lost its claim learns it from the history (§ 9a). G856: only a
+    /// beat that is due goes out ([`Self::due`]).
+    pub fn beat(&mut self, repo: &Repo, signer: Option<&Signer>, every: Duration) {
+        if self.lost || !self.due(every) {
             return;
         }
         let git = &repo.git;
@@ -269,9 +276,18 @@ impl Holding {
         {
             let _ = git.run(&["update-ref", &name, &commit]);
             self.pushed = Some(commit);
+            self.beaten = self.tree.clone().map(|tree| (Instant::now(), tree));
         } else {
             fetch(repo, &self.lease.change);
         }
+    }
+
+    /// G856: whether a beat is due: none went out yet, the record changed since the last one
+    /// (G845's batch), or the last one is `every` old. A beat the remote refused is due again.
+    fn due(&self, every: Duration) -> bool {
+        self.beaten.as_ref().is_none_or(|(at, tree)| {
+            self.tree.as_ref() != Some(tree) || at.elapsed() >= every
+        })
     }
 
     /// The lease commit of this beat: the record's tree, written once, and no parent.
@@ -379,6 +395,19 @@ mod tests {
         );
         holding.checks((0..200).map(|n| format!("m{n:07}.1")).collect());
         assert_eq!(holding.lease.batch, None);
+    }
+
+    #[test]
+    fn a_beat_is_due_first_then_when_its_record_changes_or_its_interval_passes() {
+        let mut holding = Holding::new(Lease::new("c", "c.1", 1, "a"));
+        let hour = std::time::Duration::from_secs(3600);
+        assert!(holding.due(hour));
+        holding.tree = Some("t1".to_owned());
+        holding.beaten = Some((std::time::Instant::now(), "t1".to_owned()));
+        assert!(!holding.due(hour));
+        assert!(holding.due(std::time::Duration::ZERO));
+        holding.checks(vec!["c.1".to_owned(), "d.1".to_owned()]);
+        assert!(holding.due(hour));
     }
 
     #[test]
