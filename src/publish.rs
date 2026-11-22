@@ -5950,13 +5950,42 @@ fn retry_blocked(
     op.unavailable = None;
     op.trunk_moved = 0;
     ctx.save_or_moved(revision, None, &format!("rearmed {op_id}"))?;
-    ctx.push_chain();
+    let pushed = ctx.push_chain();
+    // G858: re-armed from `CHECK_UNKNOWN`, it takes back the place its check left. Its re-armed
+    // chain is on the remote first, so no executor releases that place again as a blocked head's.
+    if reason == Some(Reason::CheckUnknown) && pushed && ctx.push_mode == PushMode::Now {
+        reopen_place(ctx, op_id)?;
+    }
     // G284: an approval (or a rejection) arrived for the candidate it waited on, or trunk
     // moved: the run that follows checks that same candidate again while trunk stands.
     if reason == Some(Reason::ApprovalPending) {
         ctx.approved = Some(op_id.to_owned());
     }
     Ok(None)
+}
+
+/// G858 (a fleet finding, 2026-11-22: a change whose check gave no clear answer at the head was
+/// re-armed a minute later and waited 54 minutes behind the 26 places that queued meanwhile):
+/// re-armed `op_id` takes back the place its check gave no clear answer at
+/// ([`crate::queue::Queue::kept_place`]), ahead of every change that queued behind it, while a
+/// pass would still ask it again ([`UNKNOWN_RETRIES`]). Past that bound, or when the place moved
+/// meanwhile, it joins at the back, as a new operation does.
+fn reopen_place(ctx: &mut Ctx, op_id: &str) -> Result<(), String> {
+    let unknown = ctx
+        .op(op_id)
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.verdict == "unknown")
+        .count();
+    if unknown >= UNKNOWN_RETRIES {
+        return Ok(());
+    }
+    let queue = crate::queue::Queue::read(ctx.repo)?;
+    let Some(entry) = queue.kept_place(op_id).cloned() else {
+        return Ok(());
+    };
+    let signer = ctx.executor_signer().ok().flatten();
+    crate::queue::reopen(ctx.repo, signer.as_ref(), &queue, &entry).map(|_| ())
 }
 
 /// G637 (a fleet finding, 2026-11-02: two changes whose own task cards failed a records check
