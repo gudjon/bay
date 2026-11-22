@@ -48,9 +48,10 @@ fn a_change_whose_check_gave_no_answer_takes_its_place_back_when_it_is_asked_aga
     let landed = held.test_box.trunk_change_ids(&held.remote);
     assert!(landed.contains(&state), "main never moved: {landed:?}");
     assert!(!landed.contains(&stuck), "{landed:?}");
-    let released = held
-        .test_box
-        .git_bare(&held.remote, &["show", "refs/bay/queue-done/1:release.json"]);
+    let released = held.test_box.git_bare(
+        &held.remote,
+        &["show", "refs/bay/queue-done/1:release.json"],
+    );
     assert!(
         released.contains(&format!("{stuck}.1")) && released.contains("check_unknown"),
         "stuck's place was not released as no answer: {released}"
