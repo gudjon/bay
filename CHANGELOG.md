@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.146
+
+- A landing pushes its chain record and terminal record with main: one landing takes 5 pushes, not 6.
+- A runner's journal line names each step's time and count of pushes and fetches.
+
 ## 0.6.145
 
 - A landing whose chain its landing runner left checked is recorded on its chain, and runners stop visiting it.
