@@ -1189,19 +1189,10 @@ impl Repo {
     pub fn remote_chain(&self, change: &str) -> Result<String, GitError> {
         let git = &self.git;
         let name = crate::change::change_ref(change);
-        // G787: the holder's lease comes in the same round trip, pruned (`crate::lease`).
         let lease = crate::lease::refspec_of(change);
-        if git
-            .run(&[
-                "fetch",
-                "-q",
-                "--prune",
-                "--no-tags",
-                self.remote(),
-                &format!("{name}:{name}"),
-                &lease,
-            ])
-            .is_ok()
+        let args = self.chain_fetch(change);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        if git.run(&args).is_ok()
             && let Some(head) = git.ref_target(&name)?
         {
             return Ok(head);
@@ -1220,6 +1211,26 @@ impl Repo {
         let _ = git.run(&["update-ref", "-d", &fetched, &remote]);
         self.settle_chain(change, &remote)?;
         Ok(remote)
+    }
+
+    /// The fetch [`Repo::remote_chain`] reads `change`'s chain with first; G787: the holder's
+    /// lease comes in the same round trip, pruned (`crate::lease`). G734: a merge starts this
+    /// very call early (`publish::read_ahead`), and a read started early is taken only by a call
+    /// with the same arguments, so both build them here.
+    #[must_use]
+    pub fn chain_fetch(&self, change: &str) -> Vec<String> {
+        let name = crate::change::change_ref(change);
+        [
+            "fetch",
+            "-q",
+            "--prune",
+            "--no-tags",
+            self.remote(),
+            &format!("{name}:{name}"),
+            &crate::lease::refspec_of(change),
+        ]
+        .map(str::to_owned)
+        .to_vec()
     }
 
     /// [`Repo::remote_chain`] for each of `changes`, in one fetch per 200 of them rather than

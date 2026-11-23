@@ -205,9 +205,9 @@ fn read_ahead(repo: &Repo, change: Option<&str>) {
         fetch(format!("{talks}:{talks}")),
         fetch(Repo::registry_refspec()),
     ];
+    // The chain is read as `Repo::remote_chain` reads it, so the chain read takes this one.
     if let Some(change) = change {
-        let name = crate::change::change_ref(change);
-        calls.push(fetch(format!("{name}:{name}")));
+        calls.push(repo.chain_fetch(change));
     }
     repo.git.read_ahead(&calls);
 }

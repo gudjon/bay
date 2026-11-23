@@ -5,8 +5,14 @@
 //! four waves of remote calls, each wave's calls in flight at once. Read from the trace a test
 //! build writes (G171).
 //!
-//! Guard to mutate: in `src/publish.rs` `land`, drop the call of `read_ahead`, and the merge reads
-//! the remote in seven waves.
+//! The chain read early is the one the chain read takes, so the merge fetches its chain once
+//! (a 2026-11-23 measurement: the chain read had gained the lease refspec and `--prune` (G787)
+//! and the read started early had not, so every merge fetched its chain twice, one after the
+//! other, inside the wave tolerance below).
+//!
+//! Guards to mutate: in `src/publish.rs` `land`, drop the call of `read_ahead`, and the merge
+//! reads the remote in seven waves; in `read_ahead`, start the chain fetch with arguments of its
+//! own, and the chain is fetched twice.
 
 // The host hook is a shell script, so this runs on Unix only.
 #![cfg(unix)]
@@ -52,7 +58,7 @@ fn a_merge_reads_the_remote_in_four_waves() {
     let keys = test_box.keys();
     test_box.enroll(&repo, &keys);
     test_box.use_keys(&repo, &keys);
-    let (_, view) = test_box.start_and_edit(&repo);
+    let (id, view) = test_box.start_and_edit(&repo);
 
     // WHEN the change is merged
     let trace = test_box.path().join("merge-trace.jsonl");
@@ -75,4 +81,19 @@ fn a_merge_reads_the_remote_in_four_waves() {
     let text = std::fs::read_to_string(&trace).expect("the trace was written");
     let made = waves(&text);
     assert!((4..=5).contains(&made), "{made} waves: {text}");
+
+    // AND its chain is fetched once: the read started early is the one the chain read takes.
+    let chain = format!("refs/bay/changes/{id}:");
+    let chain_fetches = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|line| line["sub"] == "fetch")
+        .filter(|line| {
+            line["args"].as_array().is_some_and(|args| {
+                args.iter()
+                    .any(|arg| arg.as_str().is_some_and(|arg| arg.starts_with(&chain)))
+            })
+        })
+        .count();
+    assert_eq!(chain_fetches, 1, "{text}");
 }
