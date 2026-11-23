@@ -14,11 +14,8 @@
 
 use crate::support;
 
-use std::time::{Duration, Instant};
-
-use serde_json::{Value, json};
-use support::PRODUCER;
-use support::queued::{Check, Held, OTHER_PRODUCER, finished, host, ran_for};
+use support::queued::{Check, OTHER_PRODUCER, finished, host, ran_for};
+use support::{PRODUCER, wait_lease_names};
 
 const CONFIG: &str =
     "[runner]\nlease_s = 30\nheartbeat_s = 1\nahead = 4\nbatch = { min = 2, max = 4 }\n";
@@ -36,35 +33,6 @@ fn policy() -> String {
         check("code", "src/**"),
         check("notes", "notes/**")
     )
-}
-
-/// Waits until the host's lease of `change` names `members` as what its holder's check covers.
-fn wait_lease_names(held: &Held, change: &str, members: &[String]) {
-    let name = format!(
-        "{}:{}",
-        bay::lease::lease_ref(change),
-        bay::lease::LEASE_FILE
-    );
-    let start = Instant::now();
-    loop {
-        let shown = std::process::Command::new("git")
-            .arg("--git-dir")
-            .arg(&held.remote)
-            .args(["show", &name])
-            .output()
-            .unwrap();
-        if shown.status.success() {
-            let lease: Value = serde_json::from_slice(&shown.stdout).unwrap();
-            if lease["batch"] == json!(members) {
-                return;
-            }
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(60),
-            "the lease of {change} never named {members:?}"
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 #[test]
@@ -89,7 +57,7 @@ fn a_change_clear_of_the_head_but_not_of_its_batch_waits_for_the_batch() {
     let runner_a = held.spawn(&a);
     held.wait_held();
     wait_lease_names(
-        &held,
+        &held.remote,
         &one,
         &[
             format!("{one}.1"),

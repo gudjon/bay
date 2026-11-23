@@ -1112,6 +1112,36 @@ pub fn sweeps_ended(repo: &Path) {
     }
 }
 
+/// Waits until the lease of `change` on the host `remote` names `members` (operation ids, the
+/// head first) as what its holder's check covers (G845).
+pub fn wait_lease_names(remote: &Path, change: &str, members: &[String]) {
+    let name = format!(
+        "{}:{}",
+        bay::lease::lease_ref(change),
+        bay::lease::LEASE_FILE
+    );
+    let start = std::time::Instant::now();
+    loop {
+        let shown = StdCommand::new("git")
+            .arg("--git-dir")
+            .arg(remote)
+            .args(["show", &name])
+            .output()
+            .unwrap();
+        if shown.status.success() {
+            let lease: serde_json::Value = serde_json::from_slice(&shown.stdout).unwrap();
+            if lease["batch"] == serde_json::json!(members) {
+                return;
+            }
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(60),
+            "the lease of {change} never named {members:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// Waits until process `pid` has ended, for at most 120 s: a sweep a read started and left
 /// running (G710, G837) may not hold its lock yet when the read returns, so a test waits for the
 /// process the read names.

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-use support::{TestBox, check_files, passing_result, result_json};
+use support::{TestBox, check_files, passing_result, result_json, wait_lease_names};
 
 /// An executor clone of `remote` named `name`.
 fn executor(test_box: &TestBox, remote: &Path, name: &str) -> PathBuf {
@@ -113,6 +113,9 @@ fn an_unrelated_change_merges_past_a_head_in_its_check() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+    // G867: and its lease names what its check covers, the head alone; until then no change
+    // passes it.
+    wait_lease_names(&remote, &code, &[format!("{code}.1")]);
 
     // WHEN another runner passes while the head's check runs
     let other = executor(&test_box, &remote, "exec-b");

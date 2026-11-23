@@ -14,8 +14,10 @@
 //! this process last pushed, stands for the read of the chain before it, so one landing makes at
 //! most 13 fetches and 5 pushes. G865: a batch's records ride its publishing push too, so a batch
 //! of three makes at most 17 fetches and 7 pushes; a batch whose records go apart (as a refused
-//! push leaves them) still makes at most 20 and 8. Read from the trace a test build writes when
-//! `BAY_TEST_GIT_TRACE` names a file (G171).
+//! push leaves them) still makes at most 20 and 8. G867: a batch's plan reads the chains and
+//! leases of the line as the remote holds them now, so a place another runner took since the
+//! pass fetched reads held: a fetch more a batch, at most 18 and 21. Read from the trace a test
+//! build writes when `BAY_TEST_GIT_TRACE` names a file (G171).
 //!
 //! The heartbeat is longer than a pass, so no beat falls inside one: a beat's presence push comes
 //! once a heartbeat, not once a landing (at `heartbeat_s = 1`, one landing made 10 pushes, 5 of
@@ -105,7 +107,7 @@ fn a_landing_and_a_batch_of_three_make_their_round_trips_once() {
     assert_eq!(ran_for(&ran, &one)["decision"], "merged", "{ran}");
     within(&trace, 13, 5);
 
-    // GIVEN three changes waiting WHEN a pass lands them in one batch THEN 17 fetches and 7
+    // GIVEN three changes waiting WHEN a pass lands them in one batch THEN 18 fetches and 7
     // pushes at most
     let ids: Vec<String> = ["b1", "b2", "b3"]
         .into_iter()
@@ -115,10 +117,10 @@ fn a_landing_and_a_batch_of_three_make_their_round_trips_once() {
     for id in &ids {
         assert_eq!(ran_for(&ran, id)["decision"], "merged", "{ran}");
     }
-    within(&trace, 17, 7);
+    within(&trace, 18, 7);
 
     // GIVEN three more WHEN a pass lands them in one batch whose records go apart from its
-    // publishing push THEN 20 fetches and 8 pushes at most
+    // publishing push THEN 21 fetches and 8 pushes at most
     let ids: Vec<String> = ["c1", "c2", "c3"]
         .into_iter()
         .map(|name| held.queue(name, "src"))
@@ -127,5 +129,5 @@ fn a_landing_and_a_batch_of_three_make_their_round_trips_once() {
     for id in &ids {
         assert_eq!(ran_for(&ran, id)["decision"], "merged", "{ran}");
     }
-    within(&trace, 20, 8);
+    within(&trace, 21, 8);
 }
