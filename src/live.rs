@@ -17,12 +17,21 @@
 //! The machine name is repository-local `git config bay.machine` (install writes it), by default
 //! the host name folded to `[a-z0-9-]{1,32}`, and is an operator name (§ 10a).
 //!
-//! A hook event never pushes and never waits: it starts one detached `bay live push` unless one
-//! is running. The pusher holds a lock file for its whole life, pushes, waits one heartbeat
-//! (`[runner] heartbeat_s`) and pushes again while session records changed in the meantime,
-//! so a burst of events ends with its latest state published, pushes stay one per heartbeat,
-//! and two pushers never overwrite a newer summary with an older one. Its last outcome is kept
-//! in `<git-common-dir>/bay/live-push.json`, which `bay doctor` shows when it failed.
+//! A hook event never pushes and never waits: it starts one detached `bay live push --paced`
+//! unless one is running. The pusher holds a lock file for its whole life and looks at the
+//! session records once a heartbeat (`[runner] heartbeat_s`), so pushes stay one per heartbeat
+//! and two pushers never overwrite a newer summary with an older one. G876 (a measurement,
+//! 2026-11-23: a machine of 14 sessions pushed its summary about 190 times an hour, at about
+//! 8 s a push, while what a reader decides on changed about 30 times an hour): it pushes at once
+//! only when the summary out no longer says what a reader decides on ([`due`]): which session
+//! holds which change for which actor, or a row that would read as older than the takeover
+//! window while its session is newer. A change only in a row's time, state, event, wait or
+//! context waits for the keep-alive ([`keep_alive`], a sixth of the takeover window), so the
+//! summary out is never more than that behind its records, and a burst of events still ends with
+//! its latest state published. The pusher ends when the summary out says what the records say;
+//! one that ends after [`MAX_ROUNDS`] pushes with the summary out of date starts a successor.
+//! Its last outcome is kept in `<git-common-dir>/bay/live-push.json`, which `bay doctor` shows
+//! when it failed, and from which a successor reads the summary out.
 //!
 //! G314: the summary also carries `doctor`, this machine's last `bay doctor` verdict
 //! ([`DOCTOR_FIELDS`]): doctor writes and pushes the summary with it ([`publish_doctor`]), and
@@ -504,18 +513,6 @@ pub fn acquire(lock: &Path, stale: Duration) -> bool {
     create()
 }
 
-/// Whether a session record changed at or after `since`.
-fn changed_since(repo: &Repo, since: SystemTime) -> bool {
-    std::fs::read_dir(sessions_dir(repo)).is_ok_and(|entries| {
-        entries.filter_map(Result::ok).any(|entry| {
-            entry
-                .metadata()
-                .and_then(|meta| meta.modified())
-                .is_ok_and(|at| at >= since)
-        })
-    })
-}
-
 /// The outcome of this repository's last live push, as the pusher kept it.
 #[must_use]
 pub fn last_push(common_dir: &Path) -> Option<Value> {
@@ -535,12 +532,136 @@ fn keep_outcome(repo: &Repo, outcome: &Result<Value, String>) {
     }
 }
 
-/// `bay live push`: writes the summary and pushes it, replacing the remote's live ref of this
-/// machine (the hook accepts it only from the ref's bound key). One pusher runs at a time: it
-/// pushes again, one heartbeat later, while the session records keep changing, up to
-/// [`MAX_ROUNDS`] pushes.
+/// G876: the longest the summary out may stand while its rows change only in what no reader
+/// decides on (a row's time, state, event, wait or context): a sixth of the takeover window, and
+/// never less than one heartbeat. A reader ages a row by its time against the takeover window,
+/// so a summary this far behind its records still says which sessions hold which changes.
 #[must_use]
-pub fn push(dir: &Path) -> BayResult {
+pub fn keep_alive(repo: &Repo) -> u64 {
+    (repo.config.takeover().as_secs() / 6)
+        .max(repo.config.heartbeat().as_secs())
+        .max(1)
+}
+
+/// The summary out: the rows it carries and the Unix time it was written.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Published {
+    pub rows: Vec<Value>,
+    pub at: u64,
+}
+
+/// The summary live commit `commit` carries, as [`Published`]; `None` when it carries none.
+fn published_at(git: &Git, commit: &str) -> Option<Published> {
+    let summary = summary_at(git, commit).ok().flatten()?;
+    Some(Published {
+        rows: summary["sessions"].as_array().cloned().unwrap_or_default(),
+        at: unix_at(&summary)?,
+    })
+}
+
+/// The summary this machine last pushed, from the outcome the pusher kept; `None` when the last
+/// push failed or none is kept.
+fn published_of(repo: &Repo) -> Option<Published> {
+    let last = last_push(&repo.common_dir)?;
+    if last["ok"] != true {
+        return None;
+    }
+    published_at(&repo.git, last["detail"]["commit"].as_str()?)
+}
+
+/// What a pusher does next with the summary out ([`due`]).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Due {
+    /// The summary out carries every row as the records say it now: nothing to push.
+    UpToDate,
+    /// Only what no reader decides on changed, and the summary out is younger than the
+    /// keep-alive: look again one heartbeat later.
+    Wait,
+    /// Push now, for the reason named.
+    Now(&'static str),
+}
+
+/// G876: whether `published`, the summary out, still says what a reader decides on, against
+/// `current`, the rows a summary written `now` carries ([`rows_of`]). Each reader ages a row by
+/// its own time against `window` (the takeover window), so a row both leave out by age changes
+/// nothing. A push is due now when:
+/// - `holders`: a session holds another change or actor than the summary out says, starts, or
+///   ends (`other_session_of`, [`names_change`] and the host's heartbeat check read these);
+/// - `expiring`: a row of the summary out would read as older than `window` before the
+///   keep-alive, while its session's record is newer (a session back from a long wait);
+/// - `keep_alive`: anything else changed and the summary out is `keep_alive` seconds old;
+/// - `first`: there is no summary out and there are rows to publish.
+#[must_use]
+pub fn due(
+    published: Option<&Published>,
+    current: &[Value],
+    now: u64,
+    window: u64,
+    keep_alive: u64,
+) -> Due {
+    let fresh = |row: &&Value| unix_at(row).is_some_and(|at| now.saturating_sub(at) < window);
+    let Some(published) = published else {
+        return if current.is_empty() {
+            Due::UpToDate
+        } else {
+            Due::Now("first")
+        };
+    };
+    let out: Vec<&Value> = published.rows.iter().filter(fresh).collect();
+    if out.len() == current.len() && out.iter().zip(current).all(|(was, is)| *was == is) {
+        return Due::UpToDate;
+    }
+    let by_session = |rows: Vec<&'_ Value>| -> std::collections::BTreeMap<String, Value> {
+        rows.into_iter()
+            .filter_map(|row| Some((row["session"].as_str()?.to_owned(), row.clone())))
+            .collect()
+    };
+    let (out, now_rows) = (by_session(out), by_session(current.iter().collect()));
+    let holds = |row: &Value| (row["actor"]["name"].clone(), row["change"].clone());
+    if out.len() != now_rows.len()
+        || out
+            .iter()
+            .zip(&now_rows)
+            .any(|((was, was_row), (is, is_row))| was != is || holds(was_row) != holds(is_row))
+    {
+        return Due::Now("holders");
+    }
+    let expiring = now_rows.iter().any(|(session, row)| {
+        let (Some(at), Some(was)) = (unix_at(row), out.get(session).and_then(unix_at)) else {
+            return false;
+        };
+        at > was && now.saturating_sub(was).saturating_add(keep_alive) >= window
+    });
+    if expiring {
+        return Due::Now("expiring");
+    }
+    if now.saturating_sub(published.at) >= keep_alive {
+        return Due::Now("keep_alive");
+    }
+    Due::Wait
+}
+
+/// The rows a summary written `now` would carry.
+fn current_rows(repo: &Repo, now: u64, window: u64) -> Vec<Value> {
+    rows_of(lines(repo).unwrap_or_default(), now, window)
+}
+
+/// Marks the lock file at `lock` as made now: a pusher that waits for its keep-alive is never
+/// taken for a dead one.
+fn touch(lock: &Path) {
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .open(lock)
+        .and_then(|file| file.set_modified(SystemTime::now()));
+}
+
+/// `bay live push`: writes the summary and pushes it, replacing the remote's live ref of this
+/// machine (the hook accepts it only from the ref's bound key). One pusher runs at a time. It
+/// looks at the session records once a heartbeat and pushes when [`due`] says so, until the
+/// summary out says what the records say, or [`MAX_ROUNDS`] pushes. Unless `paced` (the hook
+/// starts it so) its first push is at once.
+#[must_use]
+pub fn push(dir: &Path, paced: bool) -> BayResult {
     let repo = match Repo::open(dir) {
         Ok(repo) => repo,
         Err(why) => return BayResult::failed(why),
@@ -549,34 +670,85 @@ pub fn push(dir: &Path) -> BayResult {
     if std::fs::create_dir_all(bay_dir(&repo)).is_err() || !acquire(&lock, stale) {
         return BayResult::ok(json!({"pushed": false, "why": "another live push is running"}));
     }
-    let mut rounds = 0;
+    let window = repo.config.takeover().as_secs();
+    let keep_alive = keep_alive(&repo);
+    let mut published = published_of(&repo);
+    let mut asked = !paced;
+    let mut pushes = 0;
+    let mut detail = json!({"pushed": false, "why": "up to date"});
     loop {
-        let began = SystemTime::now();
-        let outcome = push_once(&repo);
-        keep_outcome(&repo, &outcome);
-        rounds += 1;
-        let detail = match outcome {
-            Ok(detail) => detail,
-            Err(why) => {
-                let _ = std::fs::remove_file(&lock);
-                return BayResult::failed(why);
-            }
+        touch(&lock);
+        let now = unix_now();
+        let why = if std::mem::take(&mut asked) {
+            Due::Now("asked")
+        } else {
+            due(
+                published.as_ref(),
+                &current_rows(&repo, now, window),
+                now,
+                window,
+                keep_alive,
+            )
         };
+        match why {
+            Due::UpToDate => break,
+            Due::Wait => {}
+            Due::Now(why) => {
+                let outcome = push_once(&repo).map(|mut done| {
+                    done["why"] = json!(why);
+                    done
+                });
+                keep_outcome(&repo, &outcome);
+                match outcome {
+                    Ok(done) => detail = done,
+                    Err(why) => {
+                        let _ = std::fs::remove_file(&lock);
+                        return BayResult::failed(why);
+                    }
+                }
+                let Some(commit) = detail["commit"].as_str() else {
+                    // No session records and no doctor verdict: nothing to publish.
+                    break;
+                };
+                published = published_at(&repo.git, commit);
+                pushes += 1;
+                if pushes >= MAX_ROUNDS {
+                    break;
+                }
+            }
+        }
         std::thread::sleep(repo.config.heartbeat());
-        if rounds < MAX_ROUNDS && changed_since(&repo, began) {
-            continue;
-        }
-        let _ = std::fs::remove_file(&lock);
-        // An event between the last look and the release found the lock held and started no
-        // pusher: look once more.
-        if rounds < MAX_ROUNDS && changed_since(&repo, began) && acquire(&lock, stale) {
-            continue;
-        }
-        return BayResult::ok(detail);
+    }
+    let _ = std::fs::remove_file(&lock);
+    // An event while this pusher held the lock started no other: a summary out that no longer
+    // says what the records say gets a successor, so no change is left unpublished.
+    let now = unix_now();
+    let current = current_rows(&repo, now, window);
+    if due(published.as_ref(), &current, now, window, keep_alive) != Due::UpToDate {
+        start_pusher(dir);
+    }
+    BayResult::ok(detail)
+}
+
+/// Starts one detached paced `bay live push` in `cwd`. Never waits.
+fn start_pusher(cwd: &Path) {
+    let Some(bay) = crate::update::own_binary() else {
+        return;
+    };
+    let mut cmd = Command::new(bay);
+    cmd.arg("-C")
+        .arg(cwd)
+        .args(["--json", "live", "push", "--paced"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    crate::platform::detach(&mut cmd);
+    if let Ok(child) = cmd.spawn() {
+        crate::platform::reap(child);
     }
 }
 
-/// After a hook event: starts one detached `bay live push` unless one is running. Never fails
+/// After a hook event: starts one detached paced `bay live push` unless one is running. Never fails
 /// the hook, never waits, and never touches the network itself.
 pub fn after_event(dir: &Path, input: &str) {
     let payload: Value = serde_json::from_str(input).unwrap_or(Value::Null);
@@ -592,20 +764,7 @@ pub fn after_event(dir: &Path, input: &str) {
     if lock_is_held(&lock, stale) {
         return;
     }
-    let Some(bay) = crate::update::own_binary() else {
-        return;
-    };
-    let mut cmd = Command::new(bay);
-    cmd.arg("-C")
-        .arg(&cwd)
-        .args(["--json", "live", "push"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    crate::platform::detach(&mut cmd);
-    if let Ok(child) = cmd.spawn() {
-        crate::platform::reap(child);
-    }
+    start_pusher(&cwd);
 }
 
 /// Whether `summary` holds a fresh row of `change` by `actor`: a row naming both whose own time
@@ -906,7 +1065,7 @@ pub fn tips(git: &Git) -> Result<std::collections::BTreeMap<String, String>, Str
 
 #[cfg(test)]
 mod tests {
-    use super::{fold, names_change, rows_of};
+    use super::{Due, Published, due, fold, names_change, rows_of};
     use serde_json::json;
 
     #[test]
@@ -998,5 +1157,94 @@ mod tests {
             30
         ));
         assert!(!names_change(&summary("now", "a"), "c1", "a", 30));
+    }
+
+    /// A summary row of `session` holding `change`, written at Unix time `at` in `state`.
+    fn row(session: &str, change: &str, at: u64, state: &str) -> serde_json::Value {
+        json!({"session": session, "actor": {"name": "a", "session": session}, "change": change,
+            "state": state, "at": crate::clock::rfc3339_of(at)})
+    }
+
+    #[test]
+    fn a_summary_out_is_pushed_at_once_only_for_what_a_reader_decides_on() {
+        // G876: the takeover window is 900 s and the keep-alive 150 s; the summary out was
+        // written at `base` with two sessions working.
+        let base = crate::clock::unix_of("2026-11-23T20:00:00Z").unwrap();
+        let out = Published {
+            rows: vec![
+                row("s1", "c1", base, "working"),
+                row("s2", "c2", base, "working"),
+            ],
+            at: base,
+        };
+        let at = |now: u64, current: &[serde_json::Value]| due(Some(&out), current, now, 900, 150);
+        // The records say what the summary out says.
+        assert_eq!(at(base + 5, &out.rows), Due::UpToDate);
+        // A session only went idle later: no reader decides on that before the keep-alive.
+        let idle = [
+            row("s1", "c1", base + 4, "idle"),
+            row("s2", "c2", base, "working"),
+        ];
+        assert_eq!(at(base + 5, &idle), Due::Wait);
+        assert_eq!(at(base + 149, &idle), Due::Wait);
+        assert_eq!(at(base + 150, &idle), Due::Now("keep_alive"));
+        // A session holds another change, starts, or ends: at once.
+        let moved = [
+            row("s1", "c3", base + 4, "working"),
+            row("s2", "c2", base, "working"),
+        ];
+        assert_eq!(at(base + 5, &moved), Due::Now("holders"));
+        let mut started = out.rows.clone();
+        started.push(row("s3", "c4", base + 4, "working"));
+        assert_eq!(at(base + 5, &started), Due::Now("holders"));
+        let ended = [row("s2", "c2", base, "working")];
+        assert_eq!(at(base + 5, &ended), Due::Now("holders"));
+        // Another actor of the same session and change: at once.
+        let mut other = idle.clone();
+        other[0]["actor"]["name"] = json!("b");
+        assert_eq!(at(base + 5, &other), Due::Now("holders"));
+    }
+
+    #[test]
+    fn a_row_about_to_read_as_stale_is_pushed_at_once_when_its_session_is_back() {
+        // G876: s1's row in the summary out is 800 s old; with a keep-alive of 150 s it would
+        // read as older than the 900 s window before the keep-alive pushes its newer time.
+        let base = crate::clock::unix_of("2026-11-23T20:00:00Z").unwrap();
+        let out = Published {
+            rows: vec![
+                row("s1", "c1", base, "idle"),
+                row("s2", "c2", base + 790, "working"),
+            ],
+            at: base + 795,
+        };
+        let back = [
+            row("s1", "c1", base + 799, "working"),
+            row("s2", "c2", base + 790, "working"),
+        ];
+        assert_eq!(
+            due(Some(&out), &back, base + 800, 900, 150),
+            Due::Now("expiring")
+        );
+        // A row both leave out by its age changes nothing a reader sees.
+        let aged = [row("s2", "c2", base + 790, "working")];
+        assert_eq!(due(Some(&out), &aged, base + 900, 900, 150), Due::UpToDate);
+    }
+
+    #[test]
+    fn with_no_summary_out_only_rows_are_pushed() {
+        let base = crate::clock::unix_of("2026-11-23T20:00:00Z").unwrap();
+        assert_eq!(due(None, &[], base, 900, 150), Due::UpToDate);
+        let rows = [row("s1", "c1", base, "working")];
+        assert_eq!(due(None, &rows, base, 900, 150), Due::Now("first"));
+        // An empty summary out says what no records say.
+        let empty = Published {
+            rows: vec![],
+            at: base,
+        };
+        assert_eq!(due(Some(&empty), &[], base + 1000, 900, 150), Due::UpToDate);
+        assert_eq!(
+            due(Some(&empty), &rows, base + 1, 900, 150),
+            Due::Now("holders")
+        );
     }
 }

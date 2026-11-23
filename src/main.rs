@@ -524,7 +524,12 @@ struct HostArgs {
 #[derive(Subcommand)]
 enum LiveAction {
     /// Write this machine's summary of its sessions and push refs/bay/live/<machine>
-    Push,
+    Push {
+        /// Push only when the summary out no longer says what a reader decides on, or at its
+        /// keep-alive (the agent hook starts it so)
+        #[arg(long)]
+        paced: bool,
+    },
     /// Checkpoint a change's view and push its chain (started by the agent hook at a session's
     /// end and on its idle timer)
     Checkpoint { change: String },
@@ -1160,7 +1165,7 @@ fn plugin(dir: &std::path::Path, action: PluginAction) -> BayResult {
 /// The hidden `bay live` commands a hook starts: push the live summary, or checkpoint a draft.
 fn live(dir: &std::path::Path, action: LiveAction) -> BayResult {
     match action {
-        LiveAction::Push => bay::live::push(dir),
+        LiveAction::Push { paced } => bay::live::push(dir, paced),
         LiveAction::Checkpoint { change } => bay::start::checkpoint(dir, &change),
         LiveAction::Poll {
             talks,
