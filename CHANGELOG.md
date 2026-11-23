@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.145
+
+- A landing whose chain its landing runner left checked is recorded on its chain, and runners stop visiting it.
+
 ## 0.6.144
 
 - A change whose place a check with no clear answer released keeps its turn when it takes a place again.
