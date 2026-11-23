@@ -885,12 +885,17 @@ pub fn session_start(dir: &Path, input: &str) -> String {
     out
 }
 
-/// G651 (a fleet finding, 2026-11-04: a new session oriented itself with some thirty lines of raw
-/// Git, read its talks from their refs and never ran `bay status`): what a session outside any
-/// view hears first in a repository that merges with bay, and who it acts as. A session that
-/// falls back to the user name is told, as work under that name reads as no one's in particular.
-/// Empty where main holds no policy: bay is not how that repository merges.
+/// G651, G870: what a session outside any view hears first in a repository that merges with
+/// bay. A session whose actor falls back to the user name is told so, as work under that name
+/// reads as no one's in particular. A named session hears nothing here: what needs its actor
+/// reaches it without a read, its open refusals in [`session_start`] and its talks and outcomes
+/// as notices at its next step (G870: the line that sent every session to `bay status` was read
+/// again in every later call of every session, whether or not anything waited). Empty where main
+/// holds no policy: bay is not how that repository merges.
 fn orientation(repo: &Repo, actor: &str) -> String {
+    if crate::change::actor_source() == crate::change::ActorSource::Env {
+        return String::new();
+    }
     let policy = format!(
         "{}:{}",
         repo.trunk_tracking_ref(),
@@ -899,13 +904,10 @@ fn orientation(repo: &Repo, actor: &str) -> String {
     if repo.git.run(&["cat-file", "-e", &policy]).is_err() {
         return String::new();
     }
-    let named = crate::change::actor_source() == crate::change::ActorSource::Env;
-    let who = if named {
-        format!("you act as {actor}")
-    } else {
-        format!("you act as {actor}, the user name, as BAY_ACTOR is not set")
-    };
-    format!("bay: {who}. Run `bay status` first: it says what needs you.\n")
+    format!(
+        "bay: you act as {actor}, the user name, as BAY_ACTOR is not set: set it to the name \
+         your changes should carry.\n"
+    )
 }
 
 /// The most characters of an overlap line.

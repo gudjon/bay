@@ -462,11 +462,12 @@ fn an_undo_whose_effect_is_already_gone_opens_no_change() {
     assert_eq!(refs(&test_box, &remote, "refs/bay/intent/"), claims);
 }
 
-// G651: outside a view, a session hears to run `bay status` and who it acts as. Guards to mutate,
-// in `src/session.rs`: drop `orientation` (these cases hear nothing); drop its policy test (the
-// last case hears a line); drop `named` (the first case reads as the user name).
+// G651, G870: outside a view, a named session with nothing to act on hears nothing, and one that
+// falls back to the user name hears that BAY_ACTOR is not set. Guards to mutate, in
+// `src/session.rs`: drop `orientation` (the second case hears nothing); drop its policy test (the
+// last test hears a line); drop the named early return (the first case hears a line).
 #[test]
-fn a_session_outside_a_view_hears_to_run_status_and_who_it_acts_as() {
+fn a_named_session_outside_a_view_hears_nothing_and_an_unnamed_one_hears_who_it_acts_as() {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     test_box.seed_with_check(
@@ -477,14 +478,12 @@ fn a_session_outside_a_view_hears_to_run_status_and_who_it_acts_as() {
 
     let (code, named) = session_start_as(&test_box, &repo, "s-named", Some("a-seat"));
     assert_eq!(code, Some(0), "{named}");
-    assert!(
-        named.contains("you act as a-seat. Run `bay status` first"),
-        "{named}"
-    );
+    assert_eq!(named, "", "{named}");
 
     let (code, unnamed) = session_start_as(&test_box, &repo, "s-unnamed", Some(""));
     assert_eq!(code, Some(0), "{unnamed}");
     assert!(unnamed.contains("BAY_ACTOR is not set"), "{unnamed}");
+    assert!(!unnamed.contains("bay status"), "{unnamed}");
 }
 
 #[test]
