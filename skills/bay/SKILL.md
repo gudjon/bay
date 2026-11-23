@@ -64,6 +64,7 @@ notes on views, overlaps and questions: read `commands.md` in this skill when yo
 
 - **Wait without polling.** To hear when a change merges, run `bay merge <change> --wait` as a background task
   (it does not submit it again, and you are woken when it returns), or let `[plugin.wake]` wake the session.
+  A script that runs shell commands starts that wait without awaiting it and ends: its later output wakes you.
   Never read `bay status` again and again: each read is a turn, and one that finds nothing new says so.
 - **What needs you comes to you.** An open refusal of your change is in the session's first lines, and a
   talk or an outcome comes as a `bay:` line at your next step. A session that hears no `bay:` line has
