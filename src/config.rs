@@ -430,6 +430,29 @@ pub struct Executor {
     /// its own work directory. Default 1, one after another; at most
     /// [`crate::check::MAX_PARALLEL_CHECKS`].
     pub parallel_checks: Option<usize>,
+    /// G878: the author of the commits bay makes on main, `"Name <email>"`, for a host that takes
+    /// a commit only from an author it knows. A draft a person wrote keeps its own author, and the
+    /// committer stays bay's, since a signed landing is checked by its committer. Absent, bay's own.
+    pub author: Option<String>,
+}
+
+/// `"Name <email>"` (G878) as its name and email, or `None` when it is not that shape: a name
+/// Git keeps (not only spaces and punctuation Git strips) and an email, with no `<`, `>` or line
+/// break in either.
+fn split_author(text: &str) -> Option<(&str, &str)> {
+    let (name, email) = text.strip_suffix('>')?.rsplit_once(" <")?;
+    let name = name.trim();
+    let broken = |part: &str| part.contains(['<', '>', '\n', '\r', '\0']);
+    let kept = name.chars().any(|c| c > ' ' && !".,:;\"\\'".contains(c));
+    if !kept
+        || broken(name)
+        || email.is_empty()
+        || email.contains(char::is_whitespace)
+        || broken(email)
+    {
+        return None;
+    }
+    Some((name, email))
 }
 
 /// `[runner] batch` (`crate::throughput`): at least `min` members (default 1; a batch always
@@ -668,6 +691,16 @@ impl Config {
                 "[runner] parallel_checks = {parallel}: 1 to {} of a candidate's checks run at \
                  once",
                 crate::check::MAX_PARALLEL_CHECKS
+            ));
+        }
+        if let Some(author) = config
+            .executor
+            .as_ref()
+            .and_then(|executor| executor.author.as_deref())
+            .filter(|author| split_author(author).is_none())
+        {
+            return Err(format!(
+                "[runner] author = {author:?}: the author is \"Name <email>\", a name and an email"
             ));
         }
         // § 4: the takeover window is longer than the executor lease.
@@ -1173,6 +1206,16 @@ impl Config {
             .as_ref()
             .and_then(|executor| executor.parallel_checks)
             .unwrap_or(1)
+    }
+
+    /// `[runner] author` (G878): the name and email that author the commits bay makes on main.
+    /// `None`, the default, keeps bay's own.
+    #[must_use]
+    pub fn merge_author(&self) -> Option<(&str, &str)> {
+        self.executor
+            .as_ref()
+            .and_then(|executor| executor.author.as_deref())
+            .and_then(split_author)
     }
 
     /// `[runner] ahead` (NEW-2, `crate::throughput`): how many entries behind the queue's
@@ -1690,6 +1733,33 @@ product = "claude"                 # leave this table out when the box does not 
             assert!(error.contains("parallel_checks"), "{error}");
         }
         assert!(Config::parse("[runner]\nparallel_checks = 16\n").is_ok());
+    }
+
+    /// G878: `[runner] author` is read as its name and email, and any other shape fails the
+    /// config load, naming the key.
+    #[test]
+    fn a_merge_author_is_a_name_and_an_email() {
+        assert_eq!(Config::default().merge_author(), None);
+        let on = Config::parse("[runner]\nauthor = \"Deploy Bot <deploy@example.com>\"\n").unwrap();
+        assert_eq!(
+            on.merge_author(),
+            Some(("Deploy Bot", "deploy@example.com"))
+        );
+        for bad in [
+            "",
+            "Deploy Bot",
+            "<deploy@example.com>",
+            " . <deploy@example.com>",
+            "Deploy Bot <>",
+            "Deploy Bot <deploy@example.com",
+            "Deploy Bot <deploy@example.com> ",
+            "Deploy <Bot> <deploy@example.com>",
+            "Deploy Bot <deploy @example.com>",
+            "Deploy\\nBot <deploy@example.com>",
+        ] {
+            let error = Config::parse(&format!("[runner]\nauthor = \"{bad}\"\n")).unwrap_err();
+            assert!(error.contains("[runner] author"), "{bad:?}: {error}");
+        }
     }
 
     /// `crate::throughput`: every lever is off by default, in its bounds, and turns exact-inputs

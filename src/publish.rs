@@ -10760,6 +10760,10 @@ fn commit_candidate(
             ("GIT_AUTHOR_EMAIL", email.as_str()),
             ("GIT_AUTHOR_DATE", date.as_str()),
         ]);
+    } else if let Some((who, address)) = ctx.repo.config.merge_author() {
+        // G878: `[runner] author` writes bay's own commits on main; the committer stays bay's.
+        envs.retain(|(key, _)| !matches!(*key, "GIT_AUTHOR_NAME" | "GIT_AUTHOR_EMAIL"));
+        envs.extend([("GIT_AUTHOR_NAME", who), ("GIT_AUTHOR_EMAIL", address)]);
     }
     git.run_with(&args, &envs, None)
         .map_err(|error| error.message())

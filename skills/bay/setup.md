@@ -148,6 +148,9 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
    A `dev → staging → production` repository serves `dev` (the remote's default branch), with
    `[[target]] name = "staging"` (from main) and `[[target]] name = "production"` with `from = "staging"`:
    changes merge into `dev`, and `bay status` names each target's promotable commit.
+   A host that deploys main only from an author it knows gets `[runner] author = "Name <email>"`:
+   that author writes the commits bay makes on main, a person's own commits keep theirs, and bay
+   stays the committer.
    A key a newer bay brought is a config error on an older bay, naming the key: run `bay update` there.
 2. `.bay/policy.toml` lists the required checks. Each `[[check]]` needs `expected_minimum`. A
    repository that wants no checks says `unchecked = true`. A check with `when_paths` runs only
