@@ -179,6 +179,9 @@ pub struct Queued {
     pub fails_on: Vec<String>,
     /// G861: what its newest screen found ([`screened`]).
     pub screen: Option<bool>,
+    /// G867: the runner that runs the operation now (`Running` or `Checked`, and not waiting for
+    /// a worker), as its chain here names it.
+    pub holder: Option<String>,
 }
 
 impl Queued {
@@ -221,6 +224,9 @@ impl Queued {
                 .map(|precheck| precheck.base_tree.clone())
                 .collect(),
             screen: screened(&op.prechecks),
+            holder: op.owner.clone().filter(|_| {
+                matches!(op.state, OpState::Running | OpState::Checked) && op.unavailable.is_none()
+            }),
         })
     }
 }
@@ -1502,6 +1508,7 @@ mod tests {
             checked: None,
             fails_on,
             screen: None,
+            holder: None,
         }
     }
 

@@ -1636,7 +1636,14 @@ impl Parked {
                         main,
                         repairs,
                     },
-                    until: Instant::now() + STAND_KEPT,
+                    // G867: a wait on a held head whose lease names no batch yet holds until
+                    // the holder's next beat, which names it.
+                    until: Instant::now()
+                        + if row["detail"]["batch_unnamed"] == true {
+                            repo.config.heartbeat()
+                        } else {
+                            STAND_KEPT
+                        },
                 })
         } else if let Some((environments, until)) = left {
             Under::line(repo, true).map(|(head, main)| Stand {

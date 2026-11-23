@@ -939,6 +939,9 @@ struct Ctx<'a> {
     /// G861: this visit's last check ahead of its turn gave way to a head nobody runs
     /// ([`HeadWatch`]): it is no verdict, and nothing of it is recorded.
     yielded: std::cell::Cell<bool>,
+    /// G867: this visit's queue gate found a place ahead that another runner holds, whose lease
+    /// names no batch yet ([`batch_behind`]): its wait ends at that runner's next beat.
+    batch_unnamed: std::cell::Cell<bool>,
 }
 
 /// G796: main moved past the base of a candidate while its checks ran.
@@ -1007,6 +1010,7 @@ impl<'a> Ctx<'a> {
             stopped: std::cell::RefCell::new(None),
             stopped_trees: Vec::new(),
             yielded: std::cell::Cell::new(false),
+            batch_unnamed: std::cell::Cell::new(false),
         })
     }
 
@@ -2627,6 +2631,7 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     if let Some(report) = claim(ctx, op_id, &revision, &trunk)? {
         return Ok(report);
     }
+    kill_point("after-claim");
     let trunk = trunk_after_claim(ctx, trunk);
     // G173: whatever the outcome, the operation's anchor goes with it.
     let repo = ctx.repo;
@@ -3255,6 +3260,56 @@ fn pass_over_passing(
     Ok(passed)
 }
 
+/// G867 (a fleet finding, 2026-11-23: a runner took a code change from its own place 18 s after
+/// another runner claimed a notes head; the head's batch took that change in, checked for about
+/// 1,280 s, and was cut when the change landed, about 21 minutes more for the head): a place
+/// another runner holds lands from its own place past this head, so it joins no batch of it;
+/// its claim would fail after the batch's check. Nor does a member whose check reads what such a
+/// place changes, unless the head's check reads it too: that landing would stop the batch's
+/// check. Returns the places passed over: those held, then those whose check reads them.
+fn pass_over_held(
+    ctx: &Ctx,
+    policy: &policy::Policy,
+    trunk: &str,
+    head: &throughput::Queued,
+    behind: &mut [throughput::Queued],
+) -> Result<(Vec<u64>, Vec<u64>), String> {
+    let git = &ctx.repo.git;
+    let me = ctx.executor_name();
+    let mut taken = Vec::new();
+    let mut theirs = Vec::new();
+    let mut unknown = false;
+    for queued in behind.iter_mut() {
+        if !queued.live || queued.holder.as_ref().is_none_or(|holder| *holder == me) {
+            continue;
+        }
+        queued.batchable = false;
+        taken.push(queued.seq);
+        match own_paths(git, trunk, &queued.revision)? {
+            Some(paths) => theirs.extend(paths),
+            None => unknown = true,
+        }
+    }
+    // A held place of unknown paths reads as changing everything, which the head reads too.
+    if taken.is_empty()
+        || unknown
+        || !reads_none_of(git, policy, trunk, [head.revision.as_str()], &theirs)?
+    {
+        return Ok((taken, Vec::new()));
+    }
+    let mut readers = Vec::new();
+    for queued in behind.iter_mut() {
+        if queued.live
+            && queued.batchable
+            && !reads_none_of(git, policy, trunk, [queued.revision.as_str()], &theirs)?
+        {
+            queued.batchable = false;
+            readers.push(queued.seq);
+        }
+    }
+    Ok((taken, readers))
+}
+
 /// G852 (a fleet finding, 2026-11-22: a code change was passed over as one that passes a head on
 /// notes, and the head's batch then took in three code changes from behind it; the batch's code
 /// check read it, so it could not pass that batch (G846), and it waited the whole batch out and
@@ -3340,9 +3395,16 @@ fn batch_plan(
         checked: None,
         fails_on: Vec::new(),
         screen: throughput::screened(&ctx.op(op_id).prechecks),
+        holder: Some(ctx.executor_name()),
     };
     let waiting = queue.behind(at);
-    let (mut behind, unread) = read_line_fetched(repo, &waiting);
+    // G867: the chains and leases as the remote holds them now, so a place another runner took
+    // since this pass fetched them reads held. One fetch for the whole line (G788 fetched only
+    // the places this store could not read).
+    let chains: Vec<String> = waiting.iter().map(|entry| entry.change.clone()).collect();
+    let _ = repo.remote_chains(&chains);
+    let (mut behind, unread) = throughput::read_line(git, waiting.iter().copied());
+    let elsewhere = pass_over_held(ctx, &policy, trunk, &head, &mut behind)?;
     let mut passers = pass_over_passing(ctx, &queue, trunk, &mut behind)?;
     let by_lane = repo.config.footprint_lanes();
     let size = batch_size(git, &queue, &policy, bounds.max);
@@ -3380,7 +3442,7 @@ fn batch_plan(
     }
     // R7: one journal line per batch decision, naming why the batch ended, and each place passed
     // over.
-    let passed_over = passed_over_note(&unread, &behind, &passers);
+    let passed_over = passed_over_note(&unread, &behind, &passers, &elsewhere);
     // G588: and the change the batch ended at, when one entry ended it.
     let at_change = stopped_at
         .as_deref()
@@ -3411,11 +3473,13 @@ fn batch_plan(
 }
 
 /// The batch line's note of the places passed over: G581, each whose operation does not read
-/// here; G852, each of `passers` that lands from its own place past the head.
+/// here; G852, each of `passers` that lands from its own place past the head; G867, each of
+/// `held` ([`pass_over_held`]): another runner holds it, or its check reads what one changes.
 fn passed_over_note(
     unread: &[&crate::queue::Entry],
     behind: &[throughput::Queued],
     passers: &[u64],
+    held: &(Vec<u64>, Vec<u64>),
 ) -> String {
     let mut note = Vec::new();
     if !unread.is_empty() {
@@ -3435,6 +3499,19 @@ fn passed_over_note(
             "; passed over, lands from its own place: {}",
             passing.join(", ")
         ));
+    }
+    for (places, why) in [
+        (&held.0, "another runner holds it"),
+        (&held.1, "its check reads what a held place changes"),
+    ] {
+        let changes: Vec<&str> = behind
+            .iter()
+            .filter(|queued| places.contains(&queued.seq))
+            .map(|queued| queued.change.as_str())
+            .collect();
+        if !changes.is_empty() {
+            note.push(format!("; passed over, {why}: {}", changes.join(", ")));
+        }
     }
     note.concat()
 }
@@ -4953,6 +5030,7 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     // main moved under a running repair: it keeps its place until that repair leaves the line.
     // A repair with no place yet takes one and runs from it in this visit, never a pass later.
     let repairs = repairs_red(ctx, trunk)?;
+    ctx.batch_unnamed.set(false);
     if repairs && queue.of(op_id).is_none() {
         crate::queue::join(ctx.repo, signer.as_ref(), op_id, &ctx.id)?;
         queue = crate::queue::Queue::read(ctx.repo)?;
@@ -4963,14 +5041,44 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
                 && !main_moved_under(ctx.repo, &head)
                 && !head_check_long(ctx.repo, &head)
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?)
-            || (passes_unread(ctx, &queue, entry.seq, trunk, &ctx.op(op_id).revision)?
+            || (passes_fresh(ctx, &queue, entry.seq, trunk, &ctx.op(op_id).revision)?
                 && !head_check_long(ctx.repo, &head)
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?))
     {
         return unless_red(ctx, op_id, trunk, Gate::Head(entry.seq));
     }
     let revision = ctx.op(op_id).revision.clone();
-    enqueue(ctx, op_id, &revision, Reason::Queued).map(|result| Gate::Wait(Box::new(result)))
+    let mut queued = enqueue(ctx, op_id, &revision, Reason::Queued)?;
+    // G867: a looping runner visits this wait again at the holder's next beat, which names its
+    // batch, not only once the line or main moves (`executor::Parked`).
+    if ctx.batch_unnamed.take()
+        && let Some(detail) = queued.detail.as_mut()
+    {
+        detail["batch_unnamed"] = json!(true);
+    }
+    Ok(Gate::Wait(Box::new(queued)))
+}
+
+/// G867: [`passes_unread`], once this store's chains say the operation at `place` passes, read
+/// again on the chains and leases of the entries ahead as the remote holds them now: a claim
+/// made since this pass fetched them, or a lease that named its batch since, decides it.
+fn passes_fresh(
+    ctx: &Ctx,
+    queue: &crate::queue::Queue,
+    place: u64,
+    trunk: &str,
+    revision: &str,
+) -> Result<bool, String> {
+    if !passes_unread(ctx, queue, place, trunk, revision)? {
+        return Ok(false);
+    }
+    let changes: Vec<String> = queue
+        .ahead_of(place)
+        .iter()
+        .map(|entry| entry.change.clone())
+        .collect();
+    let _ = ctx.repo.remote_chains(&changes);
+    passes_unread(ctx, queue, place, trunk, revision)
 }
 
 /// How often main may move under one queue entry before no change passes it any more (G703):
@@ -5016,6 +5124,7 @@ fn passes_unread(
     if ahead.is_empty() {
         return Ok(false);
     }
+    let me = ctx.executor_name();
     for entry in ahead {
         let Some(queued) = throughput::Queued::read(git, entry) else {
             return Ok(false);
@@ -5027,7 +5136,10 @@ fn passes_unread(
             return Ok(false);
         }
         // G846: an entry its holder checks in a batch reads what the whole batch changes.
-        let Some(batch) = batch_behind(ctx.repo, queue, entry) else {
+        let holder = (queued.holder.as_deref(), me.as_str());
+        let Some(batch) = batch_behind(ctx.repo, queue, entry, holder) else {
+            ctx.batch_unnamed
+                .set(held_batch(git, &entry.change, &entry.op_id).is_none());
             return Ok(false);
         };
         let revisions = std::iter::once(queued.revision.as_str())
@@ -5871,13 +5983,19 @@ fn held_batch(git: &Git, change: &str, op_id: &str) -> Option<Vec<String>> {
 /// the live entries other than `entry` that its holder's check covers, as its lease names them
 /// (G845), read from `queue`: empty when no holder's lease names a batch, `None` when one of
 /// them cannot be read.
+///
+/// G867 (a fleet finding, 2026-11-23: a passer decided 18 s after another runner claimed the
+/// head, before that runner's lease named its batch, and the batch it passed was cut when it
+/// landed): `None` too while `holder`, a runner other than `me`, holds the entry and its lease
+/// names no batch yet. The holder names one before its check starts, alone or in a batch.
 fn batch_behind(
     repo: &Repo,
     queue: &crate::queue::Queue,
     entry: &crate::queue::Entry,
+    (holder, me): (Option<&str>, &str),
 ) -> Option<Vec<throughput::Queued>> {
     let Some(members) = held_batch(&repo.git, &entry.change, &entry.op_id) else {
-        return Some(Vec::new());
+        return holder.is_none_or(|holder| holder == me).then(Vec::new);
     };
     members
         .iter()
@@ -10119,8 +10237,17 @@ fn heartbeat(ctx: &Ctx, op_id: &str) {
 }
 
 /// G845: the holder's lease names `members` (operation ids, `op_id` first) as what its check of
-/// `op_id` covers (`crate::lease::Holding::checks`); its next beat says so.
+/// `op_id` covers (`crate::lease::Holding::checks`). G867: when a place outside `members` stands
+/// in the line, the beat that says so goes out now, before the check starts, since that place
+/// passes the head only once the lease names its batch ([`batch_behind`]). With none, the next
+/// due beat says it.
 fn names_batch(ctx: &Ctx, op_id: &str, members: Vec<String>) {
+    let waited_on = crate::queue::Queue::local(&ctx.repo.git).is_ok_and(|queue| {
+        queue
+            .line()
+            .iter()
+            .any(|entry| !members.contains(&entry.op_id))
+    });
     if let Some(lease) = ctx
         .lease
         .borrow_mut()
@@ -10128,6 +10255,9 @@ fn names_batch(ctx: &Ctx, op_id: &str, members: Vec<String>) {
         .filter(|lease| lease.of(op_id))
     {
         lease.checks(members);
+    }
+    if waited_on {
+        heartbeat(ctx, op_id);
     }
 }
 
