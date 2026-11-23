@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.150
+
+- A landing's wake fetches no log and rides the next push of the log: two fetches and a push fewer.
+
 ## 0.6.149
 
 - A change passes a head another runner holds only once that runner's lease names what its check covers.
