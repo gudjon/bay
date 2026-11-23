@@ -7,11 +7,14 @@
 //! push's command line, which names thirty refs and more, so the host's reason was lost; and
 //! the yield said "main moved" although main had not moved. Now a refused batch push is pushed
 //! again as built while main stands still (BACKLOG 83), its record names the host's own lines
-//! (BACKLOG 81), and its yield names the refusal (BACKLOG 82).
+//! (BACKLOG 81), and its yield names the refusal (BACKLOG 82). G865: the push that carries the
+//! batch's records is its first push.
 //!
 //! The guards to mutate: the re-push loop in `land_batch` (`src/publish.rs`; the batch is
 //! given back and nothing lands in the pass), `host_said` in the batch refusal record (the
-//! record holds the command line, not GH013) and the yield's `cause` (it says "main moved").
+//! record holds the command line, not GH013), the yield's `cause` (it says "main moved") and,
+//! in `batch_with_records`, a refusal the host made returned as `Unsent` (the batch is pushed a
+//! fourth time and lands in the pass).
 
 // Each case runs shell scripts (the check adapter, a host hook), so these run on Unix only.
 #![cfg(unix)]

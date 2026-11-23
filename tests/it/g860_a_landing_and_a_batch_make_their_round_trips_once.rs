@@ -25,7 +25,7 @@
 //! pushes more a batch whose records go apart); in `src/log.rs` `push`, drop the `on_remote` test
 //! (a push more a pass); in `src/bisect.rs` `Fresh::tip`, fetch main each time (a fetch more a
 //! pass); in `src/publish.rs` `land_with_records`, return a refusal at once (two fetches and a
-//! push more a landing); in `batch_with_records`, return `None` at once (three fetches and a push
+//! push more a landing); in `batch_with_records`, return `Unsent` at once (three fetches and a push
 //! more a batch of three).
 
 #![cfg(unix)]

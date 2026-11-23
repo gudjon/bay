@@ -5,9 +5,13 @@
 //! before it. A member its author revised while the batch published refuses that push, and no
 //! record of it stays on this box; the batch then goes as before, and lands each member once.
 //!
+//! A refusal bay's hook makes may judge the records the push carries, as a host whose hook is
+//! older than the executor's can; the batch then goes again without them in the same pass.
+//!
 //! Guards to mutate: in `src/publish.rs` `batch_with_records`, push no chain in `riding.specs`
-//! (the landing push carries no member's chain); in `src/log.rs` `ride`, keep the records after
-//! a refused push (the head's landing is recorded twice).
+//! (the landing push carries no member's chain), and count a refusal by bay's hook as the batch's
+//! first push (the batch is given back, and lands nothing in the pass); in `src/log.rs` `ride`,
+//! keep the records after a refused push (the head's landing is recorded twice).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -20,7 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use support::queued::{Check, Held, finished, host, ran_for};
-use support::{EXECUTOR, PRODUCER, TestBox, result_json};
+use support::{EXECUTOR, PRODUCER, TestBox, result_json, write_executable};
 
 const CONFIG: &str = "[runner]\nlease_s = 450\nheartbeat_s = 120\nbatch = { min = 2, max = 8, max_failure_rate = 1.0 }\n";
 
@@ -72,6 +76,20 @@ fn pushes(trace: &Path) -> Vec<String> {
             args.contains(&"push").then(|| args.join(" "))
         })
         .collect()
+}
+
+/// Makes the host refuse the next push that moves main in bay's words, as a bay hook older than
+/// the executor refuses records it does not know; returns the file the refusal leaves.
+fn refuse_records_once(held: &Held) -> PathBuf {
+    let refused = held.test_box.path().join("refused");
+    write_executable(
+        &held.remote.join("hooks/pre-receive"),
+        &format!(
+            "#!/bin/sh\nwhile read old new name; do\n  if [ \"$name\" = refs/heads/main ] && [ ! -e '{refused}' ]; then\n    : > '{refused}'\n    echo 'bay: refs/heads/main: a record this push carries is not one this host reads' >&2\n    exit 1\n  fi\ndone\nexit 0\n",
+            refused = refused.display()
+        ),
+    );
+    refused
 }
 
 /// Starts change `intent` on `lib/`, submits it and puts it in the queue, as [`Held::queue`]
@@ -246,4 +264,43 @@ fn a_member_revised_while_its_batch_publishes_lands_once_in_its_newer_revision()
         0,
         "{pass}"
     );
+}
+
+#[test]
+fn a_batch_whose_records_the_hosts_bay_refused_lands_without_them_in_the_same_pass() {
+    let held = host(&Check {
+        config: CONFIG,
+        policy: None,
+        seed: &[("src/a.rs", "fn a() {}\n")],
+        hold_first: false,
+        fails: "false",
+    });
+    let exec = held.executor("exec", PRODUCER);
+    let ids: Vec<String> = ["b1", "b2"]
+        .into_iter()
+        .map(|name| held.queue(name, "src"))
+        .collect();
+
+    // GIVEN a host whose bay refuses the push that carries the batch's records
+    let refused = refuse_records_once(&held);
+
+    // WHEN a pass lands the batch
+    let pass = held.pass(&exec);
+
+    // THEN the batch goes again without its records and lands in the same pass, each member
+    // recorded once
+    assert!(refused.exists(), "the host never refused: {pass}");
+    for id in &ids {
+        assert_eq!(ran_for(&pass, id)["decision"], "merged", "{pass}");
+        assert_eq!(
+            terminal_records(
+                &held.test_box,
+                &held.remote,
+                &format!("{id}.1"),
+                "published"
+            ),
+            1,
+            "{id}: {pass}"
+        );
+    }
 }

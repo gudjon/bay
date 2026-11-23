@@ -3,20 +3,43 @@
 //! revised one member during the batch's check). A member its author revises while its batch
 //! checks still lands its checked version with the batch: nothing checked is thrown away. The
 //! author's next `bay merge` opens the next change of the same intent from the newer version,
-//! under the author's own key, and sends it; it lands after, carrying the newer edits.
+//! under the author's own key, and sends it; it lands after, carrying the newer edits. G865: the
+//! batch's records, the revised member's too, ride the one push that lands it.
 //!
 //! Guards to mutate, in `src/publish.rs`: `frozen` (answer `false`: the revised member leaves
 //! the batch and it lands nothing), and `follow_up` (answer `None`: the author's next merge is
-//! refused as already on main, and the newer edits never go in).
+//! refused as already on main, and the newer edits never go in); in `src/hook.rs`
+//! `frozen_member`, take a checked operation only (the push carrying the records is refused, and
+//! main moves in a second push).
 
 #![cfg(unix)]
 
 use crate::support;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use serde_json::Value;
 
 use support::queued::{Check, finished, host};
 use support::{EXECUTOR, PRODUCER, result_json};
+
+/// The pushes a pass traced in `trace` that move main, each as its arguments joined.
+fn main_pushes(trace: &Path) -> Vec<String> {
+    std::fs::read_to_string(trace)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let call: Value = serde_json::from_str(line).unwrap();
+            let args: Vec<&str> = call["args"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            (args.contains(&"push") && args.iter().any(|arg| arg.ends_with(":refs/heads/main")))
+                .then(|| args.join(" "))
+        })
+        .collect()
+}
 
 const CONFIG: &str = "[runner]\nlease_s = 60\nheartbeat_s = 1\nbatch = { min = 2, max = 8, max_failure_rate = 1.0 }\n";
 
@@ -49,7 +72,15 @@ fn a_member_revised_in_its_batch_check_lands_and_its_new_edits_follow() {
 
     // GIVEN the batch of one and two in its check
     let runner = held.executor("exec", PRODUCER);
-    let pass = held.spawn(&runner);
+    let trace = held.test_box.path().join("trace.jsonl");
+    let pass = held
+        .test_box
+        .bay_process(&runner)
+        .env("BAY_TEST_GIT_TRACE", &trace)
+        .args(["--json", "runner", "run", "--once"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
     held.wait_held();
 
     // WHEN two's author revises it meanwhile
@@ -64,6 +95,17 @@ fn a_member_revised_in_its_batch_check_lands_and_its_new_edits_follow() {
     assert!(
         on_main.contains(&one) && on_main.contains(&two),
         "the batch did not land every checked member: {on_main:?} {pass}"
+    );
+    let mains = main_pushes(&trace);
+    assert_eq!(
+        mains.len(),
+        1,
+        "main moved in more than one push: {mains:#?}"
+    );
+    assert!(
+        mains[0].contains(&format!("refs/bay/changes/{two}")),
+        "the revised member's records did not ride the landing push: {}",
+        mains[0]
     );
     let tree = held
         .test_box

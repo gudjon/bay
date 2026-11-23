@@ -1060,8 +1060,9 @@ impl Judge<'_> {
     }
 
     /// G754: whether `commit` lands the batch candidate the change's chain records as checked
-    /// for the operation of request `request_id`, of a change neither abandoned nor taken over:
-    /// a batch member whose author revised it during the batch's check.
+    /// for the operation of request `request_id`, or as published by the push it rides in (G865),
+    /// of a change neither abandoned nor taken over: a batch member whose author revised it during
+    /// the batch's check.
     fn frozen_member(&self, change: &str, request_id: &str, commit: &str) -> Result<bool, String> {
         let Some(head) = self.after(&format!("{}{change}", crate::names::CHANGES))? else {
             return Ok(false);
@@ -1077,7 +1078,10 @@ impl Judge<'_> {
         }
         Ok(record.operations.iter().any(|op| {
             op.request_id.as_deref() == Some(request_id)
-                && op.state == crate::change::OpState::Checked
+                && matches!(
+                    op.state,
+                    crate::change::OpState::Checked | crate::change::OpState::Published
+                )
                 && op
                     .attempts
                     .last()

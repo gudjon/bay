@@ -3713,8 +3713,8 @@ struct Built {
 /// persisted as checked in its own chain ([`persist_batch`]), then one atomic push moves trunk
 /// to the last member with every member's landed marker, intent marker, queue release and records
 /// ([`batch_with_records`]). A push refused goes again without the records, each chain read
-/// first, and each landing is derived from trunk. `None` when a member is no longer this
-/// executor's: nothing was pushed.
+/// first, and each landing is derived from trunk; a refusal the host made, other than bay's own
+/// judgement, counts as the batch's first push. `None` when a member is no longer this executor's: nothing was pushed.
 fn land_batch<'a>(
     ctx: &mut Ctx<'a>,
     others: &mut [Ctx<'a>],
@@ -3730,17 +3730,21 @@ fn land_batch<'a>(
     }
     ctx.step.set("publish");
     let signer = ctx.executor_signer().ok().flatten();
-    if let Some(mut landings) = batch_with_records(ctx, others, members, &built, signer.as_ref())? {
-        drop(anchors);
-        let head = landings.remove(0);
-        let landed = landings
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, landing)| landing.ok().map(|landing| (index + 1, landing)))
-            .collect();
-        tell_members(others, members, landed);
-        return head.map(Some);
-    }
+    let first = match batch_with_records(ctx, others, members, &built, signer.as_ref())? {
+        WithRecords::Landed(mut landings) => {
+            drop(anchors);
+            let head = landings.remove(0);
+            let landed = landings
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, landing)| landing.ok().map(|landing| (index + 1, landing)))
+                .collect();
+            tell_members(others, members, landed);
+            return head.map(Some);
+        }
+        WithRecords::Unsent => None,
+        WithRecords::Refused(error) => Some(error),
+    };
     for (index, member) in members.iter().enumerate() {
         let owner = member_ctx(ctx, others, index);
         if still_owner(owner, &member.op_id, &member.revision)?.is_some() {
@@ -3750,8 +3754,12 @@ fn land_batch<'a>(
     let pushes = batch_pushes(ctx, others, members, &built, signer.as_ref())?;
     let tip = &built[members.len() - 1].commit;
     let bare = Riding::default();
-    kill_point("before-publish");
-    let mut answer = publish_batch_push(repo, tip, &pushes, &bare);
+    let mut answer = if let Some(error) = first {
+        Err(error)
+    } else {
+        kill_point("before-publish");
+        publish_batch_push(repo, tip, &pushes, &bare)
+    };
     // BACKLOG 83 (2026-10-28: the host refused one batch twice with main unmoved, and each
     // refusal gave the batch back to be built and checked again, 4.5 min each; the third push of
     // the same refs landed): a refusal on an unmoved main, other than bay's own judgement, is
@@ -3804,9 +3812,9 @@ fn land_batch<'a>(
 /// log, with each member's terminal record, move in the one atomic push that moves trunk to the
 /// batch's tip. Each chain's lease stands for the read of that member's chain ([`still_owner`]).
 ///
-/// Returns each member's landing, the head's first; or `None` when the remote refused the push or
-/// a record could not be written, once every record is taken back off this box, so the caller
-/// reads each chain again and pushes the batch without its records ([`land_batch`]).
+/// Each record is taken back off this box when the push does not land, so the caller reads each
+/// chain again and pushes the batch without its records ([`land_batch`]). A refusal by bay's hook
+/// may judge the records themselves (a host whose hook is older), so it is not a first push.
 ///
 /// # Errors
 ///
@@ -3817,9 +3825,9 @@ fn batch_with_records<'a>(
     members: &[throughput::Member],
     built: &[Built],
     signer: Option<&Signer>,
-) -> Result<Option<Vec<Result<BayResult, String>>>, String> {
+) -> Result<WithRecords, String> {
     if records_apart() {
-        return Ok(None);
+        return Ok(WithRecords::Unsent);
     }
     let repo = ctx.repo;
     let pushes = batch_pushes(ctx, others, members, built, signer)?;
@@ -3830,7 +3838,7 @@ fn batch_with_records<'a>(
         let Ok(mark) = mark_landed(owner, &member.op_id, &member.revision, &built[index].commit)
         else {
             take_all_back(ctx, others, marked);
-            return Ok(None);
+            return Ok(WithRecords::Unsent);
         };
         marked.push(mark);
     }
@@ -3848,7 +3856,12 @@ fn batch_with_records<'a>(
     });
     if !matches!(answer, Ok(Ok(_))) {
         take_all_back(ctx, others, marked);
-        return Ok(None);
+        return Ok(match answer {
+            Ok(Err(error)) if !crate::git::ref_moved(&error) && !judged_by_bay(&error) => {
+                WithRecords::Refused(error)
+            }
+            _ => WithRecords::Unsent,
+        });
     }
     kill_point("after-publish");
     for index in 0..members.len() {
@@ -3864,7 +3877,19 @@ fn batch_with_records<'a>(
             &mark.behind,
         ));
     }
-    Ok(Some(landings))
+    Ok(WithRecords::Landed(landings))
+}
+
+/// What [`batch_with_records`] made of a batch's publishing push.
+enum WithRecords {
+    /// The push landed the batch: each member's landing, the head's first.
+    Landed(Vec<Result<BayResult, String>>),
+    /// No push the host judged for itself: the records go apart, a record could not be written, a
+    /// ref moved under a lease, or bay's hook refused the push.
+    Unsent,
+    /// The host refused the push for a reason of its own, as it said: the batch's first push
+    /// (BACKLOG 83).
+    Refused(String),
 }
 
 /// A batch member's context: the head's, at `index` 0, or another member's.
