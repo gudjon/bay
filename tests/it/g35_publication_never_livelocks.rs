@@ -22,7 +22,7 @@ use crate::support;
 
 use std::path::{Path, PathBuf};
 
-use support::{TestBox, check_files, passing_result, result_json};
+use support::{TestBox, check_files, passing_result, result_json, write_executable};
 
 /// A trunk whose check moves trunk (from another clone) on its first `moves` runs, then passes,
 /// or fails from run `fail_from` on. Every run appends a line to `runs`.
@@ -686,18 +686,48 @@ fn a_release_the_remote_refuses_is_reported_and_tried_again_on_the_next_pass() {
 }
 
 /// Two executors that queue one operation at once both create a reservation; the later one
-/// sees the earlier and releases its own, so the operation holds one place (`DESIGN` § 6).
+/// read the queue before the earlier place reached the remote, so its own place is above it,
+/// and it releases that place on its read after the push: the operation holds one place
+/// (`DESIGN` § 6, G866).
 #[test]
 fn one_operation_queued_twice_at_once_holds_one_place() {
     let queued = setup(0, 0);
     let repo = bay::repo::Repo::open(&queued.repo).unwrap();
     let first = bay::queue::join(&repo, None, "aaaaaaaa.1", "aaaaaaaa").unwrap();
-    // The second executor read the queue before the first reservation existed.
+    let other = bay::queue::join(&repo, None, "bbbbbbbb.1", "bbbbbbbb").unwrap();
+    assert_eq!((first, other), (1, 2));
+    // The second executor reads the queue before the first reservation exists: the remote
+    // takes the first place back while it pushes its own.
+    let earlier = queued
+        .test_box
+        .git_bare(&queued.remote, &["rev-parse", "refs/bay/queue/1"]);
+    queued
+        .test_box
+        .git_bare(&queued.remote, &["update-ref", "-d", "refs/bay/queue/1"]);
+    queued
+        .test_box
+        .git_ok(&queued.repo, &["update-ref", "-d", "refs/bay/queue/1"]);
+    let restored = queued.test_box.path().join("restored");
+    write_executable(
+        &queued.remote.join("hooks/post-receive"),
+        &format!(
+            "#!/bin/sh
+if [ ! -e '{restored}' ]; then
+  : > '{restored}'
+  git update-ref refs/bay/queue/1 {earlier}
+fi
+exit 0
+",
+            restored = restored.display(),
+            earlier = earlier.trim()
+        ),
+    );
     let second = bay::queue::join(&repo, None, "aaaaaaaa.1", "aaaaaaaa").unwrap();
-    assert_eq!((first, second), (1, 1));
+    assert!(restored.exists(), "the second reservation was never pushed");
+    assert_eq!(second, 1);
     assert_eq!(
         queue_refs(&queued.test_box, &queued.remote),
-        "refs/bay/queue-done/2\nrefs/bay/queue/1\nrefs/bay/queue/2"
+        "refs/bay/queue-done/3\nrefs/bay/queue/1\nrefs/bay/queue/2\nrefs/bay/queue/3"
     );
     let queue = bay::queue::Queue::read(&repo).unwrap();
     assert_eq!(queue.of("aaaaaaaa.1").map(|entry| entry.seq), Some(1));
