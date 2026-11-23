@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.155
+
+- A machine pushes its live summary at once only when a session starts, ends or holds another change.
+- A row that would soon read as stale also goes out at once.
+- A change only in a row's time or state waits for the keep-alive: a sixth of the takeover window.
+
 ## 0.6.154
 
 - An agent's idle wait wakes its session once with each queued operation's outcome: merged, refused with its reason, or failed.
