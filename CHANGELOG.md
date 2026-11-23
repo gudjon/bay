@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.154
+
+- An agent's idle wait wakes its session once with each queued operation's outcome: merged, refused with its reason, or failed.
+- A wait whose agent ended wakes no one, and leaves the outcomes to the next wait.
+
 ## 0.6.153
 
 - A prompt's hook checks for a live runner first: with one live, it reads no change record.
