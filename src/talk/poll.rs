@@ -16,6 +16,8 @@ pub const BAY_TALK_POLL_S: u64 = 30;
 pub const BACKOFF_AFTER: u32 = 10;
 /// The longest interval of an idle wait.
 pub const MAX_POLL_S: u64 = 300;
+/// G873: the longest interval of an idle wait while an operation its session left queued waits.
+pub const AWAIT_POLL_S: u64 = 60;
 
 use crate::version::TEST_HOOKS;
 
@@ -110,26 +112,64 @@ pub fn command(repo: &Repo, now: u64) -> Option<Value> {
 /// nothing where talk is off.
 #[must_use]
 pub fn wait(repo: &Repo, max_s: u64) -> (u8, Value) {
-    if !crate::registry::talk_policy(&repo.git).is_ok_and(|table| table.on()) {
-        return (0, json!({"woken": false, "polls": 0, "off": true}));
-    }
+    wait_for(repo, max_s, &mut crate::awaiting::Heard::default)
+}
+
+/// G873: [`wait`], which also wakes on what `heard` hears at each poll (the outcomes of the
+/// operations the session left queued, `crate::awaiting`), and polls at least every
+/// [`AWAIT_POLL_S`] while one of them waits. With talk off, it waits only while one does. A
+/// wait that reaches `max_s` while one still waits wakes the session with what still waits, so
+/// the wait its next stop starts goes on listening; one whose agent ended (`ended`) ends.
+#[must_use]
+pub fn wait_for(
+    repo: &Repo,
+    max_s: u64,
+    heard: &mut dyn FnMut() -> crate::awaiting::Heard,
+) -> (u8, Value) {
+    let talk = crate::registry::talk_policy(&repo.git).is_ok_and(|table| table.on());
+    let mut polls = 0u32;
     let mut empty = 0u32;
     let mut slept = 0u64;
     loop {
-        if let Some(outcome) = super::accept::receive_polled(repo)
-            && outcome["acked"]
-                .as_array()
-                .is_some_and(|acked| !acked.is_empty())
-        {
-            return (
-                2,
-                json!({"woken": true, "polls": empty + 1, "accepted": outcome}),
-            );
+        let accepted = talk
+            .then(|| super::accept::receive_polled(repo))
+            .flatten()
+            .filter(|outcome| {
+                outcome["acked"]
+                    .as_array()
+                    .is_some_and(|acked| !acked.is_empty())
+            });
+        polls += u32::from(talk);
+        let now = heard();
+        if now.ended {
+            return (0, json!({"woken": false, "polls": polls, "ended": true}));
+        }
+        if accepted.is_some() || !now.lines.is_empty() {
+            let mut woken = json!({"woken": true, "polls": polls});
+            if let Some(outcome) = accepted {
+                woken["accepted"] = outcome;
+            }
+            if !now.lines.is_empty() {
+                woken["outcomes"] = Value::from(now.lines);
+            }
+            return (2, woken);
+        }
+        if !talk && now.waiting == 0 {
+            return (0, json!({"woken": false, "polls": polls, "off": true}));
         }
         empty += 1;
-        let step = interval(empty);
+        let mut step = interval(empty);
+        if now.waiting > 0 {
+            step = step.min(AWAIT_POLL_S);
+        }
         if slept + step > max_s {
-            return (0, json!({"woken": false, "polls": empty}));
+            if now.waiting > 0 {
+                return (
+                    2,
+                    json!({"woken": true, "polls": polls, "outcomes": now.still}),
+                );
+            }
+            return (0, json!({"woken": false, "polls": polls}));
         }
         std::thread::sleep(tick() * u32::try_from(step).unwrap_or(u32::MAX));
         slept += step;

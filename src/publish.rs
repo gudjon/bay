@@ -11283,7 +11283,7 @@ fn landed_if_on_main(
 
 /// G875: whether main holds `commit`: as this store's tracking ref holds main, else as the
 /// remote's main, fetched once.
-fn main_holds(repo: &Repo, commit: &str) -> bool {
+pub(crate) fn main_holds(repo: &Repo, commit: &str) -> bool {
     let holds = |tip: &str| repo.git.is_ancestor(commit, tip).unwrap_or(false);
     repo.git
         .ref_target(&repo.trunk_tracking_ref())

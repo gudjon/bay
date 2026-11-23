@@ -1086,6 +1086,8 @@ fn main() -> ExitCode {
 /// G738: records where the command's time went, then renders its result.
 fn finish(dir: &std::path::Path, result: &BayResult, json: bool) -> ExitCode {
     spent(dir, result, *BEGAN.get_or_init(std::time::Instant::now));
+    // G873: an agent's session that left an operation queued hears its outcome at its idle wait.
+    bay::awaiting::note(dir, result);
     render(result, json)
 }
 

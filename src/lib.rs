@@ -10,6 +10,7 @@ pub mod agent_settings;
 pub mod answered;
 pub mod approve;
 pub mod assets;
+pub mod awaiting;
 pub mod bisect;
 pub mod canonical;
 pub mod change;

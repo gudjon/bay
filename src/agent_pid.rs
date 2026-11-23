@@ -79,6 +79,20 @@ pub fn session_of_caller(common: &Path) -> Option<String> {
     None
 }
 
+/// G873: this process's agent: its pid and its start time; `None` with no agent's process above
+/// it.
+#[must_use]
+pub fn agent() -> Option<(u32, String)> {
+    agent_of(std::process::id()).map(|(pid, process)| (pid, process.start))
+}
+
+/// G873: whether the process `pid` that started at `start` still runs (a pid is reused; the
+/// pair is not).
+#[must_use]
+pub fn alive(pid: u32, start: &str) -> bool {
+    process(pid).is_some_and(|process| process.start == start)
+}
+
 /// The agent's process of `pid`: its nearest ancestor that is no shell, and that process.
 fn agent_of(pid: u32) -> Option<(u32, Process)> {
     let mut pid = process(pid)?.parent;

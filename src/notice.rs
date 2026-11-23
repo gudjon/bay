@@ -373,7 +373,7 @@ pub fn deliver(repo: &Repo, scope: Scope<'_>, state_dir: &Path) -> Delivery {
 
 /// The sessions live on this machine in this repository: a line newer than the takeover
 /// window, and not ended (`crate::live::rows_of`).
-fn live_sessions(repo: &Repo) -> Vec<String> {
+pub(crate) fn live_sessions(repo: &Repo) -> Vec<String> {
     let lines = crate::live::lines(repo).unwrap_or_default();
     crate::live::rows_of(lines, now_s(), repo.config.takeover().as_secs())
         .iter()
@@ -1106,6 +1106,16 @@ fn op_id<'a>(change: &str, event: &'a Value) -> Option<&'a str> {
 fn plain_op<'a>(change: &str, op: &'a str) -> Option<&'a str> {
     let n = op.strip_prefix(change)?.strip_prefix('.')?;
     (!n.is_empty() && n.bytes().all(|byte| byte.is_ascii_digit())).then_some(op)
+}
+
+/// G873: the line [`line`] gives a `kind` outcome of operation `op` of `change`, with reason code
+/// `reason`, as an executor's event of it reads.
+pub(crate) fn op_line(change: &str, kind: &str, reason: Option<&str>, op: &str) -> String {
+    line(
+        change,
+        kind,
+        &serde_json::json!({"reason": reason, "op_id": op}),
+    )
 }
 
 /// The one line for `event` of change `change`: its kind, reason and operation, what is allowed

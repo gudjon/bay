@@ -490,7 +490,7 @@ pub fn dispatch(event: &str, input: &str, dir: &Path) -> Outcome {
         if translated.is_some() || headless() {
             return Outcome::default();
         }
-        return talk_wait(dir);
+        return talk_wait(dir, input);
     }
     let input = translated.as_deref().unwrap_or(input);
     let product = Product::configured(input, dir);
@@ -1038,8 +1038,9 @@ fn poll_notice(product: Product, input: &str, dir: &Path, command: &str) -> Opti
 }
 
 /// `bay hook talk-wait` (G54): poll this actor's talks for at most an hour, on the poll schedule;
-/// exit 2 with one line per accepted talk when one arrives, exit 0 when none did.
-fn talk_wait(dir: &Path) -> Outcome {
+/// exit 2 with one line per accepted talk when one arrives, exit 0 when none did. G873: and one
+/// line per operation the session left queued that ended (`crate::awaiting`).
+fn talk_wait(dir: &Path, input: &str) -> Outcome {
     const MAX_WAIT_S: u64 = 3600;
     let Ok(repo) = crate::repo::Repo::open(dir) else {
         return Outcome::default();
@@ -1049,7 +1050,33 @@ fn talk_wait(dir: &Path) -> Outcome {
     let Some(_held) = one_wait(&repo) else {
         return Outcome::default();
     };
-    let (exit, outcome) = crate::talk::poll::wait(&repo, MAX_WAIT_S);
+    // G873: the session this wait wakes, the payload's or else the environment's, and its
+    // agent's process: a wait whose agent ended wakes no one, and leaves its markers to the next.
+    let session = serde_json::from_str::<serde_json::Value>(input)
+        .ok()
+        .and_then(|payload| payload["session_id"].as_str().map(str::to_owned))
+        .or_else(|| std::env::var("BAY_SESSION").ok())
+        .filter(|session| crate::session::SessionId::parse(session).is_some());
+    let actor = crate::change::current_actor(&repo.common_dir)
+        .ok()
+        .map(|me| me.name);
+    let agent = crate::agent_pid::agent();
+    let mut heard = || {
+        if agent
+            .as_ref()
+            .is_some_and(|(pid, start)| !crate::agent_pid::alive(*pid, start))
+        {
+            return crate::awaiting::Heard {
+                ended: true,
+                ..crate::awaiting::Heard::default()
+            };
+        }
+        actor
+            .as_deref()
+            .map(|actor| crate::awaiting::hear(&repo, actor, session.as_deref()))
+            .unwrap_or_default()
+    };
+    let (exit, outcome) = crate::talk::poll::wait_for(&repo, MAX_WAIT_S, &mut heard);
     let stderr = if exit == 2 {
         let talks: Vec<String> = outcome["accepted"]["acked"]
             .as_array()
@@ -1061,9 +1088,12 @@ fn talk_wait(dir: &Path) -> Outcome {
             })
             .unwrap_or_default();
         // H3: the same line a prompt's notice gives for each talk it accepted.
-        crate::change::current_actor(&repo.common_dir)
-            .map(|me| crate::notice::talk_lines(&repo, &me.name, &talks))
-            .unwrap_or_default()
+        let mut text = actor
+            .as_deref()
+            .map(|me| crate::notice::talk_lines(&repo, me, &talks))
+            .unwrap_or_default();
+        text.push_str(outcome["outcomes"].as_str().unwrap_or_default());
+        text
     } else {
         String::new()
     };
