@@ -1011,6 +1011,7 @@ fn claim_unwon(
                     &before,
                     record,
                     &draft,
+                    None,
                     &format!("claim generation {generation}"),
                 )
                 .map_err(|error| error.message())?;
@@ -1084,6 +1085,7 @@ fn claim_taken_chain(
             head,
             record,
             &draft,
+            None,
             &format!("abandon {id}: change {holder} holds its intent"),
         )
         .map_err(|error| error.message())?;

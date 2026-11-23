@@ -110,15 +110,16 @@ pub fn append_riding(
 }
 
 /// G864: writes `records` on this executor's log for a push that stands or falls with them:
-/// `push`, given the log's refspec, pushes it with the caller's other refs and answers. A refused
-/// push takes the records back off this box's log, and nothing is pushed again: the records stood
-/// only with what they rode with, and the caller writes them anew if they still stand. G865: a
-/// batch's landing carries the terminal record of each member.
+/// `push`, given the log's refspec, pushes them with the caller's other refs and answers. G865: a
+/// batch's landing carries the terminal record of each member. G875: the records are made on the
+/// log's tip and the log ref takes them only once the push did: every bay process on this box
+/// shares the ref, and another's push of it (a pass pushes a log the remote lacks) would carry
+/// records that stand only with this push. A refused push leaves nothing written, and nothing is
+/// pushed again: the caller writes the records anew if they still stand.
 ///
 /// # Errors
 ///
-/// A git fault while writing locally, once the records written before it are taken back; no
-/// record to write.
+/// A git fault while making a record; no record to write.
 pub fn ride<E>(
     repo: &Repo,
     executor: &str,
@@ -126,35 +127,38 @@ pub fn ride<E>(
     records: &[Value],
     push: impl FnOnce(&str) -> Result<(), E>,
 ) -> Result<Result<String, E>, String> {
-    let name = log_ref(executor);
-    // The last record written, and the tip the first went on.
-    let mut written: Option<(String, Option<String>)> = None;
-    for record in records {
-        match write(repo, &name, signer, record) {
-            Ok((commit, parent)) => {
-                let first = written.map_or(parent, |(_, first)| first);
-                written = Some((commit, first));
-            }
-            Err(why) => {
-                if let Some((commit, first)) = &written {
-                    take_back(&repo.git, &name, commit, first.as_deref());
-                }
-                return Err(why);
-            }
-        }
-    }
-    let Some((commit, first)) = written else {
+    if records.is_empty() {
         return Err("no record to write".to_owned());
-    };
-    match push(&format!("{name}:{name}")) {
+    }
+    let name = log_ref(executor);
+    let tip = repo
+        .git
+        .ref_target(&name)
+        .map_err(|error| error.message())?;
+    let mut commit = String::new();
+    for record in records {
+        let parent = if commit.is_empty() {
+            tip.as_deref()
+        } else {
+            Some(commit.as_str())
+        };
+        commit = commit_record(repo, signer, record, parent)?;
+    }
+    match push(&format!("{commit}:{name}")) {
         Ok(()) => {
+            // Unless another process wrote on the log meanwhile: its own push then finds the
+            // remote's log moved.
+            let update = match &tip {
+                Some(tip) => format!("update {name} {commit} {tip}\n"),
+                None => format!("create {name} {commit}\n"),
+            };
+            let _ = repo
+                .git
+                .run_with(&["update-ref", "--stdin"], &[], Some(update.as_bytes()));
             pushed(repo, &name, &commit);
             Ok(Ok(commit))
         }
-        Err(error) => {
-            take_back(&repo.git, &name, &commit, first.as_deref());
-            Ok(Err(error))
-        }
+        Err(error) => Ok(Err(error)),
     }
 }
 
@@ -191,6 +195,25 @@ fn write(
     signer: Option<&Signer>,
     record: &Value,
 ) -> Result<(String, Option<String>), String> {
+    let parent = repo.git.ref_target(name).map_err(|error| error.message())?;
+    let commit = commit_record(repo, signer, record, parent.as_deref())?;
+    let update = match &parent {
+        Some(parent) => format!("update {name} {commit} {parent}\n"),
+        None => format!("create {name} {commit}\n"),
+    };
+    repo.git
+        .run_with(&["update-ref", "--stdin"], &[], Some(update.as_bytes()))
+        .map_err(|error| error.message())?;
+    Ok((commit, parent))
+}
+
+/// G875: the commit of `record` on `parent`, made without moving any log ref.
+fn commit_record(
+    repo: &Repo,
+    signer: Option<&Signer>,
+    record: &Value,
+    parent: Option<&str>,
+) -> Result<String, String> {
     let git = &repo.git;
     let mut json = serde_json::to_string_pretty(record).map_err(|error| error.to_string())?;
     json.push('\n');
@@ -205,14 +228,13 @@ fn write(
     let tree = git
         .run_with(&["mktree"], &[], Some(entry.as_bytes()))
         .map_err(|error| error.message())?;
-    let parent = git.ref_target(name).map_err(|error| error.message())?;
     let mut args: Vec<String> = Vec::new();
     if let Some(signer) = signer {
         args.extend(signer.config_args());
     }
     args.extend(["commit-tree".to_owned(), tree]);
-    if let Some(parent) = &parent {
-        args.extend(["-p".to_owned(), parent.clone()]);
+    if let Some(parent) = parent {
+        args.extend(["-p".to_owned(), parent.to_owned()]);
     }
     args.push(
         if signer.is_some() {
@@ -249,16 +271,8 @@ fn write(
         .iter()
         .map(|(key, value)| (key.as_str(), value.as_str()))
         .collect();
-    let commit = git
-        .run_with(&args, &envs, None)
-        .map_err(|error| error.message())?;
-    let update = match &parent {
-        Some(parent) => format!("update {name} {commit} {parent}\n"),
-        None => format!("create {name} {commit}\n"),
-    };
-    git.run_with(&["update-ref", "--stdin"], &[], Some(update.as_bytes()))
-        .map_err(|error| error.message())?;
-    Ok((commit, parent))
+    git.run_with(&args, &envs, None)
+        .map_err(|error| error.message())
 }
 
 /// Appends the `bay.event/1` record `event` to this executor's log unless a log already holds

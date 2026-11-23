@@ -776,9 +776,9 @@ impl<'a> Chain<'a> {
         self.append_linking(expected_head, record, draft, None, message)
     }
 
-    /// G840: the state commit [`Chain::append`] would write on `previous`, made without moving
-    /// the chain ref: for a commit the remote must take together with another ref before this
-    /// store's chain holds it.
+    /// G840: the state commit [`Chain::append_linking`] would write on `previous`, made without
+    /// moving the chain ref: for a commit the remote must take together with another ref before
+    /// this store's chain holds it.
     ///
     /// # Errors
     ///
@@ -788,9 +788,10 @@ impl<'a> Chain<'a> {
         previous: &str,
         record: &ChangeRecord,
         draft: &str,
+        candidate: Option<&str>,
         message: &str,
     ) -> Result<String, ChainError> {
-        self.state_commit(record, Some(previous), draft, None, message)
+        self.state_commit(record, Some(previous), draft, candidate, message)
     }
 
     /// [`Chain::append`], also linking `candidate` so it stays reachable before it is on trunk.

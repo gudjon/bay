@@ -1170,6 +1170,36 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// G875 (a fleet finding, 2026-11-23: a landing's record, on this box's chain ref before its
+    /// push, was pushed by another bay process's sync of offline work; the landing's own push was
+    /// then refused on a main that moved, and the remote kept a landing main never held):
+    /// [`Ctx::save_cas`] for a record that stands only with the push that carries it. The state
+    /// commit is made on this process's head, and the chain ref stays where it is until that push
+    /// takes it ([`Ctx::catch_up_local`]), so no other process on this box can push it. `false`
+    /// when the chain ref is no longer that head, and nothing was made.
+    fn save_riding(
+        &mut self,
+        draft: &str,
+        candidate: Option<&str>,
+        message: &str,
+    ) -> Result<bool, String> {
+        let name = change_ref(&self.id);
+        let local = self
+            .repo
+            .git
+            .ref_target(&name)
+            .map_err(|error| error.message())?;
+        if local.as_deref() != Some(self.head.as_str()) {
+            return Ok(false);
+        }
+        let head = self
+            .chain
+            .commit_on(&self.head, &self.record, draft, candidate, message)
+            .map_err(|error| error.message())?;
+        self.wrote(head);
+        Ok(true)
+    }
+
     /// G298: [`Ctx::save`] for a land's own write before anything runs: a lost compare-and-swap
     /// is [`CHAIN_MOVED`], which `land` answers by reading the chain again and deciding from
     /// what it finds, never a fault for a race the agent did nothing wrong in.
@@ -1542,7 +1572,7 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
             .map(|op| (op.op_id.clone(), op.revision.clone()))
         && let Some(commit) = published_commit(&ctx.record).map(str::to_owned)
     {
-        return derive_landed(&mut ctx, &op_id, &revision, &commit);
+        return landed_if_on_main(&mut ctx, &op_id, &revision, &commit);
     }
 
     step.set("freeze");
@@ -1587,7 +1617,7 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
         if landed_revision == revision
             && let Some(commit) = published_commit(&ctx.record).map(str::to_owned)
         {
-            return derive_landed(&mut ctx, &op_id, &revision, &commit);
+            return landed_if_on_main(&mut ctx, &op_id, &revision, &commit);
         }
         let mut detail = json!({"landed_revision": landed_revision, "op_id": op_id});
         if let Some(carry) = carry(&ctx, &trunk, &revision, &landed_revision)? {
@@ -2334,7 +2364,12 @@ fn landed_on_chain(
     {
         return Ok(None);
     }
+    // G875: a chain's landing whose commit main does not hold is no landing (a record an older
+    // client pushed before its landing push was refused), and is never answered merged.
     let revision = op.revision.clone();
+    if !main_holds(ctx.repo, &commit) {
+        return Ok(None);
+    }
     // The landing runner recorded it, its terminal record and its wake: this visit writes none.
     Ok(Some(existing(landing_row(ctx, op_id, &revision, &commit))))
 }
@@ -10988,6 +11023,7 @@ fn land_with_records(
     let terminal = std::slice::from_ref(&marked.terminal);
     let pushed = crate::log::ride(repo, &executor, signer.as_ref(), terminal, |log| {
         riding.specs.push(log.to_owned());
+        kill_point("landing-marked");
         publish_push(repo, &id, commit, release, claim, &riding)
     });
     match pushed {
@@ -11014,9 +11050,10 @@ struct Marked {
     terminal: serde_json::Value,
 }
 
-/// G864: records `op_id`'s landing of `commit` on this box's chain ref, the operation published
-/// and the change landed, and builds its terminal record; or why not, with nothing left written,
-/// when another process moved the chain ref or a record could not be written.
+/// G864: makes the record of `op_id`'s landing of `commit`, the operation published and the change
+/// landed, on this process's head, and builds its terminal record; or why not, with nothing left
+/// written, when another process moved the chain ref or a record could not be written. G875: the
+/// chain ref takes the record only once the landing's push took it ([`Ctx::save_riding`]).
 fn mark_landed(ctx: &mut Ctx, op_id: &str, revision: &str, commit: &str) -> Result<Marked, String> {
     let before = ctx.head.clone();
     let record = ctx.record.clone();
@@ -11026,7 +11063,7 @@ fn mark_landed(ctx: &mut Ctx, op_id: &str, revision: &str, commit: &str) -> Resu
     op.state = OpState::Published;
     op.outcome = None;
     end_behind(ctx, &behind);
-    match ctx.save_cas(revision, Some(commit), &format!("landed {op_id}")) {
+    match ctx.save_riding(revision, Some(commit), &format!("landed {op_id}")) {
         Ok(true) => {}
         Ok(false) => {
             ctx.record = record;
@@ -11087,8 +11124,9 @@ fn recorded(
     Ok(landing_row(ctx, op_id, revision, commit))
 }
 
-/// G864: a landing whose push did not take its records: its chain ref goes back to `before`,
-/// the head it was written on, and the record to `record`, as they stood before it.
+/// G864: a landing whose push did not take its records: this process's head goes back to
+/// `before`, the head the records were made on, and the record to `record`, as they stood before
+/// it. G875: the chain ref never took them, so no other process on this box holds them.
 fn taken_back(ctx: &mut Ctx, before: &str, record: ChangeRecord) {
     ctx.withdraw(before);
     ctx.record = record;
@@ -11217,6 +11255,42 @@ fn scanned(ctx: &mut Ctx, trunk: &str, revision: &str) -> Result<Option<BayResul
                 json!({"landed": publication.commit, "landed_revision": publication.revision}),
             ),
     ))
+}
+
+/// G875 (a fleet finding, 2026-11-23: `bay merge --wait` answered a change merged from its
+/// chain's record, which another process had pushed before the landing's own push was refused;
+/// main never held the commit): [`derive_landed`] for a landing read from the change's record
+/// alone, once main holds its commit. One main does not hold is answered `MERGE_OUTCOME_UNKNOWN`,
+/// never merged, and nothing is recorded.
+///
+/// # Errors
+///
+/// As [`derive_landed`].
+fn landed_if_on_main(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    commit: &str,
+) -> Result<BayResult, String> {
+    if main_holds(ctx.repo, commit) {
+        return derive_landed(ctx, op_id, revision, commit);
+    }
+    Ok(BayResult::blocked(Reason::PublishOutcomeUnknown)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(json!({"recorded_merged": commit, "on_main": false})))
+}
+
+/// G875: whether main holds `commit`: as this store's tracking ref holds main, else as the
+/// remote's main, fetched once.
+fn main_holds(repo: &Repo, commit: &str) -> bool {
+    let holds = |tip: &str| repo.git.is_ancestor(commit, tip).unwrap_or(false);
+    repo.git
+        .ref_target(&repo.trunk_tracking_ref())
+        .ok()
+        .flatten()
+        .is_some_and(|tip| holds(&tip))
+        || repo.refetch_trunk().is_ok_and(|tip| holds(&tip))
 }
 
 /// Step 7: derive "landed" from trunk, record it, and push the chain (idempotent).
