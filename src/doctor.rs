@@ -405,17 +405,19 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
         notes.push(&left_note);
     }
     let (packs, pack_note) = packs_row(git);
-    if let Some(note) = &pack_note {
-        notes.push(note);
-    }
     let (refs, crowded, refs_note) = refs_row(git);
-    if let Some(note) = &refs_note {
-        notes.push(note);
-    }
+    let (shallow, shallow_note) = shallow_row(git);
+    notes.extend(
+        [&pack_note, &refs_note, &shallow_note]
+            .into_iter()
+            .flatten()
+            .map(String::as_str),
+    );
     json!({"name": "store",
         "packs": packs,
         "refs": refs,
         "refs_crowded": crowded,
+        "shallow": shallow,
         "state": if notes.is_empty() { "green" } else { "advisory" },
         "promisor_remote": promisor.then_some(remote),
         "filter": filter,
@@ -429,6 +431,43 @@ fn store_row(git: &Git, config: &Config, info: &crate::git::RepoInfo) -> Value {
         "commit_graph": graph.detail(),
         "fetch_writes_commit_graph": fetch_writes,
         "notes": notes})
+}
+
+/// G877 (a measurement, 2026-11-23: a machine's shared store kept a shallow boundary of 17 commits
+/// whose history it held in full, and each push from it packed against the boundary for about 4 s
+/// of a 5 to 13 s push): the commits in a shallow store's boundary and the note that names it,
+/// `None` when the store is not shallow. Advisory: a shallow clone can be the site's choice.
+fn shallow_row(git: &Git) -> (Option<usize>, Option<String>) {
+    let entries = shallow_entries(git);
+    let note = entries.map(|entries| {
+        format!(
+            "a shallow store ({entries} in its boundary): each push packs against the boundary, \
+             seconds when the remote advertises many refs (git fetch --unshallow)"
+        )
+    });
+    (entries, note)
+}
+
+/// The commits in the boundary of a shallow store, `None` when it is not shallow.
+fn shallow_entries(git: &Git) -> Option<usize> {
+    let out = git
+        .run(&[
+            "rev-parse",
+            "--is-shallow-repository",
+            "--path-format=absolute",
+            "--git-common-dir",
+        ])
+        .ok()?;
+    let mut lines = out.lines();
+    if lines.next()? != "true" {
+        return None;
+    }
+    let common = std::path::Path::new(lines.next()?);
+    Some(
+        std::fs::read_to_string(common.join("shallow")).map_or(0, |text| {
+            text.lines().filter(|line| !line.is_empty()).count()
+        }),
+    )
 }
 
 /// G265 (N-13): a `gc.log` in the repository's common dir, present only when it is there. Git
