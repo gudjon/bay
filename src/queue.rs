@@ -681,9 +681,11 @@ pub(crate) fn commit(
 }
 
 /// Joins the queue: creates the next reservation on the remote, trying the next number when
-/// another joiner took it. Returns the sequence number. G862: an operation whose last place a
-/// check that gave no clear answer released keeps that place's rank ([`Queue::kept_rank`], read
-/// from the queue refs this store holds): its entry names the rank and the place it follows.
+/// another joiner took it. Returns the sequence number: the live place the operation already
+/// holds, when a fresh read shows one (G866), and no reservation is pushed. G862: an operation
+/// whose last place a check that gave no clear answer released keeps that place's rank
+/// ([`Queue::kept_rank`], read from the queue refs this store holds): its entry names the rank
+/// and the place it follows.
 ///
 /// # Errors
 ///
@@ -708,6 +710,13 @@ pub fn join(
     )?;
     for _ in 0..20 {
         let queue = Queue::read(repo)?;
+        // G866 (a fleet measurement, 2026-11-23: in one hour 27 of 60 places were released as
+        // duplicates, reserved up to 37 s after the operation's first place): a visit decides to
+        // join on its pass's read of the queue, up to [`crate::repo::PASS_READS`] old, so a place
+        // another runner reserved since is the operation's, and none is pushed.
+        if let Some(held) = queue.of(op_id) {
+            return Ok(held.seq);
+        }
         let above = queue
             .entries
             .keys()
