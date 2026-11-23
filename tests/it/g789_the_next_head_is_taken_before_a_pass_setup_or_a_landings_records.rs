@@ -15,7 +15,9 @@
 //! Guards to mutate, in `src/executor.rs`: `pass`'s heads taken first (drop the loop, and the
 //! woken runner reads every chain first); the conflict probe after the abandoned-head take (put
 //! it back in `run_op`, and the lander probes first). In `src/publish.rs`, `land_with_records`'s
-//! chain in `riding.specs` (push no chain, and the records go in a push after the landing).
+//! chain in `riding.specs` (push no chain, and the records go in a push after the landing);
+//! G867, `Riding::lease` (return false, and the lease the check beat is released in a push of its
+//! own before the next head's claim).
 
 #![cfg(unix)]
 
@@ -359,5 +361,15 @@ fn a_runner_that_lands_takes_the_next_head_before_its_probes_and_records_in_one_
             && lands_first.contains("refs/bay/log/exec-a"),
         "the landing's records took {} pushes of their own before the next head: {pushes:#?}\nlanding: {lands_first}",
         pushes.len()
+    );
+    // G867: and no lease of the landed head stays on the remote: its release rode that push
+    let lease = bay::lease::lease_ref(&first);
+    let left = held.test_box.git_bare(
+        &held.remote,
+        &["for-each-ref", "--format=%(refname)", &lease],
+    );
+    assert!(
+        left.trim().is_empty(),
+        "the landed head's lease stays: {left}"
     );
 }
