@@ -4,8 +4,13 @@
 //! operation .2 and the change `ready`. No runner answers that operation (a merged operation
 //! ends the change), so its record said "waits its turn in the queue" for days and audits
 //! counted it live. The record decides, as for another revision (G682): a merged operation of
-//! this revision answers `merged` with its landing, whatever main the process read, and
-//! writes nothing.
+//! this revision is never submitted again, whatever main the process read, and writes nothing.
+//!
+//! G875 (a fleet finding, 2026-11-23: two changes whose records said landed, on commits main never
+//! held, were answered merged): a record alone does not prove a landing, so the answer is
+//! `merged` once main holds the commit, as this box's main shows it or the remote's, fetched once.
+//! With neither (this box's main is from before the landing and the remote cannot be asked) it is
+//! `MERGE_OUTCOME_UNKNOWN`, still with nothing written, and `merged` once the remote answers.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -49,9 +54,9 @@ fn a_landed_change_merged_again_on_a_main_read_before_its_landing_is_merged() {
     let (code, again) = result_json(test_box.bay(&view).arg("merge"));
     std::fs::rename(&away, &remote).unwrap();
 
-    assert_eq!(code, 0, "{again}");
-    assert_eq!(again["decision"], "merged", "{again}");
-    assert_eq!(again["detail"]["commit"], landing.as_str(), "{again}");
+    assert_eq!(code, 10, "{again}");
+    assert_eq!(again["decision"], "blocked", "{again}");
+    assert_eq!(again["reason"], "MERGE_OUTCOME_UNKNOWN", "{again}");
     let after = record(&test_box, &repo, &id);
     assert_eq!(after["state"], "landed", "{after}");
     assert_eq!(
@@ -59,7 +64,14 @@ fn a_landed_change_merged_again_on_a_main_read_before_its_landing_is_merged() {
         1,
         "no operation is written: {after}"
     );
-    // Back online, nothing runs and nothing lands again.
+    // Back online, it is merged, with its landing, and nothing is written
+    let (code, online) = result_json(test_box.bay(&view).arg("merge"));
+    assert_eq!(code, 0, "{online}");
+    assert_eq!(online["decision"], "merged", "{online}");
+    assert_eq!(online["detail"]["commit"], landing.as_str(), "{online}");
+    let after = record(&test_box, &repo, &id);
+    assert_eq!(after["operations"].as_array().unwrap().len(), 1, "{after}");
+    // AND nothing runs and nothing lands again
     let executor = test_box.clone_of(&remote, "executor");
     let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
     assert_eq!(ran["detail"]["ran"], serde_json::json!([]), "{ran}");
