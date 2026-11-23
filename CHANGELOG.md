@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.153
+
+- A prompt's hook checks for a live runner first: with one live, it reads no change record.
+- A landing's records reach the box's refs only after its push: no other process can push them first.
+- A change whose chain says landed is answered merged only once main holds its commit.
+
 ## 0.6.152
 
 - The skill tells a script to start its merge wait without awaiting it and end: the later output wakes it.
