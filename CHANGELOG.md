@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.147
+
+- A batch pushes its members' chain records and the log with main: three members take 7 pushes, not 8.
+- A batch whose member was revised during its check still lands in one push, its records with it.
+
 ## 0.6.146
 
 - A landing pushes its chain record and terminal record with main: one landing takes 5 pushes, not 6.
