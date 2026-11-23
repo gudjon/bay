@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.157
+
+- `[runner] author = "Name <email>"` writes the commits bay makes on main; bay stays the committer.
+
 ## 0.6.156
 
 - `bay doctor` names a shallow store, the commits in its boundary, and the command that ends it.
