@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use serde_json::json;
 
-use crate::change::Chain;
+use crate::change::{Chain, ChangeRecord, ChangeState};
 use crate::git::Git;
 use crate::ids::is_change_id;
 use crate::merge::{Merge, revert_onto};
@@ -158,28 +158,86 @@ use crate::throughput::tree_of;
 /// The trunk commit that published `change`: the remote's `refs/bay/landed/<change>`, or the
 /// shard index record that stands in for it (§ 10a), names it, trunk reaches it (by ancestry,
 /// never by first-parent position: N-20), and the trunk scan from the change's `base_first`
-/// finds it (§ 6). `None` when the change is not on trunk.
+/// finds it (§ 6). G869: a change the remote holds no marker for is on trunk at its one
+/// publication when its record says it landed ([`unmarked`]). `None` when the change is not on
+/// trunk.
 pub(crate) fn landed_commit(
     repo: &Repo,
     change: &str,
     trunk: &str,
 ) -> Result<Option<String>, String> {
-    // Only a marker the remote answered without is "not landed": a remote that cannot be read
-    // is a fault, never CHANGE_NOT_MERGED, whose retry is never.
+    if let Some(landed) = marker(repo, change)? {
+        return marked_commit(repo, change, trunk, &landed);
+    }
+    // A chain the remote does not answer for, once it answered for the marker, is a change it
+    // never held: not landed.
+    let Ok(head) = repo.remote_chain(change) else {
+        return Ok(None);
+    };
+    let record = Chain::new(&repo.git)
+        .record_at(&head)
+        .map_err(|error| error.message())?;
+    unmarked(repo, &record, change, trunk)
+}
+
+/// The commit the remote's landed marker of `change` names, or the shard index record that
+/// stands in for it (§ 10a); `None` when the remote holds neither.
+///
+/// # Errors
+///
+/// The remote could not be read: only a marker the remote answered without is "not landed", a
+/// remote that cannot be read is a fault, never CHANGE_NOT_MERGED, whose retry is never.
+pub(crate) fn marker(repo: &Repo, change: &str) -> Result<Option<String>, String> {
+    let marker = format!("{}{change}", crate::names::LANDED);
+    crate::compact::remote_marker(repo, &marker).map_err(|error| {
+        format!("the remote could not be read, so whether {change} merged is unknown: {error}")
+    })
+}
+
+/// G869 (a fleet finding, 2026-11-23: the five later changes of one landing batch kept their
+/// landed records and their queue releases, but the remote held no landed marker for any of
+/// them, so a change that lands after one of them waited for ever): the trunk commit that
+/// published `change`, which the remote holds no marker for: its one publication the trunk scan
+/// from its `base_first` finds, when its `record` says it landed. `None` when the record says
+/// otherwise, or the scan finds no publication of it or more than one.
+///
+/// # Errors
+///
+/// A git fault in the scan.
+pub(crate) fn unmarked(
+    repo: &Repo,
+    record: &ChangeRecord,
+    change: &str,
+    trunk: &str,
+) -> Result<Option<String>, String> {
+    if record.state != ChangeState::Landed {
+        return Ok(None);
+    }
+    let scan = publish::scan(&repo.git, &record.base_first, trunk, change)?;
+    Ok(match scan.publications.as_slice() {
+        [only] => Some(only.commit.clone()),
+        _ => None,
+    })
+}
+
+/// [`landed_commit`] of `change`, whose landed marker names `landed`.
+///
+/// # Errors
+///
+/// The remote's chain could not be read, or a git fault in the scan.
+pub(crate) fn marked_commit(
+    repo: &Repo,
+    change: &str,
+    trunk: &str,
+    landed: &str,
+) -> Result<Option<String>, String> {
     let unreadable = |error: crate::git::GitError| {
         format!(
             "the remote could not be read, so whether {change} merged is unknown: {}",
             error.message()
         )
     };
-    // § 10a: a compacted marker's shard index record stands in for the ref.
-    let marker = format!("{}{change}", crate::names::LANDED);
-    let Some(landed) = crate::compact::remote_marker(repo, &marker).map_err(|error| {
-        format!("the remote could not be read, so whether {change} merged is unknown: {error}")
-    })?
-    else {
-        return Ok(None);
-    };
+    let landed = landed.to_owned();
     // N-20: the marker's commit is on trunk when trunk reaches it, wherever it sits: a merge
     // pushed outside bay may have put it off the first-parent line, and it is undone all the
     // same, on the tip. A marker naming a commit this clone's trunk does not hold is not on it.

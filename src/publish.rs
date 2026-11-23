@@ -942,6 +942,10 @@ struct Ctx<'a> {
     /// G867: this visit's queue gate found a place ahead that another runner holds, whose lease
     /// names no batch yet ([`batch_behind`]): its wait ends at that runner's next beat.
     batch_unnamed: std::cell::Cell<bool>,
+    /// G869: the changes this operation lands after that its dependency gate found on trunk with
+    /// no landed marker on the remote, each with its publication ([`dependency_waiting`]): their
+    /// markers ride the push that lands it ([`Riding::unmarked`]).
+    unmarked: std::cell::RefCell<Vec<(String, String)>>,
 }
 
 /// G796: main moved past the base of a candidate while its checks ran.
@@ -1011,6 +1015,7 @@ impl<'a> Ctx<'a> {
             stopped_trees: Vec::new(),
             yielded: std::cell::Cell::new(false),
             batch_unnamed: std::cell::Cell::new(false),
+            unmarked: std::cell::RefCell::new(Vec::new()),
         })
     }
 
@@ -3934,6 +3939,7 @@ fn batch_with_records<'a>(
     let mut riding = Riding::default();
     for index in 0..members.len() {
         riding.chain(member_ctx(ctx, others, index));
+        riding.unmarked(member_ctx(ctx, others, index));
     }
     let leased = riding.lease(ctx, &members[0].op_id);
     let terminals: Vec<serde_json::Value> =
@@ -7784,11 +7790,19 @@ fn config_gate(
 /// G273: the result of `op_id` while a change it lands after is not on trunk at `trunk`, read
 /// with no write: `DEPENDENCY_ABANDONED` (blocked) when one ended without landing, else
 /// `DEPENDENCY_PENDING` (queued) when one has not landed yet, naming each that is not submitted
-/// or stopped (G604) and who must act on it, else `None`.
+/// or stopped (G604) and who must act on it, else `None`. G869: each one on trunk that the
+/// remote holds no landed marker for is kept in `ctx`, for the push that lands `op_id`.
 fn dependency_waiting(ctx: &Ctx, op_id: &str, trunk: &str) -> Result<Option<BayResult>, String> {
     use crate::after::Standing;
     use std::fmt::Write as _;
     let standing = crate::after::standing(ctx.repo, &ctx.record.after, trunk)?;
+    *ctx.unmarked.borrow_mut() = standing
+        .iter()
+        .filter_map(|dependency| match &dependency.standing {
+            Standing::Unmarked(commit) => Some((dependency.change.clone(), commit.clone())),
+            _ => None,
+        })
+        .collect();
     let after: Vec<serde_json::Value> = standing
         .iter()
         .map(crate::after::Dependency::to_json)
@@ -10900,6 +10914,22 @@ impl Riding {
         self.specs.push(spec);
         true
     }
+
+    /// G869: the landed marker of each change `ctx`'s operation lands after that the remote
+    /// holds none for ([`Ctx::unmarked`]), at its publication, which the push's trunk reaches.
+    /// Each is create-only: a marker another writer made first refuses the push, and the
+    /// operation's next visit reads it.
+    fn unmarked(&mut self, ctx: &Ctx) {
+        for (change, commit) in ctx.unmarked.borrow().iter() {
+            let name = format!("{}{change}", crate::names::LANDED);
+            let spec = format!("{commit}:{name}");
+            if self.specs.contains(&spec) {
+                continue;
+            }
+            self.leases.push(format!("--force-with-lease={name}:"));
+            self.specs.push(spec);
+        }
+    }
 }
 
 /// G867: the push that landed `ctx`'s operation took its lease's release ([`Riding::lease`]).
@@ -10952,6 +10982,7 @@ fn land_with_records(
     let signer = ctx.executor_signer().ok().flatten();
     let mut riding = Riding::default();
     riding.chain(ctx);
+    riding.unmarked(ctx);
     let leased = riding.lease(ctx, op_id);
     let id = ctx.id.clone();
     let terminal = std::slice::from_ref(&marked.terminal);

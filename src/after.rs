@@ -17,6 +17,13 @@
 //! who must `bay merge` it, and the chain head it was read at, which only a request, a landing or
 //! an end moves (`crate::executor` visits the wait again then).
 //!
+//! G869 (a fleet finding, 2026-11-23: the later changes of one landing batch kept their landed
+//! records but the remote held no landed marker for them, and a change after one of them waited
+//! for ever): a named change the remote holds no marker for, whose record says it landed, is on
+//! trunk at its one publication the trunk scan finds ([`crate::undo::unmarked`]). Its marker
+//! rides the push that lands the change after it (`crate::publish`), so every other reader of
+//! the markers finds it too.
+//!
 //! G604 (a fleet finding, 2026-10-31: an operation waited 22 minutes on a change whose only
 //! operation a runner had blocked, and each of 34 journal lines said only that it waits): a
 //! named change whose every open operation is blocked is stopped. It moves again only once a
@@ -43,6 +50,9 @@ pub const RELEASE: &str = "dependency_pending";
 pub enum Standing {
     /// On trunk, at this commit.
     Landed(String),
+    /// On trunk, at this commit, though the remote holds no landed marker for it: its record
+    /// says it landed, and the trunk scan finds its one publication (G869).
+    Unmarked(String),
     /// Not on trunk yet: its record's state, or why it could not be read.
     Pending(String),
     /// Not on trunk, and not submitted: no operation of it is under way, so it lands only once
@@ -82,6 +92,12 @@ impl Dependency {
             Standing::Landed(commit) => {
                 json!({"change": self.change, "state": "landed", "commit": commit})
             }
+            Standing::Unmarked(commit) => json!({
+                "change": self.change,
+                "state": "landed",
+                "commit": commit,
+                "marker": false,
+            }),
             Standing::Pending(state) => json!({"change": self.change, "state": state}),
             Standing::Unsubmitted { state, actor, head } => json!({
                 "change": self.change,
@@ -164,9 +180,14 @@ pub const fn ended_unlanded(state: ChangeState) -> bool {
 pub fn standing(repo: &Repo, after: &[String], trunk: &str) -> Result<Vec<Dependency>, String> {
     let mut out = Vec::new();
     for change in after {
-        let standing = match crate::undo::landed_commit(repo, change, trunk)? {
+        let marker = crate::undo::marker(repo, change)?;
+        let marked = match &marker {
+            Some(landed) => crate::undo::marked_commit(repo, change, trunk, landed)?,
+            None => None,
+        };
+        let standing = match marked {
             Some(commit) => Standing::Landed(commit),
-            None => unlanded(repo, change),
+            None => unlanded(repo, change, marker.is_none().then_some(trunk)),
         };
         out.push(Dependency {
             change: change.clone(),
@@ -176,8 +197,10 @@ pub fn standing(repo: &Repo, after: &[String], trunk: &str) -> Result<Vec<Depend
     Ok(out)
 }
 
-/// The standing of `change`, which is not on trunk: its record's state, read from the remote.
-fn unlanded(repo: &Repo, change: &str) -> Standing {
+/// The standing of `change`, which no landed marker puts on trunk: its record's state, read from
+/// the remote. With `unmarked_on`, the trunk the remote holds no marker of it on: a record that
+/// says it landed is on that trunk at the publication the scan finds there (G869).
+fn unlanded(repo: &Repo, change: &str, unmarked_on: Option<&str>) -> Standing {
     let head = match repo.remote_chain(change) {
         Ok(head) => head,
         Err(error) => {
@@ -190,6 +213,17 @@ fn unlanded(repo: &Repo, change: &str) -> Standing {
     match Chain::new(&repo.git).record_at(&head) {
         Ok(record) => {
             let state = state_word(record.state);
+            if let Some(trunk) = unmarked_on {
+                match crate::undo::unmarked(repo, &record, change, trunk) {
+                    Ok(Some(commit)) => return Standing::Unmarked(commit),
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Standing::Pending(format!(
+                            "unknown: trunk could not be scanned for it: {error}"
+                        ));
+                    }
+                }
+            }
             if record.state == ChangeState::NoEffect {
                 Standing::Met
             } else if ended_unlanded(record.state) {
