@@ -579,6 +579,20 @@ pub fn queued(repo: &Repo) -> usize {
         })
 }
 
+/// G872 (a measurement, 2026-11-23: in a store of 11,200 changes, [`queued`] took about 1 s of
+/// each prompt's hook, and 4 s on a loaded box): whether operations wait and no executor presence
+/// is fresh, the rule of [`no_live_executor`], judged in the cheap order. The presences of the
+/// last recorded fetch come first; the change records are read only when none is fresh.
+#[must_use]
+pub fn unserved_queue(repo: &Repo) -> bool {
+    if let Ok(Some(rows)) = crate::fleet::executors(repo)
+        && any_fresh(&rows)
+    {
+        return false;
+    }
+    queued(repo) > 0
+}
+
 /// G67: operations are queued and no executor presence on record is fresh. The warning says how
 /// many operations wait, the presences the last fleet fetch recorded, and the age of the
 /// freshest readable one (`seen_s`, `null` when none was seen). Never a refusal: the operations

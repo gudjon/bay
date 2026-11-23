@@ -11,7 +11,7 @@
 //! The guards to mutate: in `src/notice.rs`, `no_executor` returns early with
 //! `if waiting == cursor.no_executor` (drop it, and the second prompt is told again) and stores
 //! `cursor.no_executor = waiting` (drop it, and the cleared state never arms the line again);
-//! `src/presence.rs` `no_live_executor` returns `None` when `any_fresh(&rows)` (drop it, and a
+//! `src/presence.rs` `unserved_queue` returns `false` when `any_fresh(&rows)` (drop it, and a
 //! live executor is reported missing); `src/session.rs` `notices` calls `no_executor` at
 //! `SessionStart` and at `UserPromptSubmit` (drop either, and that hook says nothing).
 

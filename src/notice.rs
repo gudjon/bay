@@ -1087,7 +1087,8 @@ pub fn no_executor(repo: &Repo, state_dir: &Path) -> Option<&'static str> {
     if crate::fleet::fetched_age_s(repo).is_none_or(|age| age > window) {
         return None;
     }
-    let waiting = crate::presence::no_live_executor(repo, crate::presence::queued(repo)).is_some();
+    // G872: the presences first, so a repository with a live runner reads no change record.
+    let waiting = crate::presence::unserved_queue(repo);
     if waiting == cursor.no_executor {
         return None;
     }
