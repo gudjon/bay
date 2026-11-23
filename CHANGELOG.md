@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.156
+
+- `bay doctor` names a shallow store, the commits in its boundary, and the command that ends it.
+- A command's spent line keeps what the host said on each call it tried again.
+- A merge fetches its change's chain once: the read it starts early is the one it uses.
+
 ## 0.6.155
 
 - A machine pushes its live summary at once only when a session starts, ends or holds another change.
