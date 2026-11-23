@@ -63,6 +63,7 @@ use drain::Drain;
 use post::Post;
 
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
     let git = crate::git::Git::new(dir).version().ok();
     if let Some(refusal) = git.as_deref().and_then(below_floor) {
@@ -139,6 +140,10 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
                 None => continue,
             },
         };
+        // G868: a landing's wake went on this box's log only, for the next push of the log to
+        // carry. One that no later push in the pass carried goes now, once a pass, not once a
+        // landing.
+        crate::log::push(&repo, &Keys::load(&repo.git).executor_name);
         retries = !once;
         // Between passes, never inside an operation: the re-exec point. G589: a drain asked of
         // this runner comes first: it stops there once its post pieces end, and its service

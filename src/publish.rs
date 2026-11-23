@@ -2366,13 +2366,22 @@ fn wake_author(
 /// nothing is asked and nothing is written. The notify adapter is not told: the landing is
 /// on trunk, and a wake is no outcome of its own. G825: each member of a merged batch is woken
 /// so too, by its own context ([`land_batch`]).
+///
+/// G868 (a fleet measurement, 2026-11-23: each landing's wake made two fetches and a push of its
+/// own after the publishing push, about 8 s of the runner's time): after this process's own
+/// push landed the operation, no log can hold its wake yet, so none is fetched to look for one,
+/// and the event goes on this box's log only. The next push of the log carries it: the next
+/// landing's, or the one at the end of the pass ([`crate::executor`]).
 fn landed_wake(ctx: &Ctx, op_id: &str, decision: Decision) -> Result<(), String> {
     if decision != Decision::Landed || !crate::talk::wake::configured(ctx.repo) {
         return Ok(());
     }
     let id = digest(&json!({"op_id": op_id, "outcome": "landed"}))?;
     let id = format!("evt_{}", &id.trim_start_matches("sha256:")[..20]);
-    crate::log::fetch(ctx.repo);
+    let ours = ctx.pushed_landing.is_some();
+    if !ours {
+        crate::log::fetch(ctx.repo);
+    }
     if crate::log::held_events(&ctx.repo.git)?.contains(&id) {
         return Ok(());
     }
@@ -2391,6 +2400,9 @@ fn landed_wake(ctx: &Ctx, op_id: &str, decision: Decision) -> Result<(), String>
     });
     let executor = ctx.executor_name();
     let signer = ctx.executor_signer().ok().flatten();
+    if ours {
+        return crate::log::write_local(ctx.repo, &executor, signer.as_ref(), &event).map(|_| ());
+    }
     crate::log::append(ctx.repo, &executor, signer.as_ref(), &event).map(|_| ())
 }
 
