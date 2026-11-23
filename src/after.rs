@@ -181,11 +181,11 @@ pub fn standing(repo: &Repo, after: &[String], trunk: &str) -> Result<Vec<Depend
     let mut out = Vec::new();
     for change in after {
         let marker = crate::undo::marker(repo, change)?;
-        let marked = match &marker {
+        let on_trunk = match &marker {
             Some(landed) => crate::undo::marked_commit(repo, change, trunk, landed)?,
             None => None,
         };
-        let standing = match marked {
+        let standing = match on_trunk {
             Some(commit) => Standing::Landed(commit),
             None => unlanded(repo, change, marker.is_none().then_some(trunk)),
         };

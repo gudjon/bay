@@ -186,7 +186,7 @@ pub(crate) fn landed_commit(
 /// # Errors
 ///
 /// The remote could not be read: only a marker the remote answered without is "not landed", a
-/// remote that cannot be read is a fault, never CHANGE_NOT_MERGED, whose retry is never.
+/// remote that cannot be read is a fault, never `CHANGE_NOT_MERGED`, whose retry is never.
 pub(crate) fn marker(repo: &Repo, change: &str) -> Result<Option<String>, String> {
     let marker = format!("{}{change}", crate::names::LANDED);
     crate::compact::remote_marker(repo, &marker).map_err(|error| {
