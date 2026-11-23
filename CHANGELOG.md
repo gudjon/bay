@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.152
+
+- The skill tells a script to start its merge wait without awaiting it and end: the later output wakes it.
+
 ## 0.6.151
 
 - A session outside a view hears nothing at its start when nothing waits on it.
