@@ -3923,6 +3923,7 @@ fn batch_with_records<'a>(
     for index in 0..members.len() {
         riding.chain(member_ctx(ctx, others, index));
     }
+    let leased = riding.lease(ctx, &members[0].op_id);
     let terminals: Vec<serde_json::Value> =
         marked.iter().map(|mark| mark.terminal.clone()).collect();
     let tip = &built[members.len() - 1].commit;
@@ -3941,6 +3942,9 @@ fn batch_with_records<'a>(
         });
     }
     kill_point("after-publish");
+    if leased {
+        lease_released(ctx);
+    }
     for index in 0..members.len() {
         chain_pushed(member_ctx(ctx, others, index));
     }
@@ -10866,6 +10870,31 @@ impl Riding {
         }
         self.specs.push(format!("{}:{name}", ctx.head));
     }
+
+    /// G867: the release of the lease `ctx`'s beats pushed for `op_id`, when they pushed one: it
+    /// rides the push that lands it, so the next head's claim never waits on a push of its own.
+    /// Returns whether it rides.
+    fn lease(&mut self, ctx: &Ctx, op_id: &str) -> bool {
+        let release = ctx
+            .lease
+            .borrow()
+            .as_ref()
+            .filter(|lease| lease.of(op_id))
+            .and_then(|lease| lease.riding_release(&ctx.repo.git));
+        let Some((expected, spec)) = release else {
+            return false;
+        };
+        self.leases.push(expected);
+        self.specs.push(spec);
+        true
+    }
+}
+
+/// G867: the push that landed `ctx`'s operation took its lease's release ([`Riding::lease`]).
+fn lease_released(ctx: &Ctx) {
+    if let Some(lease) = ctx.lease.borrow_mut().as_mut() {
+        lease.released_riding(&ctx.repo.git);
+    }
 }
 
 /// Test builds keep a landing's records apart from its push on request, as a refused push leaves
@@ -10911,6 +10940,7 @@ fn land_with_records(
     let signer = ctx.executor_signer().ok().flatten();
     let mut riding = Riding::default();
     riding.chain(ctx);
+    let leased = riding.lease(ctx, op_id);
     let id = ctx.id.clone();
     let terminal = std::slice::from_ref(&marked.terminal);
     let pushed = crate::log::ride(repo, &executor, signer.as_ref(), terminal, |log| {
@@ -10925,6 +10955,9 @@ fn land_with_records(
         }
     }
     kill_point("after-publish");
+    if leased {
+        lease_released(ctx);
+    }
     chain_pushed(ctx);
     recorded(ctx, op_id, revision, commit, &marked.behind).map(Ok)
 }

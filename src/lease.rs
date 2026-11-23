@@ -200,7 +200,8 @@ pub struct Holding {
     pushed: Option<String>,
     /// G856: when this holder last pushed a beat, and the lease tree that beat carried.
     beaten: Option<(Instant, String)>,
-    /// A later holder's lease stands: this holder beats no more.
+    /// A later holder's lease stands, or the push that ended this visit released this one
+    /// ([`Self::released_riding`]): this holder beats no more.
     lost: bool,
 }
 
@@ -340,6 +341,31 @@ impl Holding {
         ];
         git.run_with(&args, &envs, None)
             .map_err(|error| error.message())
+    }
+
+    /// G867: the release of this holder's own last beat, to ride the push that ends its visit:
+    /// the lease that push expects, and the refspec that deletes it. None when this store's lease
+    /// is not the one this holder last pushed: [`Self::release`] then judges it apart.
+    #[must_use]
+    pub fn riding_release(&self, git: &Git) -> Option<(String, String)> {
+        let name = lease_ref(&self.lease.change);
+        let seen = tip(git, &self.lease.change)?;
+        (self.pushed.as_ref() == Some(&seen)).then(|| {
+            (
+                format!("--force-with-lease={name}:{seen}"),
+                format!(":{name}"),
+            )
+        })
+    }
+
+    /// G867: the push that ended this holder's visit took its release
+    /// ([`Self::riding_release`]), so this store's lease goes too, and the visit's end releases
+    /// nothing more.
+    pub fn released_riding(&mut self, git: &Git) {
+        if let Some(pushed) = self.pushed.take() {
+            let _ = git.run(&["update-ref", "-d", &lease_ref(&self.lease.change), &pushed]);
+        }
+        self.lost = true;
     }
 
     /// Releases the lease as the holder's visit ends: its own last beat, or an older holder's
