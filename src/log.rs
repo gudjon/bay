@@ -109,30 +109,50 @@ pub fn append_riding(
     Ok(commit)
 }
 
-/// G864: writes `record` on this executor's log for a push that stands or falls with it:
+/// G864: writes `records` on this executor's log for a push that stands or falls with them:
 /// `push`, given the log's refspec, pushes it with the caller's other refs and answers. A refused
-/// push takes the record back off this box's log, and nothing is pushed again: the record stood
-/// only with what it rode with, and the caller writes it anew if it still stands.
+/// push takes the records back off this box's log, and nothing is pushed again: the records stood
+/// only with what they rode with, and the caller writes them anew if they still stand. G865: a
+/// batch's landing carries the terminal record of each member.
 ///
 /// # Errors
 ///
-/// A git fault while writing locally.
+/// A git fault while writing locally, once the records written before it are taken back; no
+/// record to write.
 pub fn ride<E>(
     repo: &Repo,
     executor: &str,
     signer: Option<&Signer>,
-    record: &Value,
+    records: &[Value],
     push: impl FnOnce(&str) -> Result<(), E>,
 ) -> Result<Result<String, E>, String> {
     let name = log_ref(executor);
-    let (commit, parent) = write(repo, &name, signer, record)?;
+    // The last record written, and the tip the first went on.
+    let mut written: Option<(String, Option<String>)> = None;
+    for record in records {
+        match write(repo, &name, signer, record) {
+            Ok((commit, parent)) => {
+                let first = written.map_or(parent, |(_, first)| first);
+                written = Some((commit, first));
+            }
+            Err(why) => {
+                if let Some((commit, first)) = &written {
+                    take_back(&repo.git, &name, commit, first.as_deref());
+                }
+                return Err(why);
+            }
+        }
+    }
+    let Some((commit, first)) = written else {
+        return Err("no record to write".to_owned());
+    };
     match push(&format!("{name}:{name}")) {
         Ok(()) => {
             pushed(repo, &name, &commit);
             Ok(Ok(commit))
         }
         Err(error) => {
-            take_back(&repo.git, &name, &commit, parent.as_deref());
+            take_back(&repo.git, &name, &commit, first.as_deref());
             Ok(Err(error))
         }
     }

@@ -3711,9 +3711,10 @@ struct Built {
 /// Lands `members` (the head first, then the claimed `others`) as batch `id`, checked on
 /// `trunk` as their last member's tree: each member's candidate is built ([`build_batch`]) and
 /// persisted as checked in its own chain ([`persist_batch`]), then one atomic push moves trunk
-/// to the last member with every member's landed marker, intent marker and queue release, and
-/// each landing is derived from trunk. `None` when a member is no longer this executor's:
-/// nothing was pushed.
+/// to the last member with every member's landed marker, intent marker, queue release and records
+/// ([`batch_with_records`]). A push refused goes again without the records, each chain read
+/// first, and each landing is derived from trunk. `None` when a member is no longer this
+/// executor's: nothing was pushed.
 fn land_batch<'a>(
     ctx: &mut Ctx<'a>,
     others: &mut [Ctx<'a>],
@@ -3722,7 +3723,6 @@ fn land_batch<'a>(
     id: &str,
 ) -> Result<Option<BayResult>, String> {
     let repo = ctx.repo;
-    let git = &repo.git;
     ctx.membership = Membership::Batch;
     let (built, anchors) = build_batch(ctx, others, members, trunk, id)?;
     if !persist_batch(ctx, others, members, &built, trunk, id)? {
@@ -3730,33 +3730,28 @@ fn land_batch<'a>(
     }
     ctx.step.set("publish");
     let signer = ctx.executor_signer().ok().flatten();
-    let mut pushes = Vec::new();
+    if let Some(mut landings) = batch_with_records(ctx, others, members, &built, signer.as_ref())? {
+        drop(anchors);
+        let head = landings.remove(0);
+        let landed = landings
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, landing)| landing.ok().map(|landing| (index + 1, landing)))
+            .collect();
+        tell_members(others, members, landed);
+        return head.map(Some);
+    }
     for (index, member) in members.iter().enumerate() {
-        let owner: &mut Ctx = if index == 0 {
-            &mut *ctx
-        } else {
-            &mut others[index - 1]
-        };
+        let owner = member_ctx(ctx, others, index);
         if still_owner(owner, &member.op_id, &member.revision)?.is_some() {
             return Ok(None);
         }
-        let release = crate::queue::release_commit(
-            git,
-            signer.as_ref(),
-            member.seq,
-            &member.op_id,
-            "published",
-        )?;
-        pushes.push(BatchPush {
-            change: member.change.clone(),
-            commit: built[index].commit.clone(),
-            release: (member.seq, release),
-            claim: owner.record.claim.clone(),
-        });
     }
+    let pushes = batch_pushes(ctx, others, members, &built, signer.as_ref())?;
     let tip = &built[members.len() - 1].commit;
+    let bare = Riding::default();
     kill_point("before-publish");
-    let mut answer = publish_batch_push(repo, tip, &pushes);
+    let mut answer = publish_batch_push(repo, tip, &pushes, &bare);
     // BACKLOG 83 (2026-10-28: the host refused one batch twice with main unmoved, and each
     // refusal gave the batch back to be built and checked again, 4.5 min each; the third push of
     // the same refs landed): a refusal on an unmoved main, other than bay's own judgement, is
@@ -3769,7 +3764,7 @@ fn land_batch<'a>(
     {
         again += 1;
         std::thread::sleep(HOOK_RETRY_WAIT);
-        answer = publish_batch_push(repo, tip, &pushes);
+        answer = publish_batch_push(repo, tip, &pushes, &bare);
     }
     answer.map_err(|error| format!("batch {id} was refused: {error}"))?;
     kill_point("after-publish");
@@ -3779,17 +3774,15 @@ fn land_batch<'a>(
     for other in others.iter_mut() {
         other.push_mode = PushMode::Defer;
     }
-    let mut merged = Vec::new();
-    let mut landings = Vec::new();
+    let mut landed = Vec::new();
     for (index, member) in members.iter().enumerate().skip(1) {
         let other = &mut others[index - 1];
         other.pushed_landing = Some(built[index].commit.clone());
         // A landing whose record could not be written now is derived from trunk on a later run.
-        if let Ok(landed) =
+        if let Ok(landing) =
             derive_landed(other, &member.op_id, &member.revision, &built[index].commit)
         {
-            merged.push((index, landed.decision));
-            landings.push((member.change.clone(), member.op_id.clone(), landed));
+            landed.push((index, landing));
         }
     }
     ctx.pushed_landing = Some(built[0].commit.clone());
@@ -3800,18 +3793,148 @@ fn land_batch<'a>(
         &built[0].commit,
     );
     push_landed(ctx, others);
-    if let Ok(mut landed) = MEMBERS_LANDED.lock() {
-        landed.extend(landings);
+    tell_members(others, members, landed);
+    head.map(Some)
+}
+
+/// G865 (a fleet measurement, 2026-11-23: a batch of three read each member's chain again before
+/// its publishing push, and pushed every member's records after it): a batch's records ride its
+/// publishing push, as a single landing's do ([`land_with_records`]). Each member's chain,
+/// recorded landed on the head this process last pushed and leased on it, and this executor's
+/// log, with each member's terminal record, move in the one atomic push that moves trunk to the
+/// batch's tip. Each chain's lease stands for the read of that member's chain ([`still_owner`]).
+///
+/// Returns each member's landing, the head's first; or `None` when the remote refused the push or
+/// a record could not be written, once every record is taken back off this box, so the caller
+/// reads each chain again and pushes the batch without its records ([`land_batch`]).
+///
+/// # Errors
+///
+/// A queue release cannot be written.
+fn batch_with_records<'a>(
+    ctx: &mut Ctx<'a>,
+    others: &mut [Ctx<'a>],
+    members: &[throughput::Member],
+    built: &[Built],
+    signer: Option<&Signer>,
+) -> Result<Option<Vec<Result<BayResult, String>>>, String> {
+    if records_apart() {
+        return Ok(None);
     }
-    for other in others.iter() {
+    let repo = ctx.repo;
+    let pushes = batch_pushes(ctx, others, members, built, signer)?;
+    kill_point("before-publish");
+    let mut marked = Vec::new();
+    for (index, member) in members.iter().enumerate() {
+        let owner = member_ctx(ctx, others, index);
+        let Ok(mark) = mark_landed(owner, &member.op_id, &member.revision, &built[index].commit)
+        else {
+            take_all_back(ctx, others, marked);
+            return Ok(None);
+        };
+        marked.push(mark);
+    }
+    let mut riding = Riding::default();
+    for index in 0..members.len() {
+        riding.chain(member_ctx(ctx, others, index));
+    }
+    let terminals: Vec<serde_json::Value> =
+        marked.iter().map(|mark| mark.terminal.clone()).collect();
+    let tip = &built[members.len() - 1].commit;
+    let executor = ctx.executor_name();
+    let answer = crate::log::ride(repo, &executor, signer, &terminals, |log| {
+        riding.specs.push(log.to_owned());
+        publish_batch_push(repo, tip, &pushes, &riding)
+    });
+    if !matches!(answer, Ok(Ok(_))) {
+        take_all_back(ctx, others, marked);
+        return Ok(None);
+    }
+    kill_point("after-publish");
+    for index in 0..members.len() {
+        chain_pushed(member_ctx(ctx, others, index));
+    }
+    let mut landings = Vec::new();
+    for (index, (member, mark)) in members.iter().zip(marked).enumerate() {
+        landings.push(recorded(
+            member_ctx(ctx, others, index),
+            &member.op_id,
+            &member.revision,
+            &built[index].commit,
+            &mark.behind,
+        ));
+    }
+    Ok(Some(landings))
+}
+
+/// A batch member's context: the head's, at `index` 0, or another member's.
+fn member_ctx<'c, 'a>(
+    ctx: &'c mut Ctx<'a>,
+    others: &'c mut [Ctx<'a>],
+    index: usize,
+) -> &'c mut Ctx<'a> {
+    if index == 0 {
+        ctx
+    } else {
+        &mut others[index - 1]
+    }
+}
+
+/// G865: the records [`mark_landed`] wrote for each member, taken back off this box.
+fn take_all_back<'a>(ctx: &mut Ctx<'a>, others: &mut [Ctx<'a>], marked: Vec<Marked>) {
+    for (index, mark) in marked.into_iter().enumerate() {
+        taken_back(member_ctx(ctx, others, index), &mark.before, mark.record);
+    }
+}
+
+/// Each member's part of the batch's publishing push ([`publish_batch_push`]): its queue
+/// release and its intent claim, as its record holds them.
+fn batch_pushes(
+    ctx: &Ctx,
+    others: &[Ctx],
+    members: &[throughput::Member],
+    built: &[Built],
+    signer: Option<&Signer>,
+) -> Result<Vec<BatchPush>, String> {
+    let git = &ctx.repo.git;
+    let mut pushes = Vec::new();
+    for (index, member) in members.iter().enumerate() {
+        let owner: &Ctx = if index == 0 { ctx } else { &others[index - 1] };
+        let release =
+            crate::queue::release_commit(git, signer, member.seq, &member.op_id, "published")?;
+        pushes.push(BatchPush {
+            change: member.change.clone(),
+            commit: built[index].commit.clone(),
+            release: (member.seq, release),
+            claim: owner.record.claim.clone(),
+        });
+    }
+    Ok(pushes)
+}
+
+/// G825: each other member's landing, kept for the run's answer, its deferred events told, and
+/// its author woken once, as the head's is in `execute` (G307), after every record is written,
+/// so a slow adapter holds no record back.
+fn tell_members(others: &[Ctx], members: &[throughput::Member], landed: Vec<(usize, BayResult)>) {
+    let woken: Vec<_> = landed
+        .iter()
+        .map(|(index, landing)| (*index, landing.decision))
+        .collect();
+    if let Ok(mut kept) = MEMBERS_LANDED.lock() {
+        kept.extend(landed.into_iter().map(|(index, landing)| {
+            (
+                members[index].change.clone(),
+                members[index].op_id.clone(),
+                landing,
+            )
+        }));
+    }
+    for other in others {
         other.tell_deferred();
     }
-    // G825: each other member's author is woken once, as the head's is in `execute` (G307),
-    // after every record is written, so a slow adapter holds no record back.
-    for (index, decision) in merged {
+    for (index, decision) in woken {
         let _ = landed_wake(&others[index - 1], &members[index].op_id, decision);
     }
-    head.map(Some)
 }
 
 /// Step 5 for a batch: each member's candidate linked into its own chain as checked, with the
@@ -3977,10 +4100,15 @@ struct BatchPush {
 }
 
 /// Step 6 for a batch (`crate::throughput`): one atomic push moves trunk to `tip`, the last
-/// member, and creates every member's landed marker, intent marker and queue release. Never
-/// forced; each marker and release is create-only.
-fn publish_batch_push(repo: &Repo, tip: &str, members: &[BatchPush]) -> Result<(), String> {
-    let mut leases = Vec::new();
+/// member, and creates every member's landed marker, intent marker and queue release, with what
+/// rides it (G865). Never forced; each marker and release is create-only.
+fn publish_batch_push(
+    repo: &Repo,
+    tip: &str,
+    members: &[BatchPush],
+    riding: &Riding,
+) -> Result<(), String> {
+    let mut leases = riding.leases.clone();
     let mut refspecs = vec![format!("{tip}:refs/heads/{}", repo.trunk())];
     for member in members {
         let landed = format!("{}{}", crate::names::LANDED, member.change);
@@ -3996,6 +4124,7 @@ fn publish_batch_push(repo: &Repo, tip: &str, members: &[BatchPush]) -> Result<(
             refspecs.push(format!("{}:{intent}", member.commit));
         }
     }
+    refspecs.extend(riding.specs.iter().cloned());
     let mut args = vec!["push", "-q", "--atomic"];
     args.extend(leases.iter().map(String::as_str));
     args.push(repo.remote());
@@ -10572,6 +10701,24 @@ struct Riding {
     specs: Vec<String>,
 }
 
+impl Riding {
+    /// G864: `ctx`'s chain, on the head this process holds, leased on the head it last pushed.
+    fn chain(&mut self, ctx: &Ctx) {
+        let name = change_ref(&ctx.id);
+        if let Some(expected) = &ctx.pushed_head {
+            self.leases
+                .push(format!("--force-with-lease={name}:{expected}"));
+        }
+        self.specs.push(format!("{}:{name}", ctx.head));
+    }
+}
+
+/// Test builds keep a landing's records apart from its push on request, as a refused push leaves
+/// them (G809, G863).
+fn records_apart() -> bool {
+    TEST_HOOKS && std::env::var_os("BAY_TEST_LAND_APART").is_some()
+}
+
 /// G864 (a fleet measurement, 2026-11-23: a landing made four pushes in a row at about 5.5 s
 /// each, its claim, its checked state, its publishing push and its records, and read its chain
 /// again before the publishing one): the landing's own records ride in its publishing push. The
@@ -10596,11 +10743,50 @@ fn land_with_records(
     release: Option<&(u64, String)>,
     claim: Option<&crate::change::IntentClaim>,
 ) -> Result<Result<BayResult, String>, String> {
-    // Test builds keep the records apart on request, as a refused push leaves them (G809, G863).
-    if TEST_HOOKS && std::env::var_os("BAY_TEST_LAND_APART").is_some() {
+    if records_apart() {
         return Ok(Err("the test keeps the landing's records apart".to_owned()));
     }
     kill_point("before-publish");
+    let marked = match mark_landed(ctx, op_id, revision, commit) {
+        Ok(marked) => marked,
+        Err(why) => return Ok(Err(why)),
+    };
+    let repo = ctx.repo;
+    let executor = ctx.executor_name();
+    let signer = ctx.executor_signer().ok().flatten();
+    let mut riding = Riding::default();
+    riding.chain(ctx);
+    let id = ctx.id.clone();
+    let terminal = std::slice::from_ref(&marked.terminal);
+    let pushed = crate::log::ride(repo, &executor, signer.as_ref(), terminal, |log| {
+        riding.specs.push(log.to_owned());
+        publish_push(repo, &id, commit, release, claim, &riding)
+    });
+    match pushed {
+        Ok(Ok(_)) => {}
+        Ok(Err(why)) | Err(why) => {
+            taken_back(ctx, &marked.before, marked.record);
+            return Ok(Err(why));
+        }
+    }
+    kill_point("after-publish");
+    chain_pushed(ctx);
+    recorded(ctx, op_id, revision, commit, &marked.behind).map(Ok)
+}
+
+/// G864: a landing's records as this box holds them before its push: the head and the record
+/// [`taken_back`] restores, the operations the landing ends, and its terminal record.
+struct Marked {
+    before: String,
+    record: ChangeRecord,
+    behind: Vec<String>,
+    terminal: serde_json::Value,
+}
+
+/// G864: records `op_id`'s landing of `commit` on this box's chain ref, the operation published
+/// and the change landed, and builds its terminal record; or why not, with nothing left written,
+/// when another process moved the chain ref or a record could not be written.
+fn mark_landed(ctx: &mut Ctx, op_id: &str, revision: &str, commit: &str) -> Result<Marked, String> {
     let before = ctx.head.clone();
     let record = ctx.record.clone();
     let behind = under_way_beside(ctx, op_id);
@@ -10613,60 +10799,61 @@ fn land_with_records(
         Ok(true) => {}
         Ok(false) => {
             ctx.record = record;
-            return Ok(Err(CHAIN_MOVED.to_owned()));
+            return Err(CHAIN_MOVED.to_owned());
         }
         Err(why) => {
             ctx.record = record;
-            return Ok(Err(why));
+            return Err(why);
         }
     }
     // BACKLOG 99: the record stands only if this push lands the operation, and then no other
     // runner holds a terminal record of it, so no log is fetched to look for one. A refusal
     // takes the mark back with the record.
     ctx.pushed_landing = Some(commit.to_owned());
-    let terminal = match terminal_record(ctx, op_id, "published", Some(commit)) {
-        Ok(Some(terminal)) => terminal,
+    match terminal_record(ctx, op_id, "published", Some(commit)) {
+        Ok(Some(terminal)) => Ok(Marked {
+            before,
+            record,
+            behind,
+            terminal,
+        }),
         Ok(None) => {
             taken_back(ctx, &before, record);
-            return Ok(Err("no terminal record was written".to_owned()));
+            Err("no terminal record was written".to_owned())
         }
         Err(why) => {
             taken_back(ctx, &before, record);
-            return Ok(Err(why));
-        }
-    };
-    let repo = ctx.repo;
-    let executor = ctx.executor_name();
-    let signer = ctx.executor_signer().ok().flatten();
-    let name = change_ref(&ctx.id);
-    let mut riding = Riding::default();
-    if let Some(expected) = &ctx.pushed_head {
-        riding
-            .leases
-            .push(format!("--force-with-lease={name}:{expected}"));
-    }
-    riding.specs.push(format!("{}:{name}", ctx.head));
-    let id = ctx.id.clone();
-    let pushed = crate::log::ride(repo, &executor, signer.as_ref(), &terminal, |log| {
-        riding.specs.push(log.to_owned());
-        publish_push(repo, &id, commit, release, claim, &riding)
-    });
-    match pushed {
-        Ok(Ok(_)) => {}
-        Ok(Err(why)) | Err(why) => {
-            taken_back(ctx, &before, record);
-            return Ok(Err(why));
+            Err(why)
         }
     }
-    kill_point("after-publish");
+}
+
+/// G864: a landing whose push took its chain: the chain stands pushed, as [`Ctx::push_chain`]
+/// leaves it.
+fn chain_pushed(ctx: &mut Ctx) {
     ctx.pushed_head = Some(ctx.head.clone());
     ctx.unpushed_from = None;
     ctx.catch_up_local();
+}
+
+/// G864: the landing of `commit` once its push took its records: the view's journal says
+/// published, the operations it ended are told (G823), and the landing is answered.
+///
+/// # Errors
+///
+/// The view's journal cannot be written.
+fn recorded(
+    ctx: &Ctx,
+    op_id: &str,
+    revision: &str,
+    commit: &str,
+    behind: &[String],
+) -> Result<BayResult, String> {
     if view::journal(ctx.repo, &ctx.id).is_some() {
         view::set_journal(ctx.repo, &ctx.id, view::Journal::Published)?;
     }
-    tell_behind(ctx, &behind, revision, commit);
-    Ok(Ok(landing_row(ctx, op_id, revision, commit)))
+    tell_behind(ctx, behind, revision, commit);
+    Ok(landing_row(ctx, op_id, revision, commit))
 }
 
 /// G864: a landing whose push did not take its records: its chain ref goes back to `before`,
