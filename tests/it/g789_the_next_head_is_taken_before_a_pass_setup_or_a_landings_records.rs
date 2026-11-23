@@ -8,14 +8,14 @@
 //!   it claims it before it reads every chain, lists the remote's land requests, or probes the
 //!   changes in line for conflicts.
 //! - A runner that lands takes the next head before it probes the line for conflicts, and its
-//!   landing's record and terminal record go in one push.
+//!   landing's record and terminal record ride in its landing's own push (G864).
 //!
 //! Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file (G171).
 //!
 //! Guards to mutate, in `src/executor.rs`: `pass`'s heads taken first (drop the loop, and the
 //! woken runner reads every chain first); the conflict probe after the abandoned-head take (put
-//! it back in `run_op`, and the lander probes first). In `src/publish.rs`, `derive_landed`'s
-//! `push_chain_with_record` (push the chain and append the record each alone: two pushes).
+//! it back in `run_op`, and the lander probes first). In `src/publish.rs`, `land_with_records`'s
+//! chain in `riding.specs` (push no chain, and the records go in a push after the landing).
 
 #![cfg(unix)]
 
@@ -294,8 +294,16 @@ fn a_runner_that_lands_takes_the_next_head_before_its_probes_and_records_in_one_
     held.go();
     let claim = format!("claim {second}.1");
     let next = format!("landed {second}.1");
+    // The trace holds a call once it returns, and since G864 the remote holds a landing's record
+    // while its push has yet to return: so wait for both.
+    let lands_second = format!("landed/{second}");
     let drained = until(Duration::from_secs(BOUND_S + 20), || {
         written(&held, &second, &next).is_some()
+            && std::fs::read_to_string(&trace).is_ok_and(|calls| {
+                calls
+                    .lines()
+                    .any(|call| call.contains("\"push\"") && call.contains(&lands_second))
+            })
     });
     let _ = child.kill();
     let _ = child.wait();
@@ -308,7 +316,7 @@ fn a_runner_that_lands_takes_the_next_head_before_its_probes_and_records_in_one_
     );
 
     // THEN between its landing's push and its claim of the next head, the runner probed nothing
-    // and pushed once: the landing's record and its terminal record together
+    // and pushed nothing: the landing's record and its terminal record rode in that push
     let main = "refs/heads/main";
     let landing = |args: &str| args.contains("push") && args.contains(main);
     let claiming = |args: &str| args.contains("commit-tree") && args.contains(&claim);
@@ -331,11 +339,25 @@ fn a_runner_that_lands_takes_the_next_head_before_its_probes_and_records_in_one_
         .iter()
         .filter(|args| args.split(' ').any(|word| word == "push"))
         .collect();
+    let lands_first = std::fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .filter_map(|line| {
+            let call: Value = serde_json::from_str(line).ok()?;
+            let args: Vec<&str> = call["args"]
+                .as_array()?
+                .iter()
+                .filter_map(Value::as_str)
+                .collect();
+            Some(args.join(" "))
+        })
+        .find(|args| landing(args) && args.contains(&format!("landed/{first}")))
+        .expect("the trace holds the head's landing");
     assert!(
-        pushes.len() == 1
-            && pushes[0].contains(&format!("refs/bay/changes/{first}"))
-            && pushes[0].contains("refs/bay/log/exec-a"),
-        "the landing's records took {} pushes before the next head: {pushes:#?}",
+        pushes.is_empty()
+            && lands_first.contains(&format!("refs/bay/changes/{first}"))
+            && lands_first.contains("refs/bay/log/exec-a"),
+        "the landing's records took {} pushes of their own before the next head: {pushes:#?}\nlanding: {lands_first}",
         pushes.len()
     );
 }

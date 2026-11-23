@@ -1797,6 +1797,7 @@ fn run_op(
     let step = publish::Step::new("read");
     let began = std::time::Instant::now();
     let _ = crate::git::take_times(0);
+    let _ = crate::git::take_step_times();
     let mut placing = || arrivals.step(repo, op_id);
     let result = beat.during(repo, op_id, depth, &mut placing, || {
         publish::execute(repo, id, op_id, &step, took).unwrap_or_else(BayResult::failed)
@@ -1870,10 +1871,15 @@ fn journal_line(
     let line = named(repo, id, op_id, op_line(op_id, result));
     // A fleet finding (2026-10-27): a merge took five to eight minutes on a loaded box, and the
     // line did not say where; it names each step of a second or more.
+    // G864: and each step's time talking to the remote, by command.
+    let network = crate::git::take_step_times();
     let steps: Vec<String> = step
         .seconds()
         .into_iter()
-        .map(|(name, secs)| format!("{name} {secs}s"))
+        .map(|(name, secs)| match network.get(name) {
+            Some(git) => format!("{name} {secs}s [{git}]"),
+            None => format!("{name} {secs}s"),
+        })
         .collect();
     // G669 (a merge run of 65 s with a 1 s check, 30 s of it in "publish"): which Git calls.
     let git = crate::git::take_times(GIT_TIMES_SHOWN);
@@ -2096,6 +2102,7 @@ fn place_arrival(repo: &Repo, change: &str, request: &str, holding: &str) -> Opt
     let step = publish::Step::new("place");
     let began = Instant::now();
     let _ = crate::git::take_times(0);
+    let _ = crate::git::take_step_times();
     let result = match publish::place(repo, change, &op_id, &step) {
         Ok(Some(result)) => result,
         Ok(None) => return None,

@@ -92,14 +92,7 @@ pub fn append_riding(
         pushed(repo, &name, &commit);
         return Ok(commit);
     }
-    let back = match &parent {
-        Some(parent) => format!("update {name} {parent} {commit}\n"),
-        None => format!("delete {name} {commit}\n"),
-    };
-    if git
-        .run_with(&["update-ref", "--stdin"], &[], Some(back.as_bytes()))
-        .is_err()
-    {
+    if !take_back(git, &name, &commit, parent.as_deref()) {
         return Ok(commit);
     }
     let _ = git.run(&[
@@ -114,6 +107,46 @@ pub fn append_riding(
         pushed(repo, &name, &commit);
     }
     Ok(commit)
+}
+
+/// G864: writes `record` on this executor's log for a push that stands or falls with it:
+/// `push`, given the log's refspec, pushes it with the caller's other refs and answers. A refused
+/// push takes the record back off this box's log, and nothing is pushed again: the record stood
+/// only with what it rode with, and the caller writes it anew if it still stands.
+///
+/// # Errors
+///
+/// A git fault while writing locally.
+pub fn ride<E>(
+    repo: &Repo,
+    executor: &str,
+    signer: Option<&Signer>,
+    record: &Value,
+    push: impl FnOnce(&str) -> Result<(), E>,
+) -> Result<Result<String, E>, String> {
+    let name = log_ref(executor);
+    let (commit, parent) = write(repo, &name, signer, record)?;
+    match push(&format!("{name}:{name}")) {
+        Ok(()) => {
+            pushed(repo, &name, &commit);
+            Ok(Ok(commit))
+        }
+        Err(error) => {
+            take_back(&repo.git, &name, &commit, parent.as_deref());
+            Ok(Err(error))
+        }
+    }
+}
+
+/// Takes `commit`, a record no push carried, off log `name` on this box: back to `parent`, the
+/// tip it went on. Whether the log was moved back (no other write went on it since).
+fn take_back(git: &Git, name: &str, commit: &str, parent: Option<&str>) -> bool {
+    let back = match parent {
+        Some(parent) => format!("update {name} {parent} {commit}\n"),
+        None => format!("delete {name} {commit}\n"),
+    };
+    git.run_with(&["update-ref", "--stdin"], &[], Some(back.as_bytes()))
+        .is_ok()
 }
 
 /// G860: appends `record` to this executor's log on this box only: the caller's push carries it

@@ -5,8 +5,9 @@
 //! that finds it so records the landing on its chain, from main, and visits it no more.
 //!
 //! Runner A lands the head and stops right after its publishing push
-//! (`BAY_TEST_KILL_AT=after-publish`): the chain says checked, held by A, and only the line and
-//! main say it landed. Looping runner B then visits it.
+//! (`BAY_TEST_KILL_AT=after-publish`), its records kept apart from that push
+//! (`BAY_TEST_LAND_APART`, as a batch's landing pushes them): the chain says checked, held by
+//! A, and only the line and main say it landed. Looping runner B then visits it.
 //!
 //! Guard to mutate, in `src/publish.rs` `chain_left_checked`: return `false` (B answers the
 //! landing at each visit and the chain says checked for ever).
@@ -45,6 +46,7 @@ fn a_landing_whose_chain_lags_a_lease_is_recorded_on_its_chain() {
         .bay_process(&a)
         .args(["--json", "runner", "run", "--once"])
         .env("BAY_TEST_KILL_AT", "after-publish")
+        .env("BAY_TEST_LAND_APART", "1")
         .output()
         .unwrap();
     assert!(

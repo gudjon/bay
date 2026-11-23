@@ -40,19 +40,26 @@ use crate::view;
 pub struct Step {
     now: Cell<&'static str>,
     entered: RefCell<Vec<(&'static str, std::time::Instant)>>,
+    /// G864: the step this thread's network Git commands counted toward before this one began
+    /// (`crate::git::at_step`); they count toward it again once this one ends.
+    outer: &'static str,
 }
 
 impl Step {
     #[must_use]
     pub fn new(first: &'static str) -> Self {
+        let outer = crate::git::current_step();
+        crate::git::at_step(first);
         Self {
             now: Cell::new(first),
             entered: RefCell::new(vec![(first, std::time::Instant::now())]),
+            outer,
         }
     }
 
     pub fn set(&self, step: &'static str) {
         if self.now.get() != step {
+            crate::git::at_step(step);
             self.now.set(step);
             self.entered
                 .borrow_mut()
@@ -85,6 +92,12 @@ impl Step {
             .filter(|(_, spent)| spent.as_secs() >= 1)
             .map(|(step, spent)| (step, spent.as_secs()))
             .collect()
+    }
+}
+
+impl Drop for Step {
+    fn drop(&mut self) {
+        crate::git::at_step(self.outer);
     }
 }
 
@@ -2751,7 +2764,6 @@ fn run_attempts(
     seq: &mut Option<u64>,
 ) -> Result<BayResult, String> {
     let revision = revision.to_owned();
-    let id = ctx.id.clone();
     loop {
         // A candidate checked and persisted on this very trunk is published without a rebuild.
         // A batch member's candidate never lands alone (`crate::throughput`).
@@ -2813,48 +2825,81 @@ fn run_attempts(
             return Ok(waiting);
         }
 
-        ctx.step.set("publish");
-        if let Some(report) = still_owner(ctx, op_id, &revision)? {
-            return Ok(report);
+        if let Some(result) = publish_checked(ctx, op_id, &revision, &mut trunk, seq, &attempt)? {
+            return Ok(result);
         }
-        kill_point("before-publish");
-        let release = match *seq {
-            Some(at) => {
-                let signer = ctx.executor_signer().ok().flatten();
-                Some((
+    }
+}
+
+/// Step 6 for `attempt`, a candidate checked on `trunk`: its publishing push, and the landing's
+/// records. Returns the operation's outcome, or `None` when the head goes round again: main moved
+/// and the candidate is built anew, or the same candidate is pushed again.
+fn publish_checked(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    trunk: &mut String,
+    seq: &mut Option<u64>,
+    attempt: &Attempt,
+) -> Result<Option<BayResult>, String> {
+    ctx.step.set("publish");
+    let release = match *seq {
+        Some(at) => {
+            let signer = ctx.executor_signer().ok().flatten();
+            Some((
+                at,
+                crate::queue::release_commit(
+                    &ctx.repo.git,
+                    signer.as_ref(),
                     at,
-                    crate::queue::release_commit(
-                        &ctx.repo.git,
-                        signer.as_ref(),
-                        at,
-                        op_id,
-                        "published",
-                    )?,
-                ))
-            }
-            None => None,
-        };
-        let claim = ctx.record.claim.clone();
-        match publish_push(
-            ctx.repo,
-            &id,
-            &attempt.commit,
-            release.as_ref(),
-            claim.as_ref(),
-        ) {
-            Ok(()) => {
-                kill_point("after-publish");
-                ctx.pushed_landing = Some(attempt.commit.clone());
-                return derive_landed(ctx, op_id, &revision, &attempt.commit);
-            }
-            Err(error) => {
-                if let Some(result) =
-                    after_refused_push(ctx, op_id, &revision, &mut trunk, seq, &attempt, &error)?
-                {
-                    return Ok(result);
-                }
-            }
+                    op_id,
+                    "published",
+                )?,
+            ))
         }
+        None => None,
+    };
+    let claim = ctx.record.claim.clone();
+    // G864: the landing's records ride in its publishing push, whose chain, on the head this
+    // process last pushed, stands for a read of the chain before it.
+    let refused = match land_with_records(
+        ctx,
+        op_id,
+        revision,
+        &attempt.commit,
+        release.as_ref(),
+        claim.as_ref(),
+    )? {
+        Ok(landed) => return Ok(Some(landed)),
+        Err(refused) => refused,
+    };
+    // A refused landing reads the chain again first, as a landing before G864 read it before its
+    // push. A refusal on a main that moved, or at the hook's time bound, is answered as any
+    // refused publishing push is: a second push would be a second such refusal, uncounted. On an
+    // unmoved main the landing goes as before G864: trunk pushed alone, and the records after it.
+    if let Some(report) = still_owner(ctx, op_id, revision)? {
+        return Ok(Some(report));
+    }
+    if refused.contains(Reason::HookTimeout.code())
+        || !ctx.repo.fetch_trunk().is_ok_and(|now| now == *trunk)
+    {
+        return after_refused_push(ctx, op_id, revision, trunk, seq, attempt, &refused);
+    }
+    kill_point("before-publish");
+    match publish_push(
+        ctx.repo,
+        &ctx.id,
+        &attempt.commit,
+        release.as_ref(),
+        claim.as_ref(),
+        &Riding::default(),
+    ) {
+        Ok(()) => {
+            kill_point("after-publish");
+            ctx.pushed_landing = Some(attempt.commit.clone());
+            derive_landed(ctx, op_id, revision, &attempt.commit).map(Some)
+        }
+        Err(error) => after_refused_push(ctx, op_id, revision, trunk, seq, attempt, &error),
     }
 }
 
@@ -10519,6 +10564,119 @@ fn push_evidence(repo: &Repo, producer: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// G864: what rides in a publishing push beside trunk and its markers: each ref's lease, and its
+/// refspec.
+#[derive(Default)]
+struct Riding {
+    leases: Vec<String>,
+    specs: Vec<String>,
+}
+
+/// G864 (a fleet measurement, 2026-11-23: a landing made four pushes in a row at about 5.5 s
+/// each, its claim, its checked state, its publishing push and its records, and read its chain
+/// again before the publishing one): the landing's own records ride in its publishing push. The
+/// chain, with the operation recorded published, and this executor's log, with its terminal
+/// record, move in the one atomic push that moves trunk and creates the landed marker. The
+/// chain goes on the head this process last pushed, leased on it, so the push stands for the read
+/// before it ([`still_owner`]): no other write reached the chain since this process's own, so no
+/// other executor took the operation over, and no newer request or cancel came in.
+///
+/// Returns the landing; or, when the remote refused the push or a record could not be written,
+/// why, once every record is taken back off this box (the chain ref, the record and the log),
+/// so the caller reads the chain again and answers the refusal ([`publish_checked`]).
+///
+/// # Errors
+///
+/// The view's journal cannot be written once the landing is pushed.
+fn land_with_records(
+    ctx: &mut Ctx,
+    op_id: &str,
+    revision: &str,
+    commit: &str,
+    release: Option<&(u64, String)>,
+    claim: Option<&crate::change::IntentClaim>,
+) -> Result<Result<BayResult, String>, String> {
+    // Test builds keep the records apart on request, as a refused push leaves them (G809, G863).
+    if TEST_HOOKS && std::env::var_os("BAY_TEST_LAND_APART").is_some() {
+        return Ok(Err("the test keeps the landing's records apart".to_owned()));
+    }
+    kill_point("before-publish");
+    let before = ctx.head.clone();
+    let record = ctx.record.clone();
+    let behind = under_way_beside(ctx, op_id);
+    ctx.record.state = ChangeState::Landed;
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Published;
+    op.outcome = None;
+    end_behind(ctx, &behind);
+    match ctx.save_cas(revision, Some(commit), &format!("landed {op_id}")) {
+        Ok(true) => {}
+        Ok(false) => {
+            ctx.record = record;
+            return Ok(Err(CHAIN_MOVED.to_owned()));
+        }
+        Err(why) => {
+            ctx.record = record;
+            return Ok(Err(why));
+        }
+    }
+    // BACKLOG 99: the record stands only if this push lands the operation, and then no other
+    // runner holds a terminal record of it, so no log is fetched to look for one. A refusal
+    // takes the mark back with the record.
+    ctx.pushed_landing = Some(commit.to_owned());
+    let terminal = match terminal_record(ctx, op_id, "published", Some(commit)) {
+        Ok(Some(terminal)) => terminal,
+        Ok(None) => {
+            taken_back(ctx, &before, record);
+            return Ok(Err("no terminal record was written".to_owned()));
+        }
+        Err(why) => {
+            taken_back(ctx, &before, record);
+            return Ok(Err(why));
+        }
+    };
+    let repo = ctx.repo;
+    let executor = ctx.executor_name();
+    let signer = ctx.executor_signer().ok().flatten();
+    let name = change_ref(&ctx.id);
+    let mut riding = Riding::default();
+    if let Some(expected) = &ctx.pushed_head {
+        riding
+            .leases
+            .push(format!("--force-with-lease={name}:{expected}"));
+    }
+    riding.specs.push(format!("{}:{name}", ctx.head));
+    let id = ctx.id.clone();
+    let pushed = crate::log::ride(repo, &executor, signer.as_ref(), &terminal, |log| {
+        riding.specs.push(log.to_owned());
+        publish_push(repo, &id, commit, release, claim, &riding)
+    });
+    match pushed {
+        Ok(Ok(_)) => {}
+        Ok(Err(why)) | Err(why) => {
+            taken_back(ctx, &before, record);
+            return Ok(Err(why));
+        }
+    }
+    kill_point("after-publish");
+    ctx.pushed_head = Some(ctx.head.clone());
+    ctx.unpushed_from = None;
+    ctx.catch_up_local();
+    if view::journal(ctx.repo, &ctx.id).is_some() {
+        view::set_journal(ctx.repo, &ctx.id, view::Journal::Published)?;
+    }
+    tell_behind(ctx, &behind, revision, commit);
+    Ok(Ok(landing_row(ctx, op_id, revision, commit)))
+}
+
+/// G864: a landing whose push did not take its records: its chain ref goes back to `before`,
+/// the head it was written on, and the record to `record`, as they stood before it.
+fn taken_back(ctx: &mut Ctx, before: &str, record: ChangeRecord) {
+    ctx.withdraw(before);
+    ctx.record = record;
+    ctx.pushed_landing = None;
+}
+
 /// Step 6: one atomic push of trunk and the landed marker. Never forced.
 fn publish_push(
     repo: &Repo,
@@ -10526,6 +10684,7 @@ fn publish_push(
     commit: &str,
     release: Option<&(u64, String)>,
     claim: Option<&crate::change::IntentClaim>,
+    riding: &Riding,
 ) -> Result<(), String> {
     let trunk = format!("{commit}:refs/heads/{}", repo.trunk());
     let landed = format!("{commit}:{}{id}", crate::names::LANDED);
@@ -10543,6 +10702,7 @@ fn publish_push(
     for lease in [&intent_lease, &done_lease].into_iter().flatten() {
         args.push(lease);
     }
+    args.extend(riding.leases.iter().map(String::as_str));
     args.extend([repo.remote(), trunk.as_str(), landed.as_str()]);
     if let Some(done) = &done {
         // § 6: trunk, the head's release and the landed marker move in one transaction.
@@ -10551,6 +10711,7 @@ fn publish_push(
     if let Some(landed_intent) = &landed_intent {
         args.push(landed_intent);
     }
+    args.extend(riding.specs.iter().map(String::as_str));
     repo.git
         .run(&args)
         .map(|_| ())

@@ -1,9 +1,10 @@
 //! G34. A moved base never hides an earlier landing.
 //!
 //! Executor E1 stalls with revision R1; R2 supersedes it; E1 wakes and lands R1 (a race only a
-//! hook stops); the agent resumes, so its base moves past R1's landing; E2's landing of R2 is
-//! refused `CHANGE_ALREADY_MERGED` because the scan starts at `base_first`; `status` shows the
-//! change landed, never open.
+//! hook stops: since G864 a landing's lease on its chain stops it too, so E1 lands as a landing
+//! that pushes trunk apart from its records, `BAY_TEST_LAND_APART`); the agent resumes, so its
+//! base moves past R1's landing; E2's landing of R2 is refused `CHANGE_ALREADY_MERGED` because
+//! the scan starts at `base_first`; `status` shows the change landed, never open.
 //!
 //! G790: the change's own record ends as landed too, so no reader counts it live and no later
 //! visit refuses it again (a fleet finding: one such record stayed `ready` for three weeks and
@@ -40,6 +41,7 @@ fn the_scan_from_base_first_finds_the_earlier_landing() {
         .bay_process(&e1)
         .env("BAY_TEST_PAUSE_AT", "before-publish")
         .env("BAY_TEST_PAUSE_FILE", &release)
+        .env("BAY_TEST_LAND_APART", "1")
         .args(["--json", "runner", "run", "--once"])
         .stdout(std::process::Stdio::piped())
         .spawn()

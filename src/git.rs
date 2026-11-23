@@ -2040,6 +2040,63 @@ thread_local! {
     > = const { std::cell::RefCell::new(BTreeMap::new()) };
 }
 
+thread_local! {
+    /// G864: the step of the operation this thread runs (`crate::publish::Step`), which its
+    /// network Git commands count toward.
+    static STEP: std::cell::Cell<&'static str> = const { std::cell::Cell::new("") };
+    /// G864: this thread's time in each network Git command since [`take_step_times`] last ran,
+    /// by step, and how many ran.
+    static STEP_TIMES: std::cell::RefCell<StepTimes> = const { std::cell::RefCell::new(BTreeMap::new()) };
+}
+
+/// G864: network Git time by step and command, and how many ran.
+type StepTimes = BTreeMap<(&'static str, String), (std::time::Duration, u32)>;
+
+/// G864: the Git commands that talk to the remote.
+const NETWORK: [&str; 3] = ["fetch", "push", "ls-remote"];
+
+/// G864: this thread's network Git commands count toward `step` from now on.
+pub fn at_step(step: &'static str) {
+    STEP.set(step);
+}
+
+/// G864: the step this thread's network Git commands count toward.
+#[must_use]
+pub fn current_step() -> &'static str {
+    STEP.get()
+}
+
+/// G864 (a fleet measurement, 2026-11-23: a runner's line said a landing spent 31 s publishing
+/// and 41 s in pushes, and not which step made which push): this thread's network Git time in
+/// each step since the last call, longest first, and starts anew: `publish` →
+/// `push 11.0s x2, fetch 1.5s x1`.
+#[must_use]
+pub fn take_step_times() -> BTreeMap<&'static str, String> {
+    let times = STEP_TIMES.take();
+    let mut by_step: BTreeMap<&'static str, Vec<(String, std::time::Duration, u32)>> =
+        BTreeMap::new();
+    for ((step, command), (spent, count)) in times {
+        by_step
+            .entry(step)
+            .or_default()
+            .push((command, spent, count));
+    }
+    by_step
+        .into_iter()
+        .map(|(step, mut commands)| {
+            commands.sort_by_key(|(_, spent, _)| std::cmp::Reverse(*spent));
+            let named = commands
+                .iter()
+                .map(|(command, spent, count)| {
+                    format!("{command} {:.1}s x{count}", spent.as_secs_f64())
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            (step, named)
+        })
+        .collect()
+}
+
 /// G738: this process's time in each Git command, over every thread, and how many ran.
 static PROCESS_TIMES: Mutex<BTreeMap<String, (std::time::Duration, u32)>> =
     Mutex::new(BTreeMap::new());
@@ -2057,6 +2114,14 @@ pub fn process_times() -> Vec<(String, std::time::Duration, u32)> {
 
 fn record_time(args: &[&str], spent: std::time::Duration) {
     let command = args.first().copied().unwrap_or_default().to_owned();
+    if NETWORK.contains(&command.as_str()) {
+        let step = STEP.get();
+        STEP_TIMES.with_borrow_mut(|times| {
+            let entry = times.entry((step, command.clone())).or_default();
+            entry.0 += spent;
+            entry.1 += 1;
+        });
+    }
     {
         let mut all = PROCESS_TIMES.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = all.entry(command.clone()).or_default();
@@ -3086,7 +3151,7 @@ mod tests {
 
 #[cfg(test)]
 mod times {
-    use super::{record_time, take_times};
+    use super::{record_time, take_step_times, take_times};
     use std::time::Duration;
 
     /// G669: a heartbeat's push, or a change placed meanwhile on the same thread as the heartbeat,
@@ -3103,6 +3168,34 @@ mod times {
 
         assert!(line.contains("fetch"), "{line}");
         assert!(!line.contains("push"), "{line}");
+    }
+
+    /// G864: a step's network Git time is named with the step, longest first; a local command is
+    /// not, and a step that ends gives the thread back to the step it began in.
+    #[test]
+    fn each_step_names_its_time_talking_to_the_remote() {
+        let _ = take_step_times();
+        let outer = crate::publish::Step::new("check");
+        record_time(&["fetch"], Duration::from_millis(1500));
+        {
+            let inner = crate::publish::Step::new("batch");
+            record_time(&["ls-remote"], Duration::from_millis(500));
+            inner.set("probe");
+            record_time(&["push"], Duration::from_millis(500));
+        }
+        record_time(&["push"], Duration::from_secs(2));
+        outer.set("publish");
+        record_time(&["push"], Duration::from_secs(3));
+        record_time(&["fetch"], Duration::from_secs(1));
+        record_time(&["rev-parse"], Duration::from_secs(9));
+
+        let steps = take_step_times();
+
+        assert_eq!(steps["check"], "push 2.0s x1, fetch 1.5s x1", "{steps:?}");
+        assert_eq!(steps["batch"], "ls-remote 0.5s x1", "{steps:?}");
+        assert_eq!(steps["probe"], "push 0.5s x1", "{steps:?}");
+        assert_eq!(steps["publish"], "push 3.0s x1, fetch 1.0s x1", "{steps:?}");
+        assert!(take_step_times().is_empty());
     }
 }
 

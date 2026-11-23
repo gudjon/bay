@@ -7,9 +7,10 @@
 //!
 //! Each case holds runner B at the start of its visit to the head, its reads of the line and the
 //! chain from before the landing, while runner A lands it and stops right after its publishing
-//! push (`BAY_TEST_KILL_AT=after-publish`): the chain says checked, held by A, and only the line
-//! says it landed. A looping B answers on its short path (G799); a `--once` B, which watches no
-//! lease across passes, at its claim.
+//! push (`BAY_TEST_KILL_AT=after-publish`), its records kept apart from that push
+//! (`BAY_TEST_LAND_APART`, as a batch's landing pushes them): the chain says checked, held by
+//! A, and only the line says it landed. A looping B answers on its short path (G799); a `--once`
+//! B, which watches no lease across passes, at its claim.
 //!
 //! Guard to mutate, in `src/publish.rs`: `after_release` answering `Stands` (the looping case
 //! answers the landed head held; the `--once` case is answered at its claim by a scan of a main it
@@ -49,6 +50,7 @@ fn line() -> (Held, String, std::process::Child, PathBuf) {
         .bay_process(&a)
         .args(["--json", "runner", "run", "--once"])
         .env("BAY_TEST_KILL_AT", "after-publish")
+        .env("BAY_TEST_LAND_APART", "1")
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();

@@ -9,8 +9,10 @@
 //! - the post work's stages each fetched main, the registry and the notes, milliseconds apart:
 //!   now a plan reads each once for all its stages.
 //!
-//! So one landing makes at most 14 fetches and 6 pushes, and a batch of three at most 20 fetches
-//! and 8 pushes. Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file
+//! So one landing made at most 14 fetches and 6 pushes, and a batch of three at most 20 fetches
+//! and 8 pushes. G864: a landing's records ride its publishing push, whose chain, on the head
+//! this process last pushed, stands for the read of the chain before it, so one landing makes at
+//! most 13 fetches and 5 pushes. Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file
 //! (G171).
 //!
 //! The heartbeat is longer than a pass, so no beat falls inside one: a beat's presence push comes
@@ -19,7 +21,9 @@
 //!
 //! Guards to mutate: in `src/publish.rs` `land_batch`, leave each member's push mode `Now` (two
 //! pushes more a batch of three); in `src/log.rs` `push`, drop the `on_remote` test (a push more
-//! a pass); in `src/bisect.rs` `Fresh::tip`, fetch main each time (a fetch more a pass).
+//! a pass); in `src/bisect.rs` `Fresh::tip`, fetch main each time (a fetch more a pass); in
+//! `src/publish.rs` `land_with_records`, return a refusal at once (two fetches and a push more a
+//! landing).
 
 #![cfg(unix)]
 
@@ -92,11 +96,11 @@ fn a_landing_and_a_batch_of_three_make_their_round_trips_once() {
         (trace, ran)
     };
 
-    // GIVEN one change waiting WHEN a pass lands it THEN 14 fetches and 6 pushes at most
+    // GIVEN one change waiting WHEN a pass lands it THEN 13 fetches and 5 pushes at most
     let one = held.queue("one", "src");
     let (trace, ran) = traced("one.jsonl");
     assert_eq!(ran_for(&ran, &one)["decision"], "merged", "{ran}");
-    within(&trace, 14, 6);
+    within(&trace, 13, 5);
 
     // GIVEN three changes waiting WHEN a pass lands them in one batch THEN 20 fetches and 8
     // pushes at most
