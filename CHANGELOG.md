@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.151
+
+- A session outside a view hears nothing at its start when nothing waits on it.
+- A session that reads `bay status` again within 15 minutes hears once that one background wait replaces it.
+- A command that only names `bay status` in quoted text or a here-document reads nothing.
+- A landed change whose marker the remote lost counts as landed, and the next landing restores the marker.
+
 ## 0.6.150
 
 - A landing's wake fetches no log and rides the next push of the log: two fetches and a push fewer.
