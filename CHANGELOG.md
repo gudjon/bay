@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.148
+
+- A runner that joins the queue takes the place its change already holds: no duplicate places.
+
 ## 0.6.147
 
 - A batch pushes its members' chain records and the log with main: three members take 7 pushes, not 8.
