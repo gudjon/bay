@@ -143,14 +143,22 @@ fn with_footprint_lanes_the_batch_checked_ahead_ends_where_its_head_will_end_it(
     let two = held.queue("two", "ui");
     let three = held.queue("three", "ui");
     let four = held.queue("four", "api");
-    // THEN runner B checks two and three ahead, and not four, which is out of two's lane
+    // THEN runner B checks two and three ahead, and not four, which is out of two's lane. B may
+    // also screen four alone (G861), when its pass visits four itself rather than placing it
+    // beside the batch's check.
     let ahead = held.pass(&b);
-    let requests = held.requests();
-    assert_eq!(requests.len(), 2, "one held run, one ahead: {ahead}");
+    let runs: Vec<Vec<String>> = held.requests().iter().map(changed).collect();
     assert_eq!(
-        changed(&requests[1]),
-        ["ui/three.rs", "ui/two.rs"],
-        "{ahead}"
+        runs[..2],
+        [
+            vec!["ui/one.rs".to_owned()],
+            vec!["ui/three.rs".to_owned(), "ui/two.rs".to_owned()],
+        ],
+        "one held run, one ahead: {ahead}"
+    );
+    assert!(
+        runs[2..].iter().all(|run| run == &["api/four.rs"]) && runs.len() <= 3,
+        "{runs:?} {ahead}"
     );
     // AND at their turn two and three land on that record, and four is checked alone
     held.go();
@@ -162,12 +170,16 @@ fn with_footprint_lanes_the_batch_checked_ahead_ends_where_its_head_will_end_it(
     }
     let runs: Vec<Vec<String>> = held.requests().iter().map(changed).collect();
     assert_eq!(
-        runs,
+        runs[..2],
         [
             vec!["ui/one.rs".to_owned()],
             vec!["ui/three.rs".to_owned(), "ui/two.rs".to_owned()],
-            vec!["api/four.rs".to_owned()],
         ],
         "{after}"
+    );
+    // four alone at its turn, after its screen when B made one
+    assert!(
+        (3..=4).contains(&runs.len()) && runs[2..].iter().all(|run| run == &["api/four.rs"]),
+        "{runs:?} {after}"
     );
 }
