@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.149
+
+- A change passes a head another runner holds only once that runner's lease names what its check covers.
+- A batch passes over a place another runner holds, and each change whose check reads that place.
+- A landing releases its runner's lease in its own push, so the next head waits on no push.
+
 ## 0.6.148
 
 - A runner that joins the queue takes the place its change already holds: no duplicate places.
