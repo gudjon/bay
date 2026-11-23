@@ -1062,6 +1062,7 @@ impl Git {
             if crate::deadline::bounded(wait) != Some(wait) {
                 break;
             }
+            note_retry(args, &output.stderr);
             std::thread::sleep(wait);
             output = self.output(args, envs, input, timeout)?;
         }
@@ -2095,6 +2096,47 @@ pub fn take_step_times() -> BTreeMap<&'static str, String> {
             (step, named)
         })
         .collect()
+}
+
+/// BACKLOG 257 (a measurement, 2026-11-23: one traced submit pushed the same atomic push twice,
+/// ten seconds each, and no record said what the host answered the first time): what the host
+/// said on each call this process tried again ([`HOST_RETRY_WAITS`]), oldest first, at most
+/// [`RETRIES_KEPT`] of them.
+static RETRIED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// How many tried-again calls a process keeps the host's words of.
+const RETRIES_KEPT: usize = 8;
+
+/// How many characters of the host's words a tried-again call keeps.
+const RETRY_SAID: usize = 300;
+
+/// What the host said on each call this process tried again: the Git command, then its error
+/// lines joined by ` | `.
+#[must_use]
+pub fn process_retries() -> Vec<String> {
+    RETRIED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// Keeps what the host said on a call of `git <args>` that is tried again.
+fn note_retry(args: &[&str], stderr: &[u8]) {
+    let text = String::from_utf8_lossy(stderr);
+    let said: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let command = args.first().copied().unwrap_or_default();
+    let line: String = format!("{command}: {}", said.join(" | "))
+        .chars()
+        .take(RETRY_SAID)
+        .collect();
+    let mut retried = RETRIED.lock().unwrap_or_else(PoisonError::into_inner);
+    if retried.len() < RETRIES_KEPT {
+        retried.push(line);
+    }
 }
 
 /// G738: this process's time in each Git command, over every thread, and how many ran.

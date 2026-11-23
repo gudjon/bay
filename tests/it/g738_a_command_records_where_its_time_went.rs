@@ -61,5 +61,6 @@ fn a_status_and_a_start_in_a_view_each_record_one_line_in_the_store() {
             "{line}"
         );
         assert!(line["slowest"].is_array(), "{line}");
+        assert_eq!(line["retried"], serde_json::json!([]), "{line}");
     }
 }

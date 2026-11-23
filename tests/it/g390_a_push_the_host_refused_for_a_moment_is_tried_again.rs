@@ -6,7 +6,11 @@
 //! once and said the change could not be pushed; it now tries twice more, a second and three
 //! seconds apart, and a host that refuses every time is still named with its own line.
 //!
-//! Guard to mutate, in `src/git.rs`: `host_refused` returning `false` (the first case fails).
+//! BACKLOG 257: the command's spent line keeps what the host said on the try it refused, so a
+//! site can read why its pushes are tried again.
+//!
+//! Guards to mutate, in `src/git.rs`: `host_refused` returning `false` (the first case fails);
+//! `note_retry` keeping nothing (the first case fails on the spent line).
 
 #![cfg(unix)]
 
@@ -47,6 +51,26 @@ fn a_start_the_host_refused_once_is_tried_again_and_succeeds() {
     );
     assert_eq!(code, 0, "{started}");
     assert!(started["detail"]["view"].is_string(), "{started}");
+
+    // The start's spent line keeps what the host said on the refused try.
+    let spent = std::fs::read_dir(repo.join(".git/bay/spent"))
+        .unwrap()
+        .flatten()
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+        .collect::<String>();
+    let line: serde_json::Value = spent
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .rfind(|line| line["command"] == "start")
+        .expect("a spent line for the start");
+    let retried = line["retried"].as_array().expect("retried is an array");
+    assert_eq!(retried.len(), 1, "{line}");
+    let said = retried[0].as_str().unwrap();
+    assert!(said.starts_with("push: "), "{line}");
+    assert!(
+        said.contains("the hosting check could not finish"),
+        "{line}"
+    );
 }
 
 #[test]

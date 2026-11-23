@@ -2,7 +2,7 @@
 //! own transcripts, call by call, and they never said where a command's time went). Each bay
 //! command run in a repository appends one line to `bay/spent/<day>.jsonl` under the store's
 //! common directory: the command, its decision, its wall time, its time in Git and on the
-//! network, and its slowest Git commands. One `write` of one line, so commands that end
+//! network, its slowest Git commands, and what a host said on each call tried again. One `write` of one line, so commands that end
 //! together never mix their lines. A day's file is removed after [`KEPT_DAYS`] days. Best
 //! effort: a store that cannot be written records nothing, and nothing ever reads it to decide.
 
@@ -59,6 +59,7 @@ pub fn record(dir: &Path, command: &str, decision: &str, began: Instant) {
         "git_calls": times.iter().map(|(_, _, count)| u64::from(*count)).sum::<u64>(),
         "network_ms": network.as_millis(),
         "slowest": slowest,
+        "retried": crate::git::process_retries(),
     });
     let day = now.get(..10).unwrap_or("unknown");
     let file = folder.join(format!("{day}.jsonl"));
