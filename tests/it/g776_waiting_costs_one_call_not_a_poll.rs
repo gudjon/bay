@@ -3,15 +3,18 @@
 //! cheaper than polling:
 //! - a status read that finds what the session's earlier read of it found says so, and names the
 //!   wait in one call (`detail.unchanged_s`, `detail.wait_with`);
-//! - a shell call that loops over `bay status` hears once an hour that a wait in one call, run as
-//!   a background task, replaces it;
+//! - a shell call that loops over `bay status`, or a session that reads it again within 15 minutes
+//!   (G871: the seats that polled most read it once a turn, piped to a parser that drops `say`),
+//!   hears once an hour that a wait in one call, run as a background task, replaces it; a command
+//!   that only names `bay status` in quoted text or a here-document reads nothing;
 //! - `bay merge --wait=<s>` bounds the whole command, its fetch and submit too (a `--wait=90`
 //!   returned after 151 s), and its sentence names the next step when the change is still in line;
 //! - a change held until another merges (`--after`) names that change and where it stands, and
 //!   the line's longest wait counts only changes in line.
 //!
 //! Guards to mutate, one per case: in `src/status.rs` `status`, drop the call of `unchanged`; in
-//! `src/agent_hook.rs` `pre_tool`, drop the `poll_notice` branch; in `src/publish.rs`
+//! `src/agent_hook.rs` `pre_tool`, drop the `poll_notice` branch, and in `src/notice.rs`
+//! `poll_once` drop `again` from the test that tells; in `src/publish.rs`
 //! `observe_land`, time the watch from after the submit (`until` = now + `timeout` there); in
 //! `src/status.rs` `describe`, drop the `after_here` line.
 
@@ -112,6 +115,32 @@ fn hook(test_box: &TestBox, cwd: &Path, payload: &Value) -> (Option<i32>, String
     )
 }
 
+/// `bay hook session.start` for `session` at `cwd`, as the product runs it when a session starts.
+fn start(test_box: &TestBox, cwd: &Path, session: &str) {
+    let payload = json!({
+        "session_id": session,
+        "hook_event_name": "SessionStart",
+        "source": "startup",
+        "cwd": cwd,
+    });
+    let mut child = test_box
+        .bay_process(cwd)
+        .args(["hook", "session.start"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+}
+
 fn bash(session: &str, cwd: &Path, command: &str) -> Value {
     json!({
         "session_id": session,
@@ -146,6 +175,39 @@ fn a_loop_over_status_hears_once_that_one_wait_replaces_it() {
         &bash("s-other", &repo, "bay status --json"),
     );
     assert!(!once.contains("background task"), "{once}");
+}
+
+#[test]
+fn a_session_that_reads_status_again_soon_hears_once_that_one_wait_replaces_it() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &unchecked_files());
+    let read = "cd /r && timeout 60 bay status abcdefgh --json | python3 -c 'print(1)'";
+    let told = |session: &str, command: &str| {
+        let (exit, stdout, stderr) = hook(&test_box, &repo, &bash(session, &repo, command));
+        assert_eq!(exit, Some(0), "{stderr}");
+        stdout.contains("background task")
+    };
+
+    // GIVEN a started session that read `bay status` once, with no loop in the call
+    start(&test_box, &repo, "s-again");
+    assert!(!told("s-again", read));
+
+    // WHEN it reads it again soon after
+    // THEN it hears once that one wait, as a background task, replaces the reads
+    assert!(told("s-again", read));
+    // AND a third read within the hour is not told again
+    assert!(!told("s-again", read));
+
+    // AND a call that names `bay status` only in text is no read: a session that writes it in a
+    // commit text and a note, then reads once, is not told
+    start(&test_box, &repo, "s-text");
+    assert!(!told("s-text", r#"git commit -m "bay status said merged""#));
+    assert!(!told(
+        "s-text",
+        "cat >> n.md <<'EOF'\nbay status c1: queued\nEOF"
+    ));
+    assert!(!told("s-text", read));
 }
 
 #[test]

@@ -135,6 +135,8 @@ struct Cursor {
     no_executor: bool,
     /// G776: when the session was last told that a loop over `bay status` costs a turn a read.
     poll_told_s: Option<u64>,
+    /// G871: when the session last read `bay status`, in Unix seconds.
+    status_read_s: Option<u64>,
 }
 
 /// Whose notices a hook gives: the view's change, if the session is in a view, and the
@@ -1197,23 +1199,41 @@ fn red_line(change: &str, event: &Value) -> String {
     out
 }
 
+/// G871: the longest time between two `bay status` reads of one session that reads as a poll.
+pub const POLL_GAP_S: u64 = 900;
+
 /// G776 (a measurement, 2026-11-17: 61 agent sessions read `bay status` 12,452 times in a day, 1,090
-/// of those inside a shell loop, each read a turn of the model): tells the session at `state_dir`
-/// `line` about polling, at most once an hour and within its notice budget of `budget` bytes.
-/// Whether it was told; nothing is told when the cursor cannot be written, so it never repeats.
+/// of those inside a shell loop, each read a turn of the model): tells the session at `state_dir`,
+/// which reads `bay status` now, `line` about polling when the read is `looped` (in a shell loop)
+/// or comes within [`POLL_GAP_S`] of its last read (G871), at most once an hour and within its
+/// notice budget of `budget` bytes. Each read is kept in a cursor the session already has; none is
+/// made for it, so its first notices keep their start. Whether it was told; nothing is told when the
+/// cursor cannot be written, so it never repeats.
 #[must_use]
-pub fn poll_once(state_dir: &Path, line: &str, budget: u64) -> bool {
-    let mut cursor = read(state_dir).unwrap_or_default();
+pub fn poll_once(state_dir: &Path, line: &str, budget: u64, looped: bool) -> bool {
+    let held = read(state_dir);
+    let kept = held.is_ok();
+    let mut cursor = held.unwrap_or_default();
     let now = now_s();
-    if cursor
+    let again = cursor
+        .status_read_s
+        .is_some_and(|last| now >= last && now - last < POLL_GAP_S);
+    cursor.status_read_s = Some(now);
+    let told = cursor
         .poll_told_s
-        .is_some_and(|told| now >= told && now - told < WINDOW_S)
-    {
+        .is_some_and(|told| now >= told && now - told < WINDOW_S);
+    if told || !(looped || again) {
+        if kept {
+            let _ = write(state_dir, &cursor);
+        }
         return false;
     }
     open_window(&mut cursor, now);
     let bytes = line.len() as u64;
     if cursor.bytes.saturating_add(bytes) > budget {
+        if kept {
+            let _ = write(state_dir, &cursor);
+        }
         return false;
     }
     cursor.bytes += bytes;

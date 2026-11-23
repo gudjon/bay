@@ -928,36 +928,100 @@ fn pre_tool(product: Product, input: &str, dir: &Path) -> Outcome {
     }
 }
 
-/// G776: the line a session gets when it runs a loop over `bay status`.
-const POLL_LINE: &str = "bay: each `bay status` in a loop costs a turn. Run `bay merge <change> --wait` as a background task instead: it returns when the change merges or needs you, and you are woken then.\n";
+/// G776, G871: the line a session gets when it reads `bay status` in a loop, or again soon after.
+const POLL_LINE: &str = "bay: each `bay status` read costs a turn. To hear when a change merges or needs you, run `bay merge <change> --wait` once as a background task: you are woken when it returns.\n";
 
-/// G776: whether `command` reads `bay status` in a loop: `bay status` beside a loop or a wait
-/// (`until`, `while`, `for`, `sleep`, `watch`).
-fn polls_status(command: &str) -> bool {
-    let words: Vec<&str> = command
+/// G776, G871: whether `command` reads `bay status` outside quoted text and here-documents (a
+/// message, a commit text or a note that names it reads nothing), and if so whether it reads it in
+/// a loop: beside a loop or a wait (`until`, `while`, `for`, `sleep`, `watch`).
+fn reads_status(command: &str) -> Option<bool> {
+    let bare = unquoted(&without_heredocs(command));
+    let words: Vec<&str> = bare
         .split(|c: char| c.is_whitespace() || ";&|()`$".contains(c))
         .filter(|word| !word.is_empty())
         .collect();
     let reads = words
         .windows(2)
         .any(|pair| pair[0].rsplit('/').next() == Some("bay") && pair[1] == "status");
-    reads
-        && words
+    reads.then(|| {
+        words
             .iter()
             .any(|word| matches!(*word, "until" | "while" | "for" | "sleep" | "watch"))
+    })
 }
 
-/// G776: a shell call that reads `bay status` in a loop is allowed, with one line saying that a
-/// wait in one call is cheaper, at most once an hour and within the session's notice budget.
-fn poll_notice(product: Product, input: &str, dir: &Path, command: &str) -> Option<Outcome> {
-    if !polls_status(command) {
-        return None;
+/// `command` without the bodies of its here-documents (`<<EOF` to the line `EOF`).
+fn without_heredocs(command: &str) -> String {
+    let mut kept = String::with_capacity(command.len());
+    let mut ends: Vec<String> = Vec::new();
+    for line in command.split_inclusive('\n') {
+        if let Some(end) = ends.first() {
+            if line.trim() == end {
+                ends.remove(0);
+            }
+            continue;
+        }
+        kept.push_str(line);
+        ends.extend(heredoc_ends(line));
     }
+    kept
+}
+
+/// The delimiters of the here-documents `line` opens, in order; a here-string (`<<<`) opens none.
+fn heredoc_ends(line: &str) -> Vec<String> {
+    let mut ends = Vec::new();
+    let mut rest = line;
+    while let Some(at) = rest.find("<<") {
+        let after = &rest[at + 2..];
+        if let Some(string) = after.strip_prefix('<') {
+            rest = string;
+            continue;
+        }
+        let after = after.trim_start_matches('-').trim_start();
+        let word: String = after
+            .chars()
+            .take_while(|c| !c.is_whitespace() && !";&|()<>".contains(*c))
+            .collect();
+        let end: String = word
+            .chars()
+            .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+            .collect();
+        if !end.is_empty() {
+            ends.push(end);
+        }
+        rest = &after[word.len()..];
+    }
+    ends
+}
+
+/// `command` with each quoted span (`'…'` or `"…"`) put out as one space.
+fn unquoted(command: &str) -> String {
+    let mut bare = String::with_capacity(command.len());
+    let mut quote = None;
+    for c in command.chars() {
+        match quote {
+            Some(open) if c == open => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                bare.push(' ');
+            }
+            None => bare.push(c),
+        }
+    }
+    bare
+}
+
+/// G776, G871: a shell call that reads `bay status` in a loop, or within
+/// [`crate::notice::POLL_GAP_S`] of the session's last read, is allowed, with one line saying
+/// that a wait in one call is cheaper, at most once an hour and within the session's notice budget.
+fn poll_notice(product: Product, input: &str, dir: &Path, command: &str) -> Option<Outcome> {
+    let looped = reads_status(command)?;
     let payload = Payload::parse(product, "tool.before", input, dir)?;
     let session = payload.session.as_ref()?;
     let repo = crate::repo::Repo::open_quick(&payload.cwd).ok()?;
     let state = crate::session::state_dir(&repo, session);
-    if !crate::notice::poll_once(&state, POLL_LINE, repo.config.notice_budget()) {
+    if !crate::notice::poll_once(&state, POLL_LINE, repo.config.notice_budget(), looped) {
         return None;
     }
     let output = serde_json::json!({
@@ -1582,7 +1646,51 @@ fn judge_targets(cwd: &Path, targets: &[PathBuf], now: SystemTime) -> crate::coo
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{Event, Payload, Product};
+    use super::{Event, Payload, Product, reads_status};
+
+    /// G871: a read counts where the shell runs it; a loop or a wait beside it makes it a loop.
+    #[test]
+    fn a_status_read_is_counted_where_the_shell_runs_it_and_not_where_text_names_it() {
+        // GIVEN commands that run `bay status`
+        assert_eq!(reads_status("bay status --json"), Some(false));
+        assert_eq!(
+            reads_status("cd /r && timeout 60 bay status c1 --json | jq ."),
+            Some(false)
+        );
+        assert_eq!(reads_status("/usr/local/bin/bay status"), Some(false));
+        assert_eq!(
+            reads_status("while true; do bay status c1; sleep 30; done"),
+            Some(true)
+        );
+        assert_eq!(
+            reads_status("cat <<EOF > note.md\nlater\nEOF\nbay status c1"),
+            Some(false)
+        );
+        // WHEN the words are in quoted text or a here-document THEN nothing is read
+        assert_eq!(
+            reads_status(r#"git commit -m "read bay status first""#),
+            None
+        );
+        assert_eq!(
+            reads_status("echo 'until bay status says merged, sleep'"),
+            None
+        );
+        assert_eq!(
+            reads_status("cat >> state.md <<'EOF'\n- bay status c1: queued\nEOF\nsleep 5"),
+            None
+        );
+        assert_eq!(
+            reads_status("cat <<-END\n\tbay status\n\tEND\nwhile :; do :; done"),
+            None
+        );
+        // AND a here-string opens no document
+        assert_eq!(
+            reads_status("grep -q x <<< \"$v\"\nbay status"),
+            Some(false)
+        );
+        // AND a command that names no status read reads none
+        assert_eq!(reads_status("bay merge c1 --wait"), None);
+    }
 
     #[test]
     fn the_payload_names_the_event_and_the_entry_name_is_the_fallback() {
