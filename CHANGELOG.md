@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.5
+
+- `bay merge --wait` hears of a runner's merge on another machine within one heartbeat.
+- Before a merge, bay asks the asset store with main's plugin, not an older copy in the clone.
+- Agent texts name one background wait, `bay merge <change> --wait=3600`, in place of status reads.
+
 ## 0.7.4
 
 - `bay update` no longer trusts the key that signed 0.1.1 to 0.1.4.

@@ -1114,7 +1114,7 @@ impl Reason {
                 "Do nothing: bay retries after a short wait. If it keeps happening, run `bay doctor` and tell the user."
             }
             Self::Queued => {
-                "Keep working: the change waits its turn in the queue. `bay merge --wait` or `bay status <change>` shows the outcome."
+                "Keep working: the change waits its turn in the queue. `bay merge <change> --wait=3600` as a background task tells you the outcome."
             }
             Self::QueueDeadlineExceeded => {
                 "Read `detail`, shrink or split the change in the view, then `bay merge` again; or ask the user to raise the budget."
@@ -1651,7 +1651,7 @@ impl BayResult {
                 let since = waited(detail["unchanged_s"].as_u64().unwrap_or_default());
                 match detail["wait_with"].as_str() {
                     Some(change) => format!(
-                        "{said} Nothing changed since your read {since} ago; `bay merge {change} --wait` waits for it in one call."
+                        "{said} Nothing changed since your read {since} ago; `bay merge {change} --wait=3600` waits for it in one call."
                     ),
                     None => format!("{said} Nothing changed since your read {since} ago."),
                 }
@@ -1702,7 +1702,7 @@ impl BayResult {
             {
                 let change = self.change.as_deref().unwrap_or("<change>");
                 format!(
-                    "Still under way after {}; nothing for you to do. `bay merge {change} --wait` waits again in one call, or leave it: you are told when it merges or needs you.",
+                    "Still under way after {}; nothing for you to do. `bay merge {change} --wait=3600` waits again in one call, or leave it: you are told when it merges or needs you.",
                     waited(
                         detail
                             .and_then(|detail| detail["observation_timeout_s"].as_u64())

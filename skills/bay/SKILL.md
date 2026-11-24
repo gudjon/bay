@@ -32,7 +32,7 @@ Docs: https://getbay.io/docs (each page also reads as markdown: add `.md` to its
 | Ask what a change to some paths would meet, the checks and the live changes on them, starting nothing | `bay start <intent> --paths <paths> --dry-run` |
 | Work | Edit only inside the view that `bay start` prints. |
 | Submit the change | `bay merge` (returns at once; a runner checks and merges it) |
-| Wait for the outcome here | `bay merge --wait` (`--wait=<seconds>`: watch that long, then return; the run goes on) |
+| Wait for the outcome here | `bay merge --wait=<seconds>` (watch that long, then return; the run goes on). A bare `--wait` returns `queued` while other changes are ahead |
 | Submit a change from outside its view | `bay merge <change>` |
 | Pick a change up again: bring in newer main and see what moved | `bay start <change>`. When it remade an unfinished view, `detail.unsaved_kept` names where its unsaved files were kept: copy them back, then `bay merge`. A view of a change that ended a retention window ago is freed with its unsaved work kept: `git checkout refs/bay/view-kept/<change> -- <path>` brings a file back, and its loose ignored files such as `.env` are under `.git/bay/view-kept/<change>/` |
 | Fix a change that already merged | `bay start <intent> --fixes <change>` (the merge names it in a `Fixes:` trailer) |
@@ -62,7 +62,7 @@ notes on views, overlaps and questions: read `commands.md` in this skill when yo
 
 ## Wait without polling
 
-- **Wait without polling.** To hear when a change merges, run `bay merge <change> --wait` as a background task
+- **Wait without polling.** To hear when a change merges, run `bay merge <change> --wait=3600` as a background task
   (it does not submit it again, and you are woken when it returns), or let `[plugin.wake]` wake the session.
   A script that runs shell commands starts that wait without awaiting it and ends: its later output wakes you.
   Never read `bay status` again and again: each read is a turn, and one that finds nothing new says so.
@@ -100,7 +100,7 @@ notes on views, overlaps and questions: read `commands.md` in this skill when yo
 | `read` | Read what `detail` names, such as the new version of an input. |
 | `refresh` | `bay start <change>`: brings in newer main and reports what moved. |
 | `repair` | Edit in the view, then `bay merge` again. |
-| `wait` | Nothing yet. `bay merge --wait` as a background task; it wakes you. |
+| `wait` | Nothing yet. `bay merge <change> --wait=3600` as a background task; it wakes you. |
 
 Every refusal carries `next_step`: do that. `bay help --json` lists every reason with its next step.
 

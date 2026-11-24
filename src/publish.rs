@@ -623,15 +623,25 @@ fn unserved_whole(repo: &Repo, id: &str, op_id: &str) -> Option<Vec<String>> {
 /// here writes its chain again: the chain is read from the remote, once a heartbeat (G749).
 ///
 /// G816: a repository deleted under the watch can show no outcome: the watch ends at once.
+///
+/// G883 (a fleet finding, 2026-11-24: a `merge --wait=3600` still watched six minutes after a
+/// runner on another machine merged its change, because nothing here fetched its chain): an
+/// operation this clone's own run does not hold, one that waits in the line or one a runner
+/// claimed, is also read from the remote once a heartbeat. A runner writes the chain in its own
+/// clone. The local read stays once a second, so an own run that claims it is seen at once.
 fn watch_until_done(repo: &Repo, id: &str, op_id: &str, until: Instant) -> bool {
     let chain = Chain::new(&repo.git);
     let machine = crate::live::machine(&repo.git).ok();
+    let own = Keys::load(&repo.git).executor_name;
+    let heartbeat = repo.config.heartbeat().max(Duration::from_secs(1));
     let common = repo.git.common_dir().ok().map(std::path::PathBuf::from);
     let mut seen: Option<String> = None;
     let mut handed = false;
+    let mut elsewhere = false;
+    let mut fetched = Instant::now();
     loop {
         let every = if handed {
-            repo.config.heartbeat().max(Duration::from_secs(1))
+            heartbeat
         } else {
             Duration::from_secs(1)
         };
@@ -642,8 +652,9 @@ fn watch_until_done(repo: &Repo, id: &str, op_id: &str, until: Instant) -> bool 
         if !repo.git.dir().is_dir() || common.as_ref().is_some_and(|dir| !dir.is_dir()) {
             return false;
         }
-        if handed {
+        if handed || (elsewhere && fetched.elapsed() >= heartbeat) {
             let _ = repo.remote_chain(id);
+            fetched = Instant::now();
         }
         let Ok(Some(head)) = chain.head(id) else {
             continue;
@@ -664,6 +675,7 @@ fn watch_until_done(repo: &Repo, id: &str, op_id: &str, until: Instant) -> bool 
         handed = machine
             .as_ref()
             .is_some_and(|machine| op.unable.contains(machine));
+        elsewhere = op.owner.as_deref() != Some(own.as_str());
     }
 }
 

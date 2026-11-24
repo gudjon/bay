@@ -77,6 +77,6 @@ Each repository is its own bay: its own main, queue, checks, changes and talks. 
   change's id in each intent, so a reader finds the pair.
 - **`--after` follows only a change of the same repository.** A change of another repository never merges here,
   so a change that names it waits for ever. When work needs another repository's change first, run
-  `bay merge <change> --wait` in that repository's clone, then submit the dependent change in its own.
+  `bay merge <change> --wait=3600` in that repository's clone, then submit the dependent change in its own.
 - **Keep both moving.** Submit each change as soon as it is ready; a repository's queue never waits for the other's.
   Read `bay status` in each repository: a red main in one says nothing about the other.

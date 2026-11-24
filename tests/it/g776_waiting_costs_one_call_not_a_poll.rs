@@ -85,7 +85,10 @@ fn a_read_that_finds_nothing_new_says_so_and_names_the_wait() {
     assert_eq!(again["detail"]["wait_with"], id.as_str(), "{again}");
     let say = again["say"].as_str().unwrap();
     assert!(say.contains("Nothing changed since your read"), "{say}");
-    assert!(say.contains(&format!("`bay merge {id} --wait`")), "{say}");
+    assert!(
+        say.contains(&format!("`bay merge {id} --wait=3600`")),
+        "{say}"
+    );
     // AND another session's first read is not told so
     let other = read("s-g776-two");
     assert!(other["detail"]["unchanged_s"].is_null(), "{other}");
@@ -164,7 +167,10 @@ fn a_loop_over_status_hears_once_that_one_wait_replaces_it() {
     // THEN it runs, with one line naming the wait in one call as a background task
     assert_eq!(exit, Some(0), "{stderr}");
     assert!(stdout.contains("background task"), "{stdout}");
-    assert!(stderr.contains("`bay merge <change> --wait`"), "{stderr}");
+    assert!(
+        stderr.contains("`bay merge <change> --wait=3600`"),
+        "{stderr}"
+    );
     // AND the next loop within the hour is not told again
     let (_, again, _) = hook(&test_box, &repo, &bash("s-poll", &repo, looped));
     assert!(!again.contains("background task"), "{again}");
@@ -239,7 +245,9 @@ fn a_wait_is_bounded_from_the_command_and_names_the_next_step() {
     assert!(code == 0 || code == 2, "{waited}");
     let say = waited["say"].as_str().unwrap();
     assert!(
-        say.contains(&format!("`bay merge {id} --wait` waits again in one call")),
+        say.contains(&format!(
+            "`bay merge {id} --wait=3600` waits again in one call"
+        )),
         "{say}"
     );
 }

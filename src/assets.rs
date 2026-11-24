@@ -614,12 +614,15 @@ pub fn fill(
 
 /// Durability before a merge (BACKLOG 49, owner ruling 2026-10-24): the manifest lines `tree`
 /// adds to `trunk`'s whose bytes the store does not hold, asked with `exists`, through the
-/// plugin of `repo`'s config. A tree that adds lines while the config names no plugin holds
-/// none of them.
+/// plugin of `repo`'s config, its program as `trunk` holds it (G884, a fleet finding,
+/// 2026-11-24: a runner whose clone's work tree held an older copy, one that asked a store the
+/// project had left, blocked a change whose bytes main's store held). A tree that adds lines
+/// while the config names no plugin holds none of them.
 ///
 /// # Errors
 ///
-/// A manifest cannot be read, or the plugin cannot answer: unknown is never held.
+/// A manifest cannot be read, the program cannot be materialized, or the plugin cannot answer:
+/// unknown is never held.
 pub fn not_held_at_merge(repo: &Repo, trunk: &str, tree: &str) -> Result<Vec<String>, String> {
     let before = manifest_at(&repo.git, trunk)?;
     let added: Vec<Entry> = manifest_at(&repo.git, tree)?
@@ -629,8 +632,29 @@ pub fn not_held_at_merge(repo: &Repo, trunk: &str, tree: &str) -> Result<Vec<Str
     if added.is_empty() {
         return Ok(Vec::new());
     }
-    let Some(plugin) = plugin_of(&repo.config, &repo.work_root) else {
+    let Some(assets) = repo.config.plugin.assets.as_ref() else {
         return Ok(added.into_iter().map(|entry| entry.path).collect());
+    };
+    let timeout = Duration::from_secs(assets.timeout_s.unwrap_or(DEFAULT_TIMEOUT_S));
+    let id = crate::ids::new_change_id().map_err(|error| error.to_string())?;
+    let scratch = repo
+        .common_dir
+        .join("bay")
+        .join("assets")
+        .join(format!("run-{}-{id}", std::process::id()));
+    let _scratch = crate::run::Scratch(scratch.clone());
+    program_at(
+        &repo.git,
+        trunk,
+        &assets.command,
+        &scratch,
+        std::time::Instant::now() + timeout,
+    )?;
+    let plugin = Plugin {
+        work_root: &scratch,
+        command: &assets.command,
+        timeout,
+        store: own_store(&repo.git, &repo.config, &assets.command),
     };
     let mut missing = Vec::new();
     for entry in added {
@@ -674,6 +698,31 @@ pub fn fill_tree(
     )
 }
 
+/// The assets plugin's program as `commit` holds it, materialized into `scratch`, so a check
+/// and a merge run main's copy, never a work tree's. A program named by an absolute path runs as
+/// named, and the remote's own store is bay itself (66 E): for those, `scratch` is only made.
+fn program_at(
+    git: &Git,
+    commit: &str,
+    command: &str,
+    scratch: &Path,
+    deadline: std::time::Instant,
+) -> Result<(), String> {
+    match command.split_whitespace().next() {
+        Some(program) if !Path::new(program).is_absolute() => crate::materialize::materialize(
+            git,
+            commit,
+            Some(&[program.to_owned()]),
+            scratch,
+            deadline,
+            &mut || {},
+        )
+        .map_err(|unmade| format!("the assets plugin could not be materialized: {unmade:?}")),
+        _ => std::fs::create_dir_all(scratch)
+            .map_err(|error| format!("cannot make {}: {error}", scratch.display())),
+    }
+}
+
 /// A check's files (phase 2): each manifest file of `commit` that `kept` covers (all, when it
 /// is `None`) written into the check's `tree_dir`, through the assets plugin the config at
 /// `base` names, its program materialized from `base` into a scratch directory beside
@@ -707,21 +756,7 @@ pub fn fill_check(
     };
     let scratch = tree_dir.with_extension("assets-plugin");
     let _ = std::fs::remove_dir_all(&scratch);
-    // A named program is the base's own copy; the remote's own store is bay itself (66 E).
-    if let Some(program) = assets.command.split_whitespace().next() {
-        crate::materialize::materialize(
-            git,
-            base,
-            Some(&[program.to_owned()]),
-            &scratch,
-            deadline,
-            &mut || {},
-        )
-        .map_err(|unmade| format!("the assets plugin could not be materialized: {unmade:?}"))?;
-    } else {
-        std::fs::create_dir_all(&scratch)
-            .map_err(|error| format!("cannot make {}: {error}", scratch.display()))?;
-    }
+    program_at(git, base, &assets.command, &scratch, deadline)?;
     let plugin = Plugin {
         work_root: &scratch,
         command: &assets.command,

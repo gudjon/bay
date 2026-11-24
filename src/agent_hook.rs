@@ -929,7 +929,7 @@ fn pre_tool(product: Product, input: &str, dir: &Path) -> Outcome {
 }
 
 /// G776, G871: the line a session gets when it reads `bay status` in a loop, or again soon after.
-const POLL_LINE: &str = "bay: each `bay status` read costs a turn. To hear when a change merges or needs you, run `bay merge <change> --wait` once as a background task: you are woken when it returns.\n";
+const POLL_LINE: &str = "bay: each `bay status` read costs a turn. To hear when a change merges or needs you, run `bay merge <change> --wait=3600` once as a background task: you are woken when it returns.\n";
 
 /// G776, G871: whether `command` reads `bay status` outside quoted text and here-documents (a
 /// message, a commit text or a note that names it reads nothing), and if so whether it reads it in
