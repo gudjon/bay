@@ -630,13 +630,27 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
         let (generation, supersedes) = match claims.last_key_value() {
             None => (1, None),
             Some((generation, change)) => {
-                let landed = claim_merged(repo, &hash, *generation, change)?;
+                let merged = claim_merged(repo, &hash, *generation, change)?;
+                // The record is read only when the claims do not say the change merged.
+                let state = if merged {
+                    ChangeState::Landed
+                } else {
+                    fetched_record(repo, change)?.state
+                };
+                // G890 (a fleet finding, 2026-11-24: 12 landed changes had their landed marker
+                // and no merged claim, so a start of each intent answered CHANGE_ALREADY_MERGED
+                // and its `--new` answered CHANGE_SUPERSEDED): a change whose record reads
+                // landed and whose landed marker the remote holds merged, with or without its
+                // merged claim. The remote's hook closes the generation on the marker too.
+                let landed = merged
+                    || (state == ChangeState::Landed
+                        && remote_has(repo, &format!("{}{change}", crate::names::LANDED))?);
                 match (landed, request.new) {
                     // G293: a landed change closes its generation, so any start claims the
                     // next one, `--new` or not; the new change supersedes the landed one.
                     (true, _) => (generation + 1, Some(change.clone())),
                     // G272: a change that ended without landing closes its generation too.
-                    (false, _) if opens_next(repo, request, change)? => {
+                    (false, _) if opens_next(request, state) => {
                         (generation + 1, Some(change.clone()))
                     }
                     (false, true) => {
@@ -808,7 +822,9 @@ fn merged_claims_refspec(hash: &str) -> String {
 /// G775: when this start's opening fetch brought the intent's merged claims and the shard index
 /// and no read has taken them, the answer is local: a change's merge pushes its marker and its
 /// merged claim in one atomic push, and a claim is create-only, so the merged claim of the
-/// generation `change` claimed is there exactly when `change` merged. Else the remote is asked.
+/// generation `change` claimed is there when `change` merged by its landing. A change marked
+/// landed apart from its landing has no merged claim; `open` reads that from its record (G890).
+/// Else the remote is asked.
 fn claim_merged(repo: &Repo, hash: &str, generation: u64, change: &str) -> Result<bool, String> {
     if repo.take_prefetched(&merged_claims_refspec(hash)) {
         let merged = claim_of(hash, generation).landed_ref();
@@ -877,14 +893,13 @@ fn ended_unlanded(state: ChangeState) -> bool {
     )
 }
 
-/// Whether a start claims the generation after `change`, its intent's newest, which did not
-/// land: `--new` after any end without a landing (G272); and (G688) a branch taken in again, or
+/// Whether a start claims the generation after the newest change of its intent, which did not
+/// land and whose record reads `state`: `--new` after any end without a landing (G272); and (G688) a branch taken in again, or
 /// any start once the change ended with nothing to add, which can never merge. Neither takes
 /// up the ended change's old draft.
-fn opens_next(repo: &Repo, request: &StartRequest, change: &str) -> Result<bool, String> {
-    let state = fetched_record(repo, change)?.state;
-    Ok(ended_unlanded(state)
-        && (request.new || request.from.is_some() || state == ChangeState::NoEffect))
+fn opens_next(request: &StartRequest, state: ChangeState) -> bool {
+    ended_unlanded(state)
+        && (request.new || request.from.is_some() || state == ChangeState::NoEffect)
 }
 
 /// The current record of `change`'s chain as the remote holds it ([`Repo::remote_record`]):

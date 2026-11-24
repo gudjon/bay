@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.9
+
+- A start after a landing that lost its merged claim opens the next generation, with or without `--new`.
+
 ## 0.7.8
 
 - A runner no longer claims a change whose environments its machine serves only in part.
