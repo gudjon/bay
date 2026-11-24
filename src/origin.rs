@@ -489,7 +489,7 @@ struct Mirrored {
     deleted: usize,
     /// Of those, refs of bay's own: another writer wrote them to the hosted remote.
     strays: usize,
-    /// Refs left as they were: a write moved them first, or an object did not come.
+    /// Refs left as they were: a write moved them first.
     left: usize,
 }
 
@@ -523,18 +523,26 @@ fn mirror(
     if changes.is_empty() {
         return Ok(mirrored);
     }
-    let fetched: Vec<&str> = changes
+    // The listing holds each value taken, so the fetch asks for those objects by id: it names no
+    // ref and lists none. A fetch of names sends a prefix per name and matches each name against
+    // every ref the remote sends back, so its cost grows with the square of the refs taken: a
+    // first sweep of tens of thousands of refs matched names for its whole run and took no pack.
+    let taking = changes.iter().filter(|(_, new, _)| new.is_some()).count();
+    let wanted: BTreeSet<&str> = changes
         .iter()
-        .filter(|(_, new, _)| new.is_some())
-        .map(|(name, _, _)| name.as_str())
+        .filter_map(|(_, new, _)| new.map(String::as_str))
         .collect();
-    if !fetched.is_empty() {
-        let bound = if fetched.len() > LARGE_FETCH {
+    if !wanted.is_empty() {
+        let bound = if taking > LARGE_FETCH {
             LARGE_FETCH_TIMEOUT
         } else {
             GIT_NETWORK_TIMEOUT
         };
-        let input = fetched.join("\n") + "\n";
+        let input = wanted.iter().fold(String::new(), |mut input, oid| {
+            input.push_str(oid);
+            input.push('\n');
+            input
+        });
         git.run_bytes_for(
             &[
                 "fetch",
@@ -564,8 +572,8 @@ fn mirror(
             (None, None) => {}
         }
     }
-    // Each update stands alone: one that a write moved first, or whose object did not come,
-    // is refused and named, and the others are made.
+    // Each update stands alone: one that a write moved first is refused and named, and the
+    // others are made.
     let out = git
         .run_bytes_for(
             &["update-ref", "--stdin", "--batch-updates"],
