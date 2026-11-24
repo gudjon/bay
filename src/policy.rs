@@ -1068,11 +1068,7 @@ impl Policy {
         (!policy_change && !entry.wakes(changed)).then(|| NotRequired {
             check: entry.id.clone(),
             environment: entry.environment.clone(),
-            reason: format!(
-                "no path the candidate changes against its base matches when_paths {}",
-                serde_json::to_string(entry.when_paths.as_deref().unwrap_or_default())
-                    .unwrap_or_default()
-            ),
+            reason: unwoken_reason(entry.when_paths.as_deref().unwrap_or_default(), changed),
         })
     }
 
@@ -2539,6 +2535,48 @@ pub fn globs_match(globs: &[String], path: &str) -> bool {
         })
 }
 
+/// G891: why a check whose `when_paths` list `globs` matches no path of `changed` is not
+/// required. It names the list and never quotes it: the policy at the candidate holds it, and
+/// the quoted lists were most of a landed change's status row. When an exclusion dropped a path
+/// an include took (G500), it names the first such exclusion and path, and how many more paths
+/// an exclusion dropped.
+fn unwoken_reason(globs: &[String], changed: &[String]) -> String {
+    const NONE: &str = "no path the candidate changes against its base matches when_paths";
+    let mut dropped = changed
+        .iter()
+        .filter_map(|path| dropping_exclusion(globs, path).map(|glob| (glob, path)));
+    match dropped.next() {
+        None => NONE.to_owned(),
+        Some((glob, path)) => match dropped.count() {
+            0 => format!("{NONE}; {glob} drops {path}"),
+            more => format!("{NONE}; {glob} drops {path} and {more} more"),
+        },
+    }
+}
+
+/// G500: the `!` exclusion of `globs` that drops changed path `path`: an include before it
+/// took the path, and no later include takes it back. `None` when the list matches the path,
+/// or no include takes it. Read in order like [`globs_match`].
+fn dropping_exclusion<'a>(globs: &'a [String], path: &str) -> Option<&'a str> {
+    #[derive(Clone, Copy)]
+    enum Read<'a> {
+        Untaken,
+        Taken,
+        Dropped(&'a str),
+    }
+    let read = globs.iter().fold(Read::Untaken, |read, glob| {
+        match (glob.strip_prefix('!'), read) {
+            (Some(excluded), Read::Taken) if glob_matches(excluded, path) => Read::Dropped(glob),
+            (None, _) if glob_matches(glob, path) => Read::Taken,
+            (_, read) => read,
+        }
+    });
+    match read {
+        Read::Dropped(glob) => Some(glob),
+        Read::Untaken | Read::Taken => None,
+    }
+}
+
 /// Whether one glob of a `when_paths` list matches changed path `path`: `*` matches within
 /// one path part, `?` one character other than `/`, a part `**` any number of parts, and a
 /// glob ending in `/` every path under that directory.
@@ -3193,6 +3231,41 @@ mod tests {
         assert!(!globs_match(&late, "src/gen/keep.rs"));
         assert!(globs_match(&late, "src/a.rs"));
         assert!(!globs_match(&list(&["src/", "!docs/"]), "docs/a.md"));
+    }
+
+    /// G891: a not-required reason names the `when_paths` list without quoting it, and the
+    /// exclusion that dropped a path an include took.
+    #[test]
+    fn an_unwoken_reason_names_the_exclusion_not_the_list() {
+        use super::{dropping_exclusion, unwoken_reason};
+        let list =
+            |globs: &[&str]| -> Vec<String> { globs.iter().map(|g| (*g).to_owned()).collect() };
+        let none = "no path the candidate changes against its base matches when_paths";
+        let agents = list(&["**/AGENTS.md", "!notes/**"]);
+        assert_eq!(unwoken_reason(&agents, &list(&["apps/a.rs"])), none);
+        assert_eq!(
+            unwoken_reason(&agents, &list(&["apps/a.rs", "notes/AGENTS.md"])),
+            format!("{none}; !notes/** drops notes/AGENTS.md")
+        );
+        assert_eq!(
+            unwoken_reason(
+                &agents,
+                &list(&["notes/AGENTS.md", "notes/a/AGENTS.md", "notes/b/AGENTS.md"])
+            ),
+            format!("{none}; !notes/** drops notes/AGENTS.md and 2 more")
+        );
+        // A later include takes a path back, so no exclusion drops it.
+        let back = list(&["**/AGENTS.md", "!notes/**", "notes/AGENTS.md"]);
+        assert_eq!(dropping_exclusion(&back, "notes/AGENTS.md"), None);
+        assert_eq!(
+            dropping_exclusion(&back, "notes/team/AGENTS.md"),
+            Some("!notes/**")
+        );
+        // An exclusion drops only what an include before it took.
+        assert_eq!(
+            dropping_exclusion(&list(&["src/", "!docs/"]), "docs/a.md"),
+            None
+        );
     }
 
     /// A check that could see nothing, a path bay could never find in a tree, and a bound

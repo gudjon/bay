@@ -119,7 +119,7 @@ fn an_agents_md_under_an_excluded_folder_wakes_no_check_and_says_why() {
         .unwrap();
     let reason = row["reason"].as_str().unwrap();
     assert!(
-        reason.contains("when_paths") && reason.contains("!notes/**"),
+        reason.ends_with("when_paths; !notes/** drops notes/AGENTS.md"),
         "{reason}"
     );
 }

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.10
+
+- A not-required check's reason no longer quotes its `when_paths`; it names any exclusion that dropped a path.
+
 ## 0.7.9
 
 - A start after a landing that lost its merged claim opens the next generation, with or without `--new`.

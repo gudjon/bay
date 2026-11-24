@@ -130,6 +130,8 @@ fn a_studio_change_skips_the_world_check_and_records_why() {
     assert_eq!(not_required[0]["environment"], "local");
     let reason = not_required[0]["reason"].as_str().unwrap();
     assert!(reason.contains("when_paths"), "{reason}");
+    // G891: it names the list, never quotes it; the policy holds it.
+    assert!(!reason.contains("world/"), "{reason}");
     // And so does the landing's terminal record.
     let change = landed["change"].as_str().unwrap();
     let status = test_box.bay_ok(&repo, &["status", change]);
