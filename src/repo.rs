@@ -25,6 +25,10 @@ use crate::result::{BayResult, Reason};
 pub const TRUNK_KEY: &str = "bay.main";
 /// The repository-local git config key naming the trunk's remote (`bay install --remote`).
 pub const REMOTE_KEY: &str = "bay.remote";
+
+/// 0.7.0: a box's own way to the repository's origin (`git config bay.origin`), over `[origin]
+/// url`: a path on the origin's own host.
+pub const ORIGIN_KEY: &str = "bay.origin";
 /// The remote when `bay.remote` is unset.
 pub const DEFAULT_REMOTE: &str = "origin";
 
@@ -439,16 +443,20 @@ impl Repo {
         let mut config = Config::parse(&opened.config).ok()?;
         config.trunk = Some(opened.trunk.clone());
         config.remote = Some(opened.remote.clone());
+        let bootstrap = Bootstrap {
+            remote: opened.remote,
+            trunk: opened.trunk,
+            source: opened.source,
+        };
+        let git = Git::new(&opened.common_dir);
+        let route = origin_route(&git, &bootstrap, Some(&config)).ok()?;
+        crate::git::set_route(&opened.common_dir, route);
         Some(Self {
-            git: Git::new(&opened.common_dir),
+            git,
             opened_in: dir.to_path_buf(),
             common_dir: opened.common_dir,
             work_root: opened.work_root,
-            bootstrap: Bootstrap {
-                remote: opened.remote,
-                trunk: opened.trunk,
-                source: opened.source,
-            },
+            bootstrap,
             config,
             fetched_at: Mutex::new(None),
             prefetched: Mutex::new(None),
@@ -612,6 +620,12 @@ impl Repo {
         let mut brought = Vec::new();
         let mut have = tip_of(&git).map_err(known)?;
         if fetch == Fetch::First || (fetch == Fetch::IfMissing && have.is_none()) {
+            // 0.7.0: the opening fetch goes where the config at the tip this store holds sends
+            // it; the config read after the fetch decides from then on. A config that does not
+            // load here leaves the fetch with the hosted remote, and the read after it decides.
+            let held = have.as_deref().and_then(|tip| Config::at(&git, tip).ok());
+            let route = origin_route(&git, &bootstrap, held.as_ref()).map_err(known)?;
+            crate::git::set_route(&common_dir, route);
             let fetched;
             (fetched, brought) = opening_fetch(&git, &bootstrap, &work_root, reads);
             if let Err(error) = &fetched {
@@ -675,6 +689,8 @@ impl Repo {
         }
         config.trunk = Some(bootstrap.trunk.clone());
         config.remote = Some(bootstrap.remote.clone());
+        let route = origin_route(&git, &bootstrap, Some(&config)).map_err(known)?;
+        crate::git::set_route(&common_dir, route);
         Ok(Self {
             git,
             opened_in: dir.to_path_buf(),
@@ -1472,6 +1488,107 @@ pub fn views_dirs_of(common_dir: &Path) -> Vec<PathBuf> {
 /// a blob-less store fetches bay's records alone, with their blobs (G432), and a fetch that also
 /// brought trunk would bring trunk's blobs too, so there they wait for their own fetch. Returns
 /// the trunk's tip and the refspecs brought, the registry's own among them when its pattern was.
+/// 0.7.0: the route of the store whose common directory `git` runs in: its origin is the box's
+/// `git config bay.origin` when set, else `config`'s `[origin] url`; `None` when neither names
+/// one. The hosted URLs are the bootstrap remote's `url` and `pushurl` values, read once per
+/// process for an origin.
+///
+/// # Errors
+///
+/// The store names an origin but its remote has no URL to send there, or git cannot say.
+pub fn origin_route(
+    git: &Git,
+    bootstrap: &Bootstrap,
+    config: Option<&Config>,
+) -> Result<Option<crate::git::Route>, String> {
+    let named = git
+        .config_get_local(ORIGIN_KEY)
+        .map_err(|error| error.message())?
+        .filter(|value| !value.is_empty());
+    let Some(origin) = named.or_else(|| {
+        config
+            .and_then(|config| config.origin.as_ref())
+            .map(|origin| origin.url.clone())
+    }) else {
+        return Ok(None);
+    };
+    if let Some(Some(known)) = crate::git::known_route(git.dir())
+        && known.origin == origin
+        && known.trunk == bootstrap.trunk
+    {
+        return Ok(Some(known));
+    }
+    let pattern = format!(
+        r"^remote\.{}\.(url|pushurl)$",
+        regex_escape(&bootstrap.remote)
+    );
+    let (code, listed, stderr) = git
+        .run_status(&["config", "--get-regexp", &pattern])
+        .map_err(|error| error.message())?;
+    if code != 0 && !(code == 1 && stderr.is_empty()) {
+        return Err(format!("git config --get-regexp {pattern}: {stderr}"));
+    }
+    let mut hosted: Vec<String> = Vec::new();
+    for line in listed.lines() {
+        if let Some((_, url)) = line.split_once(' ')
+            && !url.is_empty()
+            && url != origin
+            && !hosted.iter().any(|known| known == url)
+        {
+            hosted.push(url.to_owned());
+        }
+    }
+    if hosted.is_empty() {
+        return Err(format!(
+            "the origin {origin} serves remote \"{}\", which has no url",
+            bootstrap.remote
+        ));
+    }
+    Ok(Some(crate::git::Route {
+        origin,
+        hosted,
+        trunk: bootstrap.trunk.clone(),
+    }))
+}
+
+/// 0.7.0: the route of a store this process has not opened ([`crate::git::resolve_routes_with`]),
+/// by the config at its trunk's tracking tip. A store bay does not serve has none.
+///
+/// # Errors
+///
+/// See [`origin_route`]; the store's bootstrap or config cannot be read.
+pub fn resolve_route(common: &Path) -> Result<Option<crate::git::Route>, String> {
+    if common.file_name().is_none_or(|name| name != ".git") {
+        return Ok(None);
+    }
+    let git = Git::new(common);
+    let bootstrap = match Bootstrap::read(&git) {
+        Ok(bootstrap) => bootstrap,
+        Err(BootstrapError::Missing(_)) => return Ok(None),
+        Err(BootstrapError::Unreadable(why)) => return Err(why),
+    };
+    let tip = git
+        .ref_target(&format!("{}^{{commit}}", bootstrap.tracking_ref()))
+        .map_err(|error| error.message())?;
+    let config = tip
+        .as_deref()
+        .map(|tip| Config::at(&git, tip))
+        .transpose()?;
+    origin_route(&git, &bootstrap, config.as_ref())
+}
+
+/// `name` with each character a POSIX extended regular expression gives a meaning escaped.
+fn regex_escape(name: &str) -> String {
+    let mut escaped = String::with_capacity(name.len());
+    for c in name.chars() {
+        if "\\.^$|?*+()[]{}".contains(c) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+    }
+    escaped
+}
+
 fn opening_fetch(
     git: &Git,
     bootstrap: &Bootstrap,

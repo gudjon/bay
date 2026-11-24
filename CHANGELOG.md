@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0
+
+- `bay host <path> --upstream <url>` makes an origin: it takes a push only after the hosted remote takes it.
+- `bay host serve <path>` keeps the origin current with what other writers push to the hosted remote.
+- `[origin] url` in `.bay/config.toml` sends bay's refs and main through the origin; other refs keep their remote.
+- With `git config bay.upstreamMode tail`, bay's refs reach the hosted remote after the origin takes them.
+- A tailing origin names a ref another writer moved on the hosted remote a stray, then writes it over.
+- `bay doctor` on an origin names its hosted remote and its mode, and goes red without its hook.
+
 ## 0.6.157
 
 - `[runner] author = "Name <email>"` writes the commits bay makes on main; bay stays the committer.

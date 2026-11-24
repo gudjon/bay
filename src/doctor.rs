@@ -893,6 +893,31 @@ fn arrives_with_main(git: &Git, config: &Config, missing: &[&str]) -> bool {
     missing.iter().all(|event| !on_main.contains(event))
 }
 
+/// 0.7.0: an origin's hosted remote, the mode it works in and the mode its config names, and
+/// whether its hook sends what it takes. A host with no upstream gets no row.
+fn origin_row(git: &Git, dir: &Path, report: &mut Report) -> Result<(), String> {
+    let Some(upstream) = crate::origin::upstream(git, dir)? else {
+        return Ok(());
+    };
+    let hook = format!("hook.{}.command", crate::origin::ORIGIN_HOOK);
+    let hooked = git
+        .config_get(&hook)
+        .map_err(|error| error.message())?
+        .is_some();
+    let mut row = json!({"name": "origin", "state": state(hooked),
+        "upstream": crate::origin::shown(&upstream.url),
+        "mode": upstream.mode.name(), "configured": upstream.configured.name()});
+    if !hooked {
+        report.red(
+            Reason::HooksMissing,
+            Some("origin has no hook that sends what it takes"),
+        );
+        row["recovery"] = json!("run bay host <path> --upstream <url> again");
+    }
+    report.rows.push(row);
+    Ok(())
+}
+
 fn hooks_row(
     git: &Git,
     config: &Config,
@@ -912,7 +937,7 @@ fn hooks_row(
                 .push(json!({"name": "trunk-hook", "state": "red",
                 "recovery": "create the host with bay host"}));
         }
-        return Ok(());
+        return origin_row(git, Path::new(&info.toplevel), report);
     }
     if config.codex_adapter() {
         return codex_hooks_rows(git, info, report);

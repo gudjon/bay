@@ -114,7 +114,8 @@ fn narrows(event: &str, hook: &Value, bay_event: &str) -> bool {
 }
 
 /// The `timeout` (seconds) on bay's `PreToolUse` entry (G158): bay's hook takes about half a
-/// second, so a hook still running at 30 s is hung, and the product denies the call.
+/// second, so a hook still running at 30 s is hung, and the product lets the call go on
+/// (`onFailure: "continue"`): main's guard judges every change.
 pub const PRE_TOOL_TIMEOUT_S: u64 = 30;
 
 /// The `timeout` (seconds) on bay's question entry (`tool.ask`): the longest wait for an answer

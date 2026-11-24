@@ -42,9 +42,16 @@ pub fn served_branch(git: &Git) -> String {
 /// the repository that holds `dir`, so that repository can push to it; outside one, Git's own
 /// default (`init.defaultObjectFormat`, SHA-256 from Git 3.0). SHA-1 and SHA-256 repositories
 /// cannot exchange objects, so a fixed default would refuse every push from the other kind.
+/// With `upstream`, the host is a bay origin of that hosted remote ([`crate::origin`]).
 #[must_use]
-pub fn init(dir: &Path, path: &Path, trunk: &str, object_format: Option<&str>) -> BayResult {
-    run_init(dir, path, trunk, object_format).unwrap_or_else(BayResult::failed)
+pub fn init(
+    dir: &Path,
+    path: &Path,
+    trunk: &str,
+    object_format: Option<&str>,
+    upstream: Option<&str>,
+) -> BayResult {
+    run_init(dir, path, trunk, object_format, upstream).unwrap_or_else(BayResult::failed)
 }
 
 fn run_init(
@@ -52,6 +59,7 @@ fn run_init(
     path: &Path,
     trunk: &str,
     object_format: Option<&str>,
+    upstream: Option<&str>,
 ) -> Result<BayResult, String> {
     // Git runs a hook defined in configuration only from 2.54. Below it the trunk hook would
     // be silently ignored and trunk would accept a force push, so refuse first.
@@ -120,6 +128,9 @@ fn run_init(
         host.run(&["config", key, value])
             .map_err(|error| error.message())?;
     }
+    if let Some(url) = upstream {
+        crate::origin::configure(&host, &bay, url)?;
+    }
     Ok(BayResult::ok(json!({
         "host": path_text,
         "trunk": trunk,
@@ -127,6 +138,10 @@ fn run_init(
         "object format": object_format,
         "hook": command,
         "commit_graph": "changed-path Bloom filters, written by Git's maintenance after a push",
+        "upstream": upstream.map(crate::origin::shown),
+        "mode": upstream.map(|_| crate::origin::Mode::Through.name()),
+        // The origin takes the hosted remote's refs on this command's first pass.
+        "serve": upstream.map(|_| format!("bay host serve {path_text}")),
     })))
 }
 
@@ -200,13 +215,19 @@ fn pre_receive_bounded(git: &Git, dir: &Path, input: String) -> u8 {
             .unwrap_or(30),
     );
     let slow = test_slow_push(git, dir, &input);
+    let started = std::time::Instant::now();
     let (done, judged) = std::sync::mpsc::channel();
     let dir = dir.to_path_buf();
     std::thread::spawn(move || {
         if slow {
             std::thread::sleep(bound + std::time::Duration::from_secs(1));
         }
-        let _ = done.send(crate::hook::pre_receive(&Git::new(&dir), &input));
+        let git = Git::new(&dir);
+        // 0.7.0: an origin sends a push its checks pass to its hosted remote before it takes it.
+        let judged = crate::hook::pre_receive(&git, &input).and_then(|()| {
+            crate::origin::forward(&git, &dir, &input, bound.saturating_sub(started.elapsed()))
+        });
+        let _ = done.send(judged);
     });
     match judged.recv_timeout(bound) {
         Ok(Ok(())) => 0,
@@ -263,6 +284,12 @@ pub fn hook(event: &str, args: &[String]) -> u8 {
         let mut input = String::new();
         let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
         return pre_receive_bounded(&git, &dir, input);
+    }
+    if event == "post-receive" {
+        let mut input = String::new();
+        let _ = std::io::Read::read_to_string(&mut std::io::stdin(), &mut input);
+        crate::origin::post_receive(&dir, &input);
+        return 0;
     }
     let ("update", [refname, old, new]) = (event, args) else {
         eprintln!("bay: unknown host hook call: {event} {}", args.join(" "));

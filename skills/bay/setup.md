@@ -245,6 +245,33 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
 7. A check that must read a directory outside its tree (a package store) needs it named on the
    machine that runs checks: `git config --global --add bay.checkReadPath ~/<dir>`. It is read-only.
 
+## Serve a fleet from an origin (only when the user asks)
+
+An origin is a bay host near the fleet's machines that keeps a hosted remote (GitHub, say) as its
+upstream. bay's reads and writes then make a round trip on the local network, not to the hosted remote.
+
+1. On the origin's machine: `bay host <path> --upstream <hosted url>`. It works in `through` mode: it
+   takes a push only after the hosted remote took it, so the hosted remote never falls behind. A push
+   whose ref another writer moved on the hosted remote is refused as stale (bay tries again), and the
+   origin then holds the hosted remote's value. The origin pushes with its own machine's Git login.
+2. Run `bay host serve <path>` under a supervisor (a systemd user unit, a launchd agent). It takes what
+   other writers push to the hosted remote: branches every `bay.pollS` seconds (5), and bay's refs and
+   notes too every `bay.sweepS` seconds (60). `bay host serve <path> --once` does one pass and prints
+   what it took. The first pass fetches the whole repository.
+3. Move every machine to a bay that reads `[origin]` (0.7.0 or newer), and check each one's version. An
+   older bay does not refuse the key: it keeps writing to the hosted remote.
+4. Merge `[origin] url = "<origin url>"` in `.bay/config.toml`. bay then sends its refs, its notes and
+   main through the origin; other branches and tags keep their remote. The remote's name and its
+   tracking refs stay as they are.
+5. Optional, faster: when `--once` shows `detail.mirrored.strays` at 0 for a day (no other writer
+   writes bay's refs to the hosted remote), run `git config bay.upstreamMode tail` in the origin. bay's
+   refs then reach the hosted remote in the next pass after the origin takes them; main still goes to
+   the hosted remote first. What is live on one machine (leases, live rows, runner records) stays on
+   the origin. A ref another writer moved there is logged `STRAY` and written over. An origin that
+   tails stays tailing: setting `through` again does not move it back.
+6. `bay doctor` in the origin names its hosted remote (never a credential in its URL), the mode it works
+   in and the mode its config names, and goes red when its hook is missing.
+
 ## What bay guards, and when
 
 - **Its own merges, always:** what merges through bay is exactly what was checked.

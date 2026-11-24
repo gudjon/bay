@@ -59,10 +59,23 @@ pub struct Config {
     /// `[[lane]]` (NEW-4): the sandbox lanes, whose changes run their checks and never land.
     #[serde(default, rename = "lane")]
     pub lanes: Vec<Lane>,
+    /// `[origin]` (0.7.0): the bay origin every peer of this repository sends its pushes to and
+    /// reads bay's refs and main from (`crate::git::Route`).
+    pub origin: Option<Origin>,
     /// `[update]` is accepted and ignored: the update pin and switch are the box's
     /// (`git config --global bay.update*`, `DESIGN` § 15.6), never a repository's, and an older
     /// config that still carries the table must keep loading.
     update: Option<toml::Table>,
+}
+
+/// `[origin]` (0.7.0): the repository's bay origin, a `bay host --upstream` repository that holds
+/// bay's refs and mirrors the hosted remote's branches. A box may name its own way to the same
+/// origin (`git config bay.origin`, a path on the origin's own host).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Origin {
+    /// The origin's URL, as a peer on another box reaches it.
+    pub url: String,
 }
 
 /// One `[[target]]` (NEW-5): a ref bay judges promotions to, never one it lands on.

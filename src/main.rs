@@ -497,6 +497,14 @@ enum HostAction {
     /// The host hook Git runs on a push (configured by `bay host`)
     #[command(hide = true)]
     Hook { event: String, args: Vec<String> },
+    /// Keep an origin (`bay host --upstream`) and its hosted remote current, until stopped
+    Serve {
+        /// The origin's bare repository
+        path: PathBuf,
+        /// Make one whole pass and report it
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 /// `bay host <path>` (0.4.0, BACKLOG 51 R7: one word for one step), and the hidden host hook
@@ -505,7 +513,7 @@ enum HostAction {
 #[command(
     args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true,
-    override_usage = "bay host <PATH> [--main <BRANCH>] [--object-format <FORMAT>]"
+    override_usage = "bay host <PATH> [--main <BRANCH>] [--object-format <FORMAT>] [--upstream <URL>]\n       bay host serve <PATH> [--once]"
 )]
 struct HostArgs {
     #[command(subcommand)]
@@ -519,6 +527,10 @@ struct HostArgs {
     /// By default the object format of the repository bay runs in, else Git's default
     #[arg(long, value_parser = ["sha1", "sha256"])]
     object_format: Option<String>,
+    /// Make the host a bay origin of this hosted remote: it sends the remote every push it
+    /// takes (`bay host serve` keeps them current)
+    #[arg(long, value_name = "URL")]
+    upstream: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -739,6 +751,29 @@ fn config_refusal(cli: &Cli) -> Option<BayResult> {
     needs_config
         .then(|| bay::repo::Repo::config_missing(&cli.dir))
         .flatten()
+}
+
+/// `bay host`: the result of a host's creation or of an origin's service, or the exit code of
+/// the host hook.
+fn host(dir: &std::path::Path, args: HostArgs) -> Result<BayResult, ExitCode> {
+    match args.action {
+        Some(HostAction::Hook { event, args }) => {
+            Err(ExitCode::from(bay::host::hook(&event, &args)))
+        }
+        Some(HostAction::Serve { path, once }) => Ok(bay::origin::serve(&path, once)),
+        None => {
+            let path = args
+                .path
+                .expect("clap requires the path without a subcommand");
+            Ok(bay::host::init(
+                dir,
+                &path,
+                &args.trunk,
+                args.object_format.as_deref(),
+                args.upstream.as_deref(),
+            ))
+        }
+    }
 }
 
 fn install(dir: &std::path::Path, args: InstallArgs) -> BayResult {
@@ -993,6 +1028,7 @@ fn hook(dir: &std::path::Path, event: String) -> ExitCode {
 }
 
 fn main() -> ExitCode {
+    bay::git::resolve_routes_with(bay::repo::resolve_route);
     let cli = parse();
     if let Some(saved) = saved_listing(&cli) {
         bay::update::auto();
@@ -1029,19 +1065,10 @@ fn main() -> ExitCode {
             }
         }
         Command::Abandon { change, why } => abandon(&cli.dir, change.as_deref(), why.as_deref()),
-        Command::Host(HostArgs {
-            action: Some(HostAction::Hook { event, args }),
-            ..
-        }) => return ExitCode::from(bay::host::hook(&event, &args)),
-        Command::Host(HostArgs {
-            path,
-            trunk,
-            object_format,
-            ..
-        }) => {
-            let path = path.expect("clap requires the path without a subcommand");
-            bay::host::init(&cli.dir, &path, &trunk, object_format.as_deref())
-        }
+        Command::Host(args) => match host(&cli.dir, args) {
+            Ok(result) => result,
+            Err(code) => return code,
+        },
         Command::Runner {
             action: RunnerAction::Run { once, interval_s },
         } => return executor_run(&cli.dir, cli.json, once, interval_s),

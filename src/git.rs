@@ -56,6 +56,19 @@ pub struct Git {
     lazy_fetch: bool,
     /// This handle's calls write a work tree byte for byte ([`Git::writing_tree`]).
     writes_tree: bool,
+    /// 0.7.0: whether this handle's calls run in the quarantine of a push its hook judges.
+    quarantine: Quarantine,
+}
+
+/// 0.7.0: where a handle's calls run when its process is a hook judging a push.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Quarantine {
+    /// In the push's quarantine, as Git starts the hook.
+    Inherited,
+    /// Reading the quarantine's objects, not marked as in it ([`Git::reading_quarantine`]).
+    Objects,
+    /// Outside it ([`Git::outside_quarantine`]).
+    Left,
 }
 
 /// G200: one `git config --list` of a handle, every entry in Git's order (the last value
@@ -125,6 +138,101 @@ static SNAPSHOTS: std::sync::LazyLock<Mutex<std::collections::HashMap<PathBuf, O
 
 /// G200: the common directory of each directory a handle asked, by the path it was given.
 static COMMON_DIRS: Mutex<BTreeMap<PathBuf, String>> = Mutex::new(BTreeMap::new());
+
+/// 0.7.0: the bay origin of a store (`[origin]`): the calls it serves go there instead of to the
+/// hosted remote. The hosted remote's URLs, as its config names them, are rewritten to the
+/// origin's for those calls only (`url.<origin>.insteadOf`), so the remote keeps its name and its
+/// tracking refs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Route {
+    /// The origin's URL.
+    pub origin: String,
+    /// The hosted remote's URLs as its config names them (`remote.<name>.url` and `.pushurl`).
+    pub hosted: Vec<String>,
+    /// The trunk's branch name: the origin serves reads of it with reads of bay's refs.
+    pub trunk: String,
+}
+
+/// The route of each store this process knows, by its common directory: `None` for a store
+/// with no origin.
+static ROUTES: std::sync::LazyLock<Mutex<std::collections::HashMap<PathBuf, Option<Route>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Finds the route of a store from its common directory ([`resolve_routes_with`]).
+pub type ResolveRoute = fn(&Path) -> Result<Option<Route>, String>;
+
+/// Finds the route of a store no [`set_route`] named (set once by the binary; a library user
+/// without it routes nothing).
+static RESOLVE_ROUTE: OnceLock<ResolveRoute> = OnceLock::new();
+
+/// Records the route of the store whose common directory is `common`; `None`: it has no origin.
+pub fn set_route(common: &Path, route: Option<Route>) {
+    let key = std::fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
+    ROUTES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, route);
+}
+
+/// The route recorded for the store whose common directory is `common`, if any was.
+#[must_use]
+pub fn known_route(common: &Path) -> Option<Option<Route>> {
+    let key = std::fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
+    ROUTES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+        .cloned()
+}
+
+/// Sets how a store no [`set_route`] named finds its route. The first call wins.
+pub fn resolve_routes_with(resolve: ResolveRoute) {
+    let _ = RESOLVE_ROUTE.set(resolve);
+}
+
+/// The route of the store whose common directory is `common`: the one recorded, or else the one
+/// the resolver finds, then recorded. A resolver that fails is asked again next time.
+fn route_of(common: &Path) -> Result<Option<Route>, String> {
+    let key = std::fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
+    if let Some(known) = ROUTES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(known.clone());
+    }
+    let Some(resolve) = RESOLVE_ROUTE.get() else {
+        return Ok(None);
+    };
+    let route = resolve(&key)?;
+    ROUTES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, route.clone());
+    Ok(route)
+}
+
+/// The environment that rewrites each hosted URL of `route` to its origin, after any config
+/// this process was itself given in its environment (`GIT_CONFIG_COUNT`).
+fn route_env(route: &Route) -> Vec<(String, String)> {
+    let given = std::env::var("GIT_CONFIG_COUNT")
+        .ok()
+        .and_then(|count| count.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    let mut env = Vec::with_capacity(route.hosted.len() * 2 + 1);
+    for (at, hosted) in route.hosted.iter().enumerate() {
+        env.push((
+            format!("GIT_CONFIG_KEY_{}", given + at),
+            format!("url.{}.insteadOf", route.origin),
+        ));
+        env.push((format!("GIT_CONFIG_VALUE_{}", given + at), hosted.clone()));
+    }
+    env.push((
+        "GIT_CONFIG_COUNT".to_owned(),
+        (given + route.hosted.len()).to_string(),
+    ));
+    env
+}
 
 /// G734: each remote read [`Git::read_ahead`] started, by its handle's directory and arguments,
 /// until the first call with the same arguments takes its answer.
@@ -567,6 +675,37 @@ impl Git {
             bare_dir,
             lazy_fetch: false,
             writes_tree: false,
+            quarantine: Quarantine::Inherited,
+        }
+    }
+
+    /// 0.7.0: a handle on the same repository whose calls run outside the quarantine Git keeps a
+    /// pushed object in while a hook judges the push: their ref updates are allowed and the
+    /// objects they fetch go to the repository's own store, to stay whatever the judgement is.
+    /// For an origin's hook, which takes what the hosted remote holds when it refuses a push
+    /// ([`crate::origin`]).
+    #[must_use]
+    pub fn outside_quarantine(&self) -> Self {
+        self.in_quarantine(Quarantine::Left)
+    }
+
+    /// 0.7.0: a handle on the same repository whose calls read the objects of the push a hook
+    /// judges, as a call in its quarantine does, without being marked as in it. Git refuses every
+    /// ref update in a process so marked, and a push to a repository on this machine passes the
+    /// mark to the side that receives it. For an origin's hook, which sends the push it judges to
+    /// the hosted remote ([`crate::origin`]).
+    #[must_use]
+    pub fn reading_quarantine(&self) -> Self {
+        self.in_quarantine(Quarantine::Objects)
+    }
+
+    fn in_quarantine(&self, quarantine: Quarantine) -> Self {
+        Self {
+            dir: self.dir.clone(),
+            bare_dir: self.bare_dir,
+            lazy_fetch: self.lazy_fetch,
+            writes_tree: self.writes_tree,
+            quarantine,
         }
     }
 
@@ -580,6 +719,7 @@ impl Git {
             bare_dir: self.bare_dir,
             lazy_fetch: true,
             writes_tree: self.writes_tree,
+            quarantine: self.quarantine,
         }
     }
 
@@ -594,6 +734,7 @@ impl Git {
             bare_dir: self.bare_dir,
             lazy_fetch: self.lazy_fetch,
             writes_tree: true,
+            quarantine: self.quarantine,
         }
     }
 
@@ -809,6 +950,7 @@ impl Git {
                 bare_dir: self.bare_dir,
                 lazy_fetch: self.lazy_fetch,
                 writes_tree: self.writes_tree,
+                quarantine: self.quarantine,
             };
             let args = call.clone();
             let handle = thread::spawn(move || {
@@ -1099,13 +1241,22 @@ impl Git {
         envs: &[(&str, &str)],
     ) -> Result<(i32, String, String), GitError> {
         let output = self.output(args, envs, None, GIT_CALL_TIMEOUT)?;
-        Ok((
-            output.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&output.stdout)
-                .trim_end()
-                .to_owned(),
-            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-        ))
+        Ok(status_of(&output))
+    }
+
+    /// [`Self::run_status`] bounded by `timeout`: for a push whose bound is what is left of a
+    /// hook's.
+    ///
+    /// # Errors
+    ///
+    /// The git binary is missing or the call exceeds `timeout`.
+    pub fn run_status_for(
+        &self,
+        args: &[&str],
+        timeout: std::time::Duration,
+    ) -> Result<(i32, String, String), GitError> {
+        let output = self.output(args, &[], None, timeout)?;
+        Ok(status_of(&output))
     }
 
     /// Runs `git <args>` with `envs` and optional stdin, bounded by `timeout`. G104b: when a
@@ -1129,6 +1280,12 @@ impl Git {
         } else {
             timeout
         };
+        // 0.7.0: a call the store's origin serves goes there ([`through_origin`]).
+        let routed = if talks_to_remote(args) {
+            self.route_for(args)?
+        } else {
+            None
+        };
         let run = || {
             let mut cmd = self.command();
             cmd.args(as_formatted(args));
@@ -1137,6 +1294,11 @@ impl Git {
             }
             for (key, value) in envs {
                 cmd.env(key, value);
+            }
+            if let Some(route) = &routed {
+                for (key, value) in route_env(route) {
+                    cmd.env(key, value);
+                }
             }
             run_bounded_for(cmd, &args_display, input, timeout)
         };
@@ -1176,6 +1338,24 @@ impl Git {
                 Ok(output)
             }
         }
+    }
+
+    /// The route of `git <args>`, a call to a remote: the store's origin when the store has one
+    /// and the origin serves the call ([`through_origin`]).
+    ///
+    /// # Errors
+    ///
+    /// The store's origin cannot be found: the call is not made, since a write that went to the
+    /// hosted remote instead would bypass the origin.
+    fn route_for(&self, args: &[&str]) -> Result<Option<Route>, GitError> {
+        let Some(common) = self.store_dir() else {
+            return Ok(None);
+        };
+        let route = route_of(&common).map_err(|why| GitError::Failed {
+            args: args.join(" "),
+            stderr: format!("bay origin: {why}"),
+        })?;
+        Ok(route.filter(|route| through_origin(args, &route.trunk)))
     }
 
     /// G104b: fetches the objects `names` name from the promisor remote in one explicit
@@ -1357,6 +1537,17 @@ impl Git {
         cmd.env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
         // G104b: Git fetches no absent object on its own, unless this handle means it to.
         cmd.env("GIT_NO_LAZY_FETCH", if self.lazy_fetch { "0" } else { "1" });
+        match self.quarantine {
+            Quarantine::Inherited => {}
+            Quarantine::Objects => {
+                cmd.env_remove(QUARANTINE_ENV[0]);
+            }
+            Quarantine::Left => {
+                for key in QUARANTINE_ENV {
+                    cmd.env_remove(key);
+                }
+            }
+        }
         cmd
     }
 
@@ -2567,6 +2758,17 @@ pub fn ref_moved(why: &str) -> bool {
     REF_MOVED.iter().any(|moved| why.contains(moved))
 }
 
+/// The exit code, stdout and stderr of a finished call ([`Git::run_status`]).
+fn status_of(output: &Output) -> (i32, String, String) {
+    (
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_owned(),
+        String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+    )
+}
+
 /// Whether the words of a `push` or `fetch` after its remote name only bay's records: every
 /// destination (or excluded name, `^<name>`) is under `refs/bay/` or `refs/notes/bay/`, and
 /// there is at least one.
@@ -2583,6 +2785,79 @@ fn records_only(words: &[&str]) -> bool {
         ours(name)
     }) && any
 }
+
+/// 0.7.0: whether `git <args>`, a call to a remote, goes to the store's origin. A push does when
+/// it writes one of bay's refs or `refs/heads/<trunk>`: the origin forwards each ref it does not
+/// own to the hosted remote, by compare-and-swap, before it takes the push ([`crate::origin`]). A
+/// fetch or ls-remote does when it names refs and every one is one of bay's or
+/// `refs/heads/<trunk>`. Any other call goes to the hosted remote, which holds every
+/// branch and object: a read that names no ref or another branch, one by object id (`--stdin`),
+/// a clone, a pull.
+fn through_origin(args: &[&str], trunk: &str) -> bool {
+    let Some(at) = command_at(args) else {
+        return false;
+    };
+    let words = &args[at + 1..];
+    let main = format!("refs/heads/{trunk}");
+    let served = |name: &str| {
+        name.starts_with(crate::names::BAY) || name.starts_with(crate::names::NOTES) || name == main
+    };
+    match args[at] {
+        "push" => {
+            let destination = |spec: &&str| {
+                let spec = spec.trim_start_matches('+');
+                let to = spec.rsplit_once(':').map_or(spec, |(_, to)| to);
+                if to.starts_with("refs/") {
+                    to.to_owned()
+                } else {
+                    format!("refs/heads/{to}")
+                }
+            };
+            named(words, PUSH_VALUED)
+                .skip(1)
+                .any(|spec| served(&destination(&spec)))
+        }
+        "fetch" | "ls-remote" if !words.contains(&"--stdin") => {
+            let source = |name: &&str| {
+                let name = name.trim_start_matches(['+', '^']);
+                served(name.split_once(':').map_or(name, |(from, _)| from))
+            };
+            let mut names = named(words, &[]).skip(1);
+            let mut any = false;
+            names.all(|name| {
+                any = true;
+                source(&name)
+            }) && any
+        }
+        _ => false,
+    }
+}
+
+/// The options of `git push` whose value is the next word.
+const PUSH_VALUED: &[&str] = &["-o", "--push-option", "--repo", "--receive-pack", "--exec"];
+
+/// The words of a call after its command that are not options or the value of one of `valued`:
+/// its remote, then the refs or refspecs it names.
+fn named<'a>(words: &'a [&'a str], valued: &'a [&'a str]) -> impl Iterator<Item = &'a str> + 'a {
+    let mut value_next = false;
+    words.iter().copied().filter(move |word| {
+        if std::mem::take(&mut value_next) {
+            return false;
+        }
+        if word.starts_with('-') {
+            value_next = valued.contains(word);
+            return false;
+        }
+        true
+    })
+}
+
+/// The environment by which Git hands a hook the quarantine of the push it judges.
+pub const QUARANTINE_ENV: [&str; 3] = [
+    "GIT_QUARANTINE_PATH",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
 
 /// The bound of a call to `git <args>` given `timeout`: a call that talks to a remote under the
 /// default local bound gets [`GIT_NETWORK_TIMEOUT`]; a bound a caller chose stays as it is.
@@ -2603,16 +2878,23 @@ fn talks_to_remote(args: &[&str]) -> bool {
 /// The command of `git <args>`: its first word that is not an option or the value of `-c` or
 /// `-C`.
 fn command_of<'a>(args: &[&'a str]) -> Option<&'a str> {
-    let mut words = args.iter();
-    while let Some(word) = words.next() {
-        if *word == "-c" || *word == "-C" {
-            words.next();
+    command_at(args).map(|at| args[at])
+}
+
+/// Where in `args` the command of `git <args>` is ([`command_of`]).
+fn command_at(args: &[&str]) -> Option<usize> {
+    let mut at = 0;
+    while at < args.len() {
+        let word = args[at];
+        if word == "-c" || word == "-C" {
+            at += 2;
             continue;
         }
         if word.starts_with('-') {
+            at += 1;
             continue;
         }
-        return Some(word);
+        return Some(at);
     }
     None
 }
@@ -3188,6 +3470,191 @@ mod tests {
         assert!(records_only(&["origin", &change, &format!("^{change}")]));
         assert!(!records_only(&["origin"]));
         assert!(!records_only(&["origin"]));
+    }
+
+    /// 0.7.0: what a store's origin serves: a push that writes one of bay's refs or main, and a
+    /// read whose every ref is one of bay's or main. A read of another branch, of no named ref, or by object id goes to the
+    /// hosted remote.
+    #[test]
+    fn the_origin_serves_pushes_and_reads_of_bays_refs_and_main() {
+        use super::through_origin;
+        let routed = |args: &[&str]| through_origin(args, "main");
+        assert!(routed(&["push", "--atomic", "origin", "a:refs/heads/main"]));
+        assert!(routed(&[
+            "push",
+            "-q",
+            "--atomic",
+            "origin",
+            "+a:refs/bay/live/m",
+            "b:main"
+        ]));
+        assert!(routed(&["push", "-q", "origin", ":refs/bay/changes/x"]));
+        assert!(routed(&[
+            "push",
+            "-o",
+            "refs/heads/x",
+            "--force-with-lease=refs/notes/bay/evidence/x:",
+            "origin",
+            "refs/notes/bay/evidence/x",
+        ]));
+        assert!(!routed(&["push", "-q", "origin", "a:refs/heads/staging"]));
+        assert!(!routed(&["push", "-q", "--delete", "origin", "archive/x"]));
+        assert!(!routed(&[
+            "push",
+            "-o",
+            "refs/bay/x",
+            "origin",
+            "a:refs/heads/other"
+        ]));
+        assert!(!routed(&["push", "origin"]));
+        assert!(routed(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main",
+            "+refs/bay/changes/*:refs/bay/changes/*",
+            "^refs/bay/changes/x",
+        ]));
+        assert!(routed(&[
+            "-c",
+            "protocol.version=2",
+            "ls-remote",
+            "origin",
+            "refs/notes/bay/evidence/x",
+        ]));
+        assert!(!routed(&[
+            "fetch",
+            "origin",
+            "+refs/heads/staging:refs/remotes/origin/staging"
+        ]));
+        assert!(!routed(&[
+            "fetch",
+            "origin",
+            "+refs/heads/main:refs/remotes/origin/main",
+            "refs/heads/other",
+        ]));
+        assert!(!routed(&["fetch", "origin"]));
+        assert!(!routed(&[
+            "fetch",
+            "--filter=blob:none",
+            "--stdin",
+            "origin"
+        ]));
+        assert!(!routed(&["ls-remote", "origin"]));
+        assert!(!routed(&["ls-remote", "origin", "HEAD"]));
+        assert!(!routed(&["clone", "x", "y"]));
+        assert!(!routed(&["status"]));
+        assert!(!through_origin(
+            &["fetch", "origin", "refs/heads/main"],
+            "dev"
+        ));
+    }
+
+    /// 0.7.0: with a route recorded, the store's pushes and reads of bay's refs reach the
+    /// origin under the remote's own name, and a read of another branch reaches the hosted
+    /// remote.
+    #[test]
+    fn a_routed_store_reaches_its_origin_under_the_remotes_name() {
+        use super::{Route, set_route};
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path();
+        let git = |at: &std::path::Path, args: &[&str]| -> String {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(at)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@example.invalid")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@example.invalid")
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        let hosted = root.join("hosted.git");
+        let origin = root.join("origin.git");
+        let client = root.join("client");
+        for bare in [&hosted, &origin] {
+            git(
+                root,
+                &["init", "-q", "--bare", "-b", "main", bare.to_str().unwrap()],
+            );
+        }
+        git(
+            root,
+            &["init", "-q", "-b", "main", client.to_str().unwrap()],
+        );
+        git(&client, &["commit", "-q", "--allow-empty", "-m", "a"]);
+        let a = git(&client, &["rev-parse", "HEAD"]);
+        git(
+            &client,
+            &["remote", "add", "origin", hosted.to_str().unwrap()],
+        );
+        git(
+            &client,
+            &[
+                "push",
+                "-q",
+                "origin",
+                "HEAD:refs/heads/main",
+                "HEAD:refs/heads/other",
+            ],
+        );
+        git(&client, &["commit", "-q", "--allow-empty", "-m", "b"]);
+        let b = git(&client, &["rev-parse", "HEAD"]);
+        git(
+            &client,
+            &[
+                "push",
+                "-q",
+                origin.to_str().unwrap(),
+                "HEAD:refs/bay/changes/a",
+            ],
+        );
+        set_route(
+            &client.join(".git"),
+            Some(Route {
+                origin: origin.to_str().unwrap().to_owned(),
+                hosted: vec![hosted.to_str().unwrap().to_owned()],
+                trunk: "main".to_owned(),
+            }),
+        );
+        let store = Git::new(&client);
+        let read = store
+            .run(&["ls-remote", "origin", "refs/bay/changes/a"])
+            .unwrap();
+        assert!(read.starts_with(&b), "{read}");
+        let other = store
+            .run(&["ls-remote", "origin", "refs/heads/other"])
+            .unwrap();
+        assert!(other.starts_with(&a), "{other}");
+        store
+            .run(&["push", "-q", "origin", "HEAD:refs/bay/changes/b"])
+            .unwrap();
+        assert_eq!(git(&origin, &["rev-parse", "refs/bay/changes/b"]), b);
+        assert!(
+            git(&hosted, &["for-each-ref", "refs/bay/"]).is_empty(),
+            "the hosted remote took a bay ref"
+        );
+        store
+            .run(&["push", "-q", "origin", "HEAD:refs/heads/other"])
+            .unwrap();
+        assert_eq!(git(&hosted, &["rev-parse", "refs/heads/other"]), b);
+        assert!(
+            git(&origin, &["for-each-ref", "refs/heads/"]).is_empty(),
+            "the origin took a push of another branch"
+        );
+        store
+            .run(&[
+                "fetch",
+                "-q",
+                "origin",
+                "+refs/bay/changes/a:refs/remotes/origin/bay-a",
+            ])
+            .unwrap();
+        assert_eq!(git(&client, &["rev-parse", "refs/remotes/origin/bay-a"]), b);
     }
 }
 
