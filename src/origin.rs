@@ -330,7 +330,7 @@ impl Mark {
         });
         std::fs::create_dir_all(&at)
             .and_then(|()| std::fs::write(&writing, text))
-            .and_then(|()| std::fs::rename(&writing, &path))
+            .and_then(|()| crate::durable::rename(&writing, &path))
             .map_err(|error| format!("bay origin: cannot write the in-flight mark: {error}"))?;
         Ok(Self(path))
     }
@@ -617,7 +617,7 @@ fn write_state(path: &Path, state: &BTreeMap<String, String>) -> Result<(), Stri
         std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     std::fs::write(&writing, text)
-        .and_then(|()| std::fs::rename(&writing, path))
+        .and_then(|()| crate::durable::rename(&writing, path))
         .map_err(|error| format!("bay origin: cannot write the tail state: {error}"))
 }
 

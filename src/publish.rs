@@ -7317,9 +7317,8 @@ fn admit(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<(), String> {
     });
     let name = command.split_whitespace().next().unwrap_or_default();
     let timeout = ctx.repo.config.submission_timeout();
-    // The executor runs as any adapter does (`crate::run`): from the work tree, with only
-    // `PATH` and `HOME` of bay's environment, killed whole at its bound. What it needs it is
-    // given explicitly: its action as an argument and the request on stdin.
+    // The executor runs from the work tree as any adapter does (`crate::run`), killed whole at
+    // its bound, and is given its action as an argument and the request on stdin.
     let started = match crate::run::command(&ctx.repo.work_root, &command) {
         Some(Ok(cmd)) => Ok(cmd),
         Some(Err(why)) => Err(("submission_failed", why)),
