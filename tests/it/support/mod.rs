@@ -713,7 +713,9 @@ impl TestBox {
             .map(|event| event["value"].clone())
     }
 
-    /// A clone of `bare` at `<root>/<name>`.
+    /// A clone of `bare` at `<root>/<name>`. It copies `bare`'s object files one by one, so make
+    /// it before any process pushes into `bare`: a push taken meanwhile removes the files it
+    /// received in (its quarantine) after the clone listed them, and the clone fails.
     pub fn clone_of(&self, bare: &Path, name: &str) -> PathBuf {
         let dir = self.path().join(name);
         self.git_ok(

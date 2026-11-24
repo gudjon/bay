@@ -101,8 +101,10 @@ fn written(held: &Held, id: &str, subject: &str) -> Option<u64> {
 }
 
 /// The host, a line of `first` (`src/`, served by `exec-a`) and `second` (`lib/`, served by
-/// `exec-b`), and `exec-a`'s one pass holding `first`'s check. `config` is `.bay/config.toml`.
-fn line_with_held_head(config: &str) -> (Held, String, String, std::process::Child) {
+/// `exec-b`), `exec-a`'s one pass holding `first`'s check, and `exec-b`'s clone, made before
+/// that pass pushes into the host ([`support::TestBox::clone_of`]). `config` is
+/// `.bay/config.toml`.
+fn line_with_held_head(config: &str) -> (Held, String, String, std::process::Child, PathBuf) {
     let held = host_under(
         &Check {
             config,
@@ -116,9 +118,10 @@ fn line_with_held_head(config: &str) -> (Held, String, String, std::process::Chi
     let first = held.queue("first", "src");
     let second = held.queue("second", "lib");
     let head_runner = runner(&held, "exec-a", "env-a");
+    let other = runner(&held, "exec-b", "env-b");
     let holder = held.spawn(&head_runner);
     held.wait_held();
-    (held, first, second, holder)
+    (held, first, second, holder, other)
 }
 
 /// Lets `holder`'s check of `first` go, and waits for its pass to land `first`; returns when
@@ -156,12 +159,11 @@ fn claimed_soon(held: &Held, second: &str, landed: u64, journal: &Mutex<Vec<Stri
 
 #[test]
 fn a_runner_waiting_between_passes_claims_the_next_head_at_publish() {
-    let (held, first, second, holder) =
+    let (held, first, second, holder, other) =
         line_with_held_head("[runner]\nlease_s = 60\nheartbeat_s = 1\n");
 
     // GIVEN the runner that serves the next change made its pass (it found the head another
     // runner's to check) and waits a quarter of an hour for the next
-    let other = runner(&held, "exec-b", "env-b");
     let (mut child, journal) = looping(&held, &other);
     let visited =
         until(Duration::from_secs(180), || {
@@ -189,14 +191,13 @@ fn a_runner_waiting_between_passes_claims_the_next_head_at_publish() {
 
 #[test]
 fn a_runner_busy_in_its_pass_claims_the_next_head_between_operations() {
-    let (held, first, second, holder) =
+    let (held, first, second, holder, other) =
         line_with_held_head("[runner]\nlease_s = 60\nheartbeat_s = 1\nahead = 4\n");
     let third = held.queue("third", "lib");
 
     // GIVEN the runner that serves the next change checks it ahead of its turn, held
     held.hold_run(2);
     held.hold_run(3);
-    let other = runner(&held, "exec-b", "env-b");
     let (mut child, journal) = looping(&held, &other);
     held.wait_held_run(2);
 
