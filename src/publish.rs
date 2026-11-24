@@ -2431,10 +2431,12 @@ fn landed_wake(ctx: &Ctx, op_id: &str, decision: Decision) -> Result<(), String>
     let id = digest(&json!({"op_id": op_id, "outcome": "landed"}))?;
     let id = format!("evt_{}", &id.trim_start_matches("sha256:")[..20]);
     let ours = ctx.pushed_landing.is_some();
-    if !ours {
-        crate::log::fetch(ctx.repo);
-    }
-    if crate::log::held_events(&ctx.repo.git)?.contains(&id) {
+    let held = if ours {
+        crate::log::held_events(&ctx.repo.git)?.contains(&id)
+    } else {
+        crate::log::holds_event(ctx.repo, &id)?
+    };
+    if held {
         return Ok(());
     }
     let wake = wake_author(ctx, op_id, Decision::Landed, None);
@@ -2484,8 +2486,7 @@ fn outcome_event(
     // As `crate::log::append_event` does, an event a log already holds is not new: the
     // outcome was told, and its author woken, by whoever wrote it.
     let id = event["id"].as_str().unwrap_or_default().to_owned();
-    crate::log::fetch(ctx.repo);
-    if crate::log::held_events(&ctx.repo.git)?.contains(&id) {
+    if crate::log::holds_event(ctx.repo, &id)? {
         return Ok(None);
     }
     // G307: a block whose next step is the author's wakes the author once, keyed by this
@@ -2567,7 +2568,8 @@ fn blocked_event(
 /// leaves a blocked operation with no event. For every blocked operation of `records` whose
 /// event no log holds, the event is written now from the chain (its `detail` is then null),
 /// and the notify adapter is told once. Returns how many were written. The cost is one
-/// `git log` over the executor logs, and one append per event written.
+/// `git log` over the executor logs on this box, a fetch of the logs only when they lack one of
+/// the events (G887), and one append per event written.
 ///
 /// # Errors
 ///
@@ -2589,8 +2591,23 @@ pub fn recover_events(repo: &Repo, records: &[ChangeRecord]) -> Result<usize, St
     if blocked.is_empty() {
         return Ok(0);
     }
+    let mut events = Vec::with_capacity(blocked.len());
+    for (record, op_id, reason) in blocked {
+        events.push(blocked_event(
+            record,
+            op_id,
+            reason,
+            &serde_json::Value::Null,
+        )?);
+    }
+    let id = |event: &serde_json::Value| event["id"].as_str().unwrap_or_default().to_owned();
+    // G887: the logs on this box are read first, and fetched only when they lack an event.
+    let mut held = crate::log::held_events(&repo.git)?;
+    if events.iter().all(|event| held.contains(&id(event))) {
+        return Ok(0);
+    }
     crate::log::fetch(repo);
-    let held = crate::log::held_events(&repo.git)?;
+    held = crate::log::held_events(&repo.git)?;
     let keys = Keys::load(&repo.git);
     // N-21: executor logs are signed only where the registry signs everything.
     let signer = match Registry::current(&repo.git)?.filter(Registry::signs_all) {
@@ -2600,9 +2617,8 @@ pub fn recover_events(repo: &Repo, records: &[ChangeRecord]) -> Result<usize, St
         )?),
     };
     let mut written = 0;
-    for (record, op_id, reason) in blocked {
-        let event = blocked_event(record, op_id, reason, &serde_json::Value::Null)?;
-        if held.contains(event["id"].as_str().unwrap_or_default()) {
+    for event in events {
+        if held.contains(&id(&event)) {
             continue;
         }
         // G307: no wake. The pass that reached this outcome may have asked the wake adapter
@@ -6217,8 +6233,7 @@ fn early_conflict_wake(ctx: &Ctx, op_id: &str, paths: &[String]) -> Result<(), S
     }
     let id = digest(&json!({"op_id": op_id, "outcome": "early_conflict", "paths": paths}))?;
     let id = format!("evt_{}", &id.trim_start_matches("sha256:")[..20]);
-    crate::log::fetch(ctx.repo);
-    if crate::log::held_events(&ctx.repo.git)?.contains(&id) {
+    if crate::log::holds_event(ctx.repo, &id)? {
         return Ok(());
     }
     let reason = Reason::MergeConflict;
@@ -6253,8 +6268,7 @@ fn screen_failed_wake(ctx: &Ctx, op_id: &str, tree: &str) -> Result<(), String> 
     }
     let id = digest(&json!({"op_id": op_id, "outcome": "screen_failed", "tree": tree}))?;
     let id = format!("evt_{}", &id.trim_start_matches("sha256:")[..20]);
-    crate::log::fetch(ctx.repo);
-    if crate::log::held_events(&ctx.repo.git)?.contains(&id) {
+    if crate::log::holds_event(ctx.repo, &id)? {
         return Ok(());
     }
     let reason = Reason::CheckFailed;
@@ -12131,12 +12145,17 @@ fn terminal_record(
     // BACKLOG 99: after this process's own push landed the operation, no runner can hold its
     // terminal record (that push would have been refused), so no log is fetched to look for one.
     if ctx.pushed_landing.is_none() {
+        // G887: as for an event ([`crate::log::holds_event`]), the logs on this box first.
+        let held = || -> Result<bool, String> {
+            Ok(crate::log::records_for(&ctx.repo.git, &ctx.id)?
+                .iter()
+                .any(|record| record["op_id"] == op_id && record["outcome"] == outcome))
+        };
+        if held()? {
+            return Ok(None);
+        }
         crate::log::fetch(ctx.repo);
-        let existing = crate::log::records_for(&ctx.repo.git, &ctx.id)?;
-        if existing
-            .iter()
-            .any(|record| record["op_id"] == op_id && record["outcome"] == outcome)
-        {
+        if held()? {
             return Ok(None);
         }
     }

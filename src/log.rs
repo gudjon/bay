@@ -51,7 +51,8 @@ pub fn fetch(repo: &Repo) {
 /// Appends `record` to this executor's log and pushes it. Only this executor writes its log,
 /// so the record goes on the local tip and is pushed at once (BACKLOG 92: no fetch first, one
 /// round trip). A push the remote refuses (its log is ahead, as a clone of the same runner
-/// name pushed it) takes the record back, fetches the log forward and writes it there again.
+/// name pushed it, or apart, G886) takes the record back, joins the log to the remote's
+/// ([`reconcile_own`]) and writes it there again.
 ///
 /// # Errors
 ///
@@ -95,13 +96,13 @@ pub fn append_riding(
     if !take_back(git, &name, &commit, parent.as_deref()) {
         return Ok(commit);
     }
-    let _ = git.run(&[
-        "fetch",
-        "-q",
-        "--no-tags",
-        repo.remote(),
-        &format!("{name}:{name}"),
-    ]);
+    // G886: a log apart from the remote's is joined to it first, as one behind it is moved on,
+    // and a record the remote's log took meanwhile (a push it took while its answer said
+    // refused) is not written twice.
+    reconcile_own(repo, executor);
+    if let Some(held) = joined_holds(git, &name, parent.as_deref(), &commit) {
+        return Ok(held);
+    }
     let (commit, _) = write(repo, &name, signer, record)?;
     if git.run(&["push", "-q", repo.remote(), &refspec]).is_ok() {
         pushed(repo, &name, &commit);
@@ -173,6 +174,147 @@ fn take_back(git: &Git, name: &str, commit: &str, parent: Option<&str>) -> bool 
         .is_ok()
 }
 
+/// G886 (a fleet measurement, 2026-11-24: the own logs of 3 of 5 runners had forked from the
+/// remote's, one for 6 hours, each at a batch's landing; every pass's push of the log was refused,
+/// and every landing's publishing push with it, so each landing pushed 5 to 8 times, and no other
+/// box held the records written since the fork). A push the remote took can be answered as failed.
+/// [`ride`] then leaves its records off this box's log, the caller writes them again on the old
+/// tip, and the log on this box and the remote's are two lines no fast-forward joins.
+///
+/// Called after a push of this executor's log was refused: reads the remote's log into a scratch
+/// ref and makes the two one line again, never forced (A10). A log behind the remote's moves to
+/// it. A log apart from it goes on the remote's tip: each record only this box holds is made
+/// again there, in order, except one the remote's line already holds (the same record, or an
+/// event with the same id), and that line is pushed. The log on this box takes the result only
+/// when no other write went on it meanwhile. A log ahead is left to the next push. Returns
+/// whether the remote's log now holds the tip of the log on this box.
+pub fn reconcile_own(repo: &Repo, executor: &str) -> bool {
+    let git = &repo.git;
+    let name = log_ref(executor);
+    let side = format!("{}{executor}", crate::scratch::own(crate::names::FETCH_LOG));
+    let fetched = git
+        .run(&[
+            "fetch",
+            "-q",
+            "--no-tags",
+            repo.remote(),
+            &format!("+{name}:{side}"),
+        ])
+        .is_ok();
+    let remote = git.ref_target(&side).ok().flatten();
+    let _ = git.run(&["update-ref", "-d", &side]);
+    let (true, Some(remote), Some(local)) = (fetched, remote, git.ref_target(&name).ok().flatten())
+    else {
+        return false;
+    };
+    if local == remote {
+        pushed(repo, &name, &remote);
+        return true;
+    }
+    if git.is_ancestor(&remote, &local).unwrap_or(false) {
+        return false;
+    }
+    let tip = if git.is_ancestor(&local, &remote).unwrap_or(false) {
+        remote.clone()
+    } else {
+        match rejoined(repo, &local, &remote) {
+            Ok(tip) => tip,
+            Err(_) => return false,
+        }
+    };
+    if tip != remote
+        && git
+            .run(&["push", "-q", repo.remote(), &format!("{tip}:{name}")])
+            .is_err()
+    {
+        return false;
+    }
+    let update = format!("update {name} {tip} {local}\n");
+    let moved = git
+        .run_with(&["update-ref", "--stdin"], &[], Some(update.as_bytes()))
+        .is_ok();
+    pushed(repo, &name, &tip);
+    moved
+}
+
+/// G886: the records of log line `local` that line `remote` lacks, made again in order on
+/// `remote`'s tip, each but one `remote`'s line holds already: the same record (its tree), or an
+/// event with the same id. The tip made, `remote` when none is left.
+fn rejoined(repo: &Repo, local: &str, remote: &str) -> Result<String, String> {
+    let git = &repo.git;
+    let line = |from: &str, not: &str| -> Result<Vec<(String, String)>, String> {
+        let listed = git
+            .run(&[
+                "log",
+                "--reverse",
+                "--format=%T %s",
+                from,
+                &format!("^{not}"),
+            ])
+            .map_err(|error| error.message())?;
+        Ok(listed
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .map(|(tree, subject)| (tree.to_owned(), subject.to_owned()))
+            .collect())
+    };
+    let theirs = line(remote, local)?;
+    let event_id = |subject: &str| {
+        subject
+            .strip_prefix("event ")
+            .and_then(|rest| rest.split_whitespace().nth(1))
+            .map(str::to_owned)
+    };
+    let trees: BTreeSet<&str> = theirs.iter().map(|(tree, _)| tree.as_str()).collect();
+    let events: BTreeSet<String> = theirs
+        .iter()
+        .filter_map(|(_, subject)| event_id(subject))
+        .collect();
+    let signer = own_signer(repo)?;
+    let mut tip = remote.to_owned();
+    for (tree, subject) in line(local, remote)? {
+        let held = trees.contains(tree.as_str())
+            || event_id(&subject).is_some_and(|id| events.contains(&id));
+        if !held {
+            tip = commit_tree(repo, signer.as_ref(), &tree, &subject, Some(&tip))?;
+        }
+    }
+    Ok(tip)
+}
+
+/// G886: the commit on log `name` since `parent` that holds the record of `commit` (the same
+/// tree): one the remote's log took, and the log on this box was joined to.
+fn joined_holds(git: &Git, name: &str, parent: Option<&str>, commit: &str) -> Option<String> {
+    let tree = git
+        .run(&["rev-parse", &format!("{commit}^{{tree}}")])
+        .ok()?;
+    let not = parent.map(|parent| format!("^{parent}"));
+    let mut args = vec!["log", "--format=%H %T", name];
+    args.extend(not.as_deref());
+    let listed = git.run(&args).ok()?;
+    listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .find(|(_, held)| *held == tree.trim())
+        .map(|(commit, _)| commit.to_owned())
+}
+
+/// This executor's signer for its log: none where the registry does not sign everything
+/// (N-21).
+fn own_signer(repo: &Repo) -> Result<Option<Signer>, String> {
+    let signs =
+        crate::registry::Registry::current(&repo.git)?.is_some_and(|registry| registry.signs_all());
+    if !signs {
+        return Ok(None);
+    }
+    crate::signing::Keys::load(&repo.git)
+        .executor
+        .map(Some)
+        .ok_or_else(|| {
+            "the repository has a key registry and this machine has no runner key (git config bay.runnerKey)".to_owned()
+        })
+}
+
 /// G860: appends `record` to this executor's log on this box only: the caller's push carries it
 /// (`crate::publish`'s batch push), and a pass pushes a log the remote lacks ([`push`]).
 ///
@@ -228,22 +370,6 @@ fn commit_record(
     let tree = git
         .run_with(&["mktree"], &[], Some(entry.as_bytes()))
         .map_err(|error| error.message())?;
-    let mut args: Vec<String> = Vec::new();
-    if let Some(signer) = signer {
-        args.extend(signer.config_args());
-    }
-    args.extend(["commit-tree".to_owned(), tree]);
-    if let Some(parent) = parent {
-        args.extend(["-p".to_owned(), parent.to_owned()]);
-    }
-    args.push(
-        if signer.is_some() {
-            "-S"
-        } else {
-            "--no-gpg-sign"
-        }
-        .to_owned(),
-    );
     let subject = if record["schema"] == EVENT_SCHEMA {
         format!(
             "event {} {}",
@@ -256,7 +382,36 @@ fn commit_record(
             record["op_id"].as_str().unwrap_or_default()
         )
     };
-    args.extend(["-m".to_owned(), subject]);
+    commit_tree(repo, signer, &tree, &subject, parent)
+}
+
+/// The log commit of `tree`, a record's, on `parent`, with subject `subject`: signed by
+/// `signer`, or under bay's record identity when the registry signs nothing (N-21).
+fn commit_tree(
+    repo: &Repo,
+    signer: Option<&Signer>,
+    tree: &str,
+    subject: &str,
+    parent: Option<&str>,
+) -> Result<String, String> {
+    let git = &repo.git;
+    let mut args: Vec<String> = Vec::new();
+    if let Some(signer) = signer {
+        args.extend(signer.config_args());
+    }
+    args.extend(["commit-tree".to_owned(), tree.to_owned()]);
+    if let Some(parent) = parent {
+        args.extend(["-p".to_owned(), parent.to_owned()]);
+    }
+    args.push(
+        if signer.is_some() {
+            "-S"
+        } else {
+            "--no-gpg-sign"
+        }
+        .to_owned(),
+    );
+    args.extend(["-m".to_owned(), subject.to_owned()]);
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let identity: Vec<(String, String)> = signer.map_or_else(
         || {
@@ -289,13 +444,29 @@ pub fn append_event(
     signer: Option<&Signer>,
     event: &Value,
 ) -> Result<bool, String> {
-    let id = event["id"].as_str().unwrap_or_default();
-    fetch(repo);
-    if held_events(&repo.git)?.contains(id) {
+    if holds_event(repo, event["id"].as_str().unwrap_or_default())? {
         return Ok(false);
     }
     append(repo, executor, signer, event)?;
     Ok(true)
+}
+
+/// Whether a log holds event `id`. G887 (a fleet measurement, 2026-11-24: a landing's evidence
+/// stage fetched the logs twice for each event of a policy edit made outside bay that every
+/// landing since had held, 4 of its 12 fetches): the logs on this box are read first, and they
+/// are fetched only when none of them holds it. An event a log on this box holds is on the
+/// remote's, or rides the next push of this executor's log: the remote's logs are only ever
+/// moved forward, and this box's copies of the others are the remote's.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn holds_event(repo: &Repo, id: &str) -> Result<bool, String> {
+    if held_events(&repo.git)?.contains(id) {
+        return Ok(true);
+    }
+    fetch(repo);
+    Ok(held_events(&repo.git)?.contains(id))
 }
 
 /// The id of every event the executor logs in this repository hold, read from the log
@@ -328,6 +499,8 @@ pub fn held_events(git: &Git) -> Result<BTreeSet<String>, String> {
 /// when the remote already held each record on it): a log whose tip this process pushed is not
 /// pushed again. Only this executor writes its log, so the tip it pushed stays the remote's
 /// until it writes the next record, and that record's own push carries it.
+///
+/// G886: a refused push joins the log to the remote's ([`reconcile_own`]).
 pub fn push(repo: &Repo, executor: &str) {
     let name = log_ref(executor);
     let Some(tip) = repo.git.ref_target(&name).ok().flatten() else {
@@ -342,7 +515,11 @@ pub fn push(repo: &Repo, executor: &str) {
         .is_ok()
     {
         pushed(repo, &name, &tip);
+        return;
     }
+    // G886: a refused push of a log apart from the remote's is refused again at every pass, and
+    // the log rides every landing's publishing push, so it is joined to the remote's now.
+    reconcile_own(repo, executor);
 }
 
 /// G860: the tip of each log this process pushed, by repository and log ref.

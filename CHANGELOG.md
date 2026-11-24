@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.7
+
+- A runner's log that went apart from the remote's, after a push the remote took but answered as failed, joins it again at the next push; no record is lost or written twice.
+- A runner reads its own logs before it fetches them to find an event it already holds.
+
 ## 0.7.6
 
 - The skill shows one script per change: start, edit, commit, merge, and a background wait.

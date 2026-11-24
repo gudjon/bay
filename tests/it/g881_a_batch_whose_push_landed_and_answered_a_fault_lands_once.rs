@@ -7,6 +7,11 @@
 //!
 //! Guard to mutate: in `src/publish.rs` `land_batch`, answer a refused batch push as refused whether
 //! or not main holds its tip (the head yields over its landing, and its members are given back).
+//!
+//! G886 (a fleet measurement, 2026-11-24: 3 of 5 runners' own logs had forked so, at a batch's
+//! landing): the records the host took with the push stand, and the runner's log is the remote's
+//! again by the pass's end, each terminal record on it once. Guard to mutate: in `src/log.rs`
+//! `append_riding`, drop the call of `reconcile_own`.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -75,6 +80,33 @@ fn landed_once(held: &Held, pass: &Value, ids: &[String]) {
     }
 }
 
+/// The runner's log at `exec` is the remote's, and each of `ids` has its terminal record on it once.
+fn log_joined(held: &Held, exec: &Path, ids: &[String]) {
+    let tips = |listed: String| listed.lines().map(str::to_owned).collect::<Vec<_>>();
+    let format = "--format=%(refname) %(objectname)";
+    let here = tips(
+        held.test_box
+            .git_ok(exec, &["for-each-ref", format, "refs/bay/log/"]),
+    );
+    let there = tips(
+        held.test_box
+            .git_bare(&held.remote, &["for-each-ref", format, "refs/bay/log/"]),
+    );
+    assert_eq!(here, there, "the runner's log and the remote's are apart");
+    let subjects = held.test_box.git_bare(
+        &held.remote,
+        &["log", "--format=%s", "--glob=refs/bay/log/"],
+    );
+    for id in ids {
+        let record = format!("terminal record {id}.1");
+        let count = subjects
+            .lines()
+            .filter(|subject| *subject == record)
+            .count();
+        assert_eq!(count, 1, "{record}: {subjects}");
+    }
+}
+
 fn held() -> Held {
     host(&Check {
         config: CONFIG,
@@ -110,6 +142,7 @@ fn a_batch_whose_push_landed_with_its_records_and_answered_a_fault_is_merged_in_
             "not in a batch: {pass}"
         );
     }
+    log_joined(&held, &exec, &ids);
 }
 
 #[test]
@@ -154,4 +187,5 @@ fn a_landing_whose_push_landed_and_answered_a_fault_is_merged_in_that_pass() {
     assert!(answered.exists(), "no push moved main: {pass}");
     assert_eq!(code, 0, "{pass}");
     landed_once(&held, &pass, &ids);
+    log_joined(&held, &exec, &ids);
 }

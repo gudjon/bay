@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::git::Git;
-use crate::names::{FETCH, FETCH_EVIDENCE, FETCH_WAITING};
+use crate::names::{FETCH, FETCH_EVIDENCE, FETCH_LOG, FETCH_WAITING};
 
 /// The namespaces whose refs are scratch: read and deleted by the command that wrote them.
-pub const NAMESPACES: [&str; 3] = [FETCH, FETCH_EVIDENCE, FETCH_WAITING];
+pub const NAMESPACES: [&str; 4] = [FETCH, FETCH_EVIDENCE, FETCH_LOG, FETCH_WAITING];
 
 /// This process's own prefix under `namespace`.
 #[must_use]

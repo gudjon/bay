@@ -63,6 +63,9 @@ pub const KEPT: &str = "refs/bay/kept/";
 /// `refs/bay/fetch-evidence/<pid>/<writer>`: the remote's copy of this machine's own evidence
 /// notes ref, local only, while `bay evidence record` compares the two (G781: per process).
 pub const FETCH_EVIDENCE: &str = "refs/bay/fetch-evidence/";
+/// `refs/bay/fetch-log/<pid>/<executor>`: the remote's copy of this executor's own log, local
+/// only, while a refused push of the log is joined to it (G886), deleted once read.
+pub const FETCH_LOG: &str = "refs/bay/fetch-log/";
 /// `refs/bay/fetch-waiting/<pid>/<Change-Id>`: `bay waiting`'s and `bay approve`'s copy of a
 /// remote change chain this store lacks (G280), local only, deleted before the read returns
 /// (G781).
