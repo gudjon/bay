@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.3
+
+- `bay host serve` fetches what it takes by object id, so a first sweep of many refs brings its pack.
+
 ## 0.7.2
 
 - A batch whose push landed but answered a fault is merged in that pass, never yielded over its landing.
