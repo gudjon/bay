@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.1
+
+- An agent's idle wait tells an operation whose change landed as merged, whatever state its record was left in.
+
 ## 0.7.0
 
 - `bay host <path> --upstream <url>` makes an origin: it takes a push only after the hosted remote takes it.
