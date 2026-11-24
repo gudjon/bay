@@ -448,11 +448,10 @@ impl Repo {
             trunk: opened.trunk,
             source: opened.source,
         };
-        let git = Git::new(&opened.common_dir);
-        let route = origin_route(&git, &bootstrap, Some(&config)).ok()?;
-        crate::git::set_route(&opened.common_dir, route);
+        // 0.7.0: a store opened from its last open finds its route at its first call to a remote
+        // ([`resolve_route`]), so a tool call judged here reads no config (G810).
         Some(Self {
-            git,
+            git: Git::new(&opened.common_dir),
             opened_in: dir.to_path_buf(),
             common_dir: opened.common_dir,
             work_root: opened.work_root,
@@ -1552,16 +1551,17 @@ pub fn origin_route(
 }
 
 /// 0.7.0: the route of a store this process has not opened ([`crate::git::resolve_routes_with`]),
-/// by the config at its trunk's tracking tip. A store bay does not serve has none.
+/// by the config at its trunk's tracking tip. A store bay does not serve has none, and neither has
+/// an origin: what it takes goes on to its hosted remote ([`crate::origin`]).
 ///
 /// # Errors
 ///
 /// See [`origin_route`]; the store's bootstrap or config cannot be read.
 pub fn resolve_route(common: &Path) -> Result<Option<crate::git::Route>, String> {
-    if common.file_name().is_none_or(|name| name != ".git") {
+    let git = Git::new(common);
+    if crate::origin::upstream(&git, common)?.is_some() {
         return Ok(None);
     }
-    let git = Git::new(common);
     let bootstrap = match Bootstrap::read(&git) {
         Ok(bootstrap) => bootstrap,
         Err(BootstrapError::Missing(_)) => return Ok(None),

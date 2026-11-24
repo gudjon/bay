@@ -71,8 +71,12 @@ use support::TestBox;
 /// - 0.6.88, two flags (`queue --deadline`, `doctor --deadline`, G756): a panel showing a busy
 ///   person their line and their machine's health waited 23 s and 15 s for these two reads; now
 ///   `--deadline 0` answers at once from this machine, as `status --deadline` already did.
-const COMMANDS: usize = 30;
-const FLAGS: usize = 95;
+/// - 0.7.0, one command and two flags (`host serve`, its `--once`, `host --upstream`): a fleet
+///   far from its hosted remote sent every push and read of bay's refs there, about 2.7 s a push;
+///   now `bay host <path> --upstream <url>` makes an origin near it, `bay host serve` keeps the
+///   two current, and `--once` runs one pass whose result a check reads.
+const COMMANDS: usize = 31;
+const FLAGS: usize = 97;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,

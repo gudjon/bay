@@ -3519,6 +3519,7 @@ mod tests {
     #[test]
     fn the_origin_serves_pushes_and_reads_of_bays_refs_and_main() {
         use super::through_origin;
+        use crate::names::{BAY, CHANGES, EVIDENCE, LIVE};
         let routed = |args: &[&str]| through_origin(args, Some("main"));
         assert!(routed(&["push", "--atomic", "origin", "a:refs/heads/main"]));
         assert!(routed(&[
@@ -3526,24 +3527,29 @@ mod tests {
             "-q",
             "--atomic",
             "origin",
-            "+a:refs/bay/live/m",
+            format!("+a:{LIVE}m").as_str(),
             "b:main"
         ]));
-        assert!(routed(&["push", "-q", "origin", ":refs/bay/changes/x"]));
+        assert!(routed(&[
+            "push",
+            "-q",
+            "origin",
+            format!(":{CHANGES}x").as_str()
+        ]));
         assert!(routed(&[
             "push",
             "-o",
             "refs/heads/x",
-            "--force-with-lease=refs/notes/bay/evidence/x:",
+            format!("--force-with-lease={EVIDENCE}x:").as_str(),
             "origin",
-            "refs/notes/bay/evidence/x",
+            format!("{EVIDENCE}x").as_str(),
         ]));
         assert!(!routed(&["push", "-q", "origin", "a:refs/heads/staging"]));
         assert!(!routed(&["push", "-q", "--delete", "origin", "archive/x"]));
         assert!(!routed(&[
             "push",
             "-o",
-            "refs/bay/x",
+            format!("{BAY}x").as_str(),
             "origin",
             "a:refs/heads/other"
         ]));
@@ -3554,15 +3560,15 @@ mod tests {
             "--no-tags",
             "origin",
             "+refs/heads/main:refs/remotes/origin/main",
-            "+refs/bay/changes/*:refs/bay/changes/*",
-            "^refs/bay/changes/x",
+            format!("+{CHANGES}*:{CHANGES}*").as_str(),
+            format!("^{CHANGES}x").as_str(),
         ]));
         assert!(routed(&[
             "-c",
             "protocol.version=2",
             "ls-remote",
             "origin",
-            "refs/notes/bay/evidence/x",
+            format!("{EVIDENCE}x").as_str(),
         ]));
         assert!(!routed(&[
             "fetch",
@@ -3614,6 +3620,7 @@ mod tests {
     #[test]
     fn a_routed_store_reaches_its_origin_under_the_remotes_name() {
         use super::{Route, set_route};
+        use crate::names::{BAY, CHANGES};
         let dir = tempfile::TempDir::new().unwrap();
         let root = dir.path();
         let git = |at: &std::path::Path, args: &[&str]| -> String {
@@ -3667,7 +3674,7 @@ mod tests {
                 "push",
                 "-q",
                 origin.to_str().unwrap(),
-                "HEAD:refs/bay/changes/a",
+                format!("HEAD:{CHANGES}a").as_str(),
             ],
         );
         set_route(
@@ -3680,7 +3687,7 @@ mod tests {
         );
         let store = Git::new(&client);
         let read = store
-            .run(&["ls-remote", "origin", "refs/bay/changes/a"])
+            .run(&["ls-remote", "origin", format!("{CHANGES}a").as_str()])
             .unwrap();
         assert!(read.starts_with(&b), "{read}");
         let other = store
@@ -3688,11 +3695,14 @@ mod tests {
             .unwrap();
         assert!(other.starts_with(&a), "{other}");
         store
-            .run(&["push", "-q", "origin", "HEAD:refs/bay/changes/b"])
+            .run(&["push", "-q", "origin", format!("HEAD:{CHANGES}b").as_str()])
             .unwrap();
-        assert_eq!(git(&origin, &["rev-parse", "refs/bay/changes/b"]), b);
+        assert_eq!(
+            git(&origin, &["rev-parse", format!("{CHANGES}b").as_str()]),
+            b
+        );
         assert!(
-            git(&hosted, &["for-each-ref", "refs/bay/"]).is_empty(),
+            git(&hosted, &["for-each-ref", BAY]).is_empty(),
             "the hosted remote took a bay ref"
         );
         store
@@ -3708,7 +3718,7 @@ mod tests {
                 "fetch",
                 "-q",
                 "origin",
-                "+refs/bay/changes/a:refs/remotes/origin/bay-a",
+                format!("+{CHANGES}a:refs/remotes/origin/bay-a").as_str(),
             ])
             .unwrap();
         assert_eq!(git(&client, &["rev-parse", "refs/remotes/origin/bay-a"]), b);
