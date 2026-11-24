@@ -3903,7 +3903,16 @@ fn land_batch<'a>(
         std::thread::sleep(HOOK_RETRY_WAIT);
         answer = publish_batch_push(repo, tip, &pushes, &bare);
     }
-    answer.map_err(|error| format!("batch {id} was refused: {error}"))?;
+    // G881 (a fleet finding, 2026-11-24: the host took a batch of eight with its records and
+    // answered the push with a fault; the head read its chain again, found it landed, and yielded
+    // "main moved" over its own landing, so its record read admitted on a change main held): a
+    // push the host took can answer a fault. Main holding the batch's tip is its landing, whatever
+    // the push answered, and each member's landing is derived from main as after any other.
+    if let Err(error) = answer
+        && !main_holds(repo, tip)
+    {
+        return Err(format!("batch {id} was refused: {error}"));
+    }
     kill_point("after-publish");
     drop(anchors);
     // G860: every member's landed record goes in one push ([`push_landed`]).
