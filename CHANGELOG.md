@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.4
+
+- `bay update` no longer trusts the key that signed 0.1.1 to 0.1.4.
+
 ## 0.7.3
 
 - `bay host serve` fetches what it takes by object id, so a first sweep of many refs brings its pack.

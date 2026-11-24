@@ -52,8 +52,6 @@ use crate::version::BAY;
 /// `sk-ecdsa-sha2-nistp256@openssh.com` for one held in a secure enclave).
 /// `scripts/release/allowed_signers` lists the same keys.
 pub const RELEASE_KEYS: &[&str] = &[
-    // The release key 0.1.1-0.1.4 are signed with; dropped by a later release.
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPnvMnsFVUR3lBcKXj2PkjHH3mIDFHKl2/Ov/lgVHMM7",
     // The 0.x pre-release key, kept on the build box and signing each 0.x release there
     // (owner ruling 2026-10-26); dropped before 1.0.
     "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICks1fBuvAPoSH96LnFu0M5ZSbaO6FQpAn2xITWLpuYL",
