@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.6
+
+- The skill shows one script per change: start, edit, commit, merge, and a background wait.
+
 ## 0.7.5
 
 - `bay merge --wait` hears of a runner's merge on another machine within one heartbeat.
