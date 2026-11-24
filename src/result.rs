@@ -234,6 +234,9 @@ reasons! {
     // journal records another actor than the writer (`crate::view::not_yours`): `bay merge`,
     // `bay save`, `bay start <change>`, and the agent hook's edit or `git commit`.
     ViewNotYours => "VIEW_NOT_YOURS", ["read"], "never", false;
+    // BACKLOG 280: the box is at or above a check-start load limit it sets (`crate::load`); a
+    // runner's pass claims nothing there until it is below, or a runner on another box takes it.
+    BoxBusy => "BOX_BUSY", ["wait"], "by_itself", false;
 }
 
 impl Reason {
@@ -1247,6 +1250,9 @@ impl Reason {
             Self::DiskLow => {
                 "Tell the user to free disk space on this machine, or lower `bay.minFreeMiB`, then run the command again."
             }
+            Self::BoxBusy => {
+                "Wait: a runner on another machine takes it, or this one once its load is below `detail.limits`. Nothing to do."
+            }
             Self::TrunkHeld => {
                 "Wait: the change stays queued and merges once the hold clears; `bay status` shows the hold. Only fixes and reverts merge now."
             }
@@ -1413,6 +1419,9 @@ impl Reason {
             }
             Self::DiskLow => {
                 "Nothing was done: this computer is almost out of disk space. Free some, then try again."
+            }
+            Self::BoxBusy => {
+                "Saved. The machine that runs its checks is busy; they start once it is less busy. Nothing to do."
             }
             Self::DependencyPending => "Saved. It waits until the change it depends on is added.",
             Self::DependencyAbandoned => {
@@ -3059,7 +3068,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 63);
+        assert_eq!(Reason::ALL.len(), 64);
     }
 
     #[test]

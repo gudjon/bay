@@ -17,6 +17,8 @@ Read with `SKILL.md`, whose "Read the result" names the fields every result carr
   files and that change in `operation.undoes`, each other change in `undoes.also`: bring in main, keep that work, then `bay merge`.
 - `DISK_LOW`: the disk is below this machine's floor, 5 GiB unless `git config bay.minFreeMiB` sets another; `0` turns
   it off. `bay start` already freed what it could, and `detail.released_views` names those views. Free more, then start again.
+- `BOX_BUSY`: the runner's machine is at or above the load limits it sets (`git config bay.checkStartLoad1`,
+  `bay.checkStartCpuSome`), so it starts no check there; `detail` names the load and the limits. Nothing to do.
 - Main is red on your paths (your change's row in `bay status` names the check in `red_on_paths`): nothing waits. Your change runs that check
   before it merges, judged against main, and merges unless it adds a failure; its result names it in
   `detail.red_checked`. A change that fixes it goes ahead of the line: `bay start <intent> --fixes <check>`, the check

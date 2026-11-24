@@ -95,7 +95,10 @@ const FLAGS: usize = 97;
 /// - 0.6.119, one reason (`PRODUCER_SHARED`, G807): a runner started under a live runner's
 ///   producer name ran each check it took, up to 16 minutes, before its evidence collided; it is
 ///   refused at start, naming the other runner.
-const REASONS: usize = 63;
+/// - 0.7.8, one reason (`BOX_BUSY`, BACKLOG 280): an operator who saw runners start checks on a
+///   machine already at load1 30 stopped them by hand; now the machine sets its limits once, and
+///   its runner waits below them and says why.
+const REASONS: usize = 64;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.

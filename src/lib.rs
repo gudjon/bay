@@ -53,6 +53,7 @@ pub mod limits;
 pub mod line;
 pub mod lineage;
 pub mod live;
+pub mod load;
 pub mod locks;
 pub mod log;
 pub mod materialize;

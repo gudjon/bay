@@ -999,7 +999,8 @@ fn pass(
     );
     ran.extend(compaction(repo, &chain));
     ran.extend(recovered.take());
-    let plans = !leaving(watch);
+    // BACKLOG 280: a box at or above a check-start load limit starts no post piece.
+    let plans = !leaving(watch) && !box_busy(shared);
     ran.extend(post_pass(shared, post, plans, (beat, depth, &mut arrivals)));
     // A fleet finding (2026-10-27): a retention cut costs a fetch of its chain, and one that
     // does not happen leaves the chain due again; read inside the loop, hundreds of closed chains
@@ -1157,6 +1158,21 @@ fn post_pass(
         rows.extend(beat.meanwhile(repo, "post", depth, &mut placing, || post.finish()));
     }
     post::rows(rows)
+}
+
+/// BACKLOG 280: whether this box is at or above a check-start load limit it sets, or its limits
+/// or load cannot be read (`crate::load`): a pass then starts no post piece. The journal names the
+/// wait at most once a minute.
+fn box_busy(repo: &Repo) -> bool {
+    let why = match crate::load::busy(&repo.git) {
+        Ok(None) => return false,
+        Ok(Some(busy)) => busy.line(),
+        Err(error) => format!("box busy: {error}"),
+    };
+    if crate::load::say_now("post") {
+        eprintln!("bay runner: post work waits: {why}");
+    }
+    true
 }
 
 /// Whether a looping runner is leaving: its binary changed, or a drain is asked (G589). A
@@ -1827,10 +1843,13 @@ fn run_op(
         repo.forget_reads();
         arrivals.owed = true;
     }
-    eprintln!(
-        "bay runner: {}",
-        journal_line(repo, id, op_id, &result, &step, began)
-    );
+    // BACKLOG 280: a wait for the box's load is named at most once a minute.
+    if result.reason != Some(Reason::BoxBusy) || crate::load::say_now(op_id) {
+        eprintln!(
+            "bay runner: {}",
+            journal_line(repo, id, op_id, &result, &step, began)
+        );
+    }
     let mut rows = vec![row(id, op_id, &result)];
     for (change, member, landed) in publish::members_landed() {
         let landed = landed.with_op(member.clone());

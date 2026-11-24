@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.8
+
+- A runner no longer claims a change whose environments its machine serves only in part.
+- A machine can set check-start load limits, `bay.checkStartLoad1` and `bay.checkStartCpuSome`; above either, its runner claims nothing.
+
 ## 0.7.7
 
 - A runner's log that went apart from the remote's joins it again at its next push, never forced.

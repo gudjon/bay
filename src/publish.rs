@@ -2708,6 +2708,9 @@ fn execute_op(ctx: &mut Ctx, op_id: &str, trunk: String) -> Result<BayResult, St
     if let Some(waiting) = policy_unread_here(ctx, op_id, &trunk) {
         return Ok(waiting);
     }
+    if let Some(waiting) = box_busy(ctx, op_id) {
+        return Ok(waiting);
+    }
     if let Some(report) = claim(ctx, op_id, &revision, &trunk)? {
         return Ok(report);
     }
@@ -9658,6 +9661,28 @@ fn unavailable(
     result
 }
 
+/// BACKLOG 280: a runner's pass on a box at or above a check-start load limit it sets
+/// (`crate::load`) claims nothing and writes nothing: a runner on another box takes the
+/// operation, or this one at its first pass below the limits. A limit that cannot be read, or a
+/// load that cannot be measured, claims nothing either, and says why. A `merge --wait` runs its
+/// own operation, as asked.
+fn box_busy(ctx: &Ctx, op_id: &str) -> Option<BayResult> {
+    if ctx.visit != Visit::Pass {
+        return None;
+    }
+    let detail = match crate::load::busy(&ctx.repo.git) {
+        Ok(None) => return None,
+        Ok(Some(busy)) => busy.detail(),
+        Err(error) => json!({"error": error, "recovery": crate::load::RECOVERY}),
+    };
+    let mut result = BayResult::refused(Decision::Queued, Reason::BoxBusy)
+        .with_change(ctx.id.clone())
+        .with_op(op_id)
+        .with_detail(detail);
+    result.waiting_for = Some("executor".to_owned());
+    Some(result)
+}
+
 /// The current time in Unix milliseconds.
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -9997,6 +10022,14 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Opti
                 .as_ref()
                 .is_none_or(|still| still.contains(environment))
     });
+    // G888 (BACKLOG 278; a fleet finding, 2026-11-24: a change needed checks in two environments
+    // and no live runner served both; each runner served the environment the last wait named,
+    // took the operation over, found no worker for the other and named that one: 25 claims in 20
+    // minutes): one runner runs every check of a candidate (G819), so a box that does not serve
+    // every environment the change still needs passes over the wait too.
+    let partial = still
+        .as_ref()
+        .is_some_and(|still| still.iter().any(|environment| !served.serves(environment)));
     let answered_here = op.owner.as_deref() == Some(ctx.executor_name().as_str());
     let early = waiting.adapter.is_some() && answered_here && {
         let gap = rejoin_gap(ctx.repo.config.lease(), waiting.repeats);
@@ -10005,7 +10038,7 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Opti
                 .at_ms
                 .saturating_add(u64::try_from(gap.as_millis()).unwrap_or(u64::MAX))
     };
-    if !unserved && !early {
+    if !unserved && !partial && !early {
         return None;
     }
     Some(unavailable(
