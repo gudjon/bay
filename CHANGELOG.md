@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2
+
+- A batch whose push landed but answered a fault is merged in that pass, never yielded over its landing.
+
 ## 0.7.1
 
 - An agent's idle wait tells an operation whose change landed as merged, whatever state its record was left in.
