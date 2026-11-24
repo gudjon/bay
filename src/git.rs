@@ -3713,13 +3713,9 @@ mod tests {
             git(&origin, &["for-each-ref", "refs/heads/"]).is_empty(),
             "the origin took a push of another branch"
         );
+        let fetch_a = format!("+{CHANGES}a:refs/remotes/origin/bay-a");
         store
-            .run(&[
-                "fetch",
-                "-q",
-                "origin",
-                format!("+{CHANGES}a:refs/remotes/origin/bay-a").as_str(),
-            ])
+            .run(&["fetch", "-q", "origin", fetch_a.as_str()])
             .unwrap();
         assert_eq!(git(&client, &["rev-parse", "refs/remotes/origin/bay-a"]), b);
     }
