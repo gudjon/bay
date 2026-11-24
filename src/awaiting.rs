@@ -17,6 +17,8 @@
 //! clears without the agent (its retry is `by_itself` or `after_wait`) is no end: the runner
 //! goes on with it. A line removes its marker, so each outcome wakes once. The marker of an
 //! operation whose change has a later operation is removed untold: the later one has its own.
+//! An operation whose change has ended is no longer waited for, whatever state its own record
+//! was left in (G880): merged when main holds one of its attempts' commits, else removed untold.
 //!
 //! A line is bay's own words, as a notice is (ruling R13): the change and operation ids, a reason
 //! code bay knows, and a commit id; never text from the record.
@@ -24,7 +26,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::change::{Chain, OpState};
+use crate::change::{Chain, ChangeState, OpState};
 use crate::repo::Repo;
 use crate::result::{BayResult, Decision, Reason};
 
@@ -206,9 +208,22 @@ fn ended(repo: &Repo, chain: &Chain, change: &str, op: &str) -> End {
             _ => End::Waits("published"),
         },
         _ if later => End::Passed,
-        OpState::NoEffect => End::Told(format!(
-            "bay: change {change}: {op} needed no merge, main already holds its tree; nothing more to do\n"
-        )),
+        OpState::NoEffect => End::Told(no_merge_line(change, op)),
+        // G880 (BACKLOG 213, 238): an older state left on an ended change's operation is no work.
+        // A batch landed the change, and the operation's record still reads `admitted`: it is
+        // merged once main holds one of its attempts' commits, and is no more to wait for.
+        _ if record.ended() && !operation.state.is_terminal() => match record.state {
+            ChangeState::Landed => operation
+                .attempts
+                .iter()
+                .rev()
+                .find(|attempt| crate::publish::main_holds(repo, &attempt.commit))
+                .map_or(End::Passed, |attempt| {
+                    End::Told(merged_line(change, op, &attempt.commit))
+                }),
+            ChangeState::NoEffect => End::Told(no_merge_line(change, op)),
+            _ => End::Passed,
+        },
         OpState::Blocked
             if outcome.and_then(Reason::from_code).is_some_and(|reason| {
                 matches!(reason.retry_when(), "by_itself" | "after_wait")
@@ -224,6 +239,13 @@ fn ended(repo: &Repo, chain: &Chain, change: &str, op: &str) -> End {
         OpState::Running => End::Waits("running"),
         OpState::Checked => End::Waits("checked"),
     }
+}
+
+/// The line of an operation that needed no merge.
+fn no_merge_line(change: &str, op: &str) -> String {
+    format!(
+        "bay: change {change}: {op} needed no merge, main already holds its tree; nothing more to do\n"
+    )
 }
 
 /// The line of a merged operation: its commit's first twelve hex digits, or a fixed word for a

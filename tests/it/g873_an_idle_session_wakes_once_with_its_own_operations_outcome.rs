@@ -6,16 +6,20 @@
 //! wait (`bay hook talk-wait`, an asynchronous Stop hook) reads the marked operations' chains from
 //! the remote and wakes the session (exit 2) with one line for each one that ended: merged, once
 //! main holds it (G875), or refused, with its reason. The line removes the marker, so a second
-//! wait has nothing to say, and with no talk policy it ends at once.
+//! wait has nothing to say, and with no talk policy it ends at once. An operation whose change
+//! has landed is merged, whatever state its own record was left in (G880).
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
 
 use crate::support;
 
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use serde_json::Value;
 use support::{TestBox, check_files, passing_result, result_json};
 
 const SESSION: &str = "s-g873-seat";
@@ -78,6 +82,103 @@ fn a_merged_operation_wakes_the_session_once() {
         told.contains(&format!("bay: change {id}: merged {id}.1 as ")),
         "{told}"
     );
+    assert_eq!(told.lines().count(), 1, "{told}");
+    // AND a second idle wait has nothing new to say, and ends at once
+    let (code, again, took) = wait(&test_box, &repo);
+    assert_eq!(code, 0, "{again}");
+    assert_eq!(again, "", "a second wake with no new outcome");
+    assert!(took < Duration::from_secs(20), "{took:?}");
+}
+
+/// `git <args>` in `dir` with `input` on stdin: its trimmed stdout.
+fn git_in(test_box: &TestBox, dir: &Path, args: &[&str], input: &[u8]) -> String {
+    let mut child = test_box
+        .git(dir)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// One more state commit of the chain of `id` in `dir`, pushed to its remote: the change stays
+/// `landed` and its operation reads `admitted` again, `QUEUED`, as a fleet's record of an
+/// operation a batch merged read (BACKLOG 213, 238). The repository has no key registry, so its
+/// chain is unsigned.
+fn leave_admitted(test_box: &TestBox, dir: &Path, id: &str) {
+    let name = format!("refs/bay/changes/{id}");
+    let head = test_box.git_ok(dir, &["rev-parse", &name]);
+    let text = test_box.git_ok(dir, &["cat-file", "blob", &format!("{head}:change.json")]);
+    let mut record: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(record["state"], "landed", "{record}");
+    let op = record["operations"]
+        .as_array_mut()
+        .and_then(|ops| ops.last_mut())
+        .expect("the change has an operation");
+    op["state"] = Value::from("admitted");
+    op["outcome"] = Value::from("QUEUED");
+    let blob = git_in(
+        test_box,
+        dir,
+        &["hash-object", "-w", "--stdin"],
+        record.to_string().as_bytes(),
+    );
+    let entries: String = test_box
+        .git_ok(dir, &["ls-tree", &head])
+        .lines()
+        .map(|line| {
+            if line.ends_with("\tchange.json") {
+                format!("100644 blob {blob}\tchange.json\n")
+            } else {
+                format!("{line}\n")
+            }
+        })
+        .collect();
+    let tree = git_in(test_box, dir, &["mktree"], entries.as_bytes());
+    let parents = test_box.git_ok(dir, &["show", "-s", "--format=%P", &head]);
+    let mut args = vec![
+        "-c",
+        "user.name=t",
+        "-c",
+        "user.email=t@t",
+        "commit-tree",
+        &tree,
+        "-p",
+        &head,
+    ];
+    for parent in parents.split_whitespace().skip(1) {
+        args.extend(["-p", parent]);
+    }
+    args.extend(["--no-gpg-sign", "-m", "admitted again"]);
+    let commit = test_box.git_ok(dir, &args);
+    test_box.git_ok(dir, &["update-ref", &name, &commit, &head]);
+    test_box.git_ok(dir, &["push", "-q", "origin", &name]);
+}
+
+/// G880: the record of a merged operation left at `admitted` told the session it still waited,
+/// at the end of every wait, though its change had landed.
+#[test]
+fn a_merged_operation_whose_record_reads_admitted_wakes_the_session_once_as_merged() {
+    let test_box = TestBox::new();
+    let (id, repo, remote, _) = queued(&test_box, false);
+    // GIVEN a runner merged the session's operation, and its record then read `admitted` again
+    let executor = test_box.clone_of(&remote, "executor");
+    let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+    assert_eq!(ran["detail"]["ran"][0]["decision"], "merged", "{ran}");
+    leave_admitted(&test_box, &executor, &id);
+    // WHEN the session goes idle
+    let (code, told, _) = wait(&test_box, &repo);
+    // THEN it wakes once with the merge, never with a line that it still waits
+    assert_eq!(code, 2, "{told}");
+    assert!(
+        told.contains(&format!("bay: change {id}: merged {id}.1 as ")),
+        "{told}"
+    );
+    assert!(!told.contains("still"), "{told}");
     assert_eq!(told.lines().count(), 1, "{told}");
     // AND a second idle wait has nothing new to say, and ends at once
     let (code, again, took) = wait(&test_box, &repo);
