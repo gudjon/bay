@@ -190,8 +190,30 @@ pub fn resolve_routes_with(resolve: ResolveRoute) {
     let _ = RESOLVE_ROUTE.set(resolve);
 }
 
+thread_local! {
+    /// The stores whose route this thread is finding ([`route_of`]), so that a call the
+    /// resolver makes to a remote never asks for the same route again.
+    static RESOLVING: std::cell::RefCell<Vec<PathBuf>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Takes a store off [`RESOLVING`] when its resolver returns or unwinds.
+struct Resolving(PathBuf);
+
+impl Drop for Resolving {
+    fn drop(&mut self) {
+        RESOLVING.with_borrow_mut(|stores| stores.retain(|store| *store != self.0));
+    }
+}
+
 /// The route of the store whose common directory is `common`: the one recorded, or else the one
 /// the resolver finds, then recorded. A resolver that fails is asked again next time.
+///
+/// # Errors
+///
+/// The resolver fails, or a call it makes to a remote asks for the route it is finding: a
+/// read of the store's config that a blob-less clone fetches by id is no such call
+/// ([`through_origin`] with no trunk), so this is a resolver that reaches a remote another
+/// way, refused at once rather than waiting on the read that asked.
 fn route_of(common: &Path) -> Result<Option<Route>, String> {
     let key = std::fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
     if let Some(known) = ROUTES
@@ -204,7 +226,17 @@ fn route_of(common: &Path) -> Result<Option<Route>, String> {
     let Some(resolve) = RESOLVE_ROUTE.get() else {
         return Ok(None);
     };
-    let route = resolve(&key)?;
+    if RESOLVING.with_borrow(|stores| stores.contains(&key)) {
+        return Err(format!(
+            "the route of {} was asked for by a call made while finding it",
+            key.display()
+        ));
+    }
+    RESOLVING.with_borrow_mut(|stores| stores.push(key.clone()));
+    let resolving = Resolving(key.clone());
+    let route = resolve(&key);
+    drop(resolving);
+    let route = route?;
     ROUTES
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1341,13 +1373,18 @@ impl Git {
     }
 
     /// The route of `git <args>`, a call to a remote: the store's origin when the store has one
-    /// and the origin serves the call ([`through_origin`]).
+    /// and the origin serves the call ([`through_origin`]). A call no trunk would route (a fetch
+    /// by object id, a clone) never asks for the store's route: finding it reads the store's
+    /// config, which a blob-less clone fetches by id.
     ///
     /// # Errors
     ///
     /// The store's origin cannot be found: the call is not made, since a write that went to the
     /// hosted remote instead would bypass the origin.
     fn route_for(&self, args: &[&str]) -> Result<Option<Route>, GitError> {
+        if !through_origin(args, None) {
+            return Ok(None);
+        }
         let Some(common) = self.store_dir() else {
             return Ok(None);
         };
@@ -1355,7 +1392,7 @@ impl Git {
             args: args.join(" "),
             stderr: format!("bay origin: {why}"),
         })?;
-        Ok(route.filter(|route| through_origin(args, &route.trunk)))
+        Ok(route.filter(|route| through_origin(args, Some(&route.trunk))))
     }
 
     /// G104b: fetches the objects `names` name from the promisor remote in one explicit
@@ -2792,15 +2829,19 @@ fn records_only(words: &[&str]) -> bool {
 /// fetch or ls-remote does when it names refs and every one is one of bay's or
 /// `refs/heads/<trunk>`. Any other call goes to the hosted remote, which holds every
 /// branch and object: a read that names no ref or another branch, one by object id (`--stdin`),
-/// a clone, a pull.
-fn through_origin(args: &[&str], trunk: &str) -> bool {
+/// a clone, a pull. With no `trunk` (one not yet read), any branch may be it.
+fn through_origin(args: &[&str], trunk: Option<&str>) -> bool {
     let Some(at) = command_at(args) else {
         return false;
     };
     let words = &args[at + 1..];
-    let main = format!("refs/heads/{trunk}");
+    let main = trunk.map(|trunk| format!("refs/heads/{trunk}"));
     let served = |name: &str| {
-        name.starts_with(crate::names::BAY) || name.starts_with(crate::names::NOTES) || name == main
+        name.starts_with(crate::names::BAY)
+            || name.starts_with(crate::names::NOTES)
+            || main
+                .as_ref()
+                .map_or(name.starts_with("refs/heads/"), |main| name == main)
     };
     match args[at] {
         "push" => {
@@ -3478,7 +3519,7 @@ mod tests {
     #[test]
     fn the_origin_serves_pushes_and_reads_of_bays_refs_and_main() {
         use super::through_origin;
-        let routed = |args: &[&str]| through_origin(args, "main");
+        let routed = |args: &[&str]| through_origin(args, Some("main"));
         assert!(routed(&["push", "--atomic", "origin", "a:refs/heads/main"]));
         assert!(routed(&[
             "push",
@@ -3547,8 +3588,24 @@ mod tests {
         assert!(!routed(&["status"]));
         assert!(!through_origin(
             &["fetch", "origin", "refs/heads/main"],
-            "dev"
+            Some("dev")
         ));
+        // No trunk read yet: a call some trunk would route may go, one none would never does.
+        let unread = |args: &[&str]| through_origin(args, None);
+        assert!(unread(&["push", "-q", "origin", "a:refs/heads/staging"]));
+        assert!(unread(&["fetch", "origin", "refs/heads/main"]));
+        assert!(!unread(&[
+            "-c",
+            "fetch.negotiationAlgorithm=noop",
+            "fetch",
+            "--no-tags",
+            "--filter=blob:none",
+            "--stdin",
+            "origin"
+        ]));
+        assert!(!unread(&["fetch", "origin"]));
+        assert!(!unread(&["ls-remote", "origin", "HEAD"]));
+        assert!(!unread(&["clone", "x", "y"]));
     }
 
     /// 0.7.0: with a route recorded, the store's pushes and reads of bay's refs reach the
