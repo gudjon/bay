@@ -841,6 +841,8 @@ fn run_serve(path: &Path, once: bool) -> Result<BayResult, String> {
     let git = Git::new(path);
     let mut tail = Tail::default();
     let mut due = Due::default();
+    // G892: a serving origin moves to a new bay between passes, as a runner does.
+    let mut binary = crate::executor::OwnBinary::now("origin");
     loop {
         let upstream = upstream(&git, path)?.ok_or_else(|| {
             format!(
@@ -859,6 +861,7 @@ fn run_serve(path: &Path, once: bool) -> Result<BayResult, String> {
             Ok(()) => eprintln!("bay origin: {}", pass.detail(path, &upstream)),
             Err(why) => eprintln!("bay origin: {why}"),
         }
+        binary.between_passes();
         std::thread::sleep(TICK);
     }
 }

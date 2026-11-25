@@ -2,7 +2,8 @@
 //! transcripts, and never said where a command's time went). A command run in a repository
 //! appends one line to `bay/spent/<day>.jsonl` in the store's common directory: its command, its
 //! decision, its wall time, its time in Git and on the network, and its slowest Git commands. A
-//! command run in a view records in the store it shares.
+//! command run in a view records in the store it shares. G893: the line also says what the
+//! command wrote: how it chose its output, and its bytes on stdout and stderr.
 //!
 //! Guard to mutate: in `src/main.rs`, drop the call of `spent` before the result is rendered, and
 //! no line is written.
@@ -63,4 +64,38 @@ fn a_status_and_a_start_in_a_view_each_record_one_line_in_the_store() {
         assert!(line["slowest"].is_array(), "{line}");
         assert_eq!(line["retried"], serde_json::json!([]), "{line}");
     }
+}
+
+#[test]
+fn a_line_says_how_its_command_wrote_and_how_many_bytes() {
+    let test_box = TestBox::new();
+    let repo = test_box.repo_any("repo");
+    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &unchecked_files());
+    let common = repo.join(".git");
+
+    // WHEN a status runs through a pipe, then with `--json`
+    let piped = test_box.bay(&repo).arg("status").output().unwrap();
+    let json = test_box
+        .bay(&repo)
+        .args(["--json", "status"])
+        .output()
+        .unwrap();
+
+    // THEN each line names its output and counts what went to each stream
+    let recorded = lines(&common);
+    let shown: Vec<&Value> = recorded.iter().map(|line| &line["shown"]).collect();
+    let [.., piped_line, json_line] = shown.as_slice() else {
+        panic!("{recorded:?}");
+    };
+    assert_eq!(piped_line["as"], "pipe", "{piped_line}");
+    assert_eq!(piped_line["stdout"], piped.stdout.len(), "{piped_line}");
+    let err = piped_line["stderr"].as_u64().unwrap();
+    assert!(
+        err > 0 && usize::try_from(err).unwrap() <= piped.stderr.len(),
+        "{piped_line}"
+    );
+    assert_eq!(piped_line["stderr_terminal"], false, "{piped_line}");
+    assert_eq!(json_line["as"], "json", "{json_line}");
+    assert_eq!(json_line["stdout"], json.stdout.len(), "{json_line}");
+    assert_eq!(json_line["stderr"], 0, "{json_line}");
 }

@@ -1117,10 +1117,16 @@ fn main() -> ExitCode {
 
 /// G738: records where the command's time went, then renders its result.
 fn finish(dir: &std::path::Path, result: &BayResult, json: bool) -> ExitCode {
-    spent(dir, result, *BEGAN.get_or_init(std::time::Instant::now));
+    let shown = shown(result, json);
+    spent(
+        dir,
+        result,
+        *BEGAN.get_or_init(std::time::Instant::now),
+        &shown,
+    );
     // G873: an agent's session that left an operation queued hears its outcome at its idle wait.
     bay::awaiting::note(dir, result);
-    render(result, json)
+    shown.write()
 }
 
 /// `bay help [COMMAND]`: with no command, every command, subcommand and flag on one page
@@ -1388,7 +1394,7 @@ fn with_config_used(text: String) -> String {
 }
 
 /// G738: one line of where this command's time went, in the store it ran in.
-fn spent(dir: &std::path::Path, result: &BayResult, began: std::time::Instant) {
+fn spent(dir: &std::path::Path, result: &BayResult, began: std::time::Instant, shown: &Shown) {
     // The command's own word: the first argument that is no option and no option's value.
     let mut words = std::env::args().skip(1);
     let mut command = String::from("bay");
@@ -1404,26 +1410,66 @@ fn spent(dir: &std::path::Path, result: &BayResult, began: std::time::Instant) {
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned))
         .unwrap_or_default();
-    bay::spent::record(dir, &command, &decision, began);
+    let output = bay::spent::Output {
+        how: shown.how,
+        stdout: shown.out.len(),
+        stderr: shown.err.len(),
+        stderr_terminal: std::io::IsTerminal::is_terminal(&std::io::stderr()),
+    };
+    bay::spent::record(dir, &command, &decision, began, &output);
+}
+
+/// What a command writes when it ends: its stdout and stderr text, how it chose them, and its
+/// exit code. Built before anything is written, so its sizes are recorded (G893) even when a
+/// reader closes the pipe early.
+struct Shown {
+    how: &'static str,
+    out: String,
+    err: String,
+    code: ExitCode,
+}
+
+impl Shown {
+    fn write(self) -> ExitCode {
+        print!("{}", self.out);
+        eprint!("{}", self.err);
+        self.code
+    }
 }
 
 fn render(result: &BayResult, json: bool) -> ExitCode {
+    shown(result, json).write()
+}
+
+fn shown(result: &BayResult, json: bool) -> Shown {
     // G313 (ruling 2026-10-22, ch. 35 R5): a person at a terminal reads the plain sentence
     // first, with no document; a program reads stdout through a pipe, or passes `--json`, and
     // always gets the result document, with human text on stderr (`INTERFACES` § 1).
+    let code = ExitCode::from(u8::try_from(result.decision.exit_code()).unwrap_or(20));
     if !json && stdout_is_terminal() {
-        print!("{}", result.to_terminal());
-        return ExitCode::from(u8::try_from(result.decision.exit_code()).unwrap_or(20));
+        return Shown {
+            how: "terminal",
+            out: result.to_terminal(),
+            err: String::new(),
+            code,
+        };
     }
     match result.to_json() {
-        Ok(text) => print!("{}", with_config_used(text)),
-        Err(error) => {
-            eprintln!("result serialization failed: {error}");
-            return ExitCode::from(20);
-        }
+        Ok(text) => Shown {
+            how: if json { "json" } else { "pipe" },
+            out: with_config_used(text),
+            err: if json {
+                String::new()
+            } else {
+                result.to_human()
+            },
+            code,
+        },
+        Err(error) => Shown {
+            how: "error",
+            out: String::new(),
+            err: format!("result serialization failed: {error}\n"),
+            code: ExitCode::from(20),
+        },
     }
-    if !json {
-        eprint!("{}", result.to_human());
-    }
-    ExitCode::from(u8::try_from(result.decision.exit_code()).unwrap_or(20))
 }

@@ -344,17 +344,71 @@ pub fn reexec(result: &BayResult) {
     else {
         return;
     };
+    exec_in_place(Path::new(path), "runner");
+}
+
+/// Replaces this process with the binary at `path`, under the same pid and with the same
+/// arguments. Its open readers end first (G803): the exec keeps this process's children, and
+/// the new binary waits for none of them. Returns only when it cannot, after saying why.
+fn exec_in_place(path: &Path, who: &str) {
     let _ = std::io::Write::flush(&mut std::io::stdout());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
-        // G803: the exec keeps this process's children, and the new binary waits for none of them.
         crate::git::close_open_readers();
         let error = Command::new(path).args(std::env::args_os().skip(1)).exec();
-        eprintln!("bay runner: cannot start {path}: {error}");
+        eprintln!("bay {who}: cannot start {}: {error}", path.display());
     }
     #[cfg(not(unix))]
-    let _ = path;
+    let _ = (path, who);
+}
+
+/// G892: a long-running process that is not a runner (`bay host serve`) moves to a new
+/// binary between passes the way a runner does: the same probes (it answers as bay, it takes
+/// this process's arguments), the same pin rule, the same pid. Before this, an origin kept
+/// running the deleted file of the release it started with until a person restarted it.
+pub(crate) struct OwnBinary {
+    binary: Binary,
+    who: &'static str,
+}
+
+impl OwnBinary {
+    /// The binary this process runs now; `who` names the process in what it says.
+    pub(crate) fn now(who: &'static str) -> Self {
+        Self {
+            binary: Binary::now(),
+            who,
+        }
+    }
+
+    /// Between two passes: when the file at this process's path is a new bay this box may run,
+    /// execs it in place and does not return. Otherwise says once why this process stays.
+    pub(crate) fn between_passes(&mut self) {
+        if !self.binary.changed() {
+            return;
+        }
+        let who = self.who;
+        let Some(next) = self
+            .binary
+            .version()
+            .filter(|_| MOVES && self.binary.takes_arguments())
+        else {
+            eprintln!("bay {who}: {}", self.binary.stays(who));
+            self.binary.accept();
+            return;
+        };
+        if let Some(pin) = pinned_elsewhere(&next) {
+            if self.binary.hold() {
+                eprintln!("bay {who}: {}", self.binary.pinned(&next, &pin, who));
+            }
+            return;
+        }
+        if let Some(path) = self.binary.path.clone() {
+            eprintln!("bay {who}: moves to bay {next}");
+            exec_in_place(&path, who);
+        }
+        self.binary.accept();
+    }
 }
 
 /// The running binary as it was at start: its path and what identifies the file there.
@@ -435,32 +489,32 @@ impl Binary {
         self.stamp = self.path.as_deref().and_then(stamp);
     }
 
-    /// Why this runner keeps running its own version though its binary is now bay `next`:
-    /// `pin` says which pin keeps it.
-    fn pinned(&self, next: &str, pin: &str) -> String {
+    /// Why this process (`who`) keeps running its own version though its binary is now bay
+    /// `next`: `pin` says which pin keeps it.
+    fn pinned(&self, next: &str, pin: &str, who: &str) -> String {
         let path = self
             .path
             .as_deref()
             .map_or_else(String::new, |path| path.display().to_string());
         format!(
-            "{path} is bay {next}, but {pin}; this runner keeps running bay {} until its pin allows bay {next}",
+            "{path} is bay {next}, but {pin}; this {who} keeps running bay {} until its pin allows bay {next}",
             crate::version::BAY
         )
     }
 
-    /// Why this executor keeps running its own version though its binary changed.
-    fn stays(&self) -> String {
+    /// Why this process (`who`) keeps running its own version though its binary changed.
+    fn stays(&self, who: &str) -> String {
         let path = self
             .path
             .as_deref()
             .map_or_else(String::new, |path| path.display().to_string());
         let why = if MOVES {
-            "does not answer as bay, or does not take this runner's command"
+            format!("does not answer as bay, or does not take this {who}'s command")
         } else {
-            "changed, and this platform cannot start it in this process's place"
+            "changed, and this platform cannot start it in this process's place".to_owned()
         };
         format!(
-            "{path} {why}; this runner keeps running bay {} until it is restarted",
+            "{path} {why}; this {who} keeps running bay {} until it is restarted",
             crate::version::BAY
         )
     }
@@ -1198,7 +1252,7 @@ fn reexec_point(
         .version()
         .filter(|_| moves && binary.takes_arguments())
     else {
-        eprintln!("bay runner: {}", binary.stays());
+        eprintln!("bay runner: {}", binary.stays("runner"));
         binary.accept();
         return None;
     };
@@ -1225,7 +1279,7 @@ fn reexec_point(
         }
         Some(pin) => {
             if binary.hold() {
-                eprintln!("bay runner: {}", binary.pinned(&next, &pin));
+                eprintln!("bay runner: {}", binary.pinned(&next, &pin, "runner"));
             }
             None
         }

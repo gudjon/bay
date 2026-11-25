@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.11
+
+- `bay host serve` moves to a newly installed bay between passes, as a runner does.
+- Each command's time line also records how it wrote its result and how many bytes.
+
 ## 0.7.10
 
 - A not-required check's reason no longer quotes its `when_paths`; it names any exclusion that dropped a path.

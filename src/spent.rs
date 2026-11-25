@@ -2,7 +2,8 @@
 //! own transcripts, call by call, and they never said where a command's time went). Each bay
 //! command run in a repository appends one line to `bay/spent/<day>.jsonl` under the store's
 //! common directory: the command, its decision, its wall time, its time in Git and on the
-//! network, its slowest Git commands, and what a host said on each call tried again. One `write` of one line, so commands that end
+//! network, its slowest Git commands, what a host said on each call tried again, and what it
+//! wrote (G893: how it chose its output, and its bytes on stdout and stderr). One `write` of one line, so commands that end
 //! together never mix their lines. A day's file is removed after [`KEPT_DAYS`] days. Best
 //! effort: a store that cannot be written records nothing, and nothing ever reads it to decide.
 
@@ -26,8 +27,19 @@ fn off() -> bool {
     crate::version::TEST_HOOKS && std::env::var("BAY_TEST_SPENT").is_ok_and(|value| value == "off")
 }
 
-/// Records that `command` run in `dir` ended with `decision`, `began` being when it began.
-pub fn record(dir: &Path, command: &str, decision: &str, began: Instant) {
+/// What a command wrote when it ended (G893): `how` it chose its output (`terminal`, `pipe`,
+/// `json` or `error`), its bytes on stdout and stderr, and whether stderr is a terminal. An
+/// agent that reads both streams of a piped command reads both texts.
+pub struct Output {
+    pub how: &'static str,
+    pub stdout: usize,
+    pub stderr: usize,
+    pub stderr_terminal: bool,
+}
+
+/// Records that `command` run in `dir` ended with `decision` and wrote `output`, `began`
+/// being when it began.
+pub fn record(dir: &Path, command: &str, decision: &str, began: Instant, output: &Output) {
     if off() {
         return;
     }
@@ -60,6 +72,12 @@ pub fn record(dir: &Path, command: &str, decision: &str, began: Instant) {
         "network_ms": network.as_millis(),
         "slowest": slowest,
         "retried": crate::git::process_retries(),
+        "shown": {
+            "as": output.how,
+            "stdout": output.stdout,
+            "stderr": output.stderr,
+            "stderr_terminal": output.stderr_terminal,
+        },
     });
     let day = now.get(..10).unwrap_or("unknown");
     let file = folder.join(format!("{day}.jsonl"));
