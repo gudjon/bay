@@ -5579,13 +5579,25 @@ fn enqueue(
         ctx.save(revision, None, &format!("queued {op_id} at {}", entry.seq))?;
         ctx.push_chain();
     }
+    let head = queue.head().cloned();
+    // BACKLOG 291: a place behind another names who holds that head, as its lease in this store
+    // says, so a reader of the runner's line can tell a line that moves from one that is stuck.
+    let head_holder = head
+        .as_ref()
+        .filter(|head| head.op_id != op_id)
+        .and_then(|head| {
+            let tip = crate::lease::tip(&ctx.repo.git, &head.change)?;
+            let lease = crate::lease::read(&ctx.repo.git, &tip).ok().flatten()?;
+            (lease.op_id == head.op_id).then_some(lease.holder)
+        });
     let mut result = BayResult::refused(Decision::Queued, reason)
         .with_change(ctx.id.clone())
         .with_op(op_id)
         .with_detail(json!({
             "position": queue.position(entry.seq),
             "seq": entry.seq,
-            "head": queue.head().map(|head| head.op_id.clone()),
+            "head": head.map(|head| head.op_id),
+            "head_holder": head_holder,
         }));
     result.waiting_for = Some("queue".to_owned());
     Ok(result)

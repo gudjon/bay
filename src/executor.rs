@@ -1835,6 +1835,19 @@ fn op_line(op_id: &str, result: &BayResult) -> String {
     if let Some(waiting) = &result.waiting_for {
         line.push_str(" waiting for ");
         line.push_str(waiting);
+        // BACKLOG 291: a place in line names the head it waits behind, and who holds that head.
+        if waiting == "queue"
+            && let Some(detail) = result.detail.as_ref()
+            && let (Some(place), Some(head)) =
+                (detail["position"].as_u64(), detail["head"].as_str())
+            && head != op_id
+        {
+            let _ = write!(line, " (place {place}, behind {head}");
+            if let Some(holder) = detail["head_holder"].as_str() {
+                let _ = write!(line, ", held by {holder}");
+            }
+            line.push(')');
+        }
     }
     // A fleet finding (2026-10-26): a head that failed said only "failed", and nobody could
     // tell why. A failure names its cause, on the same one line.
@@ -2835,6 +2848,37 @@ mod tests {
         assert_eq!(
             op_line("abcd1234.1", &failed),
             "abcd1234.1 failed: git push: the remote refused the ref"
+        );
+    }
+
+    /// BACKLOG 291: a place in line names its place, the head it waits behind and that head's
+    /// holder; a head with no holder in this store is named alone, and the head itself names none.
+    #[test]
+    fn a_place_in_line_names_the_head_it_waits_behind_and_its_holder() {
+        let waiting = |detail: serde_json::Value| {
+            let mut result =
+                BayResult::refused(Decision::Queued, Reason::Queued).with_detail(detail);
+            result.waiting_for = Some("queue".to_owned());
+            result
+        };
+        let taken = waiting(
+            serde_json::json!({"position": 2, "seq": 9, "head": "h1.1", "head_holder": "runner-b"}),
+        );
+        assert_eq!(
+            op_line("abcd1234.1", &taken),
+            "abcd1234.1 queued QUEUED waiting for queue (place 2, behind h1.1, held by runner-b)"
+        );
+        let free = waiting(
+            serde_json::json!({"position": 3, "seq": 9, "head": "h1.1", "head_holder": null}),
+        );
+        assert_eq!(
+            op_line("abcd1234.1", &free),
+            "abcd1234.1 queued QUEUED waiting for queue (place 3, behind h1.1)"
+        );
+        let first = waiting(serde_json::json!({"position": 1, "seq": 9, "head": "abcd1234.1"}));
+        assert_eq!(
+            op_line("abcd1234.1", &first),
+            "abcd1234.1 queued QUEUED waiting for queue"
         );
     }
 

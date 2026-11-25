@@ -13,7 +13,8 @@
 //! land with bounded check time; a worker outage releases each head as `unavailable`, never
 //! by its deadline, and all three queued operations land once the workers return; a box that
 //! does not declare a check's environment (`bay.checkEnvironment`) runs nothing for it and
-//! waits with `CHECK_UNAVAILABLE`.
+//! waits with `CHECK_UNAVAILABLE`; an arrival names the head it waits behind and, from that head's
+//! lease, who holds it.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -158,6 +159,9 @@ fn an_arrival_while_the_queue_is_live_holds_a_place_without_a_check_and_lands_in
     assert_eq!(held["decision"], "queued");
     assert!(held["reason"] == "QUEUED", "{held}");
     assert_eq!(held["detail"]["position"], 2, "{held}");
+    // BACKLOG 291: it names the head it waits behind; nobody holds that head yet.
+    assert_eq!(held["detail"]["head"], format!("{first}.1"), "{held}");
+    assert!(held["detail"]["head_holder"].is_null(), "{held}");
     assert_eq!(runs(&queued), before, "no check ran for the arrival");
 
     for _ in 0..3 {
@@ -171,6 +175,69 @@ fn an_arrival_while_the_queue_is_live_holds_a_place_without_a_check_and_lands_in
         vec![second, first],
         "the queue's order, newest first on trunk"
     );
+}
+
+/// BACKLOG 291: an arrival behind a head that another runner holds names that runner, as the
+/// head's lease says, so a reader of the line can tell a line that moves from one that is stuck.
+#[test]
+fn an_arrival_behind_a_held_head_names_who_holds_it() {
+    let queued = setup(2, 0);
+    let (first, _) = land(&queued, "first");
+    let executor = queued.test_box.clone_of(&queued.remote, "executor");
+    queued
+        .test_box
+        .bay_ok(&executor, &["runner", "run", "--once"]);
+
+    // Another runner takes the head: its lease is on the remote and in this store.
+    let lease = queued.test_box.path().join("lease.json");
+    std::fs::write(
+        &lease,
+        format!(
+            r#"{{"schema":"bay.lease/1","change":"{first}","op_id":"{first}.1","epoch":1,"holder":"runner-b"}}"#
+        ),
+    )
+    .unwrap();
+    let blob = queued.test_box.git_ok(
+        &queued.repo,
+        &["hash-object", "-w", lease.to_str().unwrap()],
+    );
+    let mut mktree = queued
+        .test_box
+        .git(&queued.repo)
+        .arg("mktree")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(
+        &mut mktree.stdin.take().unwrap(),
+        format!("100644 blob {blob}\tlease.json\n").as_bytes(),
+    )
+    .unwrap();
+    let tree = String::from_utf8(mktree.wait_with_output().unwrap().stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let commit = queued.test_box.git_ok(
+        &queued.repo,
+        &["commit-tree", "--no-gpg-sign", &tree, "-m", "lease"],
+    );
+    let name = format!("refs/bay/lease/{first}");
+    queued
+        .test_box
+        .git_ok(&queued.repo, &["update-ref", &name, &commit]);
+    queued.test_box.git_ok(
+        &queued.repo,
+        &["push", "-q", "origin", &format!("{commit}:{name}")],
+    );
+
+    let (_, view) = land(&queued, "second");
+    let (code, held) = result_json(queued.test_box.bay(&view).args(["merge", "--wait"]));
+    assert_eq!(code, 0, "{held}");
+    assert_eq!(held["decision"], "queued", "{held}");
+    assert_eq!(held["detail"]["position"], 2, "{held}");
+    assert_eq!(held["detail"]["head"], format!("{first}.1"), "{held}");
+    assert_eq!(held["detail"]["head_holder"], "runner-b", "{held}");
 }
 
 #[test]

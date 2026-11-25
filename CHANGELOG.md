@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.13
+
+- A queued change names the head it waits behind and that head's holder, on the runner's line too.
+
 ## 0.7.12
 
 - When its origin does not answer, a peer uses the hosted remote, unless the origin wrote there that it tails.
