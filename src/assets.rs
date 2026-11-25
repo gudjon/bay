@@ -706,7 +706,7 @@ impl Cache {
                 .open(&tmp)
                 .and_then(|copy| copy.set_modified(std::time::SystemTime::now()))
                 .is_ok()
-            && std::fs::rename(&tmp, &place).is_ok();
+            && crate::durable::rename(&tmp, &place).is_ok();
         if !kept {
             let _ = std::fs::remove_file(&tmp);
         }
