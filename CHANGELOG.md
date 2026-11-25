@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.23
+
+- A session never acks or wakes on a question it asked a person, and no session acks a closed talk.
+
 ## 0.7.22
 
 - The agent hook refuses a fetch that copies every `refs/bay/*` ref into another namespace.

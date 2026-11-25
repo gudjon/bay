@@ -7,7 +7,8 @@
 //! (`refs/bay/talk/<actor>/*`, ruling T6), checks each talk without an ack (the body's rules, the
 //! registry actors, the root commit signed by the sender's agent key at `sent`), and writes the ack
 //! on the same chain, signed by the recipient's key and naming its session. A talk that fails
-//! accept is listed as refused and gets no ack. An accepted talk that supersedes another of this
+//! accept is listed as refused and gets no ack. A closed talk, and a question this very session
+//! asked a person, get no ack and wake nothing (G903). An accepted talk that supersedes another of this
 //! recipient's talks closes that one as `superseded`, naming its successor (ruling T1). A
 //! reviewer's talk about a change that stands beside another open talk of that reviewer about
 //! that change, one this box acked or an earlier one, is refused (G149b). An acked
@@ -234,6 +235,11 @@ fn accept(repo: &Repo, trust: &Trust) -> Result<Outcome, String> {
         if talk.has("ack") {
             continue;
         }
+        // G903: a closed talk has nothing left to read, and the session that asked a person waits
+        // for the answer in its own dialog: neither is acked here, so neither wakes this session.
+        if talk.closed() || asked_here(&talk.body, &me) {
+            continue;
+        }
         // A talk the `[talk]` table does not allow (its kind, sender or recipient) is not acked.
         if let Some(why) = table.refusal(&talk.body) {
             outcome.refused.push(json!({"talk": talk.id, "why": why}));
@@ -268,6 +274,16 @@ fn accept(repo: &Repo, trust: &Trust) -> Result<Outcome, String> {
     close_evidenced(repo, &prefix, key, &me, &mut outcome)?;
     outcome.pushed = push_moved(repo, &prefix, &remote)?;
     Ok(outcome)
+}
+
+/// G903 (a fleet finding, 2026-11-25: a session's own accept acked the two questions it had
+/// asked a person, and its wake gave each back to it as a peer's ask): whether `body` is a
+/// question this very session asked a person (dossier 63). Another session of the same actor
+/// still receives it.
+fn asked_here(body: &Value, me: &crate::change::Actor) -> bool {
+    super::asks_a_person(body)
+        && body["from"]["name"] == me.name.as_str()
+        && body["from"]["session"] == me.session.as_str()
 }
 
 fn append(
