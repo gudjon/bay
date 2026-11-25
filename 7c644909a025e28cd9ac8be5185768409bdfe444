@@ -1,0 +1,25 @@
+[
+  {
+    "schema": "bay.evidence/1",
+    "id": "linux-2/fmt-linux-x86_64-git2.56.0-d5e83c3bdeae",
+    "kind": "check",
+    "subject": {
+      "tree": "7c644909a025e28cd9ac8be5185768409bdfe444",
+      "commit": "d5e83c3bdeae652f3761eb4b2f15e583010a6488",
+      "base_tree": "d08309a5f3956a622415f17eaee1430639c0d7ab"
+    },
+    "check": {
+      "id": "fmt",
+      "environment": "linux-x86_64-git2.56.0"
+    },
+    "policy_revision": 0,
+    "manifest_digest": "gate",
+    "producer": {
+      "name": "linux-2",
+      "version": "0.7.17"
+    },
+    "verdict": "pass",
+    "at": "2026-11-25T06:36:26Z",
+    "signature": "-----BEGIN SSH SIGNATURE-----\nU1NIU0lHAAAAAQAAADMAAAALc3NoLWVkMjU1MTkAAAAgWo6IrM4HWKEiywi56LHy96qcm5\n8ohKN/vT3gFKAJ5cUAAAAMYmF5LXByb2R1Y2VyAAAAAAAAAAZzaGE1MTIAAABTAAAAC3Nz\naC1lZDI1NTE5AAAAQPOp5Tbp6tr4lqkTCPyBxIIsm/LH2W9tH0Sy2r8ckTz6MlM+5RhLLs\n88RmSvD/kVvi+oiKuN6uokYX+Cy592kwA=\n-----END SSH SIGNATURE-----\n"
+  }
+]
