@@ -3500,6 +3500,28 @@ fn readmit_read(
     Ok(!readmitted.is_empty())
 }
 
+/// G905 (a fleet measurement, 2026-11-25: a speculative check passed a batch of four on this
+/// trunk, the batch grew to seven by its turn, and the head ran a 32-minute check again): the
+/// head keeps the longest prefix of `members` a check ahead of its turn already passed on
+/// `trunk`, and the members after it plan a batch of their own. The change the batch now ends
+/// at, when it is shorter.
+fn keep_checked_prefix(
+    ctx: &Ctx,
+    op_id: &str,
+    trunk: &str,
+    members: &mut Vec<throughput::Member>,
+) -> Result<Option<String>, String> {
+    let trunk_tree = tree_of(&ctx.repo.git, trunk)?;
+    let Some(size) = throughput::checked_prefix(&ctx.op(op_id).prechecks, &trunk_tree, members)
+        .filter(|size| *size < members.len())
+    else {
+        return Ok(None);
+    };
+    let at = members[size].change.clone();
+    members.truncate(size);
+    Ok(Some(at))
+}
+
 /// The batch the head `op_id` at place `at` would form on `trunk`, with the policy at
 /// `trunk`: `None` when batching is off, reuse cannot stand for a run (§ 7,
 /// [`Ctx::reuse_trusted`]), the head runs ahead of its turn (G554), is a repair, a culprit or
@@ -3599,6 +3621,10 @@ fn batch_plan(
             stopped_at = Some(members[within].change.clone());
         }
         members.truncate(within);
+    }
+    if let Some(at) = keep_checked_prefix(ctx, op_id, trunk, &mut members)? {
+        stopped = "checked";
+        stopped_at = Some(at);
     }
     // R7: one journal line per batch decision, naming why the batch ended, and each place passed
     // over.

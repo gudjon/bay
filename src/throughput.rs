@@ -108,7 +108,9 @@
 //!
 //! The head's executor takes the head and the live entries behind it, in queue order, while
 //! each folds onto the one before it ([`plan_batch`]); with footprint lanes, only while each
-//! one's footprint overlaps the head's (one lane). At least `max(min, 2)` and at most `max`
+//! one's footprint overlaps the head's and it wakes no check slower than the head's own (one lane,
+//! G904: `timeout_s` ranks a check's cost, so a head whose checks take two minutes never waits on
+//! a member's half-hour check). At least `max(min, 2)` and at most `max`
 //! members, none of a lane, with named inputs, a policy change, or a culprit's note. It checks
 //! the predicted tip once on the trunk tip: the tree of every member merged in order, with the
 //! paths the whole batch changes against trunk. A batch is skipped when the recent failure
@@ -455,6 +457,41 @@ fn globs_overlap(a: &str, b: &str) -> bool {
 /// The part of `glob` before its first wildcard.
 fn literal_prefix(glob: &str) -> &str {
     glob.find(['*', '?', '[']).map_or(glob, |at| &glob[..at])
+}
+
+/// G904: the `timeout_s` of the slowest check a diff that changes `changed` requires under
+/// `policy`; 0 when it requires none. A lane ranks its members' cost by it: the policy's bound on a
+/// check is the one cost bay knows before the check runs.
+#[must_use]
+pub fn slowest(policy: &Policy, changed: &[String]) -> u64 {
+    let (required, _) = policy.required(changed);
+    required
+        .iter()
+        .filter_map(|entry| {
+            let id = crate::evidence::CheckId::new(&entry.id, &entry.environment);
+            policy.check(&id).map(|check| check.timeout_s)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// G905: how many of `members`, a batch planned on a trunk whose tree is `trunk_tree`, a check
+/// ahead of its turn already passed there: the longest prefix whose tip tree one of the head's
+/// `prechecks` passed on that base tree (a batch the head led, or the head alone screened).
+/// `None` when none did.
+#[must_use]
+pub fn checked_prefix(
+    prechecks: &[crate::change::Precheck],
+    trunk_tree: &str,
+    members: &[Member],
+) -> Option<usize> {
+    (1..=members.len()).rev().find(|&size| {
+        prechecks.iter().any(|precheck| {
+            precheck.verdict == "pass"
+                && precheck.base_tree == trunk_tree
+                && precheck.tree == members[size - 1].tree
+        })
+    })
 }
 
 /// Whether `revision`'s footprint on `trunk` is disjoint from that of every live entry
@@ -1135,7 +1172,7 @@ pub fn plan_batch(
     by_lane: bool,
 ) -> Result<(Vec<Member>, &'static str, Option<String>), String> {
     let mut members: Vec<Member> = Vec::new();
-    let mut lane: Option<Footprint> = None;
+    let mut lane: Option<(Footprint, u64)> = None;
     // R7 (2026-10-27): why the batch ended, recorded with it, so a measured window can say
     // which rule kept batches small.
     let mut stopped = "end_of_line";
@@ -1210,11 +1247,19 @@ pub fn plan_batch(
         }
         if by_lane {
             let footprint = Footprint::of(policy, &changed);
+            let cost = slowest(policy, &changed);
             match &lane {
-                None => lane = Some(footprint),
-                Some(first) if first.overlaps(&footprint) => {}
-                Some(_) => {
-                    stopped = "footprint";
+                None => lane = Some((footprint, cost)),
+                Some((first, head)) if first.overlaps(&footprint) && cost <= *head => {}
+                Some((first, _)) => {
+                    // G904: a member whose slowest check is slower than the head's ends the
+                    // lane, so a head that needs only its two-minute checks never waits on a
+                    // member's half-hour check.
+                    stopped = if first.overlaps(&footprint) {
+                        "slower"
+                    } else {
+                        "footprint"
+                    };
                     stopped_at = Some(queued.change.clone());
                     break;
                 }
@@ -1463,8 +1508,8 @@ pub fn roles(tags: &[Option<&str>]) -> Result<Vec<Role>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchTag, Bisect, Fold, Footprint, Queued, Role, failure_rate, fold, plan_batch, predict,
-        roles, tree_of,
+        BatchTag, Bisect, Fold, Footprint, Member, Queued, Role, checked_prefix, failure_rate,
+        fold, plan_batch, predict, roles, slowest, tree_of,
     };
     use crate::git::Git;
 
@@ -1687,6 +1732,103 @@ mod tests {
         let notes = Footprint::of(&policy, &["notes/plan.md".to_owned()]);
         assert_eq!(notes, globs(&["notes/**"]));
         assert!(agents.overlaps(&notes));
+    }
+
+    /// G904: with lanes on, a member whose slowest check (by `timeout_s`) is slower than the
+    /// head's ends the batch, so a head with two-minute checks never waits on a half-hour one;
+    /// a member with faster checks still joins a slow head.
+    #[test]
+    fn a_lane_never_makes_its_head_wait_for_a_slower_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path());
+        let run = |args: &[&str]| git.run(args).unwrap();
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@t.invalid"]);
+        std::fs::create_dir_all(dir.path().join(".bay")).unwrap();
+        std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+        std::fs::write(dir.path().join("scripts/bay-check"), "#!/bin/sh\n").unwrap();
+        let check = |id: &str, when: &str, timeout: u64| {
+            format!(
+                "\n[[check]]\nid = \"{id}\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = {timeout}\nwhen_paths = {when}\n"
+            )
+        };
+        let text = format!(
+            "revision = 1\n{}{}",
+            check("tree", r#"["**", "!src/**"]"#, 120),
+            check("code", r#"["src/**"]"#, 1800)
+        );
+        std::fs::write(dir.path().join(".bay/policy.toml"), text).unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "base"]);
+        let trunk = run(&["rev-parse", "HEAD"]);
+        let mut revisions = Vec::new();
+        for path in ["docs/a.md", "src/a.rs", "docs/b.md"] {
+            run(&["checkout", "-q", "--detach", &trunk]);
+            let file = dir.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, "x\n").unwrap();
+            run(&["add", "."]);
+            run(&["commit", "-q", "-m", path]);
+            revisions.push(run(&["rev-parse", "HEAD"]));
+        }
+        let policy = crate::policy::load_at(&git, &trunk).unwrap().unwrap();
+        assert_eq!(slowest(&policy, &["docs/a.md".to_owned()]), 120);
+        assert_eq!(slowest(&policy, &["src/a.rs".to_owned()]), 1800);
+        let docs = queued(1, &revisions[0], Vec::new());
+        let behind = [
+            queued(2, &revisions[1], Vec::new()),
+            queued(3, &revisions[2], Vec::new()),
+        ];
+        let (members, stopped, at) =
+            plan_batch(&git, &policy, &trunk, &docs, &behind, 8, true).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!((stopped, at.as_deref()), ("slower", Some("change2")));
+        let (members, ..) = plan_batch(&git, &policy, &trunk, &docs, &behind, 8, false).unwrap();
+        assert_eq!(members.len(), 3, "without lanes the cost is no bound");
+        let code = queued(1, &revisions[1], Vec::new());
+        let behind = [
+            queued(2, &revisions[0], Vec::new()),
+            queued(3, &revisions[2], Vec::new()),
+        ];
+        let (members, stopped, _) =
+            plan_batch(&git, &policy, &trunk, &code, &behind, 8, true).unwrap();
+        let seqs: Vec<u64> = members.iter().map(|member| member.seq).collect();
+        assert_eq!((seqs, stopped), (vec![1, 2, 3], "end_of_line"));
+    }
+
+    /// G905: the longest prefix whose tip tree a passing pre-check holds on this trunk's tree;
+    /// a pre-check on another base, one that failed or one of another tree counts for none.
+    #[test]
+    fn the_checked_prefix_is_the_longest_one_a_passing_precheck_holds() {
+        let member = |seq: u64| Member {
+            seq,
+            change: format!("change{seq}"),
+            op_id: format!("change{seq}.1"),
+            revision: format!("r{seq}"),
+            commit: format!("c{seq}"),
+            tree: format!("t{seq}"),
+        };
+        let members: Vec<Member> = (1..=5).map(member).collect();
+        let precheck = |base_tree: &str, tree: &str, verdict: &str| crate::change::Precheck {
+            base: "b".to_owned(),
+            base_tree: base_tree.to_owned(),
+            tree: tree.to_owned(),
+            verdict: verdict.to_owned(),
+            at_ms: 1,
+            screen: false,
+        };
+        assert_eq!(checked_prefix(&[], "trunk", &members), None);
+        let prechecks = [
+            precheck("trunk", "t1", "pass"),
+            precheck("trunk", "t3", "pass"),
+            precheck("trunk", "t4", "fail"),
+            precheck("older", "t5", "pass"),
+            precheck("trunk", "elsewhere", "pass"),
+        ];
+        assert_eq!(checked_prefix(&prechecks, "trunk", &members), Some(3));
+        assert_eq!(checked_prefix(&prechecks[2..], "trunk", &members), None);
+        assert_eq!(checked_prefix(&prechecks, "older", &members), Some(5));
     }
 
     /// A batch of `size` whose first failing member is `culprit` (none: all pass), searched:

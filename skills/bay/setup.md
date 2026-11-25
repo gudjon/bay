@@ -181,7 +181,7 @@ would meet before opening it: `bay start <intent> --paths <paths> --dry-run`.
    queued changes as one tree, merges them in one push, and splits a red batch to find the culprit;
    `footprint_lanes = true`, with `footprint = true` on a check whose verdict reads only its `paths`
    (else its `when_paths`), carries its records across unrelated merges and checks a change beside the
-   head. These three turn on evidence reuse, and need a registry that signs everything or
+   head; a batch then ends at a change whose slowest check (`timeout_s`) is slower than the head's. These three turn on evidence reuse, and need a registry that signs everything or
    `[policy] reuse_unsigned = true`. `parallel_checks = N` (1 to 16) runs one change's checks at
    once, with no reuse. A required check with no `when_paths` makes every change's footprint the
    whole tree, so no change is checked beside another. Each runner is its own check slot: more runners give more early checks. When

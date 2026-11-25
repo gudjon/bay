@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.24
+
+- A batch with footprint lanes ends at a change whose slowest check is slower than the head's slowest.
+- A head lands the longest prefix of its batch that a check ahead of its turn already passed.
+
 ## 0.7.23
 
 - A session never acks or wakes on a question it asked a person, and no session acks a closed talk.
