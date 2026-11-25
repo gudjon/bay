@@ -2,7 +2,7 @@
 
 ## 0.7.27
 
-- A machine keeps the bytes of the large files it fetched for a day, by their hash, and its next checks and views take them from disk, hashed before use.
+- A machine keeps fetched large files for a day; its next checks take them from disk, hashed first.
 
 ## 0.7.26
 
