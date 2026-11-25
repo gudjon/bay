@@ -903,6 +903,11 @@ struct Ctx<'a> {
     /// G860: the executor whose log holds a terminal record that waits for the batch's one push
     /// ([`push_owed`]).
     owed_log: Option<String>,
+    /// G897: the chain ref's value under this process's head while records ride toward a push
+    /// that carries them ([`Ctx::save_riding`]): a checked candidate's record waits for its
+    /// landing push. `None` when the chain ref is at this process's head, or another process
+    /// moved it.
+    riding_from: Option<String>,
     /// The head this process's first write not yet on the remote went on; `None` once every
     /// write it made is pushed or withdrawn. [`Ctx::take_back`] takes those writes off the
     /// local chain ref, and only those, at every re-read of the remote chain and when the
@@ -1011,6 +1016,7 @@ impl<'a> Ctx<'a> {
             push_mode: PushMode::Now,
             evidence_rides: None,
             owed_log: None,
+            riding_from: None,
             unpushed_from: None,
             my_epoch: 0,
             repair: None,
@@ -1146,6 +1152,9 @@ impl<'a> Ctx<'a> {
     }
 
     fn save(&mut self, draft: &str, candidate: Option<&str>, message: &str) -> Result<(), String> {
+        if !self.flush_riding()? {
+            return Err(RIDING_UNPUSHED.to_owned());
+        }
         let head = self
             .chain
             .append_linking(&self.head, &self.record, draft, candidate, message)
@@ -1169,6 +1178,9 @@ impl<'a> Ctx<'a> {
         candidate: Option<&str>,
         message: &str,
     ) -> Result<bool, String> {
+        if !self.flush_riding()? {
+            return Ok(false);
+        }
         match self
             .chain
             .append_linking(&self.head, &self.record, draft, candidate, message)
@@ -1201,15 +1213,52 @@ impl<'a> Ctx<'a> {
             .git
             .ref_target(&name)
             .map_err(|error| error.message())?;
-        if local.as_deref() != Some(self.head.as_str()) {
+        // G897: a record may already ride on this head, which the chain ref is then under.
+        let expected = self.riding_from.as_deref().unwrap_or(self.head.as_str());
+        if local.as_deref() != Some(expected) {
             return Ok(false);
         }
         let head = self
             .chain
             .commit_on(&self.head, &self.record, draft, candidate, message)
             .map_err(|error| error.message())?;
+        if self.riding_from.is_none() {
+            self.riding_from = local;
+        }
         self.wrote(head);
         Ok(true)
+    }
+
+    /// G897: the records riding toward a push that carries them ([`Ctx::save_riding`]) go to the
+    /// remote now, with the evidence their checked record names, before any write that is not
+    /// theirs goes on them and before any read of the remote chain: a refused landing push leaves
+    /// the candidate checked on the remote, as its own push did before. `true` when nothing rides
+    /// or the remote took it; otherwise the records are taken back ([`Ctx::take_back`]).
+    ///
+    /// # Errors
+    ///
+    /// The evidence cannot be pushed ([`push_evidence`]), as a persist's own push failed before:
+    /// the candidate never stands checked without it.
+    fn flush_riding(&mut self) -> Result<bool, String> {
+        if self.riding_from.is_none() {
+            return Ok(true);
+        }
+        match self.push_chain_with_evidence() {
+            Ok(true) => Ok(true),
+            pushed => {
+                self.take_back();
+                pushed
+            }
+        }
+    }
+
+    /// The remote took this process's head: later pushes are leased on it, no write of this
+    /// process is unpushed, and the chain ref catches up.
+    fn took(&mut self) {
+        self.pushed_head = Some(self.head.clone());
+        self.unpushed_from = None;
+        self.riding_from = None;
+        self.catch_up_local();
     }
 
     /// G298: [`Ctx::save`] for a land's own write before anything runs: a lost compare-and-swap
@@ -1239,6 +1288,10 @@ impl<'a> Ctx<'a> {
             self.push_mode = PushMode::Owed;
             return true;
         }
+        // G897: a chain whose checked record has not yet carried its evidence carries it now.
+        if self.evidence_rides.is_some() {
+            return self.push_chain_with_evidence().unwrap_or(false);
+        }
         let name = change_ref(&self.id);
         let lease = self
             .pushed_head
@@ -1252,9 +1305,7 @@ impl<'a> Ctx<'a> {
         args.extend([self.repo.remote(), refspec.as_str()]);
         let pushed = self.repo.git.run(&args).is_ok();
         if pushed {
-            self.pushed_head = Some(self.head.clone());
-            self.unpushed_from = None;
-            self.catch_up_local();
+            self.took();
         }
         pushed
     }
@@ -1299,14 +1350,16 @@ impl<'a> Ctx<'a> {
             let notes_spec = format!("{notes}:{notes}");
             args.extend([self.repo.remote(), notes_spec.as_str(), chain.as_str()]);
             if self.repo.git.run(&args).is_ok() {
-                self.pushed_head = Some(self.head.clone());
-                self.unpushed_from = None;
-                self.catch_up_local();
+                self.took();
                 return Ok(true);
             }
         }
         drop(writing);
-        push_evidence(self.repo, &producer)?;
+        if let Err(why) = push_evidence(self.repo, &producer) {
+            // The chain names the candidate checked only once the remote holds its evidence.
+            self.evidence_rides = Some(producer);
+            return Err(why);
+        }
         Ok(self.push_chain())
     }
 
@@ -1342,9 +1395,7 @@ impl<'a> Ctx<'a> {
             let chain = format!("{}:{name}", self.head);
             args.extend([repo.remote(), chain.as_str(), log]);
             if repo.git.run(&args).is_ok() {
-                self.pushed_head = Some(self.head.clone());
-                self.unpushed_from = None;
-                self.catch_up_local();
+                self.took();
                 return true;
             }
             self.push_chain();
@@ -1373,9 +1424,7 @@ impl<'a> Ctx<'a> {
         args.extend([self.repo.remote(), chain.as_str(), request_spec.as_str()]);
         match self.repo.git.run(&args) {
             Ok(_) => {
-                self.pushed_head = Some(self.head.clone());
-                self.unpushed_from = None;
-                self.catch_up_local();
+                self.took();
                 Ok(())
             }
             // G388: the remote took this very head from another push of this box's records
@@ -1384,9 +1433,7 @@ impl<'a> Ctx<'a> {
                 let alone = ["push", "-q", self.repo.remote(), request_spec.as_str()];
                 match self.repo.git.run(&alone) {
                     Ok(_) => {
-                        self.pushed_head = Some(self.head.clone());
-                        self.unpushed_from = None;
-                        self.catch_up_local();
+                        self.took();
                         Ok(())
                     }
                     Err(error) => Err(self.refused(&name, &error.message())),
@@ -1458,10 +1505,17 @@ impl<'a> Ctx<'a> {
     /// another process (a sync of offline work) carries it there later.
     fn withdraw(&mut self, before: &str) {
         let name = change_ref(&self.id);
-        let _ = self
-            .repo
-            .git
-            .run(&["update-ref", &name, before, &self.head]);
+        // G897: while records ride, the chain ref is under this process's head and never took
+        // them: it goes back only when `before` is under it too.
+        let local = self
+            .riding_from
+            .clone()
+            .unwrap_or_else(|| self.head.clone());
+        if self.riding_from.is_none() || self.repo.git.is_ancestor(before, &local).unwrap_or(false)
+        {
+            let _ = self.repo.git.run(&["update-ref", &name, before, &local]);
+            self.riding_from = None;
+        }
         before.clone_into(&mut self.head);
         if self.unpushed_from.as_deref() == Some(before) {
             self.unpushed_from = None;
@@ -1482,11 +1536,13 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Reads the remote's chain ([`Repo::remote_record`]) and goes on from its head. This
+    /// Reads the remote's chain ([`Repo::remote_record`]) and goes on from its head. Records riding
+    /// toward a landing push go to the remote first ([`Ctx::flush_riding`], G897). This
     /// process's own unpushed writes are taken back first ([`Ctx::take_back`]); the local
     /// chain ref is then never forced (G289): it moves only forward, and keeps local work the
     /// remote lacks.
     fn refetch(&mut self) -> Result<(), String> {
+        self.flush_riding()?;
         self.take_back();
         let remote = self.repo.remote_record(&self.id)?;
         self.head = remote.head;
@@ -2969,6 +3025,9 @@ fn publish_checked(
             host_said(&refused)
         );
     }
+    // G897: the checked record and evidence that rode the refused push go to the remote now, so
+    // nothing lands without them. A chain the remote moved meanwhile took them back.
+    let flushed = ctx.flush_riding();
     // A refused landing reads the chain again first, as a landing before G864 read it before its
     // push. A refusal on a main that moved, or at the hook's time bound, is answered as any
     // refused publishing push is: a second push would be a second such refusal, uncounted. On an
@@ -2979,7 +3038,14 @@ fn publish_checked(
     if refused.contains(Reason::HookTimeout.code())
         || !ctx.repo.fetch_trunk().is_ok_and(|now| now == *trunk)
     {
+        // The push may have landed before its answer was lost, whatever the flush said: main tells.
         return after_refused_push(ctx, op_id, revision, trunk, seq, attempt, &refused);
+    }
+    // Main is unmoved, so the landing did not land. Evidence the remote refuses fails the
+    // operation, as a persist's own push failed it before; a remote chain that lacks the checked
+    // record sends the head round again to check anew. Trunk never goes alone without them.
+    if !flushed? {
+        return Ok(None);
     }
     kill_point("before-publish");
     match publish_push(
@@ -4227,8 +4293,8 @@ fn persist_each<'a>(
             owner,
             &member.op_id,
             &member.revision,
-            &attempt.commit,
-            &message,
+            (&attempt.commit, &message),
+            false,
             |op| {
                 op.attempts.push(attempt.clone());
                 op.unavailable = None;
@@ -6599,12 +6665,10 @@ fn push_owed(owners: &mut [&mut Ctx]) -> Result<bool, String> {
     }
     for &index in &owed {
         let owner = &mut *owners[index];
-        owner.pushed_head = Some(owner.head.clone());
-        owner.unpushed_from = None;
         owner.evidence_rides = None;
         owner.owed_log = None;
         owner.push_mode = PushMode::Defer;
-        owner.catch_up_local();
+        owner.took();
     }
     Ok(true)
 }
@@ -7272,6 +7336,11 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
 
 /// `submit` or a rearm lost a race with another writer of the chain (G298).
 const CHAIN_MOVED: &str = "the change chain moved on the remote while the request was written";
+
+/// G897: the records riding toward a landing push could not be pushed before a write that is not
+/// theirs ([`Ctx::flush_riding`]); they are taken back.
+const RIDING_UNPUSHED: &str =
+    "the checked record riding toward the landing push could not be pushed, so it was taken back";
 
 /// The abandon request (§ 4, G40): an agent-signed request of kind `abandon` on the change
 /// chain, by the actor the chain records as current. The change becomes `abandoned` and any
@@ -8562,6 +8631,13 @@ fn persist_attempt(
     if refusal.is_none() && has_policy {
         ctx.evidence_rides = Some(ctx.producer()?.0);
     }
+    // G897: a passing candidate's checked record, and its evidence, ride the landing push that
+    // follows, so the remote takes them in one push, not two. A lane change never lands, a batch
+    // member's chain goes in the batch's push, and a refusal ends the run here.
+    let rides = refusal.is_none()
+        && ctx.record.lane.is_none()
+        && ctx.push_mode == PushMode::Now
+        && ctx.online;
     // N-9: a check's refusal shares its evidence too, so the approver who may waive the check
     // reads its real verdict. The refusal stands when that push fails; the approver then
     // reads `unknown`, never a pass.
@@ -8585,7 +8661,7 @@ fn persist_attempt(
         .and_then(|refusal| refusal.reason)
         .map(|reason| reason.code().to_owned());
     let message = format!("{word} {}", attempt.candidate_id);
-    let persisted = persist_owned(ctx, op_id, revision, &attempt.commit, &message, |op| {
+    let persisted = persist_owned(ctx, op_id, revision, (&attempt.commit, &message), rides, |op| {
         if again
             && op
                 .attempts
@@ -8606,7 +8682,7 @@ fn persist_attempt(
         (Persisted::Unpushed, None) => {
             Err("the change chain could not be pushed; nothing was merged".to_owned())
         }
-        (Persisted::Pushed, None) => {
+        (Persisted::Pushed | Persisted::Riding, None) => {
             kill_point("after-persist");
             Ok(Ok(attempt))
         }
@@ -8617,6 +8693,9 @@ fn persist_attempt(
 enum Persisted {
     /// The write is on the remote chain.
     Pushed,
+    /// G897: the write rides toward the landing push, on this process's head alone
+    /// ([`Ctx::save_riding`]).
+    Riding,
     /// The write is in the local chain only: the remote could not be reached or kept moving.
     Unpushed,
     /// The operation is no longer this executor's: the result says so.
@@ -8627,12 +8706,14 @@ enum Persisted {
 /// under the chain's compare-and-swap. A lost race, on this box's shared chain ref or on the
 /// remote, re-reads the remote chain and applies again while the operation is still this
 /// executor's epoch; once another epoch holds it, or the remote lacks it, it is `superseded`.
+/// With `rides` (G897) the write is made on this process's head alone, and the landing push
+/// that follows carries it.
 fn persist_owned(
     ctx: &mut Ctx,
     op_id: &str,
     revision: &str,
-    candidate: &str,
-    message: &str,
+    (candidate, message): (&str, &str),
+    rides: bool,
     apply: impl Fn(&mut Operation),
 ) -> Result<Persisted, String> {
     for _ in 0..3 {
@@ -8653,7 +8734,13 @@ fn persist_owned(
             ))));
         }
         apply(op);
-        if ctx.save_cas(revision, Some(candidate), message)? && ctx.push_chain_with_evidence()? {
+        if rides {
+            if ctx.save_riding(revision, Some(candidate), message)? {
+                return Ok(Persisted::Riding);
+            }
+        } else if ctx.save_cas(revision, Some(candidate), message)?
+            && ctx.push_chain_with_evidence()?
+        {
             return Ok(Persisted::Pushed);
         }
         if ctx.refetch().is_err() {
@@ -11041,6 +11128,31 @@ impl Riding {
         true
     }
 
+    /// G897: the evidence notes of `ctx`'s checked candidate, while its checked record rides this
+    /// push ([`persist_attempt`]): the host's hook judges trunk on the notes the push carries
+    /// (`crate::hook`), so they need no push of their own before it. Returns whether they ride.
+    ///
+    /// # Errors
+    ///
+    /// The notes ref cannot be read.
+    fn evidence(&mut self, ctx: &Ctx) -> Result<bool, String> {
+        let Some(producer) = &ctx.evidence_rides else {
+            return Ok(false);
+        };
+        let notes = evidence::notes_ref(producer);
+        if ctx
+            .repo
+            .git
+            .ref_target(&notes)
+            .map_err(|error| error.message())?
+            .is_none()
+        {
+            return Ok(false);
+        }
+        self.specs.push(format!("{notes}:{notes}"));
+        Ok(true)
+    }
+
     /// G869: the landed marker of each change `ctx`'s operation lands after that the remote
     /// holds none for ([`Ctx::unmarked`]), at its publication, which the push's trunk reaches.
     /// Each is create-only: a marker another writer made first refuses the push, and the
@@ -11110,6 +11222,16 @@ fn land_with_records(
     riding.chain(ctx);
     riding.unmarked(ctx);
     let leased = riding.lease(ctx, op_id);
+    // G897: and the candidate's evidence, whose checked record rides on the chain. #123: no post
+    // piece writes the notes between the read of the local ref and the push.
+    let writing = ctx.evidence_rides.is_some().then(evidence::writing);
+    let notes = match riding.evidence(ctx) {
+        Ok(notes) => notes,
+        Err(why) => {
+            taken_back(ctx, &marked.before, marked.record);
+            return Ok(Err(why));
+        }
+    };
     let id = ctx.id.clone();
     let terminal = std::slice::from_ref(&marked.terminal);
     let pushed = crate::log::ride(repo, &executor, signer.as_ref(), terminal, |log| {
@@ -11117,12 +11239,16 @@ fn land_with_records(
         kill_point("landing-marked");
         publish_push(repo, &id, commit, release, claim, &riding)
     });
+    drop(writing);
     match pushed {
         Ok(Ok(_)) => {}
         Ok(Err(why)) | Err(why) => {
             taken_back(ctx, &marked.before, marked.record);
             return Ok(Err(why));
         }
+    }
+    if notes {
+        ctx.evidence_rides = None;
     }
     kill_point("after-publish");
     if leased {
@@ -11190,9 +11316,7 @@ fn mark_landed(ctx: &mut Ctx, op_id: &str, revision: &str, commit: &str) -> Resu
 /// G864: a landing whose push took its chain: the chain stands pushed, as [`Ctx::push_chain`]
 /// leaves it.
 fn chain_pushed(ctx: &mut Ctx) {
-    ctx.pushed_head = Some(ctx.head.clone());
-    ctx.unpushed_from = None;
-    ctx.catch_up_local();
+    ctx.took();
 }
 
 /// G864: the landing of `commit` once its push took its records: the view's journal says

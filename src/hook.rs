@@ -488,6 +488,24 @@ impl Judge<'_> {
             .map_err(|error| error.message())
     }
 
+    /// G897: the evidence records on `tree` as this push leaves the producer refs, so the notes
+    /// a landing push carries answer for the trunk it moves (`evidence::records_after`).
+    fn evidence_on(&self, tree: &str) -> Result<Vec<evidence::EvidenceRecord>, String> {
+        let pushed: Vec<(&str, Option<&str>)> = self
+            .updates
+            .iter()
+            .filter_map(|update| {
+                let producer = update.name.strip_prefix(evidence::EVIDENCE_PREFIX)?;
+                Some((producer, (!is_zero(&update.new)).then_some(update.new.as_str())))
+            })
+            .collect();
+        if pushed.is_empty() {
+            evidence::records_for(self.git, tree)
+        } else {
+            evidence::records_after(self.git, tree, &pushed)
+        }
+    }
+
     /// A ref's value after this push: its new value if the push moves it, else its current one.
     fn after(&self, name: &str) -> Result<Option<String>, String> {
         if let Some(update) = self.by_name.get(name) {
@@ -1012,7 +1030,7 @@ impl Judge<'_> {
         // G163: a record from a producer the check's list leaves out never answers it.
         let mut records = policy.answering(evidence::counted(
             self.git,
-            evidence::records_for(self.git, &tree)?,
+            self.evidence_on(&tree)?,
             Some(registry),
         )?);
         // G292: an approval holds while the files it covers are unchanged. G638: a waiver of

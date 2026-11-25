@@ -612,7 +612,8 @@ fn a_publication_naming_a_request_under_a_forged_registry_is_refused() {
 
 /// An executor clone running `executor run --once`, held at `before-publish` until `release`
 /// exists: it has built, checked and confirmed it still owns the operation, and its publishing
-/// push has not started.
+/// push has not started. G897: its landing goes apart (`BAY_TEST_LAND_APART`), so its checked
+/// record and evidence are on the host before it is held, as a landing before G897 left them.
 fn held_executor(
     test_box: &TestBox,
     host: &Path,
@@ -623,6 +624,7 @@ fn held_executor(
     test_box.use_keys(&executor, keys);
     let child = test_box
         .bay_process(&executor)
+        .env("BAY_TEST_LAND_APART", "1")
         .env("BAY_TEST_PAUSE_AT", "before-publish")
         .env("BAY_TEST_PAUSE_FILE", release)
         .args(["--json", "runner", "run", "--once"])

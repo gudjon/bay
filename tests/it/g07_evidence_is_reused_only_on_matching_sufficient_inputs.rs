@@ -162,13 +162,15 @@ impl Trunk {
     }
 
     /// Executor E1, a clone writing evidence as `producer`, checks the submitted change, pushes
-    /// its evidence and dies before it publishes.
+    /// its evidence and dies before it publishes. G897: its landing goes apart
+    /// (`BAY_TEST_LAND_APART`), so the evidence reaches the remote before the publishing push.
     fn checked_elsewhere(&self, producer: &str) {
         let e1 = self.test_box.clone_of(&self.remote, "e1");
         self.produce_as(&e1, producer);
         let died = self
             .test_box
             .bay_process(&e1)
+            .env("BAY_TEST_LAND_APART", "1")
             .env("BAY_TEST_KILL_AT", "before-publish")
             .args(["--json", "runner", "run", "--once"])
             .output()

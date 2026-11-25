@@ -31,8 +31,8 @@ fn a_runner_takes_over_a_dead_own_run_within_heartbeats() {
     test_box.git_ok(&runner, &["config", "bay.runnerName", "runner-1"]);
     test_box.git_ok(&runner, &["config", "bay.producerName", "runner-1"]);
 
-    // GIVEN a change whose own run (the agent's clone names no runner) claimed it, recorded its
-    // check, and died.
+    // GIVEN a change whose own run (the agent's clone names no runner) claimed it, ran its check,
+    // and died before the landing push that carries its checked record (G897).
     let (id, view) = test_box.start_and_edit(&repo);
     let killed = test_box
         .bay(&view)
@@ -43,7 +43,7 @@ fn a_runner_takes_over_a_dead_own_run_within_heartbeats() {
     assert_eq!(killed.status.code(), Some(137));
     let status = test_box.bay_ok(&repo, &["status", &id]);
     let operation = &status["detail"]["changes"][0]["operation"];
-    assert_eq!(operation["state"], "checked", "{status}");
+    assert_eq!(operation["state"], "running", "{status}");
 
     // WHEN a runner's pass meets the dead claim THEN it takes it over within six heartbeats,
     // not the 120 s lease, and the change lands once.

@@ -250,12 +250,14 @@ fn a_chain_that_says_landed_while_main_lacks_the_commit_is_never_answered_merged
     let (test_box, _repo, remote, id, view) = queued_change();
     let op_id = format!("{id}.1");
 
-    // GIVEN a runner that ended after it made the landing's records, before its push
+    // GIVEN a runner that ended before its publishing push, its checked record on the remote
+    // (G897: its landing goes apart, so that record reaches the remote before the push)
     let e1 = test_box.clone_of(&remote, "e1");
     test_box.git_ok(&e1, &["config", "bay.producerName", "e1-checks"]);
     let out = test_box
         .bay_process(&e1)
-        .env("BAY_TEST_KILL_AT", "landing-marked")
+        .env("BAY_TEST_LAND_APART", "1")
+        .env("BAY_TEST_KILL_AT", "before-publish")
         .args(["--json", "runner", "run", "--once"])
         .output()
         .unwrap();
@@ -334,12 +336,14 @@ fn a_looping_runner_that_finds_a_held_head_landed_on_its_chain_alone_never_answe
     let b = host.executor("exec-b", OTHER_PRODUCER);
     host.test_box
         .git_ok(&b, &["config", "bay.runnerName", "exec-b"]);
-    // GIVEN runner A holds the head in its check, and stops once it made the landing's records
+    // GIVEN runner A holds the head in its check, and stops before its publishing push, its
+    // checked record on the remote (G897: its landing goes apart, so that record is pushed first)
     let mut holder = host
         .test_box
         .bay_process(&a)
         .args(["--json", "runner", "run", "--once"])
-        .env("BAY_TEST_KILL_AT", "landing-marked")
+        .env("BAY_TEST_LAND_APART", "1")
+        .env("BAY_TEST_KILL_AT", "before-publish")
         .stdout(Stdio::null())
         .spawn()
         .unwrap();

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.20
+
+- A landing's checked record and evidence ride its landing push, which saves one push to the host per landing.
+- A host's hook judges trunk on the evidence a landing push carries, as well as stored evidence.
+
 ## 0.7.19
 
 - An origin takes a place a third writer holds when two runners reserve it at once, so neither loops.

@@ -494,6 +494,15 @@ pub fn records_for(git: &Git, tree: &str) -> Result<Vec<EvidenceRecord>, String>
 ///
 /// A git fault, or an unreadable note.
 pub fn records_for_many(git: &Git, trees: &[&str]) -> Result<Vec<Vec<EvidenceRecord>>, String> {
+    records_on(git, &listed(git)?, trees)
+}
+
+/// Every producer ref this store holds: its producer, and its notes tree.
+///
+/// # Errors
+///
+/// A git fault.
+fn listed(git: &Git) -> Result<Vec<(String, String)>, String> {
     let refs = git
         .run(&[
             "for-each-ref",
@@ -501,12 +510,59 @@ pub fn records_for_many(git: &Git, trees: &[&str]) -> Result<Vec<Vec<EvidenceRec
             EVIDENCE_PREFIX,
         ])
         .map_err(|error| error.message())?;
-    let (producers, notes_trees): (Vec<&str>, Vec<&str>) = refs
+    Ok(refs
         .lines()
         .map(|line| {
             let (name, tree) = line.split_once(' ').unwrap_or((line, ""));
-            (name.trim_start_matches(EVIDENCE_PREFIX), tree)
+            (
+                name.trim_start_matches(EVIDENCE_PREFIX).to_owned(),
+                tree.to_owned(),
+            )
         })
+        .collect())
+}
+
+/// G897: [`records_for`] as a push leaves the producer refs, read by the host's hook before the
+/// push moves them: each of `pushed`, a producer and the notes commit the push moves its ref to
+/// (`None`: the push deletes it), stands for the ref the store holds. A landing push that carries
+/// its candidate's evidence is then judged on that evidence, with no push of the notes before it.
+/// A note read producer by producer, where `cat-file` cannot read the store, is read from the
+/// stored refs: a pushed note is then missing, never invented.
+///
+/// # Errors
+///
+/// A git fault, or an unreadable note.
+pub fn records_after(
+    git: &Git,
+    tree: &str,
+    pushed: &[(&str, Option<&str>)],
+) -> Result<Vec<EvidenceRecord>, String> {
+    let mut refs = listed(git)?;
+    for &(producer, commit) in pushed {
+        refs.retain(|(name, _)| name != producer);
+        if let Some(commit) = commit {
+            let notes_tree = git
+                .run(&["rev-parse", &format!("{commit}^{{tree}}")])
+                .map_err(|error| error.message())?;
+            refs.push((producer.to_owned(), notes_tree));
+        }
+    }
+    Ok(records_on(git, &refs, &[tree])?.pop().unwrap_or_default())
+}
+
+/// [`records_for_many`] over `refs`, each producer and its notes tree.
+///
+/// # Errors
+///
+/// A git fault, or an unreadable note.
+fn records_on(
+    git: &Git,
+    refs: &[(String, String)],
+    trees: &[&str],
+) -> Result<Vec<Vec<EvidenceRecord>>, String> {
+    let (producers, notes_trees): (Vec<&str>, Vec<&str>) = refs
+        .iter()
+        .map(|(producer, tree)| (producer.as_str(), tree.as_str()))
         .unzip();
     let notes = notes_on(git, &producers, &notes_trees, trees)?;
     Ok(trees

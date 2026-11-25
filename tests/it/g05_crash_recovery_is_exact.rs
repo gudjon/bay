@@ -63,9 +63,11 @@ fn killed_after_commit() {
     kill_then_resume("after-commit", "ready", "running");
 }
 
+/// G897: a single landing's checked record rides its publishing push, so a kill between them
+/// leaves the operation running on the remote, and the resume checks it again.
 #[test]
 fn killed_after_persist() {
-    kill_then_resume("after-persist", "ready", "checked");
+    kill_then_resume("after-persist", "ready", "running");
 }
 
 #[test]
