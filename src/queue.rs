@@ -585,13 +585,17 @@ impl Queue {
 /// lease on the commit `queue` read, then from this repository. Returns the places removed;
 /// none when `seqs` is empty.
 ///
+/// G909 (a fleet finding, 2026-11-25: two runners of one remote removed the same pairs, and the
+/// second one's push was refused on every ref, `stale info`, four times in 6 h): after a refused
+/// push the remote's refs of those pairs are read once. A ref gone there was removed by another
+/// runner; the push is made again for the refs that still stand at the commits `queue` read.
+///
 /// # Errors
 ///
-/// The remote refused the push (a lease that no longer holds, or its hook), or a git fault.
+/// The remote refused the push again, a ref there stands at another commit than `queue` read
+/// (its hook, or a place taken again), or a git fault.
 pub fn prune(repo: &Repo, queue: &Queue, seqs: &[u64]) -> Result<Vec<u64>, String> {
-    let mut leases = Vec::new();
-    let mut refspecs = Vec::new();
-    let mut local = String::new();
+    let mut refs = Vec::new();
     let mut pruned = Vec::new();
     for seq in seqs {
         let (Some(entry), Some((release, _))) =
@@ -599,33 +603,66 @@ pub fn prune(repo: &Repo, queue: &Queue, seqs: &[u64]) -> Result<Vec<u64>, Strin
         else {
             continue;
         };
-        for (name, commit) in [
-            (format!("{QUEUE_PREFIX}{seq}"), &entry.commit),
-            (format!("{DONE_PREFIX}{seq}"), release),
-        ] {
-            leases.push(format!("--force-with-lease={name}:{commit}"));
-            refspecs.push(format!(":{name}"));
-            let _ = writeln!(local, "delete {name} {commit}");
-        }
+        refs.push((format!("{QUEUE_PREFIX}{seq}"), entry.commit.clone()));
+        refs.push((format!("{DONE_PREFIX}{seq}"), release.clone()));
         pruned.push(*seq);
     }
     if pruned.is_empty() {
         return Ok(pruned);
     }
-    let mut args = vec!["push", "-q", "--atomic"];
-    args.extend(leases.iter().map(String::as_str));
-    args.push(repo.remote());
-    args.extend(refspecs.iter().map(String::as_str));
-    repo.git.run(&args).map_err(|error| {
-        format!(
-            "the retention of queue places could not be pushed: {}",
-            error.message()
-        )
-    })?;
+    let refused =
+        |message: &str| format!("the retention of queue places could not be pushed: {message}");
+    if let Err(first) = delete_remote(repo, &refs) {
+        let names: Vec<&str> = refs.iter().map(|(name, _)| name.as_str()).collect();
+        let mut args = vec!["ls-remote", repo.remote()];
+        args.extend(names);
+        let listed = repo
+            .git
+            .run(&args)
+            .map_err(|error| refused(&error.message()))?;
+        let standing: BTreeMap<&str, &str> = listed
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .map(|(commit, name)| (name, commit))
+            .collect();
+        let mut left = Vec::new();
+        for (name, commit) in &refs {
+            match standing.get(name.as_str()) {
+                None => {}
+                Some(at) if at == commit => left.push((name.clone(), commit.clone())),
+                Some(_) => return Err(refused(&first)),
+            }
+        }
+        if !left.is_empty() {
+            delete_remote(repo, &left).map_err(|error| refused(&error))?;
+        }
+    }
+    let mut local = String::new();
+    for (name, commit) in &refs {
+        let _ = writeln!(local, "delete {name} {commit}");
+    }
     let _ = repo
         .git
         .run_with(&["update-ref", "--stdin"], &[], Some(local.as_bytes()));
     Ok(pruned)
+}
+
+/// Deletes `refs` (name, the commit this store read) on the remote in one atomic push, each
+/// under a lease on that commit. The remote's refusal as git said it.
+fn delete_remote(repo: &Repo, refs: &[(String, String)]) -> Result<(), String> {
+    let leases: Vec<String> = refs
+        .iter()
+        .map(|(name, commit)| format!("--force-with-lease={name}:{commit}"))
+        .collect();
+    let deletes: Vec<String> = refs.iter().map(|(name, _)| format!(":{name}")).collect();
+    let mut args = vec!["push", "-q", "--atomic"];
+    args.extend(leases.iter().map(String::as_str));
+    args.push(repo.remote());
+    args.extend(deletes.iter().map(String::as_str));
+    repo.git
+        .run(&args)
+        .map(|_| ())
+        .map_err(|error| error.message())
 }
 
 pub(crate) fn commit(

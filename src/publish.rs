@@ -3184,8 +3184,12 @@ fn batch(
     let id = throughput::batch_id(op_id, trunk)?;
     let Some((search, mut checks)) = bisect_batch(ctx, op_id, trunk, &policy, &members, &id)?
     else {
-        return Ok(None);
+        return taken_from(ctx, op_id, revision);
     };
+    // G910: a head another runner took claims no member, and checks nothing more.
+    if let Some(taken) = taken_from(ctx, op_id, revision)? {
+        return Ok(Some(taken));
+    }
     if let Some(culprit) = search.culprit().filter(|culprit| *culprit >= 2) {
         let member = &members[culprit - 1];
         let _ = note_culprit(repo, &member.change, &member.op_id, &id);
@@ -3789,7 +3793,9 @@ fn bisect_batch(
             &[],
         )?;
         // G796: a batch main's move stopped is no batch; its head builds again on the new main.
+        // G910: nor is one whose head another runner took.
         if ctx.stopped.borrow().is_some()
+            || taken_over(ctx, op_id)
             || refusal
                 .as_ref()
                 .is_some_and(|refusal| refusal.reason == Some(Reason::CheckUnavailable))
@@ -6604,6 +6610,34 @@ fn lost_claim(ctx: &mut Ctx, op_id: &str, read: u64) -> Result<Option<BayResult>
     Ok(None)
 }
 
+/// G910 (a fleet finding, 2026-11-25: on one host in 30 h, runners checked a batch head for 10 to
+/// 36 minutes after another runner took its claim, then claimed four to eleven members, found the
+/// head gone only at its persist, and gave every member back, while the head's new holder waited
+/// for them): whether a beat of this visit's lease on `op_id` found a later holder's.
+fn taken_over(ctx: &Ctx, op_id: &str) -> bool {
+    ctx.lease
+        .borrow()
+        .as_ref()
+        .is_some_and(|lease| lease.of(op_id) && lease.taken())
+}
+
+/// G910: the result of a visit whose claim of `op_id` another runner took ([`taken_over`]), as
+/// [`still_owner`] reads it from the remote, or waiting for that runner while the remote cannot
+/// be read; `None` while the claim is still this visit's.
+fn taken_from(ctx: &mut Ctx, op_id: &str, revision: &str) -> Result<Option<BayResult>, String> {
+    if !taken_over(ctx, op_id) {
+        return Ok(None);
+    }
+    if let Some(read) = still_owner(ctx, op_id, revision)? {
+        return Ok(Some(read));
+    }
+    let mut waiting = BayResult::new(Decision::Queued)
+        .with_change(ctx.id.clone())
+        .with_op(op_id);
+    waiting.waiting_for = Some("executor".to_owned());
+    Ok(Some(waiting))
+}
+
 /// Before the publishing push: the executor reads the chain from the remote, and if its epoch
 /// is no longer current it never pushes (§ 9a, G24). It reports the existing publication, or
 /// that it was superseded.
@@ -8600,6 +8634,11 @@ fn build_and_check(
         trunk,
         &inputs::request_inputs(&judged),
     )?;
+    // G910: another runner took the operation while its candidate was checked: nothing of it is
+    // persisted, and the visit ends as the remote's chain reads.
+    if let Some(taken) = taken_from(ctx, op_id, revision)? {
+        return Ok(Err(taken));
+    }
     // G796: main moved while the candidate was checked; nothing of it is persisted.
     if ctx.stopped.borrow().is_some()
         && let Some(stopped) = refusal
@@ -9407,6 +9446,16 @@ fn run_policy(
         let Some(halt) = &halt else {
             return;
         };
+        // G910: a holder another runner took over stops its checks at once.
+        if taken_over(ctx, op_id) {
+            if !halt.moved() {
+                eprintln!(
+                    "bay runner: another runner took {op_id} while {candidate_id} was checked: its checks stop"
+                );
+                halt.stop_all_but(Vec::new());
+            }
+            return;
+        }
         if let Some(line) = line.as_mut() {
             if let Some(head) = line.gives_way(ctx.repo, halt) {
                 eprintln!(
@@ -9479,7 +9528,8 @@ fn run_policy(
         }
     };
     // G861: a check that gave way to a head nobody runs is no verdict: nothing of it is recorded.
-    if stopped && ctx.yielded.get() {
+    // G910: nor is one another runner took over.
+    if stopped && (ctx.yielded.get() || taken_over(ctx, op_id)) {
         let mut waiting = BayResult::new(Decision::Queued)
             .with_change(ctx.id.clone())
             .with_op(op_id);

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.26
+
+- A runner's queue retention no longer fails when another runner removed some of the same places first.
+- A runner whose claim another runner took stops its checks at once and claims no batch member.
+
 ## 0.7.25
 
 - A check's log names how long bay took to make its tree, and whether the tree was whole or part.

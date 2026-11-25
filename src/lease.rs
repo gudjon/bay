@@ -200,9 +200,12 @@ pub struct Holding {
     pushed: Option<String>,
     /// G856: when this holder last pushed a beat, and the lease tree that beat carried.
     beaten: Option<(Instant, String)>,
-    /// A later holder's lease stands, or the push that ended this visit released this one
-    /// ([`Self::released_riding`]): this holder beats no more.
-    lost: bool,
+    /// A beat found a later holder's lease: another runner took this claim, and this holder
+    /// beats no more (G910: [`Self::taken`]).
+    taken: bool,
+    /// The push that ended this visit released this lease ([`Self::released_riding`]): this
+    /// holder beats no more.
+    released: bool,
 }
 
 impl Holding {
@@ -213,7 +216,8 @@ impl Holding {
             tree: None,
             pushed: None,
             beaten: None,
-            lost: false,
+            taken: false,
+            released: false,
         }
     }
 
@@ -221,6 +225,12 @@ impl Holding {
     #[must_use]
     pub fn of(&self, op_id: &str) -> bool {
         self.lease.op_id == op_id
+    }
+
+    /// G910: whether a beat found a later holder's lease: another runner took this claim.
+    #[must_use]
+    pub const fn taken(&self) -> bool {
+        self.taken
     }
 
     /// G845: this holder's check covers `members` (operation ids, its own first), and its next
@@ -245,7 +255,7 @@ impl Holding {
     /// Best effort: a holder that lost its claim learns it from the history (§ 9a). G856: only a
     /// beat that is due goes out ([`Self::due`]).
     pub fn beat(&mut self, repo: &Repo, signer: Option<&Signer>, every: Duration) {
-        if self.lost || !self.due(every) {
+        if self.taken || self.released || !self.due(every) {
             return;
         }
         let git = &repo.git;
@@ -258,7 +268,7 @@ impl Holding {
                 .flatten()
                 .is_some_and(|other| other.after(&self.lease))
         {
-            self.lost = true;
+            self.taken = true;
             return;
         }
         let Ok(commit) = self.commit(git, signer) else {
@@ -365,7 +375,7 @@ impl Holding {
         if let Some(pushed) = self.pushed.take() {
             let _ = git.run(&["update-ref", "-d", &lease_ref(&self.lease.change), &pushed]);
         }
-        self.lost = true;
+        self.released = true;
     }
 
     /// Releases the lease as the holder's visit ends: its own last beat, or an older holder's
