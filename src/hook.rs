@@ -496,7 +496,10 @@ impl Judge<'_> {
             .iter()
             .filter_map(|update| {
                 let producer = update.name.strip_prefix(evidence::EVIDENCE_PREFIX)?;
-                Some((producer, (!is_zero(&update.new)).then_some(update.new.as_str())))
+                Some((
+                    producer,
+                    (!is_zero(&update.new)).then_some(update.new.as_str()),
+                ))
             })
             .collect();
         if pushed.is_empty() {

@@ -8661,21 +8661,28 @@ fn persist_attempt(
         .and_then(|refusal| refusal.reason)
         .map(|reason| reason.code().to_owned());
     let message = format!("{word} {}", attempt.candidate_id);
-    let persisted = persist_owned(ctx, op_id, revision, (&attempt.commit, &message), rides, |op| {
-        if again
-            && op
-                .attempts
-                .last()
-                .is_some_and(|last| last.candidate_id == attempt.candidate_id)
-        {
-            op.attempts.pop();
-        }
-        op.attempts.push(attempt.clone());
-        op.unavailable = None;
-        op.state = state;
-        op.outcome.clone_from(&outcome);
-        op.blocked_on.clone_from(&blocked_on);
-    })?;
+    let persisted = persist_owned(
+        ctx,
+        op_id,
+        revision,
+        (&attempt.commit, &message),
+        rides,
+        |op| {
+            if again
+                && op
+                    .attempts
+                    .last()
+                    .is_some_and(|last| last.candidate_id == attempt.candidate_id)
+            {
+                op.attempts.pop();
+            }
+            op.attempts.push(attempt.clone());
+            op.unavailable = None;
+            op.state = state;
+            op.outcome.clone_from(&outcome);
+            op.blocked_on.clone_from(&blocked_on);
+        },
+    )?;
     match (persisted, refusal) {
         (Persisted::Lost(result), _) => Ok(Err(*result)),
         (_, Some(refusal)) => Ok(Err(refusal)),

@@ -60,9 +60,10 @@ fn notes() -> String {
 
 /// Whether the host holds a passing record of [`PRODUCER`] on the tree of main.
 fn passes_on_main(held: &Held) -> bool {
-    let text = held
-        .test_box
-        .git_bare(&held.remote, &["notes", "--ref", &notes(), "show", "main^{tree}"]);
+    let text = held.test_box.git_bare(
+        &held.remote,
+        &["notes", "--ref", &notes(), "show", "main^{tree}"],
+    );
     let records: Vec<Value> = serde_json::from_str(&text).unwrap();
     records.iter().any(|record| record["verdict"] == "pass")
 }
