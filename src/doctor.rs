@@ -252,6 +252,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
             repository_row(&git, &config, &mut report);
             live_row(&git, &mut report);
             environments_row(&git, &config, executor, &mut report);
+            report.rows.extend(runner_caps_row(&git, &config));
             report.rows.extend(pre_merge_row(&git, &config));
         }
         if executor && !info.bare {
@@ -1404,6 +1405,29 @@ fn environments_row(git: &Git, config: &Config, executor: bool, report: &mut Rep
         }
     }
     report.rows.push(row);
+}
+
+/// G898: the caps this box sets on its runner's share of the work ([`crate::load::Cap`]), each
+/// with the repository's value and the one in force. Present only when the box sets one. A cap
+/// bay cannot take is `refused` and leaves the repository's value; the runner runs on, so the
+/// row is never red.
+fn runner_caps_row(git: &Git, config: &Config) -> Option<Value> {
+    let caps: Vec<crate::load::Cap> = [
+        crate::load::parallel_checks_cap(git, config),
+        crate::load::ahead_cap(git, config),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!caps.is_empty()).then(|| {
+        let refused = caps.iter().any(|cap| cap.set.is_err());
+        json!({
+            "name": "runner-caps",
+            "required": false,
+            "state": if refused { "refused" } else { "capped" },
+            "caps": caps.iter().map(crate::load::Cap::row).collect::<Vec<_>>(),
+        })
+    })
 }
 
 /// G642: the pre-merge checks every change waits for, whatever its files, so no change can merge

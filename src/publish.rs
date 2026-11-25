@@ -5688,8 +5688,8 @@ fn enqueue(
 /// operation's outcome, which stays its place in the queue.
 fn ahead_of_turn(ctx: &mut Ctx, op_id: &str, trunk: &str, mut result: BayResult) -> BayResult {
     let repo = ctx.repo;
-    let config = &repo.config;
-    if result.decision != Decision::Queued || (config.ahead() == 0 && !config.footprint_lanes()) {
+    if result.decision != Decision::Queued || (repo.ahead() == 0 && !repo.config.footprint_lanes())
+    {
         return result;
     }
     ctx.step.set("ahead");
@@ -5752,7 +5752,7 @@ fn precheck(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Option<serde_json
     let revision = ctx.op(op_id).revision.clone();
     // Within `ahead` of the head: on the base the entries ahead predict. Further behind, with
     // footprint lanes, an entry disjoint from every entry ahead: on the tip, for its footprint.
-    let (kind, base) = if ahead.len() <= repo.config.ahead() {
+    let (kind, base) = if ahead.len() <= repo.ahead() {
         match throughput::predict(git, &at_trunk, trunk, &ahead)? {
             Some(base) => ("predicted", base),
             None => return Ok(None),
@@ -5887,7 +5887,8 @@ fn speculate_batch(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Ahead, Str
     let mut covered = 0;
     let mut at = 0;
     let mut first = true;
-    while at < line.len() && covered <= repo.config.ahead() {
+    let reach = repo.ahead();
+    while at < line.len() && covered <= reach {
         let head = &line[at];
         if !head.live {
             at += 1;
@@ -9402,7 +9403,7 @@ fn run_policy(
                 hidden: hidden_paths(ctx),
                 sandbox: check::Sandbox::here().reading(git),
                 baseline: baseline.clone(),
-                parallel: ctx.repo.config.parallel_checks(),
+                parallel: ctx.repo.parallel_checks(),
                 halt: halt.clone(),
             },
             &mut check::Hooks {

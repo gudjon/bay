@@ -375,6 +375,24 @@ fn missing_config(
 }
 
 impl Repo {
+    /// `[runner] parallel_checks` as this box's runner runs it: lowered by the box's cap, never
+    /// raised (G898, [`crate::load::parallel_checks_cap`]).
+    #[must_use]
+    pub fn parallel_checks(&self) -> usize {
+        crate::load::parallel_checks_cap(&self.git, &self.config)
+            .as_ref()
+            .map_or(self.config.parallel_checks(), crate::load::Cap::in_force)
+    }
+
+    /// `[runner] ahead` as this box's runner runs it: lowered by the box's cap, never raised
+    /// (G898, [`crate::load::ahead_cap`]).
+    #[must_use]
+    pub fn ahead(&self) -> usize {
+        crate::load::ahead_cap(&self.git, &self.config)
+            .as_ref()
+            .map_or(self.config.ahead(), crate::load::Cap::in_force)
+    }
+
     /// Opens the repository that contains `dir` (the main work tree, a linked worktree, or one
     /// of its views) without a fetch ([`Fetch::Never`]): the agent hook calls it on every tool
     /// call, and a command that needs the config has fetched trunk before its first read

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.21
+
+- A machine can cap its runner's share, `bay.runnerParallelChecks` and `bay.runnerAhead`; each only lowers the repository's value there.
+
 ## 0.7.20
 
 - A landing's checked record and evidence ride its landing push, which saves one push to the host per landing.

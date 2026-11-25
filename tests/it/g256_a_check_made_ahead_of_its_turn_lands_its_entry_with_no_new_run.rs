@@ -16,6 +16,10 @@
 //! `throughput::predict` (return `trunk` without folding the entries ahead), and
 //! `throughput::fold` (fold a policy change like any other). `predict`'s own policy test on a
 //! persisted candidate backs `fold`'s: that candidate is the same merge, so either one stops.
+//!
+//! G898: a box caps how far ahead its runner checks, with no landing: `bay.runnerAhead` lowers
+//! the repository's `ahead` there. The guard to mutate: `Repo::ahead` in `src/repo.rs` reading
+//! the repository's value alone.
 
 // Each case runs shell scripts (the check adapter, the relay), so these run on Unix only.
 #![cfg(unix)]
@@ -220,4 +224,55 @@ fn a_queued_change_is_told_its_place_in_line() {
         again["say"], "Saved. It is place 2 of 3 in line; bay checks it when its turn comes.",
         "{again}"
     );
+}
+
+/// G898: with the repository's `ahead = 2` and executor B's box capping it at 1, B pre-checks
+/// the entry behind the head and not the one after it; the third is checked at its turn.
+#[test]
+fn a_box_cap_on_ahead_pre_checks_fewer_entries() {
+    // GIVEN three queued changes, executor A checking the head, and executor B on a box that
+    // caps ahead at 1
+    let held = host(&Check {
+        config: CONFIG,
+        policy: None,
+        seed: &[("src/a.rs", "fn a() {}\n")],
+        hold_first: true,
+        fails: "false",
+    });
+    let ids = [
+        held.queue("one", "src"),
+        held.queue("two", "src"),
+        held.queue("three", "src"),
+    ];
+    let a = held.executor("exec-a", PRODUCER);
+    let b = held.executor("exec-b", OTHER_PRODUCER);
+    held.test_box
+        .git_ok(&b, &["config", "bay.runnerAhead", "1"]);
+    let child = held.spawn(&a);
+    held.wait_held();
+
+    // WHEN B makes a pass
+    let ahead = held.pass(&b);
+
+    // THEN it pre-checked the second entry alone
+    let requests = held.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the head's run and one pre-check: {ahead}"
+    );
+    assert_eq!(requests[1]["turn"], "ahead", "{:?}", requests[1]);
+    let second = ran_for(&ahead, &ids[1]);
+    assert_eq!(
+        second["detail"]["precheck"]["tree"], requests[1]["candidate"]["tree"],
+        "{ahead}"
+    );
+
+    // AND all three land once A goes on, the third on a check at its turn
+    held.go();
+    let outcome = finished(child);
+    for id in &ids {
+        assert_eq!(ran_for(&outcome, id)["decision"], "merged", "{outcome}");
+    }
+    assert_eq!(held.requests().len(), 3, "{outcome}");
 }

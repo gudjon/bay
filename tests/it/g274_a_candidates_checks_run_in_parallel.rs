@@ -9,6 +9,13 @@
 //! The guard to mutate is the choice of a parallel run in `check::run_all` (src/check.rs),
 //! `if width > 1`: make it `if width > MAX_PARALLEL_CHECKS` and every candidate's checks run
 //! serially, so the three 3 s checks below no longer overlap and the land takes 9 s or more.
+//!
+//! G898: a box caps how many run at once on it, with no landing: `bay.runnerParallelChecks`
+//! lowers the repository's value there and never raises it, and a value bay cannot take leaves
+//! the repository's in force; doctor's `runner-caps` row names each. Guards to mutate in
+//! `src/load.rs`: `Cap::in_force` taking the box's value whole (no `min`: a cap above the
+//! repository's raises it), and `cap` taking any number (no range: 0 runs the checks serially);
+//! in `src/repo.rs`, `Repo::parallel_checks` reading the repository's value alone.
 
 // Each case runs a check adapter (a shell script), so these run on Unix only.
 #![cfg(unix)]
@@ -19,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use support::{TestBox, check_files, passing_result, result_json};
+use support::{TestBox, check_files, passing_result, result_json, row};
 
 /// The policy's checks, in its order.
 const CHECKS: [&str; 3] = ["a", "b", "c"];
@@ -120,6 +127,18 @@ fn overlap(runs: &[(String, u64, u64)]) -> bool {
             .enumerate()
             .any(|(j, (_, other_start, _))| i != j && start <= other_start && other_start < end)
     })
+}
+
+/// The most runs at once: at each run's start, how many runs have started and not ended.
+fn most_at_once(runs: &[(String, u64, u64)]) -> usize {
+    runs.iter()
+        .map(|(_, at, _)| {
+            runs.iter()
+                .filter(|(_, start, end)| start <= at && at < end)
+                .count()
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 /// The records on the landed tree in the remote, in the order they were written, each without
@@ -254,4 +273,80 @@ fn a_parallel_refusal_names_what_a_serial_one_names() {
         Some("b"),
         "{parallel}"
     );
+}
+
+/// G898: a box's cap lowers the checks run at once there, and a cap above the repository's
+/// value changes nothing.
+#[test]
+fn a_box_cap_lowers_the_checks_run_at_once_and_never_raises_them() {
+    // GIVEN a repository that runs three checks at once, on a box that caps them at one
+    let lowered = TestBox::new();
+    let (repo, log) = trunk(&lowered, "[runner]\nparallel_checks = 3\n", &even());
+    lowered.git_ok(&repo, &["config", "bay.runnerParallelChecks", "1"]);
+
+    // WHEN a change lands there
+    let (code, landed, _) = land(&lowered, &repo, &[]);
+
+    // THEN its checks ran one after another
+    assert_eq!(code, 0, "{landed}");
+    let runs = intervals(&log);
+    assert!(
+        !overlap(&runs),
+        "the box's cap of one runs them serially: {runs:?}"
+    );
+
+    // AND doctor names the cap in force
+    let (_, doctor) = result_json(lowered.bay(&repo).arg("doctor"));
+    let caps = row(&doctor, "runner-caps");
+    assert_eq!(caps["state"], "capped", "{caps}");
+    assert_eq!(caps["caps"][0]["key"], "bay.runnerParallelChecks", "{caps}");
+    assert_eq!(caps["caps"][0]["repository"], 3, "{caps}");
+    assert_eq!(caps["caps"][0]["in_force"], 1, "{caps}");
+
+    // GIVEN a repository that runs two checks at once, on a box whose cap is above that
+    let above = TestBox::new();
+    let (repo, log) = trunk(&above, "[runner]\nparallel_checks = 2\n", &even());
+    above.git_ok(&repo, &["config", "bay.runnerParallelChecks", "8"]);
+
+    // WHEN a change lands there
+    let (code, landed, _) = land(&above, &repo, &[]);
+
+    // THEN two ran at once and never three: the repository's value holds
+    assert_eq!(code, 0, "{landed}");
+    let runs = intervals(&log);
+    assert_eq!(most_at_once(&runs), 2, "{runs:?}");
+}
+
+/// G898: a cap bay cannot take leaves the repository's value in force, and doctor names it.
+#[test]
+fn a_cap_bay_cannot_take_leaves_the_repositorys_value_and_doctor_names_it() {
+    for value in ["0", "many"] {
+        // GIVEN a repository that runs three checks at once, on a box whose cap bay cannot take
+        let test_box = TestBox::new();
+        let (repo, log) = trunk(&test_box, "[runner]\nparallel_checks = 3\n", &even());
+        test_box.git_ok(&repo, &["config", "bay.runnerParallelChecks", value]);
+
+        // WHEN a change lands there
+        let (code, landed, _) = land(&test_box, &repo, &[]);
+
+        // THEN its checks ran at once, as the repository says
+        assert_eq!(code, 0, "{value}: {landed}");
+        let runs = intervals(&log);
+        assert!(
+            overlap(&runs),
+            "{value}: the repository's value holds: {runs:?}"
+        );
+
+        // AND doctor names the cap refused, with the value in force
+        let (_, doctor) = result_json(test_box.bay(&repo).arg("doctor"));
+        let caps = row(&doctor, "runner-caps");
+        assert_eq!(caps["state"], "refused", "{value}: {caps}");
+        assert_eq!(caps["caps"][0]["in_force"], 3, "{value}: {caps}");
+        assert!(
+            caps["caps"][0]["refused"]
+                .as_str()
+                .is_some_and(|why| why.contains("bay.runnerParallelChecks")),
+            "{value}: {caps}"
+        );
+    }
 }

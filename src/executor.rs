@@ -2404,7 +2404,7 @@ fn within_reach(repo: &Repo, queue: &Queue) -> impl Fn(&crate::change::Operation
     let reach = if repo.config.footprint_lanes() {
         usize::MAX / 2
     } else {
-        1 + repo.config.ahead() + repo.config.batch().map_or(0, |batch| batch.max)
+        1 + repo.ahead() + repo.config.batch().map_or(0, |batch| batch.max)
     };
     let places: HashMap<String, usize> = queue
         .entries

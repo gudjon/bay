@@ -9,13 +9,24 @@
 //! while it waits. Unset is no limit: a box sets its own. A box setting, never a repository one.
 //!
 //! Read on Linux; on any other system the limits are not judged.
+//!
+//! G898: a box also caps its runner's share of the work, with no landing. `[runner]
+//! parallel_checks` and `ahead` are the repository's, so they reach every box at once and change
+//! only by a landing; one box in a hot spell had no cap of its own. Git config, global or for one
+//! clone, `bay.runnerParallelChecks` and `bay.runnerAhead`: each only lowers the repository's
+//! value on this box and never raises it. Each is read where the runner uses it, so a change
+//! holds from its next visit, with no restart. A value bay cannot take (not a whole number, or
+//! outside the range of the repository's own key) leaves the repository's value in force, and
+//! `bay doctor` names it: a cap never stops a runner.
 
 use std::collections::BTreeMap;
+use std::ops::RangeInclusive;
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::config::Config;
 use crate::git::Git;
 use crate::version::TEST_HOOKS;
 
@@ -24,6 +35,14 @@ pub const LOAD1_KEY: &str = "bay.checkStartLoad1";
 
 /// The CPU pressure (`some avg10`, percent) at or above which a runner starts no check.
 pub const CPU_SOME_KEY: &str = "bay.checkStartCpuSome";
+
+/// G898: the box's cap on `[runner] parallel_checks`, how many of a candidate's checks its
+/// runner runs at once.
+pub const PARALLEL_CHECKS_KEY: &str = "bay.runnerParallelChecks";
+
+/// G898: the box's cap on `[runner] ahead`, how many queue entries its runner checks ahead of
+/// their turn.
+pub const AHEAD_KEY: &str = "bay.runnerAhead";
 
 /// What a box whose limits cannot be read, or whose load cannot be measured, does.
 pub const RECOVERY: &str =
@@ -150,6 +169,96 @@ pub fn busy(git: &Git) -> Result<Option<Busy>, String> {
     )
 }
 
+/// G898: a cap the box sets on one of the repository's runner settings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Cap {
+    pub key: &'static str,
+    /// The repository's value.
+    pub repository: usize,
+    /// The box's value, or why bay cannot take it.
+    pub set: Result<usize, String>,
+}
+
+impl Cap {
+    /// What the runner uses: the repository's value, lowered by the box's. A cap never raises
+    /// it, and one bay cannot take leaves it.
+    #[must_use]
+    pub fn in_force(&self) -> usize {
+        self.set
+            .as_ref()
+            .map_or(self.repository, |&set| set.min(self.repository))
+    }
+
+    /// The cap as `bay doctor` names it.
+    #[must_use]
+    pub fn row(&self) -> Value {
+        let mut row = json!({"key": self.key, "repository": self.repository,
+            "in_force": self.in_force()});
+        match &self.set {
+            Ok(set) => row["set"] = json!(set),
+            Err(why) => row["refused"] = json!(why),
+        }
+        row
+    }
+}
+
+/// The box's cap on `[runner] parallel_checks`; `None` when it sets none. It lowers the
+/// checks at once to one, never to none.
+#[must_use]
+pub fn parallel_checks_cap(git: &Git, config: &Config) -> Option<Cap> {
+    cap(
+        git,
+        PARALLEL_CHECKS_KEY,
+        config.parallel_checks(),
+        &(1..=crate::check::MAX_PARALLEL_CHECKS),
+    )
+}
+
+/// The box's cap on `[runner] ahead`; `None` when it sets none. At 0 the runner checks no
+/// entry ahead of its turn.
+#[must_use]
+pub fn ahead_cap(git: &Git, config: &Config) -> Option<Cap> {
+    cap(
+        git,
+        AHEAD_KEY,
+        config.ahead(),
+        &(0..=crate::throughput::MAX_AHEAD),
+    )
+}
+
+/// The cap `key` sets, taken only in `range`, the range of the repository's own key.
+fn cap(
+    git: &Git,
+    key: &'static str,
+    repository: usize,
+    range: &RangeInclusive<usize>,
+) -> Option<Cap> {
+    let set = match git.config_get(key) {
+        Ok(None) => return None,
+        Ok(Some(value)) => {
+            let value = value.trim();
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|set| range.contains(set))
+                .ok_or_else(|| {
+                    format!(
+                        "{key} = \"{value}\" is not a whole number from {} to {}, so the \
+                         repository's {repository} holds",
+                        range.start(),
+                        range.end()
+                    )
+                })
+        }
+        Err(error) => Err(format!("{key} could not be read: {}", error.message())),
+    };
+    Some(Cap {
+        key,
+        repository,
+        set,
+    })
+}
+
 /// Whether this system's load is judged: Linux, or a test build.
 fn judged() -> bool {
     cfg!(target_os = "linux") || TEST_HOOKS
@@ -220,6 +329,23 @@ mod tests {
         );
         assert_eq!(some_avg10("some avg60=1.00\n"), None);
         assert_eq!(some_avg10(""), None);
+    }
+
+    /// G898: a cap lowers the repository's value and never raises it; one bay cannot take
+    /// leaves it.
+    #[test]
+    fn a_cap_only_lowers_the_repositorys_value() {
+        let cap = |set| Cap {
+            key: AHEAD_KEY,
+            repository: 4,
+            set,
+        };
+        assert_eq!(cap(Ok(2)).in_force(), 2);
+        assert_eq!(cap(Ok(0)).in_force(), 0);
+        assert_eq!(cap(Ok(8)).in_force(), 4);
+        assert_eq!(cap(Err("bad".to_owned())).in_force(), 4);
+        assert_eq!(cap(Ok(2)).row()["set"], 2);
+        assert_eq!(cap(Err("bad".to_owned())).row()["refused"], "bad");
     }
 
     #[test]
