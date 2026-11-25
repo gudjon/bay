@@ -29,7 +29,8 @@ Read with `SKILL.md`, whose "Read the result" names the fields every result carr
   beforehand, in `detail.pre_merge`: `at_once`, and in `checks` each pre-merge check a file under your declared
   paths can wake, with that path and an example file. To stay fast, narrow your paths. `bay doctor` names a
   check every change waits for (`pre_merge`).
-- A session that starts outside a view hears who it acts as and to run `bay status` first. Do that before
+- A session that starts outside a view hears nothing unless something waits on it, such as an open refusal of
+  its own change. Without `BAY_ACTOR`, it also hears that it acts as the user name. Run `bay status` before
   you read refs or logs by hand.
 - A session keeps the name it started with when it is resumed, even with no `BAY_ACTOR`. A resume that sets
   `BAY_ACTOR` to another name changes it.

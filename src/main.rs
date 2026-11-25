@@ -996,8 +996,8 @@ fn hook(dir: &std::path::Path, event: String) -> ExitCode {
     let _ = std::io::stdin().read_to_string(&mut input);
     // G158 (owner ruling 2026-11-20, Code Mode): bay denies only on purpose. A fault of
     // its own (a panic) or a hook that runs past its deadline answers allow, never the
-    // product's failure, which in Code Mode refuses the call; main's guard judges every
-    // change.
+    // product's failure: a wait to the entry's timeout, or under a site's
+    // `onFailure: "block"` a refusal; main's guard judges every change.
     let Some(budget) = budget else {
         let outcome = bay::agent_hook::dispatch(&event, &input, dir);
         bay::live::after_event(dir, &input);

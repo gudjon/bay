@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.28
+
+- The skill says what a new session hears, how each origin mode waits, and when to choose tail.
+
 ## 0.7.27
 
 - A machine keeps fetched large files for a day; its next checks take them from disk, hashed first.

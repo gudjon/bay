@@ -428,7 +428,8 @@ pub const BUDGET: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// G158 (owner ruling 2026-11-20, Code Mode): how long past its [`budget`] `bay hook` may take
 /// before it answers allow: well within the entry's timeout ([`PRE_TOOL_TIMEOUT_S`]), so a hook
-/// that hangs never reaches the product's timeout, which in Code Mode refuses the call.
+/// that hangs never reaches the product's timeout. With bay's entry the call would wait out the
+/// timeout and then go on; under a site's `onFailure: "block"`, Code Mode would refuse it.
 ///
 /// [`PRE_TOOL_TIMEOUT_S`]: crate::agent_settings::PRE_TOOL_TIMEOUT_S
 pub const ANSWER_MARGIN: std::time::Duration = std::time::Duration::from_secs(5);

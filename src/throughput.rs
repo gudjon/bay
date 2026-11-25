@@ -4,10 +4,11 @@
 //! One queue checks only its head, one check after another, so check slots, not merges, set a
 //! trunk's ceiling (`DESIGN` § 6: about 120 landings a day for a 12-minute check). Three levers
 //! raise it. Each is off by default behind a key of `[runner]` in `.bay/config.toml`, and each
-//! is a rule of evidence reuse, never a new verdict: every one needs `[policy] evidence_reuse =
-//! "exact-inputs"` and a producer registry that signs everything, or, where evidence counts
-//! unsigned (no registry, or `signing = "approvals"`), `[policy] reuse_unsigned = true` in the
-//! policy at the base (G318); without them nothing here runs. What they keep:
+//! is a rule of evidence reuse, never a new verdict: a lever turns `[policy] evidence_reuse` on
+//! unless the policy gives it another value (0.3.0, `Config::evidence_reuse`), and every one
+//! needs a producer registry that signs everything, or, where evidence counts unsigned (no
+//! registry, or `signing = "approvals"`), `[policy] reuse_unsigned = true` in the policy at the
+//! base (G318); without them nothing here runs. What they keep:
 //!
 //! - **G1, what lands is exactly the checked tree on the trunk it was checked against.** The
 //!   publishing push is still judged per commit by the executor and by the host hook: a commit
