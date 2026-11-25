@@ -60,6 +60,7 @@ fn every_shape_on_the_deny_list_gets_the_deny_exit() {
         "git push --force-with-lease origin topic",
         "git push origin main",
         "git push",
+        "git fetch origin 'refs/bay/*:refs/remotes/origin-bay/*'",
     ] {
         let (code, reason) = pre_tool(&test_box, &repo, command);
         assert_eq!(code, Some(2), "{command} was allowed");
@@ -74,6 +75,7 @@ fn a_bay_ref_push_ordinary_commands_and_other_tools_get_the_allow_exit() {
     test_box.seed_trunk(&repo, &[("src/a.rs", "fn a() {}\n")]);
     for command in [
         "git push origin refs/bay/changes/abcd2345",
+        "git fetch origin refs/bay/changes/abcd2345",
         "git status",
         "git checkout -b topic",
     ] {
@@ -119,6 +121,7 @@ fn a_denied_shape_inside_a_wrapper_gets_the_deny_exit() {
         "sudo -u builder sh -c 'git push -f'",
         "bash -c \"sh -c 'git reset --hard'\"",
         "bash -c 'git status; git reset --hard'",
+        "sh -c \"git fetch -q origin '+refs/bay/*:refs/remotes/bay-peek/*'\"",
     ] {
         let (code, reason) = pre_tool(&test_box, &repo, command);
         assert_eq!(code, Some(2), "{command} was allowed");

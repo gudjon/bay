@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.22
+
+- The agent hook refuses a fetch that copies every `refs/bay/*` ref into another namespace.
+- A ref lock briefly held on the host at an evidence push is retried, never reported as a runner collision.
+- A queue place another runner already released, or gave to another operation, no longer fails the batch that releases it.
+- `bay start` reads a landing on main even when its landed marker is missing, and opens the card's next generation.
+
 ## 0.7.21
 
 - A machine can cap its runner's share, `bay.runnerParallelChecks` and `bay.runnerAhead`; each only lowers the repository's value there.

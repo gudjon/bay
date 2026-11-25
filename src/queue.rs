@@ -840,10 +840,17 @@ pub fn release_commit(
 
 /// Releases `seq` on its own: any outcome of the head other than publishing.
 ///
+/// G901 (a fleet finding, 2026-11-25: a runner released a place for the operation it had run, 43
+/// minutes after a newer revision of the change took that place, and the release refused the
+/// atomic push of a batch of eleven that held the place): a place is released only for the
+/// operation it names. A place this store reads as another operation's, or reads no entry for,
+/// is left alone. The push leases the place's entry with its release, so a place another
+/// operation took since this store read it is left alone too.
+///
 /// # Errors
 ///
-/// The release already exists (someone released it first is fine and not an error), or a git
-/// fault.
+/// The place is still this operation's and its release could not be pushed (someone released
+/// it first is fine and not an error), or a git fault.
 pub fn release(
     repo: &Repo,
     signer: Option<&Signer>,
@@ -851,6 +858,17 @@ pub fn release(
     op_id: &str,
     reason: &str,
 ) -> Result<(), String> {
+    let entry_name = format!("{QUEUE_PREFIX}{seq}");
+    let Some(entry) = repo
+        .git
+        .ref_target(&entry_name)
+        .map_err(|error| error.message())?
+    else {
+        return Ok(());
+    };
+    if !names_op(&repo.git, &entry, op_id)? {
+        return Ok(());
+    }
     let release = release_commit(&repo.git, signer, seq, op_id, reason)?;
     let name = format!("{DONE_PREFIX}{seq}");
     if repo
@@ -858,10 +876,15 @@ pub fn release(
         .run(&[
             "push",
             "-q",
+            "--atomic",
             // G198: a release is create-only, so a lease expects no ref.
             &format!("--force-with-lease={name}:"),
+            // G901: the entry is pushed as this store read it, so the push changes nothing on it
+            // and is refused when the remote's entry is another.
+            &format!("--force-with-lease={entry_name}:{entry}"),
             repo.remote(),
             &format!("{release}:{name}"),
+            &format!("{entry}:{entry_name}"),
         ])
         .is_ok()
     {
@@ -870,13 +893,26 @@ pub fn release(
         let _ = repo.git.run(&["update-ref", &name, &release]);
         return Ok(());
     }
-    // Released by someone else first: the queue moves on either way.
-    if Queue::read(repo)?.released.contains(&seq) {
+    // Released by someone else first, or taken by another operation since: the queue moves on
+    // either way.
+    let queue = Queue::read(repo)?;
+    if queue.released.contains(&seq)
+        || queue
+            .entries
+            .get(&seq)
+            .is_none_or(|entry| entry.op_id != op_id)
+    {
         return Ok(());
     }
     Err(format!(
         "the release of queue entry {seq} could not be pushed"
     ))
+}
+
+/// G901: whether the entry commit `entry` names `op_id` as the operation that holds its place.
+fn names_op(git: &Git, entry: &str, op_id: &str) -> Result<bool, String> {
+    Ok(entry_json(git, entry, "entry.json")?
+        .is_some_and(|json| json["op_id"].as_str() == Some(op_id)))
 }
 
 #[cfg(test)]

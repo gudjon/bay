@@ -638,8 +638,51 @@ fn denied_git(
         "checkout" if has(".") => deny("git checkout ."),
         "restore" if has(".") => deny("git restore ."),
         "push" => denied_push(&args, trunk, targets, current),
+        "fetch" => denied_fetch(&args),
         _ => None,
     }
+}
+
+/// G899: why a fetch that writes copies of bay's refs outside `refs/bay/` is denied
+/// (`git fetch origin 'refs/bay/*:refs/remotes/x/*'`, or a glob of every ref into one
+/// namespace), or `None`. Every agent on a machine may share one clone, and each ref in it slows
+/// every Git command there (a measurement, 2026-11-25: one clone held 136,093 refs, 78,971 of
+/// them such copies). A fetch of one ref, one with no destination and one into `refs/bay/`
+/// itself write no copy and run. Refspecs a fetch reads from `--stdin` or from config are not
+/// judged.
+fn denied_fetch(args: &[&str]) -> Option<Denial> {
+    let copies = args
+        .iter()
+        .copied()
+        .filter(|arg| !arg.starts_with('-'))
+        .find_map(bay_copies_into)?;
+    Some(Denial {
+        shape: "git fetch of every bay ref",
+        wrapped: None,
+        reason: format!(
+            "bay denies a fetch that copies every bay ref into {copies} from an agent shell: each ref it writes slows every Git command in this clone. Read one change with `bay status <change> --json`"
+        ),
+    })
+}
+
+/// Where the glob `refspec` writes copies of refs under `refs/bay/` outside it, or `None`:
+/// one ref the source matches is mapped through the refspec as Git maps it.
+fn bay_copies_into(refspec: &str) -> Option<&str> {
+    use crate::names::BAY;
+    let refspec = refspec.strip_prefix('+').unwrap_or(refspec);
+    let (source, destination) = refspec.split_once(':')?;
+    let (source_head, source_tail) = source.split_once('*')?;
+    let (destination_head, destination_tail) = destination.split_once('*')?;
+    let sample = if source_head.starts_with(BAY) {
+        format!("{source_head}x{source_tail}")
+    } else if BAY.starts_with(source_head) {
+        format!("{BAY}changes/x{source_tail}")
+    } else {
+        return None;
+    };
+    let matched = &sample[source_head.len()..sample.len() - source_tail.len()];
+    let copy = format!("{destination_head}{matched}{destination_tail}");
+    (!copy.starts_with(BAY)).then_some(destination)
 }
 
 fn denied_push(
@@ -1098,6 +1141,44 @@ mod tests {
         ] {
             assert!(
                 denied(command, "main", Some("topic")).is_some(),
+                "{command}"
+            );
+        }
+    }
+
+    /// G899: a fetch that writes a copy of every bay ref outside `refs/bay/` is denied, also
+    /// forced, quoted, wrapped or as a glob of every ref; a fetch that writes no copy runs.
+    #[test]
+    fn a_fetch_that_copies_every_bay_ref_is_denied_and_one_that_copies_none_runs() {
+        for command in [
+            "git fetch -q origin 'refs/bay/*:refs/remotes/origin-bay/*'",
+            "git fetch -q origin +refs/bay/*:refs/remotes/origin-bay/* main",
+            "git fetch origin \"refs/bay/changes/*:refs/peek/changes/*\"",
+            "git fetch origin 'refs/*:refs/remotes/all/*'",
+            "git -C /w fetch --prune origin 'refs/bay*:refs/x*'",
+            "bash -c \"git fetch origin 'refs/bay/*:refs/tmp-audit/*'\"",
+        ] {
+            let denial = denied(command, "main", Some("topic"));
+            assert_eq!(
+                denial.as_ref().map(|denial| denial.shape),
+                Some("git fetch of every bay ref"),
+                "{command}"
+            );
+        }
+        for command in [
+            "git fetch origin",
+            "git fetch -q origin main",
+            "git fetch origin refs/bay/changes/abcd2345",
+            "git fetch origin refs/bay/changes/abcd2345:refs/remotes/x/abcd2345",
+            "git fetch origin 'refs/bay/*'",
+            "git fetch origin 'refs/bay/*:'",
+            "git fetch origin '+refs/bay/*:refs/bay/*'",
+            "git fetch origin '+refs/*:refs/*'",
+            "git fetch origin 'refs/heads/*:refs/remotes/origin/*'",
+            "git fetch -q --stdin origin",
+        ] {
+            assert!(
+                denied(command, "main", Some("topic")).is_none(),
                 "{command}"
             );
         }

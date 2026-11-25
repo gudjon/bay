@@ -3772,6 +3772,7 @@ fn bisect_batch(
         }
         search.record(prefix, refusal.is_none());
         checks.push(json!({"members": prefix, "tree": tip.tree, "verdict": verdict}));
+        kill_point("before-batch-evidence-push");
         push_evidence(ctx.repo, &ctx.producer()?.0)?;
     }
     Ok(Some((search, checks)))
@@ -11072,34 +11073,53 @@ fn bay_message(
 
 /// Pushes the producer's notes ref. A push the remote took holds exactly that commit: Git reports
 /// a ref update only once the remote made it, so nothing is read back (BACKLOG 92).
+///
+/// G900: a ref lock another process holds on the remote is waited out and the push tried again,
+/// up to [`PUBLISH_RETRY_LIMIT`] tries; it is never read as a collision, and bay never unlinks it
+/// (G128). A lock held through every try fails the push and says so.
 fn push_evidence(repo: &Repo, producer: &str) -> Result<(), String> {
-    // #123: no post piece writes the notes between the read of the local ref and the push.
-    let _writing = evidence::writing();
     let notes = evidence::notes_ref(producer);
-    if repo
-        .git
-        .ref_target(&notes)
-        .map_err(|error| error.message())?
-        .is_none()
-    {
-        // This producer wrote nothing: every record the pass rests on was resumed from
-        // another producer's ref, fetched from the remote (a takeover, G22).
-        return Ok(());
-    }
-    repo.git
-        .run(&["push", "-q", repo.remote(), &format!("{notes}:{notes}")])
-        .map_err(|error| {
-            let message = error.message();
-            if message.contains("non-fast-forward") || message.contains("fetch first") || message.contains("rejected") {
-                // § 7: one producer name used by two executors is a collision.
-                format!(
-                    "producer {producer} collides with another runner: the remote's {notes} holds records this runner never wrote; give each runner its own bay.producerName"
-                )
-            } else {
-                format!("evidence could not be pushed: {message}")
+    let spec = format!("{notes}:{notes}");
+    let mut tries = 0;
+    loop {
+        // #123: no post piece writes the notes between the read of the local ref and the push.
+        let writing = evidence::writing();
+        if repo
+            .git
+            .ref_target(&notes)
+            .map_err(|error| error.message())?
+            .is_none()
+        {
+            // This producer wrote nothing: every record the pass rests on was resumed from
+            // another producer's ref, fetched from the remote (a takeover, G22).
+            return Ok(());
+        }
+        let Err(error) = repo.git.run(&["push", "-q", repo.remote(), &spec]) else {
+            return Ok(());
+        };
+        drop(writing);
+        let message = error.message();
+        tries += 1;
+        if held_lock(&message) {
+            if tries < PUBLISH_RETRY_LIMIT {
+                std::thread::sleep(HOOK_RETRY_WAIT);
+                continue;
             }
-        })?;
-    Ok(())
+            return Err(format!(
+                "evidence could not be pushed: another process held the remote's lock on {notes} through {tries} tries: {message}"
+            ));
+        }
+        if message.contains("non-fast-forward")
+            || message.contains("fetch first")
+            || message.contains("rejected")
+        {
+            // § 7: one producer name used by two executors is a collision.
+            return Err(format!(
+                "producer {producer} collides with another runner: the remote's {notes} holds records this runner never wrote; give each runner its own bay.producerName"
+            ));
+        }
+        return Err(format!("evidence could not be pushed: {message}"));
+    }
 }
 
 /// G864: what rides in a publishing push beside trunk and its markers: each ref's lease, and its

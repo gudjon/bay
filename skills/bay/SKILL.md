@@ -128,7 +128,8 @@ that need more than their next step: `CHECK_FAILED`, `POLICY_INVALID`, `APPROVAL
 - Never push main, merge into main, or move main yourself. bay merges.
 - Never push a target such as `staging` (`[[target]]` in the config). bay's hook refuses it.
 - Never run `git reset --hard`, `git clean -f`, `git branch -D`, `git checkout .`, `git restore .`, a force push,
-  or a push of `--all` or `--mirror`. bay's hook refuses them, also inside `bash -c`.
+  a push of `--all` or `--mirror`, or a fetch of `refs/bay/*` into another namespace. bay's hook refuses them,
+  also inside `bash -c`.
 - Never merge, cherry-pick, check out or restore from a lane's refs (`[[lane]]` in the config) in a
   view that is not of that lane. bay's hook refuses those commands, and `bay merge` refuses lane commits.
 - Never edit or commit in another actor's view. Take it over with `bay start <change> --adopt` first.

@@ -632,19 +632,28 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
             Some((generation, change)) => {
                 let merged = claim_merged(repo, &hash, *generation, change)?;
                 // The record is read only when the claims do not say the change merged.
-                let state = if merged {
-                    ChangeState::Landed
+                let record = if merged {
+                    None
                 } else {
-                    fetched_record(repo, change)?.state
+                    Some(fetched_record(repo, change)?)
                 };
+                let state = record
+                    .as_ref()
+                    .map_or(ChangeState::Landed, |record| record.state);
                 // G890 (a fleet finding, 2026-11-24: 12 landed changes had their landed marker
                 // and no merged claim, so a start of each intent answered CHANGE_ALREADY_MERGED
                 // and its `--new` answered CHANGE_SUPERSEDED): a change whose record reads
                 // landed and whose landed marker the remote holds merged, with or without its
                 // merged claim. The remote's hook closes the generation on the marker too.
+                // G902 (a fleet finding, 2026-11-25: a host answered a batch's push with a fault
+                // and kept trunk and the records but not every member's markers; 20 landings in
+                // three days had no landed marker, and a start of one's intent adopted the merged
+                // change while its `--new` answered CHANGE_SUPERSEDED): with no marker, its one
+                // publication on trunk says the same ([`crate::undo::unmarked`]).
                 let landed = merged
                     || (state == ChangeState::Landed
-                        && remote_has(repo, &format!("{}{change}", crate::names::LANDED))?);
+                        && (remote_has(repo, &format!("{}{change}", crate::names::LANDED))?
+                            || published_on(repo, record.as_ref(), change, &base)?));
                 match (landed, request.new) {
                     // G293: a landed change closes its generation, so any start claims the
                     // next one, `--new` or not; the new change supersedes the landed one.
@@ -906,6 +915,20 @@ fn opens_next(request: &StartRequest, state: ChangeState) -> bool {
 /// this store's chain moves only forward, and keeps local work the remote lacks (G289).
 fn fetched_record(repo: &Repo, change: &str) -> Result<ChangeRecord, String> {
     Ok(repo.remote_record(change)?.record)
+}
+
+/// G902: whether `record`, read landed, has its one publication on `base`, whatever markers
+/// the remote holds for it.
+fn published_on(
+    repo: &Repo,
+    record: Option<&ChangeRecord>,
+    change: &str,
+    base: &str,
+) -> Result<bool, String> {
+    match record {
+        Some(record) => Ok(crate::undo::unmarked(repo, record, change, base)?.is_some()),
+        None => Ok(false),
+    }
 }
 
 /// G272: the newer generation of `record`'s intent that the remote claims, when `record` ended

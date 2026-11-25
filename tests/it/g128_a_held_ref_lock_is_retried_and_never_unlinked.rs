@@ -5,6 +5,9 @@
 //! ref". Trunk did not move, so the same candidate is pushed again after a short wait,
 //! uncounted toward `MAIN_MOVED`. A lock that is never released ends the operation
 //! `MERGE_RETRY_EXHAUSTED`, a stated refusal, and the lock is still where its owner left it.
+//!
+//! G900: the same holds for the lock on a runner's evidence notes ref met at a persist push:
+//! the push is tried again, and a held lock is never read as a collision with another runner.
 
 // Each case runs shell scripts (adapters, a wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -14,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use crate::support;
 
+use support::PRODUCER;
+use support::queued::{Check, host};
 use support::{TestBox, check_files, passing_result, result_json};
 
 /// Kills a background process if the test ends before it does.
@@ -135,5 +140,72 @@ fn never_released(env: &[(&str, &str)]) {
             .trunk_change_ids(&remote)
             .iter()
             .all(|landed| *landed != id)
+    );
+}
+
+/// The file whose presence holds the lock on `producer`'s evidence notes ref on `remote`.
+fn evidence_lock(test_box: &TestBox, remote: &Path, producer: &str) -> PathBuf {
+    if test_box.git_bare(remote, &["rev-parse", "--show-ref-format"]) == "reftable" {
+        remote.join("reftable/tables.list.lock")
+    } else {
+        remote.join(format!("refs/notes/bay/evidence/{producer}.lock"))
+    }
+}
+
+#[test]
+fn a_lock_on_the_evidence_ref_released_meanwhile_is_waited_out_and_the_batch_lands() {
+    // GIVEN a runner whose batch of two is checked, held just before it pushes the check's evidence
+    let held = host(&Check {
+        config: "[runner]\nlease_s = 60\nheartbeat_s = 30\nbatch = { min = 2, max = 8, max_failure_rate = 1.0 }\n",
+        policy: None,
+        seed: &[("src/a.rs", "fn a() {}\n")],
+        hold_first: false,
+        fails: "false",
+    });
+    let one = held.queue("one", "src");
+    let two = held.queue("two", "libtwo");
+    let runner = held.executor("exec", PRODUCER);
+    let release = held.test_box.path().join("release-runner");
+    let mut child = Killed(Some(
+        held.test_box
+            .bay_process(&runner)
+            .env("BAY_TEST_PAUSE_AT", "before-batch-evidence-push")
+            .env("BAY_TEST_PAUSE_FILE", &release)
+            .args(["--json", "runner", "run", "--once"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    ));
+    let paused = PathBuf::from(format!("{}.paused", release.display()));
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !paused.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the batch never came to its evidence push"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // WHEN another process on the remote holds the lock on the runner's evidence ref a moment
+    let lock = evidence_lock(&held.test_box, &held.remote, PRODUCER);
+    std::fs::create_dir_all(lock.parent().unwrap()).unwrap();
+    std::fs::write(&lock, "").unwrap();
+    std::fs::write(&release, "go").unwrap();
+    std::thread::sleep(Duration::from_millis(1500));
+    std::fs::remove_file(&lock).unwrap();
+    let output = child.0.take().unwrap().wait_with_output().unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // THEN the batch lands, and the runner never reads the lock as a collision
+    assert!(!text.contains("collides"), "{text}");
+    let on_main = held.test_box.trunk_change_ids(&held.remote);
+    assert!(
+        on_main.contains(&one) && on_main.contains(&two),
+        "the batch did not land: {on_main:?} {text}"
     );
 }
