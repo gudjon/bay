@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.27
+
+- A machine keeps the bytes of the large files it fetched for a day, by their hash, and its next checks and views take them from disk, hashed before use.
+
 ## 0.7.26
 
 - A runner's queue retention no longer fails when another runner removed some of the same places first.

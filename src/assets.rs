@@ -36,7 +36,8 @@
 //! with the plugin's program taken from the candidate's base. Each is hashed before it is used:
 //! a `get` whose bytes are not the manifest's is refused, and a check whose files cannot all be
 //! fetched is an `infra_failure`, never a pass. A file already there with the manifest's size is
-//! kept as it is.
+//! kept as it is. A box keeps the bytes its `get`s brought back for a day, under their hash, and
+//! takes them from disk for its next trees (G912, `Cache`).
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -579,6 +580,11 @@ pub fn fill(
         .into_iter()
         .filter(|entry| covered(&entry.path))
         .collect();
+    let cache = if wanted.is_empty() {
+        None
+    } else {
+        Cache::of(git)
+    };
     let mut filled = Filled::default();
     // BACKLOG 295: each file written here holds its line's bytes (`get` hashed them), so the
     // folder's record learns it and the next freeze does not hash it again (`moved_in`).
@@ -597,7 +603,21 @@ pub fn fill(
             .and_then(|name| name.to_str())
             .unwrap_or("asset");
         let tmp = file.with_file_name(format!(".{name}.{}.get", std::process::id()));
-        match plugin.get(&entry.id, &tmp) {
+        let got = if cache
+            .as_ref()
+            .is_some_and(|cache| cache.take(&entry.id, &tmp))
+        {
+            Ok(Got::Bytes)
+        } else {
+            let got = plugin.get(&entry.id, &tmp);
+            if matches!(got, Ok(Got::Bytes))
+                && let Some(cache) = &cache
+            {
+                cache.keep(&entry.id, &tmp);
+            }
+            got
+        };
+        match got {
             Ok(Got::Bytes) => {}
             // A takedown: the address stays in the manifest, and the file is named, not made.
             Ok(Got::Purged) => {
@@ -619,10 +639,99 @@ pub fn fill(
         filled.written.push(entry.path.clone());
     }
     known.keep(root);
+    if let Some(cache) = &cache {
+        cache.prune();
+    }
     if let Some(exclude) = exclude {
         exclude_paths(exclude, &wanted)?;
     }
     Ok(filled)
+}
+
+/// How long a box takes a file's bytes from its [`Cache`] after the store gave them. A purge
+/// reaches each box within it.
+const CACHE_FRESH: Duration = Duration::from_hours(24);
+
+/// G912 (a fleet finding, 2026-11-25: one project's runners fetched its 97 offloaded files
+/// through the plugin for every check, about 2 s a file, so each check began 168 to 177 s after
+/// its runner took it): the bytes a `get` brought back, kept in the store's common directory
+/// under their hash, `<common dir>/bay/assets/cache/<hex>`, so the next tree on the box takes
+/// them from disk. Each copy is hashed before it is used, as a `get`'s bytes are: a copy that
+/// is not its name's bytes is removed, and the store is asked.
+struct Cache(std::path::PathBuf);
+
+impl Cache {
+    fn of(git: &Git) -> Option<Self> {
+        let common = git.common_dir().ok()?;
+        Some(Self(
+            Path::new(&common).join("bay").join("assets").join("cache"),
+        ))
+    }
+
+    fn place(&self, id: &str) -> Option<std::path::PathBuf> {
+        let hex = id.strip_prefix("sha256:").filter(|_| is_id(id))?;
+        Some(self.0.join(hex))
+    }
+
+    /// Writes the cache's bytes of `id` to `tmp`: true when a copy younger than
+    /// [`CACHE_FRESH`] is there and hashes to `id`.
+    fn take(&self, id: &str, tmp: &Path) -> bool {
+        let Some(place) = self.place(id) else {
+            return false;
+        };
+        if !fresh(&place) {
+            return false;
+        }
+        if std::fs::copy(&place, tmp).is_ok() && identity(tmp).is_ok_and(|got| got == id) {
+            return true;
+        }
+        let _ = std::fs::remove_file(tmp);
+        let _ = std::fs::remove_file(&place);
+        false
+    }
+
+    /// Keeps a copy of `file`, whose bytes are `id`'s, dated now; a copy that cannot be made
+    /// is no fault.
+    fn keep(&self, id: &str, file: &Path) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let Some(place) = self.place(id) else {
+            return;
+        };
+        let next = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = self.0.join(format!(".{}.{next}.keep", std::process::id()));
+        let kept = std::fs::create_dir_all(&self.0).is_ok()
+            && std::fs::copy(file, &tmp).is_ok()
+            && std::fs::File::options()
+                .write(true)
+                .open(&tmp)
+                .and_then(|copy| copy.set_modified(std::time::SystemTime::now()))
+                .is_ok()
+            && std::fs::rename(&tmp, &place).is_ok();
+        if !kept {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    /// Removes each copy no tree takes any more: those as old as [`CACHE_FRESH`].
+    fn prune(&self) {
+        let Ok(entries) = std::fs::read_dir(&self.0) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !fresh(&entry.path()) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+}
+
+/// Whether `place` was written less than [`CACHE_FRESH`] ago.
+fn fresh(place: &Path) -> bool {
+    std::fs::metadata(place)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < CACHE_FRESH)
 }
 
 /// Durability before a merge (BACKLOG 49, owner ruling 2026-10-24): the manifest lines `tree`
