@@ -136,11 +136,11 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
     }
     let (checkout, head, trunk) = where_it_stands(dir, repo, request)?;
     let name = &checkout.name;
-    let changed = under_paths(changes(&checkout.git, name)?, &request.paths)?;
+    let (changed, pins) = edits_with_pins(repo, &checkout, &request.paths)?;
     if let Some(refused) = take_locks(repo, &checkout.root, &changed, None) {
         return Ok(refused);
     }
-    let (saved, offloaded, undo) = offload(repo, &checkout.root, &trunk, &changed)?;
+    let (saved, offloaded, undo) = offload(repo, &checkout.root, &trunk, &changed, &pins)?;
     // Every way this save ends short of a merge, a refusal or an error, leaves the folder as it
     // found it (the manifest and the exclude list): `undo` puts them back when dropped unkept.
     if saved.is_empty() {
@@ -227,6 +227,33 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         ],
     );
     Ok(result.with_detail(detail))
+}
+
+/// The save's edits under `paths` and the pinned files among them whose bytes moved. BACKLOG
+/// 295: new bytes at a pinned path ([`crate::assets::moved_in`]) are an edit that no status
+/// lists, so each counts as one.
+fn edits_with_pins(
+    repo: &Repo,
+    checkout: &Checkout,
+    paths: &[String],
+) -> Result<(Vec<Entry>, Vec<crate::assets::Entry>), String> {
+    let pins = crate::assets::moved_in(repo, &checkout.root)?;
+    let mut edits = changes(&checkout.git, &checkout.name)?;
+    for pin in &pins {
+        if !edits.iter().any(|entry| entry.path == pin.path) {
+            edits.push(Entry {
+                path: pin.path.clone(),
+                tracked: true,
+            });
+        }
+    }
+    edits.sort_by(|a, b| a.path.cmp(&b.path));
+    let changed = under_paths(edits, paths)?;
+    let pins = pins
+        .into_iter()
+        .filter(|pin| changed.iter().any(|entry| entry.path == pin.path))
+        .collect();
+    Ok((changed, pins))
 }
 
 /// A save says what the work is, before any other check.
@@ -325,9 +352,16 @@ fn take_locks(
 /// `[limits] max_file_mib` of the policy at `trunk` goes to the assets plugin, and the manifest
 /// takes its place among the saved paths (`crate::assets`). A file Git already tracks is never
 /// offloaded: moving the checkout to a merge without it would delete it, so it is judged by the
-/// limit as before. Returns the paths to save, the offloaded ones, and how to put the folder
-/// back when the save is then refused. `root` is the checkout the edits are in.
-fn offload(repo: &Repo, root: &Path, trunk: &str, changed: &[Entry]) -> Result<Offloads, String> {
+/// limit as before. Each of `pins`, a pinned file with new bytes (BACKLOG 295), is put again
+/// and its line replaced. Returns the paths to save, the offloaded ones, and how to put the
+/// folder back when the save is then refused. `root` is the checkout the edits are in.
+fn offload(
+    repo: &Repo,
+    root: &Path,
+    trunk: &str,
+    changed: &[Entry],
+    pins: &[crate::assets::Entry],
+) -> Result<Offloads, String> {
     let all: Vec<String> = changed.iter().map(|entry| entry.path.clone()).collect();
     let Some((plugin, rule)) = crate::assets::configured(repo, trunk)? else {
         return Ok((all, Vec::new(), None));
@@ -341,6 +375,7 @@ fn offload(repo: &Repo, root: &Path, trunk: &str, changed: &[Entry]) -> Result<O
         &plugin,
         root,
         &new,
+        pins,
         &rule,
         &crate::assets::exclude_file(repo),
     )?;

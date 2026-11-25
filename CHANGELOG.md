@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.18
+
+- New bytes written over a pinned file are pinned again at save and merge, so the store holds them.
+- Old bytes left in a folder never undo a newer manifest line.
+
 ## 0.7.17
 
 - A runner's journal names why a landing's push was refused, with the host's own reason.

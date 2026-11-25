@@ -25,6 +25,11 @@
 //! anything is made (unknown is never a pass). The saved file stays in the work tree, and the
 //! clone's own `info/exclude` names it, so Git leaves it alone there.
 //!
+//! New bytes at a path the manifest already names (BACKLOG 295) are an edit no `git status`
+//! lists, since Git neither tracks the file nor shows it. The same saves and freezes put them
+//! and replace the path's line ([`moved_in`]). A per-folder record of what bay last saw
+//! (`known`) keeps that to a hash of the files whose stat moved.
+//!
 //! The bytes come back wherever the tree is used (phase 2): a view gets each manifest file its
 //! declared paths cover when it is made; the main checkout gets the ones it lacks at `bay
 //! install` and when `bay save` moves it to a merge; a check gets the ones it sees, read-only,
@@ -42,6 +47,7 @@ use crate::repo::Repo;
 
 use sha2::{Digest, Sha256};
 
+mod known;
 pub mod store;
 
 /// The manifest, at the repository's root.
@@ -574,6 +580,9 @@ pub fn fill(
         .filter(|entry| covered(&entry.path))
         .collect();
     let mut filled = Filled::default();
+    // BACKLOG 295: each file written here holds its line's bytes (`get` hashed them), so the
+    // folder's record learns it and the next freeze does not hash it again (`moved_in`).
+    let mut known = known::Known::of(root);
     for entry in &wanted {
         let file = root.join(&entry.path);
         if std::fs::metadata(&file).is_ok_and(|meta| meta.is_file() && meta.len() == entry.size) {
@@ -604,8 +613,12 @@ pub fn fill(
             let _ = std::fs::remove_file(&tmp);
             format!("{} cannot be written: {error}", file.display())
         })?;
+        if let Ok(meta) = std::fs::metadata(&file) {
+            known.learn(&entry.path, &entry.id, known::Stat::of(&meta));
+        }
         filled.written.push(entry.path.clone());
     }
+    known.keep(root);
     if let Some(exclude) = exclude {
         exclude_paths(exclude, &wanted)?;
     }
@@ -854,9 +867,9 @@ pub fn exclude_file(repo: &Repo) -> std::path::PathBuf {
 }
 
 /// Before a view is frozen (`bay merge`, a checkpoint): offloads each file the view adds that
-/// Git does not track yet and that is over the policy's limit at main's tracking ref, so the
-/// freeze, which adds the view's files, writes the manifest and leaves the file out. Returns
-/// the offloaded paths.
+/// Git does not track yet and that is over the policy's limit at main's tracking ref, and puts
+/// again each pinned file whose bytes moved ([`moved_in`]), so the freeze, which adds the
+/// view's files, writes the manifest and leaves the file out. Returns the offloaded paths.
 ///
 /// # Errors
 ///
@@ -884,12 +897,121 @@ pub fn offload_view(repo: &Repo, view: &Path) -> Result<Vec<String>, String> {
         .filter_map(|entry| entry.strip_prefix("?? "))
         .map(str::to_owned)
         .collect();
-    let done = offload(&plugin, view, &new, &rule, &exclude_file(repo))?;
+    let pins = moved_in(repo, view)?;
+    let done = offload(&plugin, view, &new, &pins, &rule, &exclude_file(repo))?;
     // The freeze that follows takes the manifest from the view's folder.
     if let Some(undo) = &done.undo {
         undo.keep();
     }
     Ok(done.entries.into_iter().map(|entry| entry.path).collect())
+}
+
+/// BACKLOG 295 (a fleet finding, 2026-11-25: a change that wrote new bytes over four pinned
+/// files merged with their old lines, and the store never got the new bytes): the pinned files
+/// in the folder at `root` whose bytes are no longer those of their manifest line, each with
+/// the identity and size of its bytes now. Git neither tracks such a file nor lists it (the
+/// clone's `info/exclude` names it), so no `git status` shows the edit.
+///
+/// The side that moved since bay last saw the file wins ([`known`]):
+/// - its stat is the one bay recorded: the file did not move, so a line that names other bytes
+///   moved (a merge brought newer bytes, or a revert), and the line stands;
+/// - it moved since bay recorded it: its bytes are the new ones;
+/// - bay has no record of it (a folder from before the record, a file kept as it was found, a
+///   record that cannot tell): bytes that an earlier line of the path named are old bytes left
+///   in the folder, never an edit, so the line stands; any other bytes are new.
+///
+/// Empty when the config names no assets plugin: there is nothing to put them with.
+///
+/// # Errors
+///
+/// The manifest cannot be read, a file cannot be hashed, or the manifest's history cannot be
+/// read: unknown is never "unchanged".
+pub fn moved_in(repo: &Repo, root: &Path) -> Result<Vec<Entry>, String> {
+    if repo.config.plugin.assets.is_none() {
+        return Ok(Vec::new());
+    }
+    let lines = match std::fs::read_to_string(root.join(MANIFEST)) {
+        Ok(text) => parse(&text)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            manifest_at(&Git::new(root), "HEAD")?
+        }
+        Err(error) => return Err(format!("{MANIFEST} cannot be read: {error}")),
+    };
+    let mut known = known::Known::of(root);
+    let mut earlier: Option<std::collections::BTreeSet<String>> = None;
+    let mut moved = Vec::new();
+    for line in &lines {
+        let file = root.join(&line.path);
+        let Ok(meta) = std::fs::metadata(&file) else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let stat = known::Stat::of(&meta);
+        let seen = known.seen(&line.path, &stat);
+        if matches!(seen, known::Seen::Holds(_)) {
+            continue;
+        }
+        let id = identity(&file)?;
+        if id == line.id {
+            known.learn(&line.path, &id, stat);
+            continue;
+        }
+        if seen == known::Seen::Unknown {
+            if earlier.is_none() {
+                earlier = Some(earlier_ids(&Git::new(root))?);
+            }
+            if earlier
+                .as_ref()
+                .is_some_and(|ids| ids.contains(&format!("{id} {}", line.path)))
+            {
+                known.learn(&line.path, &id, stat);
+                continue;
+            }
+        }
+        moved.push(Entry {
+            id,
+            size: meta.len(),
+            path: line.path.clone(),
+        });
+    }
+    known.keep(root);
+    Ok(moved)
+}
+
+/// Every `<identity> <path>` a manifest line in the history of `git`'s `HEAD` ever named.
+fn earlier_ids(git: &Git) -> Result<std::collections::BTreeSet<String>, String> {
+    let log = git
+        .run_bytes(
+            &[
+                "-c",
+                "core.quotePath=false",
+                "log",
+                "--format=",
+                "-p",
+                "-U0",
+                "--no-ext-diff",
+                "--no-color",
+                "--no-renames",
+                "HEAD",
+                "--",
+                MANIFEST,
+            ],
+            &[],
+            None,
+        )
+        .map_err(|error| error.message())?;
+    let text = String::from_utf8_lossy(&log);
+    Ok(text
+        .lines()
+        .filter_map(|line| line.strip_prefix('+').or_else(|| line.strip_prefix('-')))
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, ' ');
+            let (id, _size, path) = (fields.next()?, fields.next()?, fields.next()?);
+            is_id(id).then(|| format!("{id} {path}"))
+        })
+        .collect())
 }
 
 /// What [`offload`] did to a save.
@@ -938,10 +1060,11 @@ impl Drop for Undo {
     }
 }
 
-/// Offloads each of `paths` (relative to `work_root`, files that exist) over `limit_bytes`:
-/// puts it, writes its line in `work_root`'s manifest (replacing a line of the same path), and
-/// names it in `exclude` (the clone's `info/exclude`), so Git leaves the file alone there. The
-/// manifest is written only when a line changed.
+/// Offloads each of `paths` (relative to `work_root`, files that exist) over `limit_bytes`,
+/// and each of `pins` ([`moved_in`]) whatever its size: puts it, writes its line in
+/// `work_root`'s manifest (replacing a line of the same path), and names it in `exclude` (the
+/// clone's `info/exclude`), so Git leaves the file alone there. The manifest is written only
+/// when a line changed.
 ///
 /// # Errors
 ///
@@ -950,6 +1073,7 @@ pub fn offload(
     plugin: &Plugin<'_>,
     work_root: &Path,
     paths: &[String],
+    pins: &[Entry],
     rule: &Rule<'_>,
     exclude: &Path,
 ) -> Result<Offloaded, String> {
@@ -969,6 +1093,20 @@ pub fn offload(
             id,
             size: meta.len(),
             path: path.clone(),
+        });
+    }
+    for pin in pins {
+        let file = work_root.join(&pin.path);
+        // The bytes as stored, and their size now: a file written again since it was read is
+        // stored as it is.
+        let id = plugin.put(&file)?;
+        let size = std::fs::metadata(&file)
+            .map_err(|error| format!("{} cannot be read: {error}", file.display()))?
+            .len();
+        offloaded.entries.push(Entry {
+            id,
+            size,
+            path: pin.path.clone(),
         });
     }
     if offloaded.entries.is_empty() {
