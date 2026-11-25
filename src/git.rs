@@ -158,6 +158,36 @@ pub struct Route {
 static ROUTES: std::sync::LazyLock<Mutex<std::collections::HashMap<PathBuf, Option<Route>>>> =
     std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
+/// BACKLOG 290: how long the calls of a store whose origin did not answer go to the hosted
+/// remote before the store asks its origin again.
+const ORIGIN_DOWN_FOR: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// BACKLOG 290: the stores whose origin did not answer while it worked through its hosted
+/// remote, by common directory: until when their calls go to the hosted remote.
+static ORIGIN_DOWN: std::sync::LazyLock<Mutex<std::collections::HashMap<PathBuf, Instant>>> =
+    std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Whether the calls of the store whose common directory is `common` go to its hosted remote
+/// now: its origin did not answer less than [`ORIGIN_DOWN_FOR`] ago ([`Git::past_origin`]).
+fn origin_down(common: &Path) -> bool {
+    let key = std::fs::canonicalize(common).unwrap_or_else(|_| common.to_path_buf());
+    let mut down = ORIGIN_DOWN.lock().unwrap_or_else(PoisonError::into_inner);
+    match down.get(&key) {
+        Some(until) if *until > Instant::now() => true,
+        Some(_) => {
+            down.remove(&key);
+            false
+        }
+        None => false,
+    }
+}
+
+/// BACKLOG 290: whether a call's answer says it reached no host ([`HOST_UNREACHED`]), so the
+/// remote took nothing.
+fn never_connected(stderr: &str) -> bool {
+    HOST_UNREACHED.iter().any(|words| stderr.contains(words))
+}
+
 /// Finds the route of a store from its common directory ([`resolve_routes_with`]).
 pub type ResolveRoute = fn(&Path) -> Result<Option<Route>, String>;
 
@@ -1302,23 +1332,23 @@ impl Git {
         input: Option<&[u8]>,
         timeout: std::time::Duration,
     ) -> Result<Output, GitError> {
-        let timeout = bound_for(args, timeout);
+        let asked = bound_for(args, timeout);
         let args_display = args.join(" ");
         // BACKLOG 218: a call to a remote ends by this process's deadline, and none starts after it.
         let timeout = if talks_to_remote(args) {
-            crate::deadline::bounded(timeout).ok_or_else(|| GitError::Deadline {
+            crate::deadline::bounded(asked).ok_or_else(|| GitError::Deadline {
                 args: args_display.clone(),
             })?
         } else {
-            timeout
+            asked
         };
         // 0.7.0: a call the store's origin serves goes there ([`through_origin`]).
-        let routed = if talks_to_remote(args) {
+        let mut routed = if talks_to_remote(args) {
             self.route_for(args)?
         } else {
             None
         };
-        let run = || {
+        let run = |routed: Option<&Route>, timeout: std::time::Duration| {
             let mut cmd = self.command();
             cmd.args(as_formatted(args));
             if fetches_blobs(args) {
@@ -1327,7 +1357,7 @@ impl Git {
             for (key, value) in envs {
                 cmd.env(key, value);
             }
-            if let Some(route) = &routed {
+            if let Some(route) = routed {
                 for (key, value) in route_env(route) {
                     cmd.env(key, value);
                 }
@@ -1335,8 +1365,38 @@ impl Git {
             run_bounded_for(cmd, &args_display, input, timeout)
         };
         let began = std::time::Instant::now();
-        let output = run();
+        let mut output = run(routed.as_ref(), timeout);
         record_time(args, began.elapsed());
+        // BACKLOG 290: a call its origin never answered goes to the hosted remote while the
+        // origin works through it, within what is left of the process's deadline.
+        let past = match (&routed, &output) {
+            (Some(route), Ok(failed))
+                if !failed.status.success()
+                    && never_connected(&String::from_utf8_lossy(&failed.stderr)) =>
+            {
+                Some(self.past_origin(route, &String::from_utf8_lossy(&failed.stderr)))
+            }
+            _ => None,
+        };
+        match past {
+            Some(Ok(())) => {
+                routed = None;
+                if let Some(left) = crate::deadline::bounded(asked) {
+                    let began = std::time::Instant::now();
+                    output = run(None, left);
+                    record_time(args, began.elapsed());
+                }
+            }
+            Some(Err(why)) => {
+                // A caller may keep the call's failure without its words (a merge queued for a
+                // remote it cannot reach), so the process says why it waits as well.
+                eprintln!("{}", why.trim());
+                if let Ok(failed) = &mut output {
+                    failed.stderr.extend_from_slice(why.as_bytes());
+                }
+            }
+            None => {}
+        }
         // G617, G618: a push, landed or not, may have changed what the remote holds, so no sweep
         // that began before it ends serves a status read, unless the store holds what it sent.
         if args.first() == Some(&"push")
@@ -1355,7 +1415,7 @@ impl Git {
         }
         match self.fetch_named(&absent, timeout) {
             None => Ok(output),
-            Some(Ok(())) => run(),
+            Some(Ok(())) => run(routed.as_ref(), timeout),
             // A `--batch` read answers `<name> missing` and exits 0 for a path its tree lacks and
             // for a blob the store lacks alike: one the tree names that no fetch could bring is
             // an error, never read as absent.
@@ -1392,7 +1452,79 @@ impl Git {
             args: args.join(" "),
             stderr: format!("bay origin: {why}"),
         })?;
+        // BACKLOG 290: the calls of a store whose origin did not answer go to the hosted remote
+        // for a while.
+        if route.is_some() && origin_down(&common) {
+            return Ok(None);
+        }
         Ok(route.filter(|route| through_origin(args, Some(&route.trunk))))
+    }
+
+    /// BACKLOG 290: whether a call `route` sent to an origin that never answered (`why`) goes
+    /// to the hosted remote instead. It does while the hosted remote holds no
+    /// [`crate::names::ORIGIN_TAILS`]: an origin that works through its hosted remote takes nothing the
+    /// hosted remote lacks, and it takes what other writers write there. Then this store's calls
+    /// go to the hosted remote for [`ORIGIN_DOWN_FOR`]. An origin that tails may hold what the
+    /// hosted remote lacks, so the call waits for it (ruling R5).
+    ///
+    /// # Errors
+    ///
+    /// What to add to the call's own answer: the origin tails, or the hosted remote did not say.
+    fn past_origin(&self, route: &Route, why: &str) -> Result<(), String> {
+        let origin = crate::origin::shown(&route.origin);
+        let unreachable = format!("\nbay origin: ORIGIN_UNREACHABLE {origin}");
+        let Some(hosted) = route.hosted.first() else {
+            return Err(format!("{unreachable}: the store names no hosted remote\n"));
+        };
+        let Some(bound) = crate::deadline::bounded(GIT_NETWORK_TIMEOUT) else {
+            return Err(format!(
+                "{unreachable}: no time is left to ask the hosted remote\n"
+            ));
+        };
+        let shown_hosted = crate::origin::shown(hosted);
+        let mut cmd = self.command();
+        cmd.args([
+            "ls-remote",
+            "--refs",
+            hosted.as_str(),
+            crate::names::ORIGIN_TAILS,
+        ]);
+        let display = format!(
+            "ls-remote --refs {shown_hosted} {}",
+            crate::names::ORIGIN_TAILS
+        );
+        let began = Instant::now();
+        let read = run_bounded_for(cmd, &display, None, bound);
+        record_time(&["ls-remote"], began.elapsed());
+        match read {
+            Ok(read) if read.status.success() && read.stdout.trim_ascii().is_empty() => {
+                if let Some(common) = self.store_dir() {
+                    let key = std::fs::canonicalize(&common).unwrap_or_else(|_| common.clone());
+                    ORIGIN_DOWN
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .insert(key, Instant::now() + ORIGIN_DOWN_FOR);
+                }
+                let first = why.lines().find(|line| never_connected(line)).unwrap_or("");
+                eprintln!(
+                    "bay origin: ORIGIN_UNREACHABLE {origin}: {}; it works through {shown_hosted}, so this store's calls go there for {} s",
+                    first.trim(),
+                    ORIGIN_DOWN_FOR.as_secs()
+                );
+                Ok(())
+            }
+            Ok(read) if read.status.success() => Err(format!(
+                "{unreachable}: the origin tails, so bay waits for it\n"
+            )),
+            Ok(read) => Err(format!(
+                "{unreachable}: the hosted remote did not say whether the origin tails: {}\n",
+                String::from_utf8_lossy(&read.stderr).trim()
+            )),
+            Err(error) => Err(format!(
+                "{unreachable}: the hosted remote did not say whether the origin tails: {}\n",
+                error.message()
+            )),
+        }
     }
 
     /// G104b: fetches the objects `names` name from the promisor remote in one explicit
@@ -2754,18 +2886,20 @@ fn host_unreached(args: &[&str], stderr: &[u8]) -> bool {
         return false;
     }
     let text = String::from_utf8_lossy(stderr);
-    HOST_UNREACHED.iter().any(|words| text.contains(words))
+    never_connected(&text)
         || (command_of(args) != Some("push")
             && READ_FAULTS.iter().any(|words| text.contains(words)))
 }
 
-/// G847: the words of a call to a remote that reached no host: its name did not resolve, or no
-/// connection opened.
-const HOST_UNREACHED: [&str; 4] = [
+/// G847: the words of a call to a remote that reached no host: its name did not resolve, no
+/// connection opened, or (BACKLOG 290) the ssh server sent no greeting, so no git ran there.
+const HOST_UNREACHED: [&str; 6] = [
     "Could not resolve host",
     "Failed to connect to",
     "Couldn't connect to server",
     "ssh: connect to host",
+    "kex_exchange_identification: ",
+    "Connection timed out during banner exchange",
 ];
 
 /// G847: the words of a read from a remote that the host or the connection broke off: a server
@@ -3118,8 +3252,8 @@ fn wait_until(
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        Git, GitError, LISTED_PATH_BYTES, batch_missing, bound_for, host_unreached, path_chunks,
-        run_bounded_for, tree_path,
+        Git, GitError, LISTED_PATH_BYTES, batch_missing, bound_for, host_unreached,
+        never_connected, path_chunks, run_bounded_for, tree_path,
     };
     use crate::result::{GIT_CALL_TIMEOUT, GIT_NETWORK_TIMEOUT};
     use std::process::Command;
@@ -3152,6 +3286,25 @@ mod tests {
             &["fetch", "origin"],
             b"fatal: couldn't find remote ref refs/heads/x\n"
         ));
+    }
+
+    /// BACKLOG 290: a call that reached no git on its host is one an origin never took; a
+    /// connection that broke after it opened is not.
+    #[test]
+    fn a_call_the_origin_never_took_is_told_from_one_it_broke_off() {
+        assert!(never_connected(
+            "ssh: connect to host forge.invalid port 22: Connection timed out\nfatal: Could not read from remote repository.\n"
+        ));
+        assert!(never_connected(
+            "ssh: Could not resolve hostname forge.invalid: Name or service not known\n"
+        ));
+        assert!(never_connected(
+            "kex_exchange_identification: read: Connection reset by peer\n"
+        ));
+        assert!(!never_connected(
+            "client_loop: send disconnect: Broken pipe\nfatal: early EOF\n"
+        ));
+        assert!(!never_connected("Connection reset by peer\n"));
     }
 
     /// G847: the call itself is made again, twice, before its failure is answered.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.12
+
+- When its origin does not answer, a peer uses the hosted remote, unless the origin wrote there that it tails.
+- An origin that tails writes `refs/bay-origin/tails` to its hosted remote first, and removes it when it works through again.
+- A call whose ssh server sent no greeting is tried again, as one that reached no host.
+
 ## 0.7.11
 
 - `bay host serve` moves to a newly installed bay between passes, as a runner does.

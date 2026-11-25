@@ -233,6 +233,12 @@ fn a_tailing_origin_sends_bays_refs_after_it_takes_them_and_stays_tailing() {
     test_box.git_bare(&origin, &["config", "bay.upstreamMode", "tail"]);
     let trunk = value(&test_box, &origin, "refs/heads/main").unwrap();
 
+    // BACKLOG 290: the origin tells the hosted remote it tails before it takes a push alone.
+    let served = serve_once(&test_box, &origin);
+    assert_eq!(served["detail"]["mode"], "tail", "{served}");
+    assert_eq!(served["detail"]["tails_mark"], "written", "{served}");
+    assert!(value(&test_box, &hosted, "refs/bay-origin/tails").is_some());
+
     // A change's record goes to the origin alone; the tail sends it.
     let (id, view) = test_box.start_and_edit(&repo);
     let record = format!("refs/bay/changes/{id}");
@@ -292,6 +298,14 @@ fn a_tailing_origin_sends_bays_refs_after_it_takes_them_and_stays_tailing() {
     let served = serve_once(&test_box, &origin);
     assert_eq!(served["detail"]["mode"], "tail", "{served}");
     assert_eq!(served["detail"]["configured"], "through", "{served}");
+
+    // A person removed the tail state: the origin works through and takes its mark off the
+    // hosted remote, so a peer whose origin does not answer goes there again.
+    std::fs::remove_file(origin.join("bay/tail-state")).unwrap();
+    let served = serve_once(&test_box, &origin);
+    assert_eq!(served["detail"]["mode"], "through", "{served}");
+    assert_eq!(served["detail"]["tails_mark"], "removed", "{served}");
+    assert_eq!(value(&test_box, &hosted, "refs/bay-origin/tails"), None);
 }
 
 #[test]

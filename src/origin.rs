@@ -19,9 +19,14 @@
 //!
 //! A fleet starts in `through` mode, which is safe while a peer that does not read `[origin]`
 //! still writes to the hosted remote, and moves to `tail` when `bay host serve` has mirrored no
-//! such write for a day. Once the origin tails, its tail state keeps it in `tail` mode whatever
-//! its config says, until a person removes the state file: the hosted remote can lag the origin
-//! then, and taking the hosted remote's values would undo writes.
+//! such write for a day. BACKLOG 290: an origin whose config says `tail` tails from the serve
+//! pass that wrote [`names::ORIGIN_TAILS`] to the hosted remote and then its first tail state.
+//! A peer whose origin does not answer reads that ref on the hosted remote: while it is absent,
+//! the peer's calls go to the hosted remote instead, since an origin that works through it holds
+//! nothing the hosted remote lacks. Once the origin works through again it removes the ref.
+//! Once the origin tails, its tail state keeps it in `tail` mode whatever its config says,
+//! until a person removes the state file: the hosted remote can lag the origin then, and taking
+//! the hosted remote's values would undo writes.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -93,7 +98,7 @@ impl Mode {
 #[derive(Clone, Debug)]
 pub struct Upstream {
     pub url: String,
-    /// The mode the origin works in: its tail state keeps it in `tail` (module docs).
+    /// The mode the origin works in: `tail` while its tail state is there (module docs).
     pub mode: Mode,
     /// The mode its config names.
     pub configured: Mode,
@@ -124,10 +129,12 @@ pub fn upstream(git: &Git, dir: &Path) -> Result<Option<Upstream>, String> {
         Some("tail") => Mode::Tail,
         Some(other) => return Err(format!("{MODE_KEY} is {other:?}: it is through or tail")),
     };
+    // BACKLOG 290: an origin tails only once its tail state is written, after its hosted remote
+    // said so ([`enter_tail`]); until then it works through, whatever its config says.
     let mode = if dir.join(TAIL_STATE).exists() {
         Mode::Tail
     } else {
-        configured
+        Mode::Through
     };
     Ok(Some(Upstream {
         url,
@@ -491,6 +498,8 @@ struct Mirrored {
     strays: usize,
     /// Refs left as they were: a write moved them first.
     left: usize,
+    /// A listing of every ref showed [`names::ORIGIN_TAILS`] on the hosted remote.
+    marked: bool,
 }
 
 /// Takes into the origin the hosted remote's value of each ref under `scope` that `wanted`
@@ -506,7 +515,9 @@ fn mirror(
 ) -> Result<Mirrored, String> {
     let before = held(git, scope)?;
     let heads = scope.iter().all(|prefix| prefix.starts_with(HEADS));
-    let hosted: BTreeMap<String, String> = listing(git, url, heads)?
+    let listed = listing(git, url, heads)?;
+    let marked = !heads && listed.contains_key(names::ORIGIN_TAILS);
+    let hosted: BTreeMap<String, String> = listed
         .into_iter()
         .filter(|(name, _)| scope.iter().any(|prefix| name.starts_with(prefix)))
         .collect();
@@ -519,7 +530,10 @@ fn mirror(
         .map(|name| (name, hosted.get(name), before.get(name)))
         .filter(|(_, new, old)| new != old)
         .collect();
-    let mut mirrored = Mirrored::default();
+    let mut mirrored = Mirrored {
+        marked,
+        ..Mirrored::default()
+    };
     if changes.is_empty() {
         return Ok(mirrored);
     }
@@ -661,12 +675,12 @@ impl Tail {
         if kept.is_some() && tables.is_some() && tables == self.seen {
             return Ok(Tailed::default());
         }
-        let mut state = match kept {
-            Some(state) => state,
-            None => listing(git, url, false)?
-                .into_iter()
-                .filter(|(name, _)| tailed(name))
-                .collect(),
+        // BACKLOG 290: the first tail state is [`enter_tail`]'s, written after the hosted
+        // remote said the origin tails.
+        let Some(mut state) = kept else {
+            return Err(
+                "the tail state is gone, so the origin works through from its next pass".to_owned(),
+            );
         };
         let origin: BTreeMap<String, String> = held(git, &OWNED)?
             .into_iter()
@@ -759,6 +773,78 @@ fn differences(
         .collect()
 }
 
+/// BACKLOG 290: makes the origin at `dir` tail. It writes [`names::ORIGIN_TAILS`] to the hosted
+/// remote at `url` first, then the first tail state: what the hosted remote holds of each ref
+/// the tail sends. A push's hook reads the mode as it runs, so the origin takes no push in
+/// `tail` mode before the hosted remote says that it tails.
+///
+/// # Errors
+///
+/// The hosted remote could not be read or did not take the ref, or the state could not be
+/// written: the origin works through until a later pass makes it tail.
+fn enter_tail(git: &Git, dir: &Path, url: &str) -> Result<(), String> {
+    let hosted = listing(git, url, false)?;
+    if !hosted.contains_key(names::ORIGIN_TAILS) {
+        let tree = git
+            .run_with(&["mktree"], &[], Some("".as_bytes()))
+            .map_err(|error| error.message())?;
+        let envs = [
+            ("GIT_AUTHOR_NAME", "bay origin"),
+            ("GIT_AUTHOR_EMAIL", "origin@bay.invalid"),
+            ("GIT_COMMITTER_NAME", "bay origin"),
+            ("GIT_COMMITTER_EMAIL", "origin@bay.invalid"),
+        ];
+        let mark = git
+            .run_with(
+                &[
+                    "commit-tree",
+                    &tree,
+                    "--no-gpg-sign",
+                    "-m",
+                    "bay origin tails",
+                ],
+                &envs,
+                None,
+            )
+            .map_err(|error| error.message())?;
+        let update = Update {
+            name: names::ORIGIN_TAILS.to_owned(),
+            old: String::new(),
+            new: mark,
+        };
+        let pushed = push(git, url, &[update], false, GIT_NETWORK_TIMEOUT)?;
+        if !pushed.rejected.is_empty() {
+            return Err(format!(
+                "the hosted remote did not take {}: {}",
+                names::ORIGIN_TAILS,
+                pushed.refusals()
+            ));
+        }
+    }
+    let state: BTreeMap<String, String> = hosted
+        .into_iter()
+        .filter(|(name, _)| tailed(name))
+        .collect();
+    write_state(&dir.join(TAIL_STATE), &state)
+}
+
+/// BACKLOG 290: removes [`names::ORIGIN_TAILS`] from the hosted remote at `url` once the origin
+/// works through it again, its one writer.
+fn unmark(git: &Git, url: &str) -> Result<(), String> {
+    let delete = format!(":{}", names::ORIGIN_TAILS);
+    let (code, out, err) = git
+        .run_status_for(&["push", "--porcelain", url, &delete], GIT_NETWORK_TIMEOUT)
+        .map_err(|error| error.message())?;
+    if code != 0 {
+        return Err(format!(
+            "the hosted remote did not remove {}: {}",
+            names::ORIGIN_TAILS,
+            if err.is_empty() { out } else { err }
+        ));
+    }
+    Ok(())
+}
+
 /// `bay host serve <path>`: keeps the origin at `path` and its hosted remote current (module docs)
 /// until stopped. `once` makes one whole pass and reports it.
 #[must_use]
@@ -771,12 +857,17 @@ pub fn serve(path: &Path, once: bool) -> BayResult {
 struct Pass {
     mirrored: Option<Mirrored>,
     tailed: Option<Tailed>,
+    /// BACKLOG 290: `written` or `removed`, when the pass wrote or removed
+    /// [`names::ORIGIN_TAILS`] on the hosted remote.
+    tails_mark: Option<&'static str>,
 }
 
 impl Pass {
     fn quiet(&self) -> bool {
-        self.mirrored
-            .is_none_or(|m| m.taken + m.deleted + m.left == 0)
+        self.tails_mark.is_none()
+            && self
+                .mirrored
+                .is_none_or(|m| m.taken + m.deleted + m.left == 0)
             && self
                 .tailed
                 .is_none_or(|t| t.sent + t.strays + t.refused == 0)
@@ -788,6 +879,7 @@ impl Pass {
             "upstream": shown(&upstream.url),
             "mode": upstream.mode.name(),
             "configured": upstream.configured.name(),
+            "tails_mark": self.tails_mark,
             "mirrored": self.mirrored.map(|m| json!({
                 "taken": m.taken,
                 "deleted": m.deleted,
@@ -844,14 +936,22 @@ fn run_serve(path: &Path, once: bool) -> Result<BayResult, String> {
     // G892: a serving origin moves to a new bay between passes, as a runner does.
     let mut binary = crate::executor::OwnBinary::now("origin");
     loop {
-        let upstream = upstream(&git, path)?.ok_or_else(|| {
+        let mut upstream = upstream(&git, path)?.ok_or_else(|| {
             format!(
                 "{} has no {UPSTREAM_KEY}: it is a host, not an origin",
                 path.display()
             )
         })?;
         let mut pass = Pass::default();
-        let round = serve_round(&git, path, &upstream, once, &mut tail, &mut due, &mut pass);
+        let round = serve_round(
+            &git,
+            path,
+            &mut upstream,
+            once,
+            &mut tail,
+            &mut due,
+            &mut pass,
+        );
         if once {
             round?;
             return Ok(BayResult::ok(pass.detail(path, &upstream)));
@@ -871,12 +971,17 @@ fn run_serve(path: &Path, once: bool) -> Result<BayResult, String> {
 fn serve_round(
     git: &Git,
     path: &Path,
-    upstream: &Upstream,
+    upstream: &mut Upstream,
     once: bool,
     tail: &mut Tail,
     due: &mut Due,
     pass: &mut Pass,
 ) -> Result<(), String> {
+    if upstream.mode == Mode::Through && upstream.configured == Mode::Tail {
+        enter_tail(git, path, &upstream.url)?;
+        upstream.mode = Mode::Tail;
+        pass.tails_mark = Some("written");
+    }
     if upstream.mode == Mode::Tail {
         pass.tailed = Some(tail.pass(git, path, &upstream.url)?);
     }
@@ -887,13 +992,19 @@ fn serve_round(
     if upstream.mode == Mode::Through && elapsed(due.swept, seconds(git, SWEEP_KEY, 60)) {
         due.swept = Some(now);
         due.polled = Some(now);
-        pass.mirrored = Some(mirror(
+        let swept = mirror(
             git,
             path,
             &upstream.url,
             &[HEADS, names::BAY, names::NOTES],
             &|_| true,
-        )?);
+        )?;
+        pass.mirrored = Some(swept);
+        // BACKLOG 290: an origin that works through again says so to the peers of its fleet.
+        if swept.marked {
+            unmark(git, &upstream.url)?;
+            pass.tails_mark = Some("removed");
+        }
     } else if elapsed(due.polled, seconds(git, POLL_KEY, 5)) {
         due.polled = Some(now);
         pass.mirrored = Some(mirror(git, path, &upstream.url, &[HEADS], &|_| true)?);

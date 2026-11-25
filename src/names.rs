@@ -78,6 +78,11 @@ pub const CENSUS: &str = "refs/bay/census/";
 pub const ARCHIVE_HEADS: &str = "refs/bay/archive/heads/";
 /// The enrolment registry.
 pub const REGISTRY: &str = "refs/bay/registry";
+/// `refs/bay-origin/tails` on a hosted remote: its bay origin tails (`crate::origin`), so the
+/// hosted remote may lag the origin's bay refs (BACKLOG 290). The origin writes it before it
+/// tails and removes it once it works through again. It is outside `refs/bay/`, so no mirror,
+/// tail or sweep of bay's refs moves it, and a peer reads it from the hosted remote.
+pub const ORIGIN_TAILS: &str = "refs/bay-origin/tails";
 /// The refs of the temporary history repository a check with `inputs = ["history"]` reads
 /// (G267, `crate::check`): the base the candidate was merged onto, the candidate, and the
 /// change's revision. They exist only in that repository, in the check's scratch, and are never
