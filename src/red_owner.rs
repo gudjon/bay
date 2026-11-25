@@ -122,7 +122,7 @@ fn told(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
 /// weighs most with the check and its environment, as the runner that runs a post check is
 /// chosen (G822, [`crate::bisect::rendezvous`]). Every runner names the same one; once its
 /// presence reads stale, the next one tells.
-fn teller<'a>(red: &Red, me: &'a str, live: &'a [Value]) -> &'a str {
+pub(crate) fn teller<'a>(red: &Red, me: &'a str, live: &'a [Value]) -> &'a str {
     live.iter()
         .filter(|record| crate::presence::serves(record, &red.environment))
         .filter_map(|record| record["executor"].as_str())
@@ -153,6 +153,7 @@ fn told_one(
                 actor: &record.actor,
                 said: &said(red, owns, record),
                 fix: &fix_command(record),
+                undo: None,
             },
         );
     }
@@ -381,6 +382,16 @@ fn event_id(red: &Red, owner: &str, owns: &Owns) -> Result<String, String> {
     Ok(format!("evt_{}", &id.trim_start_matches("sha256:")[..20]))
 }
 
+/// Item 98: the id of the `red_owner` event that told `culprit`, the change `red`'s evidence
+/// pins, that it broke the check (G827).
+///
+/// # Errors
+///
+/// The fields cannot be digested.
+pub(crate) fn culprit_event(red: &Red, culprit: &str) -> Result<String, String> {
+    event_id(red, culprit, &Owns::Red)
+}
+
 /// The `red_owner` event `id` of `red`, for `record`, the change it tells.
 fn event(id: &str, red: &Red, owns: &Owns, record: &ChangeRecord) -> Value {
     let mut event = json!({
@@ -411,7 +422,7 @@ fn event(id: &str, red: &Red, owns: &Owns, record: &ChangeRecord) -> Value {
 }
 
 /// The command that opens the fix: a new change of the owner's intent that names it.
-fn fix_command(record: &ChangeRecord) -> String {
+pub(crate) fn fix_command(record: &ChangeRecord) -> String {
     format!(
         "bay start {} --fixes {}",
         record.intent.reference, record.id

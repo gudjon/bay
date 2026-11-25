@@ -492,6 +492,41 @@ pub fn held_events(git: &Git) -> Result<BTreeSet<String>, String> {
         .collect())
 }
 
+/// Item 98: the event `id` the executor logs in this repository hold, read from the newest log
+/// commit whose subject names it (`event <kind> <id>`); `None` when none does.
+///
+/// # Errors
+///
+/// A git fault.
+pub fn event(git: &Git, id: &str) -> Result<Option<Value>, String> {
+    let tips = tips(git)?;
+    if tips.is_empty() {
+        return Ok(None);
+    }
+    let mut args = vec!["log".to_owned(), "--format=%H %s".to_owned()];
+    args.extend(tips.into_values());
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let listed = git.run(&args).map_err(|error| error.message())?;
+    let Some(commit) = listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .find(|(_, subject)| {
+            subject
+                .strip_prefix("event ")
+                .and_then(|rest| rest.split_whitespace().nth(1))
+                == Some(id)
+        })
+        .map(|(commit, _)| commit)
+    else {
+        return Ok(None);
+    };
+    Ok(records(git, &[commit])?
+        .into_iter()
+        .flatten()
+        .filter_map(|text| serde_json::from_str::<Value>(&text).ok())
+        .find(|record| record["schema"] == EVENT_SCHEMA && record["id"] == id))
+}
+
 /// Pushes this executor's log, best effort, so a record whose push failed reaches the remote
 /// without waiting for the next append.
 ///

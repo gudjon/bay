@@ -24,7 +24,7 @@ const POST: &str = "\n[[check]]\nid = \"suite\"\nenvironment = \"local\"\nstage 
 pub(crate) struct Trunk {
     pub(crate) test_box: TestBox,
     pub(crate) repo: PathBuf,
-    remote: PathBuf,
+    pub(crate) remote: PathBuf,
     suite_box: PathBuf,
 }
 

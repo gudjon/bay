@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.29
+
+- A runner undoes the change that turned main red when no fix comes within `[red] undo_after_s`.
+
 ## 0.7.28
 
 - The skill says what a new session hears, how each origin mode waits, and when to choose tail.

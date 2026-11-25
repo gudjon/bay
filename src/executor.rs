@@ -173,11 +173,17 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             let (told, notes): (Vec<Value>, Vec<Value>) = notes
                 .into_iter()
                 .partition(|note| note.get("red_owner").is_some());
+            let (undone, notes): (Vec<Value>, Vec<Value>) = notes
+                .into_iter()
+                .partition(|note| note.get("red_undo").is_some());
             if !notes.is_empty() {
                 detail["early_conflicts"] = json!(notes);
             }
             if !told.is_empty() {
                 detail["red_owners"] = json!(told);
+            }
+            if !undone.is_empty() {
+                detail["red_undo"] = json!(undone);
             }
             if !advanced.is_empty() {
                 detail["advanced"] = json!(advanced);
@@ -980,7 +986,7 @@ fn pass(
     };
     crate::log::push(repo, &Keys::load(&repo.git).executor_name);
     notes.extend(early_conflicts(repo, &queue));
-    notes.extend(red_owners(repo));
+    notes.extend(red_owners(repo, &records));
     let due = publish::retention_due(repo, &chains);
     let reach = within_reach(repo, &queue);
     // G788: when this pass last asked the remote whether the line's head moved.
@@ -2537,10 +2543,11 @@ fn compaction(repo: &Repo, chain: &Chain) -> Option<Value> {
     }
 }
 
-/// 0.6.3: tells the change that owns each red post check of trunk, once (`crate::red_owner`).
-/// A box that serves none of the policy's post checks judges nothing for post work (G444), so it
-/// tells nothing.
-fn red_owners(repo: &Repo) -> Vec<Value> {
+/// 0.6.3: tells the change that owns each red post check of trunk, once (`crate::red_owner`),
+/// then (item 98, `[red] undo_after_s`) undoes each culprit no fix came for in time, `records`
+/// the changes this pass read (`crate::red_undo`). A box that serves none of the policy's post checks
+/// judges nothing for post work (G444), so it tells and undoes nothing.
+fn red_owners(repo: &Repo, records: &[ChangeRecord]) -> Vec<Value> {
     let tracking = format!("{}^{{commit}}", repo.trunk_tracking_ref());
     let Ok(trunk) = repo.git.run(&["rev-parse", "--verify", "-q", &tracking]) else {
         return Vec::new();
@@ -2549,7 +2556,9 @@ fn red_owners(repo: &Repo) -> Vec<Value> {
     if !crate::bisect::serves_post_work(&repo.git, trunk) {
         return Vec::new();
     }
-    crate::red_owner::tell(repo, trunk)
+    let mut notes = crate::red_owner::tell(repo, trunk);
+    notes.extend(crate::red_undo::undo(repo, trunk, records));
+    notes
 }
 
 /// How many queue entries behind the head one probe tests (G177). The head merges for real

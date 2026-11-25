@@ -88,7 +88,8 @@ pub fn wake_outcome(repo: &Repo, outcome: &Outcome) -> Value {
 
 /// 0.6.3 (`crate::red_owner`): the change that owns a red post check of main, whose session is
 /// woken once to fix it. `event` is the `red_owner` event's id, `said` what it tells the red is,
-/// and `fix` the command that opens the fix.
+/// and `fix` the command that opens the fix. Item 98 (`crate::red_undo`): `undo` is the change a
+/// runner opened to undo it, on the `red_undo` event's wake.
 pub struct RedOwner<'a> {
     pub change: &'a str,
     pub check: &'a str,
@@ -96,6 +97,7 @@ pub struct RedOwner<'a> {
     pub actor: &'a Actor,
     pub said: &'a str,
     pub fix: &'a str,
+    pub undo: Option<&'a str>,
 }
 
 /// Asks the wake adapter, once, to wake the session that owns a red ([`red_request`]), and
@@ -219,7 +221,7 @@ pub fn outcome_request(outcome: &Outcome, machine: &str) -> Value {
 pub fn red_request(red: &RedOwner, machine: &str) -> Value {
     let said = shown(red.said, "(`bay status` names the red)");
     let line = crate::red_owner::with_fix(&said, red.fix);
-    json!({
+    let mut request = json!({
         "schema": "bay.wake/1", "op": "wake", "cause": "red",
         "change": red.change,
         "check": red.check,
@@ -228,7 +230,11 @@ pub fn red_request(red: &RedOwner, machine: &str) -> Value {
         "machine": machine,
         "urgent": true,
         "line": line,
-    })
+    });
+    if let Some(undo) = red.undo {
+        request["undo"] = json!(undo);
+    }
+    request
 }
 
 /// What the adapter did with one request.
@@ -385,8 +391,10 @@ mod outcome_tests {
             actor: &me,
             said: &said,
             fix: "bay start the fix --fixes abcd2345",
+            undo: None,
         };
         let told = red_request(&red, "m");
+        assert_eq!(told.get("undo"), None, "{told}");
         let line = told["line"].as_str().unwrap();
         assert!(
             line.ends_with(
@@ -402,6 +410,14 @@ mod outcome_tests {
             red_request(&short, "m")["line"],
             "main is red on suite. Fix it: bay start the fix --fixes abcd2345"
         );
+        // Item 98: the wake of a runner's undo names the undo.
+        let undone = RedOwner {
+            undo: Some("efgh6789"),
+            ..short
+        };
+        let told = red_request(&undone, "m");
+        assert_eq!(told["undo"], "efgh6789", "{told}");
+        assert_eq!(told["cause"], "red", "{told}");
     }
 
     /// BACKLOG 217. A talk's text of at most 200 characters is its line as it stands. A longer

@@ -351,15 +351,24 @@ pub struct View {
 /// `[red] reach` (B5): how many first-parent trunk commits a red check whose window holds no
 /// pass reads back for its last pass, so its suspect range has a good end and a culprit can be
 /// found. Default [`crate::red::DEFAULT_REACH`]; from the window to [`MAX_RED_WINDOW`].
+///
+/// `[red] undo_after_s` (item 98): how long after the owner of a red post check was told that
+/// its change broke it (`crate::red_owner`) a runner undoes that change on its own, when no fix
+/// or undo of it came in line (`crate::red_undo`). Off when absent; 0 to
+/// [`MAX_RED_UNDO_AFTER_S`].
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Red {
     pub window: Option<usize>,
     pub reach: Option<usize>,
+    pub undo_after_s: Option<u64>,
 }
 
 /// The deepest `[red] window`: each commit in it may cost one read of its evidence notes.
 pub const MAX_RED_WINDOW: usize = 10_000;
+
+/// The longest `[red] undo_after_s`: 30 days. A longer wait is no safety net.
+pub const MAX_RED_UNDO_AFTER_S: u64 = 30 * 86_400;
 
 /// The longest `[plugin.hold] timeout_s` (N-8): the hold adapter is asked before each publication.
 pub const MAX_HOLD_TIMEOUT_S: u64 = 120;
@@ -692,6 +701,13 @@ impl Config {
             return Err(format!(
                 "[red] reach = {reach}: the reach is the window ({}) to {MAX_RED_WINDOW} main commits",
                 config.red_window()
+            ));
+        }
+        if let Some(after) = config.red.as_ref().and_then(|red| red.undo_after_s)
+            && after > MAX_RED_UNDO_AFTER_S
+        {
+            return Err(format!(
+                "[red] undo_after_s = {after}: the wait is 0 to {MAX_RED_UNDO_AFTER_S} seconds"
             ));
         }
         config.validate_targets()?;
@@ -1057,6 +1073,16 @@ impl Config {
             .unwrap_or(crate::red::DEFAULT_WINDOW)
     }
 
+    /// Item 98: how long after its owner was told a red's culprit is undone by a runner
+    /// (`[red] undo_after_s`); `None`, the default: never.
+    #[must_use]
+    pub fn red_undo_after(&self) -> Option<std::time::Duration> {
+        self.red
+            .as_ref()
+            .and_then(|red| red.undo_after_s)
+            .map(std::time::Duration::from_secs)
+    }
+
     /// How many first-parent trunk commits a red check whose window holds no pass reads back
     /// for its last pass (`[red] reach`, B5): never fewer than the window.
     #[must_use]
@@ -1415,6 +1441,33 @@ product = "claude"                 # leave this table out when the box does not 
             "[red]\nwindow = -1\n",
             "[red]\nwindow = \"50\"\n",
             "[red]\nwidth = 50\n",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_automatic_undo_is_off_unless_configured_and_waits_at_most_30_days() {
+        // Item 98.
+        assert_eq!(Config::default().red_undo_after(), None);
+        let after = |text: &str| Config::parse(text).unwrap().red_undo_after();
+        assert_eq!(
+            after("[red]\nundo_after_s = 1800\n"),
+            Some(std::time::Duration::from_mins(30))
+        );
+        assert_eq!(
+            after("[red]\nundo_after_s = 0\n"),
+            Some(std::time::Duration::ZERO)
+        );
+        assert_eq!(
+            after("[red]\nundo_after_s = 2592000\n"),
+            Some(std::time::Duration::from_hours(720))
+        );
+        for text in [
+            "[red]\nundo_after_s = 2592001\n",
+            "[red]\nundo_after_s = -1\n",
+            "[red]\nundo_after_s = \"1800\"\n",
+            "[red]\nundo_after = 1800\n",
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }
