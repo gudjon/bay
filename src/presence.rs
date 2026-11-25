@@ -15,7 +15,8 @@
 //! costs a fixed number of git spawns (one config read, four plumbing calls, one push) whatever
 //! the queue or the history holds, and a pass within a heartbeat of the last write spawns none.
 //! The write is best effort: a failure never stops the executor, and its outcome is kept in
-//! `<git-common-dir>/bay/presence-push.json`, which `bay doctor --role runner` shows.
+//! `<git-common-dir>/bay/presence-push.json`, which `bay doctor --role runner` shows. A pass
+//! writes it on a thread of its own and goes on at once (BACKLOG 277): one write at a time.
 //!
 //! A reader judges a presence by its age: the larger of its age on the reader's clock since the
 //! fetch that first brought it, and its own time against the reader's clock. So a presence first
@@ -25,6 +26,8 @@
 //! names an operation it drives, since an executor inside an operation writes nothing.
 
 use std::path::Path;
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -73,6 +76,8 @@ pub struct Beat {
     last: Option<Instant>,
     /// The last write's outcome, for `--once`'s detail.
     pub outcome: Option<Value>,
+    /// BACKLOG 277: the write [`Self::publish_beside`] started, until its outcome is taken.
+    beside: Option<JoinHandle<Value>>,
 }
 
 impl Beat {
@@ -85,6 +90,7 @@ impl Beat {
             interval_s: interval.as_secs(),
             last: None,
             outcome: None,
+            beside: None,
         }
     }
 
@@ -142,10 +148,17 @@ impl Beat {
                 Some(Instant::now())
             },
             outcome: None,
+            beside: None,
         };
+        // BACKLOG 277: a write the pass started beside it ends on this thread, never on the path
+        // of `work`; the thread beats after it.
+        let started = self.beside.take();
         let done = std::sync::atomic::AtomicBool::new(false);
         let out = std::thread::scope(|scope| {
             scope.spawn(|| {
+                if let Some(outcome) = started.and_then(|write| write.join().ok()) {
+                    ticker.outcome = Some(outcome);
+                }
                 if first {
                     ticker.publish(repo, Some(holding), queue_depth);
                 }
@@ -182,11 +195,43 @@ impl Beat {
         self.last = Some(Instant::now());
         let keys = Keys::load(&repo.git);
         let record = self.record(repo, &keys, holding, queue_depth);
-        let outcome =
-            write(repo, &keys, &record).and_then(|(name, commit)| push(repo, &name, &commit));
-        let kept = outcome.unwrap_or_else(|why| json!({"pushed": false, "why": why}));
-        keep(repo, &kept);
-        self.outcome = Some(kept);
+        self.outcome = Some(written(repo, &keys, &record));
+    }
+
+    /// BACKLOG 277 (a fleet measurement, 2026-11-24: an idle pass pushed its presence on its
+    /// own path, 4.8 to 6.1 s of a pass of about 15 s): as [`Self::publish`], but the write and
+    /// its push run on a thread of their own, so the pass goes on at once. While one runs, none
+    /// starts. The next beat takes its outcome ([`Self::during`], [`Self::meanwhile`]), or
+    /// [`Self::settle`] does.
+    pub fn publish_beside(
+        &mut self,
+        shared: &Arc<Repo>,
+        holding: Option<&str>,
+        queue_depth: usize,
+    ) {
+        if self.beside.as_ref().is_some_and(JoinHandle::is_finished) {
+            self.settle();
+        }
+        if self.beside.is_some()
+            || self
+                .last
+                .is_some_and(|last| last.elapsed() < shared.config.heartbeat())
+        {
+            return;
+        }
+        self.last = Some(Instant::now());
+        let keys = Keys::load(&shared.git);
+        let record = self.record(shared, &keys, holding, queue_depth);
+        let repo = Arc::clone(shared);
+        self.beside = Some(std::thread::spawn(move || written(&repo, &keys, &record)));
+    }
+
+    /// Waits for the write [`Self::publish_beside`] started and takes its outcome: before
+    /// `--once` reports it, and before the process ends or runs another binary.
+    pub fn settle(&mut self) {
+        if let Some(outcome) = self.beside.take().and_then(|write| write.join().ok()) {
+            self.outcome = Some(outcome);
+        }
     }
 
     fn record(&self, repo: &Repo, keys: &Keys, holding: Option<&str>, queue_depth: usize) -> Value {
@@ -205,6 +250,14 @@ impl Beat {
             "queue_depth": queue_depth,
         })
     }
+}
+
+/// Writes `record` as this executor's presence and pushes it; keeps and gives the outcome.
+fn written(repo: &Repo, keys: &Keys, record: &Value) -> Value {
+    let outcome = write(repo, keys, record).and_then(|(name, commit)| push(repo, &name, &commit));
+    let kept = outcome.unwrap_or_else(|why| json!({"pushed": false, "why": why}));
+    keep(repo, &kept);
+    kept
 }
 
 /// Writes `record` as this executor's presence commit and points the local presence ref at it:

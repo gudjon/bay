@@ -9,6 +9,9 @@
 //!   changes in line for conflicts.
 //! - A runner that lands takes the next head before it probes the line for conflicts, and its
 //!   landing's record and terminal record ride in its landing's own push (G864).
+//! - BACKLOG 277 (a fleet measurement, 2026-11-24: an idle pass pushed its presence on its own
+//!   path, 4.8 to 6.1 s of a pass of about 15 s): a pass pushes its presence on a thread of its
+//!   own, and `--once` still reports the push.
 //!
 //! Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file (G171).
 //!
@@ -372,4 +375,39 @@ fn a_runner_that_lands_takes_the_next_head_before_its_probes_and_records_in_one_
         left.trim().is_empty(),
         "the landed head's lease stays: {left}"
     );
+}
+
+/// BACKLOG 277: a pass pushes its presence beside it, never on its own thread, and `--once`
+/// waits for the push before it reports it.
+#[test]
+fn a_pass_pushes_its_presence_beside_it_and_once_reports_the_push() {
+    let test_box = support::TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let remote = test_box.path().join("repo-remote.git");
+    test_box.seed_with_check(
+        &repo,
+        &[("src/a.rs", "fn a() {}\n")],
+        &support::unchecked_files(),
+    );
+    let executor = test_box.clone_of(&remote, "executor");
+    let trace = test_box.path().join("trace.jsonl");
+    let (code, once) = support::result_json(
+        test_box
+            .bay(&executor)
+            .env("BAY_TEST_GIT_TRACE", &trace)
+            .args(["runner", "run", "--once"]),
+    );
+    assert_eq!(code, 0, "{once}");
+    assert_eq!(once["detail"]["presence"]["pushed"], true, "{once}");
+    let pushes: Vec<Value> = std::fs::read_to_string(&trace)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|call| {
+            let args = call["args"].to_string();
+            args.contains("\"push\"") && args.contains("refs/bay/executor/")
+        })
+        .collect();
+    assert_eq!(pushes.len(), 1, "one presence push: {pushes:?}");
+    assert_ne!(pushes[0]["thread"], "ThreadId(1)", "{pushes:?}");
 }

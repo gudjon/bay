@@ -106,7 +106,10 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         let repo = match open_pass(dir, &mut started) {
             Ok(repo) => repo,
             Err(error) => match ends(*error, retries, dir, interval) {
-                Some(result) => return result,
+                Some(result) => {
+                    beat.settle();
+                    return result;
+                }
                 None => continue,
             },
         };
@@ -136,7 +139,10 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         ) {
             Ok(ran) => ran,
             Err(message) => match ends(BayResult::failed(message), retries, dir, interval) {
-                Some(result) => return result,
+                Some(result) => {
+                    beat.settle();
+                    return result;
+                }
                 None => continue,
             },
         };
@@ -150,6 +156,7 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
         // starts the installed binary, a new one too.
         if !once && drain.asked() {
             if let Some(drained) = drain.point(&mut post, &mut ran) {
+                beat.settle();
                 return drained;
             }
         } else if !once
@@ -157,9 +164,11 @@ pub fn run(dir: &Path, once: bool, interval: Duration) -> BayResult {
             && let Some(moved) =
                 reexec_point(&mut binary, moves, (&mut post, &mut waits_for), &mut ran)
         {
+            beat.settle();
             return moved;
         }
         if once {
+            beat.settle();
             let mut detail = json!({"ran": ran});
             let (told, notes): (Vec<Value>, Vec<Value>) = notes
                 .into_iter()
@@ -960,7 +969,8 @@ fn pass(
         .next()
         .map(|op| op.op_id.as_str());
     let depth = live_depth(&queue);
-    beat.publish(repo, holding, depth);
+    // BACKLOG 277: the pass goes on while its presence is pushed.
+    beat.publish_beside(shared, holding, depth);
     // An event a past run lost between the chain and the log is written now (G9), and a log
     // record whose push failed is pushed again.
     let mut recovered = match publish::recover_events(repo, &records) {

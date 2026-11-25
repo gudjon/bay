@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.14
+
+- A runner pushes its presence beside its pass, so an idle pass no longer waits for that push.
+
 ## 0.7.13
 
 - A queued change names the head it waits behind and that head's holder, on the runner's line too.
