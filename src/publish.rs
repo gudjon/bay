@@ -3029,13 +3029,16 @@ fn publish_checked(
     // nothing lands without them. A chain the remote moved meanwhile took them back.
     let flushed = ctx.flush_riding();
     // A refused landing reads the chain again first, as a landing before G864 read it before its
-    // push. A refusal on a main that moved, or at the hook's time bound, is answered as any
-    // refused publishing push is: a second push would be a second such refusal, uncounted. On an
-    // unmoved main the landing goes as before G864: trunk pushed alone, and the records after it.
+    // push. A refusal on a main that moved, at the hook's time bound, or for a ref lock another
+    // process holds on the remote (G128; under reftable one lock holds every ref, so it refused the
+    // flush too) is answered as any refused publishing push is: a second push would be a second
+    // such refusal, uncounted. On an unmoved main the landing goes as before G864: trunk pushed
+    // alone, and the records after it.
     if let Some(report) = still_owner(ctx, op_id, revision)? {
         return Ok(Some(report));
     }
     if refused.contains(Reason::HookTimeout.code())
+        || held_lock(&refused)
         || !ctx.repo.fetch_trunk().is_ok_and(|now| now == *trunk)
     {
         // The push may have landed before its answer was lost, whatever the flush said: main tells.
