@@ -3437,7 +3437,7 @@ fn pass_over_held(
     let git = &ctx.repo.git;
     let me = ctx.executor_name();
     let mut taken = Vec::new();
-    let mut theirs = Vec::new();
+    let mut theirs = throughput::Own::default();
     let mut unknown = false;
     for queued in behind.iter_mut() {
         if !queued.live || queued.holder.as_ref().is_none_or(|holder| *holder == me) {
@@ -3445,8 +3445,8 @@ fn pass_over_held(
         }
         queued.batchable = false;
         taken.push(queued.seq);
-        match own_paths(git, trunk, &queued.revision)? {
-            Some(paths) => theirs.extend(paths),
+        match own_change(git, trunk, &queued.revision)? {
+            Some(own) => theirs.absorb(own),
             None => unknown = true,
         }
     }
@@ -3489,7 +3489,7 @@ fn readmit_read(
         if !passers.contains(&queued.seq) {
             continue;
         }
-        let ours = own_paths(git, trunk, &queued.revision)?.unwrap_or_default();
+        let ours = own_change(git, trunk, &queued.revision)?.unwrap_or_default();
         let revisions = members.iter().map(|member| member.revision.as_str());
         if !reads_none_of(git, policy, trunk, revisions, &ours)? {
             queued.batchable = true;
@@ -5293,9 +5293,10 @@ const PASSES_PER_ENTRY: u32 = 3;
 /// It does when evidence reuse is on, it changes no `.bay/` path, and for each live entry ahead
 /// the pre-merge checks that entry requires read, as far as the policy at `trunk` says, none of
 /// its paths, and main moved under that entry fewer than [`PASSES_PER_ENTRY`] times. A check's
-/// reads are its changed files and `paths` for `materialize = "changed"`, else its `paths` (or
-/// `when_paths`) for `footprint = "observed"`, whose record is carried across an unrelated merge
-/// byte for byte. Any other check, or one that reads history, is read as reading everything:
+/// reads are its changed files and `paths` for `materialize = "changed"`, else for
+/// `footprint = "observed"`, whose record is carried across an unrelated merge byte for byte,
+/// what its records on main near `trunk` read and listed (G907), or with none its `paths` (or
+/// `when_paths`). Any other check, or one that reads history, is read as reading everything:
 /// footprint lanes (`footprint = true`) keep their own order, a pre-check and queue order (G257).
 ///
 /// It is a prediction of cost, never of correctness: the entry passed rebuilds its candidate
@@ -5318,7 +5319,7 @@ fn passes_unread(
     if policy.unchecked || policy.checks.is_empty() {
         return Ok(false);
     }
-    let Some(ours) = own_paths(git, trunk, revision)? else {
+    let Some(ours) = own_change(git, trunk, revision)? else {
         return Ok(false);
     };
     let ahead = queue.ahead_of(place);
@@ -5352,15 +5353,16 @@ fn passes_unread(
     Ok(true)
 }
 
-/// Whether the pre-merge checks of the changes at `revisions` on `trunk` read none of `ours`,
-/// as far as `policy` says (see [`passes_unread`]): false when one of them changes nothing or a
-/// `.bay/` path, or one of the checks may read anything.
+/// Whether the pre-merge checks of the changes at `revisions` on `trunk` read none of what
+/// `ours` changes, as far as `policy` and their records near main say (see [`passes_unread`]):
+/// false when one of them changes nothing or a `.bay/` path, or one of the checks may read
+/// anything.
 fn reads_none_of<'r>(
     git: &Git,
     policy: &policy::Policy,
     trunk: &str,
     revisions: impl IntoIterator<Item = &'r str>,
-    ours: &[String],
+    ours: &throughput::Own,
 ) -> Result<bool, String> {
     let mut theirs = Vec::new();
     for revision in revisions {
@@ -5369,10 +5371,10 @@ fn reads_none_of<'r>(
         };
         theirs.extend(paths);
     }
-    let Some(reads) = predicted_reads(policy, &theirs) else {
+    let Some(reads) = predicted_reads(git, policy, trunk, &theirs) else {
         return Ok(false);
     };
-    Ok(!throughput::Footprint::Globs(reads).overlaps(&throughput::Footprint::Globs(ours.to_vec())))
+    Ok(!reads.meets(ours))
 }
 
 /// The paths `revision` changes from where it meets `trunk`; `None` when it changes none, or a
@@ -5388,16 +5390,34 @@ fn own_paths(git: &Git, trunk: &str, revision: &str) -> Result<Option<Vec<String
     Ok(Some(changed))
 }
 
-/// What the pre-merge checks a change of `changed` requires under `policy` read, as globs;
-/// `None` when one of them may read anything (see [`passes_unread`]).
-fn predicted_reads(policy: &policy::Policy, changed: &[String]) -> Option<Vec<String>> {
+/// G907: [`own_paths`] of `revision` with the directories whose entry names it changes on
+/// `trunk` ([`throughput::Own`]); `None` as for [`own_paths`].
+fn own_change(git: &Git, trunk: &str, revision: &str) -> Result<Option<throughput::Own>, String> {
+    let Ok(base) = git.run(&["merge-base", trunk, revision]) else {
+        return Ok(None);
+    };
+    let own = throughput::Own::of(git, (&base, revision), trunk)?;
+    if own.paths.is_empty() || own.paths.iter().any(|path| path.starts_with(".bay/")) {
+        return Ok(None);
+    }
+    Ok(Some(own))
+}
+
+/// What the pre-merge checks a change of `changed` requires under `policy` read; `None` when
+/// one of them may read anything (see [`passes_unread`]). G907: an observed check with records
+/// on main near `trunk` reads what they read and listed, exactly, and the changed paths; one
+/// with none reads its `paths` (or `when_paths`) by their literal prefixes.
+fn predicted_reads(
+    git: &Git,
+    policy: &policy::Policy,
+    trunk: &str,
+    changed: &[String],
+) -> Option<throughput::Reads> {
     let (required, _) = policy.required(changed);
-    let mut reads = Vec::new();
+    let mut reads = throughput::Reads::default();
     for entry in required {
-        let check = policy.check(&crate::evidence::CheckId::new(
-            &entry.id,
-            &entry.environment,
-        ))?;
+        let id = crate::evidence::CheckId::new(&entry.id, &entry.environment);
+        let check = policy.check(&id)?;
         if check.stage == policy::Stage::Post {
             continue;
         }
@@ -5405,14 +5425,19 @@ fn predicted_reads(policy: &policy::Policy, changed: &[String]) -> Option<Vec<St
             return None;
         }
         if check.changed_only() {
-            reads.extend(changed.iter().cloned());
-            reads.extend(check.paths.iter().flatten().cloned());
+            reads.globs.extend(changed.iter().cloned());
+            reads.globs.extend(check.paths.iter().flatten().cloned());
             continue;
         }
         if check.footprint != policy::FootprintMode::Observed {
             return None;
         }
-        reads.extend(
+        if let Some(seen) = throughput::observed_near(git, trunk, &id) {
+            reads.globs.extend(changed.iter().cloned());
+            reads.observed.push(seen);
+            continue;
+        }
+        reads.globs.extend(
             check
                 .paths
                 .as_ref()

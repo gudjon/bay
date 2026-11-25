@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.25
+
+- A check's log names how long bay took to make its tree, and whether the tree was whole or part.
+- A change merges past a head in its check when that check's records on main never read or listed it.
+
 ## 0.7.24
 
 - A batch with footprint lanes ends at a change whose slowest check is slower than the head's slowest.

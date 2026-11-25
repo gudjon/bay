@@ -459,6 +459,223 @@ fn literal_prefix(glob: &str) -> &str {
     glob.find(['*', '?', '[']).map_or(glob, |at| &glob[..at])
 }
 
+/// G907 (a fleet measurement, 2026-11-25: on a repository whose whole-tree check lists `**`, no
+/// change ever passed a head in its check, since a glob's literal prefix meets every path): what
+/// a change does to a tree as an observed footprint reads it: the paths it changes, and the
+/// directories whose entry names it changes. A path it adds names its directory, and each
+/// directory above that the tree it lands on lacks; a path it deletes names its directory, and
+/// each directory above that the change leaves empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Own {
+    pub paths: Vec<String>,
+    pub listings: std::collections::BTreeSet<String>,
+}
+
+impl Own {
+    /// What `revision` changes from `base`, landed on `onto`.
+    ///
+    /// # Errors
+    ///
+    /// A git fault.
+    pub fn of(git: &Git, (base, revision): (&str, &str), onto: &str) -> Result<Self, String> {
+        let out = git
+            .run(&[
+                "diff-tree",
+                "-r",
+                "-z",
+                "--name-status",
+                "--no-renames",
+                base,
+                revision,
+            ])
+            .map_err(|error| error.message())?;
+        let mut fields = out.split('\0').filter(|field| !field.is_empty());
+        let (mut paths, mut added, mut deleted) = (Vec::new(), Vec::new(), Vec::new());
+        while let (Some(status), Some(path)) = (fields.next(), fields.next()) {
+            match status {
+                "A" => added.push(path),
+                "D" => deleted.push(path),
+                _ => {}
+            }
+            paths.push(path.to_owned());
+        }
+        paths.sort_unstable();
+        let mut listings = listings_changed(git, onto, &added)?;
+        listings.extend(listings_changed(git, revision, &deleted)?);
+        Ok(Self { paths, listings })
+    }
+
+    /// Adds what `other` changes to this.
+    pub fn absorb(&mut self, other: Self) {
+        self.paths.extend(other.paths);
+        self.listings.extend(other.listings);
+    }
+}
+
+/// The directories whose entry names change when each of `paths` comes or goes: its directory,
+/// and each one above it that `tree` lacks, up to the root (`""`). One `cat-file` reads them all.
+fn listings_changed(
+    git: &Git,
+    tree: &str,
+    paths: &[&str],
+) -> Result<std::collections::BTreeSet<String>, String> {
+    let parent = |path: &str| path.rsplit_once('/').map_or("", |(dir, _)| dir).to_owned();
+    let mut asked = std::collections::BTreeSet::new();
+    for path in paths {
+        let mut dir = parent(path);
+        while !dir.is_empty() && asked.insert(dir.clone()) {
+            dir = parent(&dir);
+        }
+    }
+    // A name git cannot take on one line of input is read as absent: its parent is named too.
+    asked.retain(|dir| !dir.contains('\n'));
+    let mut present = std::collections::HashSet::new();
+    if !asked.is_empty() {
+        let input = asked.iter().fold(String::new(), |mut input, dir| {
+            input.push_str(tree);
+            input.push(':');
+            input.push_str(dir);
+            input.push('\n');
+            input
+        });
+        let out = git
+            .run_with(&["cat-file", "--batch-check"], &[], Some(input.as_bytes()))
+            .map_err(|error| error.message())?;
+        for (dir, line) in asked.iter().zip(out.lines()) {
+            if line.split(' ').nth(1) == Some("tree") {
+                present.insert(dir.as_str());
+            }
+        }
+    }
+    let mut changed = std::collections::BTreeSet::new();
+    for path in paths {
+        let mut dir = parent(path);
+        loop {
+            changed.insert(dir.clone());
+            if dir.is_empty() || present.contains(dir.as_str()) {
+                break;
+            }
+            dir = parent(&dir);
+        }
+    }
+    Ok(changed)
+}
+
+/// G907: the files a check read and the directories it listed, in the observed footprints of
+/// its records near main ([`observed_near`]).
+#[derive(Debug, Default)]
+pub struct Observed {
+    pub read: std::collections::HashSet<String>,
+    pub listed: std::collections::HashSet<String>,
+}
+
+/// G907: what the pre-merge checks of the changes ahead read, as bay predicts it: globs, read by
+/// their literal prefixes as [`Footprint::overlaps`] reads them, and observed footprints, read
+/// exactly as a carried record is ([`same_observed`]).
+#[derive(Debug, Default)]
+pub struct Reads {
+    pub globs: Vec<String>,
+    pub observed: Vec<std::sync::Arc<Observed>>,
+}
+
+impl Reads {
+    /// Whether a check of these reads what `own` changes.
+    #[must_use]
+    pub fn meets(&self, own: &Own) -> bool {
+        own.paths.iter().any(|path| {
+            self.globs.iter().any(|glob| globs_overlap(glob, path))
+                || self.observed.iter().any(|seen| seen.read.contains(path))
+        }) || own
+            .listings
+            .iter()
+            .any(|dir| self.observed.iter().any(|seen| seen.listed.contains(dir)))
+    }
+}
+
+/// How many first-parent commits of main [`observed_near`] reads the records of.
+const NEAR_COMMITS: usize = 8;
+/// How many of the newest records there [`observed_near`] unites.
+const NEAR_RECORDS: usize = 3;
+/// How long one process reuses what [`observed_near`] read for one main and check.
+const NEAR_FOR: std::time::Duration = std::time::Duration::from_secs(60);
+
+type NearCache = std::collections::HashMap<
+    (String, String, String),
+    (std::time::Instant, Option<std::sync::Arc<Observed>>),
+>;
+static NEAR: std::sync::LazyLock<std::sync::Mutex<NearCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// G907: what check `id` read and listed on main near `trunk`: the union of the observed
+/// footprints of its newest [`NEAR_RECORDS`] records on the trees of the first [`NEAR_COMMITS`]
+/// first-parent commits from `trunk`, where a landing's records and a runner's warm records
+/// sit. `None` when there is none, or the records cannot be read: the check's declared globs
+/// stand in then. A prediction of cost only, like every pass ([`Own`]).
+#[must_use]
+pub fn observed_near(
+    git: &Git,
+    trunk: &str,
+    id: &crate::evidence::CheckId,
+) -> Option<std::sync::Arc<Observed>> {
+    let key = (trunk.to_owned(), id.id.clone(), id.environment.clone());
+    let mut cache = NEAR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((at, seen)) = cache.get(&key)
+        && at.elapsed() < NEAR_FOR
+    {
+        return seen.clone();
+    }
+    let seen = read_near(git, trunk, id).map(std::sync::Arc::new);
+    if cache.len() >= 64 {
+        cache.clear();
+    }
+    cache.insert(key, (std::time::Instant::now(), seen.clone()));
+    seen
+}
+
+fn read_near(git: &Git, trunk: &str, id: &crate::evidence::CheckId) -> Option<Observed> {
+    let count = NEAR_COMMITS.to_string();
+    let trees = git
+        .run(&["log", "--first-parent", "-n", &count, "--format=%T", trunk])
+        .ok()?;
+    let trees: Vec<&str> = trees.lines().collect();
+    let mut records: Vec<EvidenceRecord> = crate::evidence::records_for_many(git, &trees)
+        .ok()?
+        .into_iter()
+        .flatten()
+        .filter(|record| record.kind == crate::evidence::KIND_CHECK && record.check == *id)
+        .filter(|record| observed_paths(record).is_some())
+        .collect();
+    records.sort_by(|a, b| b.at.cmp(&a.at));
+    let mut seen = Observed::default();
+    for record in records.iter().take(NEAR_RECORDS) {
+        let (read, listed) = observed_paths(record)?;
+        seen.read.extend(read);
+        seen.listed.extend(listed);
+    }
+    (!records.is_empty()).then_some(seen)
+}
+
+/// The files read and directories listed in `record`'s observed footprint; `None` when it has none.
+fn observed_paths(record: &EvidenceRecord) -> Option<(Vec<String>, Vec<String>)> {
+    let held = record
+        .unknown
+        .get(FOOTPRINT)
+        .filter(|held| held["observed"] == true)?;
+    let paths = |field: &str| -> Vec<String> {
+        held[field]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| row.get(0).and_then(Value::as_str).map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    Some((paths("read"), paths("listed")))
+}
+
 /// G904: the `timeout_s` of the slowest check a diff that changes `changed` requires under
 /// `policy`; 0 when it requires none. A lane ranks its members' cost by it: the policy's bound on a
 /// check is the one cost bay knows before the check runs.
@@ -665,24 +882,12 @@ pub fn same_observed(
     record: &EvidenceRecord,
     (tree, base_tree): (&str, &str),
 ) -> Result<bool, String> {
-    let Some(held) = record
-        .unknown
-        .get(FOOTPRINT)
-        .filter(|held| held["observed"] == true)
-    else {
+    let Some(held) = record.unknown.get(FOOTPRINT) else {
         return Ok(false);
     };
-    let paths = |field: &str| -> Vec<String> {
-        held[field]
-            .as_array()
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| row.get(0).and_then(Value::as_str).map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default()
+    let Some((read, listed)) = observed_paths(record) else {
+        return Ok(false);
     };
-    let (read, listed) = (paths("read"), paths("listed"));
     let ours = observed_digest(git, tree, &read, &listed)?;
     let base = observed_digest(git, base_tree, &read, &listed)?;
     Ok(held["tree"] == json!(ours.digest) && held["base_tree"] == json!(base.digest))
@@ -695,22 +900,8 @@ pub fn same_observed(
 ///
 /// A git fault, or a record with no observed footprint.
 pub fn restamp(git: &Git, record: &EvidenceRecord, trees: (&str, &str)) -> Result<Value, String> {
-    let held = record
-        .unknown
-        .get(FOOTPRINT)
-        .filter(|held| held["observed"] == true)
-        .ok_or("the record has no observed footprint")?;
-    let paths = |field: &str| -> Vec<String> {
-        held[field]
-            .as_array()
-            .map(|rows| {
-                rows.iter()
-                    .filter_map(|row| row.get(0).and_then(Value::as_str).map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    observed_stamp(git, trees, &paths("read"), &paths("listed"))
+    let (read, listed) = observed_paths(record).ok_or("the record has no observed footprint")?;
+    observed_stamp(git, trees, &read, &listed)
 }
 
 /// Whether `record` holds exactly `stamp`: the same read set, and the same digests of it in
@@ -1508,8 +1699,8 @@ pub fn roles(tags: &[Option<&str>]) -> Result<Vec<Role>, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BatchTag, Bisect, Fold, Footprint, Member, Queued, Role, checked_prefix, failure_rate,
-        fold, plan_batch, predict, roles, slowest, tree_of,
+        BatchTag, Bisect, Fold, Footprint, Member, Observed, Own, Queued, Reads, Role,
+        checked_prefix, failure_rate, fold, plan_batch, predict, roles, slowest, tree_of,
     };
     use crate::git::Git;
 
@@ -1947,5 +2138,94 @@ mod tests {
         ] {
             assert!(roles(&partial).is_err(), "{partial:?}");
         }
+    }
+
+    /// G907: a change names the directories whose entry names it changes: the directory of a
+    /// path it adds and each one above it the tree it lands on lacks, the directory of a path it
+    /// deletes and each one above it the change leaves empty; an edit names none.
+    #[test]
+    fn a_change_names_the_directories_whose_entries_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::new(dir.path());
+        let run = |args: &[&str]| git.run(args).unwrap();
+        run(&["init", "-q", "-b", "main"]);
+        run(&["config", "user.name", "t"]);
+        run(&["config", "user.email", "t@t.invalid"]);
+        let write = |path: &str| {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, path).unwrap();
+        };
+        for path in [
+            "kanban/work/a.md",
+            "kanban/activity/x.md",
+            "src/lib.rs",
+            "top.md",
+        ] {
+            write(path);
+        }
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "base"]);
+        let base = run(&["rev-parse", "HEAD"]);
+        write("kanban/new/dir/f.md");
+        write("kanban/work/b.md");
+        write("second.md");
+        std::fs::write(dir.path().join("src/lib.rs"), "edited\n").unwrap();
+        run(&["rm", "-q", "kanban/activity/x.md"]);
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "change"]);
+        let revision = run(&["rev-parse", "HEAD"]);
+        let own = Own::of(&git, (&base, &revision), &base).unwrap();
+        assert_eq!(
+            own.paths,
+            [
+                "kanban/activity/x.md",
+                "kanban/new/dir/f.md",
+                "kanban/work/b.md",
+                "second.md",
+                "src/lib.rs"
+            ]
+        );
+        let listings: Vec<&str> = own.listings.iter().map(String::as_str).collect();
+        assert_eq!(
+            listings,
+            [
+                "",
+                "kanban",
+                "kanban/activity",
+                "kanban/new",
+                "kanban/new/dir",
+                "kanban/work"
+            ]
+        );
+    }
+
+    /// G907: an observed footprint is met only by a file it read or a directory it listed whose
+    /// entries change; a glob, by its literal prefix, as before.
+    #[test]
+    fn an_observed_check_is_met_only_by_what_it_read_or_listed() {
+        let own = |paths: &[&str], listings: &[&str]| Own {
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            listings: listings.iter().map(|dir| (*dir).to_owned()).collect(),
+        };
+        let seen = Observed {
+            read: ["src/lib.rs".to_owned()].into(),
+            listed: ["kanban".to_owned()].into(),
+        };
+        let reads = Reads {
+            globs: vec!["src/b.rs".to_owned()],
+            observed: vec![std::sync::Arc::new(seen)],
+        };
+        assert!(!reads.meets(&own(&["kanban/work/a.md"], &[])));
+        assert!(!reads.meets(&own(&["kanban/work/b.md"], &["kanban/work"])));
+        assert!(reads.meets(&own(&["kanban/new/b.md"], &["kanban/new", "kanban"])));
+        assert!(reads.meets(&own(&["src/lib.rs"], &[])));
+        assert!(reads.meets(&own(&["src/b.rs"], &[])));
+        let whole = Reads {
+            globs: vec!["**".to_owned()],
+            observed: Vec::new(),
+        };
+        assert!(whole.meets(&own(&["kanban/work/a.md"], &[])));
+        assert!(!Reads::default().meets(&own(&["kanban/work/a.md"], &["kanban"])));
     }
 }

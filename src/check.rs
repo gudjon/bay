@@ -1789,6 +1789,7 @@ fn run_once(
         read_path_overlap(&limits.sandbox.read, &limits.hidden)
             .filter(|_| limits.sandbox.kind != "none")
     });
+    let making = Instant::now();
     let not_run = match refusal {
         Some(why) => Some(Judged::without_units(Verdict::InfraFailure, Some(why))),
         None => prepare(
@@ -1800,6 +1801,17 @@ fn run_once(
             (&mut *hooks.beat, limits.heartbeat),
         )?,
     };
+    // G906: the time bay spent writing the check's files, apart from the check's own seconds
+    // in its record, so a journal shows what a faster tree could save on each box.
+    if not_run.is_none() {
+        eprintln!(
+            "bay: check {} on {} tree made in {:.1}s ({})",
+            entry.id,
+            short(candidate.commit),
+            making.elapsed().as_secs_f64(),
+            tree_kind(entry, candidate),
+        );
+    }
     // G267: a check that reads history gets it through a repository of its own run, which
     // borrows the store's objects and is removed with the scratch.
     let history = if not_run.is_none() && entry.reads_history() {
@@ -2931,6 +2943,19 @@ fn prepare(
             Verdict::InfraFailure,
             Some(format!("{}; the check did not run", low.message())),
         ))),
+    }
+}
+
+/// G906: what [`prepare`] writes of a check's candidate: the whole tree or the part the check
+/// keeps, as links to the store or as files of its own (an observed footprint).
+fn tree_kind(entry: &CheckEntry, candidate: &Candidate) -> &'static str {
+    let whole = entry.materialized(candidate.changed_paths).is_none();
+    let owned = entry.footprint == crate::policy::FootprintMode::Observed;
+    match (whole, owned) {
+        (true, true) => "whole tree, own files",
+        (true, false) => "whole tree",
+        (false, true) => "part, own files",
+        (false, false) => "part",
     }
 }
 
