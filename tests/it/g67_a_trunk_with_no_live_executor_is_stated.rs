@@ -148,6 +148,42 @@ fn the_fleet_map_lists_each_executor_with_its_version_and_environments() {
     assert_eq!(own["last_push"]["pushed"], true, "{doctor}");
 }
 
+/// BACKLOG 292: `--all` never fetches, so a copy of the presences older than a row's stale
+/// window says nothing of that runner now: its `stale` is unknown, and says why.
+#[test]
+fn an_old_copy_of_the_presences_leaves_a_runner_unknown_not_stale() {
+    let (test_box, repo, _remote, executor) = seeded();
+    once(&test_box, &executor);
+    status(&test_box, &repo, 0);
+    let all = || {
+        let (code, fleet) = result_json(test_box.bay(&repo).args(["status", "--all"]));
+        assert_eq!(code, 0, "{fleet}");
+        fleet["detail"]["runners"][0].clone()
+    };
+    let fresh = all();
+    assert_eq!(fresh["stale"], false, "{fresh}");
+    assert!(fresh.get("stale_why").is_none(), "{fresh}");
+    // The sweep a status read starts records its own fetch when it ends.
+    support::sweeps_ended(&repo);
+
+    let common = test_box.git_ok(&repo, &["rev-parse", "--git-common-dir"]);
+    let record = repo.join(common.trim()).join("bay/fleet/fetched.json");
+    let mut fetched: Value =
+        serde_json::from_str(&std::fs::read_to_string(&record).unwrap()).unwrap();
+    let after = fresh["stale_after_s"].as_u64().unwrap();
+    let at = bay::clock::unix_of(fetched["at"].as_str().unwrap()).unwrap() - after - 60;
+    fetched["at"] = Value::from(bay::clock::rfc3339_of(at));
+    std::fs::write(&record, fetched.to_string()).unwrap();
+    let old = all();
+    assert_eq!(old["stale"], Value::Null, "{old}");
+    assert!(
+        old["stale_why"]
+            .as_str()
+            .is_some_and(|why| why.contains("bay status")),
+        "{old}"
+    );
+}
+
 #[test]
 fn queued_work_with_only_a_stale_presence_says_no_live_executor() {
     let (test_box, repo, _remote, executor) = seeded();

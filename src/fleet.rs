@@ -507,6 +507,11 @@ fn verified(
 
 /// G67: the executor presences of the recorded fetch, as [`crate::presence::rows`] shows them
 /// at `now`.
+///
+/// BACKLOG 292 (a fleet finding, 2026-11-25: in a runner's clone no fetching `bay status` ran for
+/// 8 h, and `--all` read every runner as stale while each pushed its presence every pass): a
+/// row is judged from the copy this store fetched, so once that copy is older than the row's
+/// `stale_after_s` its `stale` is unknown (null) and `stale_why` names the copy's age.
 fn executor_rows(repo: &Repo, fetched: &Fetched, now: u64) -> Result<Vec<Value>, String> {
     let held: Vec<crate::presence::Held> = fetched
         .executors
@@ -517,7 +522,21 @@ fn executor_rows(repo: &Repo, fetched: &Fetched, now: u64) -> Result<Vec<Value>,
             since: *since,
         })
         .collect();
-    crate::presence::rows(&repo.git, &repo.config, &held, now)
+    let mut rows = crate::presence::rows(&repo.git, &repo.config, &held, now)?;
+    // The fetch's time is on this machine's clock, never the reader's test skew.
+    let Some(copy) = unix_of(&fetched.at).map(|at| live::unix_now().saturating_sub(at)) else {
+        return Ok(rows);
+    };
+    for row in &mut rows {
+        if let Some(after) = row["stale_after_s"].as_u64().filter(|after| copy > *after) {
+            row["stale"] = Value::Null;
+            row["stale_why"] = json!(format!(
+                "this store's copy of the runners' presences was fetched {copy} s ago, more than \
+                 the {after} s a presence stays live; a `bay status` without --all fetches it again"
+            ));
+        }
+    }
+    Ok(rows)
 }
 
 /// G67, for `bay status`: the executor presences of the remote as the last recorded fetch of

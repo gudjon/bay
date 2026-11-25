@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.15
+
+- A pass ends with its work; a presence push that outlasts it finishes beside the runner.
+- `bay status --all` shows `stale` as null, and says why, when this store's copy of the presences is too old.
+
 ## 0.7.14
 
 - A runner pushes its presence beside its pass, so an idle pass no longer waits for that push.

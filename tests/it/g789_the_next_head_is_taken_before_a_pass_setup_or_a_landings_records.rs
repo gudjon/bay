@@ -12,6 +12,9 @@
 //! - BACKLOG 277 (a fleet measurement, 2026-11-24: an idle pass pushed its presence on its own
 //!   path, 4.8 to 6.1 s of a pass of about 15 s): a pass pushes its presence on a thread of its
 //!   own, and `--once` still reports the push.
+//! - 277b (a fleet measurement, 2026-11-25: the pass's post work waited for that push to end,
+//!   so the wait between passes began ~5.9 s late): a looping runner's next pass starts while a
+//!   slow presence push runs, and no second presence push starts before it ends.
 //!
 //! Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file (G171).
 //!
@@ -375,6 +378,87 @@ fn a_runner_that_lands_takes_the_next_head_before_its_probes_and_records_in_one_
         left.trim().is_empty(),
         "the landed head's lease stays: {left}"
     );
+}
+
+/// 277b: a slow presence push outlasts the pass's post work; the runner goes on to its wait and
+/// its next pass meanwhile, and starts no other presence push until that one ends. Guard to
+/// mutate, in `src/presence.rs`: `Beat::beating` (join the started write inside the scope, as
+/// 0.7.14 did, and no call of the runner's own thread starts during the push).
+#[test]
+fn a_runner_goes_on_while_a_slow_presence_push_runs() {
+    let test_box = support::TestBox::new();
+    let repo = test_box.repo_any("repo");
+    let remote = test_box.path().join("repo-remote.git");
+    test_box.seed_with_check(
+        &repo,
+        &[("src/a.rs", "fn a() {}\n")],
+        &support::unchecked_files(),
+    );
+    let executor = test_box.clone_of(&remote, "executor");
+    support::write_executable(
+        &remote.join("hooks/pre-receive"),
+        "#!/bin/sh\nwhile read old new name; do\n  case \"$name\" in refs/bay/executor/*) sleep 5 ;; esac\ndone\nexit 0\n",
+    );
+    let trace = test_box.path().join("trace.jsonl");
+    let mut child = test_box
+        .bay_process(&executor)
+        .env("BAY_TEST_GIT_TRACE", &trace)
+        .args(["--json", "runner", "run", "--interval-s", "1"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let calls = || -> Vec<Value> {
+        std::fs::read_to_string(&trace)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let presence = |call: &Value| {
+        let args = call["args"].to_string();
+        args.contains("\"push\"") && args.contains("refs/bay/executor/")
+    };
+    let span = |call: &Value| {
+        let end = call["end"].as_u64().unwrap();
+        (end - call["us"].as_u64().unwrap(), end)
+    };
+    let seen = until(Duration::from_secs(60), || {
+        calls().iter().filter(|call| presence(call)).count() >= 1
+    });
+    std::thread::sleep(Duration::from_secs(2));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(seen, "no presence push in 60 s: {:?}", calls());
+    let calls = calls();
+    let pushes: Vec<(u64, u64)> = calls
+        .iter()
+        .filter(|call| presence(call))
+        .map(span)
+        .collect();
+    let (began, ended) = pushes[0];
+    assert!(
+        ended - began >= 4_000_000,
+        "the hook did not slow the push: {pushes:?}"
+    );
+    let meanwhile: Vec<&Value> = calls
+        .iter()
+        .filter(|call| call["thread"] == "ThreadId(1)")
+        .filter(|call| {
+            let (start, _) = span(call);
+            start > began + 2_000_000 && start < ended
+        })
+        .collect();
+    assert!(
+        !meanwhile.is_empty(),
+        "the runner's own thread started nothing during the push: {calls:?}"
+    );
+    for pair in pushes.windows(2) {
+        assert!(
+            pair[1].0 >= pair[0].1,
+            "two presence pushes at once: {pushes:?}"
+        );
+    }
 }
 
 /// BACKLOG 277: a pass pushes its presence beside it, never on its own thread, and `--once`

@@ -151,13 +151,14 @@ impl Beat {
             beside: None,
         };
         // BACKLOG 277: a write the pass started beside it ends on this thread, never on the path
-        // of `work`; the thread beats after it.
-        let started = self.beside.take();
+        // of `work`; the thread beats after it. 277b: one that outlasts `work` is left beside the
+        // runner, so the pass ends with its work and the next beat or [`Self::settle`] takes it.
+        let mut started = self.beside.take();
         let done = std::sync::atomic::AtomicBool::new(false);
         let out = std::thread::scope(|scope| {
             scope.spawn(|| {
-                if let Some(outcome) = started.and_then(|write| write.join().ok()) {
-                    ticker.outcome = Some(outcome);
+                if !ended_before(&mut started, &mut ticker.outcome, &done) {
+                    return;
                 }
                 if first {
                     ticker.publish(repo, Some(holding), queue_depth);
@@ -174,6 +175,7 @@ impl Beat {
             done.store(true, std::sync::atomic::Ordering::SeqCst);
             out
         });
+        self.beside = started;
         // G779: a beat the thread made is this executor's last write, so the next operation's
         // beat waits its heartbeat from it rather than pushing again at once.
         if ticker.outcome.is_some() {
@@ -250,6 +252,28 @@ impl Beat {
             "queue_depth": queue_depth,
         })
     }
+}
+
+/// BACKLOG 277b: waits for the write `started` while `done` is unset, and takes its outcome
+/// into `outcome`. False when `done` came first: the write still runs and stays in `started`.
+fn ended_before(
+    started: &mut Option<JoinHandle<Value>>,
+    outcome: &mut Option<Value>,
+    done: &std::sync::atomic::AtomicBool,
+) -> bool {
+    while let Some(write) = started.as_ref() {
+        if write.is_finished() {
+            if let Some(kept) = started.take().and_then(|write| write.join().ok()) {
+                *outcome = Some(kept);
+            }
+            return true;
+        }
+        if done.load(std::sync::atomic::Ordering::SeqCst) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
 }
 
 /// Writes `record` as this executor's presence and pushes it; keeps and gives the outcome.
@@ -839,8 +863,53 @@ pub fn single_machine_environments(repo: &Repo, queued: usize, trunk: &str) -> O
 
 #[cfg(test)]
 mod tests {
-    use super::age;
+    use super::{age, ended_before};
     use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    /// BACKLOG 277b: work that ends during a slow write does not wait for it; the write stays
+    /// to be taken later, and one that ended is taken at once.
+    #[test]
+    fn a_write_that_outlasts_the_work_is_left_running_and_taken_later() {
+        let mut started = Some(std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_secs(2));
+            json!({"pushed": true})
+        }));
+        let mut outcome = None;
+        let done = AtomicBool::new(false);
+        let began = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                done.store(true, Ordering::SeqCst);
+            });
+            assert!(!ended_before(&mut started, &mut outcome, &done));
+        });
+        assert!(
+            began.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            began.elapsed()
+        );
+        assert!(outcome.is_none());
+        let write = started.take().expect("the write was dropped");
+        assert_eq!(write.join().unwrap()["pushed"], true);
+
+        let mut started = Some(std::thread::spawn(|| json!({"pushed": true})));
+        while !started
+            .as_ref()
+            .is_some_and(std::thread::JoinHandle::is_finished)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ended_before(
+            &mut started,
+            &mut outcome,
+            &AtomicBool::new(true)
+        ));
+        assert!(started.is_none());
+        assert_eq!(outcome.unwrap()["pushed"], true);
+    }
 
     #[test]
     fn a_presence_is_as_old_as_the_older_of_its_fetch_and_its_own_time() {
