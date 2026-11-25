@@ -347,8 +347,9 @@ impl Mark {
     }
 }
 
-/// The refs pushes are forwarding now. A mark past [`MARK_TTL`] is removed.
-fn marks(dir: &Path) -> HashSet<String> {
+/// The refs pushes are forwarding now, each with the value its push sends. A mark past
+/// [`MARK_TTL`] is removed.
+fn marks(dir: &Path) -> HashSet<(String, String)> {
     let mut held = HashSet::new();
     let Ok(entries) = std::fs::read_dir(dir.join(FORWARDING)) else {
         return held;
@@ -368,13 +369,21 @@ fn marks(dir: &Path) -> HashSet<String> {
             continue;
         }
         if let Ok(text) = std::fs::read_to_string(&path) {
-            held.extend(
-                text.lines()
-                    .filter_map(|line| line.split_once(' ').map(|(name, _)| name.to_owned())),
-            );
+            held.extend(text.lines().filter_map(|line| {
+                line.split_once(' ')
+                    .map(|(name, new)| (name.to_owned(), new.to_owned()))
+            }));
         }
     }
     held
+}
+
+/// Whether a push forwarding now sends `name` as `hosted`, the hosted remote's value (`None`:
+/// it has none), so that push's own update takes it.
+fn forwarding(busy: &HashSet<(String, String)>, name: &str, hosted: Option<&String>) -> bool {
+    busy.iter().any(|(marked, new)| {
+        marked == name && hosted.map_or_else(|| absent(new), |hosted| hosted == new)
+    })
 }
 
 /// What the hosted remote said of a push.
@@ -504,8 +513,10 @@ struct Mirrored {
 
 /// Takes into the origin the hosted remote's value of each ref under `scope` that `wanted`
 /// selects, where the two differ, by compare-and-swap on the origin's value read before the
-/// hosted remote is listed. A ref a push is forwarding now is left to that push: its own update
-/// would fail if this one came first.
+/// hosted remote is listed. A ref the hosted remote holds as a push forwarding now sends it is
+/// left to that push: its own update would fail if this one came first. BACKLOG 296: a ref a
+/// push forwards with another value is taken, since the hosted remote refuses that push: two
+/// runners that reserved one place, refused for a third writer's, each left it to the other.
 fn mirror(
     git: &Git,
     dir: &Path,
@@ -526,9 +537,10 @@ fn mirror(
     let names: BTreeSet<&String> = before.keys().chain(hosted.keys()).collect();
     let changes: Vec<(&String, Option<&String>, Option<&String>)> = names
         .into_iter()
-        .filter(|name| wanted(name) && !busy.contains(*name))
+        .filter(|name| wanted(name))
         .map(|name| (name, hosted.get(name), before.get(name)))
         .filter(|(_, new, old)| new != old)
+        .filter(|(name, new, _)| !forwarding(&busy, name, *new))
         .collect();
     let mut mirrored = Mirrored {
         marked,
@@ -1060,7 +1072,17 @@ mod tests {
         let sent = updates("0000 aaaa refs/bay/changes/a\nbbbb 0000 refs/heads/main\n");
         let mark = Mark::write(dir.path(), &sent).unwrap();
         let busy = marks(dir.path());
-        assert!(busy.contains("refs/bay/changes/a") && busy.contains("refs/heads/main"));
+        let aaaa = "aaaa".to_owned();
+        assert!(forwarding(&busy, "refs/bay/changes/a", Some(&aaaa)));
+        assert!(forwarding(&busy, "refs/heads/main", None));
+        // BACKLOG 296: a value no push sends is not left to a push.
+        assert!(!forwarding(
+            &busy,
+            "refs/bay/changes/a",
+            Some(&"cccc".to_owned())
+        ));
+        assert!(!forwarding(&busy, "refs/bay/changes/a", None));
+        assert!(!forwarding(&busy, "refs/heads/main", Some(&aaaa)));
         post_receive(dir.path(), "0000 aaaa refs/bay/changes/a\n");
         assert_eq!(marks(dir.path()).len(), 2, "one ref is not taken yet");
         post_receive(

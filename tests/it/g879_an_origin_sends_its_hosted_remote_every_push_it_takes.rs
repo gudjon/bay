@@ -18,7 +18,7 @@ use crate::support;
 use support::{TestBox, check_files, formats, passing_result, result_json};
 
 /// The value of `name` in the bare repository `bare`, `None` when it has none.
-fn value(test_box: &TestBox, bare: &Path, name: &str) -> Option<String> {
+pub fn value(test_box: &TestBox, bare: &Path, name: &str) -> Option<String> {
     let out = test_box
         .git(test_box.path())
         .arg(format!("--git-dir={}", bare.display()))
@@ -30,7 +30,7 @@ fn value(test_box: &TestBox, bare: &Path, name: &str) -> Option<String> {
         .then(|| String::from_utf8(out.stdout).unwrap().trim().to_owned())
 }
 
-fn serve_once(test_box: &TestBox, origin: &Path) -> serde_json::Value {
+pub fn serve_once(test_box: &TestBox, origin: &Path) -> serde_json::Value {
     test_box.bay_ok(
         test_box.path(),
         &["host", "serve", origin.to_str().unwrap(), "--once"],
@@ -39,7 +39,7 @@ fn serve_once(test_box: &TestBox, origin: &Path) -> serde_json::Value {
 
 /// A hosted remote with a checked trunk, its origin holding what it holds, and a repository whose
 /// config sends bay's traffic to the origin: (hosted, origin, repository).
-fn fleet(test_box: &TestBox) -> (PathBuf, PathBuf, PathBuf) {
+pub fn fleet(test_box: &TestBox) -> (PathBuf, PathBuf, PathBuf) {
     let hosted = test_box.bare_any("hosted.git");
     let origin = test_box.path().join("origin.git");
     let (object_format, _) = formats();
@@ -70,7 +70,7 @@ fn fleet(test_box: &TestBox) -> (PathBuf, PathBuf, PathBuf) {
 }
 
 /// A new commit on `base` in `repo` that no branch holds.
-fn commit_on(test_box: &TestBox, repo: &Path, base: &str, message: &str) -> String {
+pub fn commit_on(test_box: &TestBox, repo: &Path, base: &str, message: &str) -> String {
     let tree = test_box.git_ok(repo, &["rev-parse", &format!("{base}^{{tree}}")]);
     test_box.git_ok(repo, &["commit-tree", &tree, "-p", base, "-m", message])
 }

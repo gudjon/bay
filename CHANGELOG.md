@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.19
+
+- An origin takes a place a third writer holds when two runners reserve it at once, so neither loops.
+
 ## 0.7.18
 
 - New bytes written over a pinned file are pinned again at save and merge, so the store holds them.
