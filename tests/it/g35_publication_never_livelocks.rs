@@ -1262,18 +1262,26 @@ fn hosted_with_hook_bound() -> (TestBox, PathBuf, String, PathBuf) {
 
 /// The trunk hook times out on the first two publishing pushes: each is `HOOK_TIMEOUT`, which
 /// retries the same candidate after a short wait and counts as neither a trunk move nor a
-/// deadline release (`INTERFACES` § 2). The third push lands.
+/// deadline release (`INTERFACES` § 2). The third push lands. BACKLOG 294: the journal names
+/// each refusal of the landing's push with the host's reason.
 #[test]
 fn a_hook_timeout_retries_the_same_candidate_uncounted() {
     let (test_box, host, id, view) = hosted_with_hook_bound();
-    let (code, landed) = result_json(
-        test_box
-            .bay(&view)
-            .env("BAY_TEST_HOOK_SLOW_PUSHES", "2")
-            .args(["merge", "--wait"]),
-    );
-    assert_eq!(code, 0, "{landed}");
+    let out = test_box
+        .bay(&view)
+        .env("BAY_TEST_HOOK_SLOW_PUSHES", "2")
+        .args(["merge", "--wait", "--json"])
+        .output()
+        .unwrap();
+    let landed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "{landed}");
     assert_eq!(landed["decision"], "merged", "{landed}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let named = stderr
+        .lines()
+        .filter(|line| line.contains("landing push refused") && line.contains("HOOK_TIMEOUT"))
+        .count();
+    assert_eq!(named, 2, "{stderr}");
     assert_eq!(test_box.trunk_change_ids(&host), vec![id.clone()]);
     let status = test_box.bay_ok(&view, &["status", &id]);
     let op = &status["detail"]["changes"][0]["operation"];

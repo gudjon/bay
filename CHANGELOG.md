@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.17
+
+- A runner's journal names why a landing's push was refused, with the host's own reason.
+
 ## 0.7.16
 
 - The evidence stage reads which policy and adapter paths changed outside bay in one git walk.

@@ -2961,6 +2961,14 @@ fn publish_checked(
         Ok(landed) => return Ok(Some(landed)),
         Err(refused) => refused,
     };
+    // BACKLOG 294 (a fleet measurement, 2026-11-25: solo landings made four publishing pushes, not
+    // one, and no record said why the first was refused): the runner's journal names the refusal.
+    if !records_apart() {
+        eprintln!(
+            "bay runner: {op_id} landing push refused: {}",
+            host_said(&refused)
+        );
+    }
     // A refused landing reads the chain again first, as a landing before G864 read it before its
     // push. A refusal on a main that moved, or at the hook's time bound, is answered as any
     // refused publishing push is: a second push would be a second such refusal, uncounted. On an
