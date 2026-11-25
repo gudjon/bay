@@ -1248,7 +1248,16 @@ pub fn outside_edits(
     policy: &Policy,
     is_publication: &dyn Fn(&str) -> Result<bool, String>,
 ) -> Result<Vec<OutsideEdit>, String> {
-    let paths = policy.paths();
+    edits_outside(git, base, &policy.paths(), is_publication)
+}
+
+/// [`outside_edits`] of `paths`.
+fn edits_outside(
+    git: &Git,
+    base: &str,
+    paths: &[String],
+    is_publication: &dyn Fn(&str) -> Result<bool, String>,
+) -> Result<Vec<OutsideEdit>, String> {
     // The bootstrap: the first commit on trunk's first-parent line that added the policy
     // file. Before it there was no policy for an edit to weaken and no bay judgement to go
     // around, so it and everything it stands on reached trunk the only way a first policy can,
@@ -1264,33 +1273,40 @@ pub fn outside_edits(
             POLICY_PATH,
         ])
         .map_err(|error| error.message())?;
-    let bootstrap = adds.lines().last().map(str::to_owned);
+    let bootstrap = adds.lines().last();
+    let last = last_changes(git, base, bootstrap, paths)?;
+    // The commits to name, each once, in the order of the paths they last changed.
+    let mut named: Vec<(&str, Option<&str>)> = Vec::new();
+    let mut publications: Vec<&str> = Vec::new();
+    for path in paths {
+        let Some((commit, parent)) = last.get(path.as_str()) else {
+            continue;
+        };
+        let commit = commit.as_str();
+        if named.iter().any(|(seen, _)| *seen == commit) || publications.contains(&commit) {
+            continue;
+        }
+        if is_publication(commit)? {
+            publications.push(commit);
+            continue;
+        }
+        named.push((commit, parent.as_deref()));
+    }
+    // One `git diff-tree` reads what every named commit with a parent changed.
+    let pairs: Vec<(&str, &str)> = named
+        .iter()
+        .filter_map(|(commit, parent)| parent.map(|parent| (*commit, parent)))
+        .collect();
+    let mut changed_many = crate::check::changed_paths_many(git, &pairs)?.into_iter();
     let mut edits: Vec<OutsideEdit> = Vec::new();
-    for path in &paths {
-        let last = git
-            .run(&[
-                "log",
-                "-1",
-                "--first-parent",
-                "--format=%H",
-                base,
-                "--",
-                path,
-            ])
-            .map_err(|error| error.message())?;
-        let last = last.trim();
-        if last.is_empty() || edits.iter().any(|edit| edit.commit == last) {
-            continue;
-        }
-        if let Some(bootstrap) = &bootstrap
-            && git.is_ancestor(last, bootstrap)?
-        {
-            continue;
-        }
-        if is_publication(last)? {
-            continue;
-        }
-        let changed = changed_paths(git, last)?;
+    for (commit, parent) in named {
+        let changed = if parent.is_some() {
+            changed_many
+                .next()
+                .ok_or_else(|| format!("git diff-tree named no paths for {commit}"))?
+        } else {
+            changed_paths(git, commit)?
+        };
         let mut touched: Vec<String> = paths
             .iter()
             .filter(|path| changed.iter().any(|file| covers(path, file)))
@@ -1301,12 +1317,118 @@ pub fn outside_edits(
             .iter()
             .any(|file| !paths.iter().any(|path| covers(path, file)));
         edits.push(OutsideEdit {
-            commit: last.to_owned(),
+            commit: commit.to_owned(),
             paths: touched,
             other_paths,
         });
     }
     Ok(edits)
+}
+
+/// For each of `paths` that changed after `bootstrap`, the last commit on the first-parent line
+/// of `base` that changed it, with that commit's first parent (none for a root commit), from one
+/// `git log` of every path: never one walk a path. The first-parent line is one line, so the
+/// walk ends at the bootstrap: a commit after it is never its ancestor, and one before it is.
+/// A commit changed a path when its diff against its first parent, merge or not, names the
+/// path or a file under it: what `git log --first-parent -- <path>` selects.
+fn last_changes<'p>(
+    git: &Git,
+    base: &str,
+    bootstrap: Option<&str>,
+    paths: &'p [String],
+) -> Result<std::collections::HashMap<&'p str, (String, Option<String>)>, String> {
+    let not_bootstrap = bootstrap.map(|bootstrap| format!("^{bootstrap}"));
+    let mut args: Vec<&str> = vec![
+        "-c",
+        "log.showRoot=true",
+        "log",
+        "-z",
+        "--first-parent",
+        "--diff-merges=first-parent",
+        "--no-renames",
+        "--no-relative",
+        "--no-show-signature",
+        "--no-color",
+        "--name-only",
+        // A path Git lists never ends in `/`, so this line is never read as one.
+        "--format=%H %P/",
+        base,
+    ];
+    if let Some(not_bootstrap) = &not_bootstrap {
+        args.push(not_bootstrap);
+    }
+    args.push("--");
+    args.extend(paths.iter().map(String::as_str));
+    // An adapter path names one file or directory, never a pattern.
+    let out = git
+        .run_bytes(&args, &[("GIT_LITERAL_PATHSPECS", "1")], None)
+        .map_err(|error| error.message())?;
+    let out =
+        String::from_utf8(out).map_err(|_| "git log gave a path that is not utf-8".to_owned())?;
+    let mut last = std::collections::HashMap::new();
+    let mut commit: Option<(&str, Option<&str>)> = None;
+    let mut first = false;
+    for token in out.split('\0') {
+        // Git starts the paths of each commit on a new line.
+        let token = if first {
+            token.strip_prefix('\n').unwrap_or(token)
+        } else {
+            token
+        };
+        first = false;
+        if let Some(line) = token.strip_suffix('/') {
+            let mut ids = line.split(' ');
+            let id = ids.next().unwrap_or_default();
+            let parent = ids.next().filter(|parent| !parent.is_empty());
+            if !crate::compact::is_object_id(id)
+                || parent.is_some_and(|parent| !crate::compact::is_object_id(parent))
+            {
+                return Err(format!("git log gave {line:?} for a commit"));
+            }
+            commit = Some((id, parent));
+            first = true;
+            continue;
+        }
+        if token.is_empty() {
+            continue;
+        }
+        let Some((id, parent)) = commit else {
+            return Err(format!("git log named {token} before any commit"));
+        };
+        for path in paths {
+            if pathspec_names(path, token) {
+                last.entry(path.as_str())
+                    .or_insert_with(|| (id.to_owned(), parent.map(str::to_owned)));
+            }
+        }
+    }
+    Ok(last)
+}
+
+/// Whether Git's literal pathspec `path` names `file`: the file itself, or a file under it, read
+/// as Git reads it, with no empty or `.` component and each `..` taking off the one before it. One
+/// ending in `/` names only what is under it.
+fn pathspec_names(path: &str, file: &str) -> bool {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                if parts.pop().is_none() {
+                    return false;
+                }
+            }
+            part => parts.push(part),
+        }
+    }
+    if parts.is_empty() {
+        return true;
+    }
+    let spec = parts.join("/");
+    let under = file
+        .strip_prefix(spec.as_str())
+        .is_some_and(|rest| rest.starts_with('/'));
+    under || (!path.ends_with('/') && file == spec)
 }
 
 /// The files `commit` changed against its first parent (every file, for a root commit), read
@@ -3402,5 +3524,165 @@ mod tests {
         let child = commit(child_path);
         assert_eq!(super::changed_paths(&git, &root).unwrap(), [root_path]);
         assert_eq!(super::changed_paths(&git, &child).unwrap(), [child_path]);
+    }
+
+    /// The edits outside bay of one walk of every path, the way an operation that lands reads
+    /// them, against one walk a path: the way it read them before.
+    fn one_walk_a_path(
+        git: &crate::git::Git,
+        base: &str,
+        paths: &[String],
+        is_publication: &dyn Fn(&str) -> Result<bool, String>,
+    ) -> Vec<super::OutsideEdit> {
+        let adds = git
+            .run(&[
+                "log",
+                "--first-parent",
+                "--diff-filter=A",
+                "--format=%H",
+                base,
+                "--",
+                super::POLICY_PATH,
+            ])
+            .unwrap();
+        let bootstrap = adds.lines().last().map(str::to_owned);
+        let mut edits: Vec<super::OutsideEdit> = Vec::new();
+        for path in paths {
+            let last = git
+                .run(&[
+                    "log",
+                    "-1",
+                    "--first-parent",
+                    "--format=%H",
+                    base,
+                    "--",
+                    path,
+                ])
+                .unwrap();
+            let last = last.trim();
+            if last.is_empty() || edits.iter().any(|edit| edit.commit == last) {
+                continue;
+            }
+            if let Some(bootstrap) = &bootstrap
+                && git.is_ancestor(last, bootstrap).unwrap()
+            {
+                continue;
+            }
+            if is_publication(last).unwrap() {
+                continue;
+            }
+            let changed = super::changed_paths(git, last).unwrap();
+            let mut touched: Vec<String> = paths
+                .iter()
+                .filter(|path| changed.iter().any(|file| covers(path, file)))
+                .cloned()
+                .collect();
+            touched.sort();
+            let other_paths = changed
+                .iter()
+                .any(|file| !paths.iter().any(|path| covers(path, file)));
+            edits.push(super::OutsideEdit {
+                commit: last.to_owned(),
+                paths: touched,
+                other_paths,
+            });
+        }
+        edits
+    }
+
+    /// One walk of every path names the edits outside bay that one walk a path named: across a
+    /// merge whose side branch changed an adapter, a rename, a directory entry, a directory
+    /// named without its slash, a path written with `./`, a path last changed before the
+    /// bootstrap and one never changed, from every base, with and without publications. A path
+    /// is read as itself, never as a pattern.
+    #[test]
+    fn one_walk_of_every_path_names_the_edits_one_walk_a_path_named() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let git = crate::git::Git::new(dir.path());
+        let run = |args: &[&str]| {
+            let mut all = vec!["-c", "user.name=t", "-c", "user.email=t@example.invalid"];
+            all.extend(args);
+            git.run(&all).unwrap().trim().to_owned()
+        };
+        run(&["init", "-q", "-b", "main"]);
+        let commit = |files: &[(&str, &str)], message: &str| {
+            for (path, text) in files {
+                let file = dir.path().join(path);
+                std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+                std::fs::write(&file, text).unwrap();
+                run(&["add", "--", path]);
+            }
+            run(&["commit", "-q", "-m", message]);
+            run(&["rev-parse", "HEAD"])
+        };
+        let root = commit(
+            &[
+                ("README", "r\n"),
+                ("tools/a.sh", "a\n"),
+                ("lib/x", "x\n"),
+                ("old/thing", "o\n"),
+                ("scripts/check", "1\n"),
+            ],
+            "root",
+        );
+        let early = commit(&[("scripts/check", "2\n")], "early");
+        let bootstrap = commit(&[(".bay/policy.toml", "revision = 1\n")], "bootstrap");
+        let lib = commit(&[("lib/x", "x2\n"), ("other.txt", "o\n")], "lib");
+        run(&["checkout", "-q", "-b", "side"]);
+        commit(&[("scripts/check", "3\n")], "side");
+        run(&["checkout", "-q", "main"]);
+        commit(&[("README", "r2\n")], "readme");
+        run(&["merge", "-q", "--no-ff", "-m", "merge", "side"]);
+        let merge = run(&["rev-parse", "HEAD"]);
+        run(&["mv", "tools/a.sh", "tools/b.sh"]);
+        run(&["commit", "-q", "-m", "rename"]);
+        let rename = run(&["rev-parse", "HEAD"]);
+        let attributes = commit(
+            &[(".gitattributes", "* -text\n"), ("lib/y", "y\n")],
+            "attrs",
+        );
+        let tip = commit(
+            &[
+                (".bay/policy.toml", "revision = 2\n"),
+                ("other.txt", "o2\n"),
+            ],
+            "tip",
+        );
+        let paths: Vec<String> = [
+            "./tools",
+            ".bay/policy.toml",
+            ".gitattributes",
+            "lib/",
+            "never/touched",
+            "old/thing",
+            "scripts/check",
+            "tools",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let publications: [&[&String]; 4] = [&[], &[&tip], &[&merge, &attributes], &[&lib]];
+        for base in [&root, &early, &bootstrap, &lib, &merge, &rename, &tip] {
+            for published in publications {
+                let is_publication = |commit: &str| -> Result<bool, String> {
+                    Ok(published.iter().any(|known| known.as_str() == commit))
+                };
+                assert_eq!(
+                    super::edits_outside(&git, base, &paths, &is_publication).unwrap(),
+                    one_walk_a_path(&git, base, &paths, &is_publication),
+                    "base {base}, publications {published:?}"
+                );
+            }
+        }
+        let named = |paths: &[String]| -> Vec<String> {
+            let none = |_: &str| -> Result<bool, String> { Ok(false) };
+            let edits = super::edits_outside(&git, &tip, paths, &none).unwrap();
+            edits.into_iter().map(|edit| edit.commit).collect()
+        };
+        let order = [&rename, &tip, &attributes, &merge];
+        assert_eq!(named(&paths), order.map(String::as_str));
+        // Adapter paths are literal: a glob names nothing, and magic excludes no other path.
+        assert_eq!(named(&["scripts/che*".to_owned()]), Vec::<String>::new());
+        let magic = ["lib/".to_owned(), ":(exclude)lib/".to_owned()];
+        assert_eq!(named(&magic), [attributes.as_str()]);
     }
 }

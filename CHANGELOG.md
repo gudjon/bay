@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.16
+
+- The evidence stage reads which policy and adapter paths changed outside bay in one git walk.
+- Adapter paths match literally, so a path with `*` or a leading `:` names only the commits that changed it.
+
 ## 0.7.15
 
 - A pass ends with its work; a presence push that outlasts it finishes beside the runner.
