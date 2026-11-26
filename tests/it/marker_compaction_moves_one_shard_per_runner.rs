@@ -7,6 +7,11 @@
 //!
 //! Guards to mutate, in `src/compact.rs`: `pick` answering the first shard (the second runner
 //! moves the first runner's shard); `batch` answering `PUSH_MAX` (its unit test).
+//!
+//! BACKLOG 334 (a fleet finding, 2026-11-26: at 59,000 remote refs a push of one shard's names
+//! still took longer than its bound): a push's batch is sized by the time the last one took, read
+//! from the runner's record. Guards: `sized` answering `FIRST` (a slow record does not shrink the
+//! batch); `run` writing no record (the record keeps the old push).
 
 #![cfg(unix)]
 
@@ -244,4 +249,46 @@ fn live_runners_over_the_budget_move_different_shards() {
             "{name}"
         );
     }
+}
+
+/// The batch a pass's compaction named, if it pushed.
+fn batch_of(ran: &Value) -> Option<u64> {
+    ran["detail"]["ran"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find_map(|entry| entry.get("batch").and_then(Value::as_u64))
+}
+
+#[test]
+fn a_push_is_sized_by_the_time_the_last_one_took() {
+    let test_box = TestBox::new();
+    let (_host, [first, _second], _markers) = setup(&test_box);
+    let record = first.join(".git").join("bay").join("compaction-push");
+
+    // GIVEN a pass that cuts the three chains, and no push recorded
+    pass(&test_box, &first);
+    assert!(!record.exists());
+
+    // WHEN the runner passes with no record
+    let ran = pass(&test_box, &first);
+    // THEN it pushes at most the first batch, and records the names it pushed and the time
+    let (taken, errors) = moved(&ran);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(batch_of(&ran), Some(4), "{ran}");
+    assert!(!taken.is_empty() && taken.len() <= 4, "{ran}");
+    let written = std::fs::read_to_string(&record).unwrap();
+    let (names, ms) = written.trim().split_once(' ').unwrap();
+    assert_eq!(names, taken.len().to_string(), "{written}");
+    assert!(ms.parse::<u64>().is_ok(), "{written}");
+
+    // WHEN the last push moved 2 names in 60 s, past twice the target
+    std::fs::write(&record, "2 60000").unwrap();
+    let ran = pass(&test_box, &first);
+    // THEN the next push moves half of them: one name
+    let (taken, errors) = moved(&ran);
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(batch_of(&ran), Some(1), "{ran}");
+    assert_eq!(taken.len(), 1, "{ran}");
+    assert!(std::fs::read_to_string(&record).unwrap().starts_with("1 "));
 }

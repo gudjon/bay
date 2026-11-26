@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.33
+
+- A runner reads a lowered ref budget on its next pass, not after its count expires.
+- A compaction push moves as many names as the last push's time allows, near ten seconds a push.
+
 ## 0.7.32
 
 - `bay merge --expedite <why>` runs a change next, alone, within the repository's `[expedite] per_day`.

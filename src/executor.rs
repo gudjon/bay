@@ -2543,9 +2543,27 @@ fn compaction(repo: &Repo, chain: &Chain) -> Option<Value> {
     let keys = Keys::load(&repo.git);
     let me = crate::presence::presence_ref(&keys.executor_name);
     match crate::compact::run(repo, (keys.executor.as_ref(), &me), &records) {
-        Ok(moved) if moved.is_empty() => None,
-        Ok(moved) => Some(json!({"compacted": moved})),
-        Err(error) => Some(json!({"compacted": null, "error": error})),
+        Ok(None) => None,
+        Ok(Some(pushed)) => {
+            // BACKLOG 334: a compaction push's time is the one reading of what it costs.
+            eprintln!(
+                "bay runner: compacted {} of at most {} names into {} in {:.1} s",
+                pushed.names.len(),
+                pushed.batch,
+                pushed.index,
+                pushed.took.as_secs_f64()
+            );
+            Some(json!({
+                "compacted": pushed.names,
+                "index": pushed.index,
+                "batch": pushed.batch,
+                "push_ms": u64::try_from(pushed.took.as_millis()).unwrap_or(u64::MAX),
+            }))
+        }
+        Err(error) => {
+            eprintln!("bay runner: compaction: {error}");
+            Some(json!({"compacted": null, "error": error}))
+        }
     }
 }
 

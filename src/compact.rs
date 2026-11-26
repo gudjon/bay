@@ -9,9 +9,9 @@
 //! compacted name, at the name with `/` written `%2F`, whose content is the ref's target id. The
 //! executor only appends; the host takes a shard by fast-forward only, and refuses a create of a
 //! name its shard records (`crate::hook`), so create-only still holds once the ref is gone.
-//! Every lookup reads the ref and then its one shard. A push moves one shard, at most [`batch`]
+//! Every lookup reads the ref and then its one shard. A push moves one shard, at most [`sized`]
 //! names of it, on a runner's pass that ran no operation, and live runners take different shards
-//! ([`pick`]), so a push's cost on its git client stays bounded and runners do not race it.
+//! ([`pick`]), so a push's cost stays near [`TARGET`] and runners do not race it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -35,6 +35,12 @@ pub const PUSH_MAX: usize = 4096;
 const PUSH_PAIRS: usize = 2_000_000;
 /// The fewest names a compaction push moves, however many refs the remote holds.
 const PUSH_MIN: usize = 16;
+/// BACKLOG 334: the time a compaction push aims at. A host that forwards each push upstream, on
+/// a busy box, spent about 0.7 s a name at 59,000 refs, ten times the bench model behind
+/// [`PUSH_PAIRS`]; a constant cannot know the topology or the load, and the last push's time can.
+const TARGET: std::time::Duration = std::time::Duration::from_secs(10);
+/// The names a store's first compaction push moves, before it has timed one.
+const FIRST: usize = 4;
 /// G695: how long a count of the remote's bay refs under the budget stands, so a pass lists
 /// them at most this often while the remote stays under it.
 const COUNTED_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -329,6 +335,47 @@ pub fn batch(remote_refs: usize) -> usize {
     (PUSH_PAIRS / remote_refs.max(1)).clamp(PUSH_MIN, PUSH_MAX)
 }
 
+/// The names the next compaction push moves, from `last`, the names and the time of this
+/// store's last compaction push (BACKLOG 334): [`FIRST`] before any; half of them after a push
+/// over twice [`TARGET`]; else as many as would take [`TARGET`] at the last push's rate, at most
+/// twice the last, so one push never runs past twice the target. Always at least one, at most
+/// [`batch`] of the remote's refs.
+#[must_use]
+pub fn sized(last: Option<(usize, std::time::Duration)>, remote_refs: usize) -> usize {
+    let next = match last {
+        None => FIRST,
+        Some((names, took)) if took > TARGET * 2 => names / 2,
+        Some((names, took)) => {
+            let rate = u128::try_from(names).unwrap_or(u128::MAX) * TARGET.as_millis()
+                / took.as_millis().max(1);
+            usize::try_from(rate)
+                .unwrap_or(usize::MAX)
+                .min(names.saturating_mul(2))
+        }
+    };
+    next.clamp(1, batch(remote_refs))
+}
+
+/// The names and the time of the last compaction push `record` holds (`<names> <ms>`).
+fn last_push(record: &std::path::Path) -> Option<(usize, std::time::Duration)> {
+    let text = std::fs::read_to_string(record).ok()?;
+    let (names, millis) = text.trim().split_once(' ')?;
+    Some((
+        names.parse().ok()?,
+        std::time::Duration::from_millis(millis.parse().ok()?),
+    ))
+}
+
+/// One compaction push: the names it moved, into which shard index, the most it could move
+/// ([`sized`]) and how long the push took.
+#[derive(Debug)]
+pub struct Pushed {
+    pub names: Vec<String>,
+    pub index: String,
+    pub batch: usize,
+    pub took: std::time::Duration,
+}
+
 /// The shard a runner moves in a pass, from `shards` (each shard that holds a marker to move,
 /// ascending): runner `rank` of `runners` live runners takes the shard at its own place, so
 /// runners over the budget at once push different shards; with fewer shards than runners the
@@ -374,11 +421,24 @@ fn remote_bay_refs(repo: &Repo) -> Result<HashMap<String, String>, String> {
         .collect())
 }
 
+/// G695, BACKLOG 333: whether the count `marker` records stands: it found the remote's bay refs
+/// under `budget`, the budget in force now, less than [`COUNTED_EVERY`] ago. A count under
+/// another budget stands for nothing, so a lowered budget is read on the next pass.
+fn counted(marker: &std::path::Path, budget: u64) -> bool {
+    std::fs::read_to_string(marker).is_ok_and(|text| text.trim() == budget.to_string())
+        && std::fs::metadata(marker)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age < COUNTED_EVERY)
+}
+
 /// One executor pass of compaction: when the remote holds more bay refs than the budget, moves
 /// markers of the landed, cut changes in `records` into their shard index, one shard a push
 /// (BACKLOG 332): the shard [`pick`] gives this runner (`me`, its presence ref), at most
-/// [`batch`] of its names, in one atomic push that appends the shard and deletes each moved ref
-/// under a lease on its target. Returns the names moved; none when under the budget.
+/// [`sized`] of its names, in one atomic push that appends the shard and deletes each moved ref
+/// under a lease on its target. The push's names and time are kept for the next one to size
+/// itself by (BACKLOG 334). Returns the push; none when under the budget or nothing moves.
 ///
 /// # Errors
 ///
@@ -387,36 +447,33 @@ pub fn run(
     repo: &Repo,
     (signer, me): (Option<&Signer>, &str),
     records: &[ChangeRecord],
-) -> Result<Vec<String>, String> {
+) -> Result<Option<Pushed>, String> {
     // G695 (a fleet finding, 2026-11-10: every runner pass listed 30,000 refs, 2.3 MB and
     // 1.7 s, to learn the remote was under a budget of 100,000). Under the budget, the count
     // stands for an hour; over it, each pass counts again until the markers are moved.
-    let marker = repo.git.common_dir().ok().map(|common| {
-        std::path::Path::new(&common)
-            .join("bay")
-            .join("under-ref-budget")
-    });
-    let counted = marker
-        .as_ref()
-        .and_then(|marker| {
-            std::fs::metadata(marker)
-                .and_then(|meta| meta.modified())
-                .ok()
-        })
-        .and_then(|at| at.elapsed().ok())
-        .is_some_and(|age| age < COUNTED_EVERY);
-    if counted {
-        return Ok(Vec::new());
+    let state = repo
+        .git
+        .common_dir()
+        .ok()
+        .map(|common| std::path::Path::new(&common).join("bay"));
+    let marker = state.as_ref().map(|state| state.join("under-ref-budget"));
+    let record = state.as_ref().map(|state| state.join("compaction-push"));
+    let budget = repo.config.ref_budget();
+    if marker
+        .as_deref()
+        .is_some_and(|marker| counted(marker, budget))
+    {
+        return Ok(None);
     }
     let remote = remote_bay_refs(repo)?;
-    if (remote.len() as u64) <= repo.config.ref_budget() {
+    if (remote.len() as u64) <= budget {
         if let Some(marker) = &marker
             && let Some(dir) = marker.parent()
             && std::fs::create_dir_all(dir).is_ok()
         {
-            let _ = std::fs::write(marker, b"");
+            let _ = std::fs::write(marker, budget.to_string());
         }
-        return Ok(Vec::new());
+        return Ok(None);
     }
     // The landed claims already recorded are read from this repository's copy of the shards.
     fetch(repo)?;
@@ -427,10 +484,11 @@ pub fn run(
     let order: Vec<u8> = shards.keys().copied().collect();
     let (rank, runners) = standing(repo, me);
     let Some(chosen) = pick(&order, rank, runners) else {
-        return Ok(Vec::new());
+        return Ok(None);
     };
     let mut moved = shards.remove(&chosen).unwrap_or_default();
-    moved.truncate(batch(remote.len()));
+    let size = sized(record.as_deref().and_then(last_push), remote.len());
+    moved.truncate(size);
     let index = format!("{INDEX_PREFIX}{chosen}");
     let parent = remote.get(&index).cloned();
     let entries: Vec<&(String, String)> = moved.iter().collect();
@@ -453,16 +511,37 @@ pub fn run(
     args.push(format!("{commit}:{index}"));
     args.extend(moved.iter().map(|(name, _)| format!(":{name}")));
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    repo.git
-        .run(&args)
-        .map_err(|error| format!("the compaction could not be pushed: {}", error.message()))?;
+    let began = std::time::Instant::now();
+    let pushed = repo.git.run(&args);
+    let took = began.elapsed();
+    // A quick refusal (a lease another runner won) says nothing of what a push costs.
+    if (pushed.is_ok() || took > TARGET * 2)
+        && let Some(record) = &record
+        && let Some(dir) = record.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        let _ = std::fs::write(record, format!("{} {}", moved.len(), took.as_millis()));
+    }
+    pushed.map_err(|error| {
+        format!(
+            "the compaction could not be pushed ({} names, {:.1} s): {}",
+            moved.len(),
+            took.as_secs_f64(),
+            error.message()
+        )
+    })?;
     let mut lines = vec![format!("update {index} {commit}")];
     lines.extend(moved.iter().map(|(name, _)| format!("delete {name}")));
     let local = lines.join("\n") + "\n";
     let _ = repo
         .git
         .run_with(&["update-ref", "--stdin"], &[], Some(local.as_bytes()));
-    Ok(moved.into_iter().map(|(name, _)| name).collect())
+    Ok(Some(Pushed {
+        names: moved.into_iter().map(|(name, _)| name).collect(),
+        index,
+        batch: size,
+        took,
+    }))
 }
 
 /// A shard commit on `parent` whose tree is the parent's tree plus `entries`, signed when a
@@ -534,7 +613,12 @@ fn append(
 
 #[cfg(test)]
 mod tests {
-    use super::{PUSH_MAX, PUSH_MIN, batch, compactable, index_ref, name_of, path, pick, shard};
+    use std::time::Duration;
+
+    use super::{
+        FIRST, PUSH_MAX, PUSH_MIN, TARGET, batch, compactable, counted, index_ref, last_push,
+        name_of, path, pick, shard, sized,
+    };
 
     #[test]
     fn a_name_has_one_shard_and_one_path() {
@@ -573,5 +657,52 @@ mod tests {
         assert_eq!(pick(&shards, 4, 6), Some(9));
         assert_eq!(pick(&[7], 1, 2), Some(7));
         assert_eq!(pick(&[], 0, 1), None);
+    }
+
+    /// BACKLOG 334: a push is sized by the last push's time: the first moves FIRST names; a push
+    /// under the target grows the next towards it, at most twice; a push over twice the target
+    /// halves the next; never none, never past the bound of the remote's refs.
+    #[test]
+    fn a_push_is_sized_by_the_last_push_time() {
+        let secs = Duration::from_secs;
+        assert_eq!(sized(None, 60_000), FIRST);
+        assert_eq!(sized(Some((4, secs(5))), 60_000), 8, "twice, never more");
+        assert_eq!(sized(Some((4, TARGET / 2 * 3)), 60_000), 2);
+        assert_eq!(sized(Some((10, TARGET)), 60_000), 10, "on target: the same");
+        assert_eq!(sized(Some((33, secs(35))), 60_000), 16, "over twice: half");
+        assert_eq!(sized(Some((1, secs(60))), 60_000), 1, "never none");
+        assert_eq!(
+            sized(Some((30, secs(1))), 60_000),
+            batch(60_000),
+            "the bound holds"
+        );
+        assert_eq!(sized(Some((0, Duration::ZERO)), 1_000), 1);
+    }
+
+    #[test]
+    fn a_push_record_reads_back_or_not_at_all() {
+        let dir = std::env::temp_dir().join(format!("bay-push-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("compaction-push");
+        assert_eq!(last_push(&record), None, "no push yet");
+        std::fs::write(&record, "12 8500\n").unwrap();
+        assert_eq!(last_push(&record), Some((12, Duration::from_millis(8500))));
+        std::fs::write(&record, "12").unwrap();
+        assert_eq!(last_push(&record), None, "a record without its time");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_count_stands_only_under_the_budget_it_was_made_against() {
+        let dir = std::env::temp_dir().join(format!("bay-counted-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("under-ref-budget");
+        assert!(!counted(&marker, 100_000), "no count yet");
+        std::fs::write(&marker, "").unwrap();
+        assert!(!counted(&marker, 100_000), "a count that names no budget");
+        std::fs::write(&marker, "100000").unwrap();
+        assert!(counted(&marker, 100_000));
+        assert!(!counted(&marker, 56_000), "the budget was lowered since");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
