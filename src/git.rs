@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
 use std::thread;
 use std::time::Instant;
@@ -63,12 +63,27 @@ pub struct Git {
 /// 0.7.0: where a handle's calls run when its process is a hook judging a push.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Quarantine {
-    /// In the push's quarantine, as Git starts the hook.
+    /// In the push's quarantine, as Git starts the hook: the default of a hook's handles only
+    /// ([`judging_a_push`]).
     Inherited,
     /// Reading the quarantine's objects, not marked as in it ([`Git::reading_quarantine`]).
     Objects,
-    /// Outside it ([`Git::outside_quarantine`]).
+    /// Outside it ([`Git::outside_quarantine`]); the default of every other process's handles.
     Left,
+}
+
+/// Item 325: whether this process is a hook Git started to judge a push ([`judging_a_push`]).
+static JUDGING_A_PUSH: AtomicBool = AtomicBool::new(false);
+
+/// Item 325 (a fleet finding, 2026-11-25: one `bay status`, in a process whose environment
+/// named another object directory with the store's own as its alternate, wrote 18 refs into a
+/// shared store; their 150 objects went to that directory, which was then removed, and every
+/// fetch of the store failed on them): marks this process as a hook Git started to judge a push,
+/// whose handles run in the push's quarantine, as Git starts the hook. Every other process's
+/// handles run outside any object directory its environment names, so each object a call
+/// writes, and each object a ref it writes names, is in the store itself.
+pub fn judging_a_push() {
+    JUDGING_A_PUSH.store(true, Ordering::Relaxed);
 }
 
 /// G200: one `git config --list` of a handle, every entry in Git's order (the last value
@@ -737,7 +752,11 @@ impl Git {
             bare_dir,
             lazy_fetch: false,
             writes_tree: false,
-            quarantine: Quarantine::Inherited,
+            quarantine: if JUDGING_A_PUSH.load(Ordering::Relaxed) {
+                Quarantine::Inherited
+            } else {
+                Quarantine::Left
+            },
         }
     }
 

@@ -552,6 +552,7 @@ const LOCK_LEFT_S: u64 = 3600;
 /// killed on day one left `maintenance.lock` behind and every later run found it taken; 2,340
 /// packs and 240,000 loose objects followed, and an empty ref file left by a killed write stopped
 /// `git gc` itself): a store whose maintenance cannot run says why. Present only when one is so.
+/// Item 325: so does a store with a ref whose object it does not hold.
 fn stuck_store_row(git: &Git, report: &mut Report) {
     let Ok(common) = git.run(&["rev-parse", "--path-format=absolute", "--git-common-dir"]) else {
         return;
@@ -606,6 +607,18 @@ fn stuck_store_row(git: &Git, report: &mut Report) {
             empty.join(", ")
         ));
     }
+    let lost = refs_without_objects(git);
+    if !lost.is_empty() {
+        findings.push(json!({
+            "refs_without_objects": lost,
+            "note": "a ref names an object the store does not hold: each fetch and walk that reads it fails",
+        }));
+        recoveries.push(
+            "fetch each named object from a remote that holds it (git fetch <remote> <object>), \
+             or else delete its ref (git update-ref -d <ref>)"
+                .to_owned(),
+        );
+    }
     if findings.is_empty() {
         return;
     }
@@ -615,6 +628,36 @@ fn stuck_store_row(git: &Git, report: &mut Report) {
         "findings": findings,
         "recovery": recoveries.join("; "),
     }));
+}
+
+/// Item 325 (a fleet finding, 2026-11-25: 18 refs a process wrote while its environment named
+/// another object directory, which was then removed): each ref whose object the store does not
+/// hold, as `<ref> <object>`; at most 20. One listing and one `cat-file --batch-check`, which
+/// fetches nothing (G104b).
+fn refs_without_objects(git: &Git) -> Vec<String> {
+    let Ok(listed) = git.run(&["for-each-ref", "--format=%(objectname) %(refname)"]) else {
+        return Vec::new();
+    };
+    let mut ids = String::new();
+    for (id, _) in listed.lines().filter_map(|line| line.split_once(' ')) {
+        ids.push_str(id);
+        ids.push('\n');
+    }
+    let Ok(checked) = git.run_with(
+        &["cat-file", "--batch-check=%(objectname)"],
+        &[],
+        Some(ids.as_bytes()),
+    ) else {
+        return Vec::new();
+    };
+    listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .zip(checked.lines())
+        .filter(|(_, answer)| answer.ends_with(" missing"))
+        .take(20)
+        .map(|((id, name), _)| format!("{name} {id}"))
+        .collect()
 }
 
 /// The refs under `dir` (a `files` store's loose refs) whose file is empty, by name; at most 20.

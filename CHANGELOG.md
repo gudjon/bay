@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.30
+
+- Outside a push hook, bay's Git writes objects into the store, never an object directory its environment names.
+- `bay doctor` names a ref whose object the store lacks, and how to recover it.
+
 ## 0.7.29
 
 - A runner undoes the change that turned main red when no fix comes within `[red] undo_after_s`.

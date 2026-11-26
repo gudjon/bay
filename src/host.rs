@@ -277,6 +277,7 @@ fn test_slow_push(git: &Git, dir: &Path, input: &str) -> bool {
 /// Runs a host hook event. Returns the process exit code: 0 accepts, 1 refuses.
 #[must_use]
 pub fn hook(event: &str, args: &[String]) -> u8 {
+    crate::git::judging_a_push();
     let dir = std::env::var("GIT_DIR")
         .map_or_else(|_| std::path::PathBuf::from("."), std::path::PathBuf::from);
     let git = Git::new(&dir);
