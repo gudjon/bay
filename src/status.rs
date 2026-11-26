@@ -1705,6 +1705,29 @@ fn flake_rows(repo: &Repo, trunk: &str, read: &Read) -> Value {
     flakes(&repo.git, trunk, registry).map_or_else(|why| json!({"unread": why}), Value::from)
 }
 
+/// The tree of the base each of `landings` (`(commit, tree, Bay-Batch trailer)`, newest first
+/// on main's first-parent line) was judged at (`crate::throughput::judged_depth`): the tree of
+/// the landing that far down the line, read from git past the window's end; `None` past the
+/// root.
+fn judged_trees(
+    git: &crate::git::Git,
+    landings: &[(&str, &str, Option<&str>)],
+) -> Vec<Option<String>> {
+    landings
+        .iter()
+        .enumerate()
+        .map(|(at, &(commit, _, tag))| {
+            let depth = crate::throughput::judged_depth(tag);
+            match landings.get(at + depth) {
+                Some(&(_, tree, _)) => Some(tree.to_owned()),
+                None => git
+                    .run(&["rev-parse", &format!("{commit}~{depth}^{{tree}}")])
+                    .ok(),
+            }
+        })
+        .collect()
+}
+
 /// The rows of [`flake_rows`].
 ///
 /// # Errors
@@ -1733,26 +1756,36 @@ fn flakes(
             "--first-parent",
             "-n",
             &window,
-            "--format=%H %T",
+            &format!(
+                "--format=%H %T %(trailers:key={},valueonly)",
+                crate::throughput::BATCH_TRAILER
+            ),
             trunk,
         ])
         .map_err(|error| error.message())?;
-    let landings: Vec<(&str, &str)> = landings
+    let landings: Vec<(&str, &str, Option<&str>)> = landings
         .lines()
-        .filter_map(|line| line.split_once(' '))
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, ' ');
+            let (commit, tree) = (fields.next()?, fields.next()?);
+            let tag = fields.next().map(str::trim).filter(|tag| !tag.is_empty());
+            Some((commit, tree, tag))
+        })
         .collect();
+    let base_trees = judged_trees(git, &landings);
     // G608: one read of the window's records, never one a landing (a fleet finding, 2026-10-31:
     // the window of 60 landings cost a status about 60 reads of the evidence refs).
-    let trees: Vec<&str> = landings.iter().map(|&(_, tree)| tree).collect();
+    let trees: Vec<&str> = landings.iter().map(|&(_, tree, _)| tree).collect();
     let records_of = evidence::records_for_many(git, &trees)?;
     let mut counts = vec![0_u64; required.len()];
     let mut read = 0_u64;
-    for (&(commit, _), records) in landings.iter().zip(records_of) {
+    for ((&(commit, _, _), base_tree), records) in landings.iter().zip(&base_trees).zip(records_of)
+    {
         read += 1;
         let records = policy.answering(evidence::counted(git, records, registry)?);
         for (entry, count) in required.iter().zip(counts.iter_mut()) {
             let id = evidence::CheckId::new(&entry.id, &entry.environment);
-            let subject = policy.commit_keyed(&id).then_some(commit);
+            let key = policy.key(&id, (commit, base_tree.as_deref()));
             // Each landing was judged under the manifest of its own base: any one of them
             // under which its runs combine to flaky counts it once.
             let mut digests: Vec<&str> = records
@@ -1763,7 +1796,7 @@ fn flakes(
             digests.sort_unstable();
             digests.dedup();
             if digests.iter().any(|digest| {
-                evidence::combine(&records, &id, digest, subject) == evidence::Combined::Flaky
+                evidence::combine(&records, &id, digest, key) == evidence::Combined::Flaky
             }) {
                 *count += 1;
             }

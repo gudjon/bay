@@ -515,10 +515,9 @@ pub struct CheckEntry {
     /// changes (the request's `changed_paths`; a deleted path is simply absent), together with
     /// the entry's `paths` when it lists them, and the request says `"materialized":
     /// "changed"`. What such a check sees depends on the base as well as the tree, so its
-    /// evidence is keyed by subject commit, as `inputs = ["commit"]` keys it
-    /// ([`CheckEntry::commit_keyed`]): the candidate commit names its base, so a record never
-    /// answers another changed set. Refused with `footprint = true`, which carries a record
-    /// onto another changed set, and on an approval. Judged at the base; `"changed"` enters the
+    /// evidence is keyed by the base's tree as well ([`CheckEntry::key`]): the two trees fix
+    /// the diff, so a record never answers another changed set. Refused with `footprint =
+    /// true`, which carries a record onto another changed set, and on an approval. Judged at the base; `"changed"` enters the
     /// definition digest, and absent is left out of the canonical entry (the G26 vector).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub materialize: Option<Materialize>,
@@ -707,18 +706,45 @@ impl CheckEntry {
     }
 
     /// Whether the check's evidence is keyed by subject commit: it declares the input `commit`
-    /// or `history`, or sees only its changed paths (`materialize = "changed"`, N-18), so its
-    /// verdict reads more than the tree, and a result for one commit never stands for another
-    /// with the same tree. A changed-only check sees what the candidate changes against its
-    /// base; the candidate commit names that base, so its record never answers a candidate on
-    /// another base, whose changed set differs.
+    /// or `history`, so its verdict reads more than the tree, and a result for one commit never
+    /// stands for another with the same tree.
     #[must_use]
     pub fn commit_keyed(&self) -> bool {
-        self.changed_only()
-            || self
-                .inputs
-                .iter()
-                .any(|input| input == INPUT_COMMIT || input == INPUT_HISTORY)
+        self.inputs
+            .iter()
+            .any(|input| input == INPUT_COMMIT || input == INPUT_HISTORY)
+    }
+
+    /// Whether a record of the check answers every candidate with its tree: it is keyed by
+    /// neither its commit ([`CheckEntry::commit_keyed`]) nor its base (a changed-only check).
+    #[must_use]
+    pub fn tree_keyed(&self) -> bool {
+        !self.commit_keyed() && !self.changed_only()
+    }
+
+    /// What a record of the check must be about besides its tree to answer a candidate
+    /// `commit` judged against a base whose tree is `base_tree`: the commit, for a check keyed
+    /// by its commit; the base's tree, for a pre-merge changed-only check (N-18), since the two
+    /// trees fix the diff it sees, and a batch tip, judged at the batch's base over the batch's
+    /// whole diff, has the tree and base tree its batch run had; else the tree alone. A post
+    /// check runs on main's own commit, so a changed-only one is keyed by that commit, as one
+    /// is where its base's tree is not known (`None`).
+    #[must_use]
+    pub fn key<'a>(
+        &self,
+        (commit, base_tree): (&'a str, Option<&'a str>),
+    ) -> crate::evidence::Key<'a> {
+        use crate::evidence::Key;
+        if self.commit_keyed() {
+            return Key::Commit(commit);
+        }
+        if !self.changed_only() {
+            return Key::Tree;
+        }
+        match base_tree {
+            Some(base_tree) if self.stage != Stage::Post => Key::Base(base_tree),
+            _ => Key::Commit(commit),
+        }
     }
 
     /// Whether the check sees only the candidate's changed paths and its `paths`
@@ -898,26 +924,23 @@ impl Policy {
         self.check(id).is_some_and(|check| check.allow_flaky)
     }
 
-    /// The checks of `required` that `records` do not pass for `commit` (G30), with their
-    /// combined verdicts, less each `flaky` one whose entry says `allow_flaky`, and less each
-    /// waivable one that a valid waiver answers on `commit` (N-9, [`Policy::waiver`]), or that
-    /// a waiver of an earlier candidate among `carried` answers (G638). The executor and the
-    /// host hook judge a landing by this one rule.
+    /// The checks of `required` that `records` do not pass for `commit` judged against a base
+    /// whose tree is `base_tree` (G30, each under its [`Policy::key`]), with their combined
+    /// verdicts, less each `flaky` one whose entry says `allow_flaky`, and less each waivable
+    /// one that a valid waiver answers on `commit` (N-9, [`Policy::waiver`]), or that a waiver
+    /// of an earlier candidate among `carried` answers (G638). The executor and the host hook
+    /// judge a landing by this one rule.
     #[must_use]
     pub fn gaps(
         &self,
         records: &[crate::evidence::EvidenceRecord],
         carried: &[crate::evidence::EvidenceRecord],
         required: &[ManifestEntry],
-        commit: &str,
+        (commit, base_tree): (&str, &str),
     ) -> Vec<(crate::evidence::CheckId, crate::evidence::Combined)> {
-        crate::evidence::aggregate(
-            records,
-            required,
-            &self.manifest_digest,
-            &|id| self.commit_keyed(id),
-            commit,
-        )
+        crate::evidence::aggregate(records, required, &self.manifest_digest, &|id| {
+            self.key(id, (commit, Some(base_tree)))
+        })
         .into_iter()
         .filter(|(id, combined)| {
             *combined != crate::evidence::Combined::Flaky || !self.allows_flaky(id)
@@ -1011,10 +1034,16 @@ impl Policy {
             .or_else(|| carried.iter().find(|record| holds(record)))
     }
 
-    /// Whether check `id` is keyed by subject commit ([`CheckEntry::commit_keyed`]).
+    /// The key of check `id`'s records for `commit` judged against a base whose tree is
+    /// `base_tree` ([`CheckEntry::key`]); the tree alone for a check this policy lacks.
     #[must_use]
-    pub fn commit_keyed(&self, id: &crate::evidence::CheckId) -> bool {
-        self.check(id).is_some_and(CheckEntry::commit_keyed)
+    pub fn key<'a>(
+        &self,
+        id: &crate::evidence::CheckId,
+        subject: (&'a str, Option<&'a str>),
+    ) -> crate::evidence::Key<'a> {
+        self.check(id)
+            .map_or(crate::evidence::Key::Tree, |entry| entry.key(subject))
     }
 
     /// Whether check `entry` is required of a candidate whose diff against its base changes
@@ -1123,7 +1152,9 @@ impl Policy {
 
     /// G560: the first pre-merge check keyed by its commit that `changed` wakes. Its record
     /// answers one commit only, so a member whose diff wakes one never lands in a batch, whose
-    /// candidate commit that check never saw; a member that wakes none batches.
+    /// candidate commit that check never saw; a member that wakes none batches. A changed-only
+    /// check is keyed by its base's tree instead ([`CheckEntry::key`]), which a batch tip shares
+    /// with its batch run, so it keeps no member out.
     #[must_use]
     pub fn commit_keyed_woken(&self, changed: &[String]) -> Option<&CheckEntry> {
         self.checks.iter().find(|entry| {
@@ -2995,9 +3026,9 @@ mod tests {
     }
 
     /// N-18: `materialize = "changed"` enters the definition digest; absent, it is left out of
-    /// the canonical entry (the G26 vector). It keys the check's evidence by commit, keeps the
-    /// changed paths and the entry's `paths`, and is invalid with `footprint = true` or on an
-    /// approval. Its one value is `"changed"`.
+    /// the canonical entry (the G26 vector). It keys a pre-merge check's evidence by the base's
+    /// tree and a post check's by commit, keeps the changed paths and the entry's `paths`, and
+    /// is invalid with `footprint = true` or on an approval. Its one value is `"changed"`.
     #[test]
     fn a_changed_only_check_enters_the_digest_and_keeps_its_changed_paths() {
         let text = "id = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\n";
@@ -3017,7 +3048,14 @@ mod tests {
             manifest_entry(&set, &ids).unwrap().definition_digest
         );
         assert!(toml::from_str::<CheckEntry>(&format!("{text}materialize = \"all\"\n")).is_err());
-        assert!(!plain.commit_keyed() && set.commit_keyed());
+        assert!(!plain.commit_keyed() && !set.commit_keyed());
+        assert!(plain.tree_keyed() && !set.tree_keyed());
+        let subject = ("c", Some("b"));
+        assert_eq!(plain.key(subject), crate::evidence::Key::Tree);
+        assert_eq!(set.key(subject), crate::evidence::Key::Base("b"));
+        assert_eq!(set.key(("c", None)), crate::evidence::Key::Commit("c"));
+        let post = entry("materialize = \"changed\"\nstage = \"post\"\n");
+        assert_eq!(post.key(subject), crate::evidence::Key::Commit("c"));
         let changed = ["src/b.rs", "src/a.rs"].map(str::to_owned);
         assert_eq!(plain.materialized(&changed), None);
         assert_eq!(

@@ -1036,19 +1036,20 @@ impl Judge<'_> {
             self.evidence_on(&tree)?,
             Some(registry),
         )?);
+        // The tree of the base it is judged against keys a changed-only check's records.
+        let base_tree = self
+            .git
+            .run(&["rev-parse", &format!("{parent}^{{tree}}")])
+            .map_err(|error| message(&error))?;
         // G292: an approval holds while the files it covers are unchanged. G638: a waiver of
         // an earlier candidate carries onto its rebuild that fails as it failed.
         let mut waivers = Vec::new();
         if !earlier.is_empty() {
-            let base_tree = self
-                .git
-                .run(&["rev-parse", &format!("{parent}^{{tree}}")])
-                .map_err(|error| message(&error))?;
             waivers = crate::throughput::carried_waivers(
                 self.git,
                 &policy,
                 Some(registry),
-                (commit, tree.as_str()),
+                (commit, tree.as_str(), base_tree.as_str()),
                 &records,
                 earlier,
             )?;
@@ -1066,7 +1067,7 @@ impl Judge<'_> {
         let changed = crate::check::changed_paths(self.git, &parent, commit)?;
         let (required, _) = policy.required(&changed);
         // The executor's rule: a flaky check whose entry says `allow_flaky` is no gap.
-        let gaps = policy.gaps(&records, &waivers, &required, commit);
+        let gaps = policy.gaps(&records, &waivers, &required, (commit, &base_tree));
         if gaps.is_empty() {
             Ok(())
         } else {

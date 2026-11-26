@@ -21,7 +21,7 @@ use crate::change::{
     Operation, Precheck, Unavailable, change_ref, freeze_draft,
 };
 use crate::check::{self, Candidate};
-use crate::evidence::{self, Combined};
+use crate::evidence::{self, Combined, Key};
 use crate::git::{Git, GitError};
 use crate::inputs;
 use crate::merge::{Merge, merge_onto};
@@ -5133,7 +5133,7 @@ fn carried_across(
                 }
                 _ => None,
             };
-            !entry.commit_keyed()
+            entry.tree_keyed()
                 && reads.is_some_and(|reads| {
                     !throughput::Footprint::Globs(reads.to_vec()).overlaps(&moved)
                 })
@@ -9521,7 +9521,7 @@ fn counted_and_carried(
             git,
             policy,
             ctx.registry.as_ref(),
-            (commit, tree),
+            (commit, tree, base_tree),
             &all,
             &earlier,
         )?;
@@ -9607,7 +9607,7 @@ fn run_policy(
     // ends the run before it starts, as a failure in the run ends it (owner ruling 2026-10-25).
     // A fleet finding, 2026-11-22: a batch's culprit, refused on the bisection's carried record,
     // held the head of the line 19 minutes while the checks after it ran.
-    let known = known_failures(policy, &reused, &changed, commit);
+    let known = known_failures(policy, &reused, &changed, (commit, &base_tree));
     let missing = check::unserved(policy, &changed, &finished, &check::Served::read(git));
     if !missing.is_empty() && known.is_empty() {
         return Ok(("unknown", Some(unavailable(ctx, op_id, &missing, None))));
@@ -9746,7 +9746,7 @@ fn run_policy(
             git,
             policy,
             ctx.registry.as_ref(),
-            (commit, tree),
+            (commit, tree, &base_tree),
             &own,
             &throughput::candidates_of(&ctx.record),
         )?;
@@ -9799,6 +9799,7 @@ fn run_policy(
             adapter_from,
             commit,
             tree,
+            base_tree: &base_tree,
             changed: &changed,
             all: &all,
             named: &named,
@@ -9844,6 +9845,8 @@ struct Seen<'a> {
     adapter_from: &'a str,
     commit: &'a str,
     tree: &'a str,
+    /// The tree of the base the candidate is judged against (`policy::CheckEntry::key`).
+    base_tree: &'a str,
     /// The paths the candidate's diff against its base changes (G146).
     changed: &'a [String],
     /// Every counted record on the candidate's tree.
@@ -9896,7 +9899,7 @@ fn judge_seen(
         &required,
         (seen.all, &seen.carried.waivers),
         seen.named,
-        seen.commit,
+        (seen.commit, seen.base_tree),
     ) else {
         return ("pass", None);
     };
@@ -9957,7 +9960,8 @@ fn approval_rows(
         .filter(|entry| entry.is_approval() && policy.requires(entry, changed))
         .filter_map(|entry| {
             let id = evidence::CheckId::new(&entry.id, &entry.environment);
-            let state = match evidence::combine(&listed, &id, &policy.manifest_digest, None) {
+            let state = match evidence::combine(&listed, &id, &policy.manifest_digest, Key::Tree)
+            {
                 Combined::Pass => return None,
                 Combined::Unknown => "pending",
                 Combined::ProductFailure | Combined::Flaky => "rejected",
@@ -10550,7 +10554,7 @@ fn verdict(
     required: &[policy::ManifestEntry],
     (all, carried): (&[evidence::EvidenceRecord], &[evidence::EvidenceRecord]),
     named: &[&evidence::EvidenceRecord],
-    commit: &str,
+    (commit, base_tree): (&str, &str),
 ) -> Option<(Reason, &'static str, Vec<serde_json::Value>)> {
     // G163: a record from a producer the check's list leaves out never answers it. G245: nor
     // does a record of the other kind; an approval no registry verified was never counted.
@@ -10563,7 +10567,7 @@ fn verdict(
     // G30: coverage is judged against the frozen manifest, never against counts.
     // A flaky check whose entry says `allow_flaky` is no gap: the landing names it instead.
     let gaps: Vec<(evidence::CheckId, Combined)> = policy
-        .gaps(&listed, carried, required, commit)
+        .gaps(&listed, carried, required, (commit, base_tree))
         .into_iter()
         // G245: approvers who disagree on one tree are a rejection, never a flaky check.
         .map(|(id, combined)| match combined {
@@ -11004,8 +11008,8 @@ fn finished_checks(
     let mut reused = Vec::new();
     for entry in &policy.manifest {
         let id = evidence::CheckId::new(&entry.id, &entry.environment);
-        let subject = policy.commit_keyed(&id).then_some(judged.commit);
-        if answered(&resumed, &id, digest, subject) || waived.contains(&id) {
+        let key = policy.key(&id, (judged.commit, Some(judged.base_tree)));
+        if answered(&resumed, &id, digest, key) || waived.contains(&id) {
             finished.push(id);
             continue;
         }
@@ -11022,7 +11026,7 @@ fn finished_checks(
                 fixtures: &check.fixtures,
             },
         );
-        if answered(&candidates, &id, digest, subject) {
+        if answered(&candidates, &id, digest, key) {
             reused.extend(candidates.into_iter().filter(|record| record.check == id));
             finished.push(id);
             continue;
@@ -11031,12 +11035,12 @@ fn finished_checks(
         // this operation whose read set is the same, byte for byte (`crate::throughput`).
         // Items 1 and 2: an observed footprint is exact by itself, so it carries under
         // exact-inputs reuse with no lanes key.
-        if subject.is_none()
+        if key == Key::Tree
             && (ctx.repo.config.footprint_lanes()
                 || check.footprint == policy::FootprintMode::Observed)
         {
             let carried = carry_over(ctx, op_id, policy, judged, check)?;
-            if answered(&carried, &id, digest, None) {
+            if answered(&carried, &id, digest, Key::Tree) {
                 reused.extend(carried);
                 finished.push(id);
             }
@@ -11147,15 +11151,15 @@ fn carry_over(
     Ok(carried)
 }
 
-/// G859: the checks the candidate runs whose records, reused or carried in place of a run,
-/// already answer `product_failure` (`evidence::combine`, as the judgement reads them): a
-/// failure known before the run starts. A check the candidate does not run (`Policy::runs`) is
-/// never one.
+/// G859: the checks the candidate `commit`, judged against a base whose tree is `base_tree`,
+/// runs whose records, reused or carried in place of a run, already answer `product_failure`
+/// (`evidence::combine`, as the judgement reads them): a failure known before the run starts. A
+/// check the candidate does not run (`Policy::runs`) is never one.
 fn known_failures(
     policy: &policy::Policy,
     reused: &[evidence::EvidenceRecord],
     changed: &[String],
-    commit: &str,
+    (commit, base_tree): (&str, &str),
 ) -> Vec<evidence::CheckId> {
     policy
         .checks
@@ -11163,9 +11167,9 @@ fn known_failures(
         .filter(|entry| policy.runs(entry, changed))
         .map(|entry| evidence::CheckId::new(&entry.id, &entry.environment))
         .filter(|id| {
-            let subject = policy.commit_keyed(id).then_some(commit);
+            let key = policy.key(id, (commit, Some(base_tree)));
             matches!(
-                evidence::combine(reused, id, &policy.manifest_digest, subject),
+                evidence::combine(reused, id, &policy.manifest_digest, key),
                 Combined::ProductFailure
             )
         })
@@ -11182,16 +11186,16 @@ fn reuses(ctx: &Ctx, judged: &Judged) -> bool {
     ctx.repo.config.evidence_reuse() && ctx.reuse_trusted(judged.base) && judged.inputs.is_empty()
 }
 
-/// Whether `records` answer check `id` under `digest` (for `subject`, when commit-keyed):
-/// they combine to a verdict, never `unknown`.
+/// Whether `records` answer check `id` under `digest` and its `key`: they combine to a
+/// verdict, never `unknown`.
 fn answered(
     records: &[evidence::EvidenceRecord],
     id: &evidence::CheckId,
     digest: &str,
-    subject: Option<&str>,
+    key: Key,
 ) -> bool {
     matches!(
-        evidence::combine(records, id, digest, subject),
+        evidence::combine(records, id, digest, key),
         Combined::Pass | Combined::ProductFailure | Combined::Flaky
     )
 }
@@ -12067,6 +12071,16 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
         .batch
         .as_ref()
         .map_or(&attempt.tree, |batch| &batch.tree);
+    // A batch tip is judged at the batch's base, over the batch's whole diff
+    // (`policy::CheckEntry::key`).
+    let base_tree = tree_of(
+        git,
+        attempt
+            .batch
+            .as_ref()
+            .map_or(&attempt.base, |batch| &batch.base),
+    )?;
+    let subject = (attempt.commit.as_str(), base_tree.as_str());
     let records = evidence::counted(
         git,
         evidence::records_for(git, tree)?,
@@ -12097,7 +12111,7 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
     // pre-existing failure, named with the base record it was compared with, never a pass.
     for gap in judged
         .iter()
-        .flat_map(|policy| baseline_gaps(policy, &records, &attempt.commit))
+        .flat_map(|policy| baseline_gaps(policy, &records, subject))
     {
         if !gaps.contains(&gap) {
             gaps.push(gap);
@@ -12106,7 +12120,7 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
     // A flaky check that landed under `allow_flaky` is named with every run, never as a pass.
     for gap in judged
         .iter()
-        .flat_map(|policy| flaky_gaps(policy, &records, &attempt.commit))
+        .flat_map(|policy| flaky_gaps(policy, &records, subject))
     {
         if !gaps.contains(&gap) {
             gaps.push(gap);
@@ -12123,14 +12137,14 @@ fn coverage_gaps(ctx: &Ctx, op_id: &str) -> Result<Vec<serde_json::Value>, Strin
                 git,
                 policy,
                 ctx.registry.as_ref(),
-                (&attempt.commit, &attempt.tree),
+                (&attempt.commit, &attempt.tree, &base_tree),
                 &records,
                 &earlier,
             )?
         } else {
             Vec::new()
         };
-        for gap in waiver_gaps(policy, (&records, &carried), &changed, &attempt.commit) {
+        for gap in waiver_gaps(policy, (&records, &carried), &changed, subject) {
             if !gaps.contains(&gap) {
                 gaps.push(gap);
             }
@@ -12190,7 +12204,7 @@ fn attempt_policies(git: &Git, attempt: &Attempt) -> Result<Vec<policy::Policy>,
 fn baseline_gaps(
     policy: &policy::Policy,
     records: &[evidence::EvidenceRecord],
-    commit: &str,
+    (commit, base_tree): (&str, &str),
 ) -> Vec<serde_json::Value> {
     let listed = policy.answering(records.to_vec());
     let mut gaps = Vec::new();
@@ -12202,7 +12216,7 @@ fn baseline_gaps(
         {
             continue;
         }
-        let subject = policy.commit_keyed(&id).then_some(commit);
+        let key = policy.key(&id, (commit, Some(base_tree)));
         let mut failures: Vec<String> = Vec::new();
         let mut compared: Vec<serde_json::Value> = Vec::new();
         for record in listed.iter().filter(|record| {
@@ -12210,7 +12224,7 @@ fn baseline_gaps(
                 && record.check == id
                 && record.manifest_digest == policy.manifest_digest
                 && record.verdict == evidence::Verdict::Pass
-                && subject.is_none_or(|commit| record.subject.commit == commit)
+                && key.holds(&record.subject)
         }) {
             let preexisting = record.baseline_failures();
             if preexisting.is_empty() {
@@ -12240,7 +12254,8 @@ fn baseline_gaps(
 }
 
 /// N-9: the checks `policy` requires of a candidate whose diff changes `changed` that its
-/// counted `records` do not pass for `commit` and that a valid waiver answers
+/// counted `records` do not pass for `commit`, judged against a base whose tree is
+/// `base_tree`, and that a valid waiver answers
 /// ([`policy::Policy::waiver`]): each with its real verdict and the waiver, `waived_by` (the
 /// approver), `why` and `record` (the waiver's id). A waiver is never a pass. G638: a waiver
 /// among `carried`, of an earlier candidate, also names that candidate (`carried_from`).
@@ -12248,7 +12263,7 @@ fn waiver_gaps(
     policy: &policy::Policy,
     (records, carried): (&[evidence::EvidenceRecord], &[evidence::EvidenceRecord]),
     changed: &[String],
-    commit: &str,
+    (commit, base_tree): (&str, &str),
 ) -> Vec<serde_json::Value> {
     let listed = policy.answering(records.to_vec());
     let (required, _) = policy.required(changed);
@@ -12256,8 +12271,8 @@ fn waiver_gaps(
         .iter()
         .filter_map(|entry| {
             let id = evidence::CheckId::new(&entry.id, &entry.environment);
-            let subject = policy.commit_keyed(&id).then_some(commit);
-            let verdict = match evidence::combine(&listed, &id, &policy.manifest_digest, subject) {
+            let key = policy.key(&id, (commit, Some(base_tree)));
+            let verdict = match evidence::combine(&listed, &id, &policy.manifest_digest, key) {
                 Combined::Pass => return None,
                 Combined::ProductFailure => "product_failure",
                 Combined::Flaky => "flaky",
@@ -12308,10 +12323,17 @@ pub fn waivable_gaps(
         registry,
     )?);
     // G638: a check a waiver of an earlier candidate already answers waits for no new one.
-    let carried =
-        throughput::carried_waivers(git, &policy, registry, (commit, tree), &records, earlier)?;
+    let base_tree = tree_of(git, base)?;
+    let carried = throughput::carried_waivers(
+        git,
+        &policy,
+        registry,
+        (commit, tree, &base_tree),
+        &records,
+        earlier,
+    )?;
     Ok(policy
-        .gaps(&records, &carried, &required, commit)
+        .gaps(&records, &carried, &required, (commit, &base_tree))
         .into_iter()
         .filter(|(id, _)| policy.check(id).is_some_and(|entry| entry.waivable))
         .map(|(id, combined)| {
@@ -12326,19 +12348,20 @@ pub fn waivable_gaps(
 }
 
 /// The required checks of `policy` whose counted `records` on the landed tree combine to
-/// `flaky` and whose entry says `allow_flaky`, each with every run that answered it.
+/// `flaky` for `commit` judged against a base whose tree is `base_tree`, and whose entry says
+/// `allow_flaky`, each with every run that answered it.
 fn flaky_gaps(
     policy: &policy::Policy,
     records: &[evidence::EvidenceRecord],
-    commit: &str,
+    (commit, base_tree): (&str, &str),
 ) -> Vec<serde_json::Value> {
     let listed = policy.answering(records.to_vec());
     let mut gaps = Vec::new();
     for entry in &policy.manifest {
         let id = evidence::CheckId::new(&entry.id, &entry.environment);
-        let subject = policy.commit_keyed(&id).then_some(commit);
+        let key = policy.key(&id, (commit, Some(base_tree)));
         if !policy.allows_flaky(&id)
-            || evidence::combine(&listed, &id, &policy.manifest_digest, subject) != Combined::Flaky
+            || evidence::combine(&listed, &id, &policy.manifest_digest, key) != Combined::Flaky
         {
             continue;
         }
@@ -12348,7 +12371,7 @@ fn flaky_gaps(
                 record.kind == evidence::KIND_CHECK
                     && record.check == id
                     && record.manifest_digest == policy.manifest_digest
-                    && subject.is_none_or(|commit| record.subject.commit == commit)
+                    && key.holds(&record.subject)
             })
             .map(|record| json!({"id": record.id, "verdict": record.verdict, "at": record.at}))
             .collect();
@@ -12624,8 +12647,9 @@ fn answers_of(
             out.push(row);
             continue;
         }
-        let subject = policy.commit_keyed(&id).then_some(commit);
-        let (state, due) = evidence::answer(&records, &id, &policy.manifest_digest, subject, now);
+        // A post check runs on main's own commit (`policy::CheckEntry::key`).
+        let key = policy.key(&id, (commit, None));
+        let (state, due) = evidence::answer(&records, &id, &policy.manifest_digest, key, now);
         row["state"] = json!(state);
         if let Some(due) = due {
             row[RERUN_DUE] = json!(crate::clock::rfc3339_of(due));

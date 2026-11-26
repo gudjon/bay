@@ -1977,7 +1977,7 @@ fn run_id(producer: &str, candidate: &str, index: usize, run: u32) -> String {
 
 /// N-3: whether `record` answers check `entry` on the base under the exact inputs the
 /// candidate's run had: a `check` record of it about the base's tree (and commit, for a
-/// commit-keyed check), made under the same manifest, so the same definition and adapter,
+/// check not keyed by its tree alone), made under the same manifest, so the same definition and adapter,
 /// under the same provenance and fixtures, with an answer. An `unknown` or `infra_failure`
 /// record is no answer, so the base is run again rather than leaving every later candidate on
 /// it unknown.
@@ -1989,11 +1989,10 @@ fn answers_on_base(
     base: &str,
 ) -> bool {
     // N-18: a changed-only check's base record is the base's own, on its own first parent.
-    let commit_keyed = entry.commit_keyed();
     record.kind == crate::evidence::KIND_CHECK
         && record.check == CheckId::new(&entry.id, &entry.environment)
         && record.subject.tree == candidate.base_tree
-        && (!commit_keyed || record.subject.commit == base)
+        && (entry.tree_keyed() || record.subject.commit == base)
         && record.manifest_digest == policy.manifest_digest
         && record.policy_provenance.as_deref() == Some(candidate.policy_provenance.as_str())
         && record.fixtures().as_deref() == Some(entry.fixtures.as_slice())

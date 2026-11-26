@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.34
+
+- A changed-only check keys its record by its base's tree, so changes that wake it still batch.
+
 ## 0.7.33
 
 - A runner reads a lowered ref budget on its next pass, not after its count expires.

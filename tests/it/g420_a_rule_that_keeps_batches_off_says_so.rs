@@ -1,7 +1,7 @@
 //! G420. A rule that keeps every batch off says so in the runner's journal (R7).
 //!
-//! A head whose diff wakes a check keyed by its commit (`materialize = "changed"`, or a
-//! `commit` or `history` input) never batches: its record never answers another commit (G560).
+//! A head whose diff wakes a check keyed by its commit (a `commit` or `history` input) never
+//! batches: its record never answers another commit (G560).
 //! Measured 2026-10-27, one such check kept a fleet's batches off for hours, and the journal
 //! said nothing, while a batch that ends names why. Now the head's batch decision names the
 //! check.
@@ -26,7 +26,7 @@ fn a_check_keyed_by_its_commit_says_it_keeps_batches_off() {
     let held = host(&Check {
         config: "[runner]\nlease_s = 30\nheartbeat_s = 1\nbatch = { min = 2, max = 8 }\n",
         policy: Some(
-            "revision = 1\n\n[[check]]\nid = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 120\nmaterialize = \"changed\"\n",
+            "revision = 1\n\n[[check]]\nid = \"tests\"\nenvironment = \"local\"\ncommand = \"scripts/bay-check\"\nadapter = [\"scripts/bay-check\"]\nexpected_minimum = 1\ntimeout_s = 120\ninputs = [\"commit\"]\n",
         ),
         seed: &[("src/a.rs", "fn a() {}\n")],
         hold_first: false,

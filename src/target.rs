@@ -274,6 +274,23 @@ pub fn checks(
         evidence::records_for(git, &tree)?,
         registry,
     )?);
+    // The tree of the base the commit was judged at keys a changed-only check's records: a
+    // batch tip's is its batch's base (`crate::throughput::judged_depth`).
+    let tag = git
+        .run(&[
+            "log",
+            "-1",
+            &format!(
+                "--format=%(trailers:key={},valueonly)",
+                crate::throughput::BATCH_TRAILER
+            ),
+            commit,
+        ])
+        .map_err(|error| error.message())?;
+    let depth = crate::throughput::judged_depth(Some(tag.trim()).filter(|tag| !tag.is_empty()));
+    let judged_tree = git
+        .run(&["rev-parse", &format!("{commit}~{depth}^{{tree}}")])
+        .ok();
     // G292: an approval of an earlier candidate of the commit's change that still holds
     // answers here as it answered the landing.
     let earlier = crate::throughput::change_candidates(git, commit);
@@ -310,9 +327,8 @@ pub fn checks(
                 continue;
             }
             let check = CheckId::new(&entry.id, &entry.environment);
-            let subject = policy.commit_keyed(&check).then_some(commit);
-            let (state, _) =
-                evidence::answer(&records, &check, &policy.manifest_digest, subject, now);
+            let key = policy.key(&check, (commit, judged_tree.as_deref()));
+            let (state, _) = evidence::answer(&records, &check, &policy.manifest_digest, key, now);
             out.push(json!({"check": entry.id, "environment": entry.environment, "state": state}));
         }
     }

@@ -1082,7 +1082,7 @@ pub fn carried_approvals(
     own: &[EvidenceRecord],
     earlier: &[Earlier],
 ) -> Result<CarriedApprovals, String> {
-    use crate::evidence::{CheckId, Combined, KIND_APPROVAL, Verdict};
+    use crate::evidence::{CheckId, Combined, KIND_APPROVAL, Key, Verdict};
     let mut out = CarriedApprovals::default();
     let listed = policy.answering(own.to_vec());
     let open: Vec<&CheckEntry> = policy
@@ -1091,7 +1091,7 @@ pub fn carried_approvals(
         .filter(|entry| entry.carries())
         .filter(|entry| {
             let id = CheckId::new(&entry.id, &entry.environment);
-            crate::evidence::combine(&listed, &id, &policy.manifest_digest, None)
+            crate::evidence::combine(&listed, &id, &policy.manifest_digest, Key::Tree)
                 == Combined::Unknown
         })
         .collect();
@@ -1152,7 +1152,8 @@ pub fn carried_approvals(
 /// candidate the waiver did not name, so no waiver could ever land it): a waiver carries onto
 /// a candidate the change rebuilt on a newer main when it would show the approver nothing new.
 /// For each waivable check of `policy` that `own`, the counted records on the candidate's
-/// `tree`, neither pass nor waive for `commit`: the counted waiver of that check about an
+/// `tree`, neither pass nor waive for `commit` (judged against a base whose tree is
+/// `base_tree`): the counted waiver of that check about an
 /// earlier candidate of the same change (`earlier`, on another tree) whose patch against its
 /// parent is this one's (`git patch-id --stable`), under the same manifest, when the check's
 /// records about this candidate show the same outcome as its records about the waived one
@@ -1167,7 +1168,7 @@ pub fn carried_waivers(
     git: &Git,
     policy: &Policy,
     registry: Option<&crate::registry::Registry>,
-    (commit, tree): (&str, &str),
+    (commit, tree, base_tree): (&str, &str, &str),
     own: &[EvidenceRecord],
     earlier: &[Earlier],
 ) -> Result<Vec<EvidenceRecord>, String> {
@@ -1180,8 +1181,8 @@ pub fn carried_waivers(
         .filter(|entry| entry.waivable && !entry.is_approval())
         .map(|entry| CheckId::new(&entry.id, &entry.environment))
         .filter(|id| {
-            let subject = policy.commit_keyed(id).then_some(commit);
-            crate::evidence::combine(&listed, id, digest, subject) != Combined::Pass
+            let key = policy.key(id, (commit, Some(base_tree)));
+            crate::evidence::combine(&listed, id, digest, key) != Combined::Pass
                 && policy.waiver(&listed, &[], id, commit).is_none()
         })
         .collect();
@@ -1652,6 +1653,17 @@ impl BatchTag {
     }
 }
 
+/// How far down main's first-parent line the base a landed commit was judged at lies, from its
+/// `Bay-Batch` trailer value `tag` (`None` for none): a batch tip's is the batch's base, its
+/// size down ([`Role::Tip`]); any other commit's is its first parent.
+#[must_use]
+pub fn judged_depth(tag: Option<&str>) -> usize {
+    match tag.and_then(BatchTag::parse) {
+        Some(batch) if batch.position == batch.size => batch.size,
+        _ => 1,
+    }
+}
+
 /// How the host hook judges one commit of a trunk push (`crate::hook`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -1711,7 +1723,8 @@ pub fn roles(tags: &[Option<&str>]) -> Result<Vec<Role>, String> {
 mod tests {
     use super::{
         BatchTag, Bisect, Fold, Footprint, Member, Observed, Own, Queued, Reads, Role,
-        checked_prefix, failure_rate, fold, plan_batch, predict, roles, slowest, tree_of,
+        checked_prefix, failure_rate, fold, judged_depth, plan_batch, predict, roles, slowest,
+        tree_of,
     };
     use crate::git::Git;
 
@@ -2121,6 +2134,10 @@ mod tests {
         ] {
             assert_eq!(BatchTag::parse(bad), None, "{bad}");
         }
+        // A batch tip is judged at its batch's base, any other commit at its parent.
+        assert_eq!(judged_depth(Some("0123abcd 3/3")), 3);
+        assert_eq!(judged_depth(Some("0123abcd 2/3")), 1);
+        assert_eq!(judged_depth(None), 1);
         let pushed = [
             None,
             Some("aa 1/2"),

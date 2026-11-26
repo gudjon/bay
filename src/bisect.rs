@@ -727,7 +727,7 @@ pub(crate) fn rendezvous(check: &str, environment: &str, runner: &str) -> u64 {
 /// 36 of them after the other box had recorded its answer): the checks of `entries` that another
 /// producer's `records` on `commit`'s tree already answer, as the red judgment counts them (the
 /// producers a check lists, verified under the registry, this policy's manifest, and `commit`
-/// for a commit-keyed check), with a verdict that is not unknown. Only a record already there
+/// for a check keyed by it), with a verdict that is not unknown. Only a record already there
 /// answers, so two runners that start one run together would both run it: G822 ([`left_to`])
 /// leaves each check to one of them.
 ///
@@ -759,8 +759,9 @@ fn answered_elsewhere(
     Ok(ids
         .into_iter()
         .filter(|id| {
-            let subject = policy.commit_keyed(id).then_some(commit);
-            evidence::combine(&counted, id, &policy.manifest_digest, subject)
+            // A post check runs on main's own commit (`crate::policy::CheckEntry::key`).
+            let key = policy.key(id, (commit, None));
+            evidence::combine(&counted, id, &policy.manifest_digest, key)
                 != evidence::Combined::Unknown
         })
         .collect())

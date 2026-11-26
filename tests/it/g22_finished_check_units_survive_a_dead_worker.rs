@@ -169,8 +169,7 @@ fn the_sixth_unit_is_unknown_and_the_aggregate_incomplete() {
         &records,
         &policy.manifest,
         &policy.manifest_digest,
-        &|check| policy.commit_keyed(check),
-        "",
+        &|check| policy.key(check, ("", None)),
     );
     assert_eq!(
         gaps,

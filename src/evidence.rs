@@ -1057,11 +1057,36 @@ pub enum Combined {
     Unknown,
 }
 
+/// What a record must be about, besides the tree its note is on, to answer a check
+/// (`crate::policy::CheckEntry::key`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key<'a> {
+    /// The tree alone: a record answers every candidate with that tree.
+    Tree,
+    /// The candidate commit too: a record answers that commit only.
+    Commit(&'a str),
+    /// The tree of the base it was judged against too: a record answers every candidate with
+    /// that tree judged against a base with that tree, so with the same diff.
+    Base(&'a str),
+}
+
+impl Key<'_> {
+    /// Whether a record about `subject` answers under this key.
+    #[must_use]
+    pub fn holds(self, subject: &Subject) -> bool {
+        match self {
+            Key::Tree => true,
+            Key::Commit(commit) => subject.commit == commit,
+            Key::Base(base_tree) => subject.base_tree == base_tree,
+        }
+    }
+}
+
 /// Combines records per check id and environment (`DESIGN` § 7): `pass` needs a
 /// `pass` and no `product_failure`; a `product_failure` beside a `pass` is flaky; `unknown`
 /// and `infra_failure` never cancel a `pass`. Records made under another manifest do not count.
-/// A check keyed by commit (`subject_commit`) counts only records for that commit, so a
-/// failure on one commit is never charged to another that shares its tree. Only records of
+/// Only records that hold under the check's `key` count: a failure on one commit of a check
+/// keyed by its commit is never charged to another that shares its tree. Only records of
 /// kind `check` or `approval` combine ([`combines`]): a runtime or review record that names the
 /// check is never its pass. The policy keeps an approval from answering a run check and a check
 /// record from answering an approval check before records reach here.
@@ -1070,13 +1095,13 @@ pub fn combine(
     records: &[EvidenceRecord],
     check: &CheckId,
     manifest_digest: &str,
-    subject_commit: Option<&str>,
+    key: Key,
 ) -> Combined {
     let relevant = records.iter().filter(|record| {
         combines(&record.kind)
             && &record.check == check
             && record.manifest_digest == manifest_digest
-            && subject_commit.is_none_or(|commit| record.subject.commit == commit)
+            && key.holds(&record.subject)
     });
     let (mut pass, mut failure) = (false, false);
     for record in relevant {
@@ -1127,7 +1152,7 @@ pub fn answer(
     records: &[EvidenceRecord],
     check: &CheckId,
     manifest_digest: &str,
-    subject_commit: Option<&str>,
+    key: Key,
     now: u64,
 ) -> (&'static str, Option<u64>) {
     let named = || {
@@ -1135,10 +1160,10 @@ pub fn answer(
             record.kind == KIND_CHECK
                 && &record.check == check
                 && record.manifest_digest == manifest_digest
-                && subject_commit.is_none_or(|commit| record.subject.commit == commit)
+                && key.holds(&record.subject)
         })
     };
-    match combine(records, check, manifest_digest, subject_commit) {
+    match combine(records, check, manifest_digest, key) {
         Combined::Pass => ("pass", None),
         Combined::Flaky => ("flaky", None),
         Combined::ProductFailure => {
@@ -1175,22 +1200,20 @@ pub fn answer(
 }
 
 /// The aggregate over a frozen manifest (G30): complete only when every required (check id,
-/// environment) combines to `pass`. Counts are never the measure: twelve green checks may be
-/// the wrong twelve.
+/// environment) combines to `pass`, each under its `key`. Counts are never the measure:
+/// twelve green checks may be the wrong twelve.
 #[must_use]
-pub fn aggregate(
+pub fn aggregate<'a>(
     records: &[EvidenceRecord],
     manifest: &[crate::policy::ManifestEntry],
     manifest_digest: &str,
-    commit_keyed: &dyn Fn(&CheckId) -> bool,
-    candidate_commit: &str,
+    key: &dyn Fn(&CheckId) -> Key<'a>,
 ) -> Vec<(CheckId, Combined)> {
     manifest
         .iter()
         .map(|entry| CheckId::new(&entry.id, &entry.environment))
         .map(|id| {
-            let subject = commit_keyed(&id).then_some(candidate_commit);
-            let combined = combine(records, &id, manifest_digest, subject);
+            let combined = combine(records, &id, manifest_digest, key(&id));
             (id, combined)
         })
         .filter(|(_, combined)| *combined != Combined::Pass)
@@ -1219,7 +1242,7 @@ pub fn without_conflicts(records: Vec<EvidenceRecord>) -> Vec<EvidenceRecord> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckId, Combined, EvidenceRecord, Producer, Subject, Verdict, answer, combine,
+        CheckId, Combined, EvidenceRecord, Key, Producer, Subject, Verdict, answer, combine,
         without_conflicts,
     };
 
@@ -1277,11 +1300,11 @@ mod tests {
             due,
         )];
         assert_eq!(
-            answer(&failed, &tests_on("x"), "m", None, due - 1),
+            answer(&failed, &tests_on("x"), "m", Key::Tree, due - 1),
             ("pending", Some(due))
         );
         assert_eq!(
-            answer(&failed, &tests_on("x"), "m", None, due),
+            answer(&failed, &tests_on("x"), "m", Key::Tree, due),
             ("product_failure", None)
         );
     }
@@ -1295,24 +1318,27 @@ mod tests {
         for rerun in [Verdict::ProductFailure, Verdict::Unknown] {
             let ended = [first.clone(), record("ci/2", "x", "c", rerun)];
             assert_eq!(
-                answer(&ended, &tests_on("x"), "m", None, due - 1),
+                answer(&ended, &tests_on("x"), "m", Key::Tree, due - 1),
                 ("product_failure", None),
                 "{rerun:?}"
             );
         }
         let passed = [first, record("ci/2", "x", "c", Verdict::Pass)];
         assert_eq!(
-            answer(&passed, &tests_on("x"), "m", None, due - 1),
+            answer(&passed, &tests_on("x"), "m", Key::Tree, due - 1),
             ("flaky", None)
         );
     }
 
     #[test]
     fn no_record_is_pending_and_one_that_answers_nothing_is_unknown() {
-        assert_eq!(answer(&[], &tests_on("x"), "m", None, 0), ("pending", None));
+        assert_eq!(
+            answer(&[], &tests_on("x"), "m", Key::Tree, 0),
+            ("pending", None)
+        );
         let unknown = [record("ci/1", "x", "c", Verdict::Unknown)];
         assert_eq!(
-            answer(&unknown, &tests_on("x"), "m", None, 0),
+            answer(&unknown, &tests_on("x"), "m", Key::Tree, 0),
             ("unknown", None)
         );
     }
@@ -1324,7 +1350,10 @@ mod tests {
                 record("ci/1", "x", "c", Verdict::Pass),
                 record("ci/2", "x", "c", later),
             ];
-            assert_eq!(combine(&records, &tests_on("x"), "m", None), Combined::Pass);
+            assert_eq!(
+                combine(&records, &tests_on("x"), "m", Key::Tree),
+                Combined::Pass
+            );
         }
     }
 
@@ -1338,15 +1367,21 @@ mod tests {
             record("ci/1", "x", "c", Verdict::ProductFailure),
             record("ci/2", "x", "c", Verdict::Pass),
         ];
-        assert_eq!(combine(&one, &tests_on("x"), "m", None), Combined::Flaky);
-        assert_eq!(combine(&two, &tests_on("x"), "m", None), Combined::Flaky);
+        assert_eq!(
+            combine(&one, &tests_on("x"), "m", Key::Tree),
+            Combined::Flaky
+        );
+        assert_eq!(
+            combine(&two, &tests_on("x"), "m", Key::Tree),
+            Combined::Flaky
+        );
     }
 
     #[test]
     fn a_pass_on_one_environment_does_not_satisfy_another() {
         let records = [record("ci/1", "x86", "c", Verdict::Pass)];
         assert_eq!(
-            combine(&records, &tests_on("aarch64"), "m", None),
+            combine(&records, &tests_on("aarch64"), "m", Key::Tree),
             Combined::Unknown
         );
     }
@@ -1355,12 +1390,28 @@ mod tests {
     fn a_commit_keyed_failure_is_not_charged_to_another_commit_with_the_same_tree() {
         let records = [record("ci/1", "x", "commit-a", Verdict::ProductFailure)];
         assert_eq!(
-            combine(&records, &tests_on("x"), "m", Some("commit-b")),
+            combine(&records, &tests_on("x"), "m", Key::Commit("commit-b")),
             Combined::Unknown
         );
         assert_eq!(
-            combine(&records, &tests_on("x"), "m", Some("commit-a")),
+            combine(&records, &tests_on("x"), "m", Key::Commit("commit-a")),
             Combined::ProductFailure
+        );
+    }
+
+    /// A record keyed by its base's tree answers any commit with its tree that is judged
+    /// against a base with that tree, so with the same diff, and nothing judged against
+    /// another base.
+    #[test]
+    fn a_base_keyed_record_answers_only_a_candidate_on_the_same_base_tree() {
+        let records = [record("ci/1", "x", "commit-a", Verdict::ProductFailure)];
+        assert_eq!(
+            combine(&records, &tests_on("x"), "m", Key::Base("b")),
+            Combined::ProductFailure
+        );
+        assert_eq!(
+            combine(&records, &tests_on("x"), "m", Key::Base("another")),
+            Combined::Unknown
         );
     }
 
@@ -1383,7 +1434,7 @@ mod tests {
             record("ci/1", "x", "c", Verdict::Pass),
             record("ci/2", "x", "c", Verdict::Pass),
         ];
-        let gaps = super::aggregate(&records, &manifest, "m", &|_| false, "c");
+        let gaps = super::aggregate(&records, &manifest, "m", &|_| Key::Tree);
         assert_eq!(
             gaps.len(),
             1,
@@ -1430,7 +1481,7 @@ mod tests {
             let mut other = record("ci/1", "x", "c", Verdict::Pass);
             other.kind = kind.to_owned();
             assert_eq!(
-                combine(&[other], &tests_on("x"), "m", None),
+                combine(&[other], &tests_on("x"), "m", Key::Tree),
                 Combined::Unknown,
                 "{kind}"
             );
