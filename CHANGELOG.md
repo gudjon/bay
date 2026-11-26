@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.31
+
+- A runner whose check gives no answer on its machine hands the change to another runner.
+- A runner's compaction push moves one shard, at a bounded cost, on a pass that ran no operation.
+- `bay status` names a red's automatic undo, or when a runner undoes it.
+- The README leads with what bay does and a quick start, and the code backs each claim.
+
 ## 0.7.30
 
 - Outside a push hook, bay's Git writes objects into the store, never an object directory its environment names.
