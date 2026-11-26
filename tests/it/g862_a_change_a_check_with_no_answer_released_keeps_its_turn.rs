@@ -15,16 +15,11 @@
 
 #![cfg(unix)]
 
-use std::io::Write as _;
-use std::path::Path;
-use std::process::Stdio;
-
 use serde_json::json;
 
 use crate::support;
 
-use support::TestBox;
-use support::queued::{Check, host, ran_for};
+use support::queued::{Check, entry_commit, host, ran_for};
 use support::{EXECUTOR, PRODUCER};
 
 const CONFIG: &str = "[runner]\nlease_s = 450\nheartbeat_s = 120\n";
@@ -130,37 +125,4 @@ fn the_host_refuses_a_rank_no_release_gives() {
     let queue = bay::queue::Queue::read(&opened).unwrap();
     assert_eq!(queue.head().map(|head| head.seq), Some(again));
     assert_eq!(queue.position(again), 1);
-}
-
-/// A commit of one file `entry.json` holding `entry`, as a reservation's commit holds it,
-/// signed by `signer`.
-fn entry_commit(
-    test_box: &TestBox,
-    repo: &Path,
-    signer: &bay::signing::Signer,
-    entry: &serde_json::Value,
-) -> String {
-    let piped = |args: &[&str], input: &str| {
-        let mut child = test_box
-            .git(repo)
-            .args(signer.config_args())
-            .envs(signer.identity())
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(input.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "git {args:?}");
-        String::from_utf8(out.stdout).unwrap().trim().to_owned()
-    };
-    let blob = piped(&["hash-object", "-w", "--stdin"], &format!("{entry}\n"));
-    let tree = piped(&["mktree"], &format!("100644 blob {blob}\tentry.json\n"));
-    piped(&["commit-tree", "-S", &tree, "-m", "reserve"], "")
 }

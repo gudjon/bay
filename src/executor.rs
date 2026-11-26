@@ -2853,6 +2853,8 @@ mod tests {
                 op_id: "queued01.1".to_owned(),
                 change: "queued01".to_owned(),
                 rank: 7,
+                expedite: false,
+                joined: 0,
             },
         );
         let mut chains = vec![

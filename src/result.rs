@@ -237,6 +237,10 @@ reasons! {
     // BACKLOG 280: the box is at or above a check-start load limit it sets (`crate::load`); a
     // runner's pass claims nothing there until it is below, or a runner on another box takes it.
     BoxBusy => "BOX_BUSY", ["wait"], "by_itself", false;
+    // BACKLOG 326: `bay merge --expedite` was not granted; the change waits in line as a plain
+    // arrival. One code for every limit; `detail.expedite.refused` names it: `off` (no
+    // `[expedite]`), `live` (one expedite is already live) or `spent` (the day's budget).
+    ExpediteRefused => "EXPEDITE_REFUSED", ["wait"], "by_itself", false;
 }
 
 impl Reason {
@@ -1253,6 +1257,9 @@ impl Reason {
             Self::BoxBusy => {
                 "Wait: a runner on another machine takes it, or this one once its load is below `detail.limits`. Nothing to do."
             }
+            Self::ExpediteRefused => {
+                "Wait: the change is in line as a plain arrival; `detail.expedite.refused` says why it could not go next. Do not ask again for it."
+            }
             Self::TrunkHeld => {
                 "Wait: the change stays queued and merges once the hold clears; `bay status` shows the hold. Only fixes and reverts merge now."
             }
@@ -1422,6 +1429,9 @@ impl Reason {
             }
             Self::BoxBusy => {
                 "Saved. The machine that runs its checks is busy; they start once it is less busy. Nothing to do."
+            }
+            Self::ExpediteRefused => {
+                "Saved. It waits its turn in line: it could not go first now. Nothing to do."
             }
             Self::DependencyPending => "Saved. It waits until the change it depends on is added.",
             Self::DependencyAbandoned => {
@@ -3093,7 +3103,7 @@ mod tests {
             );
             assert!(!reason.retry_when().is_empty(), "{code} has no retry_when");
         }
-        assert_eq!(Reason::ALL.len(), 64);
+        assert_eq!(Reason::ALL.len(), 65);
     }
 
     #[test]

@@ -55,6 +55,9 @@ pub struct Config {
     pub hooks: Option<Hooks>,
     pub view: Option<View>,
     pub red: Option<Red>,
+    /// `[expedite]` (BACKLOG 326): an agent may ask one change to run next, right behind the
+    /// running head, a bounded number of times a day. Off when absent.
+    pub expedite: Option<Expedite>,
     pub status: Option<Status>,
     /// `[[lane]]` (NEW-4): the sandbox lanes, whose changes run their checks and never land.
     #[serde(default, rename = "lane")]
@@ -363,6 +366,18 @@ pub struct Red {
     pub reach: Option<usize>,
     pub undo_after_s: Option<u64>,
 }
+
+/// `[expedite] per_day` (BACKLOG 326): how many expedites the line grants in one UTC day,
+/// whoever asks; required when the table is present, 1 to [`MAX_EXPEDITE_PER_DAY`]. At most one
+/// expedite is live at a time.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Expedite {
+    pub per_day: u32,
+}
+
+/// The most expedites one UTC day grants: past this, an expedite is the line itself.
+pub const MAX_EXPEDITE_PER_DAY: u32 = 100;
 
 /// The deepest `[red] window`: each commit in it may cost one read of its evidence notes.
 pub const MAX_RED_WINDOW: usize = 10_000;
@@ -708,6 +723,13 @@ impl Config {
         {
             return Err(format!(
                 "[red] undo_after_s = {after}: the wait is 0 to {MAX_RED_UNDO_AFTER_S} seconds"
+            ));
+        }
+        if let Some(per_day) = config.expedite.as_ref().map(|expedite| expedite.per_day)
+            && !(1..=MAX_EXPEDITE_PER_DAY).contains(&per_day)
+        {
+            return Err(format!(
+                "[expedite] per_day = {per_day}: 1 to {MAX_EXPEDITE_PER_DAY} expedites a day"
             ));
         }
         config.validate_targets()?;
@@ -1081,6 +1103,13 @@ impl Config {
             .as_ref()
             .and_then(|red| red.undo_after_s)
             .map(std::time::Duration::from_secs)
+    }
+
+    /// BACKLOG 326: how many expedites one UTC day grants (`[expedite] per_day`); `None`, the
+    /// default: the line grants none.
+    #[must_use]
+    pub fn expedite_per_day(&self) -> Option<u32> {
+        self.expedite.as_ref().map(|expedite| expedite.per_day)
     }
 
     /// How many first-parent trunk commits a red check whose window holds no pass reads back
@@ -1468,6 +1497,25 @@ product = "claude"                 # leave this table out when the box does not 
             "[red]\nundo_after_s = -1\n",
             "[red]\nundo_after_s = \"1800\"\n",
             "[red]\nundo_after = 1800\n",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn an_expedite_is_off_unless_configured_and_needs_a_daily_budget_of_1_to_100() {
+        // BACKLOG 326.
+        assert_eq!(Config::default().expedite_per_day(), None);
+        let per_day = |text: &str| Config::parse(text).unwrap().expedite_per_day();
+        assert_eq!(per_day("[expedite]\nper_day = 1\n"), Some(1));
+        assert_eq!(per_day("[expedite]\nper_day = 100\n"), Some(100));
+        for text in [
+            "[expedite]\n",
+            "[expedite]\nper_day = 0\n",
+            "[expedite]\nper_day = 101\n",
+            "[expedite]\nper_day = -1\n",
+            "[expedite]\nper_day = \"3\"\n",
+            "[expedite]\nper_day = 3\nmax_live = 2\n",
         ] {
             assert!(Config::parse(text).is_err(), "{text}");
         }

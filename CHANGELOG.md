@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.32
+
+- `bay merge --expedite <why>` runs a change next, alone, within the repository's `[expedite] per_day`.
+- `bay queue` marks an expedite's place with `expedite`.
+
 ## 0.7.31
 
 - A runner whose check gives no answer on its machine hands the change to another runner.

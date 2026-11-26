@@ -328,6 +328,11 @@ struct WaitArgs {
     /// while the run goes on
     #[arg(long, value_name = "SECONDS", num_args = 0..=1, require_equals = true)]
     wait: Option<Option<u64>>,
+    /// Run next, alone, right behind the change merging now. WHY is kept in the signed request
+    /// and bay's log. Within the repository's `[expedite] per_day`, one at a time; refused
+    /// (`EXPEDITE_REFUSED`), the change waits its turn in line
+    #[arg(long, value_name = "WHY", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    expedite: Option<String>,
 }
 
 impl WaitArgs {
@@ -863,7 +868,7 @@ fn approve_change(dir: &std::path::Path, command: Command) -> BayResult {
 /// `bay abandon [CHANGE]` (G301): the abandon request; with no change, the change of the view
 /// bay runs in.
 fn abandon(dir: &std::path::Path, change: Option<&str>, why: Option<&str>) -> BayResult {
-    bay::publish::land(dir, change, false, None, Some(why))
+    bay::publish::land(dir, change, false, None, Some(why), None)
 }
 
 /// `bay save`: the request its arguments make.
@@ -908,6 +913,7 @@ fn merge_from(
     branch: &str,
     wait: bool,
     observe: Option<std::time::Duration>,
+    expedite: Option<&str>,
 ) -> BayResult {
     let intent = branch
         .trim_start_matches("refs/heads/")
@@ -939,7 +945,7 @@ fn merge_from(
     else {
         return started;
     };
-    bay::publish::land(&view, None, wait, observe, None)
+    bay::publish::land(&view, None, wait, observe, None, expedite)
 }
 
 /// `bay start`: the request its arguments make.
@@ -1048,20 +1054,27 @@ fn main() -> ExitCode {
         approve @ (Command::Approve { .. } | Command::Reject { .. }) => {
             approve_change(&cli.dir, approve)
         }
-        Command::Undo { change, wait } => {
-            let (wait, observe) = wait.wait();
-            bay::undo::undo(&cli.dir, &change, wait, observe)
+        Command::Undo { change, wait: how } => {
+            let (wait, observe) = how.wait();
+            bay::undo::undo(&cli.dir, &change, wait, observe, how.expedite.as_deref())
         }
         Command::Share {
             change,
             bundle,
             remote,
         } => bay::share::share(&cli.dir, &change, bundle.as_deref(), remote.as_deref()),
-        Command::Merge { change, from, wait } => {
-            let (wait, observe) = wait.wait();
+        Command::Merge {
+            change,
+            from,
+            wait: how,
+        } => {
+            let (wait, observe) = how.wait();
+            let expedite = how.expedite.as_deref();
             match from {
-                Some(branch) => merge_from(&cli.dir, &branch, wait, observe),
-                None => bay::publish::land(&cli.dir, change.as_deref(), wait, observe, None),
+                Some(branch) => merge_from(&cli.dir, &branch, wait, observe, expedite),
+                None => {
+                    bay::publish::land(&cli.dir, change.as_deref(), wait, observe, None, expedite)
+                }
             }
         }
         Command::Abandon { change, why } => abandon(&cli.dir, change.as_deref(), why.as_deref()),

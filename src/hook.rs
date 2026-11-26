@@ -2000,6 +2000,23 @@ impl Judge<'_> {
                 "a reservation is replaced only by a newer operation of its own change".to_owned(),
             );
         }
+        // BACKLOG 326: a replacement carries its place's rank and expedite as they were, never
+        // new ones.
+        let was: Value = self
+            .git
+            .run(&["cat-file", "blob", &format!("{}:entry.json", update.old)])
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        if crate::queue::KEPT_ON_REPLACE.iter().any(|key| {
+            entry
+                .get(key)
+                .is_some_and(|kept| was.get(key) != Some(kept))
+        }) {
+            return Err(
+                "a replacement keeps its place's rank and expedite as they were".to_owned(),
+            );
+        }
         Ok(())
     }
 
@@ -2016,6 +2033,9 @@ impl Judge<'_> {
         else {
             return Ok(());
         };
+        if entry.get("expedite").is_some() {
+            return self.expedite_grant(&entry, queue);
+        }
         if entry.get("rank").is_none() && entry.get("after").is_none() {
             return Ok(());
         }
@@ -2030,6 +2050,40 @@ impl Judge<'_> {
             );
         }
         Ok(())
+    }
+
+    /// BACKLOG 326: a new reservation that holds an expedite stands right behind the head of the
+    /// line, for an operation whose agent-signed request asked one, while the repository grants
+    /// one now: `[expedite]` in main's config, none live, the UTC day's budget not spent.
+    fn expedite_grant(&self, entry: &Value, queue: &crate::queue::Queue) -> Result<(), String> {
+        let refuse = |why: &str| Err(format!("an expedite place {why}"));
+        let request = entry["expedite"]["request"].as_str().unwrap_or_default();
+        let asked = self
+            .git
+            .file_at(request, "request.json")
+            .ok()
+            .flatten()
+            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+            .is_some_and(|asked| {
+                asked["op_id"] == entry["op_id"] && asked["expedite"]["why"].is_string()
+            });
+        if !asked {
+            return refuse("names the request of its own operation, which asked one");
+        }
+        let head = queue
+            .head()
+            .map(|head| (Value::from(head.rank), Value::from(head.seq)));
+        if head != Some((entry["rank"].clone(), entry["after"].clone())) {
+            return refuse("stands right behind the head of the line");
+        }
+        let per_day = crate::config::Config::load_or_committed(self.git.dir(), self.git)
+            .or_else(|_| crate::config::Config::at(self.git, "HEAD"))
+            .ok()
+            .and_then(|config| config.expedite_per_day());
+        match crate::expedite::refusal(per_day, queue, crate::live::unix_now()) {
+            Some(refused) => refuse(&format!("is not granted now ({})", refused.code())),
+            None => Ok(()),
+        }
     }
 
     /// An intent claim: created once, together with its change, by the change's agent; the

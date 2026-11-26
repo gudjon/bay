@@ -32,6 +32,19 @@ pub const UNAVAILABLE: &str = "unavailable";
 /// its operation takes a place again, the place keeps the operation's rank.
 pub const UNKNOWN: &str = "check_unknown";
 
+/// BACKLOG 326: the release reason of an expedite's place that lost a race with another grant
+/// (one live expedite, `[expedite] per_day` a day): its operation takes a plain place again.
+pub const EXPEDITE_OVER: &str = "expedite_over";
+
+/// BACKLOG 326: what an expedite's entry names besides its operation: the rank and the place of
+/// the head it stands right behind, and the ask (`crate::expedite::Ask`).
+#[derive(Clone, Debug)]
+pub struct Grant {
+    pub rank: u64,
+    pub after: u64,
+    pub expedite: Value,
+}
+
 /// One reservation's entry.
 #[derive(Clone, Debug)]
 pub struct Entry {
@@ -43,6 +56,11 @@ pub struct Entry {
     /// operation took again after a check that gave no clear answer released the last one, the
     /// rank of that place (`rank` in its entry), so the operation keeps its turn.
     pub rank: u64,
+    /// BACKLOG 326: the place is an expedite's (`expedite` in its entry): it ranks right behind
+    /// the head it was granted behind, runs alone, and ends a batch before it.
+    pub expedite: bool,
+    /// When the change took the place: the reservation's committer time, in Unix seconds.
+    pub joined: u64,
 }
 
 impl Entry {
@@ -102,6 +120,8 @@ impl Listed {
                 .as_u64()
                 .filter(|rank| *rank <= self.seq)
                 .unwrap_or(self.seq),
+            expedite: entry["expedite"].is_object(),
+            joined: self.committed,
         }
     }
 }
@@ -299,8 +319,6 @@ pub fn fetched_age_s(common: &std::path::Path) -> Option<u64> {
 #[derive(Clone, Debug)]
 pub struct Place {
     pub entry: Entry,
-    /// When the change took the place: the reservation's committer time, in Unix seconds.
-    pub joined: u64,
 }
 
 impl Queue {
@@ -357,7 +375,6 @@ impl Queue {
             };
             places.push(Place {
                 entry: one.entry(json),
-                joined: one.committed,
             });
         }
         // `for-each-ref` lists by name, so place 10 comes before place 9; G862: and the line is
@@ -534,6 +551,70 @@ impl Queue {
             .count()
     }
 
+    /// BACKLOG 326: the live places granted as an expedite, head first.
+    #[must_use]
+    pub fn expedites(&self) -> Vec<&Entry> {
+        let mut line = self.line();
+        line.retain(|entry| entry.expedite);
+        line
+    }
+
+    /// BACKLOG 326: how many expedites were granted on the UTC day of `now` (Unix seconds): the
+    /// places whose entry names an expedite, taken that day, less those given back as
+    /// [`EXPEDITE_OVER`] (a grant that lost a race to another one).
+    #[must_use]
+    pub fn expedited_on_day(&self, now: u64) -> usize {
+        let day = now / 86_400;
+        self.granted_on_day(day).count()
+    }
+
+    /// The places granted as an expedite on UTC day `day` (days since the epoch): a place given
+    /// back as [`EXPEDITE_OVER`] or as a duplicate of its operation's place was never granted.
+    fn granted_on_day(&self, day: u64) -> impl Iterator<Item = &Entry> + '_ {
+        self.entries
+            .values()
+            .filter(move |entry| entry.expedite && entry.joined / 86_400 == day)
+            .filter(|entry| {
+                !matches!(
+                    self.release_reasons.get(&entry.seq).map(String::as_str),
+                    Some(EXPEDITE_OVER | "duplicate")
+                )
+            })
+    }
+
+    /// BACKLOG 326: whether the expedite at place `seq`, just pushed, is over a limit counted
+    /// on the places before it (two runners may grant at once): another live expedite is earlier,
+    /// or `per_day` were granted earlier on the day of `now`.
+    #[must_use]
+    pub fn over(&self, seq: u64, per_day: u32, now: u64) -> Option<crate::expedite::Refused> {
+        use crate::expedite::{MAX_LIVE, Refused};
+        if self
+            .expedites()
+            .iter()
+            .filter(|entry| entry.seq < seq)
+            .count()
+            >= MAX_LIVE
+        {
+            return Some(Refused::Live);
+        }
+        let earlier = self
+            .granted_on_day(now / 86_400)
+            .filter(|entry| entry.seq < seq)
+            .count();
+        (earlier >= usize::try_from(per_day).unwrap_or(usize::MAX)).then_some(Refused::Spent)
+    }
+
+    /// BACKLOG 326: whether an expedite that is not the head stands ahead of place `seq`. A
+    /// change that could land from its own place past the head (G552, G703) then waits its turn,
+    /// so the expedite is the next change to land.
+    #[must_use]
+    pub fn expedite_ahead(&self, seq: u64) -> bool {
+        let key = self.key_of(seq);
+        let head = self.head().map(|head| head.seq);
+        self.unreleased()
+            .any(|entry| entry.expedite && entry.key() < key && Some(entry.seq) != head)
+    }
+
     /// Whether a place of `op_id` was released with `reason`.
     #[must_use]
     pub fn released_as(&self, op_id: &str, reason: &str) -> bool {
@@ -575,6 +656,11 @@ impl Queue {
                     .is_some_and(|(_, released)| *released <= cutoff)
             })
             .filter(|entry| finished(entry))
+            // BACKLOG 326: an expedite's place counts toward its UTC day's budget, so it is kept
+            // until that day has ended.
+            .filter(|entry| {
+                !entry.expedite || entry.joined / 86_400 < crate::live::unix_now() / 86_400
+            })
             .map(|entry| entry.seq)
             .take(PRUNE_MAX)
             .collect()
@@ -733,8 +819,28 @@ pub fn join(
     op_id: &str,
     change: &str,
 ) -> Result<u64, String> {
+    join_as(repo, signer, op_id, change, None)
+}
+
+/// [`join`], as an expedite when `grant` is given (BACKLOG 326): the entry names the grant's
+/// rank, the place it follows and the ask, so the place ranks right behind that head.
+///
+/// # Errors
+///
+/// The remote refuses every attempt, or a git fault.
+pub fn join_as(
+    repo: &Repo,
+    signer: Option<&Signer>,
+    op_id: &str,
+    change: &str,
+    grant: Option<&Grant>,
+) -> Result<u64, String> {
     let mut entry = json!({"op_id": op_id, "change": change});
-    if let Some((rank, after)) = Queue::local(&repo.git)?.kept_rank(op_id) {
+    if let Some(grant) = grant {
+        entry["rank"] = json!(grant.rank);
+        entry["after"] = json!(grant.after);
+        entry["expedite"] = grant.expedite.clone();
+    } else if let Some((rank, after)) = Queue::local(&repo.git)?.kept_rank(op_id) {
         entry["rank"] = json!(rank);
         entry["after"] = json!(after);
     }
@@ -753,6 +859,16 @@ pub fn join(
         // another runner reserved since is the operation's, and none is pushed.
         if let Some(held) = queue.of(op_id) {
             return Ok(held.seq);
+        }
+        // BACKLOG 326: a grant stands right behind one head; once that head left the line it
+        // names no place, and the host would refuse it on every push.
+        if let Some(grant) = grant
+            && queue.head().map(Entry::key) != Some((grant.rank, grant.after))
+        {
+            return Err(format!(
+                "{op_id}'s expedite stood behind place {}, which is no longer the head",
+                grant.after
+            ));
         }
         let above = queue
             .entries
@@ -834,11 +950,21 @@ pub fn replace(
     if !listed.trim().is_empty() {
         return Ok(false);
     }
+    // BACKLOG 326, G862: the newer operation keeps the place's rank, the place it follows and
+    // its expedite, so a revision never loses the turn its place held.
+    let mut replacing = json!({"op_id": op_id, "change": entry.change, "replaces": entry.op_id});
+    if let Some(old) = entry_json(&repo.git, &entry.commit, "entry.json")? {
+        for key in KEPT_ON_REPLACE {
+            if let Some(value) = old.get(key) {
+                replacing[key] = value.clone();
+            }
+        }
+    }
     let reservation = commit(
         &repo.git,
         signer,
         "entry.json",
-        &json!({"op_id": op_id, "change": entry.change, "replaces": entry.op_id}),
+        &replacing,
         &format!("replace {} with {op_id}", entry.op_id),
     )?;
     let name = format!("{QUEUE_PREFIX}{}", entry.seq);
@@ -853,6 +979,10 @@ pub fn replace(
         .map(|_| true)
         .map_err(|error| error.message())
 }
+
+/// The keys of an entry a newer operation's replacement carries as they were (BACKLOG 326,
+/// G862): the host refuses a replacement that changes one.
+pub const KEPT_ON_REPLACE: [&str; 3] = ["rank", "after", "expedite"];
 
 /// The release commit for `seq`, to create in an atomic push (with a publication) or alone.
 ///
@@ -968,6 +1098,8 @@ mod tests {
                     op_id: format!("c{seq}.1"),
                     change: format!("c{seq}"),
                     rank: seq,
+                    expedite: false,
+                    joined: 0,
                 },
             );
             if seq <= released {
@@ -1008,6 +1140,8 @@ mod tests {
                     op_id: "c1.1".to_owned(),
                     change: "c1".to_owned(),
                     rank,
+                    expedite: false,
+                    joined: 0,
                 },
             );
         }

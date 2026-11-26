@@ -185,6 +185,9 @@ pub struct Queued {
     /// G867: the runner that runs the operation now (`Running` or `Checked`, and not waiting for
     /// a worker), as its chain here names it.
     pub holder: Option<String>,
+    /// BACKLOG 326: its place is an expedite's (`crate::expedite`): it runs alone, so a batch
+    /// ends before it.
+    pub expedite: bool,
 }
 
 impl Queued {
@@ -230,6 +233,7 @@ impl Queued {
             holder: op.owner.clone().filter(|_| {
                 matches!(op.state, OpState::Running | OpState::Checked) && op.unavailable.is_none()
             }),
+            expedite: entry.expedite,
         })
     }
 }
@@ -1379,6 +1383,12 @@ pub fn plan_batch(
         if !members.is_empty() && !queued.live {
             continue;
         }
+        // BACKLOG 326: an expedite runs alone, next: the batch ends before it, never past it.
+        if !members.is_empty() && queued.expedite {
+            stopped = "expedite";
+            stopped_at = Some(queued.change.clone());
+            break;
+        }
         // A member that may not join a batch (a lane, named inputs, a culprit's note) is passed
         // over and left for its own turn, never the end of the batch (measured on 0.5.20,
         // 2026-10-27: two batches of four ended at such a member, at 8 and 9).
@@ -1746,6 +1756,7 @@ mod tests {
             fails_on,
             screen: None,
             holder: None,
+            expedite: false,
         }
     }
 

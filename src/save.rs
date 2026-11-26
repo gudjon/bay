@@ -192,7 +192,7 @@ fn save_in(dir: &Path, repo: &Repo, request: &SaveRequest) -> Result<BayResult, 
         return Ok(untouched(refused, &saved, name));
     }
 
-    let landed = publish::land(&view, Some(&id), true, None, None);
+    let landed = publish::land(&view, Some(&id), true, None, None, None);
     if landed.decision != Decision::Landed {
         return Ok(untouched(landed, &saved, name));
     }

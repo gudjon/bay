@@ -238,6 +238,11 @@ opens a fix that goes ahead of the line. New in 0.7.29: `[red] undo_after_s = 36
 runner undo the culprit an hour after its owner was told. No undo happens while a fix or an undo of it is in line,
 and `bay status` names the undo, or when it is due, on the red's row. The key is off when absent, and the most is 30 days. [Results and refusals](https://getbay.io/docs/results).
 
+**Expedite one change.** New in 0.7.32: `bay merge --expedite <why>` runs a change next, right behind the
+change that merges now, alone. `[expedite] per_day = 2` in `.bay/config.toml` turns it on, for any actor, with
+that many a UTC day and one at a time. The reason is kept in the signed request and in bay's log. An ask bay
+cannot grant waits its turn as usual, and its result says why (`EXPEDITE_REFUSED`).
+
 **Promote main to other branches.** Branches after main are promotion targets. A target moves only to a
 checked commit on its source, and no agent may push one. With `advance = true` and a `requires` list, a
 runner moves it to the newest promotable commit. A repository with `dev`, `staging` and `production` and

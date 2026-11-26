@@ -4,7 +4,9 @@
 //! it gets, can hold its first run until the test lets it go, and fails a run when the test's
 //! shell condition holds in the candidate's tree.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -198,6 +200,25 @@ impl Held {
         id
     }
 
+    /// Starts change `intent` on `dir`, writes one file in its view and submits it with
+    /// `merge --expedite <why>` (BACKLOG 326), leaving its place to a runner. Returns its change
+    /// id, the exit code and the result.
+    #[must_use]
+    pub fn expedite(&self, intent: &str, dir: &str, why: &str) -> (String, i32, Value) {
+        let paths = format!("{dir}/");
+        let started = self
+            .test_box
+            .bay_ok(&self.repo, &["start", intent, "--paths", paths.as_str()]);
+        let id = started["change"].as_str().unwrap().to_owned();
+        let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+        let full = view.join(format!("{dir}/{intent}.rs"));
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(full, format!("fn {intent}() {{}}\n")).unwrap();
+        let (code, submitted) =
+            result_json(self.test_box.bay(&view).args(["merge", "--expedite", why]));
+        (id, code, submitted)
+    }
+
     /// An executor's clone of the host, writing evidence as `producer` ([`PRODUCER`] or
     /// [`OTHER_PRODUCER`]).
     #[must_use]
@@ -316,4 +337,38 @@ pub fn ran_for<'a>(pass: &'a Value, change: &str) -> &'a Value {
         .iter()
         .find(|result| result["change"] == change)
         .unwrap_or_else(|| panic!("no result for {change}: {pass}"))
+}
+
+/// A commit of one file `entry.json` holding `entry`, as a reservation's commit holds it,
+/// signed by `signer`.
+#[must_use]
+pub fn entry_commit(
+    test_box: &TestBox,
+    repo: &Path,
+    signer: &bay::signing::Signer,
+    entry: &serde_json::Value,
+) -> String {
+    let piped = |args: &[&str], input: &str| {
+        let mut child = test_box
+            .git(repo)
+            .args(signer.config_args())
+            .envs(signer.identity())
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8(out.stdout).unwrap().trim().to_owned()
+    };
+    let blob = piped(&["hash-object", "-w", "--stdin"], &format!("{entry}\n"));
+    let tree = piped(&["mktree"], &format!("100644 blob {blob}\tentry.json\n"));
+    piped(&["commit-tree", "-S", &tree, "-m", "reserve"], "")
 }

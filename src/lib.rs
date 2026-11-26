@@ -34,6 +34,7 @@ pub mod enrol;
 pub mod eta;
 pub mod evidence;
 pub mod executor;
+pub mod expedite;
 pub mod facts;
 pub mod fleet;
 pub mod flow;

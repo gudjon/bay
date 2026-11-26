@@ -75,8 +75,12 @@ use support::TestBox;
 ///   far from its hosted remote sent every push and read of bay's refs there, about 2.7 s a push;
 ///   now `bay host <path> --upstream <url>` makes an origin near it, `bay host serve` keeps the
 ///   two current, and `--once` runs one pass whose result a check reads.
+/// - 0.7.32, two flags (`merge --expedite <why>`, `undo --expedite <why>`, BACKLOG 326): a hotfix
+///   on a green main waited behind the whole line (repairs go first only on a red main, and a
+///   hold stops every other change); now it runs next, alone, logged with its reason, inside a
+///   daily budget. One flag takes the reason, so an expedite with no reason cannot be asked.
 const COMMANDS: usize = 31;
-const FLAGS: usize = 97;
+const FLAGS: usize = 99;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,
@@ -98,7 +102,9 @@ const FLAGS: usize = 97;
 /// - 0.7.8, one reason (`BOX_BUSY`, BACKLOG 280): an operator who saw runners start checks on a
 ///   machine already at load1 30 stopped them by hand; now the machine sets its limits once, and
 ///   its runner waits below them and says why.
-const REASONS: usize = 64;
+/// - 0.7.32, one reason (`EXPEDITE_REFUSED`, BACKLOG 326): an expedite bay cannot grant leaves the
+///   change in line as a plain arrival, and the agent must know it did not go first.
+const REASONS: usize = 65;
 const WORDS: usize = 7;
 
 /// The commands of the contract that are not hidden, nor under a hidden command.

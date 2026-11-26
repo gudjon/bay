@@ -312,7 +312,7 @@ fn follow_up(
         return Some(started);
     };
     let view = started.detail.as_ref()?["view"].as_str()?.to_owned();
-    let mut landed = land(Path::new(&view), Some(&next), wait, observe, None);
+    let mut landed = land(Path::new(&view), Some(&next), wait, observe, None, None);
     if let Some(detail) = landed.detail.as_mut().and_then(|d| d.as_object_mut()) {
         detail.insert(
             "follow_up".to_owned(),
@@ -332,6 +332,7 @@ pub fn land(
     wait: bool,
     observe: Option<Duration>,
     abandon: Option<Option<&str>>,
+    expedite: Option<&str>,
 ) -> BayResult {
     // G776 (a fleet finding, 2026-11-17: `bay merge --wait=90` returned after 151 s, its watch
     // timed from after the fetch, the submit and the start of the run): `--wait=<s>` bounds the
@@ -374,9 +375,10 @@ pub fn land(
                 &step,
                 until.unwrap_or_else(Instant::now),
                 timeout,
+                expedite,
             ),
-            None if wait => wait_land(&repo, &id, &step),
-            None => submit_land(&repo, &id, &step, false),
+            None if wait => wait_land(&repo, &id, &step, expedite),
+            None => submit_land(&repo, &id, &step, false, expedite),
         };
         if result.as_ref().is_err_and(|why| why == CHAIN_MOVED) {
             continue;
@@ -402,9 +404,14 @@ pub fn land(
 /// reads the chain again and goes on until the operation has one. It runs it, waits out the
 /// holder's lease and takes it over, or reports the holder's landing or refusal. It never
 /// answers `ok` for an operation it did not see land.
-fn wait_land(repo: &Repo, id: &str, step: &Step) -> Result<BayResult, String> {
+fn wait_land(
+    repo: &Repo,
+    id: &str,
+    step: &Step,
+    expedite: Option<&str>,
+) -> Result<BayResult, String> {
     loop {
-        let result = submit_land(repo, id, step, true)?;
+        let result = submit_land(repo, id, step, true, expedite)?;
         // G811: this machine handed the operation to the runners: the wait goes on until a
         // runner's outcome, which is reported, never run again here. The run a watching
         // `merge --wait=<s>` started ends at once: its watcher reports ([`observe_land`]).
@@ -423,7 +430,7 @@ fn wait_land(repo: &Repo, id: &str, step: &Step) -> Result<BayResult, String> {
             if !watch_until_done(repo, id, &op_id, watch + deadline) {
                 return Ok(still_running(repo, id, op_id, deadline, watch));
             }
-            return submit_land(repo, id, step, false)
+            return submit_land(repo, id, step, false, None)
                 .map(|result| checked_elsewhere(repo, id, &op_id, result));
         }
         if !not_taken(&result) {
@@ -526,8 +533,9 @@ fn observe_land(
     step: &Step,
     until: Instant,
     timeout: Duration,
+    expedite: Option<&str>,
 ) -> Result<BayResult, String> {
-    let submitted = submit_land(repo, id, step, false)?;
+    let submitted = submit_land(repo, id, step, false, expedite)?;
     if submitted.decision != Decision::Queued
         || submitted.waiting_for.as_deref() != Some("executor")
     {
@@ -553,7 +561,7 @@ fn observe_land(
     let watch = Instant::now();
     if watch_until_done(repo, id, &op_id, until) {
         // The outcome is in the chain; reading it again returns the same result the run did.
-        return submit_land(repo, id, step, false)
+        return submit_land(repo, id, step, false, None)
             .map(|result| checked_elsewhere(repo, id, &op_id, result));
     }
     Ok(still_running(repo, id, op_id, timeout, watch))
@@ -1573,7 +1581,13 @@ impl Drop for Ctx<'_> {
 /// The agent's part of `land` (§ 9a): freeze, scan, and append the request. Returns at once
 /// with the operation id; with `wait` it also runs the executor's part inline.
 #[allow(clippy::too_many_lines)]
-fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResult, String> {
+fn submit_land(
+    repo: &Repo,
+    id: &str,
+    step: &Step,
+    wait: bool,
+    expedite: Option<&str>,
+) -> Result<BayResult, String> {
     let mut ctx = Ctx::load(repo, step, id)?;
     // G688: a change that ended with nothing to add (or behind a newer one) is refused in plain
     // words before its view is read: bay removes an ended change's view.
@@ -1716,14 +1730,30 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     }
     kill_point("before-submit");
 
+    // BACKLOG 326: an expedite the line can grant now rides in the request; one it cannot is said
+    // in the result, and the change goes in line as a plain arrival.
+    let (ask, asked) = expedite_ask(&ctx, expedite)?;
     let op_id = match ctx
         .record
         .operations
         .iter()
         .find(|op| op.revision == revision && !op.state.is_terminal())
     {
-        Some(op) => op.op_id.clone(),
-        None => submit(&mut ctx, &revision)?,
+        // An expedite asked for an operation in line that no runner holds yet is a new request
+        // of the same revision; the runner that grants it releases the older place.
+        Some(op)
+            if ask.is_none()
+                || op.owner.is_some()
+                || !matches!(op.state, OpState::Submitted | OpState::Admitted)
+                || op
+                    .request_id
+                    .as_deref()
+                    .and_then(|request| crate::expedite::asked(&repo.git, request))
+                    .is_some() =>
+        {
+            op.op_id.clone()
+        }
+        _ => submit(&mut ctx, &revision, ask)?,
     };
     if ctx.op(&op_id).state == OpState::Blocked
         && let Some(refusal) = retry_blocked(&mut ctx, &op_id, &revision, &trunk)?
@@ -1782,9 +1812,16 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
         return Ok(with_main_changed(result, moved));
     }
     let op = ctx.op(&op_id);
-    let mut result = BayResult::new(Decision::Queued)
-        .with_change(id)
-        .with_op(op_id.clone());
+    let refused = asked
+        .as_ref()
+        .is_some_and(|detail| !detail["refused"].is_null());
+    let mut result = if refused {
+        BayResult::refused(Decision::Queued, Reason::ExpediteRefused)
+    } else {
+        BayResult::new(Decision::Queued)
+    }
+    .with_change(id)
+    .with_op(op_id.clone());
     result.state = serde_json::to_value(op.state)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned));
@@ -1794,10 +1831,36 @@ fn submit_land(repo: &Repo, id: &str, step: &Step, wait: bool) -> Result<BayResu
     if let Some(place) = place_in_line(ctx.repo, &op_id) {
         result.detail = Some(place);
     }
+    if let Some(expedite) = asked {
+        let detail = result.detail.get_or_insert_with(|| json!({}));
+        detail["expedite"] = expedite;
+    }
     Ok(with_main_changed(
         with_progress(&ctx.repo.git, ctx.op(&op_id), result),
         moved,
     ))
+}
+
+/// BACKLOG 326: what `bay merge --expedite <why>` writes and says. The first is the reason a new
+/// request carries: `Some` when the line can grant an expedite now and this change does not
+/// head it. The second is `detail.expedite` of a queued result, its `refused` set when the
+/// line cannot grant one.
+fn expedite_ask<'a>(
+    ctx: &Ctx,
+    why: Option<&'a str>,
+) -> Result<(Option<&'a str>, Option<serde_json::Value>), String> {
+    let Some(why) = why else {
+        return Ok((None, None));
+    };
+    let queue = crate::queue::Queue::read(ctx.repo)?;
+    if queue.head().is_none_or(|head| head.change == ctx.id) {
+        return Ok((None, None));
+    }
+    let per_day = ctx.repo.config.expedite_per_day();
+    let now = crate::live::unix_now();
+    let refused = crate::expedite::refusal(per_day, &queue, now);
+    let detail = crate::expedite::detail(why, refused, per_day, &queue, now);
+    Ok((refused.is_none().then_some(why), Some(detail)))
 }
 
 /// `{"place", "in_line"}`: where operation `op_id` stands among the queue's live places, 1 for
@@ -3414,6 +3477,7 @@ fn pass_over_passing(
     for queued in behind {
         if queued.live
             && queued.batchable
+            && !queue.expedite_ahead(queued.seq)
             && passes_unread(ctx, queue, queued.seq, trunk, &queued.revision)?
             && !repair_moved_under(ctx, queue, trunk, &queued.op_id)?
         {
@@ -3532,6 +3596,7 @@ fn keep_checked_prefix(
 /// names inputs, its diff wakes a pre-merge check keyed by its commit (G560: the batch's
 /// candidate commit was never checked), fewer members than `max(min, 2)` fold, or the lane's
 /// recent failure rate is above `max_failure_rate`.
+#[allow(clippy::too_many_lines)]
 fn batch_plan(
     ctx: &Ctx,
     op_id: &str,
@@ -3571,6 +3636,11 @@ fn batch_plan(
         eprintln!("bay runner: {op_id} no batch: it runs ahead of its turn");
         return Ok(None);
     }
+    // BACKLOG 326: an expedite runs alone.
+    if queue.entries.get(&at).is_some_and(|entry| entry.expedite) {
+        eprintln!("bay runner: {op_id} no batch: it is an expedite");
+        return Ok(None);
+    }
     let head = throughput::Queued {
         seq: at,
         change: ctx.id.clone(),
@@ -3582,6 +3652,7 @@ fn batch_plan(
         fails_on: Vec::new(),
         screen: throughput::screened(&ctx.op(op_id).prechecks),
         holder: Some(ctx.executor_name()),
+        expedite: false,
     };
     let waiting = queue.behind(at);
     // G867: the chains and leases as the remote holds them now, so a place another runner took
@@ -5191,6 +5262,11 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
                 .with_op(op_id),
         )));
     }
+    // BACKLOG 326: an operation that asks an expedite and holds no place takes one right behind
+    // the head, before a newer revision would take its change's older place.
+    if queue.of(op_id).is_none() && expedite(ctx, op_id, trunk, &queue)? {
+        queue = crate::queue::Queue::read(ctx.repo)?;
+    }
     if queue.of(op_id).is_none()
         && let Some(older) = queue.of_change(&ctx.id).cloned()
     {
@@ -5246,10 +5322,12 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
     if let Some(entry) = queue.of(op_id).cloned()
         && (repairs
             || (needs_no_check(&ctx.repo.git, trunk, &ctx.op(op_id).revision)?
+                && !queue.expedite_ahead(entry.seq)
                 && !main_moved_under(ctx.repo, &head)
                 && !head_check_long(ctx.repo, &head)
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?)
-            || (passes_fresh(ctx, &queue, entry.seq, trunk, &ctx.op(op_id).revision)?
+            || (!queue.expedite_ahead(entry.seq)
+                && passes_fresh(ctx, &queue, entry.seq, trunk, &ctx.op(op_id).revision)?
                 && !head_check_long(ctx.repo, &head)
                 && !repair_moved_under(ctx, &queue, trunk, op_id)?))
     {
@@ -5265,6 +5343,99 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
         detail["batch_unnamed"] = json!(true);
     }
     Ok(Gate::Wait(Box::new(queued)))
+}
+
+/// BACKLOG 326: grants the expedite `op_id`'s request asks, when the operation never held a place:
+/// a place right behind the head (`crate::queue::Grant`), within `[expedite]`'s limits, and gives
+/// back the older place of its change. Says whether the operation took a place. An ask it does not
+/// need (no line, its change holds the head, it needs no check, or it repairs a red main) is let
+/// go; one the limits refuse is logged, and the operation joins as a plain arrival.
+fn expedite(
+    ctx: &Ctx,
+    op_id: &str,
+    trunk: &str,
+    queue: &crate::queue::Queue,
+) -> Result<bool, String> {
+    use crate::expedite::Decided;
+    let git = &ctx.repo.git;
+    let request = ctx.op(op_id).request_id.clone().unwrap_or_default();
+    let Some(why) = crate::expedite::asked(git, &request) else {
+        return Ok(false);
+    };
+    let Some(head) = queue.head().cloned() else {
+        return Ok(false);
+    };
+    if head.change == ctx.id
+        || queue.entries.values().any(|entry| entry.op_id == op_id)
+        || needs_no_check(git, trunk, &ctx.op(op_id).revision)?
+        || repairs_red(ctx, trunk)?
+    {
+        return Ok(false);
+    }
+    let per_day = ctx.repo.config.expedite_per_day();
+    let now = crate::live::unix_now();
+    let by = ctx.executor_name();
+    let actor = ctx.record.actor.name.clone();
+    let signer = ctx.executor_signer().ok().flatten();
+    let mut decided = Decided {
+        change: &ctx.id,
+        op_id,
+        actor: &actor,
+        why: &why,
+        by: &by,
+        refused: crate::expedite::refusal(per_day, queue, now),
+        place: None,
+        after: None,
+    };
+    let mut took = false;
+    if decided.refused.is_none() {
+        let grant = crate::queue::Grant {
+            rank: head.rank,
+            after: head.seq,
+            expedite: crate::expedite::grant_entry(&why, &actor, &request, &by),
+        };
+        // A head that moved on before the push leaves the grant nothing to stand behind: the
+        // operation joins as a plain arrival, at its turn.
+        if crate::queue::join_as(ctx.repo, signer.as_ref(), op_id, &ctx.id, Some(&grant)).is_err() {
+            return Ok(false);
+        }
+        took = true;
+        let line = crate::queue::Queue::read(ctx.repo)?;
+        let Some(own) = line.of(op_id).cloned().filter(|own| own.expedite) else {
+            return Ok(true);
+        };
+        // Two runners that grant at once both push; the earlier place keeps its grant.
+        decided.refused = line.over(own.seq, per_day.unwrap_or(0), now);
+        if decided.refused.is_some() {
+            crate::queue::release(
+                ctx.repo,
+                signer.as_ref(),
+                own.seq,
+                op_id,
+                crate::queue::EXPEDITE_OVER,
+            )?;
+            took = false;
+        } else {
+            decided.place = Some(own.seq);
+            decided.after = Some(head.seq);
+            if let Some(older) = line
+                .of_change(&ctx.id)
+                .filter(|older| older.seq != own.seq)
+                .cloned()
+            {
+                crate::queue::release(
+                    ctx.repo,
+                    signer.as_ref(),
+                    older.seq,
+                    &older.op_id,
+                    "superseded",
+                )?;
+            }
+        }
+    }
+    let event = crate::expedite::event(&decided)?;
+    crate::log::append_event(ctx.repo, &by, signer.as_ref(), &event)?;
+    Ok(took)
 }
 
 /// G867: [`passes_unread`], once this store's chains say the operation at `place` passes, read
@@ -7356,8 +7527,9 @@ fn observe_inputs(ctx: &mut Ctx) -> Result<(), String> {
         .map_err(|error| error.message())
 }
 
-/// Appends the request for a new operation; the compare-and-swap allocates its number.
-fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
+/// Appends the request for a new operation; the compare-and-swap allocates its number. An
+/// `expedite` reason is part of the signed request (BACKLOG 326).
+fn submit(ctx: &mut Ctx, revision: &str, expedite: Option<&str>) -> Result<String, String> {
     let request_digest = digest(&json!({
         "change": ctx.id,
         "revision": revision,
@@ -7400,7 +7572,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
     });
     // The request: an agent-signed commit on the revision, linked into the chain. Appending it
     // allocates the op id by compare-and-swap; `refs/bay/requests/<id>` moves with it.
-    let request = json!({
+    let mut request = json!({
         "schema": REQUEST_SCHEMA,
         "op_id": op_id,
         "change": ctx.id,
@@ -7409,6 +7581,9 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         "actor": ctx.record.actor,
         "registry": ctx.signing().map(|registry| registry.commit.clone()),
     });
+    if let Some(why) = expedite {
+        request["expedite"] = json!({"why": why});
+    }
     let request_id = ctx
         .chain
         .request_commit(&request, revision, &format!("request {op_id}"))

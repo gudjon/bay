@@ -103,7 +103,8 @@
         "DEPENDENCY_ABANDONED",
         "CHANGE_TOO_LARGE",
         "VIEW_NOT_YOURS",
-        "BOX_BUSY"
+        "BOX_BUSY",
+        "EXPEDITE_REFUSED"
       ]
     },
     "say": {

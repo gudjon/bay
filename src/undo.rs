@@ -32,8 +32,14 @@ const UNDO_REVISION: &str = "1";
 /// `wait` runs the undo's publication here; `observe` (`--wait=SECONDS`) watches it that long
 /// at most, then returns while the run goes on, as `bay merge --wait=SECONDS` does.
 #[must_use]
-pub fn undo(dir: &Path, change: &str, wait: bool, observe: Option<Duration>) -> BayResult {
-    run(dir, change, wait, observe).unwrap_or_else(BayResult::failed)
+pub fn undo(
+    dir: &Path,
+    change: &str,
+    wait: bool,
+    observe: Option<Duration>,
+    expedite: Option<&str>,
+) -> BayResult {
+    run(dir, change, wait, observe, expedite).unwrap_or_else(BayResult::failed)
 }
 
 fn run(
@@ -41,6 +47,7 @@ fn run(
     change: &str,
     wait: bool,
     observe: Option<Duration>,
+    expedite: Option<&str>,
 ) -> Result<BayResult, String> {
     if !is_change_id(change) {
         return Err(format!("{change} is not a change id"));
@@ -53,7 +60,7 @@ fn run(
     // its result. A talk never blocks an undo.
     let open_talks = crate::talk::open_on(&repo, change);
     // G80: every result says which trunk it reflects, and when that trunk was fetched.
-    let mut result = undo_in(dir, &repo, change, wait, observe)?;
+    let mut result = undo_in(dir, &repo, change, wait, observe, expedite)?;
     result.freshness = result.freshness.or_else(|| repo.freshness());
     crate::talk::name_open_talks(&mut result, open_talks);
     Ok(result)
@@ -65,6 +72,7 @@ fn undo_in(
     change: &str,
     wait: bool,
     observe: Option<Duration>,
+    expedite: Option<&str>,
 ) -> Result<BayResult, String> {
     let trunk = repo.fetch_trunk().map_err(|error| error.message())?;
     let Some(commit) = landed_commit(repo, change, &trunk)? else {
@@ -150,7 +158,14 @@ fn undo_in(
             }));
         return Ok(publish::with_receipt(repo, &id, "undo", refused));
     }
-    Ok(publish::land(view, Some(&id), wait, observe, None))
+    Ok(publish::land(
+        view,
+        Some(&id),
+        wait,
+        observe,
+        None,
+        expedite,
+    ))
 }
 
 use crate::throughput::tree_of;

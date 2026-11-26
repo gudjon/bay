@@ -541,8 +541,9 @@ fn row(place: usize, at: &Place, record: Option<&ChangeRecord>, now: u64) -> Val
         "paths": record.map(|record| crate::inputs::paths(&record.declared_inputs)),
         "fixes": record.and_then(|record| record.fixes.as_deref()),
         "after": record.map(|record| record.after.as_slice()),
-        "joined_at": crate::clock::rfc3339_of(at.joined),
-        "waited_s": now.saturating_sub(at.joined),
+        "joined_at": crate::clock::rfc3339_of(at.entry.joined),
+        "waited_s": now.saturating_sub(at.entry.joined),
+        "expedite": entry.expedite,
         "state": op.map_or_else(
             || Value::from("unread"),
             |op| serde_json::to_value(op.state).unwrap_or(Value::Null),
@@ -560,7 +561,7 @@ fn row(place: usize, at: &Place, record: Option<&ChangeRecord>, now: u64) -> Val
 fn oldest(places: &[Place], arriving: &[Value], taken: &[Value], now: u64) -> Option<u64> {
     places
         .iter()
-        .map(|place| now.saturating_sub(place.joined))
+        .map(|place| now.saturating_sub(place.entry.joined))
         .chain(
             arriving
                 .iter()
@@ -608,6 +609,36 @@ pub fn schema() -> Value {
     let count = json!({"type": "integer", "minimum": 0});
     let maybe = |kind: Value| json!({"anyOf": [kind, {"type": "null"}]});
     let strings = json!({"type": "array", "items": string});
+    let place = json!({
+        "type": "object",
+        "required": [
+            "place", "seq", "change", "op_id", "intent", "actor", "paths", "fixes",
+            "after", "joined_at", "waited_s", "expedite", "state", "attempts", "runner",
+            "outcome",
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "place": {"type": "integer", "minimum": 1},
+            "seq": count,
+            "change": string,
+            "op_id": string,
+            "intent": maybe(string.clone()),
+            "actor": maybe(string.clone()),
+            "paths": maybe(strings.clone()),
+            "fixes": maybe(string.clone()),
+            "after": maybe(strings.clone()),
+            "joined_at": string,
+            "waited_s": count,
+            "expedite": {"type": "boolean"},
+            "state": {"enum": [
+                "submitted", "admitted", "running", "checked", "published",
+                "blocked", "failed", "superseded", "no_effect", "unread",
+            ]},
+            "attempts": maybe(count.clone()),
+            "runner": maybe(string.clone()),
+            "outcome": maybe(string.clone()),
+        },
+    });
     json!({
         "$schema": crate::contract::JSON_SCHEMA_DRAFT,
         "title": SCHEMA,
@@ -635,37 +666,7 @@ pub fn schema() -> Value {
             })),
             "depth": count,
             "oldest_wait_s": maybe(count.clone()),
-            "places": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "required": [
-                        "place", "seq", "change", "op_id", "intent", "actor", "paths", "fixes",
-                        "after", "joined_at", "waited_s", "state", "attempts", "runner", "outcome",
-                    ],
-                    "additionalProperties": false,
-                    "properties": {
-                        "place": {"type": "integer", "minimum": 1},
-                        "seq": count,
-                        "change": string,
-                        "op_id": string,
-                        "intent": maybe(string.clone()),
-                        "actor": maybe(string.clone()),
-                        "paths": maybe(strings.clone()),
-                        "fixes": maybe(string.clone()),
-                        "after": maybe(strings.clone()),
-                        "joined_at": string,
-                        "waited_s": count,
-                        "state": {"enum": [
-                            "submitted", "admitted", "running", "checked", "published",
-                            "blocked", "failed", "superseded", "no_effect", "unread",
-                        ]},
-                        "attempts": maybe(count.clone()),
-                        "runner": maybe(string.clone()),
-                        "outcome": maybe(string.clone()),
-                    },
-                },
-            },
+            "places": {"type": "array", "items": place},
             "arriving": {
                 "type": "array",
                 "items": {
