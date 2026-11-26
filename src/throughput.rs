@@ -2158,8 +2158,8 @@ mod tests {
             std::fs::write(full, path).unwrap();
         };
         for path in [
-            "kanban/work/a.md",
-            "kanban/activity/x.md",
+            "notes/work/a.md",
+            "notes/activity/x.md",
             "src/lib.rs",
             "top.md",
         ] {
@@ -2168,11 +2168,11 @@ mod tests {
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "base"]);
         let base = run(&["rev-parse", "HEAD"]);
-        write("kanban/new/dir/f.md");
-        write("kanban/work/b.md");
+        write("notes/new/dir/f.md");
+        write("notes/work/b.md");
         write("second.md");
         std::fs::write(dir.path().join("src/lib.rs"), "edited\n").unwrap();
-        run(&["rm", "-q", "kanban/activity/x.md"]);
+        run(&["rm", "-q", "notes/activity/x.md"]);
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "change"]);
         let revision = run(&["rev-parse", "HEAD"]);
@@ -2180,9 +2180,9 @@ mod tests {
         assert_eq!(
             own.paths,
             [
-                "kanban/activity/x.md",
-                "kanban/new/dir/f.md",
-                "kanban/work/b.md",
+                "notes/activity/x.md",
+                "notes/new/dir/f.md",
+                "notes/work/b.md",
                 "second.md",
                 "src/lib.rs"
             ]
@@ -2192,11 +2192,11 @@ mod tests {
             listings,
             [
                 "",
-                "kanban",
-                "kanban/activity",
-                "kanban/new",
-                "kanban/new/dir",
-                "kanban/work"
+                "notes",
+                "notes/activity",
+                "notes/new",
+                "notes/new/dir",
+                "notes/work"
             ]
         );
     }
@@ -2211,22 +2211,22 @@ mod tests {
         };
         let seen = Observed {
             read: ["src/lib.rs".to_owned()].into(),
-            listed: ["kanban".to_owned()].into(),
+            listed: ["notes".to_owned()].into(),
         };
         let reads = Reads {
             globs: vec!["src/b.rs".to_owned()],
             observed: vec![std::sync::Arc::new(seen)],
         };
-        assert!(!reads.meets(&own(&["kanban/work/a.md"], &[])));
-        assert!(!reads.meets(&own(&["kanban/work/b.md"], &["kanban/work"])));
-        assert!(reads.meets(&own(&["kanban/new/b.md"], &["kanban/new", "kanban"])));
+        assert!(!reads.meets(&own(&["notes/work/a.md"], &[])));
+        assert!(!reads.meets(&own(&["notes/work/b.md"], &["notes/work"])));
+        assert!(reads.meets(&own(&["notes/new/b.md"], &["notes/new", "notes"])));
         assert!(reads.meets(&own(&["src/lib.rs"], &[])));
         assert!(reads.meets(&own(&["src/b.rs"], &[])));
         let whole = Reads {
             globs: vec!["**".to_owned()],
             observed: Vec::new(),
         };
-        assert!(whole.meets(&own(&["kanban/work/a.md"], &[])));
-        assert!(!Reads::default().meets(&own(&["kanban/work/a.md"], &["kanban"])));
+        assert!(whole.meets(&own(&["notes/work/a.md"], &[])));
+        assert!(!Reads::default().meets(&own(&["notes/work/a.md"], &["notes"])));
     }
 }
