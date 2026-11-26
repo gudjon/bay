@@ -1404,10 +1404,26 @@ impl<'a> Ctx<'a> {
             args.extend([repo.remote(), chain.as_str(), log]);
             if repo.git.run(&args).is_ok() {
                 self.took();
-                return true;
+                return crate::log::Riding::Took;
             }
-            self.push_chain();
-            repo.git.run(&["push", "-q", repo.remote(), log]).is_ok()
+            // G918 (a fleet census, 2026-11-26: 510 of 11,186 published operations carried two
+            // published terminal records; one second record said no claim and no attempt, as a
+            // chain read before its lander's claim says): a chain the remote refuses was moved by
+            // another process, as a lander's push moves it, and the record is that process's to
+            // write. It goes alone only when the chain stands without it. A remote bay cannot read
+            // keeps the order: the record waits on this box, never lost to a fault of the network.
+            if !self.push_chain()
+                && self.remote_tip(&name).is_some_and(|tip| {
+                    !self.repo.git.is_ancestor(&self.head, &tip).unwrap_or(false)
+                })
+            {
+                return crate::log::Riding::Void;
+            }
+            if repo.git.run(&["push", "-q", repo.remote(), log]).is_ok() {
+                crate::log::Riding::Took
+            } else {
+                crate::log::Riding::Apart
+            }
         })
         .map(|_| ())
     }

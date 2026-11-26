@@ -5,8 +5,13 @@
 //! batch bound by that cost, and live runners take different shards by their rank, so passes of
 //! two runners at once both push.
 //!
-//! Guards to mutate, in `src/compact.rs`: `pick` answering the first shard (the second runner
-//! moves the first runner's shard); `batch` answering `PUSH_MAX` (its unit test).
+//! Guards to mutate, in `src/compact.rs`: `pick` answering the first shard (its unit tests; here,
+//! when the lowest shard left is not the second runner's, it moves the first runner's shard);
+//! `batch` answering `PUSH_MAX` (its unit test).
+//!
+//! BACKLOG 339 (a fleet finding, 2026-11-26: 11 of 145 compaction pushes lost their shard's lease,
+//! as runners whose lists differed took one place in them): a shard is the runner's whose rank
+//! is the shard modulo the live runners.
 //!
 //! BACKLOG 334 (a fleet finding, 2026-11-26: at 59,000 remote refs a push of one shard's names
 //! still took longer than its bound): a push's batch is sized by the time the last one took, read
@@ -72,13 +77,29 @@ fn remaining(test_box: &TestBox, host: &Path, markers: &[String]) -> Vec<String>
         .collect()
 }
 
-/// The names of `names` in the `nth` lowest of their shards.
-fn in_nth_shard(names: &[String], nth: usize) -> BTreeSet<String> {
-    let shards: BTreeSet<u8> = names.iter().map(|name| shard(name)).collect();
-    let chosen = *shards.iter().nth(nth).unwrap();
+/// The shard runner `rank` of `runners` moves from the shards of `names`: the lowest whose
+/// number modulo `runners` is its rank, or, with none of its own left, the one at its rank
+/// counted back from the highest.
+fn rank_shard(names: &[String], rank: usize, runners: usize) -> Option<u8> {
+    let shards: Vec<u8> = names
+        .iter()
+        .map(|name| shard(name))
+        .collect::<BTreeSet<u8>>()
+        .into_iter()
+        .collect();
+    shards
+        .iter()
+        .copied()
+        .find(|&number| usize::from(number) % runners == rank)
+        .or_else(|| shards.iter().rev().nth(rank % shards.len().max(1)).copied())
+}
+
+/// The names of `names` in the shard runner `rank` of `runners` moves.
+fn in_rank_shard(names: &[String], rank: usize, runners: usize) -> BTreeSet<String> {
+    let chosen = rank_shard(names, rank, runners);
     names
         .iter()
-        .filter(|name| shard(name) == chosen)
+        .filter(|name| Some(shard(name)) == chosen)
         .cloned()
         .collect()
 }
@@ -183,11 +204,11 @@ fn live_runners_over_the_budget_move_different_shards() {
     // WHEN the second runner passes while the first is live
     let left = remaining(&test_box, &host, &names);
     let (taken, errors) = moved(&pass(&test_box, &second));
-    // THEN it moves the second shard (its rank among two), never the first runner's
+    // THEN it moves a shard of its rank among two, never the first runner's
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(
         taken,
-        in_nth_shard(&left, 1),
+        in_rank_shard(&left, 1, 2),
         "exec-2 moves the shard of its rank"
     );
     let left = remaining(&test_box, &host, &names);
@@ -195,35 +216,39 @@ fn live_runners_over_the_budget_move_different_shards() {
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(
         taken,
-        in_nth_shard(&left, 0),
+        in_rank_shard(&left, 0, 2),
         "exec-1 moves the shard of its rank"
     );
 
-    // AND passes of both at once both push, each its own shard
-    let spawn = |clone: &Path| {
-        test_box
-            .bay_process(clone)
-            .args(["runner", "run", "--once", "--interval-s", "300"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .unwrap()
-    };
-    let (one, two) = (spawn(&first), spawn(&second));
-    let mut both = Vec::new();
-    for child in [one, two] {
-        let out = child.wait_with_output().unwrap();
-        let ran: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
-        let (names, errors) = moved(&ran);
-        assert!(
-            errors.is_empty(),
-            "{errors:?}\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(!names.is_empty(), "{ran}");
-        both.push(names);
+    // AND passes of both at once both push, each its own shard, when the rule gives each one
+    // (with all the shards left of one parity, the helper meets the owner at the end of the list)
+    let left = remaining(&test_box, &host, &names);
+    if rank_shard(&left, 0, 2) != rank_shard(&left, 1, 2) {
+        let spawn = |clone: &Path| {
+            test_box
+                .bay_process(clone)
+                .args(["runner", "run", "--once", "--interval-s", "300"])
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap()
+        };
+        let (one, two) = (spawn(&first), spawn(&second));
+        let mut both = Vec::new();
+        for child in [one, two] {
+            let out = child.wait_with_output().unwrap();
+            let ran: Value = serde_json::from_slice(&out.stdout).unwrap_or(Value::Null);
+            let (names, errors) = moved(&ran);
+            assert!(
+                errors.is_empty(),
+                "{errors:?}\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(!names.is_empty(), "{ran}");
+            both.push(names);
+        }
+        assert!(both[0].is_disjoint(&both[1]), "{both:?}");
     }
-    assert!(both[0].is_disjoint(&both[1]), "{both:?}");
 
     // AND further passes move every name, each recorded in its shard
     for round in 0..16 {

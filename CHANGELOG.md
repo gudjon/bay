@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.36
+
+- A visit's terminal record goes only with its chain's push; a refused chain leaves it to the lander.
+- Runners compacting at once each take shards of their own, so no compaction push loses its shard's lease.
+
 ## 0.7.35
 
 - A check's `!` exclusions narrow what bay predicts it reads, so an excluded change passes the head.

@@ -449,15 +449,21 @@ pub struct Pushed {
 }
 
 /// The shard a runner moves in a pass, from `shards` (each shard that holds a marker to move,
-/// ascending): runner `rank` of `runners` live runners takes the shard at its own place, so
-/// runners over the budget at once push different shards; with fewer shards than runners the
-/// place wraps, so the last shard is still moved.
+/// ascending): a shard is runner `rank`'s of `runners` live runners when shard % runners is
+/// its rank, so runners over the budget at once push different shards. Each runner lists its own
+/// shards, from the records it holds, so a place in the list sent two runners to one shard when
+/// their lists differed (BACKLOG 339: 11 of 145 pushes refused on the shard's lease). A runner with
+/// no shard of its own left helps from the end of its list, at its rank counted back, so the last
+/// shards are still moved and a helper meets an owner only there.
 #[must_use]
 pub fn pick(shards: &[u8], rank: usize, runners: usize) -> Option<u8> {
-    if shards.is_empty() {
-        return None;
-    }
-    shards.get(rank % runners.max(1) % shards.len()).copied()
+    let runners = runners.max(1);
+    let rank = rank % runners;
+    shards
+        .iter()
+        .copied()
+        .find(|&shard| usize::from(shard) % runners == rank)
+        .or_else(|| shards.iter().rev().nth(rank % shards.len().max(1)).copied())
 }
 
 /// This runner's place among the live runners, by presence ref, and how many they are: the
@@ -726,12 +732,39 @@ mod tests {
     #[test]
     fn live_runners_take_different_shards() {
         let shards = [3, 9, 200];
-        assert_eq!(pick(&shards, 0, 2), Some(3));
-        assert_eq!(pick(&shards, 1, 2), Some(9));
+        assert_eq!(pick(&shards, 0, 2), Some(200));
+        assert_eq!(pick(&shards, 1, 2), Some(3));
         assert_eq!(pick(&shards, 0, 1), Some(3));
         assert_eq!(pick(&shards, 4, 6), Some(9));
         assert_eq!(pick(&[7], 1, 2), Some(7));
+        assert_eq!(pick(&[7], 0, 2), Some(7));
         assert_eq!(pick(&[], 0, 1), None);
+    }
+
+    /// BACKLOG 339: two runners list their shards from the records each holds, so their lists
+    /// differ (run 5: one walked 1, 2, 3, ... and the other 0, 3, 5, 9, ...); while each has a
+    /// shard of its own they never take the same one, whatever the other's list holds.
+    #[test]
+    fn runners_whose_lists_differ_take_different_shards() {
+        let lists: [&[u8]; 5] = [
+            &[1, 2, 3, 4],
+            &[0, 3, 5, 9],
+            &[3, 5, 7, 8],
+            &[2, 3],
+            &[3, 4, 9, 200],
+        ];
+        for first in lists {
+            for second in lists {
+                for (a, b) in [(0, 1), (1, 0)] {
+                    let (mine, theirs) = (pick(first, a, 2), pick(second, b, 2));
+                    let own =
+                        |list: &[u8], rank: usize| list.iter().any(|&s| usize::from(s) % 2 == rank);
+                    if own(first, a) && own(second, b) {
+                        assert_ne!(mine, theirs, "{first:?} rank {a} and {second:?} rank {b}");
+                    }
+                }
+            }
+        }
     }
 
     /// BACKLOG 334: a push of one size is sized by its time: the first moves FIRST names; a push

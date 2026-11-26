@@ -63,17 +63,39 @@ pub fn append(
     signer: Option<&Signer>,
     record: &Value,
 ) -> Result<String, String> {
-    append_riding(repo, executor, signer, record, |refspec| {
-        repo.git
+    let pushed = append_riding(repo, executor, signer, record, |refspec| {
+        if repo
+            .git
             .run(&["push", "-q", repo.remote(), refspec])
             .is_ok()
-    })
+        {
+            Riding::Took
+        } else {
+            Riding::Apart
+        }
+    })?;
+    // A record pushed alone is never voided.
+    Ok(pushed.unwrap_or_default())
+}
+
+/// What the push given to [`append_riding`] did with the record and the caller's other refs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Riding {
+    /// The remote took the record, with the caller's refs or after them.
+    Took,
+    /// The remote refused the log, and the caller's refs stand without the record: it is
+    /// written again on the remote's log and pushed alone (G886).
+    Apart,
+    /// G918: the remote refused the caller's refs, and the record stands only with them: it is
+    /// taken back, and nothing is pushed.
+    Void,
 }
 
 /// G789: [`append`], whose push is `push`'s, given the log's refspec: a caller that pushes
 /// other refs too carries the record in its own atomic push, one round trip, not two. When
 /// `push` says the remote refused the log, the record is taken back and written again on the
-/// remote's tip, as [`append`] does.
+/// remote's tip, as [`append`] does. When it says the record does not stand ([`Riding::Void`]),
+/// it is taken back and `None` answers.
 ///
 /// # Errors
 ///
@@ -83,31 +105,40 @@ pub fn append_riding(
     executor: &str,
     signer: Option<&Signer>,
     record: &Value,
-    push: impl FnOnce(&str) -> bool,
-) -> Result<String, String> {
+    push: impl FnOnce(&str) -> Riding,
+) -> Result<Option<String>, String> {
     let git = &repo.git;
     let name = log_ref(executor);
     let (commit, parent) = write(repo, &name, signer, record)?;
     let refspec = format!("{name}:{name}");
-    if push(&refspec) {
-        pushed(repo, &name, &commit);
-        return Ok(commit);
+    match push(&refspec) {
+        Riding::Took => {
+            pushed(repo, &name, &commit);
+            return Ok(Some(commit));
+        }
+        // Another process on this box wrote on the log over it, which no take-back undoes: it
+        // stays, as a record whose push failed does.
+        Riding::Void => {
+            let taken = take_back(git, &name, &commit, parent.as_deref());
+            return Ok((!taken).then_some(commit));
+        }
+        Riding::Apart => {}
     }
     if !take_back(git, &name, &commit, parent.as_deref()) {
-        return Ok(commit);
+        return Ok(Some(commit));
     }
     // G886: a log apart from the remote's is joined to it first, as one behind it is moved on,
     // and a record the remote's log took meanwhile (a push it took while its answer said
     // refused) is not written twice.
     reconcile_own(repo, executor);
     if let Some(held) = joined_holds(git, &name, parent.as_deref(), &commit) {
-        return Ok(held);
+        return Ok(Some(held));
     }
     let (commit, _) = write(repo, &name, signer, record)?;
     if git.run(&["push", "-q", repo.remote(), &refspec]).is_ok() {
         pushed(repo, &name, &commit);
     }
-    Ok(commit)
+    Ok(Some(commit))
 }
 
 /// G864: writes `records` on this executor's log for a push that stands or falls with them:
