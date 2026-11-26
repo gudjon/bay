@@ -215,8 +215,9 @@ fn take_back(git: &Git, name: &str, commit: &str, parent: Option<&str>) -> bool 
 /// Called after a push of this executor's log was refused: reads the remote's log into a scratch
 /// ref and makes the two one line again, never forced (A10). A log behind the remote's moves to
 /// it. A log apart from it goes on the remote's tip: each record only this box holds is made
-/// again there, in order, except one the remote's line already holds (the same record, or an
-/// event with the same id), and that line is pushed. The log on this box takes the result only
+/// again there, in order, except one the remote's line already holds (the same record, an event
+/// with the same id, or a terminal record of the same operation and outcome), and that line is
+/// pushed. The log on this box takes the result only
 /// when no other write went on it meanwhile. A log ahead is left to the next push. Returns
 /// whether the remote's log now holds the tip of the log on this box.
 pub fn reconcile_own(repo: &Repo, executor: &str) -> bool {
@@ -268,11 +269,27 @@ pub fn reconcile_own(repo: &Repo, executor: &str) -> bool {
     moved
 }
 
-/// G886: the records of log line `local` that line `remote` lacks, made again in order on
-/// `remote`'s tip, each but one `remote`'s line holds already: the same record (its tree), or an
-/// event with the same id. The tip made, `remote` when none is left.
+/// G886: the records of log line `local` that line `remote` lacks ([`lacking`]), made again in
+/// order on `remote`'s tip. The tip made, `remote` when none is left.
 fn rejoined(repo: &Repo, local: &str, remote: &str) -> Result<String, String> {
-    let git = &repo.git;
+    let lacking = lacking(&repo.git, local, remote)?;
+    let signer = own_signer(repo)?;
+    let mut tip = remote.to_owned();
+    for (tree, subject) in lacking {
+        tip = commit_tree(repo, signer.as_ref(), &tree, &subject, Some(&tip))?;
+    }
+    Ok(tip)
+}
+
+/// G886: the records of log line `local` since its fork from line `remote`, oldest first, each
+/// but one `remote`'s line holds since the fork: the same record (its tree), an event with the
+/// same id, or a terminal record of the same operation and outcome.
+///
+/// G927 (a fleet census, 2026-11-26: 6 of 101 published operations on two boxes had two published
+/// terminal records, each pair a batch's, 46 to 62 s apart): a batch whose push the host took
+/// answers a fault, its records are taken back, and the landing is derived again later, so the
+/// record written again differs from the one the push carried in its time (`published_at`) alone.
+fn lacking(git: &Git, local: &str, remote: &str) -> Result<Vec<(String, String)>, String> {
     let line = |from: &str, not: &str| -> Result<Vec<(String, String)>, String> {
         let listed = git
             .run(&[
@@ -290,6 +307,7 @@ fn rejoined(repo: &Repo, local: &str, remote: &str) -> Result<String, String> {
             .collect())
     };
     let theirs = line(remote, local)?;
+    let ours = line(local, remote)?;
     let event_id = |subject: &str| {
         subject
             .strip_prefix("event ")
@@ -301,16 +319,47 @@ fn rejoined(repo: &Repo, local: &str, remote: &str) -> Result<String, String> {
         .iter()
         .filter_map(|(_, subject)| event_id(subject))
         .collect();
-    let signer = own_signer(repo)?;
-    let mut tip = remote.to_owned();
-    for (tree, subject) in line(local, remote)? {
-        let held = trees.contains(tree.as_str())
-            || event_id(&subject).is_some_and(|id| events.contains(&id));
-        if !held {
-            tip = commit_tree(repo, signer.as_ref(), &tree, &subject, Some(&tip))?;
-        }
-    }
-    Ok(tip)
+    let terminals: BTreeSet<(String, String)> =
+        terminal_keys(git, &theirs)?.into_iter().flatten().collect();
+    let keys = terminal_keys(git, &ours)?;
+    Ok(ours
+        .into_iter()
+        .zip(keys)
+        .filter(|((tree, subject), key)| {
+            !(trees.contains(tree.as_str())
+                || event_id(subject).is_some_and(|id| events.contains(&id))
+                || key.as_ref().is_some_and(|key| terminals.contains(key)))
+        })
+        .map(|(entry, _)| entry)
+        .collect())
+}
+
+/// G927: the operation and outcome of each terminal record in `entries` (tree, subject), read in
+/// one `cat-file --batch`: `None` for an event, or a record that names neither.
+fn terminal_keys(
+    git: &Git,
+    entries: &[(String, String)],
+) -> Result<Vec<Option<(String, String)>>, String> {
+    let terminal = |subject: &str| subject.starts_with("terminal record ");
+    let trees: Vec<&str> = entries
+        .iter()
+        .filter(|(_, subject)| terminal(subject))
+        .map(|(tree, _)| tree.as_str())
+        .collect();
+    let mut read = records(git, &trees)?.into_iter();
+    Ok(entries
+        .iter()
+        .map(|(_, subject)| {
+            if !terminal(subject) {
+                return None;
+            }
+            let record: Value = serde_json::from_str(&read.next().flatten()?).ok()?;
+            Some((
+                record["op_id"].as_str()?.to_owned(),
+                record["outcome"].as_str()?.to_owned(),
+            ))
+        })
+        .collect())
 }
 
 /// G886: the commit on log `name` since `parent` that holds the record of `commit` (the same
@@ -940,7 +989,7 @@ fn all_records(git: &Git) -> Result<std::sync::Arc<Vec<Value>>, String> {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{LOG_PREFIX, events_since, held_events};
+    use super::{LOG_PREFIX, events_since, held_events, lacking};
     use crate::change::RECORD_IDENTITY;
     use crate::git::Git;
     use serde_json::json;
@@ -1017,5 +1066,70 @@ mod tests {
         let read = events_since(&git, &tips, &tips, 100).unwrap();
         assert!(read.events.is_empty() && !read.more);
         assert_eq!(read.tips, tips);
+    }
+
+    #[test]
+    fn a_log_rejoined_makes_no_terminal_record_again_that_the_remotes_line_holds() {
+        // G927: a landing derived again after its push was taken writes its terminal record again,
+        // apart from the one the push carried in its time alone. The join makes it once.
+        let dir = std::env::temp_dir().join(format!("bay-log-rejoin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = Git::new(&dir);
+        git.run(&["init", "-q"]).unwrap();
+        let terminal = |op: &str, outcome: &str, at: u64| json!({"schema": "bay.terminal/1", "op_id": op, "outcome": outcome, "published_at": at});
+        let fork = add(
+            &git,
+            &json!({"schema": "bay.event/1", "id": "evt_1"}),
+            "event refused evt_1",
+        );
+        add(
+            &git,
+            &terminal("c.1", "published", 100),
+            "terminal record c.1",
+        );
+        let remote = add(
+            &git,
+            &terminal("e.1", "abandoned", 100),
+            "terminal record e.1",
+        );
+        let name = format!("{LOG_PREFIX}a");
+        git.run(&["update-ref", &name, &fork]).unwrap();
+        add(
+            &git,
+            &terminal("c.1", "published", 150),
+            "terminal record c.1",
+        );
+        add(
+            &git,
+            &json!({"schema": "bay.event/1", "id": "evt_2"}),
+            "event refused evt_2",
+        );
+        add(
+            &git,
+            &terminal("d.1", "published", 150),
+            "terminal record d.1",
+        );
+        let local = add(
+            &git,
+            &terminal("e.1", "published", 150),
+            "terminal record e.1",
+        );
+
+        let made: Vec<String> = lacking(&git, &local, &remote)
+            .unwrap()
+            .into_iter()
+            .map(|(_, subject)| subject)
+            .collect();
+
+        assert_eq!(
+            made,
+            [
+                "event refused evt_2",
+                "terminal record d.1",
+                "terminal record e.1"
+            ]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
