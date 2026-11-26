@@ -417,6 +417,32 @@ pub fn live(git: &Git) -> Vec<Value> {
         .collect()
 }
 
+/// BACKLOG 332: the presence refs this store holds that read live now by [`serving_until`]'s
+/// strict rule.
+#[must_use]
+pub fn live_names(git: &Git) -> Vec<String> {
+    let Ok(listed) = git.run(&[
+        "for-each-ref",
+        "--format=%(refname) %(objectname)",
+        PRESENCE_PREFIX,
+    ]) else {
+        return Vec::new();
+    };
+    let now = reader_now();
+    listed
+        .lines()
+        .filter_map(|line| line.split_once(' '))
+        .filter(|(_, commit)| {
+            record_at(git, commit)
+                .ok()
+                .flatten()
+                .and_then(|record| live_until(&record))
+                .is_some_and(|until| until >= now)
+        })
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
 /// Until when, in Unix seconds, `record` stays live under [`serving_until`]'s strict rule.
 fn live_until(record: &Value) -> Option<u64> {
     let cadence = record["cadence_s"].as_u64().unwrap_or(10);

@@ -451,22 +451,26 @@ fn a_compacted_marker_is_never_created_again_and_still_answers() {
 
     an_uncut_marker_is_not_compacted(&test_box, &host, &repo, &keys, &marker, &targets[0]);
 
-    // A pass cuts the landed chain; the bay refs are over the budget, so it compacts.
+    // A pass cuts the landed chain; the bay refs are over the budget, so it compacts. Each pass
+    // moves one shard (BACKLOG 332), so the three names take as many passes as their shards.
     let executor = test_box.clone_of(&host, "executor");
     test_box.use_keys(&executor, &keys);
-    let mut compacted = serde_json::Value::Null;
-    for _ in 0..2 {
-        let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
-        if let Some(entry) = ran["detail"]["ran"]
-            .as_array()
-            .unwrap()
+    let mut moved: Vec<serde_json::Value> = Vec::new();
+    for _ in 0..8 {
+        if names
             .iter()
-            .find(|entry| entry["compacted"].is_array())
+            .all(|name| moved.iter().any(|entry| entry == *name))
         {
-            compacted = entry["compacted"].clone();
             break;
         }
+        let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
+        for entry in ran["detail"]["ran"].as_array().unwrap() {
+            if let Some(list) = entry["compacted"].as_array() {
+                moved.extend(list.iter().cloned());
+            }
+        }
     }
+    let compacted = serde_json::Value::Array(moved);
     for (name, target) in names.iter().zip(&targets) {
         assert!(
             compacted

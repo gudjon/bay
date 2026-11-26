@@ -9,9 +9,11 @@
 //! compacted name, at the name with `/` written `%2F`, whose content is the ref's target id. The
 //! executor only appends; the host takes a shard by fast-forward only, and refuses a create of a
 //! name its shard records (`crate::hook`), so create-only still holds once the ref is gone.
-//! Every lookup reads the ref and then its one shard.
+//! Every lookup reads the ref and then its one shard. A push moves one shard, at most [`batch`]
+//! names of it, on a runner's pass that ran no operation, and live runners take different shards
+//! ([`pick`]), so a push's cost on its git client stays bounded and runners do not race it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use sha2::{Digest as _, Sha256};
 
@@ -25,6 +27,14 @@ pub const INDEX_PREFIX: &str = crate::names::LANDED_INDEX;
 pub const DEFAULT_BUDGET: u64 = 100_000;
 /// The most names one compaction push moves, so the host's judgement of it stays bounded.
 pub const PUSH_MAX: usize = 4096;
+/// The name × remote-ref matches one compaction push may cost its git client (BACKLOG 332: a
+/// lowered budget put six runners on one push of 4,096 names against 60,000 remote refs; each git
+/// client ran a full core until the push bound stopped it, and no name moved). Git matches each
+/// explicit name, and each lease, against every ref the remote lists, about 1 µs a match, so a
+/// push of n names under leases costs about 2 µs × n × the remote's refs.
+const PUSH_PAIRS: usize = 2_000_000;
+/// The fewest names a compaction push moves, however many refs the remote holds.
+const PUSH_MIN: usize = 16;
 /// G695: how long a count of the remote's bay refs under the budget stands, so a pass lists
 /// them at most this often while the remote stays under it.
 const COUNTED_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -247,25 +257,100 @@ pub fn read_blobs(git: &Git, blobs: &[String]) -> Result<HashMap<String, String>
     Ok(out)
 }
 
-/// The markers a landed change that retention cut can give up: its landed marker and, for its
-/// intent claim, the claim and the landed claim (a claim only together with its landed claim,
-/// which names the publication and so the change, once the claim's own commit is gone).
-fn markers_of(record: &ChangeRecord, remote: &HashMap<String, String>) -> Vec<(String, String)> {
-    if !record.retention_cut || record.state != ChangeState::Landed {
-        return Vec::new();
-    }
-    let mut names = vec![format!("{}{}", crate::names::LANDED, record.id)];
-    if let Some(claim) = &record.claim
-        && remote.contains_key(&claim.landed_ref())
+/// The markers of the landed changes in `records` that retention cut and the remote still holds,
+/// with their targets: each change's landed marker, its claim and its landed claim. A claim goes
+/// only once its landed claim, which names the publication and so the change once the claim's own
+/// commit is gone, is on the remote or recorded in its shard, as the host judges it.
+fn candidates(
+    git: &Git,
+    records: &[ChangeRecord],
+    remote: &HashMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
+    let mut names = Vec::new();
+    let mut claims = Vec::new();
+    for record in records
+        .iter()
+        .filter(|record| record.retention_cut && record.state == ChangeState::Landed)
     {
-        names.push(claim.intent_ref());
-        names.push(claim.landed_ref());
+        names.push(format!("{}{}", crate::names::LANDED, record.id));
+        if let Some(claim) = &record.claim {
+            let landed = claim.landed_ref();
+            if remote.contains_key(&landed) {
+                names.push(claim.intent_ref());
+                names.push(landed);
+            } else if remote.contains_key(&claim.intent_ref()) {
+                claims.push((claim.intent_ref(), landed));
+            }
+        }
     }
-    names
+    let recorded = recorded_names(git, claims.iter().map(|(_, landed)| landed.as_str()))?;
+    names.extend(
+        claims
+            .into_iter()
+            .filter(|(_, landed)| recorded.contains(landed))
+            .map(|(claim, _)| claim),
+    );
+    Ok(names
         .into_iter()
-        .filter_map(|name| Some((remote.get(&name)?.clone(), name)))
-        .map(|(target, name)| (name, target))
-        .collect()
+        .filter_map(|name| {
+            let target = remote.get(&name)?.clone();
+            Some((name, target))
+        })
+        .collect())
+}
+
+/// Which of `names` this repository's copy of the shard indexes records: one `ls-tree` per
+/// shard that would hold any of them.
+fn recorded_names<'a>(
+    git: &Git,
+    names: impl Iterator<Item = &'a str>,
+) -> Result<HashSet<String>, String> {
+    let mut wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in names {
+        wanted.entry(index_ref(name)).or_default().push(path(name));
+    }
+    let mut found = HashSet::new();
+    for (index, paths) in &wanted {
+        let Some(tip) = git.ref_target(index).map_err(|error| error.message())? else {
+            continue;
+        };
+        let mut args = vec!["ls-tree", "--name-only", tip.as_str(), "--"];
+        args.extend(paths.iter().map(String::as_str));
+        let listed = git.run(&args).map_err(|error| error.message())?;
+        found.extend(listed.lines().map(name_of));
+    }
+    Ok(found)
+}
+
+/// How many names one compaction push moves against a remote that lists `remote_refs` refs:
+/// [`PUSH_PAIRS`] over them, from [`PUSH_MIN`] to [`PUSH_MAX`].
+#[must_use]
+pub fn batch(remote_refs: usize) -> usize {
+    (PUSH_PAIRS / remote_refs.max(1)).clamp(PUSH_MIN, PUSH_MAX)
+}
+
+/// The shard a runner moves in a pass, from `shards` (each shard that holds a marker to move,
+/// ascending): runner `rank` of `runners` live runners takes the shard at its own place, so
+/// runners over the budget at once push different shards; with fewer shards than runners the
+/// place wraps, so the last shard is still moved.
+#[must_use]
+pub fn pick(shards: &[u8], rank: usize, runners: usize) -> Option<u8> {
+    if shards.is_empty() {
+        return None;
+    }
+    shards.get(rank % runners.max(1) % shards.len()).copied()
+}
+
+/// This runner's place among the live runners, by presence ref, and how many they are: the
+/// presences this store holds that read live now, and `me`.
+fn standing(repo: &Repo, me: &str) -> (usize, usize) {
+    let _ = crate::presence::fetch(repo);
+    let mut names = crate::presence::live_names(&repo.git);
+    names.push(me.to_owned());
+    names.sort();
+    names.dedup();
+    let rank = names.iter().position(|name| name == me).unwrap_or(0);
+    (rank, names.len())
 }
 
 /// The remote's bay refs, name to target, in one `ls-remote`.
@@ -290,16 +375,17 @@ fn remote_bay_refs(repo: &Repo) -> Result<HashMap<String, String>, String> {
 }
 
 /// One executor pass of compaction: when the remote holds more bay refs than the budget, moves
-/// the markers of every landed, cut change in `records` (at most [`PUSH_MAX`]) into their shard
-/// indexes, in one atomic push that appends each shard and deletes each moved ref under a lease
-/// on its target. Returns the names moved; none when under the budget.
+/// markers of the landed, cut changes in `records` into their shard index, one shard a push
+/// (BACKLOG 332): the shard [`pick`] gives this runner (`me`, its presence ref), at most
+/// [`batch`] of its names, in one atomic push that appends the shard and deletes each moved ref
+/// under a lease on its target. Returns the names moved; none when under the budget.
 ///
 /// # Errors
 ///
 /// The remote cannot be read, a git fault, or the push was refused.
 pub fn run(
     repo: &Repo,
-    signer: Option<&Signer>,
+    (signer, me): (Option<&Signer>, &str),
     records: &[ChangeRecord],
 ) -> Result<Vec<String>, String> {
     // G695 (a fleet finding, 2026-11-10: every runner pass listed 30,000 refs, 2.3 MB and
@@ -332,55 +418,45 @@ pub fn run(
         }
         return Ok(Vec::new());
     }
-    let mut moved: Vec<(String, String)> = records
-        .iter()
-        .flat_map(|record| markers_of(record, &remote))
-        .collect();
-    moved.truncate(PUSH_MAX);
-    // A claim never leaves without its landed claim, which names the change once it is gone.
-    if moved.len() == PUSH_MAX
-        && moved
-            .last()
-            .is_some_and(|(name, _)| name.starts_with(crate::names::INTENT))
-    {
-        moved.pop();
-    }
-    if moved.is_empty() {
-        return Ok(Vec::new());
-    }
+    // The landed claims already recorded are read from this repository's copy of the shards.
     fetch(repo)?;
-    let mut shards: BTreeMap<String, Vec<&(String, String)>> = BTreeMap::new();
-    for entry in &moved {
-        shards.entry(index_ref(&entry.0)).or_default().push(entry);
+    let mut shards: BTreeMap<u8, Vec<(String, String)>> = BTreeMap::new();
+    for (name, target) in candidates(&repo.git, records, &remote)? {
+        shards.entry(shard(&name)).or_default().push((name, target));
     }
-    let mut leases = Vec::new();
-    let mut refspecs = Vec::new();
-    let mut appended = Vec::new();
-    for (index, entries) in &shards {
-        let parent = remote.get(index).cloned();
-        let commit = append(&repo.git, signer, index, parent.as_deref(), entries)?;
-        leases.push(format!(
+    let order: Vec<u8> = shards.keys().copied().collect();
+    let (rank, runners) = standing(repo, me);
+    let Some(chosen) = pick(&order, rank, runners) else {
+        return Ok(Vec::new());
+    };
+    let mut moved = shards.remove(&chosen).unwrap_or_default();
+    moved.truncate(batch(remote.len()));
+    let index = format!("{INDEX_PREFIX}{chosen}");
+    let parent = remote.get(&index).cloned();
+    let entries: Vec<&(String, String)> = moved.iter().collect();
+    let commit = append(&repo.git, signer, &index, parent.as_deref(), &entries)?;
+    let mut args = vec![
+        "push".to_owned(),
+        "-q".to_owned(),
+        "--atomic".to_owned(),
+        format!(
             "--force-with-lease={index}:{}",
             parent.as_deref().unwrap_or_default()
-        ));
-        refspecs.push(format!("{commit}:{index}"));
-        appended.push((index.clone(), commit, parent));
-    }
-    for (name, target) in &moved {
-        leases.push(format!("--force-with-lease={name}:{target}"));
-        refspecs.push(format!(":{name}"));
-    }
-    let mut args = vec!["push", "-q", "--atomic"];
-    args.extend(leases.iter().map(String::as_str));
-    args.push(repo.remote());
-    args.extend(refspecs.iter().map(String::as_str));
+        ),
+    ];
+    args.extend(
+        moved
+            .iter()
+            .map(|(name, target)| format!("--force-with-lease={name}:{target}")),
+    );
+    args.push(repo.remote().to_owned());
+    args.push(format!("{commit}:{index}"));
+    args.extend(moved.iter().map(|(name, _)| format!(":{name}")));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     repo.git
         .run(&args)
         .map_err(|error| format!("the compaction could not be pushed: {}", error.message()))?;
-    let mut lines: Vec<String> = appended
-        .iter()
-        .map(|(index, commit, _)| format!("update {index} {commit}"))
-        .collect();
+    let mut lines = vec![format!("update {index} {commit}")];
     lines.extend(moved.iter().map(|(name, _)| format!("delete {name}")));
     let local = lines.join("\n") + "\n";
     let _ = repo
@@ -458,7 +534,7 @@ fn append(
 
 #[cfg(test)]
 mod tests {
-    use super::{compactable, index_ref, name_of, path, shard};
+    use super::{PUSH_MAX, PUSH_MIN, batch, compactable, index_ref, name_of, path, pick, shard};
 
     #[test]
     fn a_name_has_one_shard_and_one_path() {
@@ -473,5 +549,29 @@ mod tests {
         assert!(compactable("refs/bay/landed-intent/0123/1"));
         assert!(!compactable("refs/bay/changes/abcdefgh"));
         assert!(!compactable("refs/bay/landed-index/7"));
+    }
+
+    /// BACKLOG 332: a push's names fall as the remote's refs grow, so its cost on the git client
+    /// (about 2 µs a name for each remote ref) stays near four seconds.
+    #[test]
+    fn a_push_costs_at_most_its_pairs() {
+        assert_eq!(batch(60_000), 33);
+        assert_eq!(batch(1_000), 2_000);
+        assert_eq!(batch(0), PUSH_MAX);
+        assert_eq!(batch(10), PUSH_MAX);
+        assert_eq!(batch(10_000_000), PUSH_MIN);
+    }
+
+    /// BACKLOG 332: live runners over the budget at once take different shards, and the last
+    /// shard is still taken when the runners outnumber the shards.
+    #[test]
+    fn live_runners_take_different_shards() {
+        let shards = [3, 9, 200];
+        assert_eq!(pick(&shards, 0, 2), Some(3));
+        assert_eq!(pick(&shards, 1, 2), Some(9));
+        assert_eq!(pick(&shards, 0, 1), Some(3));
+        assert_eq!(pick(&shards, 4, 6), Some(9));
+        assert_eq!(pick(&[7], 1, 2), Some(7));
+        assert_eq!(pick(&[], 0, 1), None);
     }
 }

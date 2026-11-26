@@ -667,6 +667,7 @@ mod g914_a_bay_command_writes_no_ref_whose_object_is_elsewhere;
 mod g915_a_runner_whose_check_gives_no_answer_hands_it_to_another;
 mod g91_post_publication_checks_stay_pending;
 mod g97_cleanup_never_discards_newer_or_dirty_work;
+mod marker_compaction_moves_one_shard_per_runner;
 mod release_script_takes_an_external_signature;
 mod runtime_evidence_and_completion_profiles;
 mod session_record;

@@ -1063,11 +1063,16 @@ fn pass(
             }
         }
     }
+    // BACKLOG 332: marker compaction pushes only on a pass that ran no operation over an empty
+    // line, so its push never delays a landing.
+    let idle = ran.is_empty() && depth == 0;
     ran.extend(
         seen.before
             .and_then(|before| queue_retention(repo, &before, &chains)),
     );
-    ran.extend(compaction(repo, &chain));
+    if idle {
+        ran.extend(compaction(repo, &chain));
+    }
     ran.extend(recovered.take());
     // BACKLOG 280: a box at or above a check-start load limit starts no post piece.
     let plans = !leaving(watch) && !box_busy(shared);
@@ -2527,16 +2532,17 @@ fn queue_retention(repo: &Repo, before: &Queue, chains: &[HeldChain]) -> Option<
     }
 }
 
-/// The pass's marker compaction (§ 10a ref-growth budget, `crate::compact`), over the chains as
-/// this pass left them, so a change it just cut is compacted in the same pass. `None` when
+/// The pass's marker compaction (§ 10a ref-growth budget, `crate::compact`), over the chains
+/// this store holds: one shard, this runner's among the live runners (BACKLOG 332). `None` when
 /// nothing moved; a failure is reported and the next pass tries again.
 fn compaction(repo: &Repo, chain: &Chain) -> Option<Value> {
     let records: Vec<ChangeRecord> = match chain.read_all() {
         Ok(chains) => chains.into_iter().map(|held| held.record).collect(),
         Err(error) => return Some(json!({"compacted": null, "error": error.message()})),
     };
-    let signer = Keys::load(&repo.git).executor;
-    match crate::compact::run(repo, signer.as_ref(), &records) {
+    let keys = Keys::load(&repo.git);
+    let me = crate::presence::presence_ref(&keys.executor_name);
+    match crate::compact::run(repo, (keys.executor.as_ref(), &me), &records) {
         Ok(moved) if moved.is_empty() => None,
         Ok(moved) => Some(json!({"compacted": moved})),
         Err(error) => Some(json!({"compacted": null, "error": error})),
