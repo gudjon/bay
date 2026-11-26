@@ -8,6 +8,7 @@ Read with `SKILL.md`, whose "Read the result" names the fields every result carr
   not a proven cause, and `say` says so: the cause is one of `suspect.merges`, on the check's paths or not.
   With no pass in its `[red] window`, bay reads back down to `[red] reach` merges (default 250) for the
   newest pass; with none, `suspect.last_passed` is `null` and `suspect.searched` says how many it read.
+  A merge where the check was flaky is that pass when no run there failed a unit the red fails; `suspect.passed_units` names them.
   With `[red] undo_after_s` in `.bay/config.toml`, a runner undoes that culprit that many seconds after its owner was told,
   unless a change in line fixes or undoes it; the owner is told the undo, or why bay could not make it.
 - While a change waits in the queue, `bay status <change>` may show `operation.conflict`: main
