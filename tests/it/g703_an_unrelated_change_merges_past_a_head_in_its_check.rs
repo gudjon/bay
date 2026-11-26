@@ -6,6 +6,13 @@
 //!
 //! Guard to mutate: in `src/publish.rs` `queue_gate`, the `passes_unread` term (the change waits
 //! behind the head until its check ends).
+//!
+//! G500: the same holds when the head's check reads the whole tree but the notes, `["**",
+//! "!notes/**"]`: an exclusion clears what it matches from what bay predicts a check reads, so
+//! the notes change passes, and the head's check, which ran once, is carried onto the new main.
+//! Guards to mutate: in `src/throughput.rs` `list_reads`, the exclusion arm (the notes change
+//! waits: a list with `**` reads every path), and in `src/publish.rs` `carried_across`, its
+//! `list_reads` term (the move stops the head's check, and it runs twice).
 
 #![cfg(unix)]
 
@@ -46,11 +53,27 @@ fn submit(test_box: &TestBox, repo: &Path, intent: &str, paths: &str, file: &str
 
 #[test]
 fn an_unrelated_change_merges_past_a_head_in_its_check() {
+    merges_past_the_head("\"src/**\"");
+}
+
+#[test]
+fn an_unrelated_change_merges_past_a_head_whose_check_excludes_it() {
+    merges_past_the_head("\"**\", \"!notes/**\"");
+}
+
+/// A notes change passes a code change at the head while the head's check runs, when the
+/// code check's `when_paths` are `code_globs`. The policy reuses unsigned records (G318), so
+/// the head's record may be carried across the move (G796).
+fn merges_past_the_head(code_globs: &str) {
     let test_box = TestBox::new();
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
+    let runs = test_box.path().join("code-runs");
     let base = check_files(
-        &format!("[ \"$1\" = code ] && {}", test_box.relay("sleep 25")),
+        &format!(
+            "[ \"$1\" = code ] && {}",
+            test_box.relay(&format!("echo run >> '{}'; sleep 25", runs.display()))
+        ),
         &passing_result(1),
         1,
         120,
@@ -67,8 +90,8 @@ fn an_unrelated_change_merges_past_a_head_in_its_check() {
         )
     };
     let policy = format!(
-        "revision = 1\n\n{}\n{}",
-        check("code", "\"src/**\""),
+        "revision = 1\n\n[policy]\nreuse_unsigned = true\n\n{}\n{}",
+        check("code", code_globs),
         check("notes", "\"notes/**\"")
     );
     let files = vec![
@@ -141,4 +164,7 @@ fn an_unrelated_change_merges_past_a_head_in_its_check() {
             .output();
     }
     assert_eq!(test_box.trunk_change_ids(&remote), vec![code, notes]);
+    // G796: on its record, carried across the notes change: the code check ran once.
+    let ran = std::fs::read_to_string(&runs).unwrap_or_default();
+    assert_eq!(ran.lines().count(), 1, "the code check ran {ran:?}");
 }

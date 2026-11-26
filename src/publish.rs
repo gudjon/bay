@@ -5107,7 +5107,8 @@ fn watch_main(
 /// G796: the checks of `policy` whose record on a candidate a move of main changing `changed`
 /// may leave standing: a candidate on the new main carries it byte for byte ([`carry_over`]). A
 /// check that is keyed by its commit is never carried; one with an observed footprint may be,
-/// unless the move changes a path G703 predicts it reads (its `paths`, or `when_paths`), and one
+/// unless the move changes a path G703 predicts it reads (its `paths`, or `when_paths`, read in
+/// order as [`throughput::list_reads`] reads a list, so a `!` exclusion holds), and one
 /// that declares neither is read only once it ends, so it runs on; one with a declared read set
 /// is when footprint lanes are on and the move changes none of it.
 fn carried_across(
@@ -5115,7 +5116,6 @@ fn carried_across(
     policy: &policy::Policy,
     changed: &[String],
 ) -> Vec<evidence::CheckId> {
-    let moved = throughput::Footprint::Globs(changed.to_vec());
     policy
         .checks
         .iter()
@@ -5135,7 +5135,9 @@ fn carried_across(
             };
             entry.tree_keyed()
                 && reads.is_some_and(|reads| {
-                    !throughput::Footprint::Globs(reads.to_vec()).overlaps(&moved)
+                    !changed
+                        .iter()
+                        .any(|path| throughput::list_reads(reads, path))
                 })
         })
         .map(|entry| evidence::CheckId::new(&entry.id, &entry.environment))
@@ -5584,7 +5586,8 @@ fn own_change(git: &Git, trunk: &str, revision: &str) -> Result<Option<throughpu
 /// What the pre-merge checks a change of `changed` requires under `policy` read; `None` when
 /// one of them may read anything (see [`passes_unread`]). G907: an observed check with records
 /// on main near `trunk` reads what they read and listed, exactly, and the changed paths; one
-/// with none reads its `paths` (or `when_paths`) by their literal prefixes.
+/// with none reads its `paths` (or `when_paths`) in order, as [`throughput::list_reads`] reads
+/// a list (G500: a `!` exclusion holds).
 fn predicted_reads(
     git: &Git,
     policy: &policy::Policy,
@@ -5604,7 +5607,7 @@ fn predicted_reads(
         }
         if check.changed_only() {
             reads.globs.extend(changed.iter().cloned());
-            reads.globs.extend(check.paths.iter().flatten().cloned());
+            reads.lists.extend(check.paths.iter().cloned());
             continue;
         }
         if check.footprint != policy::FootprintMode::Observed {
@@ -5615,14 +5618,9 @@ fn predicted_reads(
             reads.observed.push(seen);
             continue;
         }
-        reads.globs.extend(
-            check
-                .paths
-                .as_ref()
-                .or(check.when_paths.as_ref())?
-                .iter()
-                .cloned(),
-        );
+        reads
+            .lists
+            .push(check.paths.as_ref().or(check.when_paths.as_ref())?.clone());
     }
     Some(reads)
 }

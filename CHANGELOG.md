@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.35
+
+- A check's `!` exclusions narrow what bay predicts it reads, so an excluded change passes the head.
+
 ## 0.7.34
 
 - A changed-only check keys its record by its base's tree, so changes that wake it still batch.

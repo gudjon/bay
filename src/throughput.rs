@@ -464,6 +464,20 @@ fn literal_prefix(glob: &str) -> &str {
     glob.find(['*', '?', '[']).map_or(glob, |at| &glob[..at])
 }
 
+/// G500: whether a check whose read set is the ordered list `list` (its `paths`, else its
+/// `when_paths`) may read `path`, folded in order as [`crate::policy::globs_match`] folds it:
+/// an include by its literal prefix, which meets every path it matches and more, and a `!`
+/// exclusion exactly, which clears only the paths it matches. So it is true wherever
+/// `globs_match` is, and `["**", "!docs/**"]` reads no path under `docs/`.
+#[must_use]
+pub fn list_reads(list: &[String], path: &str) -> bool {
+    list.iter()
+        .fold(false, |matched, glob| match glob.strip_prefix('!') {
+            Some(excluded) => matched && !crate::policy::glob_matches(excluded, path),
+            None => matched || globs_overlap(glob, path),
+        })
+}
+
 /// G907 (a fleet measurement, 2026-11-25: on a repository whose whole-tree check lists `**`, no
 /// change ever passed a head in its check, since a glob's literal prefix meets every path): what
 /// a change does to a tree as an observed footprint reads it: the paths it changes, and the
@@ -574,12 +588,14 @@ pub struct Observed {
     pub listed: std::collections::HashSet<String>,
 }
 
-/// G907: what the pre-merge checks of the changes ahead read, as bay predicts it: globs, read by
-/// their literal prefixes as [`Footprint::overlaps`] reads them, and observed footprints, read
-/// exactly as a carried record is ([`same_observed`]).
+/// G907: what the pre-merge checks of the changes ahead read, as bay predicts it: paths, read by
+/// their literal prefixes as [`Footprint::overlaps`] reads them; the ordered `paths` or
+/// `when_paths` lists of checks, each read as [`list_reads`] reads it; and observed footprints,
+/// read exactly as a carried record is ([`same_observed`]).
 #[derive(Debug, Default)]
 pub struct Reads {
     pub globs: Vec<String>,
+    pub lists: Vec<Vec<String>>,
     pub observed: Vec<std::sync::Arc<Observed>>,
 }
 
@@ -589,6 +605,7 @@ impl Reads {
     pub fn meets(&self, own: &Own) -> bool {
         own.paths.iter().any(|path| {
             self.globs.iter().any(|glob| globs_overlap(glob, path))
+                || self.lists.iter().any(|list| list_reads(list, path))
                 || self.observed.iter().any(|seen| seen.read.contains(path))
         }) || own
             .listings
@@ -1723,8 +1740,8 @@ pub fn roles(tags: &[Option<&str>]) -> Result<Vec<Role>, String> {
 mod tests {
     use super::{
         BatchTag, Bisect, Fold, Footprint, Member, Observed, Own, Queued, Reads, Role,
-        checked_prefix, failure_rate, fold, judged_depth, plan_batch, predict, roles, slowest,
-        tree_of,
+        checked_prefix, failure_rate, fold, judged_depth, list_reads, plan_batch, predict, roles,
+        slowest, tree_of,
     };
     use crate::git::Git;
 
@@ -2243,6 +2260,7 @@ mod tests {
         };
         let reads = Reads {
             globs: vec!["src/b.rs".to_owned()],
+            lists: Vec::new(),
             observed: vec![std::sync::Arc::new(seen)],
         };
         assert!(!reads.meets(&own(&["notes/work/a.md"], &[])));
@@ -2251,10 +2269,41 @@ mod tests {
         assert!(reads.meets(&own(&["src/lib.rs"], &[])));
         assert!(reads.meets(&own(&["src/b.rs"], &[])));
         let whole = Reads {
-            globs: vec!["**".to_owned()],
-            observed: Vec::new(),
+            lists: vec![vec!["**".to_owned()]],
+            ..Reads::default()
         };
         assert!(whole.meets(&own(&["notes/work/a.md"], &[])));
+        let tree = Reads {
+            lists: vec![vec!["**".to_owned(), "!notes/**".to_owned()]],
+            ..Reads::default()
+        };
+        assert!(!tree.meets(&own(&["notes/work/a.md"], &["notes/work"])));
+        assert!(tree.meets(&own(&["src/b.rs", "notes/work/a.md"], &[])));
         assert!(!Reads::default().meets(&own(&["notes/work/a.md"], &["notes"])));
+    }
+
+    /// G500: an ordered list reads a path as `globs_match` matches it, its includes widened to
+    /// their literal prefixes: a `!` exclusion clears what it matches, and a later include takes
+    /// a path back.
+    #[test]
+    fn a_list_reads_no_path_its_exclusion_drops() {
+        let list = |globs: &[&str]| {
+            globs
+                .iter()
+                .map(|glob| (*glob).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let tree = list(&["**", "!docs/**"]);
+        assert!(list_reads(&tree, "crates/a.rs"));
+        assert!(list_reads(&tree, ".bay/check.sh"));
+        assert!(!list_reads(&tree, "docs/x.md"));
+        let back = list(&["**", "!docs/**", "docs/README.md"]);
+        assert!(list_reads(&back, "docs/README.md"));
+        assert!(!list_reads(&back, "docs/x.md"));
+        // An include reads more than it matches; an exclusion clears no more than it matches.
+        assert!(list_reads(&list(&["src/*.rs"]), "src/a/b.md"));
+        assert!(list_reads(&list(&["**", "!src/*.rs"]), "src/a/b.rs"));
+        assert!(!list_reads(&list(&["!**"]), "src/a.rs"));
+        assert!(!list_reads(&[], "src/a.rs"));
     }
 }
