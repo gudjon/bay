@@ -290,5 +290,11 @@ fn a_push_is_sized_by_the_time_the_last_one_took() {
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(batch_of(&ran), Some(1), "{ran}");
     assert_eq!(taken.len(), 1, "{ran}");
-    assert!(std::fs::read_to_string(&record).unwrap().starts_with("1 "));
+    // AND the record keeps the push before it, so the next can part a push's fixed cost from
+    // its cost a name (BACKLOG 336)
+    let kept = std::fs::read_to_string(&record).unwrap();
+    let kept: Vec<&str> = kept.lines().collect();
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert_eq!(kept[0], "2 60000", "{kept:?}");
+    assert!(kept[1].starts_with("1 "), "{kept:?}");
 }

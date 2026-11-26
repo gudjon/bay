@@ -30,15 +30,19 @@ pub const PUSH_MAX: usize = 4096;
 /// The name × remote-ref matches one compaction push may cost its git client (BACKLOG 332: a
 /// lowered budget put six runners on one push of 4,096 names against 60,000 remote refs; each git
 /// client ran a full core until the push bound stopped it, and no name moved). Git matches each
-/// explicit name, and each lease, against every ref the remote lists, about 1 µs a match, so a
-/// push of n names under leases costs about 2 µs × n × the remote's refs.
+/// explicit name, and each lease, against every ref the remote lists, about 1 µs a match; the push
+/// holds one lease, its shard's (BACKLOG 336), so n names cost about 1 µs × n × the remote's refs.
 const PUSH_PAIRS: usize = 2_000_000;
 /// The fewest names a compaction push moves, however many refs the remote holds.
 const PUSH_MIN: usize = 16;
-/// BACKLOG 334: the time a compaction push aims at. A host that forwards each push upstream, on
-/// a busy box, spent about 0.7 s a name at 59,000 refs, ten times the bench model behind
-/// [`PUSH_PAIRS`]; a constant cannot know the topology or the load, and the last push's time can.
-const TARGET: std::time::Duration = std::time::Duration::from_secs(10);
+/// BACKLOG 334, 336: the time a compaction push aims at. A host that forwards each push upstream,
+/// on a busy box, spent about 9 s a push and 0.5–0.7 s a name at 59,000 refs, far from the bench
+/// model behind [`PUSH_PAIRS`]; a constant cannot know the topology or the load, and the times of
+/// the last pushes can ([`sized`]).
+const TARGET: std::time::Duration = std::time::Duration::from_secs(15);
+/// BACKLOG 336: the pushes a store keeps the names and time of, to part a push's fixed cost from
+/// its cost a name.
+const KEPT: usize = 4;
 /// The names a store's first compaction push moves, before it has timed one.
 const FIRST: usize = 4;
 /// G695: how long a count of the remote's bay refs under the budget stands, so a pass lists
@@ -335,35 +339,103 @@ pub fn batch(remote_refs: usize) -> usize {
     (PUSH_PAIRS / remote_refs.max(1)).clamp(PUSH_MIN, PUSH_MAX)
 }
 
-/// The names the next compaction push moves, from `last`, the names and the time of this
-/// store's last compaction push (BACKLOG 334): [`FIRST`] before any; half of them after a push
-/// over twice [`TARGET`]; else as many as would take [`TARGET`] at the last push's rate, at most
-/// twice the last, so one push never runs past twice the target. Always at least one, at most
-/// [`batch`] of the remote's refs.
+/// The names the next compaction push moves, from `pushes`, the names and the time of this
+/// store's last compaction pushes, oldest first (BACKLOG 334, 336): [`FIRST`] before any; half
+/// the last after a push over twice [`TARGET`]; else as many as the fitted `cost` says take [`TARGET`].
+/// A push over the target never grows the next, and one under it at most doubles it, so one push
+/// never runs past twice the target. Always at least one, at most [`batch`] of the remote's refs.
 #[must_use]
-pub fn sized(last: Option<(usize, std::time::Duration)>, remote_refs: usize) -> usize {
-    let next = match last {
+pub fn sized(pushes: &[(usize, std::time::Duration)], remote_refs: usize) -> usize {
+    let next = match pushes.last() {
         None => FIRST,
-        Some((names, took)) if took > TARGET * 2 => names / 2,
-        Some((names, took)) => {
-            let rate = u128::try_from(names).unwrap_or(u128::MAX) * TARGET.as_millis()
-                / took.as_millis().max(1);
-            usize::try_from(rate)
-                .unwrap_or(usize::MAX)
-                .min(names.saturating_mul(2))
+        Some(&(names, took)) if took > TARGET * 2 => names / 2,
+        Some(&(names, took)) => {
+            let most = if took > TARGET {
+                names
+            } else {
+                names.saturating_mul(2)
+            };
+            let fit = if let Some((fixed, each)) = cost(pushes) {
+                TARGET.saturating_sub(fixed).as_micros() / each.as_micros().max(1)
+            } else {
+                // One size only: all of its time is charged a name, which is never too many,
+                // and a push under the target tries one more name, so the next fit can part them.
+                let rate = u128::try_from(names).unwrap_or(u128::MAX) * TARGET.as_millis()
+                    / took.as_millis().max(1);
+                if took < TARGET {
+                    rate.max(u128::try_from(names).unwrap_or(u128::MAX) + 1)
+                } else {
+                    rate
+                }
+            };
+            usize::try_from(fit).unwrap_or(usize::MAX).min(most)
         }
     };
     next.clamp(1, batch(remote_refs))
 }
 
-/// The names and the time of the last compaction push `record` holds (`<names> <ms>`).
-fn last_push(record: &std::path::Path) -> Option<(usize, std::time::Duration)> {
-    let text = std::fs::read_to_string(record).ok()?;
-    let (names, millis) = text.trim().split_once(' ')?;
+/// BACKLOG 336: a push's fixed cost and its cost a name, fitted by least squares to `pushes`
+/// (names, time): a host that forwards each push upstream spent about 9 s a push whatever its
+/// names, so a rate a name charged that cost to every name and shrank each push to one or two.
+/// The fixed cost is at most the quickest push, and a name costs at least 1 µs. None when the
+/// pushes all moved the same names, which cannot part the two.
+fn cost(
+    pushes: &[(usize, std::time::Duration)],
+) -> Option<(std::time::Duration, std::time::Duration)> {
+    let k = i128::try_from(pushes.len()).ok()?;
+    let (mut moved, mut spent, mut squares, mut products) = (0i128, 0i128, 0i128, 0i128);
+    for &(names, took) in pushes {
+        let names = i128::try_from(names).ok()?;
+        let micros = i128::try_from(took.as_micros()).ok()?;
+        moved += names;
+        spent += micros;
+        squares += names * names;
+        products += names * micros;
+    }
+    let spread = k * squares - moved * moved;
+    if spread <= 0 {
+        return None;
+    }
+    let each = ((k * products - moved * spent) / spread).max(1);
+    let quickest = pushes.iter().map(|&(_, took)| took).min()?;
+    let fixed = ((spent - each * moved) / k).clamp(0, i128::try_from(quickest.as_micros()).ok()?);
     Some((
-        names.parse().ok()?,
-        std::time::Duration::from_millis(millis.parse().ok()?),
+        std::time::Duration::from_micros(u64::try_from(fixed).ok()?),
+        std::time::Duration::from_micros(u64::try_from(each).ok()?),
     ))
+}
+
+/// The names and the time of each compaction push `record` holds, oldest first, one
+/// `<names> <ms>` line each; a line that does not read is passed over.
+fn pushes(record: &std::path::Path) -> Vec<(usize, std::time::Duration)> {
+    std::fs::read_to_string(record)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let (names, millis) = line.trim().split_once(' ')?;
+            Some((
+                names.parse().ok()?,
+                std::time::Duration::from_millis(millis.parse().ok()?),
+            ))
+        })
+        .collect()
+}
+
+/// Adds a push of `names` that took `took` to `record`, which keeps the last [`KEPT`].
+fn keep(record: &std::path::Path, names: usize, took: std::time::Duration) {
+    let mut kept = pushes(record);
+    kept.push((names, took));
+    let from = kept.len().saturating_sub(KEPT);
+    let lines: Vec<String> = kept[from..]
+        .iter()
+        .map(|(names, took)| format!("{names} {}", took.as_millis()))
+        .collect();
+    let text = lines.join("\n") + "\n";
+    if let Some(dir) = record.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        let _ = std::fs::write(record, text);
+    }
 }
 
 /// One compaction push: the names it moved, into which shard index, the most it could move
@@ -436,9 +508,16 @@ fn counted(marker: &std::path::Path, budget: u64) -> bool {
 /// One executor pass of compaction: when the remote holds more bay refs than the budget, moves
 /// markers of the landed, cut changes in `records` into their shard index, one shard a push
 /// (BACKLOG 332): the shard [`pick`] gives this runner (`me`, its presence ref), at most
-/// [`sized`] of its names, in one atomic push that appends the shard and deletes each moved ref
-/// under a lease on its target. The push's names and time are kept for the next one to size
-/// itself by (BACKLOG 334). Returns the push; none when under the budget or nothing moves.
+/// [`sized`] of its names, in one atomic push that appends the shard under a lease on its tip and
+/// deletes each moved ref. The push's names and time are kept for the next ones to size
+/// themselves by (BACKLOG 334, 336). Returns the push; none when under the budget or nothing moves.
+///
+/// A delete carries no lease of its own (BACKLOG 336: a lease is one more match against every
+/// remote ref, a name): the push sends the target the remote listed as the ref's old value, and
+/// the host's hook takes a delete only when the shard this push appends records that same target
+/// (`crate::hook`). A marker is create-only there, so the target the shard records is the one
+/// the delete removes. On a host without bay's hook a ref moved between the listing and the push
+/// is deleted at its new target while the shard records the old one.
 ///
 /// # Errors
 ///
@@ -487,7 +566,10 @@ pub fn run(
         return Ok(None);
     };
     let mut moved = shards.remove(&chosen).unwrap_or_default();
-    let size = sized(record.as_deref().and_then(last_push), remote.len());
+    let size = sized(
+        &record.as_deref().map(pushes).unwrap_or_default(),
+        remote.len(),
+    );
     moved.truncate(size);
     let index = format!("{INDEX_PREFIX}{chosen}");
     let parent = remote.get(&index).cloned();
@@ -502,11 +584,6 @@ pub fn run(
             parent.as_deref().unwrap_or_default()
         ),
     ];
-    args.extend(
-        moved
-            .iter()
-            .map(|(name, target)| format!("--force-with-lease={name}:{target}")),
-    );
     args.push(repo.remote().to_owned());
     args.push(format!("{commit}:{index}"));
     args.extend(moved.iter().map(|(name, _)| format!(":{name}")));
@@ -517,10 +594,8 @@ pub fn run(
     // A quick refusal (a lease another runner won) says nothing of what a push costs.
     if (pushed.is_ok() || took > TARGET * 2)
         && let Some(record) = &record
-        && let Some(dir) = record.parent()
-        && std::fs::create_dir_all(dir).is_ok()
     {
-        let _ = std::fs::write(record, format!("{} {}", moved.len(), took.as_millis()));
+        keep(record, moved.len(), took);
     }
     pushed.map_err(|error| {
         format!(
@@ -616,8 +691,8 @@ mod tests {
     use std::time::Duration;
 
     use super::{
-        FIRST, PUSH_MAX, PUSH_MIN, TARGET, batch, compactable, counted, index_ref, last_push,
-        name_of, path, pick, shard, sized,
+        FIRST, KEPT, PUSH_MAX, PUSH_MIN, TARGET, batch, compactable, cost, counted, index_ref,
+        keep, name_of, path, pick, pushes, shard, sized,
     };
 
     #[test]
@@ -636,7 +711,7 @@ mod tests {
     }
 
     /// BACKLOG 332: a push's names fall as the remote's refs grow, so its cost on the git client
-    /// (about 2 µs a name for each remote ref) stays near four seconds.
+    /// (about 1 µs a name for each remote ref) stays near two seconds.
     #[test]
     fn a_push_costs_at_most_its_pairs() {
         assert_eq!(batch(60_000), 33);
@@ -659,36 +734,90 @@ mod tests {
         assert_eq!(pick(&[], 0, 1), None);
     }
 
-    /// BACKLOG 334: a push is sized by the last push's time: the first moves FIRST names; a push
-    /// under the target grows the next towards it, at most twice; a push over twice the target
-    /// halves the next; never none, never past the bound of the remote's refs.
+    /// BACKLOG 334: a push of one size is sized by its time: the first moves FIRST names; a push
+    /// under the target grows the next towards it, at most twice, and by one at the least; a push
+    /// over the target shrinks the next, and one over twice the target halves it; never none,
+    /// never past the bound of the remote's refs.
     #[test]
     fn a_push_is_sized_by_the_last_push_time() {
         let secs = Duration::from_secs;
-        assert_eq!(sized(None, 60_000), FIRST);
-        assert_eq!(sized(Some((4, secs(5))), 60_000), 8, "twice, never more");
-        assert_eq!(sized(Some((4, TARGET / 2 * 3)), 60_000), 2);
-        assert_eq!(sized(Some((10, TARGET)), 60_000), 10, "on target: the same");
-        assert_eq!(sized(Some((33, secs(35))), 60_000), 16, "over twice: half");
-        assert_eq!(sized(Some((1, secs(60))), 60_000), 1, "never none");
+        assert_eq!(sized(&[], 60_000), FIRST);
+        assert_eq!(sized(&[(4, secs(5))], 60_000), 8, "twice, never more");
+        assert_eq!(sized(&[(4, TARGET / 2 * 3)], 60_000), 2);
+        assert_eq!(sized(&[(10, TARGET)], 60_000), 10, "on target: the same");
+        assert_eq!(sized(&[(33, secs(35))], 60_000), 16, "over twice: half");
+        assert_eq!(sized(&[(1, secs(60))], 60_000), 1, "never none");
         assert_eq!(
-            sized(Some((30, secs(1))), 60_000),
+            sized(&[(30, secs(1))], 60_000),
             batch(60_000),
             "the bound holds"
         );
-        assert_eq!(sized(Some((0, Duration::ZERO)), 1_000), 1);
+        assert_eq!(sized(&[(0, Duration::ZERO)], 1_000), 1);
+        assert_eq!(
+            sized(&[(1, Duration::from_millis(9600))], 60_000),
+            2,
+            "under the target, one more name, so the next push can part the fixed cost"
+        );
+    }
+
+    /// BACKLOG 336 (about 9 s a push and 0.6 s a name into a host that forwards each push upstream
+    /// shrank each push to one to four names): a push's fixed cost is not charged a name. The fit aims
+    /// the next push at the target; a push over the target never grows the next.
+    #[test]
+    fn a_fixed_cost_is_not_charged_a_name() {
+        let ms = Duration::from_millis;
+        assert_eq!(
+            cost(&[(4, ms(10_400)), (8, ms(12_800))]),
+            Some((ms(8_000), ms(600)))
+        );
+        assert_eq!(cost(&[(4, ms(9_400)), (4, ms(9_800))]), None, "one size");
+        assert_eq!(
+            sized(&[(4, ms(9_400)), (8, ms(9_800))], 60_000),
+            16,
+            "9 s fixed and 0.1 s a name: twice the last"
+        );
+        assert_eq!(
+            sized(&[(4, ms(10_400)), (8, ms(12_800))], 60_000),
+            11,
+            "8 s fixed and 0.6 s a name: as many as take the target"
+        );
+        assert_eq!(
+            sized(&[(4, ms(10_400)), (8, ms(16_000))], 60_000),
+            7,
+            "over the target: fewer than the last"
+        );
+        let (fixed, each) = cost(&[(8, ms(9_000)), (4, ms(12_000))]).unwrap();
+        assert_eq!(
+            each,
+            Duration::from_micros(1),
+            "more names, less time: a name costs 1 µs"
+        );
+        assert_eq!(
+            fixed,
+            ms(9_000),
+            "the fixed cost is at most the quickest push"
+        );
     }
 
     #[test]
-    fn a_push_record_reads_back_or_not_at_all() {
+    fn a_push_record_reads_back_and_keeps_the_last() {
         let dir = std::env::temp_dir().join(format!("bay-push-record-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let record = dir.join("compaction-push");
-        assert_eq!(last_push(&record), None, "no push yet");
+        assert!(pushes(&record).is_empty(), "no push yet");
         std::fs::write(&record, "12 8500\n").unwrap();
-        assert_eq!(last_push(&record), Some((12, Duration::from_millis(8500))));
+        assert_eq!(pushes(&record), [(12, Duration::from_millis(8500))]);
         std::fs::write(&record, "12").unwrap();
-        assert_eq!(last_push(&record), None, "a record without its time");
+        assert!(pushes(&record).is_empty(), "a record without its time");
+        for names in 1..=KEPT + 2 {
+            keep(&record, names, Duration::from_millis(1000));
+        }
+        let kept: Vec<usize> = pushes(&record).iter().map(|&(names, _)| names).collect();
+        assert_eq!(
+            kept,
+            (3..=KEPT + 2).collect::<Vec<_>>(),
+            "the last KEPT, oldest first"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

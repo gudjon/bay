@@ -3,6 +3,7 @@
 ## 0.7.35
 
 - A check's `!` exclusions narrow what bay predicts it reads, so an excluded change passes the head.
+- A compaction push sizes itself by its fixed cost and its cost per name, and leases only its shard.
 
 ## 0.7.34
 
