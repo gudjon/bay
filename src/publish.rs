@@ -12668,6 +12668,13 @@ fn answers_of(
         if let Some(due) = due {
             row[RERUN_DUE] = json!(crate::clock::rfc3339_of(due));
         }
+        // BACKLOG 340: the units a failure failed, for the red judgement alone.
+        if recorded
+            && matches!(state, "flaky" | "product_failure")
+            && let Some(units) = evidence::failed_units(&records, &id, &policy.manifest_digest, key)
+        {
+            row[FAILED_UNITS] = json!(units);
+        }
         out.push(row);
     }
     Ok(out)
@@ -12677,6 +12684,11 @@ fn answers_of(
 /// rerun ([`evidence::answer`]): when the first of those reruns is due, in RFC 3339. Past it, the
 /// failure is the check's answer.
 pub const RERUN_DUE: &str = "rerun_due";
+
+/// BACKLOG 340: the answer row field, on a row the red judgement reads, of a post check that
+/// answers `flaky` or `product_failure`: the units its failures failed
+/// ([`evidence::failed_units`]). Absent when a failure names no unit.
+pub const FAILED_UNITS: &str = "failed_units";
 
 /// The compact terminal record that outlives the drafts (§ 9a). Written once per operation.
 fn write_terminal(

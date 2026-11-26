@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.37
+
+- A red reads a flaky merge as its pass when no run there failed a unit the red fails.
+
 ## 0.7.36
 
 - A visit's terminal record goes only with its chain's push; a refused chain leaves it to the lander.

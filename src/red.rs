@@ -173,7 +173,12 @@ pub struct Red {
 pub struct Suspect {
     /// The newest landing older than the failure whose answer is a pass; `None` when none down
     /// to the reach answers so (B5), and the range then runs to the oldest landing read.
+    /// BACKLOG 340: a landing that answers `flaky` is this red's pass when no run there failed a
+    /// unit the red's failing landings failed ([`Suspect::passed_units`]).
     pub passed: Option<Mark>,
+    /// BACKLOG 340: when `passed` answers `flaky`, the units the red's failing landings failed,
+    /// none of which failed there; `None` when `passed` answers `pass`.
+    pub passed_units: Option<Vec<String>>,
     /// The oldest landing after `passed` whose answer is a `product_failure`.
     pub failed: Mark,
     /// The landings after `passed` up to and including `failed`, oldest first.
@@ -267,6 +272,7 @@ impl Suspect {
     pub fn to_json(&self) -> Value {
         json!({
             "last_passed": self.passed.as_ref().map(Mark::to_json),
+            "passed_units": self.passed_units,
             "first_failed": self.failed.to_json(),
             "landings": self.landings.iter().map(Mark::to_json).collect::<Vec<_>>(),
             "failing": self.failing.iter().map(Mark::to_json).collect::<Vec<_>>(),
@@ -373,10 +379,19 @@ impl Red {
     fn seen(&self, suspect: &Suspect) -> String {
         let check = &self.check;
         if let Some(culprit) = &suspect.culprit {
-            return format!(
-                "{check}: {} broke it; the check passed on the merge before it and failed on it.",
-                culprit.mark.named()
-            );
+            return match &suspect.passed_units {
+                Some(units) => format!(
+                    "{check}: {} broke it; on the merge before it the check was flaky, but no run \
+                     there failed {}, which fail on it.",
+                    culprit.mark.named(),
+                    units.join(", ")
+                ),
+                None => format!(
+                    "{check}: {} broke it; the check passed on the merge before it and failed on \
+                     it.",
+                    culprit.mark.named()
+                ),
+            };
         }
         if let Some(old) = &suspect.judged_old {
             let next = if *old == suspect.newest_failed {
@@ -417,8 +432,14 @@ impl Red {
         };
         let cause = match (&suspect.passed, &suspect.added) {
             (Some(passed), _) => format!(
-                "the cause is one of the {} merges after its last pass at {}, on its paths or not",
+                "the cause is one of the {} merges after its last pass{} at {}, on its paths or \
+                 not",
                 suspect.landings.len(),
+                suspect
+                    .passed_units
+                    .as_ref()
+                    .map(|units| format!(" of {}", units.join(", ")))
+                    .unwrap_or_default(),
                 passed.named()
             ),
             (None, Some(added)) => format!(
@@ -1470,9 +1491,58 @@ impl<'a> Answers<'a> {
         Ok(false)
     }
 
+    /// BACKLOG 340: the units landing `at`'s failures of `post` failed
+    /// ([`crate::publish::FAILED_UNITS`]); `None` when it names none, or one of its failures
+    /// names no unit.
+    fn failed_units(
+        &mut self,
+        at: usize,
+        post: &crate::policy::ManifestEntry,
+    ) -> Result<Option<Vec<String>>, String> {
+        Ok(self.row(at, post)?.and_then(|row| {
+            let units: Vec<String> = row[crate::publish::FAILED_UNITS]
+                .as_array()?
+                .iter()
+                .filter_map(|unit| unit.as_str().map(str::to_owned))
+                .collect();
+            (!units.is_empty()).then_some(units)
+        }))
+    }
+
+    /// BACKLOG 340 (a fleet finding, 2026-11-26: a landing that changed one file the red's check
+    /// read, flaky there on a timing test, unpinned a culprit whose five runs all failed clippy,
+    /// so no undo came): whether landing `at` answers `post` `flaky` and no run there failed
+    /// one of `failed`, the units the red's failing landings failed. Its pass ran those units,
+    /// and no run failed them, so it is the red's pass. A failure there that names no unit
+    /// says nothing of them.
+    fn passes_units(
+        &mut self,
+        at: usize,
+        post: &crate::policy::ManifestEntry,
+        failed: Option<&[String]>,
+    ) -> Result<bool, String> {
+        let Some(failed) = failed else {
+            return Ok(false);
+        };
+        let Some(row) = self.row(at, post)? else {
+            return Ok(false);
+        };
+        if row["state"] != "flaky" {
+            return Ok(false);
+        }
+        let Some(theirs) = row[crate::publish::FAILED_UNITS].as_array() else {
+            return Ok(false);
+        };
+        Ok(!theirs
+            .iter()
+            .filter_map(Value::as_str)
+            .any(|unit| failed.iter().any(|ours| ours == unit)))
+    }
+
     /// NEW-6: the suspect range of `post`, red from landing `at`: older landings are read back
     /// to the newest pass, past the window down to the reach when it holds none (B5), and the
-    /// oldest failure after it is the first failure. G584: the walk stops at the landing that
+    /// oldest failure after it is the first failure. BACKLOG 340: a flaky landing where no run
+    /// failed a unit the failing landings failed is the pass ([`Self::passes_units`]). G584: the walk stops at the landing that
     /// added the check, which ends the range. With it, the landing that owns the red: the
     /// culprit when the pass sits right below the first failure, else the landing that added
     /// the check, else `at`.
@@ -1484,6 +1554,9 @@ impl<'a> Answers<'a> {
         let mut first = at;
         let mut passed = None;
         let mut added = None;
+        // BACKLOG 340: the units the failing landings failed, from the newest down.
+        let mut failed = self.failed_units(at, post)?;
+        let mut passed_units = None;
         let mut older = at + 1;
         while older < self.line.landings.len() || self.past()? {
             if self.unlisted(older, post)? {
@@ -1491,9 +1564,23 @@ impl<'a> Answers<'a> {
                 break;
             }
             match self.decides(older, post)? {
-                Some(true) => first = older,
+                Some(true) => {
+                    first = older;
+                    let more = self.failed_units(older, post)?;
+                    failed = failed.zip(more).map(|(mut failed, more)| {
+                        failed.extend(more);
+                        failed.sort();
+                        failed.dedup();
+                        failed
+                    });
+                }
                 Some(false) => {
                     passed = Some(older);
+                    break;
+                }
+                None if self.passes_units(older, post, failed.as_deref())? => {
+                    passed = Some(older);
+                    passed_units = failed;
                     break;
                 }
                 None => {}
@@ -1531,6 +1618,7 @@ impl<'a> Answers<'a> {
         Ok((
             Suspect {
                 passed: passed.map(|older| Mark::of(&landings[older])),
+                passed_units,
                 failed: Mark::of(&landings[first]),
                 landings: landings[first..end].iter().rev().map(Mark::of).collect(),
                 failing: landings[at..first].iter().rev().map(Mark::of).collect(),

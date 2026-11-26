@@ -496,6 +496,7 @@ mod tests {
             change: Some("cl4".to_owned()),
             suspect: Some(Suspect {
                 passed: Some(mark("l2")),
+                passed_units: None,
                 failed: mark("l3"),
                 landings: vec![mark("l3")],
                 failing: vec![mark("l4")],

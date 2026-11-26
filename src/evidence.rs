@@ -1199,6 +1199,38 @@ pub fn answer(
     }
 }
 
+/// BACKLOG 340: the units that did not pass in the `product_failure` records of `check` that
+/// [`combine`] reads, sorted, each once; `None` when one of those records names no such unit (a
+/// failure of the whole run, or of its baseline), so its failure cannot be placed in a unit.
+#[must_use]
+pub fn failed_units(
+    records: &[EvidenceRecord],
+    check: &CheckId,
+    manifest_digest: &str,
+    key: Key,
+) -> Option<Vec<String>> {
+    let mut units = std::collections::BTreeSet::new();
+    for record in records.iter().filter(|record| {
+        combines(&record.kind)
+            && &record.check == check
+            && record.manifest_digest == manifest_digest
+            && key.holds(&record.subject)
+            && record.verdict == Verdict::ProductFailure
+    }) {
+        let failed: Vec<&String> = record
+            .units
+            .iter()
+            .filter(|unit| unit.verdict != Verdict::Pass)
+            .map(|unit| &unit.id)
+            .collect();
+        if failed.is_empty() {
+            return None;
+        }
+        units.extend(failed.into_iter().cloned());
+    }
+    Some(units.into_iter().collect())
+}
+
 /// The aggregate over a frozen manifest (G30): complete only when every required (check id,
 /// environment) combines to `pass`, each under its `key`. Counts are never the measure:
 /// twelve green checks may be the wrong twelve.
@@ -1242,8 +1274,8 @@ pub fn without_conflicts(records: Vec<EvidenceRecord>) -> Vec<EvidenceRecord> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CheckId, Combined, EvidenceRecord, Key, Producer, Subject, Verdict, answer, combine,
-        without_conflicts,
+        CheckId, Combined, EvidenceRecord, Key, Producer, Subject, Unit, Verdict, answer, combine,
+        failed_units, without_conflicts,
     };
 
     fn record(id: &str, environment: &str, commit: &str, verdict: Verdict) -> EvidenceRecord {
@@ -1281,6 +1313,48 @@ mod tests {
 
     fn tests_on(environment: &str) -> CheckId {
         CheckId::new("tests", environment)
+    }
+
+    /// BACKLOG 340: `record` with `units`, each an id and its verdict.
+    fn with_units(mut record: EvidenceRecord, units: &[(&str, Verdict)]) -> EvidenceRecord {
+        record.units = units
+            .iter()
+            .map(|(id, verdict)| Unit {
+                id: (*id).to_owned(),
+                verdict: *verdict,
+                seconds: None,
+                reason: None,
+                unknown: serde_json::Map::new(),
+            })
+            .collect();
+        record
+    }
+
+    #[test]
+    fn a_failure_names_the_units_it_failed_and_one_that_names_none_places_nothing() {
+        let id = tests_on("x");
+        let clippy = with_units(
+            record("ci/1", "x", "c", Verdict::ProductFailure),
+            &[("fmt", Verdict::Pass), ("clippy", Verdict::ProductFailure)],
+        );
+        let test = with_units(
+            record("ci/2", "x", "c", Verdict::ProductFailure),
+            &[("clippy", Verdict::Pass), ("test", Verdict::ProductFailure)],
+        );
+        let passed = with_units(
+            record("ci/3", "x", "c", Verdict::Pass),
+            &[("clippy", Verdict::Pass), ("test", Verdict::Pass)],
+        );
+        assert_eq!(
+            failed_units(&[clippy.clone(), test, passed.clone()], &id, "m", Key::Tree),
+            Some(vec!["clippy".to_owned(), "test".to_owned()])
+        );
+        assert_eq!(
+            failed_units(&[passed], &id, "m", Key::Tree),
+            Some(Vec::new())
+        );
+        let whole = record("ci/4", "x", "c", Verdict::ProductFailure);
+        assert_eq!(failed_units(&[clippy, whole], &id, "m", Key::Tree), None);
     }
 
     /// G628: `record`, a failure a rerun follows, whose last rerun is due at Unix time `until`.
