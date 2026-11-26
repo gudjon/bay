@@ -1545,13 +1545,21 @@ impl Reason {
                     failed_unit(detail).unwrap_or_default()
                 ),
             },
-            Self::CheckUnknown => match unknown_why(detail) {
-                Some(why) => format!("Not added yet: a check gave no clear answer ({why})."),
-                None => format!(
-                    "Not added yet: a check gave no clear answer{}. Wait for it.",
-                    check()
-                ),
-            },
+            // G915: it names the machine the check ran on, when the refusal says.
+            Self::CheckUnknown => {
+                let on = text_at(detail, &["/checked_on"])
+                    .map(|machine| format!(" on {machine}"))
+                    .unwrap_or_default();
+                match unknown_why(detail) {
+                    Some(why) => {
+                        format!("Not added yet: a check gave no clear answer{on} ({why}).")
+                    }
+                    None => format!(
+                        "Not added yet: a check gave no clear answer{on}{}. Wait for it.",
+                        check()
+                    ),
+                }
+            }
             Self::PathHeld => format!(
                 "Not now: another session is editing these files{}. Wait for it to finish.",
                 paths()
@@ -2290,6 +2298,22 @@ fn expired_lease_say(id: &str, eta: &Value) -> String {
     )
 }
 
+/// G915: the machines that handed an operation on because its check gave no answer there, as
+/// ` (a, b could not run it)`, or nothing when there are none.
+fn unable_say(op: &Value) -> String {
+    let unable: Vec<&str> = op["unable"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if unable.is_empty() {
+        String::new()
+    } else {
+        format!(" ({} could not run it)", unable.join(", "))
+    }
+}
+
 fn change_state_say(result: &BayResult) -> Option<String> {
     let id = result.change.as_deref()?;
     let [row] = result
@@ -2387,8 +2411,9 @@ fn change_state_say(result: &BayResult) -> Option<String> {
         });
     }
     if out_of_tries(op) {
+        let unable = unable_say(op);
         return Some(format!(
-            "{id}: a check gave no clear answer {} times, so bay stopped asking. Fix it and submit again, or see whether `bay waiting` lists it for a person to waive.",
+            "{id}: a check gave no clear answer {} times{unable}, so bay stopped asking. Fix it and submit again, or see whether `bay waiting` lists it for a person to waive.",
             crate::publish::UNKNOWN_RETRIES
         ));
     }

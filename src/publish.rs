@@ -4337,6 +4337,7 @@ fn persist_each<'a>(
                 op.state = OpState::Checked;
                 op.outcome = None;
                 op.blocked_on = None;
+                op.checked_on = None;
             },
         )?;
         if !matches!(persisted, Persisted::Pushed) {
@@ -6877,6 +6878,7 @@ fn retry_blocked(
     let lane_checked = op.outcome.as_deref() == Some(crate::lane::CHECKED);
     let tree = op.attempts.last().map(|attempt| attempt.tree.clone());
     let then = op.blocked_on.clone();
+    let checked_on = op.checked_on.clone();
     // N-9: a failed or unanswered check of a policy with a waivable check may get a waiver.
     let waivable = waivable_block(ctx, op_id, reason)?;
     // G245: the approval it waits on is written on another machine and reaches this one only
@@ -6927,17 +6929,24 @@ fn retry_blocked(
         && reason != Reason::LockNotHeld
         && then.as_deref() == Some(now.as_str())
     {
+        let mut detail = json!({"unchanged": true, "condition": now});
+        if reason == Reason::CheckUnknown
+            && let Some(machine) = checked_on
+        {
+            detail["checked_on"] = json!(machine);
+        }
         return Ok(Some(
             BayResult::blocked(reason)
                 .with_change(ctx.id.clone())
                 .with_op(op_id)
-                .with_detail(json!({"unchanged": true, "condition": now})),
+                .with_detail(detail),
         ));
     }
     let op = ctx.op_mut(op_id);
     op.state = OpState::Submitted;
     op.outcome = None;
     op.blocked_on = None;
+    op.checked_on = None;
     op.unavailable = None;
     op.trunk_moved = 0;
     ctx.save_or_moved(revision, None, &format!("rearmed {op_id}"))?;
@@ -7382,6 +7391,7 @@ fn submit(ctx: &mut Ctx, revision: &str) -> Result<String, String> {
         mid_publish_releases: Vec::new(),
         kept: None,
         unable: Vec::new(),
+        checked_on: None,
         unavailable: None,
         early_conflict: None,
         undoes: None,
@@ -8652,7 +8662,7 @@ fn build_and_check(
         }
         Some(unknown) => match handed_to_runners(ctx, op_id, &unknown, trunk) {
             Some(waiting) => return wait_for_worker(ctx, op_id, revision, waiting).map(Err),
-            None => Some(unknown),
+            None => Some(checked_on(ctx, unknown)),
         },
         refusal => refusal,
     };
@@ -8755,6 +8765,11 @@ fn persist_attempt(
         .as_ref()
         .and_then(|refusal| refusal.reason)
         .map(|reason| reason.code().to_owned());
+    let checked_on = refusal
+        .as_ref()
+        .and_then(|refusal| refusal.detail.as_ref())
+        .and_then(|detail| detail["checked_on"].as_str())
+        .map(str::to_owned);
     let message = format!("{word} {}", attempt.candidate_id);
     let persisted = persist_owned(
         ctx,
@@ -8776,6 +8791,7 @@ fn persist_attempt(
             op.state = state;
             op.outcome.clone_from(&outcome);
             op.blocked_on.clone_from(&blocked_on);
+            op.checked_on.clone_from(&checked_on);
         },
     )?;
     match (persisted, refusal) {
@@ -10003,13 +10019,18 @@ fn wait_for_worker(
 /// (G797b), once per machine, while a live runner serves its environments. A runner checks it
 /// again: unknown never passes. `None` for any other refusal, a machine that handed it back
 /// already, or no live runner that serves it: blocked, as before.
+///
+/// G915 (a fleet finding, 2026-11-25: a runner's check gave no answer in 0.3 s on its machine,
+/// and the change was blocked `CHECK_UNKNOWN` on a quiet main, where nothing asks it again and
+/// its author's unchanged `bay merge` is refused): a runner's pass hands it on the same way, to
+/// another live runner, once per machine; only a placing visit never does.
 fn handed_to_runners(
     ctx: &Ctx,
     op_id: &str,
     refusal: &BayResult,
     trunk: &str,
 ) -> Option<BayResult> {
-    if ctx.visit != Visit::Own || refusal.reason != Some(Reason::CheckUnknown) {
+    if ctx.visit == Visit::Place || refusal.reason != Some(Reason::CheckUnknown) {
         return None;
     }
     // Every gap is one the adapter gave this machine no judged answer for: no result, its
@@ -10059,6 +10080,21 @@ fn handed_to_runners(
         detail["machine"] = json!(machine);
     }
     Some(waiting)
+}
+
+/// G915: a check that gave no clear answer names the machine it ran on (`detail.checked_on`),
+/// so its sentence says where; any other refusal is returned as it is.
+fn checked_on(ctx: &Ctx, mut refusal: BayResult) -> BayResult {
+    if refusal.reason == Some(Reason::CheckUnknown)
+        && let Ok(machine) = crate::live::machine(&ctx.repo.git)
+        && let Some(detail) = refusal
+            .detail
+            .as_mut()
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        detail.insert("checked_on".to_owned(), json!(machine));
+    }
+    refusal
 }
 
 /// G797: how many times a place is kept for another runner before it is released (owner ruling

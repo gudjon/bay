@@ -2621,10 +2621,14 @@ pub fn approval_pending(
     Ok(Some(approval))
 }
 
-/// G658: the work a refused operation would undo.
-fn held_by(op: &crate::change::Operation, operation: &mut Value) {
+/// What an operation carries beside its state: G658, the work a refused operation would undo;
+/// G915, the machines whose check gave no answer and handed it on, when there are any.
+fn carried(op: &crate::change::Operation, operation: &mut Value) {
     if let Some(undoes) = &op.undoes {
         operation["undoes"] = json!(undoes);
+    }
+    if !op.unable.is_empty() {
+        operation["unable"] = json!(op.unable);
     }
 }
 
@@ -3079,7 +3083,7 @@ fn describe(
         if !published && !op.state.is_terminal() && op.state != crate::change::OpState::Blocked {
             under_way(repo, shared, &record.id, op, &mut operation);
         }
-        held_by(op, &mut operation);
+        carried(op, &mut operation);
         // G776: a change held until others merge (`--after`) names each one and where it stands.
         after_here(repo, record, published, op, &mut operation);
         if let Some(fault) = fault(record, unsynced, op, published) {
