@@ -1659,7 +1659,16 @@ fn red_rows(repo: &Repo, trunk: &str) -> (Value, Value) {
         .and_then(|registry| crate::red::shown(&repo.git, trunk, registry.as_ref()))
         .map_or_else(
             |why| (json!({"unread": why}), json!({"unread": why})),
-            |judgement| judgement.to_json(),
+            |judgement| {
+                let (mut rows, pending) = judgement.to_json();
+                // BACKLOG 322: each red row names its automatic undo.
+                if let Some(rows) = rows.as_array_mut() {
+                    for (row, red) in rows.iter_mut().zip(&judgement.red) {
+                        crate::red_undo::name_in(repo, red, row);
+                    }
+                }
+                (rows, pending)
+            },
         )
 }
 

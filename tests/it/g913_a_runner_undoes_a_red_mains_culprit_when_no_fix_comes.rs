@@ -10,7 +10,8 @@
 //! Guards to mutate, in `src/red_undo.rs` `undone`: the `held` test (a culprit is undone again),
 //! the `record.reverts` test (an undo is undone), the `answered_by` test (a culprit is undone
 //! while its fix is in line) and the wait (a culprit is undone at once). The `read_main` test
-//! covers a fix another runner lands within the pass, which one runner here cannot make.
+//! covers a fix another runner lands within the pass, which one runner here cannot make. In
+//! `name_in`: a row that names no undo (BACKLOG 322: `bay status` names the undo, or when it is due).
 
 #![cfg(unix)]
 
@@ -126,6 +127,16 @@ fn a_culprit_no_fix_came_for_is_undone_and_main_turns_green() {
         line.contains(&format!("so bay opened its undo, change {undo}")),
         "{line}"
     );
+    // AND the red's status row names the undo.
+    let red = trunk.red();
+    assert_eq!(red[0]["undo"]["change"], undo.as_str(), "{red}");
+    assert!(
+        red[0]["say"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("bay opened its undo, change {undo}")),
+        "{red}"
+    );
 
     // AND the line merges the undo: an ordinary change that reverts the culprit.
     passes_until_landed(&trunk, &undo);
@@ -160,6 +171,7 @@ fn without_the_key_no_culprit_is_undone() {
     assert_eq!(undo_wakes(&trunk), Vec::<Value>::new());
     let red = trunk.red();
     assert_eq!(red[0]["culprit"]["change"], landings[3].0.as_str(), "{red}");
+    assert!(red[0].get("undo").is_none(), "{red}");
     assert_eq!(
         trunk.test_box.trunk_change_ids(&trunk.remote)[0],
         landings[4].0
@@ -185,6 +197,17 @@ fn a_culprit_is_not_undone_before_the_wait_has_passed() {
     assert_eq!(
         trunk.test_box.trunk_change_ids(&trunk.remote)[0],
         landings[4].0
+    );
+    // AND the red's status row says when a runner undoes it.
+    let red = trunk.red();
+    assert_eq!(red[0]["undo"]["culprit"], landings[3].0.as_str(), "{red}");
+    assert!(red[0]["undo"]["due_at"].is_string(), "{red}");
+    assert!(
+        red[0]["say"]
+            .as_str()
+            .unwrap()
+            .contains("Unless a fix comes first, a runner undoes it at"),
+        "{red}"
     );
 }
 

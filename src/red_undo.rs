@@ -180,6 +180,77 @@ fn undone(
     Ok(notes)
 }
 
+/// BACKLOG 322: names `red`'s automatic undo in its `bay status` row (`detail.red[]`). `undo`
+/// holds the `culprit` and the undo `change` a runner opened, or the `reason` it opened none, or
+/// `due_at`, when a runner undoes it unless a fix comes first (`null` until its owner is told);
+/// the row's `say` adds the same in one sentence. A row whose red no automatic undo takes (no
+/// `[red] undo_after_s`, no pinned culprit, or a culprit that is itself an undo) is unchanged.
+pub fn name_in(repo: &Repo, red: &Red, row: &mut Value) {
+    let named = match shown(repo, red) {
+        Ok(Some(named)) => named,
+        Ok(None) => return,
+        Err(why) => {
+            row["undo"] = json!({"unread": why});
+            return;
+        }
+    };
+    let sentence = match (
+        named["change"].as_str(),
+        named["reason"].as_str(),
+        named["due_at"].as_str(),
+    ) {
+        (Some(undo), _, _) => {
+            format!("bay opened its undo, change {undo}, which goes first in line.")
+        }
+        (None, Some(reason), _) => format!("bay did not undo it: {reason}."),
+        (None, None, Some(due)) => {
+            format!("Unless a fix comes first, a runner undoes it at {due}.")
+        }
+        (None, None, None) => format!(
+            "Unless a fix comes first, a runner undoes it {} after its owner is told.",
+            waited(Duration::from_secs(
+                named["after_s"].as_u64().unwrap_or_default()
+            ))
+        ),
+    };
+    if let Some(say) = row["say"].as_str() {
+        row["say"] = json!(format!("{say} {sentence}"));
+    }
+    row["undo"] = named;
+}
+
+/// What [`name_in`] names: `None` when no automatic undo takes `red`.
+fn shown(repo: &Repo, red: &Red) -> Result<Option<Value>, String> {
+    let Some(after) = repo.config.red_undo_after() else {
+        return Ok(None);
+    };
+    let Some(culprit) = pinned(red) else {
+        return Ok(None);
+    };
+    if let Some(event) = crate::log::event(&repo.git, &event_id(red, culprit)?)? {
+        return Ok(Some(json!({
+            "culprit": culprit,
+            "change": event["undo"],
+            "reason": event.get("reason"),
+        })));
+    }
+    // An undo is never undone automatically.
+    if Chain::new(&repo.git)
+        .read(culprit)
+        .is_ok_and(|(_, record)| record.reverts.is_some())
+    {
+        return Ok(None);
+    }
+    let due = told_at(repo, red, culprit)?
+        .map(|at| crate::clock::rfc3339_of(at.saturating_add(after.as_secs())));
+    Ok(Some(json!({
+        "culprit": culprit,
+        "change": null,
+        "due_at": due,
+        "after_s": after.as_secs(),
+    })))
+}
+
 /// What the runner did about a culprit.
 enum Undone {
     /// It opened the undo, this change, and the line has it.
