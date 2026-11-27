@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.39
+
+- `bay status --green-tip` names the newest landing of main with every post check green.
+- Each check record names its CPU seconds and whether it was carried; the flow sums them per landing.
+
 ## 0.7.38
 
 - A log joined again after a push answered a fault holds each terminal record once.
