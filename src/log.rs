@@ -48,6 +48,12 @@ pub fn fetch_with(repo: &Repo, more: &[String]) {
     ];
     args.extend(more.iter().map(String::as_str));
     let _ = repo.git.run(&args);
+    fetch_own(repo, &own);
+}
+
+/// Fetches this executor's own log `own` (its [`log_ref`]), moved only forward to the remote's
+/// (A10; best effort).
+pub fn fetch_own(repo: &Repo, own: &str) {
     let _ = repo.git.run(&[
         "fetch",
         "-q",

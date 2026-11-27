@@ -4239,7 +4239,13 @@ fn batch_with_records<'a>(
         publish_batch_push(repo, tip, &pushes, &riding)
     });
     if !matches!(answer, Ok(Ok(_))) {
+        let landed: Vec<String> = (0..members.len())
+            .map(|index| member_ctx(ctx, others, index).head.clone())
+            .collect();
         take_all_back(ctx, others, marked);
+        if matches!(answer, Ok(Err(_))) {
+            batch_took_in_part(ctx, others, members, built, &landed, &executor);
+        }
         return Ok(match answer {
             Ok(Err(error)) if !crate::git::ref_moved(&error) && !judged_by_bay(&error) => {
                 WithRecords::Refused(error)
@@ -11693,7 +11699,13 @@ fn land_with_records(
     drop(writing);
     match pushed {
         Ok(Ok(_)) => {}
-        Ok(Err(why)) | Err(why) => {
+        Ok(Err(why)) => {
+            let landed = ctx.head.clone();
+            taken_back(ctx, &marked.before, marked.record);
+            took_in_part(ctx, &executor, &landed, op_id, revision, commit);
+            return Ok(Err(why));
+        }
+        Err(why) => {
             taken_back(ctx, &marked.before, marked.record);
             return Ok(Err(why));
         }
@@ -11797,6 +11809,91 @@ fn taken_back(ctx: &mut Ctx, before: &str, record: ChangeRecord) {
     ctx.withdraw(before);
     ctx.record = record;
     ctx.pushed_landing = None;
+}
+
+/// G949 (a fleet finding, 2026-11-27: GitHub refused a landing's push for main, `missing
+/// necessary objects`, and still took the chain and the terminal record that rode in it; `bay
+/// status` read the change merged while main never held it, until [`landed_if_on_main`] could
+/// reopen it): a host checks each ref of a push before its transaction and commits the refs that
+/// pass, even in an atomic push, as Git's own receive-pack does with a hidden ref. So after a
+/// refused landing push of `commit` that main lacks, this executor's log moves on to the
+/// remote's, and the record is taken back on the remote's chain when it holds `landed`, the
+/// head with this landing's record ([`chain_taken_back`]). A fault on the way leaves it to
+/// [`landed_if_on_main`].
+fn took_in_part(
+    ctx: &mut Ctx,
+    executor: &str,
+    landed: &str,
+    op_id: &str,
+    revision: &str,
+    commit: &str,
+) {
+    if main_holds(ctx.repo, commit) {
+        return;
+    }
+    crate::log::fetch_own(ctx.repo, &crate::log::log_ref(executor));
+    let remote = ctx.repo.remote_chain(&ctx.id).ok();
+    chain_taken_back(ctx, remote.as_deref(), landed, op_id, revision, commit);
+}
+
+/// G949: [`took_in_part`] for a batch whose push of `built` was refused: each member whose
+/// record the remote's chain took, its head in `landed`, is taken back there, in one push
+/// ([`push_landed`]). The chains are read in one fetch.
+fn batch_took_in_part<'a>(
+    ctx: &mut Ctx<'a>,
+    others: &mut [Ctx<'a>],
+    members: &[throughput::Member],
+    built: &[Built],
+    landed: &[String],
+    executor: &str,
+) {
+    let repo = ctx.repo;
+    if main_holds(repo, &built[members.len() - 1].commit) {
+        return;
+    }
+    crate::log::fetch_own(repo, &crate::log::log_ref(executor));
+    let ids: Vec<String> = (0..members.len())
+        .map(|index| member_ctx(ctx, others, index).id.clone())
+        .collect();
+    let _ = repo.remote_chains(&ids);
+    for (index, member) in members.iter().enumerate() {
+        let owner = member_ctx(ctx, others, index);
+        let remote = repo.git.ref_target(&change_ref(&owner.id)).ok().flatten();
+        owner.push_mode = PushMode::Defer;
+        chain_taken_back(
+            owner,
+            remote.as_deref(),
+            &landed[index],
+            &member.op_id,
+            &member.revision,
+            &built[index].commit,
+        );
+    }
+    push_landed(ctx, others);
+}
+
+/// G949: when the remote's chain head `remote` is `landed`, the head with the record of
+/// `op_id`'s landing of `commit` that main refused, the record as it stood before the landing
+/// (`ctx`'s, which [`taken_back`] restored) goes on that head and is pushed.
+fn chain_taken_back(
+    ctx: &mut Ctx,
+    remote: Option<&str>,
+    landed: &str,
+    op_id: &str,
+    revision: &str,
+    commit: &str,
+) {
+    if remote != Some(landed) {
+        return;
+    }
+    landed.clone_into(&mut ctx.head);
+    ctx.took();
+    let message = format!(
+        "taken back {op_id}: the remote took its landing's record, and main refused {commit}"
+    );
+    if ctx.save_cas(revision, None, &message).unwrap_or(false) {
+        ctx.push_chain();
+    }
 }
 
 /// Step 6: one atomic push of trunk and the landed marker. Never forced.
