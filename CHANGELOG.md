@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.44
+
+- On a red main, a batch runs the red's checks and lands unless a member makes the red worse.
+- A runner counts a peer present for its lease, so a presence that arrives late starts no second post check.
+- Runners over the ref budget take compaction shards in an order of their own, so two seldom push one shard.
+- A load run reads each landing from its batch, never from a later visit.
+
 ## 0.7.43
 
 - With another runner live, a change takes a place even in an empty line, and later changes wait behind it.
