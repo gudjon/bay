@@ -1652,6 +1652,8 @@ impl Journal {
     /// Reads the runners' logs as one, in the order of their stamps: a batch line comes before
     /// the landing it is about, a batch's members come after their head, and a change's first
     /// `merged` line is its landing, since a later visit of a landed change says `merged` again.
+    /// A visit of a change another runner already placed says `merged (..), placed while <op>
+    /// ran`, and is no landing.
     fn read(logs: &[PathBuf]) -> Self {
         let texts: Vec<String> = logs
             .iter()
@@ -1720,6 +1722,11 @@ impl Journal {
             let Some(after) = words.strip_prefix("merged") else {
                 return;
             };
+            // The other runner's visit of a placed change can come before the lines of the batch
+            // that placed it, so it never counts as the change's landing.
+            if after.contains(", placed while ") {
+                return;
+            }
             if let Some(head) = after
                 .strip_prefix(", in ")
                 .and_then(|batch| batch.strip_suffix("'s batch"))
@@ -2112,4 +2119,34 @@ fn a_fleet_at_volume_lands_every_change_once_in_time() {
         ));
     }
     assert!(red.is_empty(), "red rows:\n{}\n\n{summary}", red.join("\n"));
+}
+
+/// A change lands through its head's line or its member line, never through another runner's
+/// visit of it once placed, even when that visit is logged first: at volume, such a visit made a
+/// member count as a head that landed alone.
+#[test]
+fn a_visit_of_a_placed_change_is_no_landing() {
+    let lines = [
+        (
+            1,
+            872.799,
+            "c2.1 [load change 2] merged (0s; git: rev-parse 0.1s x9 max 0.0s), placed while c3.1 ran",
+        ),
+        (
+            0,
+            873.440,
+            "c1.1 [load change 1] merged (19s: claim 2s, batch 7s, check 3s, publish 5s; git: rev-parse 3.8s x558 max 0.0s)",
+        ),
+        (0, 873.449, "c2.1 [load change 2] merged, in c1.1's batch"),
+    ];
+    let mut journal = Journal::default();
+    let mut notes = HashMap::new();
+    for (runner, at_s, line) in lines {
+        journal.read_line(runner, at_s, line, &mut notes);
+    }
+    let landed = &journal.landed["c2"];
+    assert!(landed.member, "c2 landed in c1.1's batch, not alone");
+    assert_eq!(landed.head, "c1.1");
+    assert_eq!(journal.batch("c1.1"), 2);
+    assert_eq!(journal.heads.len(), 1, "c1.1 is the only head");
 }
