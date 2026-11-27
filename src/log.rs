@@ -38,7 +38,14 @@ pub fn fetch_with(repo: &Repo, more: &[String]) {
     // moves it only forward.
     let own = log_ref(&crate::signing::Keys::load(&repo.git).executor_name);
     let unforced = format!("^{own}");
-    let mut args = vec!["fetch", "-q", "--no-tags", repo.remote(), &refspec, &unforced];
+    let mut args = vec![
+        "fetch",
+        "-q",
+        "--no-tags",
+        repo.remote(),
+        &refspec,
+        &unforced,
+    ];
     args.extend(more.iter().map(String::as_str));
     let _ = repo.git.run(&args);
     let _ = repo.git.run(&[

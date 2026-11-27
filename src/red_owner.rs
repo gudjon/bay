@@ -558,9 +558,7 @@ mod tests {
             .into_iter()
             .find(|runner| weight(runner) > weight("a"))
             .unwrap();
-        let presence = |runner: &str, environment: &str| {
-            json!({"executor": runner, "environments": {"source": "declared", "declared": [environment]}})
-        };
+        let presence = |runner: &str, environment: &str| json!({"executor": runner, "environments": {"source": "declared", "declared": [environment]}});
         let live = [presence("a", "local"), presence(heavier, "other")];
         assert_eq!(teller(&red, heavier, &live), "a");
         assert_eq!(teller(&red, "a", &live), "a");

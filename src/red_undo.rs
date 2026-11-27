@@ -69,6 +69,21 @@ pub fn undo(repo: &Repo, trunk: &str, records: &[ChangeRecord]) -> Vec<Value> {
         .unwrap_or_else(|error| vec![json!({"red_undo": null, "error": error})])
 }
 
+/// G930: whether the remote's logs hold event `id`, fetched into `fresh` once a pass.
+fn held_now(repo: &Repo, fresh: &mut Option<BTreeSet<String>>, id: &str) -> Result<bool, String> {
+    if fresh.is_none() {
+        crate::log::fetch(repo);
+        *fresh = Some(crate::log::held_events(&repo.git)?);
+    }
+    Ok(fresh.as_ref().is_some_and(|held| held.contains(id)))
+}
+
+/// Whether main, fetched again now, still stands at `trunk`.
+fn main_stands(repo: &Repo, trunk: &str) -> Result<bool, String> {
+    let now = repo.refetch_trunk().map_err(|error| error.message())?;
+    Ok(now.trim() == trunk)
+}
+
 fn undone(
     repo: &Repo,
     trunk: &str,
@@ -132,11 +147,7 @@ fn undone(
         {
             continue;
         }
-        if fresh.is_none() {
-            crate::log::fetch(repo);
-            fresh = Some(crate::log::held_events(git)?);
-        }
-        if fresh.as_ref().is_some_and(|held| held.contains(&id)) {
+        if held_now(repo, &mut fresh, &id)? {
             continue;
         }
         // Main where the remote holds it now, read once a pass before the first undo: a landing
@@ -144,12 +155,7 @@ fn undone(
         // them answers the red. While main moved, the decision waits for the next pass.
         if !read_main {
             read_main = true;
-            if repo
-                .refetch_trunk()
-                .map_err(|error| error.message())?
-                .trim()
-                != trunk
-            {
+            if !main_stands(repo, trunk)? {
                 break;
             }
         }
