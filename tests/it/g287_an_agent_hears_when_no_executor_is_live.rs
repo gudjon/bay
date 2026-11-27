@@ -13,7 +13,9 @@
 //! `cursor.no_executor = waiting` (drop it, and the cleared state never arms the line again);
 //! `src/presence.rs` `unserved_queue` returns `false` when `any_fresh(&rows)` (drop it, and a
 //! live executor is reported missing); `src/session.rs` `notices` calls `no_executor` at
-//! `SessionStart` and at `UserPromptSubmit` (drop either, and that hook says nothing).
+//! `SessionStart` and at `UserPromptSubmit` (drop either, and that hook says nothing);
+//! `src/hook_poll.rs` `fleet_due` is true for a record older than the window (make it false, and
+//! a prompt never fetches an old record again).
 
 // Each case runs shell scripts (the git wrapper on PATH), so these run on Unix only.
 #![cfg(unix)]
@@ -189,10 +191,30 @@ fn a_live_runner_is_never_reported_missing_from_an_old_record() {
     pass();
     let passed = std::time::Instant::now();
     queue_one(&test_box, &repo);
+    let old = fetched_at(&repo);
     let told = prompt(&test_box, &repo, "s-1", 0);
     assert!(
         !told.contains(LINE),
         "a live runner was reported missing from an old record, {:?} after its pass (window 20 s): {told}",
         passed.elapsed()
     );
+    // BACKLOG 357: an old record also tells nothing, so the line alone cannot show the refetch.
+    // The prompt's poll fetches the fleet refs again, in the background when the hook's wait
+    // ends first.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while fetched_at(&repo) == old && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    assert_ne!(
+        fetched_at(&repo),
+        old,
+        "the prompt did not fetch an old record again"
+    );
+}
+
+/// When the clone at `repo` last recorded a fetch of the fleet refs.
+fn fetched_at(repo: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(repo.join(".git/bay/fleet/fetched.json")).ok()?;
+    let record: Value = serde_json::from_str(&text).ok()?;
+    record["at"].as_str().map(str::to_owned)
 }
