@@ -135,10 +135,28 @@ fn skew_for(test_box: &TestBox, remote: &Path, left_s: u64) -> u64 {
     cadence * 3 + 30 - left_s
 }
 
+/// A clone of `remote` named `name`, made through git's transport: the looping runner pushes
+/// into `remote` meanwhile, and a local clone, which copies the remote's object files, fails
+/// when a push's incoming directory goes away while it copies.
+fn mover(test_box: &TestBox, remote: &Path, name: &str) -> PathBuf {
+    let dir = test_box.path().join(name);
+    test_box.git_ok(
+        test_box.path(),
+        &[
+            "clone",
+            "-q",
+            "--no-local",
+            remote.to_str().unwrap(),
+            dir.to_str().unwrap(),
+        ],
+    );
+    dir
+}
+
 /// Moves main from a clone named `name`: `edit` changes its files, which one commit records.
 /// Returns main's new commit.
 fn move_main(test_box: &TestBox, remote: &Path, name: &str, edit: impl FnOnce(&Path)) -> String {
-    let clone = test_box.clone_of(remote, name);
+    let clone = mover(test_box, remote, name);
     edit(&clone);
     test_box.git_ok(&clone, &["add", "-A"]);
     test_box.git_ok(
