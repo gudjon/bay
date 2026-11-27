@@ -1089,6 +1089,76 @@ fn judge_from(
 }
 
 /// The policy at `trunk`, when it has a post check.
+/// G926: the newest landing at which every post check is green ([`green_tip`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GreenTip {
+    pub commit: String,
+    pub change: Option<String>,
+    /// How many landings of the window sit above it.
+    pub above: usize,
+}
+
+impl GreenTip {
+    fn at(landing: &Landing, above: usize) -> Self {
+        Self {
+            commit: landing.commit.clone(),
+            change: landing.change.clone(),
+            above,
+        }
+    }
+}
+
+/// G926 (a pre-deploy gate: a promotion takes the newest tip whose post checks all passed, so
+/// it never picks a red tip): the newest landing of `trunk`'s window at which every post check
+/// of the policy at `trunk` is green ([`Answers::green_at`]), or `None` when no landing of the
+/// window is. A red, a pending or a flaky answer, or a landing that requires a check it has not
+/// answered, is never green. A quarantined check is not judged.
+///
+/// # Errors
+///
+/// A git fault, or a committed config bay cannot read.
+pub fn green_tip(
+    git: &Git,
+    trunk: &str,
+    registry: Option<&Registry>,
+) -> Result<Option<GreenTip>, String> {
+    let (window, reach) = bounds(git, trunk)?;
+    let line = line(git, trunk, window)?;
+    let Some(policy) = post_policy(git, trunk)? else {
+        return Ok(line
+            .landings
+            .first()
+            .map(|landing| GreenTip::at(landing, 0)));
+    };
+    let posts: Vec<&crate::policy::ManifestEntry> = policy
+        .post
+        .iter()
+        .filter(|post| {
+            let id = crate::evidence::CheckId::new(&post.id, &post.environment);
+            policy
+                .check(&id)
+                .is_some_and(|entry| !policy.is_quarantined(entry))
+        })
+        .collect();
+    let unread = vec![None; line.landings.len()];
+    let past = Past {
+        trunk,
+        reach,
+        read: false,
+        kept: None,
+    };
+    let mut answers = Answers::new(git, registry, line, unread, past);
+    'landings: for at in 0..answers.line.window {
+        for post in &posts {
+            if !answers.green_at(at, post)? {
+                continue 'landings;
+            }
+        }
+        return Ok(Some(GreenTip::at(&answers.line.landings[at], at)));
+    }
+    Ok(None)
+}
+
 fn post_policy(git: &Git, trunk: &str) -> Result<Option<crate::policy::Policy>, String> {
     match crate::policy::load_at(git, trunk) {
         Ok(Some(policy)) if !policy.post.is_empty() => Ok(Some(policy)),
@@ -1471,6 +1541,26 @@ impl<'a> Answers<'a> {
             return Ok(Some(PENDING_BEYOND_WINDOW));
         }
         Ok(None)
+    }
+
+    /// G926: whether `post` is green at landing `at`: read from it down the line, the first
+    /// landing that answers it passed, before any landing that requires it unanswered. Past the
+    /// window it reads down to the reach (B5). The landing that added the check owes nothing
+    /// below it (G584). A line that ends with neither is green only when it holds all of trunk,
+    /// so nothing was ever owed (NEW-6).
+    fn green_at(&mut self, at: usize, post: &crate::policy::ManifestEntry) -> Result<bool, String> {
+        let mut below = at;
+        loop {
+            if below >= self.line.landings.len() && !self.past()? {
+                return Ok(!self.line.full);
+            }
+            match self.decides(below, post)? {
+                Some(failed) => return Ok(!failed),
+                None if self.requires(below, post)? => return Ok(false),
+                None if self.unlisted(below, post)? => return Ok(true),
+                None => below += 1,
+            }
+        }
     }
 
     /// G598: whether the landings past a full window, none of which requires `post`, leave

@@ -39,6 +39,7 @@ pub mod facts;
 pub mod fleet;
 pub mod flow;
 pub mod git;
+pub mod green_tip;
 pub mod guide;
 pub mod heads;
 pub mod hold;

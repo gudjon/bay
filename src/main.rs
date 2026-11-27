@@ -174,6 +174,11 @@ enum Command {
         #[arg(long, value_name = "SECONDS",
             conflicts_with_all = ["all", "lineage", "branches", "since"])]
         deadline: Option<u64>,
+        /// The newest landing of main at which every post check is green, for a promotion that
+        /// must never pick a red tip: none with a red, pending or flaky post check, or a check
+        /// it requires unanswered; fetches main and the evidence notes
+        #[arg(long, conflicts_with_all = ["change", "all", "lineage", "branches", "since", "deadline"])]
+        green_tip: bool,
     },
     /// The live line, head first: each place's change, intent, actor, paths, wait, operation
     /// state and runner, as one `bay.queue/1` document in `detail`. Reads the live places and
@@ -718,6 +723,7 @@ fn saved_listing(cli: &Cli) -> Option<BayResult> {
         branches: false,
         since: None,
         deadline,
+        green_tip: false,
         ..
     } = &cli.command
     else {
@@ -1239,10 +1245,14 @@ fn status(dir: &std::path::Path, command: Command) -> BayResult {
         since,
         merged,
         deadline,
+        green_tip,
     } = command
     else {
         unreachable!("status takes a status command");
     };
+    if green_tip {
+        return bay::green_tip::green_tip(dir);
+    }
     if every_branch {
         return heads(dir, false, stale_days);
     }
