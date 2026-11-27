@@ -86,7 +86,7 @@ fn told(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
         )?),
     };
     let chain = Chain::new(git);
-    let live = crate::presence::live(git);
+    let live = crate::presence::members(git, repo.config.lease());
     // G930: the logs this store holds; the remote's are read only for an event none of them holds.
     let held = crate::log::held_events(git)?;
     let mut notes = Vec::new();
@@ -126,7 +126,7 @@ fn told(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
     // just before the first write: another runner may have told the red, or come live, meanwhile.
     crate::log::fetch_with(repo, &[crate::presence::refspec()]);
     let held = crate::log::held_events(git)?;
-    let live = crate::presence::live(git);
+    let live = crate::presence::members(git, repo.config.lease());
     for (red, owner, owns, id) in &due {
         if held.contains(id) || teller(red, &keys.executor_name, &live) != keys.executor_name {
             continue;
@@ -140,11 +140,11 @@ fn told(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
     Ok(notes)
 }
 
-/// G826: the runner that tells `red`: of the runners whose presence reads live (`live`,
-/// [`crate::presence::live`]) and that serve the red's environment, the one whose name weighs
+/// G826: the runner that tells `red`: of the runners that are members (`live`,
+/// [`crate::presence::members`], G940) and that serve the red's environment, the one whose name weighs
 /// most with the check and its environment, as the runner that runs a post check is chosen
 /// (G822, [`crate::bisect::rendezvous`]); `me` when none does. Every runner names the same one;
-/// once its presence reads stale, the next one tells. G930: `me` is not one of them unless its
+/// once it is no longer a member, the next one tells. G930: `me` is not one of them unless its
 /// own presence is: a runner that does not serve the environment named itself beside the one
 /// that does.
 pub(crate) fn teller<'a>(red: &Red, me: &'a str, live: &'a [Value]) -> &'a str {

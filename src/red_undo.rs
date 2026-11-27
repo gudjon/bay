@@ -109,7 +109,7 @@ fn undone(
     }
     let held = crate::log::held_events(git)?;
     let keys = Keys::load(git);
-    let present = crate::presence::live(git);
+    let present = crate::presence::members(git, repo.config.lease());
     let chain = Chain::new(git);
     let line = in_line(records);
     let now = SystemTime::now()

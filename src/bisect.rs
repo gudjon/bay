@@ -182,7 +182,7 @@ struct Fresh {
     registry: bool,
     evidence: bool,
     presences: bool,
-    /// G932: the presences that read live when the plan's fetch brought them ([`Fresh::live`]).
+    /// G932: the presences that were members when the plan's fetch brought them ([`Fresh::live`]).
     live: Option<Vec<Value>>,
 }
 
@@ -219,7 +219,7 @@ impl Fresh {
         self.evidence = true;
         self.presences |= presences;
         if presences {
-            self.live = Some(crate::presence::live(&repo.git));
+            self.live = Some(crate::presence::members(&repo.git, repo.config.lease()));
         }
     }
 
@@ -227,11 +227,13 @@ impl Fresh {
     /// owner ran it on too): the runners' presences that read live, judged as the plan's fetch
     /// brought them. A stage judges its checks up to a minute after that
     /// fetch, by when every peer's last beat in it read stale, so the runner elected itself to
-    /// every check its peers owned. A plan that fetched no presences reads the store now.
+    /// every check its peers owned. A plan that fetched no presences reads the store now. G940:
+    /// a peer counts while it is a member ([`crate::presence::members`]), for its lease, since
+    /// its presence can reach this store a minute late.
     fn live(&self, repo: &Repo) -> Vec<Value> {
         self.live
             .clone()
-            .unwrap_or_else(|| crate::presence::live(&repo.git))
+            .unwrap_or_else(|| crate::presence::members(&repo.git, repo.config.lease()))
     }
 }
 
@@ -679,8 +681,8 @@ struct LastRun {
 /// post check on the same tip within seconds of the others, before any had recorded the answer
 /// [`answered_elsewhere`] reads; in a day, 23.0 of 49.1 post runner-hours were second and third
 /// runs of one check on one tip): the other live runner that runs `entry` on main's tip, if one
-/// does, so `me` does not. Of the runners whose presence reads live now ([`crate::presence::live`])
-/// and serves the check's environment, and whose producer the check lists when it lists any,
+/// does, so `me` does not. Of the runners that are members now ([`crate::presence::members`])
+/// and serve the check's environment, and whose producer the check lists when it lists any,
 /// `me` among them, the check goes to the one whose name weighs most with it ([`weight`],
 /// rendezvous hashing): it stays with one runner while that runner stays live, and only the checks
 /// of a runner that leaves move.

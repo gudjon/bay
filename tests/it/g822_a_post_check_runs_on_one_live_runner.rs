@@ -12,6 +12,13 @@
 //! `bisect::left_to`; drop it and a check whose owner gave no answer within its timeout waits on
 //! that owner. The liveness filter in `presence::live` (`src/presence.rs`); drop it and a check
 //! waits on an owner whose presence reads stale.
+//!
+//! G940 (a fleet measurement, 2026-11-27: an origin took the other boxes' presences from its
+//! hosted remote once a minute, so a peer's presence reached a runner 36 to 100 s old and read
+//! stale by the strict live minute; a runner then ran a 700 s post check on tips its owner ran
+//! it on): the owner stays the owner for its lease. Guard to mutate: `presence::members` in
+//! `bisect::Fresh` (`src/bisect.rs`); read `presence::live` there again and the third case runs
+//! the check beside its owner.
 
 // Each case runs shell scripts (adapters), so these run on Unix only.
 #![cfg(unix)]
@@ -37,6 +44,15 @@ pub(crate) fn weight(runner: &str) -> u64 {
 /// Returns the clone that owns `suite`, the clone that does not, and the file each run of
 /// `suite` writes a line to.
 fn two_runners(test_box: &TestBox, timeout_s: u64) -> (PathBuf, PathBuf, PathBuf) {
+    two_runners_with(test_box, timeout_s, "")
+}
+
+/// [`two_runners`], with `runner` added to the `[runner]` table.
+fn two_runners_with(
+    test_box: &TestBox,
+    timeout_s: u64,
+    runner: &str,
+) -> (PathBuf, PathBuf, PathBuf) {
     let repo = test_box.repo_any("repo");
     let remote = test_box.path().join("repo-remote.git");
     let runs = test_box.path().join("runs");
@@ -57,7 +73,7 @@ fn two_runners(test_box: &TestBox, timeout_s: u64) -> (PathBuf, PathBuf, PathBuf
     }
     files.push((
         ".bay/config.toml".to_owned(),
-        "[runner]\npost = true\nbisect_post = false\n".to_owned(),
+        format!("[runner]\npost = true\nbisect_post = false\n{runner}"),
     ));
     test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
     test_box.git_ok(&repo, &["config", "bay.runnerName", EXECUTOR]);
@@ -144,6 +160,32 @@ fn a_post_check_its_owner_has_not_answered_within_its_timeout_runs_on_another() 
         ran_post(&test_box, &other, 5),
         "suite",
         "a post check waited past its timeout on an owner that gave no answer"
+    );
+    assert_eq!(runs_of(&runs), 2);
+}
+
+#[test]
+fn a_post_check_stays_with_its_owner_for_the_owners_lease() {
+    // GIVEN two runners with a 450 s lease, and the owner's answer on the first tip
+    let test_box = TestBox::new();
+    let (owner, other, runs) = two_runners_with(&test_box, 600, "lease_s = 450\n");
+    land(&test_box, &owner, "src", "src/s0.rs");
+    assert_eq!(ran_post(&test_box, &owner, 0), "suite");
+    land(&test_box, &owner, "src", "src/s1.rs");
+
+    // WHEN the other runner reads the owner's presence 90 s old: past its live minute, inside
+    // its lease
+    // THEN it leaves the check to the owner
+    assert_eq!(
+        ran_post(&test_box, &other, 90),
+        "",
+        "a runner ran a post check its owner holds for its lease"
+    );
+    // AND past the lease it runs the check
+    assert_eq!(
+        ran_post(&test_box, &other, 500),
+        "suite",
+        "a post check waited on an owner past its lease"
     );
     assert_eq!(runs_of(&runs), 2);
 }

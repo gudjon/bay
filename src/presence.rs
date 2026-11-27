@@ -417,6 +417,33 @@ pub fn live(git: &Git) -> Vec<Value> {
         .collect()
 }
 
+/// G940 (a fleet measurement, 2026-11-27: an origin in `through` mode takes the other boxes'
+/// presences from its hosted remote once a sweep, every 60 s, so a peer's presence reached a
+/// runner's store 36 to 100 s old, and its strict live minute had passed for most of each
+/// sweep): every presence this store holds that is still a member of the elections that share
+/// work out (G822's post check owner, G826's red teller, G857's bisector, the red undo), read at
+/// its own time. A member is live by the strict rule, or beaten within `window`, the runner's
+/// lease, after which a holder's claim is taken too. A runner that stops keeps its share for
+/// that long; each election has its own way past an owner that does not answer.
+#[must_use]
+pub fn members(git: &Git, window: Duration) -> Vec<Value> {
+    let Ok(listed) = git.run(&["for-each-ref", "--format=%(objectname)", PRESENCE_PREFIX]) else {
+        return Vec::new();
+    };
+    let now = reader_now();
+    listed
+        .lines()
+        .filter_map(|commit| record_at(git, commit).ok().flatten())
+        .filter(|record| member_until(record, window).is_some_and(|until| until >= now))
+        .collect()
+}
+
+/// Until when, in Unix seconds, `record` stays a member under [`members`]' rule.
+fn member_until(record: &Value, window: Duration) -> Option<u64> {
+    let at = record["at"].as_str().and_then(crate::clock::unix_of)?;
+    live_until(record).map(|live| live.max(at.saturating_add(window.as_secs())))
+}
+
 /// BACKLOG 332: the presence refs this store holds that read live now by [`serving_until`]'s
 /// strict rule.
 #[must_use]
@@ -889,7 +916,7 @@ pub fn single_machine_environments(repo: &Repo, queued: usize, trunk: &str) -> O
 
 #[cfg(test)]
 mod tests {
-    use super::{age, ended_before};
+    use super::{age, ended_before, member_until};
     use serde_json::json;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
@@ -956,6 +983,20 @@ mod tests {
         assert_eq!(age(&slow, at, at + 150, 120, 1860).stale_after_s, 180);
         // An executor inside an operation writes nothing until it ends.
         let busy = json!({"at": "2026-10-21T10:00:00Z", "cadence_s": 10, "holding": "abcd2345.1"});
+        // G940: a member counts for the window, and never for less than its live minute.
+        let at = crate::clock::unix_of("2026-10-21T10:00:00Z").unwrap();
+        assert_eq!(
+            member_until(&record, Duration::from_secs(450)),
+            Some(at + 450)
+        );
+        assert_eq!(
+            member_until(&record, Duration::from_secs(10)),
+            Some(at + 60)
+        );
+        assert_eq!(
+            member_until(&json!({"cadence_s": 10}), Duration::from_secs(450)),
+            None
+        );
         assert!(!age(&busy, at, at + 600, 120, 1860).stale);
         // No time of its own: never fresh.
         assert!(age(&json!({"cadence_s": 10}), at, at, 120, 1860).stale);
