@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.38
+
+- A log joined again after a push answered a fault holds each terminal record once.
+
 ## 0.7.37
 
 - A red reads a flaky merge as its pass when no run there failed a unit the red fails.
