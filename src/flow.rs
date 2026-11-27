@@ -93,6 +93,10 @@ pub fn review_queue(repo: &Repo, except: Option<&str>) -> Result<Review, String>
 ///   check runs of those same landings, and how many runs; null when none is timed. A run is one
 ///   attempt row (`checks[]`) of the published terminal record: from its candidate commit to the
 ///   chain state that first records it checked or blocked;
+/// - `cpu_s` (S5): `{p50, p90, landed, sum}`, the CPU seconds of each landing's checks
+///   ([`cpu_per_landing`]); null when none carries it;
+/// - `carried` (S5): `{runs, carried}`, how many of those landings' check records were carried
+///   rather than run ([`carried_runs`]); null when none says;
 /// - `oldest_live`: `{change, age_s}`, the live change that started first and its age in
 ///   seconds; null when none is live;
 /// - `waiting_approval`: `{count, oldest, age_s}`, how many live changes wait for a person's
@@ -167,6 +171,8 @@ pub fn flow(repo: &Repo, trunk: &str) -> Result<Value, String> {
         "cycle_time_s": spread(&mut cycles, "landed"),
         "queue_wait_s": queue_wait(&published),
         "check_time_s": check_time(&published),
+        "cpu_s": cpu_per_landing(&published),
+        "carried": carried_runs(&published),
         "recent": lately(&published, now),
         "environments": environments(repo, trunk, &chains, &published, now),
         "oldest_live": oldest_live,
@@ -460,6 +466,55 @@ fn check_time(published: &[Value]) -> Value {
         .filter_map(|row| row["seconds"].as_u64())
         .collect();
     spread(&mut runs, "runs")
+}
+
+/// S5 (plan row S5, "CPU per landing"): `cpu_s` of [`flow`], `{p50, p90, landed, sum}` in whole
+/// seconds: the CPU of each landing's checks, the summed `cpu_s` of the check records at its last
+/// attempt (`runs[]`, [`crate::timing`]; none there is a landing whose checks all reused a
+/// result: no CPU). A landing with a record that carries no `cpu_s` (written off Linux or by an
+/// older bay) is left out rather than read low. A post check runs after its landing, so it is not
+/// counted. Null when no landing qualifies.
+fn cpu_per_landing(published: &[Value]) -> Value {
+    let mut landings: Vec<u64> = published
+        .iter()
+        .filter_map(|record| {
+            let runs = record["checks"].as_array()?.last()?["runs"].as_array()?;
+            runs.iter()
+                .map(|run| run["cpu_s"].as_f64())
+                .sum::<Option<f64>>()
+        })
+        .map(whole_seconds)
+        .collect();
+    let sum: u64 = landings.iter().sum();
+    let mut out = spread(&mut landings, "landed");
+    if out.is_object() {
+        out["sum"] = json!(sum);
+    }
+    out
+}
+
+/// S5: `cpu` seconds, never negative, rounded to whole seconds.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn whole_seconds(cpu: f64) -> u64 {
+    cpu.max(0.0).round() as u64
+}
+
+/// S5 (plan row S5, the tier "check records carried by stamp"): `carried` of [`flow`],
+/// `{runs, carried}`: of the check records at the last attempt of each landing (`runs[]`) that
+/// say whether they were carried, how many there are and how many were carried from another
+/// candidate rather than run ([`crate::throughput::carried`]). Null when there are none.
+fn carried_runs(published: &[Value]) -> Value {
+    let runs: Vec<&Value> = published
+        .iter()
+        .filter_map(|record| record["checks"].as_array()?.last()?["runs"].as_array())
+        .flatten()
+        .filter(|run| run["carried"].is_boolean())
+        .collect();
+    if runs.is_empty() {
+        return Value::Null;
+    }
+    let carried = runs.iter().filter(|run| run["carried"] == true).count();
+    json!({"runs": runs.len(), "carried": carried})
 }
 
 /// `{p50, p90, <count>}` of `values` in seconds, sorted here, `count` naming how many they

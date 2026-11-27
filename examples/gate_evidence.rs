@@ -89,6 +89,7 @@ fn record(
         selection: None,
         sandbox: sandbox.map(str::to_owned),
         seconds: None,
+        cpu_s: None,
         signature: None,
         unknown: serde_json::Map::new(),
     };

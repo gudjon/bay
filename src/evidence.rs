@@ -203,6 +203,11 @@ pub struct EvidenceRecord {
     /// (`ROADMAP` § 3). Absent on records written before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seconds: Option<f64>,
+    /// S5: the CPU seconds, user and system, of the adapter's processes in this check, measured
+    /// by bay around the adapter run ([`crate::run::child_cpu`]). Absent off Linux, on a record
+    /// whose check did not run, and on records written before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_s: Option<f64>,
     /// The producer key's SSH signature over the canonical JSON of the record without this
     /// field (`ssh-keygen -Y sign -n bay-producer`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1306,6 +1311,7 @@ mod tests {
             selection: None,
             sandbox: None,
             seconds: None,
+            cpu_s: None,
             signature: None,
             unknown: serde_json::Map::new(),
         }

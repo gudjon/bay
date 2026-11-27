@@ -1768,7 +1768,7 @@ fn run_once(
     hooks: &mut Hooks,
     (index, entry): (usize, &CheckEntry),
     (work_dir, started, about): (&Path, Instant, &serde_json::Map<String, serde_json::Value>),
-) -> Result<(Judged, Instant), String> {
+) -> Result<(Judged, AdapterRun), String> {
     let budget = limits.budget;
     // G796: a check main's move stopped is not materialized; its caller keeps no record of it.
     let stop = || stopped(limits, entry);
@@ -1776,7 +1776,7 @@ fn run_once(
         let why = "main moved past the candidate's base".to_owned();
         return Ok((
             Judged::without_units(Verdict::Unknown, Some(why)),
-            Instant::now(),
+            AdapterRun::none(),
         ));
     }
     let dir = work_dir.join(format!("check-{index}"));
@@ -1839,6 +1839,7 @@ fn run_once(
         .flatten();
     let remaining = budget.map(|budget| budget.saturating_sub(started.elapsed()));
     let ran = Instant::now();
+    let cpu_from = not_run.is_none().then(crate::run::child_cpu).flatten();
     let mut judged = match not_run {
         Some(judged) => judged,
         None => saying_still(
@@ -1856,6 +1857,9 @@ fn run_once(
             },
         ),
     };
+    let cpu_s = cpu_from
+        .zip(crate::run::child_cpu())
+        .map(|(from, to)| ((to - from) * 1000.0).round() / 1000.0);
     // What it read and listed, stamped, unless the run gave no verdict to reuse.
     if let Some(armed) = armed
         && judged.unavailable.is_none()
@@ -1871,7 +1875,24 @@ fn run_once(
     }
     make_writable(&dir);
     let _ = std::fs::remove_dir_all(&dir);
-    Ok((judged, ran))
+    Ok((judged, AdapterRun { at: ran, cpu_s }))
+}
+
+/// When a check's adapter started, and the CPU seconds its processes used (S5), measured on the
+/// thread that ran it ([`crate::run::child_cpu`]); none for a check that did not run.
+#[derive(Clone, Copy)]
+struct AdapterRun {
+    at: Instant,
+    cpu_s: Option<f64>,
+}
+
+impl AdapterRun {
+    fn none() -> Self {
+        Self {
+            at: Instant::now(),
+            cpu_s: None,
+        }
+    }
 }
 
 /// The evidence record of run `run` of the check `entry`, the `index`th of `policy`, judged
@@ -1884,7 +1905,7 @@ fn evidence(
     policy: &Policy,
     (index, entry, run): (usize, &CheckEntry, u32),
     judged: Judged,
-    ran: Instant,
+    ran: AdapterRun,
     sandbox: &Sandbox,
 ) -> EvidenceRecord {
     let mut unknown = serde_json::Map::new();
@@ -1933,7 +1954,8 @@ fn evidence(
         units: judged.units,
         selection: judged.selection,
         sandbox: Some(sandbox.kind.to_owned()),
-        seconds: Some((ran.elapsed().as_secs_f64() * 1000.0).round() / 1000.0),
+        seconds: Some((ran.at.elapsed().as_secs_f64() * 1000.0).round() / 1000.0),
+        cpu_s: ran.cpu_s,
         signature: None,
         unknown,
     }

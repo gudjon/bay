@@ -319,6 +319,7 @@ fn placeholder() -> EvidenceRecord {
         selection: Some(String::new()),
         sandbox: Some(String::new()),
         seconds: Some(0.0),
+        cpu_s: Some(0.0),
         signature: None,
         unknown: Map::new(),
     }
@@ -421,6 +422,7 @@ fn build(
             selection: None,
             sandbox: None,
             seconds: None,
+            cpu_s: None,
             signature: None,
             unknown,
         });

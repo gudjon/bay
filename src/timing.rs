@@ -12,7 +12,8 @@
 //! - `checks[]`: one row per attempt. `started_at` is its candidate commit's; `finished_at` the
 //!   chain state that first records the attempt checked or blocked. The last attempt's row also
 //!   holds `runs[]`, the evidence records on its candidate, each with the worker wall time bay
-//!   measured around the check (`seconds`).
+//!   measured around the check (`seconds`), the CPU seconds of its processes (`cpu_s`, S5) and
+//!   whether it was carried from another candidate rather than run (`carried`).
 //! - `published_at` (outcome `published`): the chain state `landed <op>`, written right after
 //!   the trunk push. `ended_at` (any other outcome): the first chain state that records the
 //!   operation in a terminal state.
@@ -250,6 +251,9 @@ fn checks(
                         "producer": record.producer.name,
                         "verdict": record.verdict,
                         "seconds": record.seconds,
+                        // S5: the CPU its processes used, and whether it was carried, not run.
+                        "cpu_s": record.cpu_s,
+                        "carried": crate::throughput::carried(&record),
                     })
                 })
                 .collect();

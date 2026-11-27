@@ -16,6 +16,97 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+/// S5: the kernel's `USER_HZ`, the unit of the CPU times in `/proc/<pid>/stat`: 100 a second on
+/// every architecture bay is built for.
+const USER_HZ: f64 = 100.0;
+
+thread_local! {
+    /// S5: the CPU seconds of every process [`bounded_until`] ran on this thread, summed.
+    static CHILD_CPU: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// S5 (plan row S5, "CPU per landing"): the CPU seconds, user and system, of the processes
+/// [`bounded_until`] ran on this thread so far. A caller reads it before and after a run on the
+/// thread that runs it, and the difference is that run's. `None` off Linux.
+#[must_use]
+pub fn child_cpu() -> Option<f64> {
+    cfg!(target_os = "linux").then(|| CHILD_CPU.with(std::cell::Cell::get))
+}
+
+/// S5: adds `cpu` seconds to this thread's [`child_cpu`].
+fn spent(cpu: Option<f64>) {
+    if let Some(cpu) = cpu {
+        CHILD_CPU.with(|sum| sum.set(sum.get() + cpu));
+    }
+}
+
+/// S5: process `pid`'s state (field 3) and the CPU seconds, user and system, that it and the
+/// children it waited for used (fields 14 to 17), as Linux's `/proc/<pid>/stat` counts them. A
+/// child's time joins its parent's when the parent reaps it, often just before the parent
+/// exits; an exited process stays a zombie (`Z`) until it is reaped, and its entry then holds
+/// the whole run. `None` off Linux or when the entry cannot be read.
+fn proc_stat(pid: u32) -> Option<(char, f64)> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command's name (field 2) may hold spaces and parentheses; the fields after its last
+    // `)` start at field 3.
+    let fields: Vec<&str> = stat
+        .get(stat.rfind(')')? + 1..)?
+        .split_whitespace()
+        .collect();
+    let state = fields.first()?.chars().next()?;
+    let mut ticks = 0_u32;
+    for field in fields.get(11..15)? {
+        ticks = ticks.checked_add(field.parse::<u32>().ok()?)?;
+    }
+    Some((state, f64::from(ticks) / USER_HZ))
+}
+
+/// S5: how often [`bounded_until`] reads the CPU of a running process's whole tree.
+const TREE_EVERY: Duration = Duration::from_millis(100);
+
+/// S5: the CPU seconds of process `pid` and of every descendant it has now, each read with
+/// [`proc_stat`] (its own time and its reaped children's), the children from
+/// `/proc/<pid>/task/<tid>/children`. A parent is read before its children, so a child it reaps
+/// in between is missed for this read, never counted twice. A process can leave the tree
+/// unreaped: `bwrap --unshare-pid` exits on the sandbox's exit code without waiting for the
+/// sandbox's init, whose time then never reaches it. So the caller keeps the largest sum it
+/// read. `None` when `pid`'s entry cannot be read.
+fn tree_cpu(pid: u32) -> Option<f64> {
+    let (_, mut total) = proc_stat(pid)?;
+    let mut next = children(pid);
+    let mut visits = 0_u32;
+    while let Some(child) = next.pop() {
+        visits += 1;
+        if visits > 4096 {
+            break;
+        }
+        if let Some((_, used)) = proc_stat(child) {
+            total += used;
+            next.extend(children(child));
+        }
+    }
+    Some(total)
+}
+
+/// S5: the children of process `pid`, from each of its threads' `children` file.
+fn children(pid: u32) -> Vec<u32> {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return Vec::new();
+    };
+    tasks
+        .flatten()
+        .filter_map(|task| std::fs::read_to_string(task.path().join("children")).ok())
+        .flat_map(|list| {
+            list.split_whitespace()
+                .filter_map(|child| child.parse::<u32>().ok())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// An adapter's command as a process: a program path relative to `work_root`, then its
 /// arguments, run from `work_root` with only `PATH` and `HOME` from bay's environment. `None`
 /// for an empty command; `Some(Err)` naming why for a `#!` script bay cannot start on Windows
@@ -270,13 +361,29 @@ pub fn bounded_until(
     }
     drop(sender);
     let mut last_beat = Instant::now();
+    // S5: its CPU time, the largest of its tree's sums read (`tree_cpu`). Where it can be
+    // read, the process is waited for only once it reads as exited, and its tree is read then,
+    // so the children it reaped at its end count.
+    let (mut cpu, mut walked) = (None, None::<Instant>);
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) => {}
-            Err(error) => {
-                kill(group, &mut child);
-                return Err(Fault::Wait(error));
+        let stat = proc_stat(group);
+        let exited = stat.is_none_or(|(state, _)| matches!(state, 'Z' | 'X'));
+        if stat.is_some() && (exited || walked.is_none_or(|at| at.elapsed() >= TREE_EVERY)) {
+            walked = Some(Instant::now());
+            cpu = match (tree_cpu(group), cpu) {
+                (Some(read), Some(most)) => Some(f64::max(read, most)),
+                (read, most) => read.or(most),
+            };
+        }
+        if exited {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {}
+                Err(error) => {
+                    kill(group, &mut child);
+                    spent(cpu);
+                    return Err(Fault::Wait(error));
+                }
             }
         }
         if heartbeat.is_some_and(|every| last_beat.elapsed() >= every) {
@@ -285,14 +392,17 @@ pub fn bounded_until(
         }
         if started.elapsed() >= timeout {
             kill(group, &mut child);
+            spent(cpu);
             return Err(Fault::Timeout(timeout));
         }
         if stop() {
             kill(group, &mut child);
+            spent(cpu);
             return Err(Fault::Stopped);
         }
         std::thread::sleep(Duration::from_millis(20));
     };
+    spent(cpu);
     let [stdout, stderr] = collect(
         &outputs,
         readers,
@@ -428,5 +538,39 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!alive(), "the plugin's child {pid} outlived the bound");
+    }
+
+    /// S5: a run's CPU time counts on the thread that ran it, its children's with it.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_run_counts_the_cpu_its_processes_used_on_its_thread() {
+        let before = super::child_cpu().unwrap();
+        // GIVEN an adapter whose child spins and is reaped as the adapter exits, then one that
+        // sleeps
+        let busy = "( i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done ); exit 0";
+        let ran = captured(sh(busy), None, Duration::from_secs(60));
+        assert!(ran.is_ok(), "{ran:?}");
+        let spun = super::child_cpu().unwrap() - before;
+        let ran = captured(sh("sleep 0.3"), None, Duration::from_secs(10));
+        assert!(ran.is_ok(), "{ran:?}");
+        let slept = super::child_cpu().unwrap() - before - spun;
+        // THEN the spin's CPU counts, and the sleep's next to none
+        assert!(spun >= 0.1, "{spun}");
+        assert!(slept < 0.1, "{slept}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_run_counts_the_cpu_of_a_child_its_adapter_left_unreaped() {
+        let before = super::child_cpu().unwrap();
+        // GIVEN an adapter that exits while the child that spun still lives, never reaped by
+        // it, as `bwrap --unshare-pid` leaves the sandbox's init
+        let busy = "( i=0; while [ $i -lt 300000 ]; do i=$((i+1)); done; sleep 0.5 ) \
+                    >/dev/null 2>&1 & sleep 1";
+        let ran = captured(sh(busy), None, Duration::from_secs(60));
+        assert!(ran.is_ok(), "{ran:?}");
+        // THEN the child's CPU counts
+        let spun = super::child_cpu().unwrap() - before;
+        assert!(spun >= 0.1, "{spun}");
     }
 }

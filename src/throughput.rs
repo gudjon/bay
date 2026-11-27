@@ -970,6 +970,7 @@ pub fn carry(
     };
     carried.at = crate::clock::now_rfc3339();
     carried.seconds = Some(0.0);
+    carried.cpu_s = Some(0.0);
     carried.signature = None;
     let mut held = stamp.clone();
     held["from"] = json!({
@@ -979,6 +980,16 @@ pub fn carry(
     });
     carried.unknown.insert(FOOTPRINT.to_owned(), held);
     carried
+}
+
+/// S5: whether `record` was carried onto its candidate ([`carry`]) rather than run there: its
+/// footprint names the record it came `from`.
+#[must_use]
+pub fn carried(record: &EvidenceRecord) -> bool {
+    record
+        .unknown
+        .get(FOOTPRINT)
+        .is_some_and(|stamp| stamp.get("from").is_some())
 }
 
 /// G292: a candidate of one change as its chain names it: its commit and tree.
