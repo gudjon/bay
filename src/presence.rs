@@ -361,6 +361,28 @@ pub fn last_push(common_dir: &Path) -> Option<Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// G950: as [`serving_until`], for the presences on a machine other than `machine`: a runner on
+/// `machine` shares what that machine cannot run. A presence that names no machine counts.
+#[must_use]
+pub fn serving_off(git: &Git, machine: &str, environments: &[String]) -> Option<u64> {
+    let listed = git
+        .run(&["for-each-ref", "--format=%(objectname)", PRESENCE_PREFIX])
+        .ok()?;
+    let now = reader_now();
+    listed
+        .lines()
+        .filter_map(|commit| record_at(git, commit).ok().flatten())
+        .filter(|record| record["machine"].as_str() != Some(machine))
+        .filter(|record| {
+            environments
+                .iter()
+                .all(|environment| serves(record, environment))
+        })
+        .filter_map(|record| live_until(&record))
+        .filter(|until| *until >= now)
+        .max()
+}
+
 /// The latest time, in Unix seconds on the reader's clock ([`reader_now`]), until which a
 /// presence this store holds, other than `me` (a presence ref), stays live and serves every one
 /// of `environments` (one that declares none serves every one); `None` when none is live now.

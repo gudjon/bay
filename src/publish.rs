@@ -10302,6 +10302,13 @@ fn wait_for_worker(
 /// and the change was blocked `CHECK_UNKNOWN` on a quiet main, where nothing asks it again and
 /// its author's unchanged `bay merge` is refused): a runner's pass hands it on the same way, to
 /// another live runner, once per machine; only a placing visit never does.
+///
+/// G950 (a fleet finding, 2026-11-27: one unit of a check could not load a native addon on one
+/// machine, an `infra_failure`, and the run was `unknown` because it named that unit, so it was
+/// never handed on; the same machine ran it again ten minutes later, and it blocked): a gap whose
+/// units that did not pass are all `infra_failure` is the machine's too ([`machine_gap`]). It
+/// goes to a live runner on another machine only, as a runner on this one shares the cause, and
+/// a runner here passes it over while one is live ([`waits_for_worker`]).
 fn handed_to_runners(
     ctx: &Ctx,
     op_id: &str,
@@ -10311,16 +10318,8 @@ fn handed_to_runners(
     if ctx.visit == Visit::Place || refusal.reason != Some(Reason::CheckUnknown) {
         return None;
     }
-    // Every gap is one the adapter gave this machine no judged answer for: no result, its
-    // crash or its time (`unknown`, with why and no units), or an infrastructure failure.
     let rows = refusal.detail.as_ref()?["checks"].as_array()?;
-    let own_fault = !rows.is_empty()
-        && rows.iter().all(|row| {
-            matches!(row["verdict"].as_str(), Some("unknown" | "infra_failure"))
-                && row["why"].as_str().is_some_and(|why| !why.is_empty())
-                && row["reasons"].as_array().is_none_or(Vec::is_empty)
-        });
-    if !own_fault {
+    if rows.is_empty() || !rows.iter().all(machine_gap) {
         return None;
     }
     let machine = crate::live::machine(&ctx.repo.git).ok()?;
@@ -10341,13 +10340,22 @@ fn handed_to_runners(
         .collect();
     environments.sort();
     environments.dedup();
-    if environments.is_empty() || !live_runner_serving(ctx, &environments) {
+    if environments.is_empty() || !live_runner_elsewhere(ctx, &machine, &environments) {
         return None;
     }
     let why = rows
         .iter()
-        .find_map(|row| row["why"].as_str())
-        .unwrap_or("its check gave no answer");
+        .find_map(|row| {
+            row["reasons"][0]["unit"]
+                .as_str()
+                .map(|unit| format!("its unit {unit} is an infra_failure here"))
+        })
+        .or_else(|| {
+            rows.iter()
+                .find_map(|row| row["why"].as_str().filter(|why| !why.is_empty()))
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| "its check gave no answer".to_owned());
     let mut waiting = unavailable(
         ctx,
         op_id,
@@ -10358,6 +10366,20 @@ fn handed_to_runners(
         detail["machine"] = json!(machine);
     }
     Some(waiting)
+}
+
+/// Whether `row`, a gap of a refusal, is one the adapter gave this machine no judged answer for:
+/// no result, its crash or its time (`unknown`, with why and no units), or an infrastructure
+/// failure. G950: of the whole check, or of each unit that did not pass, as a unit's
+/// `infra_failure` says the machine could not run it; a unit with no result may be the product's
+/// (a test that hangs), so it never counts.
+fn machine_gap(row: &serde_json::Value) -> bool {
+    let reasons = row["reasons"].as_array().map_or(&[][..], Vec::as_slice);
+    matches!(row["verdict"].as_str(), Some("unknown" | "infra_failure"))
+        && reasons
+            .iter()
+            .all(|reason| reason["verdict"] == "infra_failure")
+        && (row["why"].as_str().is_some_and(|why| !why.is_empty()) || !reasons.is_empty())
 }
 
 /// G915: a check that gave no clear answer names the machine it ran on (`detail.checked_on`),
@@ -10498,6 +10520,13 @@ fn live_runner_serving(ctx: &Ctx, environments: &[String]) -> bool {
     crate::presence::serving_until(&ctx.repo.git, &me, environments).is_some()
 }
 
+/// G950: whether a live runner on another machine than `machine` serves every one of
+/// `environments`. A runner on `machine` shares what kept a check from an answer there.
+fn live_runner_elsewhere(ctx: &Ctx, machine: &str, environments: &[String]) -> bool {
+    crate::presence::fetch(ctx.repo)
+        && crate::presence::serving_off(&ctx.repo.git, machine, environments).is_some()
+}
+
 /// BACKLOG 214 (a fleet finding, 2026-11-02: ftltlvo6): a change's own run (`bay merge --wait`)
 /// on a bay older than main's policy read that policy as invalid and refused the change with
 /// `POLICY_INVALID`, a refusal no session was told of, and a runner merged it minutes later. A
@@ -10538,6 +10567,11 @@ fn policy_unread_here(ctx: &Ctx, op_id: &str, trunk: &str) -> Option<BayResult> 
 /// answered `unavailable`, and the change waited out the gap on every runner): the answer is
 /// about that runner's worker, so another runner that serves the environments takes the
 /// operation at once.
+///
+/// G950: an operation handed on because this machine could not run its check
+/// ([`handed_to_runners`]) is passed over by every runner on the machine while a live runner on
+/// another one serves the environments; with none live, a runner here takes it, so it never
+/// waits for a machine that is gone.
 fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Option<BayResult> {
     let op = ctx.op(op_id);
     let waiting = op.unavailable.as_ref()?;
@@ -10572,7 +10606,12 @@ fn waits_for_worker(ctx: &Ctx, op_id: &str, revision: &str, trunk: &str) -> Opti
                 .at_ms
                 .saturating_add(u64::try_from(gap.as_millis()).unwrap_or(u64::MAX))
     };
-    if !unserved && !partial && !early {
+    let unable_here = !op.unable.is_empty()
+        && crate::live::machine(&ctx.repo.git).is_ok_and(|machine| {
+            op.unable.contains(&machine)
+                && live_runner_elsewhere(ctx, &machine, &waiting.environments)
+        });
+    if !unserved && !partial && !early && !unable_here {
         return None;
     }
     Some(unavailable(
