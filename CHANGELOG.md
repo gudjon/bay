@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.47
+
+- A wait for a worker names why: the adapter's answer, a hand-back's cause, or environments not served.
+- `bay.checkStartCpuSome` can be judged on the cgroups `bay.checkStartCpuCgroup` names, never the box's own pressure.
+
 ## 0.7.46
 
 - A red that fails past the reach reads on to its last pass, so its culprit keeps its pin.
