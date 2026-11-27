@@ -1180,7 +1180,9 @@ fn bisect(
 /// BACKLOG 348: the one run of `red`'s check (`id`) on `base`, the oldest landing of a range
 /// with no pass, as a change of nothing on it under its own policy: the landing that added the
 /// check has no first parent whose policy lists it. A pass makes it the range's good end, and
-/// the next pass bisects above it; a failure makes the red the check's own (`crate::red`).
+/// the next pass bisects above it; a failure at the landing that added the check, or at main's
+/// first landing, makes the red the check's own, and one at the oldest landing read, with main
+/// going on below it, makes the judgement read on past it (`crate::red`, G944).
 fn on_base(
     repo: &Repo,
     (keys, writer): (&Keys, &Writer),

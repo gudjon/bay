@@ -82,6 +82,7 @@ impl Trunk {
             .bay_ok(&self.repo, &["start", path, "--paths", dir]);
         let id = started["change"].as_str().unwrap().to_owned();
         let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
+        std::fs::create_dir_all(view.join(dir)).unwrap();
         std::fs::write(view.join(path), format!("{path}\n")).unwrap();
         let (code, landed) = result_json(self.test_box.bay(&view).args(["merge", "--wait"]));
         assert_eq!(code, 0, "{landed}");

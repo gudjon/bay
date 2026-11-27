@@ -63,8 +63,17 @@
 //!   broke it, so its range had no good end, and no culprit or undo came): with no pass, the
 //!   range's base, the landing that added the check or the oldest landing read, answers as a
 //!   run of no change on it, judged by its own policy ([`Answers::on_itself`]; `crate::bisect`
-//!   runs it). A pass there is the range's good end. A failure there makes the red the check's
-//!   own ([`Suspect::base_failed`]): no merge since is its cause, and none is named.
+//!   runs it). A pass there is the range's good end. A failure at the landing that added the
+//!   check, or at main's first landing, makes the red the check's own ([`Suspect::base_failed`]):
+//!   no merge since is its cause, and none is named.
+//! - G944 (BACKLOG 358, a load measurement, 2026-11-27: batches landed on a red main, and once
+//!   the reach no longer held the pass below the culprit a bisect had named, the red lost its
+//!   culprit, its owner went to the newest failure, and later bisects said the red was the
+//!   check's own): a failure at the oldest landing read, when main goes on below it, says only
+//!   that the cause is older. The walk reads on past the reach, twice as deep each time, up to
+//!   [`crate::config::MAX_RED_WINDOW`], until a pass, the landing that added the check, or main's first landing.
+//!   The judgement after it reads its line as deep at once, with the landings since
+//!   ([`Judged::read_on`]), so the pin follows the red as main grows.
 //!
 //! While red or `pending_fix`, a candidate that touches those paths runs the check before its
 //! merge, judged against main (G677); a change that names a merge the red names in `--fixes`, an
@@ -214,7 +223,8 @@ pub struct Suspect {
     /// ways on one input, so the landing is not the culprit.
     pub same_read: Option<Mark>,
     /// BACKLOG 348: with no pass found, the range's base when the check failed there as well:
-    /// the landing that added it (`added`), or the oldest landing read. A run there is a change
+    /// the landing that added it (`added`), or main's first landing (G944: a failure at the
+    /// oldest landing read, with main going on below it, reads on past it). A run there is a change
     /// of nothing on it, under its own policy (`crate::bisect`), so no merge since caused the
     /// failure: the red is the check's own, and no culprit is named.
     pub base_failed: Option<Mark>,
@@ -463,11 +473,9 @@ impl Red {
                 added.named()
             ),
             (None, None, Some(base)) => format!(
-                "a run at {}, the oldest of the newest {} merges on main, failed as well, so the \
-                 red is the check's own, not a merge's: fix the check or its setup, and its next \
-                 run on main clears the red",
-                base.named(),
-                suspect.searched.unwrap_or_default()
+                "a run at {}, main's first merge, failed as well, so the red is the check's own, \
+                 not a merge's: fix the check or its setup, and its next run on main clears the red",
+                base.named()
             ),
             (None, Some(added), None) => format!(
                 "it has not passed since {} added it to the policy, so that merge owns the red: \
@@ -597,6 +605,11 @@ pub struct Judged {
     /// 0 and is judged in full once.
     #[serde(default)]
     pub window: usize,
+    /// G944: how many first-parent commits of main its line read when a red check's walk to its
+    /// last pass went past `[red] reach`; 0 when none did. The judgement after it reads its line
+    /// that deep at once, with the landings since. A cursor written before it reads as 0.
+    #[serde(default)]
+    pub read_on: usize,
 }
 
 /// The newest landing in the window whose answer to one post check is a pass or a
@@ -968,12 +981,7 @@ pub fn state(git: &Git, trunk: &str, registry: Option<&Registry>) -> Result<Judg
     let (window, reach) = bounds(git, trunk)?;
     let line = line(git, trunk, window)?;
     let unread = vec![None; line.landings.len()];
-    let past = Past {
-        trunk,
-        reach,
-        read: false,
-        kept: None,
-    };
+    let past = Past::new(trunk, reach, 0, None);
     let answers = Answers::new(git, registry, line, unread, past);
     Ok(decide(&policy, window, None, answers)?.0)
 }
@@ -1050,12 +1058,21 @@ fn judge_from(
         })
         .collect();
     // B5: the landings past the window are older than any new one, so only their notes decide.
-    let past = Past {
+    // G944: a judgement that read past the reach for a red is read as deep, with the landings
+    // since.
+    let deep = known.as_ref().map_or(0, |(before, moved)| {
+        if before.read_on == 0 {
+            0
+        } else {
+            before.read_on + moved.new
+        }
+    });
+    let past = Past::new(
         trunk,
         reach,
-        read: false,
-        kept: known.as_ref().map(|(_, moved)| (answers, &moved.trees)),
-    };
+        deep,
+        known.as_ref().map(|(_, moved)| (answers, &moved.trees)),
+    );
     let (judgement, decided, read) = decide(
         &policy,
         window,
@@ -1063,6 +1080,7 @@ fn judge_from(
         Answers::new(git, registry, line, carried, past),
     )?;
     trace(trunk, known.as_ref().map(|(before, _)| *before), read.read);
+    let read_on = if read.past.beyond { read.line.depth } else { 0 };
     let sched = sched
         .zip(schedstat())
         .map(|((ran, waited), (ran_now, waited_now))| {
@@ -1093,6 +1111,7 @@ fn judge_from(
             registry: registry.map(Registry::judged_key),
             decided,
             window,
+            read_on,
         }),
         answers,
     ))
@@ -1183,12 +1202,7 @@ fn greenest(
         })
         .collect();
     let unread = vec![None; line.landings.len()];
-    let past = Past {
-        trunk,
-        reach,
-        read: false,
-        kept: None,
-    };
+    let past = Past::new(trunk, reach, 0, None);
     let mut answers = Answers::new(git, registry, line, unread, past);
     let mut green = None;
     'landings: for at in 0..answers.line.window {
@@ -1436,13 +1450,40 @@ struct Line {
 /// B5: how a red judgement reads past its window for a red check's last pass.
 struct Past<'a> {
     trunk: &'a str,
-    /// `[red] reach`: how many first-parent commits of main it reads back at most.
+    /// `[red] reach`: how many first-parent commits of main it reads back at most, unless a
+    /// red's base fails there (G944, [`Answers::further`]).
     reach: usize,
+    /// G944: how deep the judgement before read past the reach, with the landings since
+    /// ([`Judged::read_on`]); 0 when it did not.
+    carried: usize,
     /// Whether the landings past the window were read.
     read: bool,
+    /// G944: whether main ended within the landings read.
+    ended: bool,
+    /// G944: whether a red check's walk read a landing past the reach.
+    beyond: bool,
     /// S4: the answers the judgement before read, and the trees whose notes moved since; `None`
     /// when there is no judgement to keep them from.
     kept: Option<(&'a Answered, &'a HashSet<String>)>,
+}
+
+impl<'a> Past<'a> {
+    fn new(
+        trunk: &'a str,
+        reach: usize,
+        carried: usize,
+        kept: Option<(&'a Answered, &'a HashSet<String>)>,
+    ) -> Self {
+        Self {
+            trunk,
+            reach,
+            carried,
+            read: false,
+            ended: false,
+            beyond: false,
+            kept,
+        }
+    }
 }
 
 /// How many landings' answers [`Answers`] reads in one batch at most: the landing asked for
@@ -1480,13 +1521,42 @@ impl<'a> Answers<'a> {
     }
 
     /// B5: reads the landings past the window, down to the reach, once: whether there were any.
-    /// A landing the judgement before read whose notes did not move keeps its answers (S4).
+    /// G944: as deep as the judgement before read past the reach, when that is deeper.
     fn past(&mut self) -> Result<bool, String> {
-        if self.past.read || !self.line.full || self.past.reach <= self.line.depth {
+        let depth = self.past.reach.max(self.past.carried);
+        if self.past.read || !self.line.full || depth <= self.line.depth {
             return Ok(false);
         }
         self.past.read = true;
-        let deeper = line(self.git, self.past.trunk, self.past.reach)?;
+        self.read_to(depth)
+    }
+
+    /// G944: reads on past the landings read, twice as deep, up to
+    /// [`crate::config::MAX_RED_WINDOW`]: whether there were more; never when main ended within
+    /// them.
+    fn further(&mut self) -> Result<bool, String> {
+        let depth = self
+            .line
+            .depth
+            .saturating_mul(2)
+            .min(crate::config::MAX_RED_WINDOW);
+        if self.past.ended || !self.line.full || depth <= self.line.depth {
+            return Ok(false);
+        }
+        self.past.read = true;
+        self.read_to(depth)
+    }
+
+    /// Whether main ends within the landings read: the oldest is main's first.
+    fn whole(&self) -> bool {
+        self.past.ended || !self.line.full
+    }
+
+    /// Reads the landing line down to `depth` first-parent commits of main: whether there were
+    /// landings past those read. A landing the judgement before read whose notes did not move
+    /// keeps its answers (S4).
+    fn read_to(&mut self, depth: usize) -> Result<bool, String> {
+        let deeper = line(self.git, self.past.trunk, depth)?;
         let known = self.line.landings.len();
         // The window's line is the start of the deeper one: one commit, one walk.
         let commits = |landings: &[Landing]| -> Vec<String> {
@@ -1502,6 +1572,7 @@ impl<'a> Answers<'a> {
             ));
         }
         self.line.depth = deeper.depth;
+        self.past.ended = deeper.depth < depth;
         for landing in deeper.landings.into_iter().skip(known) {
             let kept = self
                 .past
@@ -1720,48 +1791,57 @@ impl<'a> Answers<'a> {
         let mut failed = self.failed_units(at, post)?;
         let mut passed_units = None;
         let mut older = at + 1;
-        while older < self.line.landings.len() || self.past()? {
-            if self.unlisted(older, post)? {
-                added = Some(older);
-                break;
-            }
-            match self.decides(older, post)? {
-                Some(true) => {
-                    first = older;
-                    let more = self.failed_units(older, post)?;
-                    failed = failed.zip(more).map(|(mut failed, more)| {
-                        failed.extend(more);
-                        failed.sort();
-                        failed.dedup();
-                        failed
-                    });
-                }
-                Some(false) => {
-                    passed = Some((older, "pass"));
-                    break;
-                }
-                None if self.passes_units(older, post, failed.as_deref())? => {
-                    passed = Some((older, "flaky"));
-                    passed_units = failed;
-                    break;
-                }
-                None => {}
-            }
-            older += 1;
-        }
-        // BACKLOG 348: with no pass, the range's base answers as a run of no change on it: the
-        // landing that added the check, or the oldest landing read.
         let mut base_failed = None;
-        if passed.is_none() {
-            let base = added.unwrap_or(self.line.landings.len() - 1);
-            match self.on_itself(base, post)? {
-                Some(false) if base > first => {
-                    passed = Some((base, "pass"));
-                    added = None;
+        loop {
+            while older < self.line.landings.len() || self.past()? {
+                // Landings are first-parent commits of main, newest first: `older` sits at depth
+                // `older + 1`.
+                self.past.beyond |= older >= self.past.reach;
+                if self.unlisted(older, post)? {
+                    added = Some(older);
+                    break;
                 }
-                Some(true) => base_failed = Some(base),
-                _ => {}
+                match self.decides(older, post)? {
+                    Some(true) => {
+                        first = older;
+                        let more = self.failed_units(older, post)?;
+                        failed = failed.zip(more).map(|(mut failed, more)| {
+                            failed.extend(more);
+                            failed.sort();
+                            failed.dedup();
+                            failed
+                        });
+                    }
+                    Some(false) => {
+                        passed = Some((older, "pass"));
+                        break;
+                    }
+                    None if self.passes_units(older, post, failed.as_deref())? => {
+                        passed = Some((older, "flaky"));
+                        passed_units = failed.take();
+                        break;
+                    }
+                    None => {}
+                }
+                older += 1;
             }
+            // BACKLOG 348: with no pass, the range's base answers as a run of no change on it: the
+            // landing that added the check, or the oldest landing read.
+            if passed.is_none() {
+                let base = added.unwrap_or(self.line.landings.len() - 1);
+                match self.on_itself(base, post)? {
+                    Some(false) if base > first => {
+                        passed = Some((base, "pass"));
+                        added = None;
+                    }
+                    // G944: a failure at the oldest landing read, with main going on below it, says
+                    // only that the cause is older, so the walk reads on.
+                    Some(true) if added.is_none() && self.further()? => continue,
+                    Some(true) if added.is_some() || self.whole() => base_failed = Some(base),
+                    _ => {}
+                }
+            }
+            break;
         }
         let end = passed
             .map(|(older, _)| older)

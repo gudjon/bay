@@ -353,7 +353,9 @@ pub struct View {
 ///
 /// `[red] reach` (B5): how many first-parent trunk commits a red check whose window holds no
 /// pass reads back for its last pass, so its suspect range has a good end and a culprit can be
-/// found. Default [`crate::red::DEFAULT_REACH`]; from the window to [`MAX_RED_WINDOW`].
+/// found. Default [`crate::red::DEFAULT_REACH`]; from the window to [`MAX_RED_WINDOW`]. G944: a
+/// red whose run of no change at the oldest landing read fails reads on past it, twice as deep
+/// each time, up to [`MAX_RED_WINDOW`], so a culprit older than the reach keeps its pin.
 ///
 /// `[red] undo_after_s` (item 98): how long after the owner of a red post check was told that
 /// its change broke it (`crate::red_owner`) a runner undoes that change on its own, when no fix

@@ -939,6 +939,7 @@ mod tests {
                     failed: true,
                 }],
                 window: 50,
+                read_on: 0,
             }),
             targets: [("staging".to_owned(), "e".repeat(40))].into(),
         };
