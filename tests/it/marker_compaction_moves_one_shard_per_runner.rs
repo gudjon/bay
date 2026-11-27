@@ -179,18 +179,24 @@ fn a_push_is_sized_by_the_time_the_last_one_took() {
 
     // WHEN the runner passes with no record
     let ran = pass(&test_box, &first);
-    // THEN it pushes at most the first batch, and records the names it pushed and the time
+    // THEN it pushes at most the first batch, and records the names it pushed, the time it took
+    // and when it ended
     let (taken, errors) = moved(&ran);
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(batch_of(&ran), Some(4), "{ran}");
     assert!(!taken.is_empty() && taken.len() <= 4, "{ran}");
     let written = std::fs::read_to_string(&record).unwrap();
-    let (names, ms) = written.trim().split_once(' ').unwrap();
+    let fields: Vec<&str> = written.split_whitespace().collect();
+    let &[names, ms, ended] = fields.as_slice() else {
+        panic!("{written}");
+    };
     assert_eq!(names, taken.len().to_string(), "{written}");
     assert!(ms.parse::<u64>().is_ok(), "{written}");
+    assert!(ended.parse::<u64>().is_ok(), "{written}");
 
-    // WHEN the last push moved 2 names in 60 s, past twice the target
-    std::fs::write(&record, "2 60000").unwrap();
+    // WHEN the last push, which ended then, moved 2 names in 60 s, past twice the target
+    let slow = format!("2 60000 {ended}");
+    std::fs::write(&record, &slow).unwrap();
     let ran = pass(&test_box, &first);
     // THEN the next push moves half of them: one name
     let (taken, errors) = moved(&ran);
@@ -202,6 +208,6 @@ fn a_push_is_sized_by_the_time_the_last_one_took() {
     let kept = std::fs::read_to_string(&record).unwrap();
     let kept: Vec<&str> = kept.lines().collect();
     assert_eq!(kept.len(), 2, "{kept:?}");
-    assert_eq!(kept[0], "2 60000", "{kept:?}");
+    assert_eq!(kept[0], slow, "{kept:?}");
     assert!(kept[1].starts_with("1 "), "{kept:?}");
 }

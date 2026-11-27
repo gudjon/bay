@@ -84,7 +84,7 @@
 //! in line; a change on its paths runs it before its merge, judged against main
 //! (`crate::publish`, `crate::policy::Policy::judging_red`).
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1132,13 +1132,45 @@ pub fn green_tip(
     trunk: &str,
     registry: Option<&Registry>,
 ) -> Result<Option<GreenTip>, String> {
+    let (landings, green) = greenest(git, trunk, registry)?;
+    Ok(green.map(|at| GreenTip::at(&landings[at], at)))
+}
+
+/// S4 (a ref budget cuts a change soon after it lands): the changes of `trunk`'s window that
+/// landed above its green tip ([`green_tip`]), whose post checks are not all green yet, so a red
+/// judgement may still name one of them: every change of the window when none of its landings is
+/// green, and none under a policy with no post check.
+///
+/// # Errors
+///
+/// A git fault, or a committed config bay cannot read.
+pub fn owed(
+    git: &Git,
+    trunk: &str,
+    registry: Option<&Registry>,
+) -> Result<BTreeSet<String>, String> {
+    let (landings, green) = greenest(git, trunk, registry)?;
+    let above = green.unwrap_or(landings.len());
+    Ok(landings
+        .into_iter()
+        .take(above)
+        .filter_map(|landing| landing.change)
+        .collect())
+}
+
+/// What [`green_tip`] reads: the landings of `trunk`'s window, newest first, and the place of the
+/// newest green one among them. Under a policy with no post check, the newest is green.
+fn greenest(
+    git: &Git,
+    trunk: &str,
+    registry: Option<&Registry>,
+) -> Result<(Vec<Landing>, Option<usize>), String> {
     let (window, reach) = bounds(git, trunk)?;
-    let line = line(git, trunk, window)?;
+    let mut line = line(git, trunk, window)?;
     let Some(policy) = post_policy(git, trunk)? else {
-        return Ok(line
-            .landings
-            .first()
-            .map(|landing| GreenTip::at(landing, 0)));
+        line.landings.truncate(line.window);
+        let green = (!line.landings.is_empty()).then_some(0);
+        return Ok((line.landings, green));
     };
     let posts: Vec<&crate::policy::ManifestEntry> = policy
         .post
@@ -1158,15 +1190,19 @@ pub fn green_tip(
         kept: None,
     };
     let mut answers = Answers::new(git, registry, line, unread, past);
+    let mut green = None;
     'landings: for at in 0..answers.line.window {
         for post in &posts {
             if !answers.green_at(at, post)? {
                 continue 'landings;
             }
         }
-        return Ok(Some(GreenTip::at(&answers.line.landings[at], at)));
+        green = Some(at);
+        break;
     }
-    Ok(None)
+    let mut landings = answers.line.landings;
+    landings.truncate(answers.line.window);
+    Ok((landings, green))
 }
 
 fn post_policy(git: &Git, trunk: &str) -> Result<Option<crate::policy::Policy>, String> {

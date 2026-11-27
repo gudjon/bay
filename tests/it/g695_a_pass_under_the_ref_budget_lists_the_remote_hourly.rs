@@ -1,12 +1,13 @@
 //! G695 (a fleet finding, 2026-11-10: every runner pass listed 30,000 remote refs, 2.3 MB and
-//! 1.7 s, to learn they were under a budget of 100,000). A pass's compaction, once the store
-//! holds a change cut by retention, counts the remote's bay refs; once a count finds them under
-//! the budget, the passes of the next hour list none. A count over the budget stands for nothing:
-//! the next pass counts again (G21's compaction). A store holding no cut change lists none (G921).
+//! 1.7 s, to learn they were under a budget of 100,000). An idle pass on a store with a ref budget,
+//! or one that holds a change cut by retention, counts the remote's bay refs; once a count finds
+//! them under the budget, the passes of the next hour list none. A count over the budget stands
+//! for nothing: the next pass counts again (G21's compaction, G941). A store with no budget that
+//! holds no cut change lists none (G921).
 //!
 //! Read from the trace a test build writes when `BAY_TEST_GIT_TRACE` names a file (G171).
 //!
-//! Guard to mutate: in `src/compact.rs` `run`, the `counted` return (each pass lists the
+//! Guard to mutate: in `src/compact.rs` `over`, the `counted` return (each pass lists the
 //! remote's refs again).
 
 #![cfg(unix)]
@@ -56,9 +57,7 @@ fn a_pass_under_the_ref_budget_lists_the_remote_hourly() {
     test_box.bay_ok(&view, &["merge", "--wait"]);
     let executor = test_box.clone_of(&remote, "executor");
 
-    // GIVEN a pass that cuts the landed change after its compaction, which found nothing cut
-    assert_eq!(listings(&test_box, &executor, "cut"), 0);
-    // AND a pass that counted the remote's bay refs under the budget
+    // GIVEN a pass that counted the remote's bay refs under the budget, then cut the landed change
     assert_eq!(listings(&test_box, &executor, "first"), 1);
 
     // WHEN the next pass runs THEN it lists none

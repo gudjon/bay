@@ -389,8 +389,8 @@ pub const MAX_RED_UNDO_AFTER_S: u64 = 30 * 86_400;
 pub const MAX_HOLD_TIMEOUT_S: u64 = 120;
 
 /// How long a closed change keeps its drafts before the retention cut (§ 5), and the bay ref
-/// count past which an executor moves cut changes into their shard indexes (§ 10a ref-growth
-/// budget, `crate::compact`).
+/// count past which an executor cuts the oldest ended changes and moves their refs into their
+/// shard indexes (§ 10a ref-growth budget, `crate::compact`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Retention {
@@ -1170,8 +1170,13 @@ impl Config {
         )
     }
 
-    /// The ref-growth budget (§ 10a): bay refs on the remote past which the refs of changes cut
-    /// by retention move into their shard indexes. None by default: the window bounds the refs.
+    /// The ref-growth budget (§ 10a), `[retention] ref_budget`: the bay refs the remote keeps.
+    /// Past it, an idle runner pass cuts the oldest ended changes, even inside the window, and
+    /// moves their refs and those of changes cut before into their shard indexes, until the
+    /// remote is back under it (S4: the budget is the window). A change still owed a post check
+    /// is never cut for it. 0, the default, is none: the window alone cuts, and every cut change
+    /// moves. A store that lands thousands of changes a day keeps flat with a budget of 4000:
+    /// about 256 shard refs, its live work, and its newest few hundred changes.
     #[must_use]
     pub fn ref_budget(&self) -> u64 {
         self.retention

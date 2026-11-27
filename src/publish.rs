@@ -13130,15 +13130,36 @@ fn committer_time(commit: &[u8]) -> Option<u64> {
     line.rsplit(' ').nth(1)?.parse().ok()
 }
 
-/// G200b: the ids of `chains` whose retention cut may be due (§ 5), so an executor pass costs
-/// what its live work costs, not what its history holds: a chain already cut, one neither
-/// landed nor abandoned, and one closed less than the retention window ago are left out
-/// before any fetch. An abandoned change is closed since its chain head (`committed`), a
-/// landed one since its published commit, whose times one `git cat-file --batch` reads. A
-/// time that cannot be read leaves the chain in, and [`retain`] decides it on the chain it
-/// fetches again.
+/// The ended changes a pass may retention cut (§ 5), as [`retention_due`] reads them.
+#[derive(Debug, Default)]
+pub struct Closed {
+    /// Those whose cut the window makes due: ended longer ago than the window, or at a time that
+    /// cannot be read.
+    pub due: BTreeSet<String>,
+    /// Those that ended inside the window, oldest first: a ref budget cuts these first (S4,
+    /// `crate::compact::to_cut`).
+    pub within: Vec<String>,
+}
+
+/// Why a pass retention cuts a change (§ 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cut {
+    /// It ended longer ago than the retention window.
+    Window,
+    /// S4: the remote holds more bay refs than the ref budget, and the change is among the
+    /// oldest that ended (`crate::compact::to_cut`).
+    Budget,
+}
+
+/// G200b: the ended changes of `chains` whose retention cut may be due (§ 5), so an executor
+/// pass costs what its live work costs, not what its history holds: a chain already cut, and one
+/// neither landed nor abandoned, are left out before any fetch, and one closed less than the
+/// retention window ago is `within` it. An abandoned change is closed since its chain head
+/// (`committed`), a landed one since its published commit, whose times one `git cat-file --batch`
+/// reads. A time that cannot be read leaves the chain due, and [`retain`] decides it on the chain
+/// it fetches again.
 #[must_use]
-pub fn retention_due(repo: &Repo, chains: &[HeldChain]) -> BTreeSet<String> {
+pub fn retention_due(repo: &Repo, chains: &[HeldChain]) -> Closed {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
@@ -13163,28 +13184,39 @@ pub fn retention_due(repo: &Repo, chains: &[HeldChain]) -> BTreeSet<String> {
         .objects(&published)
         .unwrap_or_else(|_| vec![None; published.len()])
         .into_iter();
-    closed
-        .into_iter()
-        .filter(|held| {
-            let since = if held.record.state == ChangeState::Landed {
-                times.next().flatten().as_deref().and_then(committer_time)
-            } else {
-                Some(held.committed).filter(|committed| *committed > 0)
-            };
-            since.is_none_or(|since| now.saturating_sub(since) >= window)
-        })
-        .map(|held| held.id.clone())
-        .collect()
+    let mut due = BTreeSet::new();
+    let mut within = Vec::new();
+    for held in closed {
+        let since = if held.record.state == ChangeState::Landed {
+            times.next().flatten().as_deref().and_then(committer_time)
+        } else {
+            Some(held.committed).filter(|committed| *committed > 0)
+        };
+        match since {
+            Some(since) if now.saturating_sub(since) < window => {
+                within.push((since, held.id.clone()));
+            }
+            _ => {
+                due.insert(held.id.clone());
+            }
+        }
+    }
+    within.sort();
+    Closed {
+        due,
+        within: within.into_iter().map(|(_, id)| id).collect(),
+    }
 }
 
 /// The retention cut (§ 5): once a landed or abandoned change is older than the retention
-/// window, its chain is cut to one head that keeps what still matters. Superseded drafts become
-/// collectable; a landed change's terminal record stays in the log.
+/// window, or a ref budget needs its refs (`cut`), its chain is cut to one head that keeps what
+/// still matters. Superseded drafts become collectable; a landed change's terminal record stays
+/// in the log.
 ///
 /// # Errors
 ///
 /// A fault of bay's own.
-pub fn retain(repo: &Repo, id: &str) -> Result<Option<String>, String> {
+pub fn retain(repo: &Repo, id: &str, cut: Cut) -> Result<Option<String>, String> {
     let step = Step::new("retention");
     let mut ctx = Ctx::load(repo, &step, id)?;
     if ctx.refetch().is_err() || ctx.record.retention_cut {
@@ -13201,7 +13233,9 @@ pub fn retain(repo: &Repo, id: &str) -> Result<Option<String>, String> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs());
-    if now.saturating_sub(kept.since) < repo.config.retention_window().as_secs() {
+    if cut == Cut::Window
+        && now.saturating_sub(kept.since) < repo.config.retention_window().as_secs()
+    {
         return Ok(None);
     }
     // The cut must be signed by an executor key, so read the registry even when no operation

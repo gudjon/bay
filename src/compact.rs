@@ -17,9 +17,10 @@
 //! and each runner takes the shards in an order of its own name ([`pick`]), so a push's cost stays
 //! near [`TARGET`] and two runners seldom race it. Under the default budget, none, every cut change
 //! moves: the refs the remote holds are those of the retention window, and a store drops its copy
-//! of a ref moved elsewhere ([`forget`]).
+//! of a ref moved elsewhere ([`forget`]). S4: over a budget, the budget is the window: a pass also
+//! cuts the oldest ended changes the remote has no room for ([`to_cut`]).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
 use sha2::{Digest as _, Sha256};
@@ -32,7 +33,8 @@ use crate::signing::Signer;
 
 pub const INDEX_PREFIX: &str = crate::names::LANDED_INDEX;
 /// The default ref-growth budget (§ 10a): none, so every change retention cut moves into its
-/// shard, and the refs the remote holds are those of the retention window.
+/// shard, the refs the remote holds are those of the retention window, and no change is cut
+/// before the window ends.
 pub const DEFAULT_BUDGET: u64 = 0;
 
 /// The most names one compaction push moves, so the host's judgement of it stays bounded.
@@ -55,9 +57,13 @@ const TARGET: std::time::Duration = std::time::Duration::from_secs(15);
 const KEPT: usize = 4;
 /// The names a store's first compaction push moves, before it has timed one.
 const FIRST: usize = 4;
-/// G695: how long a count of the remote's bay refs under the budget stands, so a pass lists
-/// them at most this often while the remote stays under it.
+/// G695: how long a count of the remote's bay refs under the budget stands at most, so a pass
+/// lists them at most this often while the remote stays under it ([`counted`]).
 const COUNTED_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
+/// BACKLOG 336 (a fleet finding, 2026-11-26: a push timed at another hour's load, 21.5 s, kept
+/// one runner's batches at one to four names until three more pushes replaced it): how long a
+/// push's time stands in the fit ([`pushes`]).
+const PUSH_STANDS: std::time::Duration = std::time::Duration::from_secs(3600);
 /// The namespaces whose markers are compacted: an entry is the target the marker names.
 const MARKERS: [&str; 3] = [LANDED, INTENT, LANDED_INTENT];
 /// G921: the namespaces whose refs are compacted with their record, each with the file its
@@ -612,30 +618,47 @@ fn cost(
     ))
 }
 
-/// The names and the time of each compaction push `record` holds, oldest first, one
-/// `<names> <ms>` line each; a line that does not read is passed over.
-fn pushes(record: &std::path::Path) -> Vec<(usize, std::time::Duration)> {
+/// A compaction push a store timed (BACKLOG 334): the names it moved, how long it took, and when
+/// it ended, in Unix seconds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Timed {
+    names: usize,
+    took: std::time::Duration,
+    ended: u64,
+}
+
+/// The compaction pushes `record` holds that ended less than [`PUSH_STANDS`] before `now` (Unix
+/// seconds), oldest first, one `<names> <ms> <ended>` line each. A line that does not read, or
+/// that names no time it ended, is passed over.
+fn pushes(record: &std::path::Path, now: u64) -> Vec<Timed> {
     std::fs::read_to_string(record)
         .unwrap_or_default()
         .lines()
         .filter_map(|line| {
-            let (names, millis) = line.trim().split_once(' ')?;
-            Some((
-                names.parse().ok()?,
-                std::time::Duration::from_millis(millis.parse().ok()?),
-            ))
+            let mut fields = line.split_whitespace();
+            let push = Timed {
+                names: fields.next()?.parse().ok()?,
+                took: std::time::Duration::from_millis(fields.next()?.parse().ok()?),
+                ended: fields.next()?.parse().ok()?,
+            };
+            (now.saturating_sub(push.ended) < PUSH_STANDS.as_secs()).then_some(push)
         })
         .collect()
 }
 
-/// Adds a push of `names` that took `took` to `record`, which keeps the last [`KEPT`].
-fn keep(record: &std::path::Path, names: usize, took: std::time::Duration) {
-    let mut kept = pushes(record);
-    kept.push((names, took));
+/// Adds a push of `names` that took `took` and ended at `now` to `record`, which keeps the last
+/// [`KEPT`] of those that still stand.
+fn keep(record: &std::path::Path, names: usize, took: std::time::Duration, now: u64) {
+    let mut kept = pushes(record, now);
+    kept.push(Timed {
+        names,
+        took,
+        ended: now,
+    });
     let from = kept.len().saturating_sub(KEPT);
     let lines: Vec<String> = kept[from..]
         .iter()
-        .map(|(names, took)| format!("{names} {}", took.as_millis()))
+        .map(|push| format!("{} {} {}", push.names, push.took.as_millis(), push.ended))
         .collect();
     let text = lines.join("\n") + "\n";
     if let Some(dir) = record.parent()
@@ -703,16 +726,155 @@ fn remote_bay_refs(repo: &Repo) -> Result<HashMap<String, String>, String> {
         .collect())
 }
 
-/// G695, BACKLOG 333: whether the count `marker` records stands: it found the remote's bay refs
-/// under `budget`, the budget in force now, less than [`COUNTED_EVERY`] ago. A count under
-/// another budget stands for nothing, so a lowered budget is read on the next pass.
-fn counted(marker: &std::path::Path, budget: u64) -> bool {
-    std::fs::read_to_string(marker).is_ok_and(|text| text.trim() == budget.to_string())
+/// G695, BACKLOG 333: whether the count `marker` records stands for a store that holds `chains`
+/// chains now: it found the remote's bay refs under `budget`, the budget in force now, less than
+/// [`COUNTED_EVERY`] ago, and the chains the store took since, at the refs a chain it held then,
+/// would not fill the room the count left under the budget (S4: at a landing every three seconds,
+/// seven refs each, an hour's landings are 8,400 refs). A count under another budget stands for
+/// nothing, so a lowered budget is read on the next pass. One `<budget> <refs> <chains>` line.
+fn counted(marker: &std::path::Path, budget: u64, chains: usize) -> bool {
+    let Ok(text) = std::fs::read_to_string(marker) else {
+        return false;
+    };
+    let fields: Vec<u64> = text
+        .split_whitespace()
+        .map_while(|field| field.parse().ok())
+        .collect();
+    let &[under, refs, then] = fields.as_slice() else {
+        return false;
+    };
+    let grown = u64::try_from(chains)
+        .unwrap_or(u64::MAX)
+        .saturating_sub(then);
+    under == budget
+        && grown.saturating_mul(refs.div_ceil(then.max(1))) <= budget.saturating_sub(refs)
         && std::fs::metadata(marker)
             .and_then(|meta| meta.modified())
             .ok()
             .and_then(|at| at.elapsed().ok())
             .is_some_and(|age| age < COUNTED_EVERY)
+}
+
+/// `name` in this store's own bay state, `<git-common-dir>/bay/<name>`.
+fn state_file(repo: &Repo, name: &str) -> Option<std::path::PathBuf> {
+    repo.git
+        .common_dir()
+        .ok()
+        .map(|common| std::path::Path::new(&common).join("bay").join(name))
+}
+
+/// The remote's bay refs as a pass listed them, more than the budget (§ 10a): what the pass's
+/// compaction ([`run`]) and its budget's cut ([`to_cut`]) read.
+#[derive(Debug)]
+pub struct Over {
+    remote: HashMap<String, String>,
+    budget: u64,
+}
+
+impl Over {
+    /// How many refs the remote holds past the budget.
+    fn excess(&self) -> u64 {
+        (self.remote.len() as u64).saturating_sub(self.budget)
+    }
+}
+
+/// G695 (a fleet finding, 2026-11-10: every runner pass listed 30,000 refs, 2.3 MB and 1.7 s, to
+/// learn the remote was under a budget of 100,000): the remote's bay refs, when it holds more than
+/// the budget; `None` under it. Under the budget, the count stands while [`counted`] says so, and
+/// a pass lists nothing; over it, each pass counts again until the refs are moved. A store with
+/// no budget that holds no cut change lists nothing: no cut is due and nothing moves.
+///
+/// # Errors
+///
+/// The remote cannot be read.
+pub fn over(repo: &Repo, chains: &[HeldChain]) -> Result<Option<Over>, String> {
+    let budget = repo.config.ref_budget();
+    let cut = chains
+        .iter()
+        .any(|held| held.record.id == held.id && moves(&held.record));
+    if budget == 0 && !cut {
+        return Ok(None);
+    }
+    let marker = state_file(repo, "under-ref-budget");
+    if marker
+        .as_deref()
+        .is_some_and(|marker| counted(marker, budget, chains.len()))
+    {
+        return Ok(None);
+    }
+    let over = Over {
+        remote: remote_bay_refs(repo)?,
+        budget,
+    };
+    if over.excess() > 0 {
+        return Ok(Some(over));
+    }
+    if let Some(marker) = &marker
+        && let Some(dir) = marker.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+    {
+        let count = format!("{budget} {} {}\n", over.remote.len(), chains.len());
+        let _ = std::fs::write(marker, count);
+    }
+    Ok(None)
+}
+
+/// S4 (the ref budget is the retention window; a history of 453 landings left 3,179 refs on its
+/// remote, and a week's window keeps them all): the changes of `within`, ended inside the retention
+/// window and oldest first, that a pass over the budget cuts now, so their refs move. It takes them
+/// oldest first until the refs they hold on the remote cover its excess over the budget, less the
+/// refs that already wait to move: those of the changes cut before, and of those `due` for the
+/// window's cut in this pass. It never takes a change still owed a post check (`owed`, read only
+/// when a cut is needed; `None`, unread, takes none), and takes none under no budget.
+pub fn to_cut(
+    over: &Over,
+    chains: &[HeldChain],
+    within: &[String],
+    due: &BTreeSet<String>,
+    owed: impl FnOnce() -> Option<BTreeSet<String>>,
+) -> Vec<String> {
+    if over.budget == 0 {
+        return Vec::new();
+    }
+    let records: HashMap<&str, &ChangeRecord> = chains
+        .iter()
+        .filter(|held| held.record.id == held.id)
+        .map(|held| (held.id.as_str(), &held.record))
+        .collect();
+    let held = |id: &str, record: &ChangeRecord| {
+        names_of(id, record)
+            .iter()
+            .filter(|name| over.remote.contains_key(*name))
+            .count() as u64
+    };
+    let waiting: u64 = records
+        .iter()
+        .filter(|(id, record)| moves(record) || due.contains(**id))
+        .map(|(id, record)| held(id, record))
+        .sum();
+    let mut need = over.excess().saturating_sub(waiting);
+    if need == 0 {
+        return Vec::new();
+    }
+    let Some(owed) = owed() else {
+        return Vec::new();
+    };
+    let mut cut = Vec::new();
+    for id in within {
+        if need == 0 {
+            break;
+        }
+        let Some(record) = records.get(id.as_str()) else {
+            continue;
+        };
+        let freed = held(id, record);
+        if freed == 0 || owed.contains(id) {
+            continue;
+        }
+        need = need.saturating_sub(freed);
+        cut.push(id.clone());
+    }
+    cut
 }
 
 /// G921: [`forget`]s each of `names` this store holds that `remote` no longer does, and answers
@@ -745,16 +907,15 @@ fn settle_held(
         .collect())
 }
 
-/// One executor pass of compaction: when the remote holds more bay refs than the budget, moves
-/// the refs of the changes in `chains` that ended and that retention cut into their shard index,
+/// One executor pass of compaction, `over` the budget: moves the refs of the changes in `chains`
+/// that ended and that retention cut into their shard index,
 /// one shard a push (BACKLOG 332): the shard [`pick`] gives this runner (`me`, its presence ref), at
 /// most [`sized`] of its names, in one atomic push that appends the shard under a lease on its tip
 /// and deletes each moved ref. The push's names and time are kept for the next ones to size
 /// themselves by (BACKLOG 334, 336). G921: each of those refs this store holds that the remote no
 /// longer does, and that its shard records at the target here, goes from this store first
 /// ([`forget`]), so the chains a runner holds stay the live ones and the window's. Returns the
-/// push; none when under the budget or nothing moves. A store that holds no cut change lists
-/// nothing.
+/// push; none when nothing moves.
 ///
 /// A delete carries no lease of its own (BACKLOG 336: a lease is one more match against every
 /// remote ref, a name): the push sends the target the remote listed as the ref's old value, and
@@ -766,11 +927,12 @@ fn settle_held(
 ///
 /// # Errors
 ///
-/// The remote cannot be read, a git fault, or the push was refused.
+/// A git fault, or the push was refused.
 pub fn run(
     repo: &Repo,
     (signer, me): (Option<&Signer>, &str),
     chains: &[HeldChain],
+    over: &Over,
 ) -> Result<Option<Pushed>, String> {
     let cut: Vec<&HeldChain> = chains
         .iter()
@@ -779,42 +941,17 @@ pub fn run(
     if cut.is_empty() {
         return Ok(None);
     }
-    // G695 (a fleet finding, 2026-11-10: every runner pass listed 30,000 refs, 2.3 MB and
-    // 1.7 s, to learn the remote was under a budget of 100,000). Under the budget, the count
-    // stands for an hour; over it, each pass counts again until the refs are moved.
-    let state = repo
-        .git
-        .common_dir()
-        .ok()
-        .map(|common| std::path::Path::new(&common).join("bay"));
-    let marker = state.as_ref().map(|state| state.join("under-ref-budget"));
-    let record = state.as_ref().map(|state| state.join("compaction-push"));
-    let budget = repo.config.ref_budget();
-    if marker
-        .as_deref()
-        .is_some_and(|marker| counted(marker, budget))
-    {
-        return Ok(None);
-    }
-    let remote = remote_bay_refs(repo)?;
-    if (remote.len() as u64) <= budget {
-        if let Some(marker) = &marker
-            && let Some(dir) = marker.parent()
-            && std::fs::create_dir_all(dir).is_ok()
-        {
-            let _ = std::fs::write(marker, budget.to_string());
-        }
-        return Ok(None);
-    }
+    let remote = &over.remote;
+    let record = state_file(repo, "compaction-push");
     // What the shards already record is read from this repository's copy of them.
     fetch(repo)?;
     let names: Vec<String> = cut
         .iter()
         .flat_map(|held| names_of(&held.id, &held.record))
         .collect();
-    let stored = settle_held(&repo.git, &names, &remote)?;
+    let stored = settle_held(&repo.git, &names, remote)?;
     let mut shards: BTreeMap<u8, Vec<(String, String)>> = BTreeMap::new();
-    for (name, target) in candidates(&repo.git, &cut, &remote, &stored)? {
+    for (name, target) in candidates(&repo.git, &cut, remote, &stored)? {
         shards.entry(shard(&name)).or_default().push((name, target));
     }
     let order: Vec<u8> = shards.keys().copied().collect();
@@ -822,10 +959,14 @@ pub fn run(
         return Ok(None);
     };
     let mut moved = shards.remove(&chosen).unwrap_or_default();
-    let size = sized(
-        &record.as_deref().map(pushes).unwrap_or_default(),
-        remote.len(),
-    );
+    let timed: Vec<(usize, std::time::Duration)> = record
+        .as_deref()
+        .map(|record| pushes(record, crate::live::unix_now()))
+        .unwrap_or_default()
+        .iter()
+        .map(|push| (push.names, push.took))
+        .collect();
+    let size = sized(&timed, remote.len());
     moved.truncate(size);
     let index = format!("{INDEX_PREFIX}{chosen}");
     let parent = remote.get(&index).cloned();
@@ -850,7 +991,7 @@ pub fn run(
     if (pushed.is_ok() || took > TARGET * 2)
         && let Some(record) = &record
     {
-        keep(record, moved.len(), took);
+        keep(record, moved.len(), took, crate::live::unix_now());
     }
     pushed.map_err(|error| {
         format!(
@@ -1038,10 +1179,14 @@ fn append(
 mod tests {
     use std::time::Duration;
 
+    use std::collections::{BTreeSet, HashMap};
+
     use super::{
-        FIRST, KEPT, PUSH_MAX, PUSH_MIN, TARGET, batch, compactable, cost, counted, index_ref,
-        keep, name_of, path, pick, pushes, record_file, shard, sized, target_of,
+        FIRST, KEPT, Over, PUSH_MAX, PUSH_MIN, TARGET, batch, compactable, cost, counted,
+        index_ref, keep, name_of, path, pick, pushes, record_file, shard, sized, target_of, to_cut,
     };
+    use crate::change::HeldChain;
+    use crate::names::{CHANGES, LANDED, REQUESTS};
 
     /// G923: a name sits at `<hh>/<name>` in its shard, and a shard written flat still reads.
     #[test]
@@ -1207,15 +1352,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bay-push-record-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let record = dir.join("compaction-push");
-        assert!(pushes(&record).is_empty(), "no push yet");
+        let now = 1_800_000_000;
+        assert!(pushes(&record, now).is_empty(), "no push yet");
+        std::fs::write(&record, format!("12 8500 {now}\n")).unwrap();
+        let read = pushes(&record, now);
+        assert_eq!(
+            (read.len(), read[0].names, read[0].took),
+            (1, 12, Duration::from_millis(8500))
+        );
         std::fs::write(&record, "12 8500\n").unwrap();
-        assert_eq!(pushes(&record), [(12, Duration::from_millis(8500))]);
-        std::fs::write(&record, "12").unwrap();
-        assert!(pushes(&record).is_empty(), "a record without its time");
+        assert!(pushes(&record, now).is_empty(), "a record without its end");
         for names in 1..=KEPT + 2 {
-            keep(&record, names, Duration::from_millis(1000));
+            keep(&record, names, Duration::from_millis(1000), now);
         }
-        let kept: Vec<usize> = pushes(&record).iter().map(|&(names, _)| names).collect();
+        let kept: Vec<usize> = pushes(&record, now).iter().map(|push| push.names).collect();
         assert_eq!(
             kept,
             (3..=KEPT + 2).collect::<Vec<_>>(),
@@ -1229,12 +1379,161 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("bay-counted-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let marker = dir.join("under-ref-budget");
-        assert!(!counted(&marker, 100_000), "no count yet");
+        assert!(!counted(&marker, 100_000, 10), "no count yet");
         std::fs::write(&marker, "").unwrap();
-        assert!(!counted(&marker, 100_000), "a count that names no budget");
+        assert!(
+            !counted(&marker, 100_000, 10),
+            "a count that names no budget"
+        );
         std::fs::write(&marker, "100000").unwrap();
-        assert!(counted(&marker, 100_000));
-        assert!(!counted(&marker, 56_000), "the budget was lowered since");
+        assert!(!counted(&marker, 100_000, 10), "a count that names no refs");
+        std::fs::write(&marker, "100000 30000 10\n").unwrap();
+        assert!(counted(&marker, 100_000, 10));
+        assert!(
+            !counted(&marker, 56_000, 10),
+            "the budget was lowered since"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// S4 (an hour's landings at one every three seconds are 8,400 refs, past a budget of 5,000):
+    /// a count under the budget stands while the chains the store took since, at the refs a chain
+    /// it counted, fit in the room it left under the budget; chains the store dropped since take
+    /// no room.
+    #[test]
+    fn a_count_stands_only_while_the_chains_since_fit_under_the_budget() {
+        let dir = std::env::temp_dir().join(format!("bay-counted-room-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("under-ref-budget");
+        // 3,500 refs for 500 chains, 7 a chain: room for 214 chains under 5,000.
+        std::fs::write(&marker, "5000 3500 500\n").unwrap();
+        assert!(counted(&marker, 5_000, 500));
+        assert!(counted(&marker, 5_000, 714), "214 chains more: 1,498 refs");
+        assert!(!counted(&marker, 5_000, 715), "215 chains more: 1,505 refs");
+        assert!(counted(&marker, 5_000, 400), "chains dropped since");
+        std::fs::write(&marker, "5000 30 0\n").unwrap();
+        assert!(
+            counted(&marker, 5_000, 1),
+            "no chain then: each new one counts all its refs"
+        );
+        assert!(!counted(&marker, 5_000, 200));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// BACKLOG 336 (a fleet finding, 2026-11-26: a record that held a push timed at another hour's
+    /// load, 21.5 s, kept one runner's batches at one to four names): a push that ended an hour ago
+    /// or more leaves the fit, so the next push is sized by the pushes of this hour alone.
+    #[test]
+    fn a_push_timed_an_hour_ago_leaves_the_fit() {
+        let dir = std::env::temp_dir().join(format!("bay-push-aged-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("compaction-push");
+        let now = 1_800_000_000;
+        let ms = Duration::from_millis;
+        let old = now - 3600;
+        std::fs::write(
+            &record,
+            format!("3 21542 {old}\n1 9000 {}\n2 9500 {}\n", now - 120, now - 60),
+        )
+        .unwrap();
+        let read: Vec<(usize, Duration)> = pushes(&record, now)
+            .iter()
+            .map(|push| (push.names, push.took))
+            .collect();
+        assert_eq!(read, [(1, ms(9000)), (2, ms(9500))]);
+        assert_eq!(sized(&read, 60_000), 4, "fitted on this hour: 8.5 s fixed");
+        assert_eq!(
+            sized(&[(3, ms(21_542)), (1, ms(9000)), (2, ms(9500))], 60_000),
+            2,
+            "the old push would have pinned it"
+        );
+        std::fs::write(&record, format!("2 60000 {old}\n")).unwrap();
+        assert_eq!(pushes(&record, now), Vec::new());
+        keep(&record, 4, ms(7000), now);
+        let kept = std::fs::read_to_string(&record).unwrap();
+        assert_eq!(kept, format!("4 7000 {now}\n"), "the old push is not kept");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A change `id` of `state`, its chain cut by retention when `cut`.
+    fn held(id: &str, state: &str, cut: bool) -> HeldChain {
+        let record = serde_json::from_value(serde_json::json!({
+            "schema": "bay.change/1", "id": id,
+            "intent": {"reference": id, "revision": "1"},
+            "actor": {"name": "agent", "session": "s"},
+            "base_first": "b", "base": "b", "observed_remote": "b",
+            "declared_inputs": [], "state": state, "retention_cut": cut,
+        }))
+        .unwrap();
+        HeldChain {
+            id: id.to_owned(),
+            head: String::new(),
+            committed: 0,
+            record,
+        }
+    }
+
+    /// S4: over the budget, a pass cuts the oldest changes that ended inside the window, as many as
+    /// the remote's excess needs past the refs that already wait to move; never one owed a post
+    /// check, none when what is owed cannot be read, and none under no budget.
+    #[test]
+    fn over_the_budget_the_oldest_ended_changes_are_cut_first() {
+        // Four landed changes, oldest first, each with its chain, request and marker on the
+        // remote; a cut abandoned change whose chain and request wait to move; and the registry.
+        let mut chains: Vec<HeldChain> = ["a", "b", "c", "d"]
+            .iter()
+            .map(|id| held(id, "landed", false))
+            .collect();
+        chains.push(held("e", "abandoned", true));
+        let mut remote = HashMap::new();
+        for id in ["a", "b", "c", "d", "e"] {
+            for prefix in [CHANGES, REQUESTS, LANDED] {
+                if id != "e" || prefix != LANDED {
+                    remote.insert(format!("{prefix}{id}"), "t".to_owned());
+                }
+            }
+        }
+        remote.insert("refs/bay/registry".to_owned(), "t".to_owned());
+        let over = |budget| Over {
+            remote: remote.clone(),
+            budget,
+        };
+        let within: Vec<String> = ["a", "b", "c", "d"].map(str::to_owned).to_vec();
+        let none = BTreeSet::new();
+        let owed_none = || Some(BTreeSet::new());
+
+        // 15 refs over a budget of 10: e's 2 wait, and a's 3 cover the rest.
+        assert_eq!(to_cut(&over(10), &chains, &within, &none, owed_none), ["a"]);
+        assert_eq!(
+            to_cut(&over(8), &chains, &within, &none, owed_none),
+            ["a", "b"]
+        );
+        let owed = || Some(BTreeSet::from(["a".to_owned()]));
+        assert_eq!(
+            to_cut(&over(8), &chains, &within, &none, owed),
+            ["b", "c"],
+            "a change owed a post check is passed over"
+        );
+        let due = BTreeSet::from(["a".to_owned()]);
+        assert_eq!(
+            to_cut(&over(8), &chains, &within[1..], &due, owed_none),
+            ["b"],
+            "a change the window cuts this pass waits to move"
+        );
+        assert!(
+            to_cut(&over(13), &chains, &within, &none, || unreachable!(
+                "what is owed is read only when a cut is needed"
+            ))
+            .is_empty(),
+            "the refs that wait to move cover the excess"
+        );
+        assert!(
+            to_cut(&over(8), &chains, &within, &none, || None).is_empty(),
+            "what is owed is unread"
+        );
+        assert!(
+            to_cut(&over(0), &chains, &within, &none, owed_none).is_empty(),
+            "no budget"
+        );
     }
 }

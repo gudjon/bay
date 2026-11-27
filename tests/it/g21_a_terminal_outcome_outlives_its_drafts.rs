@@ -241,7 +241,10 @@ fn a_cut_racing_a_late_publishing_push_keeps_what_the_push_needs() {
     );
     let request = test_box.git_bare(&remote, &["rev-parse", &format!("refs/bay/requests/{id}")]);
     let opened = bay::repo::Repo::open(&other).unwrap();
-    assert_eq!(bay::publish::retain(&opened, &id).unwrap(), None);
+    assert_eq!(
+        bay::publish::retain(&opened, &id, bay::publish::Cut::Window).unwrap(),
+        None
+    );
     assert_eq!(
         test_box.git_bare(&remote, &["rev-parse", &format!("refs/bay/requests/{id}")]),
         request

@@ -1043,7 +1043,7 @@ fn pass(
     notes.extend(early_conflicts(repo, &queue));
     notes.extend(red_owners(repo, &records));
     red_beat = Instant::now();
-    let due = publish::retention_due(repo, &chains);
+    let closed = publish::retention_due(repo, &chains);
     let reach = within_reach(repo, &queue);
     // G788: when this pass last asked the remote whether the line's head moved.
     let mut probed = Instant::now();
@@ -1131,14 +1131,31 @@ fn pass(
         }
     }
     // BACKLOG 332: marker compaction pushes only on a pass that ran no operation over an empty
-    // line, so its push never delays a landing.
+    // line, so its push never delays a landing. S4: such a pass alone counts the remote's bay
+    // refs against the budget; over it, the pass prunes the queue's finished places, moves cut
+    // refs, and cuts the oldest ended changes the remote has no room for.
     let idle = ran.is_empty() && depth == 0;
+    let over = if idle {
+        match crate::compact::over(repo, &chains) {
+            Ok(over) => over,
+            Err(error) => {
+                eprintln!("bay runner: compaction: {error}");
+                ran.push(json!({"compacted": null, "error": error}));
+                None
+            }
+        }
+    } else {
+        None
+    };
     ran.extend(
         seen.before
-            .and_then(|before| queue_retention(repo, &before, &chains)),
+            .and_then(|before| queue_retention(repo, &before, &chains, over.is_some())),
     );
-    if idle {
-        ran.extend(compaction(repo, &chain));
+    let mut budget_cut = Vec::new();
+    if let Some(over) = &over {
+        ran.extend(compaction(repo, &chains, over));
+        budget_cut =
+            crate::compact::to_cut(over, &chains, &closed.within, &closed.due, || owed(repo));
     }
     ran.extend(recovered.take());
     // BACKLOG 280: a box at or above a check-start load limit starts no post piece.
@@ -1148,19 +1165,24 @@ fn pass(
     // does not happen leaves the chain due again; read inside the loop, hundreds of closed chains
     // kept a runner silent for minutes ahead of every change sorted after them, nothing admitted.
     // Cuts come after the queue's work and its post checks, while the pass is within its bound.
-    for record in records
+    // S4: the window's cuts first, then the budget's, oldest first.
+    let window = records
         .iter()
-        .filter(|record| due.contains(record.id.as_str()))
-    {
+        .filter(|record| closed.due.contains(record.id.as_str()))
+        .map(|record| (record.id.as_str(), publish::Cut::Window));
+    let budget = budget_cut
+        .iter()
+        .map(|id| (id.as_str(), publish::Cut::Budget));
+    for (id, cut) in window.chain(budget) {
         if began.elapsed() >= bound {
             break;
         }
         // G599: a cut the host refused is named, never dropped; it is tried again each pass.
-        match publish::retain(repo, &record.id) {
-            Ok(Some(head)) => ran.push(json!({"change": record.id, "retention_cut": head})),
+        match publish::retain(repo, id, cut) {
+            Ok(Some(head)) => ran.push(json!({"change": id, "retention_cut": head})),
             Ok(None) => {}
             Err(error) => {
-                ran.push(json!({"change": record.id, "retention_cut": null, "error": error}));
+                ran.push(json!({"change": id, "retention_cut": null, "error": error}));
             }
         }
     }
@@ -2616,7 +2638,7 @@ const QUEUE_KEPT_S: u64 = 3600;
 /// released in this pass stays for one pass more) whose operation the pass's chains show
 /// finished, released at least the retention window ago. `None` when nothing was removed; a
 /// failure is reported and the next pass tries again.
-fn queue_retention(repo: &Repo, before: &Queue, chains: &[HeldChain]) -> Option<Value> {
+fn queue_retention(repo: &Repo, before: &Queue, chains: &[HeldChain], over: bool) -> Option<Value> {
     let records: HashMap<&str, &ChangeRecord> = chains
         .iter()
         .map(|held| (held.id.as_str(), &held.record))
@@ -2634,10 +2656,16 @@ fn queue_retention(repo: &Repo, before: &Queue, chains: &[HeldChain]) -> Option<
     // QUEUE_KEPT_S after its release, not the whole retention window. Nothing reads it later:
     // queue waits come from the terminal records, and a deadline count reads only places of
     // operations still waiting.
-    let kept = repo
-        .config
-        .retention_window()
-        .min(Duration::from_secs(QUEUE_KEPT_S));
+    //
+    // S4 (a history of 453 landings left 906 queue refs on its remote): `over` its ref budget, a
+    // finished operation's pair goes once a pass has seen it released.
+    let kept = if over {
+        Duration::ZERO
+    } else {
+        repo.config
+            .retention_window()
+            .min(Duration::from_secs(QUEUE_KEPT_S))
+    };
     let cutoff = now.saturating_sub(kept.as_secs());
     let seqs = before.prunable(finished, cutoff);
     if seqs.is_empty() {
@@ -2650,17 +2678,26 @@ fn queue_retention(repo: &Repo, before: &Queue, chains: &[HeldChain]) -> Option<
     }
 }
 
-/// The pass's compaction (§ 10a ref-growth budget, `crate::compact`), over the chains this
-/// store holds: one shard, the first in this runner's own order (BACKLOG 332, 353). `None` when
-/// nothing moved; a failure is reported and the next pass tries again.
-fn compaction(repo: &Repo, chain: &Chain) -> Option<Value> {
-    let chains = match chain.read_all() {
-        Ok(chains) => chains,
-        Err(error) => return Some(json!({"compacted": null, "error": error.message()})),
-    };
+/// S4: the changes still owed a post check, which a ref budget never cuts: those landed above
+/// main's green tip in the red window (`crate::red::owed`), as this store holds main and the
+/// evidence notes. `None` when that cannot be read.
+fn owed(repo: &Repo) -> Option<std::collections::BTreeSet<String>> {
+    let trunk = repo
+        .git
+        .ref_target(&repo.trunk_tracking_ref())
+        .ok()
+        .flatten()?;
+    let registry = crate::registry::Registry::current(&repo.git).ok()?;
+    crate::red::owed(&repo.git, &trunk, registry.as_ref()).ok()
+}
+
+/// The pass's compaction (§ 10a ref-growth budget, `crate::compact`), `over` the budget, over the
+/// chains the pass read: one shard, the first in this runner's own order (BACKLOG 332, 353).
+/// `None` when nothing moved; a failure is reported and the next pass tries again.
+fn compaction(repo: &Repo, chains: &[HeldChain], over: &crate::compact::Over) -> Option<Value> {
     let keys = Keys::load(&repo.git);
     let me = crate::presence::presence_ref(&keys.executor_name);
-    match crate::compact::run(repo, (keys.executor.as_ref(), &me), &chains) {
+    match crate::compact::run(repo, (keys.executor.as_ref(), &me), chains, over) {
         Ok(None) => None,
         Ok(Some(pushed)) => {
             // BACKLOG 334: a compaction push's time is the one reading of what it costs.
