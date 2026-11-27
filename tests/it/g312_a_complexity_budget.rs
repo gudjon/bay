@@ -79,8 +79,11 @@ use support::TestBox;
 ///   on a green main waited behind the whole line (repairs go first only on a red main, and a
 ///   hold stops every other change); now it runs next, alone, logged with its reason, inside a
 ///   daily budget. One flag takes the reason, so an expedite with no reason cannot be asked.
+/// - 0.7.39, one flag (`status --green-tip`, G926): a promotion to staging picked a tip of main
+///   by hand, and could pick one whose post checks were red or still running; now one read names
+///   the newest tip with every post check green.
 const COMMANDS: usize = 31;
-const FLAGS: usize = 99;
+const FLAGS: usize = 100;
 /// - 0.3.3, one reason (`REGISTRY_UNREADABLE`): a registry no version rule allows made every
 ///   command fail with a raw error; doctor now names it and the repair.
 /// - 0.4.0, one reason (`LOCK_NOT_HELD`, BACKLOG 57): an edit of a file that never merges,

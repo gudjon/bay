@@ -174,7 +174,7 @@ enum Command {
         #[arg(long, value_name = "SECONDS",
             conflicts_with_all = ["all", "lineage", "branches", "since"])]
         deadline: Option<u64>,
-        /// The newest landing of main at which every post check is green, for a promotion that
+        /// The newest commit of main at which every post check is green, for a promotion that
         /// must never pick a red tip: none with a red, pending or flaky post check, or a check
         /// it requires unanswered; fetches main and the evidence notes
         #[arg(long, conflicts_with_all = ["change", "all", "lineage", "branches", "since", "deadline"])]

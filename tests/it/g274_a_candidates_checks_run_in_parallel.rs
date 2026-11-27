@@ -143,7 +143,8 @@ fn most_at_once(runs: &[(String, u64, u64)]) -> usize {
 
 /// The records on the landed tree in the remote, in the order they were written, each without
 /// what differs from one box to the next: its id (it names the operation), its time, its
-/// seconds, its signature and its subject (each box's trunk differs in its config). Returns
+/// seconds and CPU seconds, its signature and its subject (each box's trunk differs in its
+/// config). Returns
 /// them with each record's id suffix, its position in the policy.
 fn records(test_box: &TestBox, landed: &Value) -> Vec<(String, Value)> {
     let remote = test_box.path().join("repo-remote.git");
@@ -165,7 +166,7 @@ fn records(test_box: &TestBox, landed: &Value) -> Vec<(String, Value)> {
             let id = record["id"].as_str().unwrap().to_owned();
             let suffix = id.rsplit('-').next().unwrap().to_owned();
             let fields = record.as_object_mut().unwrap();
-            for key in ["id", "at", "seconds", "signature", "subject"] {
+            for key in ["id", "at", "seconds", "cpu_s", "signature", "subject"] {
                 fields.remove(key);
             }
             (suffix, record)
