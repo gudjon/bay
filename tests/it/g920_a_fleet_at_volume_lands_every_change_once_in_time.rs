@@ -48,15 +48,24 @@
 //! goes beside it with `.md`, and the logs with `.runner-<n>.log` and `.hook-times.log`). Run it
 //! from a release build for the numbers a fleet sees:
 //! `cargo test --release --test it g920 -- --ignored --nocapture`.
+//!
+//! Every runner and agent command runs in the run's own process group, which a reaper stops
+//! whole when the test ends, however it ends, so no runner or agent command outlives the run. A
+//! check a runner started leads a group of its own, and ends when its script does.
+
+// The hook timer is a shell command, and the run's children share a Unix process group, so this
+// runs on Unix only.
+#![cfg(unix)]
 
 use crate::support;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::io::{BufRead as _, Write as _};
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
@@ -350,6 +359,8 @@ struct Fleet {
     agent_keys: Vec<Option<PathBuf>>,
     runner_clones: Vec<PathBuf>,
     refs_before: usize,
+    /// The run's process group while its reaper leads it, or 0.
+    group: AtomicI32,
 }
 
 fn agent_name(agent: usize) -> String {
@@ -530,6 +541,7 @@ impl Fleet {
             agent_keys,
             runner_clones,
             refs_before,
+            group: AtomicI32::new(0),
         }
     }
 
@@ -542,6 +554,10 @@ impl Fleet {
         cmd.env("BAY_DISABLE_AUTOUPDATE", "1")
             .env("BAY_ACTOR", actor)
             .stdin(Stdio::null());
+        let group = self.group.load(Ordering::Relaxed);
+        if group != 0 {
+            cmd.process_group(group);
+        }
         if let Some(key) = key {
             cmd.env("GIT_CONFIG_COUNT", "1")
                 .env("GIT_CONFIG_KEY_0", "bay.agentKey")
@@ -613,6 +629,45 @@ impl Fleet {
     }
 }
 
+/// The reaper's script. Deaf to the signals that stop a test, it waits for its stdin to close,
+/// then stops its group, and kills what is left of it, itself last, a moment later.
+const REAPER: &str =
+    "trap '' HUP INT TERM; cat >/dev/null; kill -TERM -$$; sleep 2; kill -KILL -$$";
+
+/// The run's process group, led by a shell that holds the read end of a pipe from the test. The
+/// group's stop is that pipe closing: at `stop`, when a panic drops the reaper, or when the test
+/// itself is killed, so neither a runner nor an agent's `merge --wait` outlives the run.
+struct Reaper {
+    child: Child,
+    stdin: Option<ChildStdin>,
+}
+
+impl Reaper {
+    /// Starts the reaper, and has every bay command of `fleet` from now on join its group.
+    fn start(fleet: &Fleet) -> Self {
+        let mut child = Command::new("sh")
+            .args(["-c", REAPER])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take();
+        fleet
+            .group
+            .store(i32::try_from(child.id()).unwrap(), Ordering::Relaxed);
+        Self { child, stdin }
+    }
+
+    /// Stops the run's group, and waits for the reaper to end with it.
+    fn stop(mut self, fleet: &Fleet) {
+        fleet.group.store(0, Ordering::Relaxed);
+        drop(self.stdin.take());
+        let _ = self.child.wait();
+    }
+}
+
 /// A runner process, and the threads that stamp its output into its log.
 struct Runner {
     child: Child,
@@ -620,7 +675,7 @@ struct Runner {
 }
 
 impl Runner {
-    /// Stops the runner, and waits a moment for its log to close.
+    /// Ends the runner if its group's stop missed it, and waits a moment for its log to close.
     fn stop(mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -1901,6 +1956,7 @@ fn a_fleet_at_volume_lands_every_change_once_in_time() {
         })
         .collect();
     let post_30_passed = Arc::new(AtomicBool::new(false));
+    let reaper = Reaper::start(&fleet);
     let began = Instant::now();
     let runners = fleet.start_runners(&logs, began, &post_30_passed);
     let last_arrival = Duration::from_secs_f64(times.last().copied().unwrap_or(0.0));
@@ -1970,6 +2026,7 @@ fn a_fleet_at_volume_lands_every_change_once_in_time() {
     // Reads after the run, while the runners still run their post work.
     let status_after = timed_reads(&fleet, &["status"]);
     let queue_after = timed_reads(&fleet, &["queue"]);
+    reaper.stop(&fleet);
     for runner in runners {
         runner.stop();
     }
