@@ -12,8 +12,10 @@
 //! are `bay runner run` processes, as a service starts them. The pre check takes 2 s on every
 //! candidate; the post checks take 30 s and 300 s, each on its own paths and environment.
 //! Arrivals come at a rate with a peak: the first 30 s of every 10 minutes at the peak rate, the
-//! rest at the rate that keeps the average. One change, a third of the way in, breaks the 30 s
-//! post check.
+//! rest at the rate that keeps the average. One more change breaks the 30 s post check: it is sent
+//! at the first arrival a third of the way in, or later, once that check has passed on main, so
+//! bisection has a green commit below it. A run of fewer than 20 changes sends none, and its row
+//! reads not run.
 //!
 //! What it reports, one row each, with the plan row a red number names:
 //!
@@ -31,24 +33,31 @@
 //! - bad change (S2): bisection names the bad change as the red's culprit and a runner undoes it.
 //!
 //! The JSON report also carries each change's request and landing times, so a red lead shows
-//! whether the line grew through the run or each change waited alike.
+//! whether the line grew through the run or each change waited alike, and a lead split read from
+//! the runners' logs: for each landing, its batch, why the batch stopped or never formed, its wait
+//! for the queue's head, and the head's visit with its check and publish times; for the run, lone
+//! landings against batched ones, the mean batch, the stopped reasons and the refused landing
+//! pushes. The runners' logs, each line stamped with its second of the run, and the hook timer's
+//! log are kept beside the report.
 //!
 //! Parameters, from the environment: `BAY_LOAD_CHANGES` (60), `BAY_LOAD_RATE` (0.35 a second; 0
 //! submits as fast as the agents can, a history run), `BAY_LOAD_PEAK` (1.5 a second),
 //! `BAY_LOAD_AGENTS` (10), `BAY_LOAD_RUNNERS` (2), `BAY_LOAD_SECONDS` (no bound: submitting ends at
 //! the first of the count and the duration), `BAY_LOAD_SIGNING` (`approvals`, or `all`, under which
 //! a runner opens no automatic undo by design) and `BAY_LOAD_OUT` (the JSON report; the summary
-//! goes beside it with `.md`). Run it from a release build for the numbers a fleet sees:
+//! goes beside it with `.md`, and the logs with `.runner-<n>.log` and `.hook-times.log`). Run it
+//! from a release build for the numbers a fleet sees:
 //! `cargo test --release --test it g920 -- --ignored --nocapture`.
 
 use crate::support;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use std::io::{BufRead as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -75,6 +84,12 @@ const DRAIN_S: u64 = 1_800;
 /// the wait after its culprit is named.
 const UNDO_BOUND_S: u64 = 900;
 const UNDO_NAMED_BOUND_S: u64 = 300;
+/// The fewest arrivals a run sends its bad change among, and how long after the last arrival
+/// the bad change still waits for the 30 s post check's first pass on main.
+const BAD_FROM_CHANGES: usize = 20;
+const BAD_WAITS_S: u64 = DRAIN_S / 2;
+/// How long the run waits for a stopped runner's log to close: a check it started may hold it.
+const LOG_CLOSE: Duration = Duration::from_secs(10);
 /// How often the status sampler reads, and how many reads follow the run.
 const STATUS_EVERY: Duration = Duration::from_secs(5);
 const READS_AFTER: usize = 10;
@@ -345,7 +360,9 @@ fn runner_name(runner: usize) -> String {
     format!("runner-{runner}")
 }
 
-/// Points the origin's hook commands at a timer around bay's own. Each call appends
+/// Points the origin's hook commands at a timer around bay's own: its `pre-receive` hook, and its
+/// `update` hook on a host that still has one (a host judges its trunk rule in `pre-receive`
+/// since G933). Each call appends
 /// `<push> <event> <start ns> <end ns> <exit>` to the log. Its push is the receiving process (the
 /// timer's parent, or its grandparent when Git ran it through a shell) with that process's start
 /// time, so a reused pid never joins two pushes.
@@ -360,12 +377,21 @@ fn wrap_hook(test_box: &TestBox, origin: &Path) -> PathBuf {
             log = log.display()
         ),
     );
+    let mut wrapped = Vec::new();
     for (name, event) in [
         (bay::host::TRUNK_HOOK, "update"),
         (bay::host::SCOPE_HOOK, "pre-receive"),
     ] {
         let key = format!("hook.{name}.command");
-        let command = test_box.git_bare(origin, &["config", "--get", &key]);
+        let found = test_box
+            .git(origin)
+            .args(["config", "--get", &key])
+            .output()
+            .unwrap();
+        if !found.status.success() {
+            continue;
+        }
+        let command = String::from_utf8_lossy(&found.stdout).trim().to_owned();
         assert!(
             command.ends_with(&format!("host hook {event}")),
             "the origin's {event} hook is no longer bay's: {command}"
@@ -374,7 +400,12 @@ fn wrap_hook(test_box: &TestBox, origin: &Path) -> PathBuf {
             origin,
             &["config", &key, &format!("'{}' {event}", timer.display())],
         );
+        wrapped.push(event);
     }
+    assert!(
+        wrapped.contains(&"pre-receive"),
+        "the origin has no pre-receive hook of bay's to time"
+    );
     log
 }
 
@@ -527,26 +558,38 @@ impl Fleet {
         )
     }
 
-    fn start_runners(&self) -> Vec<Child> {
+    /// Starts a runner on each runner clone, its output stamped into its log in `logs`.
+    fn start_runners(
+        &self,
+        logs: &[PathBuf],
+        began: Instant,
+        passed: &Arc<AtomicBool>,
+    ) -> Vec<Runner> {
         self.runner_clones
             .iter()
+            .zip(logs)
             .enumerate()
-            .map(|(runner, clone)| {
-                let log = std::fs::File::create(self.runner_log(runner)).unwrap();
-                self.bay(clone, &runner_name(runner), None)
+            .map(|(runner, (clone, log))| {
+                let mut child = self
+                    .bay(clone, &runner_name(runner), None)
                     .args(["--json", "runner", "run"])
-                    .stdout(log.try_clone().unwrap())
-                    .stderr(log)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
                     .spawn()
-                    .unwrap()
+                    .unwrap();
+                let log = Arc::new(Mutex::new(std::fs::File::create(log).unwrap()));
+                let readers = vec![
+                    stamp(
+                        child.stdout.take().unwrap(),
+                        Arc::clone(&log),
+                        began,
+                        Arc::clone(passed),
+                    ),
+                    stamp(child.stderr.take().unwrap(), log, began, Arc::clone(passed)),
+                ];
+                Runner { child, readers }
             })
             .collect()
-    }
-
-    fn runner_log(&self, runner: usize) -> PathBuf {
-        self.test_box
-            .path()
-            .join(format!("{}.log", runner_name(runner)))
     }
 
     /// Git in `dir`: its stdout when it succeeds.
@@ -568,6 +611,66 @@ impl Fleet {
         all.extend(args);
         self.git(self.test_box.path(), &all)
     }
+}
+
+/// A runner process, and the threads that stamp its output into its log.
+struct Runner {
+    child: Child,
+    readers: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl Runner {
+    /// Stops the runner, and waits a moment for its log to close.
+    fn stop(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let bound = Instant::now() + LOG_CLOSE;
+        while Instant::now() < bound
+            && !self
+                .readers
+                .iter()
+                .all(std::thread::JoinHandle::is_finished)
+        {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// Copies each line of `stream` into `log`, after the second of the run it came at, and sets
+/// `passed` at the first line that says the 30 s post check passed.
+fn stamp(
+    stream: impl std::io::Read + Send + 'static,
+    log: Arc<Mutex<std::fs::File>>,
+    began: Instant,
+    passed: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(stream);
+        let mut bytes = Vec::new();
+        while reader
+            .read_until(b'\n', &mut bytes)
+            .is_ok_and(|read| read > 0)
+        {
+            let line = String::from_utf8_lossy(&bytes);
+            let line = line.trim_end();
+            if post_30_passed(line) {
+                passed.store(true, Ordering::Relaxed);
+            }
+            let at = began.elapsed().as_secs_f64();
+            let _ = writeln!(log.lock().unwrap(), "{at:.3} {line}");
+            bytes.clear();
+        }
+    })
+}
+
+/// Whether a runner's journal line says the 30 s post check passed: `post post-30 on <tip>: pass`,
+/// among the runs it names.
+fn post_30_passed(line: &str) -> bool {
+    line.split("; ").any(|run| {
+        run.split_once("post post-30 on ")
+            .and_then(|(_, rest)| rest.split_once(": "))
+            .is_some_and(|(_, verdict)| verdict.starts_with("pass"))
+    })
 }
 
 /// Runs a bay command with `--json`: its exit code, its result and its time in milliseconds.
@@ -660,9 +763,11 @@ fn live_refs(test_box: &TestBox, origin: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Picks the files of change `no` from the files no change in flight holds, but for an
-/// overlapping change, whose first file is one a change in flight holds.
-fn choose(book: &mut Book, rng: &mut Rng, no: usize, bad: bool) {
+/// Picks the files of the next change from the files no change in flight holds, but for an
+/// overlapping change, whose first file is one a change in flight holds, and returns its number.
+/// The bad change draws nothing, so the others are the same with it or without it.
+fn choose(book: &mut Book, rng: &mut Rng, bad: bool) -> usize {
+    let no = book.changes.len();
     let mut change = Change {
         bad,
         ..Change::default()
@@ -689,6 +794,7 @@ fn choose(book: &mut Book, rng: &mut Rng, no: usize, bad: bool) {
         }
     }
     book.changes.push(change);
+    no
 }
 
 /// Ends change `no`'s hold on its files.
@@ -959,13 +1065,45 @@ fn hook_times(log: &Path) -> (Vec<f64>, BTreeMap<String, Vec<f64>>) {
     (pushes.into_values().collect(), by_event)
 }
 
+/// A row's verdict: a row the run does not exercise is not run, neither green nor red.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Green,
+    Red,
+    NotRun,
+}
+
+impl Verdict {
+    fn of(green: bool) -> Self {
+        if green { Self::Green } else { Self::Red }
+    }
+
+    /// The word the JSON report holds.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Red => "red",
+            Self::NotRun => "not_run",
+        }
+    }
+
+    /// The word the summary shows.
+    fn shown(self) -> &'static str {
+        match self {
+            Self::Green => "green",
+            Self::Red => "RED",
+            Self::NotRun => "not run",
+        }
+    }
+}
+
 /// One row of the gate.
 struct Row {
     name: &'static str,
     plan: &'static str,
     value: String,
     target: &'static str,
-    green: bool,
+    verdict: Verdict,
     detail: Value,
 }
 
@@ -976,7 +1114,7 @@ impl Row {
             "plan": self.plan,
             "value": self.value,
             "target": self.target,
-            "green": self.green,
+            "verdict": self.verdict.word(),
             "detail": self.detail,
         })
     }
@@ -993,6 +1131,7 @@ struct Reads {
     hook_pushes: Vec<f64>,
     hook_events: BTreeMap<String, Vec<f64>>,
     runner_undo_lines: Vec<String>,
+    journal: Journal,
 }
 
 fn lead_row(book: &Book, reads: &Reads) -> Row {
@@ -1017,7 +1156,7 @@ fn lead_row(book: &Book, reads: &Reads) -> Row {
         plan: "S2, S3",
         value: format!("p50 {} / p90 {}", shown(p50, "s"), shown(p90, "s")),
         target: "p50 <= 20 s, p90 <= 60 s",
-        green: p50.is_some_and(|v| v <= 20.0) && p90.is_some_and(|v| v <= 60.0),
+        verdict: Verdict::of(p50.is_some_and(|v| v <= 20.0) && p90.is_some_and(|v| v <= 60.0)),
         detail: json!({
             "p50_s": number(p50),
             "p90_s": number(p90),
@@ -1049,7 +1188,7 @@ fn hook_row(reads: &Reads) -> Row {
             reads.hook_pushes.len()
         ),
         target: "p99 <= 200 ms",
-        green: p99.is_some_and(|v| v <= 200.0),
+        verdict: Verdict::of(p99.is_some_and(|v| v <= 200.0)),
         detail: json!({
             "p50_ms": number(percentile(&reads.hook_pushes, 500)),
             "p99_ms": number(p99),
@@ -1084,11 +1223,11 @@ fn refs_row(fleet: &Fleet, book: &Book, reads: &Reads) -> Row {
             )
         },
         target: "< 5,000 after 30,000 landings",
-        green: if measured {
+        verdict: Verdict::of(if measured {
             reads.refs.len() < 5_000
         } else {
             projected < 5_000.0
-        },
+        }),
         detail: json!({
             "live": reads.refs.len(),
             "before_run": fleet.refs_before,
@@ -1114,7 +1253,7 @@ fn status_row(book: &Book, reads: &Reads) -> Row {
             shown(after, "ms")
         ),
         target: "p50 <= 200 ms",
-        green: load.is_some_and(|v| v <= 200.0) && after.is_some_and(|v| v <= 200.0),
+        verdict: Verdict::of(load.is_some_and(|v| v <= 200.0) && after.is_some_and(|v| v <= 200.0)),
         detail: json!({
             "under_load_ms": spread(&book.status_load),
             "after_ms": spread(&reads.status_after),
@@ -1161,7 +1300,7 @@ fn census_row(book: &Book, reads: &Reads) -> Row {
             refused.len()
         ),
         target: "0 lost and 0 double",
-        green: lost.is_empty() && double.is_empty() && !submitted.is_empty(),
+        verdict: Verdict::of(lost.is_empty() && double.is_empty() && !submitted.is_empty()),
         detail: json!({
             "submitted": submitted.len(),
             "lost": lost,
@@ -1176,8 +1315,9 @@ fn census_row(book: &Book, reads: &Reads) -> Row {
 }
 
 /// The bad change's row. A runner opens an automatic undo only for a culprit the evidence pins,
-/// so its undo on main names the culprit too, when no status read saw the red in between.
-fn bad_change_row(book: &Book, reads: &Reads) -> Row {
+/// so its undo on main names the culprit too, when no status read saw the red in between. A run
+/// of fewer than [`BAD_FROM_CHANGES`] arrivals (`planned` false) sends no bad change.
+fn bad_change_row(book: &Book, reads: &Reads, planned: bool) -> Row {
     let bad = book.changes.iter().find(|c| c.bad);
     let landed = bad.and_then(|c| c.landed);
     let since = |at: Option<Instant>| {
@@ -1192,7 +1332,10 @@ fn bad_change_row(book: &Book, reads: &Reads) -> Row {
         name: "bad change",
         plan: "S2",
         value: match (bad, landed, named_s, undone_s) {
-            (None, ..) => "no bad change was made".to_owned(),
+            (None, ..) if !planned => {
+                format!("not sent: fewer than {BAD_FROM_CHANGES} changes")
+            }
+            (None, ..) => "never sent: the 30 s post check never passed on main".to_owned(),
             (_, None, ..) => "the bad change never landed".to_owned(),
             (_, _, None, _) => "bisection never named it".to_owned(),
             (_, _, Some(named), None) => format!("named at {named:.0} s; never undone"),
@@ -1201,9 +1344,14 @@ fn bad_change_row(book: &Book, reads: &Reads) -> Row {
             }
         },
         target: "named by bisection and undone by a runner",
-        green: named_s.is_some() && undone_s.is_some(),
+        verdict: if bad.is_none() && !planned {
+            Verdict::NotRun
+        } else {
+            Verdict::of(named_s.is_some() && undone_s.is_some())
+        },
         detail: json!({
             "change": bad.and_then(|c| c.id.clone()),
+            "post_30_first_pass_s": number(reads.journal.post_30_passed_s),
             "outcome": bad.and_then(|c| c.outcome.clone()),
             "culprit_named_s": number(named_s),
             "culprit_seen_in_status": book.culprit_named.is_some(),
@@ -1217,7 +1365,7 @@ fn bad_change_row(book: &Book, reads: &Reads) -> Row {
 }
 
 /// The one-screen summary.
-fn summary(params: &Params, book: &Book, reads: &Reads, rows: &[Row]) -> String {
+fn summary(params: &Params, book: &Book, reads: &Reads, rows: &[Row], split: &str) -> String {
     let submitted = book
         .changes
         .iter()
@@ -1258,10 +1406,12 @@ fn summary(params: &Params, book: &Book, reads: &Reads, rows: &[Row]) -> String 
             row.name,
             row.value,
             row.target,
-            if row.green { "green" } else { "RED" },
+            row.verdict.shown(),
             row.plan
         );
     }
+    text.push('\n');
+    text.push_str(split);
     text
 }
 
@@ -1294,7 +1444,7 @@ fn run_json_block(book: &Book, reads: &Reads, arrivals: usize) -> Value {
 }
 
 /// Each change's times in seconds from the start, and what became of it.
-fn timeline(book: &Book, began: Instant) -> Vec<Value> {
+fn timeline(book: &Book, journal: &Journal, began: Instant) -> Vec<Value> {
     let at = |instant: Option<Instant>| {
         instant.map(|instant| instant.saturating_duration_since(began).as_secs_f64())
     };
@@ -1302,6 +1452,27 @@ fn timeline(book: &Book, began: Instant) -> Vec<Value> {
         .iter()
         .enumerate()
         .map(|(no, change)| {
+            let landing = change
+                .id
+                .as_deref()
+                .and_then(|id| journal.landed.get(id))
+                .map_or(Value::Null, |landed| {
+                    let split = landed.split(change, began);
+                    json!({
+                        "runner": runner_name(landed.runner),
+                        "head": landed.head,
+                        "member": landed.member,
+                        "batch": journal.batch(&landed.head),
+                        "batch_note": landed.batch_note,
+                        "head_taken_s": number(split.head_taken),
+                        "queue_wait_s": number(split.queue_wait),
+                        "visit_s": landed.visit_s,
+                        "check_s": number(split.check),
+                        "publish_s": number(split.publish),
+                        "head_cycle_s": number(split.head_cycle),
+                        "pushes_refused": journal.refused.get(&landed.head).copied().unwrap_or(0),
+                    })
+                });
             json!({
                 "no": no,
                 "change": change.id,
@@ -1313,6 +1484,7 @@ fn timeline(book: &Book, began: Instant) -> Vec<Value> {
                 "outcome": change.outcome,
                 "refusals": change.refusals,
                 "error": change.error,
+                "landing": landing,
             })
         })
         .collect()
@@ -1351,11 +1523,347 @@ fn timed_reads(fleet: &Fleet, args: &[&str]) -> Vec<f64> {
         .collect()
 }
 
+/// One landing as a runner's log tells it.
+#[derive(Clone)]
+struct Landed {
+    runner: usize,
+    /// The second of the run the head's line came at.
+    at_s: f64,
+    /// The operation whose visit landed it: its own, or the head of the batch it joined.
+    head: String,
+    member: bool,
+    /// The head's visit, and each of its steps, in whole seconds as the line gives them.
+    visit_s: Option<f64>,
+    steps: BTreeMap<String, f64>,
+    /// The head's last batch line before it landed: the batch's size and why it stopped, or why
+    /// it had none.
+    batch_note: Option<String>,
+}
+
+/// Where one landed change's lead went, each in seconds: when the head was taken, in seconds of
+/// the run, and how long each part took. The queue wait and the head cycle add up to the lead.
+struct Split {
+    head_taken: Option<f64>,
+    queue_wait: Option<f64>,
+    head_cycle: Option<f64>,
+    check: Option<f64>,
+    publish: Option<f64>,
+}
+
+impl Landed {
+    /// Where `change`'s lead went, when this is its landing: its wait for the queue's head, and
+    /// the head's cycle from its taking to the landing on main, with the visit's check and publish.
+    /// A landing's line comes after main moved, so the cycle ends at main.
+    fn split(&self, change: &Change, began: Instant) -> Split {
+        let at = |instant: Option<Instant>| {
+            instant.map(|instant| instant.saturating_duration_since(began).as_secs_f64())
+        };
+        let head_taken = self.visit_s.map(|visit| self.at_s - visit);
+        let step = |name: &str| {
+            (!self.steps.is_empty()).then(|| self.steps.get(name).copied().unwrap_or(0.0))
+        };
+        Split {
+            head_taken,
+            queue_wait: head_taken
+                .zip(at(change.requested))
+                .map(|(taken, requested)| taken - requested),
+            head_cycle: head_taken
+                .zip(at(change.landed))
+                .map(|(taken, seen)| seen - taken),
+            check: step("check"),
+            publish: step("publish"),
+        }
+    }
+}
+
+/// What the runners' logs say, for the lead split.
+#[derive(Default)]
+struct Journal {
+    /// Each change's landing, by change id, and each landing head's, by operation.
+    landed: HashMap<String, Landed>,
+    heads: HashMap<String, Landed>,
+    /// The changes each head landed beside itself.
+    members: HashMap<String, usize>,
+    /// Why each batch plan stopped, and why each visit that planned none had none.
+    stopped: BTreeMap<String, usize>,
+    no_batch: BTreeMap<String, usize>,
+    cuts: usize,
+    /// The landing pushes the origin refused, by operation.
+    refused: HashMap<String, usize>,
+    post_30_passed_s: Option<f64>,
+}
+
+impl Journal {
+    /// Reads the runners' logs as one, in the order of their stamps: a batch line comes before
+    /// the landing it is about, a batch's members come after their head, and a change's first
+    /// `merged` line is its landing, since a later visit of a landed change says `merged` again.
+    fn read(logs: &[PathBuf]) -> Self {
+        let texts: Vec<String> = logs
+            .iter()
+            .map(|log| std::fs::read_to_string(log).unwrap_or_default())
+            .collect();
+        let mut lines: Vec<(f64, usize, &str)> = Vec::new();
+        for (runner, text) in texts.iter().enumerate() {
+            for raw in text.lines() {
+                if let Some((stamp, line)) = raw.split_once(' ')
+                    && let (Ok(at_s), Some(line)) =
+                        (stamp.parse::<f64>(), line.strip_prefix("bay runner: "))
+                {
+                    lines.push((at_s, runner, line));
+                }
+            }
+        }
+        lines.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut journal = Self::default();
+        let mut notes = HashMap::new();
+        for (at_s, runner, line) in lines {
+            journal.read_line(runner, at_s, line, &mut notes);
+        }
+        journal
+    }
+
+    /// Reads one journal line of `runner`, stamped `at_s`. `notes` holds each operation's last
+    /// batch line until it lands.
+    fn read_line<'a>(
+        &mut self,
+        runner: usize,
+        at_s: f64,
+        line: &'a str,
+        notes: &mut HashMap<&'a str, String>,
+    ) {
+        if post_30_passed(line) {
+            self.post_30_passed_s.get_or_insert(at_s);
+            return;
+        }
+        let Some((op, rest)) = line.split_once(' ') else {
+            return;
+        };
+        if let Some(plan) = rest.strip_prefix("batch of ") {
+            if plan.contains(" cut to ") {
+                self.cuts += 1;
+            } else if let Some((size, stopped)) = plan.split_once(", stopped: ") {
+                let reason: String = stopped
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                let how = size.split_once(' ').map_or(size, |(_, how)| how);
+                *self.stopped.entry(format!("{reason} ({how})")).or_default() += 1;
+                notes.insert(op, format!("batch of {size}, stopped: {reason}"));
+            }
+        } else if let Some(why) = rest.strip_prefix("no batch: ") {
+            *self.no_batch.entry(why.to_owned()).or_default() += 1;
+            notes.insert(op, format!("no batch: {why}"));
+        } else if rest.starts_with("landing push refused") {
+            *self.refused.entry(op.to_owned()).or_default() += 1;
+        } else if let Some((change, _)) = op.rsplit_once('.')
+            && !self.landed.contains_key(change)
+        {
+            let words = rest
+                .strip_prefix('[')
+                .and_then(|named| named.split_once("] "))
+                .map_or(rest, |(_, words)| words);
+            let Some(after) = words.strip_prefix("merged") else {
+                return;
+            };
+            if let Some(head) = after
+                .strip_prefix(", in ")
+                .and_then(|batch| batch.strip_suffix("'s batch"))
+            {
+                *self.members.entry(head.to_owned()).or_default() += 1;
+                if let Some(landed) = self.heads.get(head) {
+                    let joined = Landed {
+                        member: true,
+                        ..landed.clone()
+                    };
+                    self.landed.insert(change.to_owned(), joined);
+                }
+            } else {
+                let (visit_s, steps) = visit_times(after);
+                let landed = Landed {
+                    runner,
+                    at_s,
+                    head: op.to_owned(),
+                    member: false,
+                    visit_s,
+                    steps,
+                    batch_note: notes.remove(op),
+                };
+                self.heads.insert(op.to_owned(), landed.clone());
+                self.landed.insert(change.to_owned(), landed);
+            }
+        }
+    }
+
+    /// The size of the batch `head` landed: itself and its members.
+    fn batch(&self, head: &str) -> usize {
+        1 + self.members.get(head).copied().unwrap_or(0)
+    }
+}
+
+/// A visit's seconds and the seconds of each step, from the rest of its journal line after the
+/// decision: `(<N>s: <step> <S>s, <step> <S>s [<git>]; git: …)`, or `(<N>s; git: …)` for one step.
+fn visit_times(tail: &str) -> (Option<f64>, BTreeMap<String, f64>) {
+    let mut steps = BTreeMap::new();
+    let Some((_, inner)) = tail.split_once(" (") else {
+        return (None, steps);
+    };
+    let digits: String = inner.chars().take_while(char::is_ascii_digit).collect();
+    let Ok(seconds) = digits.parse::<f64>() else {
+        return (None, steps);
+    };
+    let Some(list) = inner[digits.len()..].strip_prefix("s: ") else {
+        return (Some(seconds), steps);
+    };
+    let mut depth = 0_usize;
+    let mut start = 0;
+    let mut items = Vec::new();
+    for (at, c) in list.char_indices() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' if depth > 0 => depth -= 1,
+            ',' | ';' | ')' if depth == 0 => {
+                items.push(&list[start..at]);
+                start = at + 1;
+                if c != ',' {
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    for item in items {
+        let mut words = item.split_whitespace();
+        if let (Some(name), Some(secs)) = (words.next(), words.next())
+            && let Some(Ok(secs)) = secs.strip_suffix('s').map(str::parse::<f64>)
+        {
+            *steps.entry(name.to_owned()).or_default() += secs;
+        }
+    }
+    (Some(seconds), steps)
+}
+
+/// The parts of the landed changes' leads, in seconds: the queue wait, the head cycle, the head's
+/// visit, its check and its publish; and how many landed changes no log tells of.
+fn lead_parts(book: &Book, journal: &Journal, began: Instant) -> ([Vec<f64>; 5], usize) {
+    let mut parts: [Vec<f64>; 5] = Default::default();
+    let mut unread = 0;
+    for change in book.changes.iter().filter(|c| c.landed.is_some()) {
+        let Some(landed) = change.id.as_deref().and_then(|id| journal.landed.get(id)) else {
+            unread += 1;
+            continue;
+        };
+        let split = landed.split(change, began);
+        let values = [
+            split.queue_wait,
+            split.head_cycle,
+            landed.visit_s,
+            split.check,
+            split.publish,
+        ];
+        for (part, value) in parts.iter_mut().zip(values) {
+            part.extend(value);
+        }
+    }
+    (parts, unread)
+}
+
+/// The run's lead split, as JSON and as the summary's lines: where the landed changes' leads
+/// went, and how the runners batched.
+fn lead_split(book: &Book, journal: &Journal, began: Instant) -> (Value, String) {
+    let (parts, unread) = lead_parts(book, journal, began);
+    let refused: usize = journal.refused.values().sum();
+    let mut sizes: BTreeMap<usize, usize> = BTreeMap::new();
+    for head in journal.heads.keys() {
+        *sizes.entry(journal.batch(head)).or_default() += 1;
+    }
+    let lone = sizes.get(&1).copied().unwrap_or(0);
+    let joined = sizes.iter().filter(|(size, _)| **size > 1);
+    let batches: usize = joined.clone().map(|(_, heads)| heads).sum();
+    let in_batches: usize = joined.map(|(size, heads)| size * heads).sum();
+    let mean = float(lone + in_batches) / float(journal.heads.len().max(1));
+    let mut lines: Vec<f64> = journal.heads.values().map(|landed| landed.at_s).collect();
+    lines.sort_by(f64::total_cmp);
+    let between: Vec<f64> = lines.windows(2).map(|pair| pair[1] - pair[0]).collect();
+    let mut by_runner: BTreeMap<String, usize> = BTreeMap::new();
+    for landed in journal.landed.values() {
+        *by_runner.entry(runner_name(landed.runner)).or_default() += 1;
+    }
+    let mut value = json!({
+        "landings": lone + in_batches,
+        "lone": lone,
+        "in_batches": in_batches,
+        "batches": batches,
+        "mean_batch": mean,
+        "batch_sizes": sizes,
+        "stopped": journal.stopped,
+        "no_batch": journal.no_batch,
+        "batches_cut": journal.cuts,
+        "landing_pushes_refused": refused,
+        "by_runner": by_runner,
+        "landed_not_in_a_log": unread,
+        "between_landings_s": spread(&between),
+    });
+    let names = [
+        "queue_wait_s",
+        "head_cycle_s",
+        "head_visit_s",
+        "check_s",
+        "publish_s",
+    ];
+    for (name, part) in names.into_iter().zip(&parts) {
+        value[name] = spread(part);
+    }
+    let histogram = |counts: &BTreeMap<String, usize>| {
+        if counts.is_empty() {
+            "none".to_owned()
+        } else {
+            let said: Vec<String> = counts.iter().map(|(why, n)| format!("{why} {n}")).collect();
+            said.join(", ")
+        }
+    };
+    let mut text = String::new();
+    let _ = writeln!(
+        text,
+        "Lead split, from the runners' logs: {} landings, {lone} lone and {in_batches} in {batches} batches (mean batch {mean:.2}); {} landing pushes refused, {} batches cut, {unread} landed changes in no log.\n",
+        lone + in_batches,
+        refused,
+        journal.cuts,
+    );
+    let _ = writeln!(text, "| part of the lead | p50 | p90 |\n|---|---|---|");
+    let labels = [
+        "request to head taken (queue wait)",
+        "head taken to landed on main (head cycle)",
+        "the head's visit, by its line",
+        "its check",
+        "its publish",
+    ];
+    for (label, part) in labels
+        .into_iter()
+        .zip(&parts)
+        .chain([("between two landings", &between)])
+    {
+        let _ = writeln!(
+            text,
+            "| {label} | {} | {} |",
+            shown(percentile(part, 500), "s"),
+            shown(percentile(part, 900), "s")
+        );
+    }
+    let _ = writeln!(
+        text,
+        "\nBatches stopped: {}. No batch: {}.",
+        histogram(&journal.stopped),
+        histogram(&journal.no_batch)
+    );
+    (value, text)
+}
+
 /// The last lines of the runners' logs that speak of an undo.
-fn runner_undo_lines(fleet: &Fleet, runners: usize) -> Vec<String> {
-    let mut lines: Vec<String> = (0..runners)
-        .flat_map(|runner| {
-            std::fs::read_to_string(fleet.runner_log(runner))
+fn runner_undo_lines(logs: &[PathBuf]) -> Vec<String> {
+    let mut lines: Vec<String> = logs
+        .iter()
+        .flat_map(|log| {
+            std::fs::read_to_string(log)
                 .unwrap_or_default()
                 .lines()
                 .filter(|line| line.contains("undo"))
@@ -1375,14 +1883,26 @@ fn a_fleet_at_volume_lands_every_change_once_in_time() {
     let fleet = Fleet::new(&params);
     let mut rng = Rng(0x0920_5ca1_e0f1_ee75);
     let times = arrivals(&params, &mut rng);
-    let bad_at = times.len() / 3;
+    let bad_from = (times.len() >= BAD_FROM_CHANGES).then_some(times.len() / 3);
     let book = Mutex::new(Book {
         slots: vec![0; FILES],
         ..Book::default()
     });
     let stop = AtomicBool::new(false);
-    let mut runners = fleet.start_runners();
+    if let Some(parent) = params.out.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    // The runners' logs go beside the report, so they outlive the box.
+    let logs: Vec<PathBuf> = (0..params.runners)
+        .map(|runner| {
+            params
+                .out
+                .with_extension(format!("{}.log", runner_name(runner)))
+        })
+        .collect();
+    let post_30_passed = Arc::new(AtomicBool::new(false));
     let began = Instant::now();
+    let runners = fleet.start_runners(&logs, began, &post_30_passed);
     let last_arrival = Duration::from_secs_f64(times.last().copied().unwrap_or(0.0));
     let deadline = began + last_arrival + Duration::from_secs(DRAIN_S);
 
@@ -1407,11 +1927,32 @@ fn a_fleet_at_volume_lands_every_change_once_in_time() {
                 }
             });
         }
-        for (no, at) in times.iter().enumerate() {
+        // The bad change goes at the first arrival from a third of the way in once the 30 s post
+        // check has passed on main, so bisection has a green commit below it.
+        let mut bad_sent = bad_from.is_none();
+        for (index, at) in times.iter().enumerate() {
             let due = began + Duration::from_secs_f64(*at);
             std::thread::sleep(due.saturating_duration_since(Instant::now()));
-            choose(&mut book.lock().unwrap(), &mut rng, no, no == bad_at);
-            jobs.send(no).unwrap();
+            if !bad_sent
+                && bad_from.is_some_and(|from| index >= from)
+                && post_30_passed.load(Ordering::Relaxed)
+            {
+                jobs.send(choose(&mut book.lock().unwrap(), &mut rng, true))
+                    .unwrap();
+                bad_sent = true;
+            }
+            jobs.send(choose(&mut book.lock().unwrap(), &mut rng, false))
+                .unwrap();
+        }
+        let bad_bound = began + last_arrival + Duration::from_secs(BAD_WAITS_S);
+        while !bad_sent && Instant::now() < bad_bound {
+            if post_30_passed.load(Ordering::Relaxed) {
+                jobs.send(choose(&mut book.lock().unwrap(), &mut rng, true))
+                    .unwrap();
+                bad_sent = true;
+            } else {
+                std::thread::sleep(Duration::from_secs(1));
+            }
         }
         drop(jobs);
         while Instant::now() < deadline {
@@ -1429,10 +1970,11 @@ fn a_fleet_at_volume_lands_every_change_once_in_time() {
     // Reads after the run, while the runners still run their post work.
     let status_after = timed_reads(&fleet, &["status"]);
     let queue_after = timed_reads(&fleet, &["queue"]);
-    for runner in &mut runners {
-        let _ = runner.kill();
-        let _ = runner.wait();
+    for runner in runners {
+        runner.stop();
     }
+    let hook_kept = params.out.with_extension("hook-times.log");
+    std::fs::copy(&fleet.hook_log, &hook_kept).unwrap();
     let book = book.into_inner().unwrap();
     let submit_s = book
         .changes
@@ -1466,7 +2008,8 @@ fn a_fleet_at_volume_lands_every_change_once_in_time() {
         main_patches,
         hook_pushes,
         hook_events,
-        runner_undo_lines: runner_undo_lines(&fleet, params.runners),
+        runner_undo_lines: runner_undo_lines(&logs),
+        journal: Journal::read(&logs),
     };
     let rows = [
         lead_row(&book, &reads),
@@ -1474,9 +2017,10 @@ fn a_fleet_at_volume_lands_every_change_once_in_time() {
         refs_row(&fleet, &book, &reads),
         status_row(&book, &reads),
         census_row(&book, &reads),
-        bad_change_row(&book, &reads),
+        bad_change_row(&book, &reads, bad_from.is_some()),
     ];
-    let summary = summary(&params, &book, &reads, &rows);
+    let (split, split_text) = lead_split(&book, &reads.journal, began);
+    let summary = summary(&params, &book, &reads, &rows, &split_text);
     let report = json!({
         "schema": "bay.load-report/1",
         "bay": {
@@ -1486,18 +2030,17 @@ fn a_fleet_at_volume_lands_every_change_once_in_time() {
         "params": params.json(),
         "run": run_json_block(&book, &reads, times.len()),
         "rows": rows.iter().map(Row::json).collect::<Vec<_>>(),
-        "changes": timeline(&book, began),
+        "lead_split": split,
+        "logs": {"runners": logs, "hook": hook_kept},
+        "changes": timeline(&book, &reads.journal, began),
     });
-    if let Some(parent) = params.out.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
     std::fs::write(&params.out, serde_json::to_string_pretty(&report).unwrap()).unwrap();
     std::fs::write(params.out.with_extension("md"), &summary).unwrap();
     eprintln!("{summary}\nreport: {}", params.out.display());
 
     let mut red: Vec<String> = rows
         .iter()
-        .filter(|row| !row.green)
+        .filter(|row| row.verdict == Verdict::Red)
         .map(|row| format!("{} ({}): {}", row.name, row.plan, row.value))
         .collect();
     let errors: Vec<&String> = book
