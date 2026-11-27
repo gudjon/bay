@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.46
+
+- A red that fails past the reach reads on to its last pass, so its culprit keeps its pin.
+- A failure at the oldest landing read no longer makes a red the check's own.
+
 ## 0.7.45
 
 - A `--paths` value is a path from the repository's root: `/src/` is declared as `src/`.
