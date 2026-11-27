@@ -714,14 +714,21 @@ impl TestBox {
             .map(|event| event["value"].clone())
     }
 
-    /// A clone of `bare` at `<root>/<name>`. It copies `bare`'s object files one by one, so make
-    /// it before any process pushes into `bare`: a push taken meanwhile removes the files it
-    /// received in (its quarantine) after the clone listed them, and the clone fails.
+    /// A clone of `bare` at `<root>/<name>`, through Git's transport as a clone on another machine
+    /// is. A local clone copies `bare`'s object files one by one, and a push taken meanwhile
+    /// removes the files it received in (its quarantine) after the clone listed them (BACKLOG
+    /// 351), so a clone made while a runner pushes failed. It brings only what the refs reach.
     pub fn clone_of(&self, bare: &Path, name: &str) -> PathBuf {
         let dir = self.path().join(name);
         self.git_ok(
             self.path(),
-            &["clone", "-q", bare.to_str().unwrap(), dir.to_str().unwrap()],
+            &[
+                "clone",
+                "-q",
+                "--no-local",
+                bare.to_str().unwrap(),
+                dir.to_str().unwrap(),
+            ],
         );
         dir
     }
