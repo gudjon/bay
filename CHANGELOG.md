@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.43
+
+- With another runner live, a change takes a place even in an empty line, and later changes wait behind it.
+- A change alone behind the head is checked on the main the head predicts, and lands on that check.
+- A free push refused for a place another runner gave it takes that place and pushes again.
+- A red check that never passed runs once where it was added: a pass bisects, a failure is its own.
+- A load run's runners and agents end with it, however it ends.
+
 ## 0.7.42
 
 - An origin forwards again, after 1 s and then 3 s, a push its hosted remote could not check.
