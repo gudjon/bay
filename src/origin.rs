@@ -9,7 +9,9 @@
 //!   push, its hook sends each pushed ref to the hosted remote, all or none, by compare-and-swap
 //!   on the value the push replaces. When the hosted remote refuses because a ref moved there,
 //!   the origin takes the hosted remote's values and refuses the push as stale, so the client
-//!   reads them and tries again. `bay host serve` mirrors into the origin what other writers
+//!   reads them and tries again. When the hosted remote refuses only because it could not check
+//!   the push (its objects or their large-file content), the origin forwards it again, twice at
+//!   most, within the hook's bound. `bay host serve` mirrors into the origin what other writers
 //!   push to the hosted remote directly.
 //! - `tail`: the origin is the authority for bay's refs and notes. The hook sends only the
 //!   other refs, main among them, so a landing is still a compare-and-swap on the hosted
@@ -60,6 +62,9 @@ const TAIL_STATE: &str = "bay/tail-state";
 const MARK_TTL: Duration = Duration::from_secs(120);
 /// The part of the hook's bound a forward leaves for what follows it.
 const FORWARD_MARGIN: Duration = Duration::from_secs(2);
+/// G935: the waits before the origin forwards again a push the hosted remote refused only
+/// because it could not check it.
+const UNCHECKED_WAITS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(3)];
 /// The most refs one tail push sends.
 const TAIL_BATCH: usize = 200;
 /// How long the tail leaves a ref the hosted remote refused for a reason other than a move.
@@ -231,13 +236,7 @@ pub fn forward(git: &Git, dir: &Path, input: &str, within: Duration) -> Result<(
         return Err("bay origin: the hook's bound left no time to forward the push".to_owned());
     }
     let mark = Mark::write(dir, &sent)?;
-    let pushed = push(
-        &git.reading_quarantine(),
-        &upstream.url,
-        &sent,
-        true,
-        within,
-    );
+    let pushed = push_checked(&git.reading_quarantine(), &upstream.url, &sent, within);
     if pushed
         .as_ref()
         .is_ok_and(|pushed| pushed.rejected.is_empty())
@@ -458,6 +457,63 @@ impl Pushed {
 /// Whether `why`, a refused ref's summary, says it was refused for another ref's refusal.
 fn collateral(why: &str) -> bool {
     why.contains("atomic push failed") || why.ends_with("(failed)")
+}
+
+impl Pushed {
+    /// G935 (a fleet measurement, 2026-11-27: in 15 h of one fleet's runner journal, 8 refused
+    /// landing pushes said `missing necessary objects` and one GH009, a hosted remote that could
+    /// not check a push's large-file content; each refusal cost the runner its landing, 42 to
+    /// 138 s): whether the hosted remote took no ref and refused the push only because it could
+    /// not check it, so the same push can be forwarded again.
+    fn unchecked(&self) -> bool {
+        let gh009 = self.said.iter().any(|line| line.contains("GH009"));
+        let unchecked = |why: &str| {
+            why.contains("missing necessary objects")
+                || (gh009 && why.contains("pre-receive hook declined"))
+        };
+        self.taken.is_empty()
+            && self.rejected.iter().any(|(_, why)| unchecked(why))
+            && self
+                .rejected
+                .iter()
+                .all(|(_, why)| unchecked(why) || collateral(why))
+    }
+}
+
+/// [`push`], atomic, forwarded again after each of [`UNCHECKED_WAITS`] while the hosted remote
+/// refuses it only because it could not check it ([`Pushed::unchecked`]) and `within` leaves
+/// time for the wait and a push.
+///
+/// # Errors
+///
+/// As [`push`].
+fn push_checked(
+    git: &Git,
+    url: &str,
+    updates: &[Update],
+    within: Duration,
+) -> Result<Pushed, String> {
+    let deadline = Instant::now() + within;
+    let mut pushed = push(git, url, updates, true, within);
+    for wait in UNCHECKED_WAITS {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if !pushed.as_ref().is_ok_and(Pushed::unchecked) || left < wait + Duration::from_secs(1) {
+            break;
+        }
+        eprintln!(
+            "bay origin: the hosted remote could not check the push; forwarding it again in {}s",
+            wait.as_secs()
+        );
+        std::thread::sleep(wait);
+        pushed = push(
+            git,
+            url,
+            updates,
+            true,
+            deadline.saturating_duration_since(Instant::now()),
+        );
+    }
+    pushed
 }
 
 /// Pushes each of `updates` to `url`: its `new` value (absent deletes) by compare-and-swap
@@ -1109,6 +1165,27 @@ mod tests {
         let out = "!\tabc:refs/heads/main\t[rejected] (stale info)\n";
         let refusals = Pushed::read(out).heard(err).refusals();
         assert!(refusals.contains("hint: fetch first"), "{refusals}");
+    }
+
+    #[test]
+    fn a_push_the_hosted_remote_could_not_check_is_forwarded_again_and_no_other() {
+        let missing = "!\tabc:refs/bay/changes/a\t[remote rejected] (failed)\n!\tdef:refs/heads/main\t[remote rejected] (missing necessary objects)\n";
+        assert!(Pushed::read(missing).unchecked());
+        let declined = "!\tabc:refs/bay/changes/a\t[remote rejected] (pre-receive hook declined)\n!\tdef:refs/heads/main\t[remote rejected] (pre-receive hook declined)\n";
+        let gh009 = "remote: error: GH009: Git LFS object integrity could not be checked.\n";
+        assert!(Pushed::read(declined).heard(gh009).unchecked());
+        // A hosted remote's rule refuses the same way the next time.
+        let gh013 = "remote: error: GH013: Repository rule violations found\n";
+        assert!(!Pushed::read(declined).heard(gh013).unchecked());
+        // A moved ref is the client's to read again.
+        let moved = "!\tdef:refs/heads/main\t[rejected] (stale info)\n";
+        assert!(!Pushed::read(moved).unchecked());
+        let mixed = "!\tabc:refs/bay/changes/a\t[rejected] (stale info)\n!\tdef:refs/heads/main\t[remote rejected] (missing necessary objects)\n";
+        assert!(!Pushed::read(mixed).unchecked());
+        // A push the hosted remote took in part is not sent again.
+        let part = "*\tabc:refs/bay/changes/a\t[new reference]\n!\tdef:refs/heads/main\t[remote rejected] (missing necessary objects)\n";
+        assert!(!Pushed::read(part).unchecked());
+        assert!(!Pushed::default().unchecked());
     }
 
     #[test]
