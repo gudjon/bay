@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.41
+
+- A host judges its trunk rule once a push in its pre-receive hook; a serving origin removes the update hook.
+- A fetch that lost its local ref update to another writer of the same store is tried again.
+- A load test now measures lead time, hook time, live refs, status time, lost landings and undo at volume.
+
 ## 0.7.40
 
 - A red's teller reads the logs and presences just before it tells, and counts itself only while live and serving.
