@@ -174,6 +174,8 @@ struct Fresh {
     registry: bool,
     evidence: bool,
     presences: bool,
+    /// G932: the presences that read live when the plan's fetch brought them ([`Fresh::live`]).
+    live: Option<Vec<Value>>,
 }
 
 impl Fresh {
@@ -208,6 +210,20 @@ impl Fresh {
         repo.fetch_evidence_with(keys, &more);
         self.evidence = true;
         self.presences |= presences;
+        if presences {
+            self.live = Some(crate::presence::live(&repo.git));
+        }
+    }
+
+    /// G932 (a fleet finding, 2026-11-27: a runner ran a post check of 640-700 s on every tip its
+    /// owner ran it on too): the runners' presences that read live, judged as the plan's fetch
+    /// brought them. A stage judges its checks up to a minute after that
+    /// fetch, by when every peer's last beat in it read stale, so the runner elected itself to
+    /// every check its peers owned. A plan that fetched no presences reads the store now.
+    fn live(&self, repo: &Repo) -> Vec<Value> {
+        self.live
+            .clone()
+            .unwrap_or_else(|| crate::presence::live(&repo.git))
     }
 }
 
@@ -336,7 +352,7 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<Plan
     let (entries, ran) = in_turn(git, trust, &tip, entries, &reds);
     let here = (tip.as_str(), evidence::records_for(git, &tree)?);
     let elsewhere = answered_elsewhere(git, trust, &entries, here)?;
-    let live = crate::presence::live(git);
+    let live = fresh.live(repo);
     let now = crate::presence::reader_now();
     let landed = git
         .run(&["log", "-1", "--format=%ct", &tip])
@@ -880,7 +896,7 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<
     fresh.evidence(repo, &keys, false);
     let registry = Registry::current(git)?;
     let judgement = crate::red::judged(git, &trunk, registry.as_ref())?;
-    let live = crate::presence::live(git);
+    let live = fresh.live(repo);
     let now = crate::presence::reader_now();
     let mut rows = Vec::new();
     let mut reds: BTreeMap<String, Vec<Red>> = BTreeMap::new();
