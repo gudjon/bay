@@ -531,6 +531,7 @@ mod tests {
                 added: None,
                 judged_old: None,
                 same_read: None,
+                base_failed: None,
             }),
             fix: fix.then(|| mark("l5")),
             changed_check: false,

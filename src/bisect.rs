@@ -6,10 +6,16 @@
 //! range: the landings after its newest pass up to its first failure. Off by default, with
 //! `[runner] bisect_post = true` in `.bay/config.toml` at trunk, an executor pass narrows it:
 //!
-//! - Only a red check whose range holds more than one landing and has a pass below it (in the
-//!   `[red] window`, or past it down to `[red] reach`, B5), on a
-//!   box that serves the check's environment (`bay.checkEnvironment`), and only when the
+//! - Only a red check whose range holds more than one landing, with a pass below it (in the
+//!   `[red] window`, or past it down to `[red] reach`, B5) or a base not run yet (BACKLOG 348),
+//!   on a box that serves the check's environment (`bay.checkEnvironment`), and only when the
 //!   check's `producers` list, if any, names this box's producer.
+//! - BACKLOG 348 (a load-run finding: a post check failed on its first runs, after the merge that
+//!   broke it, so its range had no good end, and no culprit or undo came): a range with no pass
+//!   below it is run once on its base, its oldest landing (the one that added the check, or the
+//!   oldest read), as a change of nothing on it under that landing's own policy. A pass there is
+//!   the range's good end, and the next pass bisects above it. A failure there makes the red the
+//!   check's own (`crate::red`): no merge is bisected or named.
 //! - G627 (fleet findings, 2026-11-02: a canary merge and a card merge were each named the
 //!   culprit of a flaky test on one failing record): a range of one landing whose culprit stands
 //!   on fewer than two records of the check in its tree takes the rerun at the suspect too, so
@@ -120,6 +126,7 @@ impl Piece {
                     &writer,
                     (&id, ("post", post)),
                     (&tip, Some(&since), &rerun),
+                    Under::FirstParent,
                 ) {
                     Ok(Ok(answer)) => answer.word(),
                     Ok(Err(why)) | Err(why) => json!({"not_run": why}),
@@ -134,6 +141,7 @@ impl Piece {
                         &writer,
                         (&id, ("warm", json!({"tip": tip}))),
                         (&tip, None, &[]),
+                        Under::Itself,
                     ) {
                         Ok(Ok(answer)) => answer.word(),
                         Ok(Err(why)) => json!({"not_run": why}),
@@ -907,18 +915,12 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<
         if suspect.landings.len() < 2 && !unconfirmed(git, &red, suspect)? {
             continue;
         }
-        if suspect.passed.is_none() {
-            let why = match &suspect.added {
-                Some(added) => format!(
-                    "the check has not passed since {} added it, so the range has no good end",
-                    added.named()
-                ),
-                None => format!(
-                    "no merge of the newest {} on main passes the check, so the range has no \
-                     good end",
-                    suspect.searched.unwrap_or_default()
-                ),
-            };
+        if let Some(base) = &suspect.base_failed {
+            let why = format!(
+                "the check failed at {} as well, the base of its range, so the red is the \
+                 check's own and no merge is bisected",
+                base.named()
+            );
             rows.push(not_run(&red, &why, &[]));
         } else if !served.serves(&red.environment) {
             rows.push(not_run(
@@ -926,6 +928,14 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<
                 "this box does not serve the check's environment",
                 &[],
             ));
+        } else if let (None, Some(base)) = (&suspect.passed, suspect.landings.first())
+            && ran_on(git, &Writer::of(git, &keys, registry.as_ref())?, &red, base)?
+        {
+            let why = format!(
+                "this box ran the check at {}, the base of its range, and the run decided nothing",
+                base.named()
+            );
+            rows.push(not_run(&red, &why, &[]));
         } else if !taken.contains(&red.environment) {
             let entry = policy
                 .checks
@@ -954,6 +964,15 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<
         });
     }
     Ok((rows, pieces))
+}
+
+/// BACKLOG 348: whether this box ran `red`'s check on `base`, the base of a range with no pass,
+/// already. Its run there decided nothing (an infra failure, say), or the range would have a
+/// good end or be the check's own, so it is not run again, as a bisect step that decided
+/// nothing is not ([`bisect`]).
+fn ran_on(git: &Git, writer: &Writer, red: &Red, base: &Mark) -> Result<bool, String> {
+    let id = CheckId::new(&red.check, &red.environment);
+    Ok(writer.records(git, &tree_of(git, &base.landing)?, &id)? > 0)
 }
 
 /// G857 (a fleet finding, 2026-11-22: two runners that served one environment each ran the same
@@ -1081,6 +1100,9 @@ fn bisect(
     });
     let git = &repo.git;
     let id = CheckId::new(&red.check, &red.environment);
+    if let (None, Some(base)) = (&suspect.passed, suspect.landings.first()) {
+        return on_base(repo, (keys, writer), (red, &id), window, base);
+    }
     let mut range: Vec<Mark> = suspect.landings.clone();
     let bound = bound(range.len());
     let probes = probes(range.len());
@@ -1101,6 +1123,7 @@ fn bisect(
             writer,
             (&id, ("bisect", window.clone())),
             (&mark.landing, None, &[]),
+            Under::FirstParent,
         )? {
             Ok(answer) => answer.verdict,
             Err(why) => return Ok(not_run(red, &why, &tested)),
@@ -1127,6 +1150,7 @@ fn bisect(
                 writer,
                 (&id, ("bisect", window.clone())),
                 (&mark.landing, None, &[]),
+                Under::FirstParent,
             )? {
                 Ok(answer) => answer.verdict,
                 Err(why) => return Ok(not_run(red, &why, &tested)),
@@ -1148,6 +1172,44 @@ fn bisect(
         "tested": tested,
         "runs": tested.len(),
         "bound": bound,
+    }))
+}
+
+/// BACKLOG 348: the one run of `red`'s check (`id`) on `base`, the oldest landing of a range
+/// with no pass, as a change of nothing on it under its own policy: the landing that added the
+/// check has no first parent whose policy lists it. A pass makes it the range's good end, and
+/// the next pass bisects above it; a failure makes the red the check's own (`crate::red`).
+fn on_base(
+    repo: &Repo,
+    (keys, writer): (&Keys, &Writer),
+    (red, id): (&Red, &CheckId),
+    window: Value,
+    base: &Mark,
+) -> Result<Value, String> {
+    let verdict = match run_at(
+        repo,
+        keys,
+        writer,
+        (id, ("bisect", window)),
+        (&base.landing, None, &[]),
+        Under::Itself,
+    )? {
+        Ok(answer) => answer.verdict,
+        Err(why) => return Ok(not_run(red, &why, &[])),
+    };
+    let outcome = match verdict {
+        Verdict::Pass => "base_passed",
+        Verdict::ProductFailure => "base_failed",
+        Verdict::InfraFailure | Verdict::Unknown => "undecided",
+    };
+    Ok(json!({
+        "check": red.check,
+        "environment": red.environment,
+        "outcome": outcome,
+        "culprit": null,
+        "tested": [tested_json(base, verdict)],
+        "runs": 1,
+        "bound": 1,
     }))
 }
 
@@ -1261,14 +1323,25 @@ fn waits_for_a_worker(repo: &Repo, id: &CheckId, holds: bool) -> Option<u64> {
     (left > 0).then_some(left)
 }
 
-/// Runs `red`'s post check on landing `commit` and records its verdict as this box's post
-/// evidence on the landing's tree, pushed. `Ok(Err(why))` when it cannot run here.
+/// The policy a run on a landing is judged under.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Under {
+    /// The landing's first parent's, as its post check is (G91): a post run and a bisect step.
+    FirstParent,
+    /// The landing's own, as a change of nothing on it: a warm run on the tip, and the run on the
+    /// base of a red's range (BACKLOG 348), whose first parent's policy may not list the check.
+    Itself,
+}
+
+/// Runs `red`'s post check on landing `commit` `under` a policy and records its verdict as this
+/// box's post evidence on the landing's tree, pushed. `Ok(Err(why))` when it cannot run here.
 fn run_at(
     repo: &Repo,
     keys: &Keys,
     writer: &Writer,
     (id, why): (&CheckId, (&'static str, Value)),
     (commit, since, rerun): (&str, Option<&str>, &[String]),
+    under: Under,
 ) -> Result<Result<Answer, String>, String> {
     let (field, body) = why;
     // A post run and a bisect step judge a red check (a post run of a green one passed the
@@ -1279,13 +1352,13 @@ fn run_at(
         )));
     }
     let git = &repo.git;
-    // A warm run is a candidate of no change on the tip, judged as one on that tip: its base
-    // is the tip itself. A post run and a bisect judge a landing under its first parent.
+    // A warm run, and the run on a red's base, is a candidate of no change on its commit, judged
+    // as one on it: its base is the commit itself. A post run and a bisect step judge a landing
+    // under its first parent.
     let warm = field == "warm";
-    let base = if warm {
-        commit.to_owned()
-    } else {
-        rev(git, &format!("{commit}^1"))?
+    let base = match under {
+        Under::Itself => commit.to_owned(),
+        Under::FirstParent => rev(git, &format!("{commit}^1"))?,
     };
     let tree = tree_of(git, commit)?;
     let base_tree = tree_of(git, &base)?;

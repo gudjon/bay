@@ -7,7 +7,7 @@
 //! does a runner before it moves to a new binary: a piece is never handed over, and a runner
 //! never stops while one runs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -28,6 +28,8 @@ pub struct Post {
     running: Vec<Running>,
     /// Whether each pass waits for the pieces it started (`--once`).
     pub waits: bool,
+    /// BACKLOG 348: the journal words each kind's planned rows said the pass before.
+    said: BTreeMap<String, String>,
 }
 
 impl Post {
@@ -37,7 +39,25 @@ impl Post {
         Self {
             running: Vec::new(),
             waits,
+            said: BTreeMap::new(),
         }
+    }
+
+    /// BACKLOG 348 (a load-run finding: two runners each wrote `bisect work (0s)` every 10 s for
+    /// a red neither could bisect, and never why): the journal words of a plan's `planned` rows,
+    /// one line for each kind, that differ from what that kind's planned rows said the pass
+    /// before. A kind with no planned rows this pass says its next words again.
+    pub fn fresh_lines(&mut self, planned: &[(&'static str, Value)]) -> Vec<String> {
+        let before = std::mem::take(&mut self.said);
+        let mut fresh = Vec::new();
+        for (kind, row) in planned {
+            let line = super::post_line(&kinded(kind, row.clone()));
+            if before.get(*kind) != Some(&line) {
+                fresh.push(line.clone());
+            }
+            self.said.insert((*kind).to_owned(), line);
+        }
+        fresh
     }
 
     /// The environments a running piece holds.

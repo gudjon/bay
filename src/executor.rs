@@ -775,9 +775,14 @@ fn pass_on_or_release(
     }
 }
 
-/// The journal words for one piece of post work: each post check run, as `post <check> on
-/// <tip>: <verdict>`, or the warm or bisect work by its kind.
+/// The journal words for one piece of post work, or a pass's planned rows of one kind: each
+/// post check run, as `post <check> on <tip>: <verdict>`; each bisect, as `bisect <check>:
+/// <outcome>`, or why it did not run (BACKLOG 348); else the work by its kind, and its fault.
 fn post_line(done: &Value) -> String {
+    if let Some(rows) = done.get("bisect").and_then(Value::as_array) {
+        let runs: Vec<String> = rows.iter().map(bisect_words).collect();
+        return runs.join("; ");
+    }
     if let Some(rows) = done.get("post").and_then(Value::as_array) {
         let runs: Vec<String> = rows
             .iter()
@@ -794,10 +799,7 @@ fn post_line(done: &Value) -> String {
                     || {
                         row["verdict"]["not_run"].as_str().map_or_else(
                             || "?".to_owned(),
-                            |why| {
-                                let why: Vec<&str> = why.lines().map(str::trim).collect();
-                                format!("not run: {}", why.join("; "))
-                            },
+                            |why| format!("not run: {}", one_line(why)),
                         )
                     },
                     str::to_owned,
@@ -811,8 +813,42 @@ fn post_line(done: &Value) -> String {
         return runs.join("; ");
     }
     done.as_object()
-        .and_then(|object| object.keys().next())
-        .map_or_else(|| "post work".to_owned(), |kind| format!("{kind} work"))
+        .and_then(|object| object.iter().next())
+        .map_or_else(
+            || "post work".to_owned(),
+            |(kind, row)| match row["error"].as_str() {
+                Some(why) => format!("{kind} work: {}", one_line(why)),
+                None => format!("{kind} work"),
+            },
+        )
+}
+
+/// The journal words of one bisect row: its check and outcome, the culprit it names, and its
+/// runs; or why it did not run.
+fn bisect_words(row: &Value) -> String {
+    let check = row["check"].as_str().unwrap_or("?");
+    if row["outcome"] == "not_run" {
+        return format!(
+            "bisect {check}: not run: {}",
+            one_line(row["why"].as_str().unwrap_or("?"))
+        );
+    }
+    let culprit = &row["culprit"];
+    let named = culprit["change"]
+        .as_str()
+        .or_else(|| culprit["landing"].as_str())
+        .map(|name| format!(" {name}"))
+        .unwrap_or_default();
+    format!(
+        "bisect {check}: {}{named} in {} run(s)",
+        row["outcome"].as_str().unwrap_or("?"),
+        row["runs"]
+    )
+}
+
+/// `text` on one line: its lines, trimmed, joined by `; `.
+fn one_line(text: &str) -> String {
+    text.lines().map(str::trim).collect::<Vec<_>>().join("; ")
 }
 
 /// A state's snake-case word, as the change chain spells it.
@@ -1215,15 +1251,13 @@ fn post_pass(
         let plan = beat.meanwhile(repo, "post", depth, &mut placing, || {
             crate::bisect::plan(repo, &busy)
         });
-        for (kind, row) in plan.rows {
-            // E21: post work writes its own journal line, as an operation does.
-            eprintln!(
-                "bay runner: {} ({}s)",
-                post_line(&post::kinded(kind, row.clone())),
-                began.elapsed().as_secs()
-            );
-            rows.push((kind, row));
+        // E21: post work writes its own journal line, as an operation does. BACKLOG 348: a
+        // planned row that says what it said the pass before is not written again.
+        let took = began.elapsed().as_secs();
+        for line in post.fresh_lines(&plan.rows) {
+            eprintln!("bay runner: {line} ({took}s)");
         }
+        rows.extend(plan.rows);
         for piece in plan.pieces {
             rows.extend(post.start(repo, piece));
         }
@@ -2767,6 +2801,50 @@ mod tests {
         assert_eq!(
             super::post_line(&not_run),
             "post suite on 24e619a45e: not run: the evidence push was refused; remote: busy"
+        );
+    }
+
+    /// BACKLOG 348: a bisect row names its check and its outcome, or why it did not run, and a
+    /// pass's planned rows are written once, until what they say changes.
+    #[test]
+    fn a_planned_bisect_row_says_why_once_until_it_changes() {
+        let not_run = |why: &str| {
+            serde_json::json!([{"check": "suite", "environment": "local", "outcome": "not_run",
+                "why": why, "tested": [], "runs": 0}])
+        };
+        assert_eq!(
+            super::post_line(&serde_json::json!({"bisect": not_run("runner b bisects it")})),
+            "bisect suite: not run: runner b bisects it"
+        );
+        let culprit = serde_json::json!({"bisect": [{"check": "suite", "outcome": "culprit",
+            "culprit": {"landing": "24e619a45e67bf46", "change": "kxqvmtwp"}, "runs": 3}]});
+        assert_eq!(
+            super::post_line(&culprit),
+            "bisect suite: culprit kxqvmtwp in 3 run(s)"
+        );
+        assert_eq!(
+            super::post_line(&serde_json::json!({"bisect": {"error": "no fetch\nremote: busy"}})),
+            "bisect work: no fetch; remote: busy"
+        );
+        let mut post = super::post::Post::new(false);
+        let planned = |why: &str| vec![("bisect", not_run(why))];
+        let line = |why: &str| vec![format!("bisect suite: not run: {why}")];
+        assert_eq!(
+            post.fresh_lines(&planned("runner b bisects it")),
+            line("runner b bisects it")
+        );
+        assert_eq!(
+            post.fresh_lines(&planned("runner b bisects it")),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            post.fresh_lines(&planned("runner c bisects it")),
+            line("runner c bisects it")
+        );
+        assert_eq!(post.fresh_lines(&[]), Vec::<String>::new());
+        assert_eq!(
+            post.fresh_lines(&planned("runner c bisects it")),
+            line("runner c bisects it")
         );
     }
 

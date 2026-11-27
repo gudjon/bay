@@ -12620,6 +12620,29 @@ pub fn post_answers_many(
     Ok(out)
 }
 
+/// BACKLOG 348: the post answers of landed `commit` judged by the policy at `commit` itself,
+/// from the records on its `tree`: what a run of no change on it answered, as the run on the
+/// base of a red's range is (`crate::bisect`). The landing that added a post check has no base
+/// policy that lists it, so [`post_answers`] never reads that run.
+///
+/// # Errors
+///
+/// A git fault, or an unreadable note.
+pub fn own_answers(
+    git: &Git,
+    commit: &str,
+    tree: &str,
+    registry: Option<&crate::registry::Registry>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let policy = match policy::load_at(git, commit) {
+        Ok(Some(policy)) if !policy.post.is_empty() => policy,
+        Ok(_) | Err(policy::LoadError::Invalid(_)) => return Ok(Vec::new()),
+        Err(policy::LoadError::Git(why)) => return Err(why),
+    };
+    let records = evidence::records_for(git, tree)?;
+    answers_of(git, &policy, commit, &[], records, registry, true)
+}
+
 /// BACKLOG 237: the answer row field of a post check its landing's own tree holds no record of,
 /// which a newer landing's run on trunk answered for it: that landing's commit.
 pub const ANSWERED_ON: &str = "answered_on";

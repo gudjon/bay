@@ -59,6 +59,12 @@
 //!   base policy lists other post checks and not this one, the landing that added the check
 //!   ([`Suspect::added`]). With no pass after it, that landing owns the red, and `--fixes` names
 //!   it: the check never passed, so the cause is the check, its setup, or a merge since.
+//! - BACKLOG 348 (a load-run finding: a post check failed on its first runs, after the merge that
+//!   broke it, so its range had no good end, and no culprit or undo came): with no pass, the
+//!   range's base, the landing that added the check or the oldest landing read, answers as a
+//!   run of no change on it, judged by its own policy ([`Answers::on_itself`]; `crate::bisect`
+//!   runs it). A pass there is the range's good end. A failure there makes the red the check's
+//!   own ([`Suspect::base_failed`]): no merge since is its cause, and none is named.
 //!
 //! While red or `pending_fix`, a candidate that touches those paths runs the check before its
 //! merge, judged against main (G677); a change that names a merge the red names in `--fixes`, an
@@ -174,7 +180,8 @@ pub struct Suspect {
     /// The newest landing older than the failure whose answer is a pass; `None` when none down
     /// to the reach answers so (B5), and the range then runs to the oldest landing read.
     /// BACKLOG 340: a landing that answers `flaky` is this red's pass when no run there failed a
-    /// unit the red's failing landings failed ([`Suspect::passed_units`]).
+    /// unit the red's failing landings failed ([`Suspect::passed_units`]). BACKLOG 348: or the
+    /// range's base, when a run of no change on it passed there ([`Suspect::base_failed`]).
     pub passed: Option<Mark>,
     /// BACKLOG 340: when `passed` answers `flaky`, the units the red's failing landings failed,
     /// none of which failed there; `None` when `passed` answers `pass`.
@@ -195,7 +202,8 @@ pub struct Suspect {
     /// `None` when `passed` or `added` names where the walk stopped.
     pub searched: Option<usize>,
     /// G584: with no pass found, the landing that added the check: its base policy lists other
-    /// post checks and not this one. It owns the red, and the range ends at it.
+    /// post checks and not this one. It owns the red, and the range ends at it. BACKLOG 348:
+    /// `None` once a run of no change on it passed, which makes it `passed`.
     pub added: Option<Mark>,
     /// G622: the landing right above the pass, when it changed the check itself. Its post run
     /// judged it with its first parent's check (G91), so no run proves it the cause: it is not
@@ -205,6 +213,11 @@ pub struct Suspect {
     /// its read set holds the same bytes in both trees ([`same_read`]). The check answered two
     /// ways on one input, so the landing is not the culprit.
     pub same_read: Option<Mark>,
+    /// BACKLOG 348: with no pass found, the range's base when the check failed there as well:
+    /// the landing that added it (`added`), or the oldest landing read. A run there is a change
+    /// of nothing on it, under its own policy (`crate::bisect`), so no merge since caused the
+    /// failure: the red is the check's own, and no culprit is named.
+    pub base_failed: Option<Mark>,
 }
 
 /// The landing that broke a red post check, as its evidence pins it: the newest pass is its
@@ -280,6 +293,7 @@ impl Suspect {
             "check_added": self.added.as_ref().map(Mark::to_json),
             "judged_old": self.judged_old.as_ref().map(Mark::to_json),
             "same_read": self.same_read.as_ref().map(Mark::to_json),
+            "base_failed": self.base_failed.as_ref().map(Mark::to_json),
         })
     }
 }
@@ -430,8 +444,8 @@ impl Red {
                 suspect.newest_failed.named()
             )
         };
-        let cause = match (&suspect.passed, &suspect.added) {
-            (Some(passed), _) => format!(
+        let cause = match (&suspect.passed, &suspect.added, &suspect.base_failed) {
+            (Some(passed), _, _) => format!(
                 "the cause is one of the {} merges after its last pass{} at {}, on its paths or \
                  not",
                 suspect.landings.len(),
@@ -442,12 +456,25 @@ impl Red {
                     .unwrap_or_default(),
                 passed.named()
             ),
-            (None, Some(added)) => format!(
+            (None, Some(added), Some(_)) => format!(
+                "a run where {} added it to the policy failed as well, so the red is the check's \
+                 own, not a merge's: fix the check or its setup, and its next run on main clears \
+                 the red",
+                added.named()
+            ),
+            (None, None, Some(base)) => format!(
+                "a run at {}, the oldest of the newest {} merges on main, failed as well, so the \
+                 red is the check's own, not a merge's: fix the check or its setup, and its next \
+                 run on main clears the red",
+                base.named(),
+                suspect.searched.unwrap_or_default()
+            ),
+            (None, Some(added), None) => format!(
                 "it has not passed since {} added it to the policy, so that merge owns the red: \
                  the cause is the check itself, its setup, or a merge since, on its paths or not",
                 added.named()
             ),
-            (None, None) => format!(
+            (None, None, None) => format!(
                 "no merge of the newest {} on main passed it, so bay cannot narrow the cause",
                 suspect.searched.unwrap_or_default()
             ),
@@ -1364,6 +1391,16 @@ fn on_paths(git: &Git, red: &Red, landing: &str) -> bool {
     })
 }
 
+/// What a post answer row's `state` decides: `Some(true)` for a `product_failure`, `Some(false)`
+/// for a pass, `None` for anything else.
+fn decided(state: Option<&str>) -> Option<bool> {
+    match state {
+        Some("pass") => Some(false),
+        Some("product_failure") => Some(true),
+        _ => None,
+    }
+}
+
 /// N-20, B5: the landings a red judgement reads, newest first: the landing line of the window,
 /// then, once a red check's window holds no pass, the line past it down to the reach.
 struct Line {
@@ -1465,12 +1502,27 @@ impl<'a> Answers<'a> {
         at: usize,
         post: &crate::policy::ManifestEntry,
     ) -> Result<Option<bool>, String> {
-        let state = self.row(at, post)?.and_then(|row| row["state"].as_str());
-        Ok(match state {
-            Some("pass") => Some(false),
-            Some("product_failure") => Some(true),
-            _ => None,
-        })
+        Ok(decided(
+            self.row(at, post)?.and_then(|row| row["state"].as_str()),
+        ))
+    }
+
+    /// BACKLOG 348: how landing `at`, the base of a red's range with no pass, answers `post` as
+    /// a run of no change on it, judged by the policy at the landing itself: the landing that
+    /// added the check has no base policy that lists it. `None` when no such run decides.
+    fn on_itself(
+        &self,
+        at: usize,
+        post: &crate::policy::ManifestEntry,
+    ) -> Result<Option<bool>, String> {
+        let landing = &self.line.landings[at];
+        let rows =
+            crate::publish::own_answers(self.git, &landing.commit, &landing.tree, self.registry)?;
+        Ok(decided(
+            rows.iter()
+                .find(|row| row["check"] == post.id && row["environment"] == post.environment)
+                .and_then(|row| row["state"].as_str()),
+        ))
     }
 
     /// Landing `at`'s answer row of `post`, read once.
@@ -1642,7 +1694,8 @@ impl<'a> Answers<'a> {
         at: usize,
     ) -> Result<(Suspect, usize), String> {
         let mut first = at;
-        let mut passed = None;
+        // The pass and its state: `pass`, or `flaky` (BACKLOG 340).
+        let mut passed: Option<(usize, &'static str)> = None;
         let mut added = None;
         // BACKLOG 340: the units the failing landings failed, from the newest down.
         let mut failed = self.failed_units(at, post)?;
@@ -1665,11 +1718,11 @@ impl<'a> Answers<'a> {
                     });
                 }
                 Some(false) => {
-                    passed = Some(older);
+                    passed = Some((older, "pass"));
                     break;
                 }
                 None if self.passes_units(older, post, failed.as_deref())? => {
-                    passed = Some(older);
+                    passed = Some((older, "flaky"));
                     passed_units = failed;
                     break;
                 }
@@ -1677,17 +1730,32 @@ impl<'a> Answers<'a> {
             }
             older += 1;
         }
+        // BACKLOG 348: with no pass, the range's base answers as a run of no change on it: the
+        // landing that added the check, or the oldest landing read.
+        let mut base_failed = None;
+        if passed.is_none() {
+            let base = added.unwrap_or(self.line.landings.len() - 1);
+            match self.on_itself(base, post)? {
+                Some(false) if base > first => {
+                    passed = Some((base, "pass"));
+                    added = None;
+                }
+                Some(true) => base_failed = Some(base),
+                _ => {}
+            }
+        }
         let end = passed
+            .map(|(older, _)| older)
             .or(added.map(|added| added + 1))
             .unwrap_or(self.line.landings.len());
         // Landings are newest first: the pass right below the first failure is at `first + 1`.
-        let pinned = passed.filter(|older| *older == first + 1);
+        let pinned = passed.filter(|(older, _)| *older == first + 1);
         // G622: a first failure that changed the check was judged with the old one (G91).
         let judged_old =
             pinned.is_some() && changed_check(self.git, &self.line.landings[first].commit, post);
         // G627: the same check read the same bytes at the pass and at the first failure.
         let same_read = match pinned {
-            Some(older) if !judged_old => same_read(
+            Some((older, _)) if !judged_old => same_read(
                 self.git,
                 &self.line.landings[older].commit,
                 &self.line.landings[first].commit,
@@ -1696,7 +1764,7 @@ impl<'a> Answers<'a> {
             _ => false,
         };
         let culprit = match pinned {
-            Some(older) if !judged_old && !same_read => Some(self.culprit(post, first, at, older)?),
+            Some(pass) if !judged_old && !same_read => Some(self.culprit(post, first, at, pass)?),
             _ => None,
         };
         let owner = match (&culprit, added) {
@@ -1707,7 +1775,7 @@ impl<'a> Answers<'a> {
         let landings = &self.line.landings;
         Ok((
             Suspect {
-                passed: passed.map(|older| Mark::of(&landings[older])),
+                passed: passed.map(|(older, _)| Mark::of(&landings[older])),
                 passed_units,
                 failed: Mark::of(&landings[first]),
                 landings: landings[first..end].iter().rev().map(Mark::of).collect(),
@@ -1718,22 +1786,27 @@ impl<'a> Answers<'a> {
                 added: added.map(|added| Mark::of(&landings[added])),
                 judged_old: judged_old.then(|| Mark::of(&landings[first])),
                 same_read: same_read.then(|| Mark::of(&landings[first])),
+                base_failed: base_failed.map(|base| Mark::of(&landings[base])),
             },
             owner,
         ))
     }
 
     /// The [`Culprit`] of `post` at landing `first`, with every answered landing from the pass
-    /// at `passed` up to the newest failure at `at`, oldest first. Each was read for the range.
+    /// at `passed`, in its state, up to the newest failure at `at`, oldest first. Each was read
+    /// for the range.
     fn culprit(
         &mut self,
         post: &crate::policy::ManifestEntry,
         first: usize,
         at: usize,
-        passed: usize,
+        (passed, state): (usize, &str),
     ) -> Result<Culprit, String> {
-        let mut tested = Vec::new();
-        for index in (at..=passed).rev() {
+        let mut tested = vec![Tested {
+            mark: Mark::of(&self.line.landings[passed]),
+            verdict: state.to_owned(),
+        }];
+        for index in (at..passed).rev() {
             let state = self
                 .row(index, post)?
                 .and_then(|row| row["state"].as_str())
