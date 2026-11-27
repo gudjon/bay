@@ -4,7 +4,7 @@
 
 - A post check one machine cannot run, as a unit's `infra_failure`, goes to a live runner on another machine.
 - A machine that could not run a post check twice leaves it to the other machines for a day.
-- A merge the host never took says when to merge again; `bay merge --wait` waits that out, and a receipt never puts the reopen off.
+- A merge the host never took says when to merge again, and `bay merge --wait` waits that out.
 - A newer pass answers a post check whose run answered nothing (`unknown`).
 - `bay status` says "is on main" only when main holds the landing.
 
