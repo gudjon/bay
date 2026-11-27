@@ -4,7 +4,8 @@
 //! other, so both counted one rank). A runner takes the shards in an order of its own name
 //! (`crate::compact::pick`), so which runners it reads live never sends two runners to one shard:
 //! two runners that each read the other as gone pass at once, each on the shard its name orders
-//! first, and neither loses its lease.
+//! first among the names it reads, and neither loses its lease. A pass reads the remote once; one
+//! that reads after the other's push also reads the chains that push made movable (G921).
 //!
 //! Guard to mutate, in `src/compact.rs`: `pick` answering the lowest shard, as the rank rule did
 //! for a runner that read no other live: both runners take one shard, and one loses its lease or
@@ -105,14 +106,29 @@ fn runners_that_read_each_other_as_gone_push_different_shards() {
             assert!(errors.is_empty(), "{errors:?}");
             continue;
         }
-        // THEN each moves names of the shard its own name orders first, and neither loses its
-        // lease to the other
+        // THEN each moves names of the shard its own name orders first among the names it read:
+        // the round's, or, read after the other's push, those the other left; and neither loses
+        // its lease to the other
         let both = at_once_alone(&test_box, [&first, &second]);
-        for (taken, chosen) in both.iter().zip(firsts) {
-            let own = in_shard(&now, chosen);
+        for (mine, runner) in [EXECUTOR, "exec-2"].into_iter().enumerate() {
+            let (taken, other) = (&both[mine], &both[1 - mine]);
+            let after: BTreeSet<String> = left.difference(other).cloned().collect();
+            let later = movable(&changes, &after);
+            let read = [
+                (now.as_slice(), firsts[mine]),
+                (later.as_slice(), name_shard(&later, runner)),
+            ];
             assert!(
-                !taken.is_empty() && taken.is_subset(&own),
-                "moved {taken:?}, not of shard {chosen:?}: {own:?}"
+                !taken.is_empty()
+                    && read
+                        .iter()
+                        .any(|&(names, chosen)| taken.is_subset(&in_shard(names, chosen))),
+                "{runner} moved {taken:?}; the other moved {other:?}; its first shard of the \
+                 round, {:?}, holds {:?}; of the names the other left, {:?} holds {:?}",
+                read[0].1,
+                in_shard(read[0].0, read[0].1),
+                read[1].1,
+                in_shard(read[1].0, read[1].1),
             );
         }
         together += 1;
