@@ -1,8 +1,8 @@
 //! G925 (plan S4, CL-1: with chains and requests moving too, runners move three times the names
 //! they did, so two of them compact at once more often). Two runners whose passes run at once
-//! each take a shard of their own, by their rank among the live runners, from the names each may
-//! move now, so neither loses its shard's lease to the other, and together they move every ref
-//! the cut changes leave.
+//! each take a shard of their own, the first in the order of their own name (BACKLOG 353), from
+//! the names each may move now, so neither loses its shard's lease to the other, and together
+//! they move every ref the cut changes leave.
 //!
 //! Guard to mutate: in `src/compact.rs`, `pick` answering the first shard (both runners take one
 //! shard, and one loses its lease).
@@ -14,10 +14,10 @@ use crate::support;
 use std::path::Path;
 
 use serde_json::Value;
-use support::TestBox;
 use support::shards::{
-    TwoRunners, index, movable, moved, pass, path, rank_shard, remaining, two_runners,
+    TwoRunners, index, movable, moved, name_shard, pass, path, remaining, two_runners,
 };
+use support::{EXECUTOR, TestBox};
 
 /// The names each of two runner passes in `clones`, run at once, moved; none reported an error.
 fn at_once(test_box: &TestBox, clones: &[&Path; 2]) -> [std::collections::BTreeSet<String>; 2] {
@@ -53,14 +53,13 @@ fn two_runners_compacting_at_once_keep_their_leases() {
         changes,
         ..
     } = two_runners(&test_box, 3, 1);
-    // GIVEN a pass that cuts every chain, and a pass of the second runner, so each knows the
-    // other is live
+    // GIVEN a pass that cuts every chain, and a pass of the second runner
     for runner in [&first, &second] {
         let (_, errors) = moved(&pass(&test_box, runner));
         assert!(errors.is_empty(), "{errors:?}");
     }
 
-    // WHEN the two runners pass at once, while the rule gives each a shard of its own
+    // WHEN the two runners pass at once, while their names order different shards first
     let mut together = 0;
     for round in 0..40 {
         let left = remaining(&test_box, &host, &changes);
@@ -68,7 +67,7 @@ fn two_runners_compacting_at_once_keep_their_leases() {
             break;
         }
         let now = movable(&changes, &left);
-        if rank_shard(&now, 0, 2) == rank_shard(&now, 1, 2) {
+        if name_shard(&now, EXECUTOR) == name_shard(&now, "exec-2") {
             let (_, errors) = moved(&pass(
                 &test_box,
                 if round % 2 == 0 { &first } else { &second },

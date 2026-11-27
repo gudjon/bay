@@ -1,5 +1,5 @@
 //! Shard indexes in tests (ruling R11, G921, G923): where a compacted name is recorded, the
-//! shard a runner of a rank moves next, two runners over a ref budget, and shard commits written
+//! shard a runner moves next, two runners over a ref budget, and shard commits written
 //! on a host directly, past its hook, as old compactions left them.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,22 +56,18 @@ pub fn movable(changes: &[Change], left: &BTreeSet<String>) -> Vec<String> {
     names
 }
 
-/// The shard runner `rank` of `runners` moves from the shards of `names`: the lowest whose
-/// number modulo `runners` is its rank, or, with none of its own left, the one at its rank
-/// counted back from the highest (BACKLOG 332, 339).
+/// The shard runner `runner` (its name) moves from the shards of `names` (BACKLOG 353): the one
+/// its order puts first, the highest sha256 of its presence ref, a NUL and the shard number.
 #[must_use]
-pub fn rank_shard(names: &[String], rank: usize, runners: usize) -> Option<u8> {
-    let shards: Vec<u8> = names
-        .iter()
-        .map(|name| shard(name))
-        .collect::<BTreeSet<u8>>()
-        .into_iter()
-        .collect();
-    shards
-        .iter()
-        .copied()
-        .find(|&number| usize::from(number) % runners == rank)
-        .or_else(|| shards.iter().rev().nth(rank % shards.len().max(1)).copied())
+pub fn name_shard(names: &[String], runner: &str) -> Option<u8> {
+    let me = format!("refs/bay/executor/{runner}");
+    names.iter().map(|name| shard(name)).max_by_key(|&number| {
+        let mut input = me.as_bytes().to_vec();
+        input.extend([0, number]);
+        let mut weight = [0; 32];
+        weight.copy_from_slice(&sha2::Sha256::digest(&input));
+        weight
+    })
 }
 
 /// The names of `changes` the host still holds as refs.

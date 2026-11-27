@@ -14,10 +14,10 @@
 //! its record in the same push, and refuses a create of a name its shard records (`crate::hook`), so
 //! create-only still holds once the ref is gone. Every lookup reads the ref and then its one shard.
 //! A push moves one shard, at most [`sized`] names of it, on a runner's pass that ran no operation,
-//! and live runners take different shards ([`pick`]), so a push's cost stays near [`TARGET`] and
-//! runners do not race it. Under the default budget, none, every cut change moves: the refs the
-//! remote holds are those of the retention window, and a store drops its copy of a ref moved
-//! elsewhere ([`forget`]).
+//! and each runner takes the shards in an order of its own name ([`pick`]), so a push's cost stays
+//! near [`TARGET`] and two runners seldom race it. Under the default budget, none, every cut change
+//! moves: the refs the remote holds are those of the retention window, and a store drops its copy
+//! of a ref moved elsewhere ([`forget`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -655,34 +655,31 @@ pub struct Pushed {
     pub took: std::time::Duration,
 }
 
-/// The shard a runner moves in a pass, from `shards` (each shard that holds a marker to move,
-/// ascending): a shard is runner `rank`'s of `runners` live runners when shard % runners is
-/// its rank, so runners over the budget at once push different shards. Each runner lists its own
-/// shards, from the records it holds, so a place in the list sent two runners to one shard when
-/// their lists differed (BACKLOG 339: 11 of 145 pushes refused on the shard's lease). A runner with
-/// no shard of its own left helps from the end of its list, at its rank counted back, so the last
-/// shards are still moved and a helper meets an owner only there.
+/// The shard a runner moves in a pass, of `shards` (each shard that holds a name it may move): the
+/// first in the order of `me`, its presence ref, the shard of the highest [`weight`]. Each runner
+/// lists its own shards, from the records it holds, so a place in the list sent two runners to one
+/// shard when their lists differed (BACKLOG 339: 11 of 145 pushes refused on the shard's lease);
+/// in an order of its own, a shard keeps its place whatever else a list holds. BACKLOG 353 (a fleet
+/// finding, 2026-11-27: 17 compaction pushes in 35 minutes refused, as two runners took one
+/// shard): a shard was the runner's whose rank among the runners it read live was the shard
+/// modulo their count, and a runner whose pass outlasted its presence read as gone to the other,
+/// so both counted one rank. Its own order reads no presence: two runners meet on a shard only as
+/// their orders happen to, about once in as many shards as they list.
 #[must_use]
-pub fn pick(shards: &[u8], rank: usize, runners: usize) -> Option<u8> {
-    let runners = runners.max(1);
-    let rank = rank % runners;
+pub fn pick(shards: &[u8], me: &str) -> Option<u8> {
     shards
         .iter()
         .copied()
-        .find(|&shard| usize::from(shard) % runners == rank)
-        .or_else(|| shards.iter().rev().nth(rank % shards.len().max(1)).copied())
+        .max_by_key(|&shard| weight(me, shard))
 }
 
-/// This runner's place among the live runners, by presence ref, and how many they are: the
-/// presences this store holds that read live now, and `me`.
-fn standing(repo: &Repo, me: &str) -> (usize, usize) {
-    let _ = crate::presence::fetch(repo);
-    let mut names = crate::presence::live_names(&repo.git);
-    names.push(me.to_owned());
-    names.sort();
-    names.dedup();
-    let rank = names.iter().position(|name| name == me).unwrap_or(0);
-    (rank, names.len())
+/// Where `shard` stands in the order of `me`: sha256 of `me`, a NUL and the shard number.
+fn weight(me: &str, shard: u8) -> [u8; 32] {
+    let mut input = me.as_bytes().to_vec();
+    input.extend([0, shard]);
+    let mut weight = [0; 32];
+    weight.copy_from_slice(&Sha256::digest(&input));
+    weight
 }
 
 /// The remote's bay refs, name to target, in one `ls-remote`.
@@ -821,8 +818,7 @@ pub fn run(
         shards.entry(shard(&name)).or_default().push((name, target));
     }
     let order: Vec<u8> = shards.keys().copied().collect();
-    let (rank, runners) = standing(repo, me);
-    let Some(chosen) = pick(&order, rank, runners) else {
+    let Some(chosen) = pick(&order, me) else {
         return Ok(None);
     };
     let mut moved = shards.remove(&chosen).unwrap_or_default();
@@ -1101,44 +1097,44 @@ mod tests {
         assert_eq!(batch(10_000_000), PUSH_MIN);
     }
 
-    /// BACKLOG 332: live runners over the budget at once take different shards, and the last
-    /// shard is still taken when the runners outnumber the shards.
+    /// BACKLOG 353: a runner takes the shards in an order of its own: the shard it takes first
+    /// from every shard is the one it takes from any list that holds it, whatever else the list
+    /// holds (BACKLOG 339: two runners' lists differ), and once that shard is gone it takes the
+    /// next in its order.
     #[test]
-    fn live_runners_take_different_shards() {
-        let shards = [3, 9, 200];
-        assert_eq!(pick(&shards, 0, 2), Some(200));
-        assert_eq!(pick(&shards, 1, 2), Some(3));
-        assert_eq!(pick(&shards, 0, 1), Some(3));
-        assert_eq!(pick(&shards, 4, 6), Some(9));
-        assert_eq!(pick(&[7], 1, 2), Some(7));
-        assert_eq!(pick(&[7], 0, 2), Some(7));
-        assert_eq!(pick(&[], 0, 1), None);
+    fn a_runner_takes_the_shards_in_an_order_of_its_own() {
+        let me = "refs/bay/executor/exec-1";
+        let every: Vec<u8> = (0..=255).collect();
+        let first = pick(&every, me).unwrap();
+        for list in [vec![first], vec![0, first, 255], vec![first, 7, 9, 200]] {
+            assert_eq!(pick(&list, me), Some(first), "{list:?}");
+        }
+        let rest: Vec<u8> = every.iter().copied().filter(|&s| s != first).collect();
+        let next = pick(&rest, me).unwrap();
+        assert_ne!(next, first);
+        assert_eq!(pick(&[first, next], me), Some(first));
+        assert_eq!(pick(&[7], me), Some(7));
+        assert_eq!(pick(&[], me), None);
     }
 
-    /// BACKLOG 339: two runners list their shards from the records each holds, so their lists
-    /// differ (run 5: one walked 1, 2, 3, ... and the other 0, 3, 5, 9, ...); while each has a
-    /// shard of its own they never take the same one, whatever the other's list holds.
+    /// BACKLOG 353: runners of different names seldom take one shard first; no rank and no view
+    /// of the live runners sends two to one. Of 64 runners over every shard, about one pair in 256
+    /// meets: here at most one in 64.
     #[test]
-    fn runners_whose_lists_differ_take_different_shards() {
-        let lists: [&[u8]; 5] = [
-            &[1, 2, 3, 4],
-            &[0, 3, 5, 9],
-            &[3, 5, 7, 8],
-            &[2, 3],
-            &[3, 4, 9, 200],
-        ];
-        for first in lists {
-            for second in lists {
-                for (a, b) in [(0, 1), (1, 0)] {
-                    let (mine, theirs) = (pick(first, a, 2), pick(second, b, 2));
-                    let own =
-                        |list: &[u8], rank: usize| list.iter().any(|&s| usize::from(s) % 2 == rank);
-                    if own(first, a) && own(second, b) {
-                        assert_ne!(mine, theirs, "{first:?} rank {a} and {second:?} rank {b}");
-                    }
-                }
-            }
-        }
+    fn runners_of_different_names_seldom_take_one_shard() {
+        let every: Vec<u8> = (0..=255).collect();
+        let firsts: Vec<u8> = (0..64)
+            .map(|n| pick(&every, &format!("refs/bay/executor/exec-{n}")).unwrap())
+            .collect();
+        let pairs = firsts.len() * (firsts.len() - 1) / 2;
+        let met = (0..firsts.len())
+            .flat_map(|a| (a + 1..firsts.len()).map(move |b| (a, b)))
+            .filter(|&(a, b)| firsts[a] == firsts[b])
+            .count();
+        assert!(
+            met * 64 <= pairs,
+            "{met} of {pairs} pairs took one shard first"
+        );
     }
 
     /// BACKLOG 334: a push of one size is sized by its time: the first moves FIRST names; a push

@@ -2567,7 +2567,7 @@ fn queue_retention(repo: &Repo, before: &Queue, chains: &[HeldChain]) -> Option<
 }
 
 /// The pass's compaction (§ 10a ref-growth budget, `crate::compact`), over the chains this
-/// store holds: one shard, this runner's among the live runners (BACKLOG 332). `None` when
+/// store holds: one shard, the first in this runner's own order (BACKLOG 332, 353). `None` when
 /// nothing moved; a failure is reported and the next pass tries again.
 fn compaction(repo: &Repo, chain: &Chain) -> Option<Value> {
     let chains = match chain.read_all() {

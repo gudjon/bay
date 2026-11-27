@@ -5,13 +5,15 @@
 //! batch bound by that cost, and live runners take different shards by their rank, so passes of
 //! two runners at once both push.
 //!
-//! Guards to mutate, in `src/compact.rs`: `pick` answering the first shard (its unit tests; here,
-//! when the lowest shard left is not the second runner's, it moves the first runner's shard);
+//! Guards to mutate, in `src/compact.rs`: `pick` answering the lowest shard (its unit tests; here,
+//! when the lowest shard left is not the one the second runner's name orders first, it moves
+//! another);
 //! `batch` answering `PUSH_MAX` (its unit test).
 //!
 //! BACKLOG 339 (a fleet finding, 2026-11-26: 11 of 145 compaction pushes lost their shard's lease,
-//! as runners whose lists differed took one place in them): a shard is the runner's whose rank
-//! is the shard modulo the live runners.
+//! as runners whose lists differed took one place in them), and BACKLOG 353 (two runners that read
+//! each other as gone counted one rank among the live runners): a runner takes the shards in an
+//! order of its own name, whatever its list holds and whichever runners it reads live (G939).
 //!
 //! BACKLOG 334 (a fleet finding, 2026-11-26: at 59,000 remote refs a push of one shard's names
 //! still took longer than its bound): a push's batch is sized by the time the last one took, read
@@ -19,7 +21,7 @@
 //! batch); `run` writing no record (the record keeps the old push).
 //!
 //! G921: a cut change's chain and request move too, the chain once its change has no other ref
-//! left, so the shard of a rank is read from the names a runner may move now.
+//! left, so a runner's shard is read from the names it may move now.
 
 #![cfg(unix)]
 
@@ -29,14 +31,14 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 use serde_json::Value;
-use support::TestBox;
 use support::shards::{
-    TwoRunners, movable, moved, pass, path, rank_shard, remaining, shard, two_runners,
+    TwoRunners, movable, moved, name_shard, pass, path, remaining, shard, two_runners,
 };
+use support::{EXECUTOR, TestBox};
 
-/// The names of `names` in the shard runner `rank` of `runners` moves.
-fn in_rank_shard(names: &[String], rank: usize, runners: usize) -> BTreeSet<String> {
-    let chosen = rank_shard(names, rank, runners);
+/// The names of `names` in the shard runner `runner` moves.
+fn in_runner_shard(names: &[String], runner: &str) -> BTreeSet<String> {
+    let chosen = name_shard(names, runner);
     names
         .iter()
         .filter(|name| Some(shard(name)) == chosen)
@@ -74,26 +76,26 @@ fn live_runners_over_the_budget_move_different_shards() {
     // WHEN the second runner passes while the first is live
     let before = left();
     let (taken, errors) = moved(&pass(&test_box, &second));
-    // THEN it moves a shard of its rank among two, never the first runner's
+    // THEN it moves the shard its own name orders first
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(
         taken,
-        in_rank_shard(&before, 1, 2),
-        "exec-2 moves the shard of its rank"
+        in_runner_shard(&before, "exec-2"),
+        "exec-2 moves the shard its name orders first"
     );
     let before = left();
     let (taken, errors) = moved(&pass(&test_box, &first));
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(
         taken,
-        in_rank_shard(&before, 0, 2),
-        "exec-1 moves the shard of its rank"
+        in_runner_shard(&before, EXECUTOR),
+        "exec-1 moves the shard its name orders first"
     );
 
-    // AND passes of both at once both push, each its own shard, when the rule gives each one
-    // (with all the shards left of one parity, the helper meets the owner at the end of the list)
+    // AND passes of both at once both push, each its own shard, when their names order different
+    // shards first
     let now = left();
-    if rank_shard(&now, 0, 2) != rank_shard(&now, 1, 2) {
+    if name_shard(&now, EXECUTOR) != name_shard(&now, "exec-2") {
         let spawn = |clone: &Path| {
             test_box
                 .bay_process(clone)
