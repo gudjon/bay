@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.42
+
+- An origin forwards again, after 1 s and then 3 s, a push its hosted remote could not check.
+- A retention-cut change moves whole into its shard with its chain and request, and leaves no ref.
+- `ref_budget` defaults to 0: the retention window bounds the live refs; a budget holds the move back.
+- A store deletes its local copy of a ref that a shard records.
+- The load test splits each landing's lead into queue wait, check and publish, and keeps the runners' logs.
+
 ## 0.7.41
 
 - A host judges its trunk rule once a push in its pre-receive hook; a serving origin removes the update hook.
