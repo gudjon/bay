@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.45
+
+- A `--paths` value is a path from the repository's root: `/src/` is declared as `src/`.
+- An undo whose main moved under it decides again on that main, in the same pass.
+- A pass tells and undoes main's reds, and plans post work, between its visits, once a minute.
+- Over its ref budget, a runner cuts the oldest ended changes first.
+
 ## 0.7.44
 
 - On a red main, a batch runs the red's checks and lands unless a member makes the red worse.
