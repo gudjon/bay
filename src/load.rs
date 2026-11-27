@@ -18,6 +18,15 @@
 //! holds from its next visit, with no restart. A value bay cannot take (not a whole number, or
 //! outside the range of the repository's own key) leaves the repository's value in force, and
 //! `bay doctor` names it: a cap never stops a runner.
+//!
+//! G946 (a fleet finding, 2026-11-27: a box's two runners waited 189 times in a day for CPU some
+//! of 20 %, read at 17.6 % for the box while the job it protects stalled 0.7 %): the box's own
+//! checks raised the pressure that held them. Git config `bay.checkStartCpuCgroup`, global or
+//! for one clone, any number of values, names the cgroups the box protects, each a cgroup v2 path
+//! under `/sys/fs/cgroup`; a `*` in a segment stands for any run of characters in it (a unit
+//! named anew at each start). While one is set, `bay.checkStartCpuSome` is judged against the
+//! highest `some avg10` of the cgroups they match (`cpu.pressure`), never the box's. One that
+//! matches none runs nothing the box protects, so it is no wait; `bay doctor` names it.
 
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
@@ -35,6 +44,13 @@ pub const LOAD1_KEY: &str = "bay.checkStartLoad1";
 
 /// The CPU pressure (`some avg10`, percent) at or above which a runner starts no check.
 pub const CPU_SOME_KEY: &str = "bay.checkStartCpuSome";
+
+/// G946: the cgroups whose CPU pressure `bay.checkStartCpuSome` is judged against, in place of
+/// the box's.
+pub const CPU_CGROUP_KEY: &str = "bay.checkStartCpuCgroup";
+
+/// Where cgroup v2 is mounted.
+const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
 /// G898: the box's cap on `[runner] parallel_checks`, how many of a candidate's checks its
 /// runner runs at once.
@@ -73,10 +89,13 @@ pub struct Limits {
 }
 
 /// A box at or above a limit: what was measured, against which limits.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Busy {
     pub load1: Option<f64>,
     pub cpu_some: Option<f64>,
+    /// G946: the cgroup `cpu_some` was read from, when the box names any ([`CPU_CGROUP_KEY`]);
+    /// `None` is the whole box.
+    pub cpu_of: Option<String>,
     pub limits: Limits,
 }
 
@@ -87,6 +106,7 @@ impl Busy {
         json!({
             "load1": self.load1,
             "cpu_some_avg10": self.cpu_some,
+            "cpu_some_of": self.cpu_of,
             "limits": {
                 LOAD1_KEY: self.limits.load1,
                 CPU_SOME_KEY: self.limits.cpu_some,
@@ -107,8 +127,13 @@ impl Busy {
         if let (Some(some), Some(limit)) = (self.cpu_some, self.limits.cpu_some)
             && some >= limit
         {
+            let of = self
+                .cpu_of
+                .as_ref()
+                .map(|cgroup| format!(" of {cgroup}"))
+                .unwrap_or_default();
             over.push(format!(
-                "CPU some avg10 {some:.1} % >= {limit} ({CPU_SOME_KEY})"
+                "CPU some avg10 {some:.1} %{of} >= {limit} ({CPU_SOME_KEY})"
             ));
         }
         format!("box busy: {}", over.join(", "))
@@ -154,7 +179,10 @@ pub fn busy(git: &Git) -> Result<Option<Busy>, String> {
         return Ok(None);
     }
     let load1 = limits.load1.map(|_| load1()).transpose()?;
-    let cpu_some = limits.cpu_some.map(|_| cpu_some()).transpose()?;
+    let (cpu_some, cpu_of) = match limits.cpu_some {
+        Some(_) => cpu_pressure(git)?,
+        None => (None, None),
+    };
     let over = |measured: Option<f64>, limit: Option<f64>| {
         measured
             .zip(limit)
@@ -164,6 +192,7 @@ pub fn busy(git: &Git) -> Result<Option<Busy>, String> {
         (over(load1, limits.load1) || over(cpu_some, limits.cpu_some)).then_some(Busy {
             load1,
             cpu_some,
+            cpu_of,
             limits,
         }),
     )
@@ -293,6 +322,156 @@ fn cpu_some() -> Result<f64, String> {
         .ok_or_else(|| format!("/proc/pressure/cpu could not be read: {}", text.trim()))
 }
 
+/// G946: the CPU pressure the box judges and where it was read: the highest of the cgroups it
+/// names ([`CPU_CGROUP_KEY`]), with that cgroup, or the box's when it names none. `None` when
+/// they match no cgroup: nothing the box protects runs.
+fn cpu_pressure(git: &Git) -> Result<(Option<f64>, Option<String>), String> {
+    let patterns = cgroups(git)?;
+    if patterns.is_empty() {
+        return Ok((Some(cpu_some()?), None));
+    }
+    let highest = pressures(&cgroup_root(), &patterns)?
+        .into_iter()
+        .max_by(|(_, a), (_, b)| a.total_cmp(b));
+    Ok(highest.map_or((None, None), |(cgroup, some)| (Some(some), Some(cgroup))))
+}
+
+/// G946: every value of [`CPU_CGROUP_KEY`] as `git` reads it. Unset is none.
+///
+/// # Errors
+///
+/// A value with a `..` segment, or a `git config` that fails.
+pub fn cgroups(git: &Git) -> Result<Vec<String>, String> {
+    let values = match git.run_status(&["config", "--get-all", CPU_CGROUP_KEY]) {
+        // `git config --get-all` exits 1 for a key that is not set.
+        Ok((1, _, _)) => return Ok(Vec::new()),
+        Ok((0, values, _)) => values,
+        Ok((_, _, stderr)) => return Err(format!("{CPU_CGROUP_KEY} could not be read: {stderr}")),
+        Err(error) => {
+            return Err(format!(
+                "{CPU_CGROUP_KEY} could not be read: {}",
+                error.message()
+            ));
+        }
+    };
+    values
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            if value.split('/').any(|segment| segment == "..") {
+                Err(format!(
+                    "{CPU_CGROUP_KEY} = \"{value}\" is not a cgroup path under {CGROUP_ROOT}"
+                ))
+            } else {
+                Ok(value.trim_matches('/').to_owned())
+            }
+        })
+        .collect()
+}
+
+/// G946: each cgroup the box names ([`cgroups`]) that exists now, with its CPU pressure
+/// `some avg10`, for `bay doctor`.
+///
+/// # Errors
+///
+/// The key cannot be read, or a cgroup it matches has no readable `cpu.pressure`.
+pub fn cgroup_pressures(git: &Git) -> Result<Vec<(String, f64)>, String> {
+    pressures(&cgroup_root(), &cgroups(git)?)
+}
+
+/// Where cgroups are read: [`CGROUP_ROOT`], or `BAY_TEST_CGROUP_ROOT` in a test build.
+fn cgroup_root() -> std::path::PathBuf {
+    TEST_HOOKS
+        .then(|| std::env::var("BAY_TEST_CGROUP_ROOT").ok())
+        .flatten()
+        .unwrap_or_else(|| CGROUP_ROOT.to_owned())
+        .into()
+}
+
+/// The cgroups under `root` that `patterns` match, each once and in order, with `some avg10` of
+/// its `cpu.pressure`.
+fn pressures(root: &std::path::Path, patterns: &[String]) -> Result<Vec<(String, f64)>, String> {
+    let mut found: Vec<String> = Vec::new();
+    for pattern in patterns {
+        for cgroup in matched(root, pattern) {
+            if !found.contains(&cgroup) {
+                found.push(cgroup);
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|cgroup| {
+            let file = root.join(&cgroup).join("cpu.pressure");
+            let text = std::fs::read_to_string(&file)
+                .map_err(|error| format!("{} could not be read: {error}", file.display()))?;
+            let some = some_avg10(&text)
+                .ok_or_else(|| format!("{} could not be read: {}", file.display(), text.trim()))?;
+            Ok((cgroup, some))
+        })
+        .collect()
+}
+
+/// The directories under `root` that `pattern` names, relative to it, sorted: a segment with a
+/// `*` matches each directory whose name it fits ([`fits`]), any other names one.
+fn matched(root: &std::path::Path, pattern: &str) -> Vec<String> {
+    let mut found = vec![String::new()];
+    for segment in pattern.split('/').filter(|segment| !segment.is_empty()) {
+        let mut next = Vec::new();
+        for dir in &found {
+            let at = root.join(dir);
+            let join = |name: &str| {
+                if dir.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{dir}/{name}")
+                }
+            };
+            if !segment.contains('*') {
+                if at.join(segment).is_dir() {
+                    next.push(join(segment));
+                }
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(&at) else {
+                continue;
+            };
+            let mut names: Vec<String> = entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter(|name| fits(segment, name))
+                .collect();
+            names.sort();
+            next.extend(names.iter().map(|name| join(name)));
+        }
+        found = next;
+    }
+    found.retain(|cgroup| !cgroup.is_empty());
+    found
+}
+
+/// Whether `name` fits `pattern`, where each `*` stands for any run of characters.
+fn fits(pattern: &str, name: &str) -> bool {
+    let mut parts = pattern.split('*');
+    let Some(rest) = name.strip_prefix(parts.next().unwrap_or_default()) else {
+        return false;
+    };
+    let parts: Vec<&str> = parts.collect();
+    let Some((last, middle)) = parts.split_last() else {
+        return rest.is_empty();
+    };
+    let mut rest = rest;
+    for part in middle {
+        let Some(at) = rest.find(part) else {
+            return false;
+        };
+        rest = &rest[at + part.len()..];
+    }
+    rest.len() >= last.len() && rest.ends_with(last)
+}
+
 /// The first field of `/proc/loadavg`.
 fn first_load(text: &str) -> Option<f64> {
     text.split_whitespace().next()?.parse().ok()
@@ -353,6 +532,7 @@ mod tests {
         let busy = Busy {
             load1: Some(30.51),
             cpu_some: Some(12.0),
+            cpu_of: None,
             limits: Limits {
                 load1: Some(24.0),
                 cpu_some: Some(20.0),
@@ -362,5 +542,85 @@ mod tests {
             busy.line(),
             "box busy: load1 30.5 >= 24 (bay.checkStartLoad1)"
         );
+        let pressed = Busy {
+            load1: None,
+            cpu_some: Some(41.0),
+            cpu_of: Some("system.slice/plant-7.service".to_owned()),
+            limits: Limits {
+                load1: None,
+                cpu_some: Some(20.0),
+            },
+        };
+        assert_eq!(
+            pressed.line(),
+            "box busy: CPU some avg10 41.0 % of system.slice/plant-7.service >= 20 (bay.checkStartCpuSome)"
+        );
+    }
+
+    /// G946: a `*` stands for any run of characters, and only in the segment it is in.
+    #[test]
+    fn a_star_fits_any_run_of_characters() {
+        assert!(fits(
+            "plant-*.service",
+            "plant-1805163-1795641087145.service"
+        ));
+        assert!(fits("plant-*.service", "plant-.service"));
+        assert!(fits("*", "anything"));
+        assert!(fits("a*b*c", "abc"));
+        assert!(fits("exact", "exact"));
+        assert!(!fits("exact", "exactly"));
+        assert!(!fits("plant-*.service", "plant-1.scope"));
+        assert!(!fits("ab*b", "ab"));
+        assert!(!fits("bay-*", "plant-1"));
+    }
+
+    /// G946: the cgroups a box names are read under the root, each once, with their pressure;
+    /// one that matches nothing adds nothing.
+    #[test]
+    fn the_named_cgroups_are_read_with_their_pressure() {
+        let root = std::env::temp_dir().join(format!("bay-g946-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cgroup = |path: &str, some: &str| {
+            let dir = root.join(path);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("cpu.pressure"),
+                format!(
+                    "some avg10={some} avg60=1.00 avg300=1.00 total=1
+full avg10=0.00 avg60=0.00 avg300=0.00 total=0
+"
+                ),
+            )
+            .unwrap();
+        };
+        cgroup("user.slice/u/plant-2.service", "3.00");
+        cgroup("user.slice/u/plant-1.service", "41.00");
+        cgroup("user.slice/u/bay-r.service", "90.00");
+        let read = |patterns: &[&str]| {
+            pressures(
+                &root,
+                &patterns.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            read(&[
+                "user.slice/u/plant-*.service",
+                "user.slice/u/plant-1.service"
+            ])
+            .unwrap(),
+            vec![
+                ("user.slice/u/plant-1.service".to_owned(), 41.0),
+                ("user.slice/u/plant-2.service".to_owned(), 3.0),
+            ]
+        );
+        assert_eq!(read(&["user.slice/*/none-*.service"]).unwrap(), vec![]);
+        assert_eq!(read(&["system.slice"]).unwrap(), vec![]);
+        std::fs::create_dir_all(root.join("user.slice/u/plant-3.service")).unwrap();
+        assert!(
+            read(&["user.slice/u/plant-3.service"])
+                .unwrap_err()
+                .contains("cpu.pressure could not be read")
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

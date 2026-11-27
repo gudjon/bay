@@ -21,7 +21,8 @@ Read with `SKILL.md`, whose "Read the result" names the fields every result carr
 - `DISK_LOW`: the disk is below this machine's floor, 5 GiB unless `git config bay.minFreeMiB` sets another; `0` turns
   it off. `bay start` already freed what it could, and `detail.released_views` names those views. Free more, then start again.
 - `BOX_BUSY`: the runner's machine is at or above the load limits it sets (`git config bay.checkStartLoad1`,
-  `bay.checkStartCpuSome`), so it starts no check there; `detail` names the load and the limits. Nothing to do.
+  `bay.checkStartCpuSome`, judged for the cgroups `bay.checkStartCpuCgroup` names when it names any), so it starts no
+  check there; `detail` names the load, the cgroup and the limits. Nothing to do.
 - `EXPEDITE_REFUSED`: `bay merge --expedite <why>` could not put the change next. It waits its turn as usual;
   `detail.expedite.refused` says why: `off` (no `[expedite]` in the config on main), `live` (another expedite waits),
   `spent` (the UTC day's `per_day` is used; `resets_at`). Do not ask again for it.

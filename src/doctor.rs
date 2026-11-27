@@ -253,6 +253,7 @@ fn probe(dir: &Path, executor: bool) -> Result<BayResult, String> {
             live_row(&git, &mut report);
             environments_row(&git, &config, executor, &mut report);
             report.rows.extend(runner_caps_row(&git, &config));
+            report.rows.extend(cpu_cgroup_row(&git));
             report.rows.extend(pre_merge_row(&git, &config));
         }
         if executor && !info.bare {
@@ -1470,6 +1471,46 @@ fn runner_caps_row(git: &Git, config: &Config) -> Option<Value> {
             "state": if refused { "refused" } else { "capped" },
             "caps": caps.iter().map(crate::load::Cap::row).collect::<Vec<_>>(),
         })
+    })
+}
+
+/// G946: the cgroups whose CPU pressure this box's check-start limit is judged against
+/// ([`crate::load::CPU_CGROUP_KEY`]), with each that exists now and its pressure. Present only
+/// when the box names one. Names that match no cgroup are `unmatched`: nothing the box protects
+/// runs, so its runner does not wait. Advice, never red.
+fn cpu_cgroup_row(git: &Git) -> Option<Value> {
+    let row =
+        |state: &str| json!({"name": "check-start-cgroups", "required": false, "state": state});
+    let named = match crate::load::cgroups(git) {
+        Ok(named) if named.is_empty() => return None,
+        Ok(named) => named,
+        Err(error) => {
+            let mut refused = row("refused");
+            refused["error"] = json!(error);
+            return Some(refused);
+        }
+    };
+    Some(match crate::load::cgroup_pressures(git) {
+        Ok(found) => {
+            let mut read = row(if found.is_empty() {
+                "unmatched"
+            } else {
+                "matched"
+            });
+            read["named"] = json!(named);
+            read["cgroups"] = found
+                .iter()
+                .map(|(cgroup, some)| json!({"cgroup": cgroup, "cpu_some_avg10": some}))
+                .collect();
+            read
+        }
+        Err(error) => {
+            let mut refused = row("refused");
+            refused["named"] = json!(named);
+            refused["error"] = json!(error);
+            refused["recovery"] = json!(crate::load::RECOVERY);
+            refused
+        }
     })
 }
 
