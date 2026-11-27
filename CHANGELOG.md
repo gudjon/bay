@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.40
+
+- A red's teller reads the logs and presences just before it tells, and counts itself only while live and serving.
+- A change whose landing main never took opens again on its author's `bay merge`, ten minutes after its record.
+- A runner judges a post check's owner by the presences its pass fetched, and no longer runs its peers' checks.
+
 ## 0.7.39
 
 - `bay status --green-tip` names the newest landing of main with every post check green.
