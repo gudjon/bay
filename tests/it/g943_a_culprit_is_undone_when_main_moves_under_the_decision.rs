@@ -23,13 +23,18 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-/// The wake adapter: appends each request to `$HOME/woken`. When `$HOME/remote` names the
-/// remote, it appends main's commit there to `$HOME/mains`. When `$HOME/move-main` names a
-/// clone, it lands a commit on main from it, outside bay, as another runner's landing does
-/// within a pass, once. bay gives an adapter only PATH and HOME.
+/// The wake adapter: appends each request to `$HOME/woken`. A landing wakes its author too;
+/// only a red's wake (`cause` `red`) does more. When `$HOME/remote` names the remote, it
+/// appends main's commit there to `$HOME/mains`. When `$HOME/move-main` names a clone, it
+/// lands a commit on main from it, outside bay, as another runner's landing does within a pass,
+/// once. bay gives an adapter only PATH and HOME.
 const WAKE: &str = "#!/bin/sh\n\
-cat >> \"$HOME/woken\"\n\
-echo >> \"$HOME/woken\"\n\
+request=$(cat)\n\
+printf '%s\\n' \"$request\" >> \"$HOME/woken\"\n\
+printf '%s' \"$request\" | grep -q '\"cause\": *\"red\"' || {\n\
+  printf '{\"schema\":\"bay.wake-result/1\",\"result\":\"woken\",\"reason\":null}'\n\
+  exit 0\n\
+}\n\
 if [ -f \"$HOME/remote\" ]; then\n\
   git ls-remote \"$(cat \"$HOME/remote\")\" refs/heads/main | cut -f1 >> \"$HOME/mains\"\n\
 fi\n\
@@ -106,6 +111,11 @@ fn submit(trunk: &Trunk, path: &str) {
     std::fs::write(view.join(path), format!("{path}\n")).unwrap();
     let (code, queued) = result_json(trunk.test_box.bay(&view).arg("merge"));
     assert_eq!(code, 0, "{queued}");
+    // In line, as a runner's setup puts it: so the pass takes it as a head, before its setup.
+    let change = started["change"].as_str().unwrap();
+    let op_id = queued["op_id"].as_str().unwrap();
+    let opened = bay::repo::Repo::open(&trunk.repo).unwrap();
+    bay::queue::join(&opened, None, op_id, change).unwrap();
 }
 
 /// Main's commit on the remote.
@@ -147,15 +157,22 @@ fn a_pass_tells_a_culprit_between_the_heads_it_takes() {
     // and not yet the second
     let after = main_tip(&trunk);
     let mains = std::fs::read_to_string(home.join("mains")).unwrap_or_default();
+    let woken = std::fs::read_to_string(home.join("woken")).unwrap_or_default();
     let told: Vec<&str> = mains.lines().collect();
     assert_eq!(
         told.len(),
         1,
-        "one tell, of {}: {mains:?}\n{ran}",
+        "one tell, of {}: {mains:?}\n{woken}\n{ran}",
         landings[3].0
     );
-    assert_ne!(told[0], before, "told before any head landed: {ran}");
-    assert_ne!(told[0], after, "told only after both heads landed: {ran}");
+    assert_ne!(
+        told[0], before,
+        "told before any head landed: {woken}\n{ran}"
+    );
+    assert_ne!(
+        told[0], after,
+        "told only after both heads landed: {woken}\n{ran}"
+    );
     let ahead = trunk.test_box.git_bare(
         &trunk.remote,
         &["rev-list", "--count", &format!("{before}..{after}")],

@@ -112,7 +112,7 @@ fn a_path_with_a_leading_slash_is_declared_from_the_root() {
     let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
     assert_eq!(code, 0, "{landed}");
     assert_eq!(landed["decision"], "merged", "{landed}");
-    assert_eq!(test_box.trunk_change_ids(&remote).last(), Some(&id));
+    assert_eq!(test_box.trunk_change_ids(&remote).first(), Some(&id));
     let merged = test_box.git_bare(&remote, &["show", "main:docs/b.md"]);
     assert_eq!(merged.trim(), "b", "{landed}");
 }
