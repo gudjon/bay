@@ -3250,7 +3250,7 @@ fn batch(
     let repo = ctx.repo;
     // E21: each part of a head's work names its own step, so a line says where the time went.
     ctx.step.set("batch");
-    let Some((policy, mut members, mut stopped, stopped_at)) =
+    let Some((policy, members, mut stopped, stopped_at)) =
         batch_plan(ctx, op_id, revision, trunk, at)?
     else {
         return Ok(None);
@@ -3263,13 +3263,10 @@ fn batch(
         return Ok(None);
     }
     red_gate(ctx, revision, trunk)?;
-    if ends_before_red(ctx, &mut members, trunk)? {
-        stopped = "main_red";
-        let min = repo.config.batch().map_or(2, |bounds| bounds.min.max(2));
-        if members.len() < min {
-            return Ok(None);
-        }
-    }
+    batch_reds(ctx, &members, trunk)?;
+    // G677: each red post check runs on every prefix the batch checks, as a pre check judged
+    // against main, as it runs on a lone candidate.
+    let policy = policy.judging_red(&ctx.red_ids());
     ctx.step.set("check");
     let id = throughput::batch_id(op_id, trunk)?;
     let Some((search, mut checks)) = bisect_batch(ctx, op_id, trunk, &policy, &members, &id)?
@@ -3359,28 +3356,36 @@ fn batch(
     }
 }
 
-/// BACKLOG 119: a batch member main's red at `trunk` holds never lands in the batch, whose red
-/// gate judged its head alone: the batch ends before the first such member, which waits in its
-/// own turn. Whether it ended there.
-fn ends_before_red(
-    ctx: &Ctx,
-    members: &mut Vec<throughput::Member>,
-    trunk: &str,
-) -> Result<bool, String> {
+/// G938 (a load measurement, 2026-11-27: while main was red, its batches held one to three
+/// members where five were planned, and the line grew from 4 to 113): the red post checks on the
+/// paths the members behind the head change join the head's own (`red_gate`). Each runs on the
+/// batch's checks, judged against main, so a member on a red's paths lands in the batch unless it
+/// makes that red worse, as it would alone ("merge unless worse", G677). The batch used to end
+/// before the first such member, a rule from when a change on a red's paths waited for main.
+fn batch_reds(ctx: &mut Ctx, members: &[throughput::Member], trunk: &str) -> Result<(), String> {
+    let (Some(head), Some(last)) = (members.first(), members.last()) else {
+        return Ok(());
+    };
+    if head.op_id == last.op_id {
+        return Ok(());
+    }
     let git = &ctx.repo.git;
     let reds = journaled(ctx, || {
         crate::red::holding(git, trunk, ctx.registry.as_ref())
     })?;
     if reds.is_empty() {
-        return Ok(false);
+        return Ok(());
     }
-    for (at, member) in members.iter().enumerate().skip(1) {
-        if crate::red::covers_change(git, &reds, trunk, &member.revision)? {
-            members.truncate(at);
-            return Ok(true);
+    // What the members behind the head change, stacked on it. Only the head's names repair a
+    // red here: a member's own Fixes: makes it a repair, which runs from its own place.
+    let changed = check::changed_paths(git, &head.commit, &last.commit)?;
+    for red in crate::red::blocking(&reds, &changed, &[]) {
+        let (id, units) = crate::bisect::red_units(git, ctx.registry.as_ref(), red)?;
+        if !ctx.red_checks.iter().any(|(asked, _)| *asked == id) {
+            ctx.red_checks.push((id, units));
         }
     }
-    Ok(false)
+    Ok(())
 }
 
 /// Whether a refused push was refused by bay's own host hook, which judged it (its lines read
@@ -8026,6 +8031,9 @@ fn lane_leak(ctx: &Ctx, trunk: &str, revision: &str) -> Result<Option<BayResult>
 /// as `red_pending`, never as clear.
 fn red_gate(ctx: &mut Ctx, revision: &str, trunk: &str) -> Result<(), String> {
     ctx.step.set("red");
+    // Each call judges main's reds anew: what an earlier call or a batch's members (G938) asked
+    // is not this candidate's.
+    ctx.red_checks.clear();
     // G657: a run of its own, unlike a runner's pass, has not read the post records another
     // machine wrote, and would merge past a red it cannot see.
     if ctx.visit == Visit::Own {

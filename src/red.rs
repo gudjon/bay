@@ -729,23 +729,6 @@ pub fn blocking<'a>(reds: &'a [Red], changed: &[String], names: &[&String]) -> V
         .collect()
 }
 
-/// BACKLOG 119: whether one of `reds`, the red checks of `trunk`, covers a path `revision`
-/// changes against its merge base with `trunk`: that change cannot land while they stand.
-///
-/// # Errors
-///
-/// A git fault.
-pub fn covers_change(git: &Git, reds: &[Red], trunk: &str, revision: &str) -> Result<bool, String> {
-    if reds.is_empty() {
-        return Ok(false);
-    }
-    let base = git
-        .run(&["merge-base", trunk, revision])
-        .map_err(|error| error.message())?;
-    let changed = crate::check::changed_paths(git, &base, revision)?;
-    Ok(reds.iter().any(|red| red.covers(&changed)))
-}
-
 /// The red and the pending checks of `trunk`, as [`state`] judges them, judged once per main tip,
 /// registry and evidence in this process, each judgement starting from the last ([`judge`]).
 ///
