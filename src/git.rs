@@ -1274,10 +1274,13 @@ impl Git {
         // W10: a host may refuse a push of bay's records for a moment of its own (a hosting
         // check it could not finish), and accept the same push a second later. Such a push is
         // tried again before it is called refused; a ref another writer moved is the caller's
-        // to read, so it is answered at once. G847: so is a call that reached no host.
+        // to read, so it is answered at once. G847: so is a call that reached no host. G934: and
+        // a fetch that lost its local ref update to another writer of this store.
         for wait in HOST_RETRY_WAITS {
             if output.status.success()
-                || !(host_refused(args, &output.stderr) || host_unreached(args, &output.stderr))
+                || !(host_refused(args, &output.stderr)
+                    || host_unreached(args, &output.stderr)
+                    || fetch_raced(args, &output.stderr))
             {
                 break;
             }
@@ -2910,6 +2913,15 @@ fn host_unreached(args: &[&str], stderr: &[u8]) -> bool {
             && READ_FAULTS.iter().any(|words| text.contains(words)))
 }
 
+/// G934 (a load test, 2026-11-27: 1 of 60 `bay start`s failed while agents that share a clone
+/// fetched at once, `cannot lock ref 'refs/remotes/origin/main': is at <a> but expected <b>`):
+/// whether a failed fetch lost its local ref update to another writer of the same store, which
+/// moved the ref or held its lock (the reftable backend says `cannot lock references`). A fetch
+/// changes nothing on the remote, so it is tried again.
+fn fetch_raced(args: &[&str], stderr: &[u8]) -> bool {
+    command_of(args) == Some("fetch") && String::from_utf8_lossy(stderr).contains("cannot lock ref")
+}
+
 /// G847: the words of a call to a remote that reached no host: its name did not resolve, no
 /// connection opened, or (BACKLOG 290) the ssh server sent no greeting, so no git ran there.
 const HOST_UNREACHED: [&str; 6] = [
@@ -3271,7 +3283,7 @@ fn wait_until(
 #[cfg(all(test, unix))]
 mod tests {
     use super::{
-        Git, GitError, LISTED_PATH_BYTES, batch_missing, bound_for, host_unreached,
+        Git, GitError, LISTED_PATH_BYTES, batch_missing, bound_for, fetch_raced, host_unreached,
         never_connected, path_chunks, run_bounded_for, tree_path,
     };
     use crate::result::{GIT_CALL_TIMEOUT, GIT_NETWORK_TIMEOUT};
@@ -3302,6 +3314,25 @@ mod tests {
         assert!(!host_unreached(&["status"], unresolved));
         assert!(!host_unreached(&["-c", "push.x=1", "log"], unresolved));
         assert!(!host_unreached(
+            &["fetch", "origin"],
+            b"fatal: couldn't find remote ref refs/heads/x\n"
+        ));
+    }
+
+    /// G934: a fetch that lost its local ref update to a writer of the same store is tried
+    /// again, in either ref format; a push refused the same way, or a fetch's other fault, is
+    /// not.
+    #[test]
+    fn a_fetch_that_lost_a_local_ref_race_is_tried_again() {
+        let raced: &[u8] = b"error: cannot lock ref 'refs/remotes/origin/main': is at 1111 but \
+            expected 2222\n";
+        assert!(fetch_raced(&["fetch", "-q", "--no-tags", "origin"], raced));
+        assert!(fetch_raced(
+            &["-c", "fetch.x=1", "fetch", "origin"],
+            b"error: cannot lock references\n"
+        ));
+        assert!(!fetch_raced(&["push", "origin", "main"], raced));
+        assert!(!fetch_raced(
             &["fetch", "origin"],
             b"fatal: couldn't find remote ref refs/heads/x\n"
         ));
