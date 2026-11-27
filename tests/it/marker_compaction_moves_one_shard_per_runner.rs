@@ -17,82 +17,22 @@
 //! still took longer than its bound): a push's batch is sized by the time the last one took, read
 //! from the runner's record. Guards: `sized` answering `FIRST` (a slow record does not shrink the
 //! batch); `run` writing no record (the record keeps the old push).
+//!
+//! G921: a cut change's chain and request move too, the chain once its change has no other ref
+//! left, so the shard of a rank is read from the names a runner may move now.
 
 #![cfg(unix)]
 
 use crate::support;
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
-use support::{
-    AGENT, EXECUTOR, PRODUCER, REGISTRAR, TestBox, check_files, key_line, passing_result,
-    result_json,
+use support::TestBox;
+use support::shards::{
+    TwoRunners, movable, moved, pass, path, rank_shard, remaining, shard, two_runners,
 };
-
-/// The shard of `name` (ruling R11): the first byte of sha256(name).
-fn shard(name: &str) -> u8 {
-    use sha2::Digest as _;
-    sha2::Sha256::digest(name.as_bytes())[0]
-}
-
-/// One pass of the runner in `clone`, live for the next 300 s.
-fn pass(test_box: &TestBox, clone: &Path) -> Value {
-    let (code, ran) =
-        result_json(
-            test_box
-                .bay(clone)
-                .args(["runner", "run", "--once", "--interval-s", "300"]),
-        );
-    assert_eq!(code, 0, "{ran}");
-    ran
-}
-
-/// The names a pass moved, and the errors it reported.
-fn moved(ran: &Value) -> (BTreeSet<String>, Vec<Value>) {
-    let mut names = BTreeSet::new();
-    let mut errors = Vec::new();
-    for entry in ran["detail"]["ran"].as_array().into_iter().flatten() {
-        if entry.get("error").is_some() {
-            errors.push(entry.clone());
-        }
-        for name in entry["compacted"].as_array().into_iter().flatten() {
-            names.insert(name.as_str().unwrap().to_owned());
-        }
-    }
-    (names, errors)
-}
-
-/// The names of `markers` the host still holds as refs.
-fn remaining(test_box: &TestBox, host: &Path, markers: &[String]) -> Vec<String> {
-    markers
-        .iter()
-        .filter(|name| {
-            !test_box
-                .git_bare(host, &["for-each-ref", "--format=%(refname)", name])
-                .is_empty()
-        })
-        .cloned()
-        .collect()
-}
-
-/// The shard runner `rank` of `runners` moves from the shards of `names`: the lowest whose
-/// number modulo `runners` is its rank, or, with none of its own left, the one at its rank
-/// counted back from the highest.
-fn rank_shard(names: &[String], rank: usize, runners: usize) -> Option<u8> {
-    let shards: Vec<u8> = names
-        .iter()
-        .map(|name| shard(name))
-        .collect::<BTreeSet<u8>>()
-        .into_iter()
-        .collect();
-    shards
-        .iter()
-        .copied()
-        .find(|&number| usize::from(number) % runners == rank)
-        .or_else(|| shards.iter().rev().nth(rank % shards.len().max(1)).copied())
-}
 
 /// The names of `names` in the shard runner `rank` of `runners` moves.
 fn in_rank_shard(names: &[String], rank: usize, runners: usize) -> BTreeSet<String> {
@@ -104,88 +44,18 @@ fn in_rank_shard(names: &[String], rank: usize, runners: usize) -> BTreeSet<Stri
         .collect()
 }
 
-/// A host over a ref budget of 1 with three landed changes, two enrolled runners `exec-1` and
-/// `exec-2` in their own clones, and the markers of the three changes with their targets.
-fn setup(test_box: &TestBox) -> (PathBuf, [PathBuf; 2], Vec<(String, String)>) {
-    let host = test_box.path().join("host.git");
-    test_box.host_init(&host);
-    let repo = test_box.repo_without_remote_any("repo");
-    test_box.add_origin(&repo, &host);
-    let mut files = check_files("true", &passing_result(1), 1, 60);
-    files.push((
-        ".bay/config.toml".to_owned(),
-        "[retention]\nwindow_s = 0\nref_budget = 1\n".to_owned(),
-    ));
-    test_box.seed_with_check(&repo, &[("src/a.rs", "fn a() {}\n")], &files);
-    let keys = test_box.keys();
-    // Each runner signs its results under its own producer name, with its own key.
-    let producer_2 = test_box.path().join("keys").join("producer-2");
-    let made = std::process::Command::new("ssh-keygen")
-        .args(["-q", "-t", "ed25519", "-N", "", "-C", "producer-2", "-f"])
-        .arg(&producer_2)
-        .status()
-        .unwrap();
-    assert!(made.success());
-    test_box.enroll_files(
-        &repo,
-        &keys,
-        &[
-            ("agent", key_line(AGENT, &keys.agent)),
-            (
-                "runner",
-                key_line(EXECUTOR, &keys.executor) + &key_line("exec-2", &keys.rogue),
-            ),
-            (
-                "producer",
-                key_line(PRODUCER, &keys.producer) + &key_line("ci-2", &producer_2),
-            ),
-            ("registry", key_line(REGISTRAR, &keys.registry)),
-        ],
-    );
-    test_box.use_keys(&repo, &keys);
-
-    let mut markers = Vec::new();
-    for n in 1..=3 {
-        let started = test_box.bay_ok(&repo, &["start", &format!("SHARD-{n}"), "--paths", "src/"]);
-        let id = started["change"].as_str().unwrap().to_owned();
-        let view = PathBuf::from(started["detail"]["view"].as_str().unwrap());
-        let intent = started["detail"]["intent"].as_str().unwrap().to_owned();
-        std::fs::write(
-            view.join(format!("src/n{n}.rs")),
-            format!("fn n{n}() {{}}\n"),
-        )
-        .unwrap();
-        let (code, landed) = result_json(test_box.bay(&view).args(["merge", "--wait"]));
-        assert_eq!(code, 0, "{landed}");
-        let landed_intent = intent.replace("refs/bay/intent/", "refs/bay/landed-intent/");
-        for name in [format!("refs/bay/landed/{id}"), intent, landed_intent] {
-            let target = test_box.git_bare(&host, &["rev-parse", &name]);
-            markers.push((name, target));
-        }
-    }
-
-    let first = test_box.clone_of(&host, "runner-1");
-    test_box.use_keys(&first, &keys);
-    let second = test_box.clone_of(&host, "runner-2");
-    test_box.use_keys(&second, &keys);
-    test_box.git_ok(
-        &second,
-        &["config", "bay.runnerKey", keys.rogue.to_str().unwrap()],
-    );
-    test_box.git_ok(&second, &["config", "bay.runnerName", "exec-2"]);
-    test_box.git_ok(&second, &["config", "bay.producerName", "ci-2"]);
-    test_box.git_ok(
-        &second,
-        &["config", "bay.producerKey", producer_2.to_str().unwrap()],
-    );
-    (host, [first, second], markers)
-}
-
 #[test]
 fn live_runners_over_the_budget_move_different_shards() {
     let test_box = TestBox::new();
-    let (host, [first, second], markers) = setup(&test_box);
-    let names: Vec<String> = markers.iter().map(|(name, _)| name.clone()).collect();
+    let TwoRunners {
+        host,
+        runners: [first, second],
+        changes,
+        markers,
+        ..
+    } = two_runners(&test_box, 3, 0);
+    let names: Vec<String> = changes.iter().flatten().cloned().collect();
+    let left = || movable(&changes, &remaining(&test_box, &host, &changes));
 
     // GIVEN the first runner's pass, which cuts the three chains after its compaction, so it
     // moves nothing yet
@@ -202,28 +72,28 @@ fn live_runners_over_the_budget_move_different_shards() {
     assert_eq!(cuts, 3, "{ran}");
 
     // WHEN the second runner passes while the first is live
-    let left = remaining(&test_box, &host, &names);
+    let before = left();
     let (taken, errors) = moved(&pass(&test_box, &second));
     // THEN it moves a shard of its rank among two, never the first runner's
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(
         taken,
-        in_rank_shard(&left, 1, 2),
+        in_rank_shard(&before, 1, 2),
         "exec-2 moves the shard of its rank"
     );
-    let left = remaining(&test_box, &host, &names);
+    let before = left();
     let (taken, errors) = moved(&pass(&test_box, &first));
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(
         taken,
-        in_rank_shard(&left, 0, 2),
+        in_rank_shard(&before, 0, 2),
         "exec-1 moves the shard of its rank"
     );
 
     // AND passes of both at once both push, each its own shard, when the rule gives each one
     // (with all the shards left of one parity, the helper meets the owner at the end of the list)
-    let left = remaining(&test_box, &host, &names);
-    if rank_shard(&left, 0, 2) != rank_shard(&left, 1, 2) {
+    let now = left();
+    if rank_shard(&now, 0, 2) != rank_shard(&now, 1, 2) {
         let spawn = |clone: &Path| {
             test_box
                 .bay_process(clone)
@@ -251,8 +121,8 @@ fn live_runners_over_the_budget_move_different_shards() {
     }
 
     // AND further passes move every name, each recorded in its shard
-    for round in 0..16 {
-        if remaining(&test_box, &host, &names).is_empty() {
+    for round in 0..32 {
+        if remaining(&test_box, &host, &changes).is_empty() {
             break;
         }
         let (_, errors) = moved(&pass(
@@ -261,18 +131,25 @@ fn live_runners_over_the_budget_move_different_shards() {
         ));
         assert!(errors.is_empty(), "{errors:?}");
     }
-    assert_eq!(remaining(&test_box, &host, &names), Vec::<String>::new());
+    assert_eq!(remaining(&test_box, &host, &changes), BTreeSet::new());
     for (name, target) in &markers {
-        let record = format!(
-            "refs/bay/landed-index/{}:{}",
-            shard(name),
-            name.replace('/', "%2F")
-        );
+        let record = format!("refs/bay/landed-index/{}:{}", shard(name), path(name));
         assert_eq!(
             test_box.git_bare(&host, &["cat-file", "blob", &record]),
             *target,
             "{name}"
         );
+    }
+    for name in names
+        .iter()
+        .filter(|name| !markers.iter().any(|(marker, _)| marker == *name))
+    {
+        let kept = format!(
+            "refs/bay/landed-index/{}:{}/target",
+            shard(name),
+            path(name)
+        );
+        test_box.git_bare(&host, &["cat-file", "-e", &kept]);
     }
 }
 
@@ -288,7 +165,10 @@ fn batch_of(ran: &Value) -> Option<u64> {
 #[test]
 fn a_push_is_sized_by_the_time_the_last_one_took() {
     let test_box = TestBox::new();
-    let (_host, [first, _second], _markers) = setup(&test_box);
+    let TwoRunners {
+        runners: [first, _],
+        ..
+    } = two_runners(&test_box, 3, 0);
     let record = first.join(".git").join("bay").join("compaction-push");
 
     // GIVEN a pass that cuts the three chains, and no push recorded

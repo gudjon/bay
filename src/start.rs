@@ -632,14 +632,13 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
             Some((generation, change)) => {
                 let merged = claim_merged(repo, &hash, *generation, change)?;
                 // The record is read only when the claims do not say the change merged.
-                let record = if merged {
+                let fetched = if merged {
                     None
                 } else {
                     Some(fetched_record(repo, change)?)
                 };
-                let state = record
-                    .as_ref()
-                    .map_or(ChangeState::Landed, |record| record.state);
+                let record = fetched.as_ref().map(Fetched::record);
+                let state = record.map_or(ChangeState::Landed, |record| record.state);
                 // G890 (a fleet finding, 2026-11-24: 12 landed changes had their landed marker
                 // and no merged claim, so a start of each intent answered CHANGE_ALREADY_MERGED
                 // and its `--new` answered CHANGE_SUPERSEDED): a change whose record reads
@@ -653,13 +652,18 @@ fn open(repo: &Repo, request: &StartRequest) -> Result<BayResult, String> {
                 let landed = merged
                     || (state == ChangeState::Landed
                         && (remote_has(repo, &format!("{}{change}", crate::names::LANDED))?
-                            || published_on(repo, record.as_ref(), change, &base)?));
+                            || published_on(repo, record, change, &base)?));
                 match (landed, request.new) {
                     // G293: a landed change closes its generation, so any start claims the
                     // next one, `--new` or not; the new change supersedes the landed one.
                     (true, _) => (generation + 1, Some(change.clone())),
                     // G272: a change that ended without landing closes its generation too.
                     (false, _) if opens_next(request, state) => {
+                        (generation + 1, Some(change.clone()))
+                    }
+                    // G921: a change whose chain moved into its shard index ended for good, and
+                    // no start takes it up again: any start claims the next generation.
+                    (false, _) if matches!(fetched, Some(Fetched::Compacted(_))) => {
                         (generation + 1, Some(change.clone()))
                     }
                     (false, true) => {
@@ -911,10 +915,34 @@ fn opens_next(request: &StartRequest, state: ChangeState) -> bool {
         && (request.new || request.from.is_some() || state == ChangeState::NoEffect)
 }
 
+/// A change's record as the remote holds it ([`fetched_record`]).
+enum Fetched {
+    /// Its chain's, at the remote's head.
+    Chain(ChangeRecord),
+    /// G921: the record its shard index keeps, once the change ended and retention cut its chain
+    /// and moved it there.
+    Compacted(ChangeRecord),
+}
+
+impl Fetched {
+    const fn record(&self) -> &ChangeRecord {
+        match self {
+            Self::Chain(record) | Self::Compacted(record) => record,
+        }
+    }
+}
+
 /// The current record of `change`'s chain as the remote holds it ([`Repo::remote_record`]):
-/// this store's chain moves only forward, and keeps local work the remote lacks (G289).
-fn fetched_record(repo: &Repo, change: &str) -> Result<ChangeRecord, String> {
-    Ok(repo.remote_record(change)?.record)
+/// this store's chain moves only forward, and keeps local work the remote lacks (G289). Once
+/// the chain moved into its shard index, the record kept there (G921).
+fn fetched_record(repo: &Repo, change: &str) -> Result<Fetched, String> {
+    match repo.remote_record(change) {
+        Ok(remote) => Ok(Fetched::Chain(remote.record)),
+        Err(error) => match crate::compact::remote_kept(repo, change)? {
+            Some(record) => Ok(Fetched::Compacted(record)),
+            None => Err(error),
+        },
+    }
 }
 
 /// G902: whether `record`, read landed, has its one publication on `base`, whatever markers
@@ -1017,7 +1045,7 @@ fn claim_unwon(
         if let Some((newest, change)) = claims.last_key_value()
             && *change != id
             && !remote_has(repo, &claim_of(&claim.hash, *newest).landed_ref())?
-            && fetched_record(repo, change)?.state.is_live()
+            && fetched_record(repo, change)?.record().state.is_live()
         {
             return Ok(Some(json!({
                 "generation": null,

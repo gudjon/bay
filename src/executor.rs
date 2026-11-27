@@ -2532,17 +2532,17 @@ fn queue_retention(repo: &Repo, before: &Queue, chains: &[HeldChain]) -> Option<
     }
 }
 
-/// The pass's marker compaction (§ 10a ref-growth budget, `crate::compact`), over the chains
-/// this store holds: one shard, this runner's among the live runners (BACKLOG 332). `None` when
+/// The pass's compaction (§ 10a ref-growth budget, `crate::compact`), over the chains this
+/// store holds: one shard, this runner's among the live runners (BACKLOG 332). `None` when
 /// nothing moved; a failure is reported and the next pass tries again.
 fn compaction(repo: &Repo, chain: &Chain) -> Option<Value> {
-    let records: Vec<ChangeRecord> = match chain.read_all() {
-        Ok(chains) => chains.into_iter().map(|held| held.record).collect(),
+    let chains = match chain.read_all() {
+        Ok(chains) => chains,
         Err(error) => return Some(json!({"compacted": null, "error": error.message()})),
     };
     let keys = Keys::load(&repo.git);
     let me = crate::presence::presence_ref(&keys.executor_name);
-    match crate::compact::run(repo, (keys.executor.as_ref(), &me), &records) {
+    match crate::compact::run(repo, (keys.executor.as_ref(), &me), &chains) {
         Ok(None) => None,
         Ok(Some(pushed)) => {
             // BACKLOG 334: a compaction push's time is the one reading of what it costs.

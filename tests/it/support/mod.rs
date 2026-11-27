@@ -15,6 +15,7 @@ pub mod approval;
 pub mod plain_talk;
 pub mod queued;
 pub mod relay;
+pub mod shards;
 pub mod talk;
 
 /// What a new test box's global Git config holds: the box's choice of no check sandbox.

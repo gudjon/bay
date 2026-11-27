@@ -1,30 +1,40 @@
-//! Marker compaction (`DESIGN` § 10a ref-growth budget; ruling R11).
+//! Marker and record compaction (`DESIGN` § 10a ref-growth budget; ruling R11).
 //!
-//! The markers kept for the life of the repository (`refs/bay/landed/<id>`,
-//! `refs/bay/intent/<hash>/<gen>`, `refs/bay/landed-intent/<hash>/<gen>`) grow by a few refs per
-//! change. Past the budget (`[retention] ref_budget`, default 100,000 bay refs on the remote) an
-//! executor moves the markers of landed changes whose chain retention already cut into
-//! `refs/bay/landed-index/<shard>`: the shard is the first byte of sha256(ref name) in decimal,
-//! 0–255; each shard is a chain of executor-signed commits whose flat tree holds one blob per
-//! compacted name, at the name with `/` written `%2F`, whose content is the ref's target id. The
-//! executor only appends; the host takes a shard by fast-forward only, and refuses a create of a
-//! name its shard records (`crate::hook`), so create-only still holds once the ref is gone.
-//! Every lookup reads the ref and then its one shard. A push moves one shard, at most [`sized`]
-//! names of it, on a runner's pass that ran no operation, and live runners take different shards
-//! ([`pick`]), so a push's cost stays near [`TARGET`] and runners do not race it.
+//! A change leaves refs for the life of the repository: its chain (`refs/bay/changes/<id>`), its
+//! latest request (`refs/bay/requests/<id>`) and, once it landed, its marker (`refs/bay/landed/<id>`)
+//! and its claims (`refs/bay/intent/<hash>/<gen>`, `refs/bay/landed-intent/<hash>/<gen>`). Once retention
+//! cut its chain, an executor moves them into `refs/bay/landed-index/<shard>`: the shard is the first
+//! byte of sha256(ref name) in decimal, 0–255, and each shard is a chain of executor-signed commits.
+//! G923: a shard's tree has two levels, a name at `<hh>/<name>` ([`path`]), so an append rewrites
+//! the top tree and one small tree under it. A marker's entry is a blob holding its target. G921: a
+//! chain's or a request's entry is a tree holding its record: `target`, the record file its target
+//! holds (`change.json`, `request.json`) and `log`, the time and subject of the step it holds. A shard
+//! written before two levels keeps its flat entries, a marker's blob at the top, and both are read.
+//! The executor only appends; the host takes a shard by fast-forward only, deletes a ref only with
+//! its record in the same push, and refuses a create of a name its shard records (`crate::hook`), so
+//! create-only still holds once the ref is gone. Every lookup reads the ref and then its one shard.
+//! A push moves one shard, at most [`sized`] names of it, on a runner's pass that ran no operation,
+//! and live runners take different shards ([`pick`]), so a push's cost stays near [`TARGET`] and
+//! runners do not race it. Under the default budget, none, every cut change moves: the refs the
+//! remote holds are those of the retention window, and a store drops its copy of a ref moved
+//! elsewhere ([`forget`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 
 use sha2::{Digest as _, Sha256};
 
-use crate::change::{ChangeRecord, ChangeState, RECORD_IDENTITY};
+use crate::change::{Chain, ChangeRecord, ChangeState, HeldChain, RECORD_FILE, RECORD_IDENTITY};
 use crate::git::Git;
+use crate::names::{CHANGES, INTENT, LANDED, LANDED_INTENT, REQUESTS};
 use crate::repo::Repo;
 use crate::signing::Signer;
 
 pub const INDEX_PREFIX: &str = crate::names::LANDED_INDEX;
-/// The default ref-growth budget (§ 10a).
-pub const DEFAULT_BUDGET: u64 = 100_000;
+/// The default ref-growth budget (§ 10a): none, so every change retention cut moves into its
+/// shard, and the refs the remote holds are those of the retention window.
+pub const DEFAULT_BUDGET: u64 = 0;
+
 /// The most names one compaction push moves, so the host's judgement of it stays bounded.
 pub const PUSH_MAX: usize = 4096;
 /// The name × remote-ref matches one compaction push may cost its git client (BACKLOG 332: a
@@ -48,17 +58,30 @@ const FIRST: usize = 4;
 /// G695: how long a count of the remote's bay refs under the budget stands, so a pass lists
 /// them at most this often while the remote stays under it.
 const COUNTED_EVERY: std::time::Duration = std::time::Duration::from_secs(3600);
-/// The namespaces whose markers are compacted.
-const NAMESPACES: [&str; 3] = [
-    crate::names::LANDED,
-    crate::names::INTENT,
-    crate::names::LANDED_INTENT,
-];
+/// The namespaces whose markers are compacted: an entry is the target the marker names.
+const MARKERS: [&str; 3] = [LANDED, INTENT, LANDED_INTENT];
+/// G921: the namespaces whose refs are compacted with their record, each with the file its
+/// target's tree holds the record in.
+const RECORDS: [(&str, &str); 2] = [(CHANGES, RECORD_FILE), (REQUESTS, "request.json")];
+/// The file of a record entry that holds the target of its ref.
+pub const TARGET_FILE: &str = "target";
+/// The file of a record entry that holds its step log ([`logs`]).
+pub const LOG_FILE: &str = "log";
 
 /// Whether `name` is in a compacted namespace.
 #[must_use]
 pub fn compactable(name: &str) -> bool {
-    NAMESPACES.iter().any(|prefix| name.starts_with(prefix))
+    MARKERS.iter().any(|prefix| name.starts_with(prefix)) || record_file(name).is_some()
+}
+
+/// The record file a compacted chain or request keeps beside its target, as its target's tree
+/// holds it; `None` for a marker.
+#[must_use]
+pub fn record_file(name: &str) -> Option<&'static str> {
+    RECORDS
+        .iter()
+        .find(|(prefix, _)| name.starts_with(prefix))
+        .map(|(_, file)| *file)
 }
 
 /// The shard of `name`: the first byte of sha256(name).
@@ -73,16 +96,45 @@ pub fn index_ref(name: &str) -> String {
     format!("{INDEX_PREFIX}{}", shard(name))
 }
 
-/// The tree path that records `name`: `/` written `%2F` (no bay ref name holds `%`).
+/// G923: the tree path that records `name`, `<hh>/<name>`: hh the second byte of sha256(name)
+/// in hex, and `/` written `%2F` (no bay ref name holds `%`).
 #[must_use]
 pub fn path(name: &str) -> String {
+    format!("{:02x}/{}", Sha256::digest(name.as_bytes())[1], flat(name))
+}
+
+/// The path a shard written before two levels records `name` at.
+fn flat(name: &str) -> String {
     name.replace('/', "%2F")
 }
 
-/// The name a tree path records.
+/// The name an entry at `path` records, at its [`path`] or flat; `None` for a path of neither.
 #[must_use]
-pub fn name_of(path: &str) -> String {
-    path.replace("%2F", "/")
+pub fn name_of(path: &str) -> Option<String> {
+    let name = path.rsplit('/').next()?.replace("%2F", "/");
+    (path == flat(&name) || path == self::path(&name)).then_some(name)
+}
+
+/// The name whose target the blob at `path` holds: a marker's entry, flat or at its path, or a
+/// record's `target` file.
+fn target_of(path: &str) -> Option<String> {
+    if let Some(entry) = path
+        .strip_suffix(TARGET_FILE)
+        .and_then(|entry| entry.strip_suffix('/'))
+        .filter(|entry| entry.contains('/'))
+    {
+        return name_of(entry).filter(|name| record_file(name).is_some());
+    }
+    name_of(path).filter(|name| record_file(name).is_none())
+}
+
+/// The type, object and path of each entry of an `ls-tree` listing.
+fn listing(listed: &str) -> impl Iterator<Item = (&str, &str, &str)> {
+    listed.lines().filter_map(|line| {
+        let (entry, path) = line.split_once('\t')?;
+        let mut fields = entry.split_whitespace().skip(1);
+        Some((fields.next()?, fields.next()?, path))
+    })
 }
 
 /// Whether `text` is a full object id (40 or 64 lower-case hex).
@@ -100,19 +152,46 @@ pub fn is_object_id(text: &str) -> bool {
 ///
 /// A git fault, or a record that is not an object id: unknown is never "absent".
 pub fn recorded_at(git: &Git, index: &str, name: &str) -> Result<Option<String>, String> {
-    let listed = git
-        .run(&["ls-tree", index, "--", &path(name)])
-        .map_err(|error| error.message())?;
-    let Some(line) = listed.lines().next() else {
-        return Ok(None);
-    };
-    let blob = line
-        .split_whitespace()
-        .nth(2)
-        .ok_or_else(|| format!("{index} has a malformed entry for {name}"))?;
-    let blob = blob.to_owned();
-    let mut read = read_blobs(git, std::slice::from_ref(&blob))?;
-    Ok(read.remove(&blob))
+    Ok(recorded_in(git, index, &[name.to_owned()])?.remove(name))
+}
+
+/// The target the shard commit `index` records for each of `names`, all of its shard, in either
+/// layout: one `ls-tree` and one batch read.
+fn recorded_in(
+    git: &Git,
+    index: &str,
+    names: &[String],
+) -> Result<HashMap<String, String>, String> {
+    let mut args = vec![
+        "ls-tree".to_owned(),
+        "-r".to_owned(),
+        index.to_owned(),
+        "--".to_owned(),
+    ];
+    for name in names {
+        args.extend([flat(name), path(name)]);
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let listed = git.run(&args).map_err(|error| error.message())?;
+    let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
+    let found: Vec<(String, String)> = listing(&listed)
+        .filter(|(kind, _, _)| *kind == "blob")
+        .filter_map(|(_, blob, path)| {
+            let name = target_of(path)?;
+            wanted
+                .contains(name.as_str())
+                .then(|| (name, blob.to_owned()))
+        })
+        .collect();
+    let blobs: Vec<String> = found.iter().map(|(_, blob)| blob.clone()).collect();
+    let targets = read_blobs(git, &blobs)?;
+    found
+        .into_iter()
+        .map(|(name, blob)| match targets.get(&blob) {
+            Some(target) => Ok((name, target.clone())),
+            None => Err(format!("the shard index record of {name} cannot be read")),
+        })
+        .collect()
 }
 
 /// The target this repository's copy of the shard index records for `name`.
@@ -128,6 +207,85 @@ pub fn recorded(git: &Git, name: &str) -> Result<Option<String>, String> {
         Some(index) => recorded_at(git, &index, name),
         None => Ok(None),
     }
+}
+
+/// What this repository's copy of the shard indexes records for each of `names`: one `ls-tree`
+/// per shard that would hold any of them.
+fn recorded_all<'a>(
+    git: &Git,
+    names: impl Iterator<Item = &'a str>,
+) -> Result<HashMap<String, String>, String> {
+    let mut wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for name in names {
+        wanted
+            .entry(index_ref(name))
+            .or_default()
+            .push(name.to_owned());
+    }
+    let mut found = HashMap::new();
+    for (index, names) in &wanted {
+        let Some(tip) = git.ref_target(index).map_err(|error| error.message())? else {
+            continue;
+        };
+        found.extend(recorded_in(git, &tip, names)?);
+    }
+    Ok(found)
+}
+
+/// G921: the record of change `id` the shard commit `index` keeps, once its chain moved there.
+///
+/// # Errors
+///
+/// A git fault, or a record that does not parse.
+pub fn kept_at(git: &Git, index: &str, id: &str) -> Result<Option<ChangeRecord>, String> {
+    let at = path(&format!("{CHANGES}{id}"));
+    let listed = git
+        .run(&["ls-tree", index, "--", &at])
+        .map_err(|error| error.message())?;
+    let Some((_, tree, _)) = listing(&listed).find(|(kind, _, _)| *kind == "tree") else {
+        return Ok(None);
+    };
+    Chain::new(git)
+        .record_at(tree)
+        .map(Some)
+        .map_err(|error| error.message())
+}
+
+/// The record of change `id` this repository's copy of its chain's shard keeps ([`kept_at`]).
+///
+/// # Errors
+///
+/// A git fault, or a record that does not parse.
+pub fn kept(git: &Git, id: &str) -> Result<Option<ChangeRecord>, String> {
+    match git
+        .ref_target(&index_ref(&format!("{CHANGES}{id}")))
+        .map_err(|error| error.message())?
+    {
+        Some(index) => kept_at(git, &index, id),
+        None => Ok(None),
+    }
+}
+
+/// G921: the record of change `id` the remote's shard keeps, once its chain moved there: one
+/// `ls-remote` of the shard and, only when the remote holds it, one fetch of it.
+///
+/// # Errors
+///
+/// The remote cannot be read, or the record does not parse.
+pub fn remote_kept(repo: &Repo, id: &str) -> Result<Option<ChangeRecord>, String> {
+    let index = index_ref(&format!("{CHANGES}{id}"));
+    let listed = repo
+        .git
+        .run(&["ls-remote", repo.remote(), &index])
+        .map_err(|error| error.message())?;
+    if !listed
+        .lines()
+        .any(|line| line.split_once('\t').is_some_and(|(_, name)| name == index))
+    {
+        return Ok(None);
+    }
+    fetch_indexes(repo, std::slice::from_ref(&index))?;
+    kept(&repo.git, id)
 }
 
 /// The refspec [`fetch`] fetches: every shard index ref.
@@ -149,6 +307,20 @@ pub fn fetch(repo: &Repo) -> Result<(), String> {
     }
     repo.git
         .run(&["fetch", "-q", "--no-tags", repo.remote(), &refspec])
+        .map(|_| ())
+        .map_err(|error| error.message())
+}
+
+/// Brings in the remote's shard indexes `indexes`, in one fetch.
+fn fetch_indexes(repo: &Repo, indexes: &[String]) -> Result<(), String> {
+    let refspecs: Vec<String> = indexes
+        .iter()
+        .map(|index| format!("+{index}:{index}"))
+        .collect();
+    let mut args = vec!["fetch", "-q", "--no-tags", repo.remote()];
+    args.extend(refspecs.iter().map(String::as_str));
+    repo.git
+        .run(&args)
         .map(|_| ())
         .map_err(|error| error.message())
 }
@@ -178,53 +350,8 @@ pub fn remote_marker(repo: &Repo, name: &str) -> Result<Option<String>, String> 
     if target(&index).is_none() {
         return Ok(None);
     }
-    repo.git
-        .run(&[
-            "fetch",
-            "-q",
-            "--no-tags",
-            repo.remote(),
-            &format!("+{index}:{index}"),
-        ])
-        .map_err(|error| error.message())?;
+    fetch_indexes(repo, std::slice::from_ref(&index))?;
     recorded(&repo.git, name)
-}
-
-/// Every name the local shard indexes record under `prefix`, with its target: one `ls-tree` per
-/// shard and one batch read of the records.
-///
-/// # Errors
-///
-/// A git fault, or a malformed record.
-pub fn entries(git: &Git, prefix: &str) -> Result<BTreeMap<String, String>, String> {
-    let shards = git
-        .run(&["for-each-ref", "--format=%(objectname)", INDEX_PREFIX])
-        .map_err(|error| error.message())?;
-    let mut wanted: Vec<(String, String)> = Vec::new();
-    for index in shards.lines() {
-        let listed = git
-            .run(&["ls-tree", index])
-            .map_err(|error| error.message())?;
-        for line in listed.lines() {
-            let Some((entry, path)) = line.split_once('\t') else {
-                continue;
-            };
-            let name = name_of(path);
-            if let (true, Some(blob)) = (name.starts_with(prefix), entry.split_whitespace().nth(2))
-            {
-                wanted.push((name, blob.to_owned()));
-            }
-        }
-    }
-    let blobs: Vec<String> = wanted.iter().map(|(_, blob)| blob.clone()).collect();
-    let contents = read_blobs(git, &blobs)?;
-    wanted
-        .into_iter()
-        .map(|(name, blob)| match contents.get(&blob) {
-            Some(target) => Ok((name, target.clone())),
-            None => Err(format!("the shard index record of {name} cannot be read")),
-        })
-        .collect()
 }
 
 /// The record each of `blobs` holds, by one `cat-file --batch`: a blob that is not a record
@@ -267,69 +394,149 @@ pub fn read_blobs(git: &Git, blobs: &[String]) -> Result<HashMap<String, String>
     Ok(out)
 }
 
-/// The markers of the landed changes in `records` that retention cut and the remote still holds,
-/// with their targets: each change's landed marker, its claim and its landed claim. A claim goes
-/// only once its landed claim, which names the publication and so the change once the claim's own
-/// commit is gone, is on the remote or recorded in its shard, as the host judges it.
+/// G921: the step log a record of each of `targets` keeps: its commit's committer time and
+/// subject, `<unix time> <subject>` and a newline. A cut chain holds one step, its cut, and a request
+/// is one. One batch read.
+///
+/// # Errors
+///
+/// A git fault, or a target that is not a commit.
+pub fn logs(git: &Git, targets: &[String]) -> Result<HashMap<String, String>, String> {
+    let read = git.objects(targets).map_err(|error| error.message())?;
+    targets
+        .iter()
+        .zip(read)
+        .map(|(target, commit)| {
+            let unreadable = || format!("{target} is not a commit");
+            let text =
+                String::from_utf8(commit.ok_or_else(unreadable)?).map_err(|_| unreadable())?;
+            let (header, message) = text.split_once("\n\n").unwrap_or((text.as_str(), ""));
+            let time = header
+                .lines()
+                .find_map(|line| line.strip_prefix("committer "))
+                .and_then(|committer| committer.rsplit(' ').nth(1))
+                .ok_or_else(unreadable)?;
+            let subject = message.lines().next().unwrap_or_default();
+            Ok((target.clone(), format!("{time} {subject}\n")))
+        })
+        .collect()
+}
+
+/// Whether `record` ended its change and retention cut its chain, so its refs move (§ 10a).
+fn moves(record: &ChangeRecord) -> bool {
+    record.retention_cut && matches!(record.state, ChangeState::Landed | ChangeState::Abandoned)
+}
+
+/// The refs the change `id` of `record` leaves that move once retention cut it: its chain and its
+/// latest request, and a landed change's marker, claim and landed claim.
+fn names_of(id: &str, record: &ChangeRecord) -> Vec<String> {
+    let mut names = vec![format!("{CHANGES}{id}"), format!("{REQUESTS}{id}")];
+    if record.state == ChangeState::Landed {
+        names.push(format!("{LANDED}{id}"));
+        if let Some(claim) = &record.claim {
+            names.extend([claim.intent_ref(), claim.landed_ref()]);
+        }
+    }
+    names
+}
+
+/// The refs of the changes in `cut` the remote still holds and may move now, with their targets:
+/// a chain or a request only at a target this store holds (`stored`), whose record it writes,
+/// and a claim only once its landed claim, which names the publication and so the change once the
+/// claim's own commit is gone, is on the remote or recorded in its shard, as the host judges it.
+/// The chain moves last, once the remote holds no other ref of its change: a store reads a change
+/// from its chain, so a ref left after its chain moved would be left for good.
 fn candidates(
     git: &Git,
-    records: &[ChangeRecord],
+    cut: &[&HeldChain],
     remote: &HashMap<String, String>,
+    stored: &HashSet<String>,
 ) -> Result<Vec<(String, String)>, String> {
     let mut names = Vec::new();
     let mut claims = Vec::new();
-    for record in records
-        .iter()
-        .filter(|record| record.retention_cut && record.state == ChangeState::Landed)
-    {
-        names.push(format!("{}{}", crate::names::LANDED, record.id));
-        if let Some(claim) = &record.claim {
-            let landed = claim.landed_ref();
-            if remote.contains_key(&landed) {
-                names.push(claim.intent_ref());
-                names.push(landed);
-            } else if remote.contains_key(&claim.intent_ref()) {
-                claims.push((claim.intent_ref(), landed));
+    for held in cut {
+        let chain = format!("{CHANGES}{}", held.id);
+        // A chain that moved on since its record was read waits for a pass that reads it again.
+        if remote.get(&chain).is_some_and(|head| *head != held.head) {
+            continue;
+        }
+        let refs = names_of(&held.id, &held.record);
+        let rest = refs
+            .iter()
+            .any(|name| *name != chain && remote.contains_key(name));
+        for name in refs {
+            let Some(target) = remote.get(&name) else {
+                continue;
+            };
+            if rest && name == chain {
+                continue;
+            }
+            if record_file(&name).is_some() && !stored.contains(target) {
+                continue;
+            }
+            match name.strip_prefix(INTENT) {
+                Some(claim) if !remote.contains_key(&format!("{LANDED_INTENT}{claim}")) => {
+                    claims.push((
+                        name.clone(),
+                        target.clone(),
+                        format!("{LANDED_INTENT}{claim}"),
+                    ));
+                }
+                _ => names.push((name, target.clone())),
             }
         }
     }
-    let recorded = recorded_names(git, claims.iter().map(|(_, landed)| landed.as_str()))?;
+    let recorded = recorded_all(git, claims.iter().map(|(_, _, landed)| landed.as_str()))?;
     names.extend(
         claims
             .into_iter()
-            .filter(|(_, landed)| recorded.contains(landed))
-            .map(|(claim, _)| claim),
+            .filter(|(_, _, landed)| recorded.contains_key(landed))
+            .map(|(claim, target, _)| (claim, target)),
     );
-    Ok(names
-        .into_iter()
-        .filter_map(|name| {
-            let target = remote.get(&name)?.clone();
-            Some((name, target))
-        })
-        .collect())
+    Ok(names)
 }
 
-/// Which of `names` this repository's copy of the shard indexes records: one `ls-tree` per
-/// shard that would hold any of them.
-fn recorded_names<'a>(
-    git: &Git,
-    names: impl Iterator<Item = &'a str>,
-) -> Result<HashSet<String>, String> {
-    let mut wanted: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for name in names {
-        wanted.entry(index_ref(name)).or_default().push(path(name));
+/// G921: deletes from this store each of `held` (a ref and its target here) that this store's copy
+/// of its shard records: a ref another store moved, which the remote no longer holds and never
+/// takes again. A chain here may be older than the cut its shard keeps, and goes all the same:
+/// the record kept there answers for its change. One `ls-tree` per shard and one transaction;
+/// returns how many went.
+///
+/// # Errors
+///
+/// A git fault reading the shards, or a malformed record.
+pub fn forget(git: &Git, held: &[(String, String)]) -> Result<usize, String> {
+    let recorded = recorded_all(git, held.iter().map(|(name, _)| name.as_str()))?;
+    let mut deletes = String::new();
+    let mut gone = 0;
+    for (name, target) in held {
+        if recorded.contains_key(name) {
+            let _ = writeln!(deletes, "delete {name} {target}");
+            gone += 1;
+        }
     }
-    let mut found = HashSet::new();
-    for (index, paths) in &wanted {
-        let Some(tip) = git.ref_target(index).map_err(|error| error.message())? else {
-            continue;
-        };
-        let mut args = vec!["ls-tree", "--name-only", tip.as_str(), "--"];
-        args.extend(paths.iter().map(String::as_str));
-        let listed = git.run(&args).map_err(|error| error.message())?;
-        found.extend(listed.lines().map(name_of));
+    if gone > 0 {
+        git.run_with(&["update-ref", "--stdin"], &[], Some(deletes.as_bytes()))
+            .map_err(|error| error.message())?;
     }
-    Ok(found)
+    Ok(gone)
+}
+
+/// G921: [`forget`]s each of `held` (a chain here and its target) the remote no longer holds,
+/// after one fetch of the shards that would record them, made only when there are some: a read
+/// that lists the store's changes never reads a shard otherwise.
+///
+/// # Errors
+///
+/// The shards cannot be fetched, or [`forget`] fails.
+pub fn forget_moved(repo: &Repo, held: &[(String, String)]) -> Result<usize, String> {
+    if held.is_empty() {
+        return Ok(0);
+    }
+    let indexes: std::collections::BTreeSet<String> =
+        held.iter().map(|(name, _)| index_ref(name)).collect();
+    fetch_indexes(repo, &indexes.into_iter().collect::<Vec<_>>())?;
+    forget(&repo.git, held)
 }
 
 /// How many names one compaction push moves against a remote that lists `remote_refs` refs:
@@ -511,19 +718,54 @@ fn counted(marker: &std::path::Path, budget: u64) -> bool {
             .is_some_and(|age| age < COUNTED_EVERY)
 }
 
+/// G921: [`forget`]s each of `names` this store holds that `remote` no longer does, and answers
+/// the remote's targets of the chains and requests among `names` whose objects this store holds:
+/// only those move ([`candidates`]). A request's ref is the remote's alone, but the cut chain
+/// keeps its commit as a parent.
+fn settle_held(
+    git: &Git,
+    names: &[String],
+    remote: &HashMap<String, String>,
+) -> Result<HashSet<String>, String> {
+    let gone: Vec<(String, String)> = names
+        .iter()
+        .cloned()
+        .zip(git.object_ids(names).map_err(|error| error.message())?)
+        .filter(|(name, _)| !remote.contains_key(name))
+        .filter_map(|(name, target)| Some((name, target?)))
+        .collect();
+    forget(git, &gone)?;
+    let records: Vec<String> = names
+        .iter()
+        .filter(|name| record_file(name).is_some())
+        .filter_map(|name| remote.get(name).cloned())
+        .collect();
+    Ok(records
+        .iter()
+        .cloned()
+        .zip(git.object_ids(&records).map_err(|error| error.message())?)
+        .filter_map(|(target, held)| held.map(|_| target))
+        .collect())
+}
+
 /// One executor pass of compaction: when the remote holds more bay refs than the budget, moves
-/// markers of the landed, cut changes in `records` into their shard index, one shard a push
-/// (BACKLOG 332): the shard [`pick`] gives this runner (`me`, its presence ref), at most
-/// [`sized`] of its names, in one atomic push that appends the shard under a lease on its tip and
-/// deletes each moved ref. The push's names and time are kept for the next ones to size
-/// themselves by (BACKLOG 334, 336). Returns the push; none when under the budget or nothing moves.
+/// the refs of the changes in `chains` that ended and that retention cut into their shard index,
+/// one shard a push (BACKLOG 332): the shard [`pick`] gives this runner (`me`, its presence ref), at
+/// most [`sized`] of its names, in one atomic push that appends the shard under a lease on its tip
+/// and deletes each moved ref. The push's names and time are kept for the next ones to size
+/// themselves by (BACKLOG 334, 336). G921: each of those refs this store holds that the remote no
+/// longer does, and that its shard records at the target here, goes from this store first
+/// ([`forget`]), so the chains a runner holds stay the live ones and the window's. Returns the
+/// push; none when under the budget or nothing moves. A store that holds no cut change lists
+/// nothing.
 ///
 /// A delete carries no lease of its own (BACKLOG 336: a lease is one more match against every
 /// remote ref, a name): the push sends the target the remote listed as the ref's old value, and
 /// the host's hook takes a delete only when the shard this push appends records that same target
-/// (`crate::hook`). A marker is create-only there, so the target the shard records is the one
-/// the delete removes. On a host without bay's hook a ref moved between the listing and the push
-/// is deleted at its new target while the shard records the old one.
+/// (`crate::hook`). A marker is create-only there, and a chain or a request moves only from the
+/// target this store holds, so the target the shard records is the one the delete removes. On a
+/// host without bay's hook a ref moved between the listing and the push is deleted at its new
+/// target while the shard records the old one.
 ///
 /// # Errors
 ///
@@ -531,11 +773,18 @@ fn counted(marker: &std::path::Path, budget: u64) -> bool {
 pub fn run(
     repo: &Repo,
     (signer, me): (Option<&Signer>, &str),
-    records: &[ChangeRecord],
+    chains: &[HeldChain],
 ) -> Result<Option<Pushed>, String> {
+    let cut: Vec<&HeldChain> = chains
+        .iter()
+        .filter(|held| held.record.id == held.id && moves(&held.record))
+        .collect();
+    if cut.is_empty() {
+        return Ok(None);
+    }
     // G695 (a fleet finding, 2026-11-10: every runner pass listed 30,000 refs, 2.3 MB and
     // 1.7 s, to learn the remote was under a budget of 100,000). Under the budget, the count
-    // stands for an hour; over it, each pass counts again until the markers are moved.
+    // stands for an hour; over it, each pass counts again until the refs are moved.
     let state = repo
         .git
         .common_dir()
@@ -560,10 +809,15 @@ pub fn run(
         }
         return Ok(None);
     }
-    // The landed claims already recorded are read from this repository's copy of the shards.
+    // What the shards already record is read from this repository's copy of them.
     fetch(repo)?;
+    let names: Vec<String> = cut
+        .iter()
+        .flat_map(|held| names_of(&held.id, &held.record))
+        .collect();
+    let stored = settle_held(&repo.git, &names, &remote)?;
     let mut shards: BTreeMap<u8, Vec<(String, String)>> = BTreeMap::new();
-    for (name, target) in candidates(&repo.git, records, &remote)? {
+    for (name, target) in candidates(&repo.git, &cut, &remote, &stored)? {
         shards.entry(shard(&name)).or_default().push((name, target));
     }
     let order: Vec<u8> = shards.keys().copied().collect();
@@ -579,8 +833,7 @@ pub fn run(
     moved.truncate(size);
     let index = format!("{INDEX_PREFIX}{chosen}");
     let parent = remote.get(&index).cloned();
-    let entries: Vec<&(String, String)> = moved.iter().collect();
-    let commit = append(&repo.git, signer, &index, parent.as_deref(), &entries)?;
+    let commit = append(&repo.git, signer, &index, parent.as_deref(), &moved)?;
     let mut args = vec![
         "push".to_owned(),
         "-q".to_owned(),
@@ -625,38 +878,131 @@ pub fn run(
     }))
 }
 
-/// A shard commit on `parent` whose tree is the parent's tree plus `entries`, signed when a
-/// signer is given.
+/// G923: a directory of this process's own under the store's `bay` state, removed when dropped:
+/// a shard append writes its blobs and its index there.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn new(git: &Git) -> Result<Self, String> {
+        let common = git.common_dir().map_err(|error| error.message())?;
+        let dir = std::path::Path::new(&common)
+            .join("bay")
+            .join(format!("compaction-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|error| format!("{}: {error}", dir.display()))?;
+        Ok(Self(dir))
+    }
+
+    /// Writes each of `contents` as a blob, by one `hash-object`; their ids, in order.
+    fn blobs(&self, git: &Git, contents: &[String]) -> Result<Vec<String>, String> {
+        let mut paths = String::new();
+        for (at, content) in contents.iter().enumerate() {
+            let file = self.0.join(at.to_string());
+            std::fs::write(&file, content)
+                .map_err(|error| format!("{}: {error}", file.display()))?;
+            let _ = writeln!(paths, "{}", file.display());
+        }
+        let ids = git
+            .run_with(
+                &["hash-object", "-w", "--no-filters", "--stdin-paths"],
+                &[],
+                Some(paths.as_bytes()),
+            )
+            .map_err(|error| error.message())?;
+        let ids: Vec<String> = ids.lines().map(str::to_owned).collect();
+        if ids.len() != contents.len() {
+            return Err(format!(
+                "git wrote {} of {} shard index blobs",
+                ids.len(),
+                contents.len()
+            ));
+        }
+        Ok(ids)
+    }
+
+    /// The tree of `parent` (none: the empty tree) with the entries `info` adds, as
+    /// `update-index --index-info` reads them, by an index of its own, so only the trees on their
+    /// paths are written.
+    fn tree(&self, git: &Git, parent: Option<&str>, info: &str) -> Result<String, String> {
+        let index = self.0.join("index");
+        let index = index.display().to_string();
+        let envs = [("GIT_INDEX_FILE", index.as_str())];
+        let base = parent.map_or(["read-tree", "--empty"], |parent| ["read-tree", parent]);
+        git.run_with(&base, &envs, None)
+            .map_err(|error| error.message())?;
+        git.run_with(
+            &["update-index", "--index-info"],
+            &envs,
+            Some(info.as_bytes()),
+        )
+        .map_err(|error| error.message())?;
+        git.run_with(&["write-tree"], &envs, None)
+            .map_err(|error| error.message())
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A shard commit on `parent` whose tree is the parent's plus `entries` at their [`path`]s: a
+/// marker's target as a blob, a chain's or a request's record as a tree of its target, its record
+/// file and its step log (G921). Written through an index of its own (G923); signed when a signer
+/// is given.
 fn append(
     git: &Git,
     signer: Option<&Signer>,
     index: &str,
     parent: Option<&str>,
-    entries: &[&(String, String)],
+    entries: &[(String, String)],
 ) -> Result<String, String> {
-    let mut listing: Vec<String> = match parent {
-        Some(parent) => git
-            .run(&["ls-tree", parent])
-            .map_err(|error| error.message())?
-            .lines()
-            .map(str::to_owned)
-            .collect(),
-        None => Vec::new(),
-    };
+    let records: Vec<String> = entries
+        .iter()
+        .filter(|(name, _)| record_file(name).is_some())
+        .map(|(_, target)| target.clone())
+        .collect();
+    let steps = logs(git, &records)?;
+    let files: Vec<String> = entries
+        .iter()
+        .filter_map(|(name, target)| Some(format!("{target}:{}", record_file(name)?)))
+        .collect();
+    let mut files = git
+        .object_ids(&files)
+        .map_err(|error| error.message())?
+        .into_iter();
+    let mut contents = Vec::new();
     for (name, target) in entries {
-        let blob = git
-            .run_with(
-                &["hash-object", "-w", "--stdin"],
-                &[],
-                Some(format!("{target}\n").as_bytes()),
-            )
-            .map_err(|error| error.message())?;
-        listing.push(format!("100644 blob {blob}\t{}", path(name)));
+        contents.push(format!("{target}\n"));
+        if record_file(name).is_some() {
+            contents.push(
+                steps
+                    .get(target)
+                    .cloned()
+                    .ok_or_else(|| format!("{target} of {name} has no step log"))?,
+            );
+        }
     }
-    let listing = listing.join("\n") + "\n";
-    let tree = git
-        .run_with(&["mktree"], &[], Some(listing.as_bytes()))
-        .map_err(|error| error.message())?;
+    let scratch = Scratch::new(git)?;
+    let mut blobs = scratch.blobs(git, &contents)?.into_iter();
+    let mut info = String::new();
+    for (name, target) in entries {
+        let at = path(name);
+        let blob = blobs.next().unwrap_or_default();
+        let Some(file) = record_file(name) else {
+            let _ = writeln!(info, "100644 blob {blob}\t{at}");
+            continue;
+        };
+        let step = blobs.next().unwrap_or_default();
+        let held = files
+            .next()
+            .flatten()
+            .ok_or_else(|| format!("{target} of {name} holds no {file}"))?;
+        let _ = writeln!(info, "100644 blob {blob}\t{at}/{TARGET_FILE}");
+        let _ = writeln!(info, "100644 blob {held}\t{at}/{file}");
+        let _ = writeln!(info, "100644 blob {step}\t{at}/{LOG_FILE}");
+    }
+    let tree = scratch.tree(git, parent, &info)?;
     let mut args: Vec<String> = signer.map(Signer::config_args).unwrap_or_default();
     args.extend(["commit-tree".to_owned(), tree]);
     if let Some(parent) = parent {
@@ -698,9 +1044,10 @@ mod tests {
 
     use super::{
         FIRST, KEPT, PUSH_MAX, PUSH_MIN, TARGET, batch, compactable, cost, counted, index_ref,
-        keep, name_of, path, pick, pushes, shard, sized,
+        keep, name_of, path, pick, pushes, record_file, shard, sized, target_of,
     };
 
+    /// G923: a name sits at `<hh>/<name>` in its shard, and a shard written flat still reads.
     #[test]
     fn a_name_has_one_shard_and_one_path() {
         let name = "refs/bay/landed/abcdefgh";
@@ -708,12 +1055,39 @@ mod tests {
             index_ref(name),
             format!("refs/bay/landed-index/{}", shard(name))
         );
-        assert_eq!(path(name), "refs%2Fbay%2Flanded%2Fabcdefgh");
-        assert_eq!(name_of(&path(name)), name);
+        let flat = "refs%2Fbay%2Flanded%2Fabcdefgh";
+        let at = path(name);
+        let (hh, rest) = at.split_once('/').expect("two levels");
+        assert_eq!((hh.len(), rest), (2, flat));
+        assert_eq!(name_of(&at).as_deref(), Some(name));
+        assert_eq!(name_of(flat).as_deref(), Some(name));
+        let other = if hh == "00" { "01" } else { "00" };
+        assert_eq!(name_of(&format!("{other}/{flat}")), None);
+        assert_eq!(target_of(&at).as_deref(), Some(name));
+        assert_eq!(target_of(flat).as_deref(), Some(name));
         assert!(compactable(name));
         assert!(compactable("refs/bay/landed-intent/0123/1"));
-        assert!(!compactable("refs/bay/changes/abcdefgh"));
         assert!(!compactable("refs/bay/landed-index/7"));
+    }
+
+    /// G921: a chain and a request move with their record, a tree whose `target` names the ref's.
+    #[test]
+    fn a_chain_and_a_request_move_with_their_record() {
+        let chain = "refs/bay/changes/abcdefgh";
+        assert!(compactable(chain));
+        assert_eq!(record_file(chain), Some("change.json"));
+        assert_eq!(
+            record_file("refs/bay/requests/abcdefgh"),
+            Some("request.json")
+        );
+        assert_eq!(record_file("refs/bay/landed/abcdefgh"), None);
+        assert_eq!(
+            target_of(&format!("{}/target", path(chain))).as_deref(),
+            Some(chain)
+        );
+        assert_eq!(target_of(&path(chain)), None);
+        assert_eq!(target_of(&format!("{}/log", path(chain))), None);
+        assert_eq!(target_of("refs%2Fbay%2Fchanges%2Fabcdefgh"), None);
     }
 
     /// BACKLOG 332: a push's names fall as the remote's refs grow, so its cost on the git client

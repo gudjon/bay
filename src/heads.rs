@@ -457,14 +457,19 @@ fn prove_by_change(repo: &Repo, trunk_tip: &str, rows: &mut [Head], unmatched: &
     }
     let mut landed: BTreeSet<String> = BTreeSet::new();
     if !change_of.is_empty() {
-        match crate::publish::landed_markers(repo) {
+        match crate::publish::LandedMarkers::read(repo) {
             Ok(markers) => {
                 let named: BTreeSet<&String> = change_of.values().collect();
                 for change in named {
-                    let Some(marker) = markers.get(change) else {
-                        continue;
+                    let marker = match markers.of(git, change) {
+                        Ok(Some(marker)) => marker,
+                        Ok(None) => continue,
+                        Err(error) => {
+                            unread = Some(error);
+                            continue;
+                        }
                     };
-                    let reached = git.is_ancestor(marker, trunk_tip).unwrap_or(false);
+                    let reached = git.is_ancestor(&marker, trunk_tip).unwrap_or(false);
                     if reached {
                         landed.insert(change.clone());
                     }

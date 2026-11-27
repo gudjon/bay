@@ -204,6 +204,13 @@ fn unlanded(repo: &Repo, change: &str, unmarked_on: Option<&str>) -> Standing {
     let head = match repo.remote_chain(change) {
         Ok(head) => head,
         Err(error) => {
+            // G921: a change whose chain moved into its shard index ended; the record kept there
+            // says how.
+            if let Ok(Some(record)) = crate::compact::remote_kept(repo, change)
+                && ended_unlanded(record.state)
+            {
+                return Standing::Ended(state_word(record.state));
+            }
             return Standing::Pending(format!(
                 "unknown: its chain could not be read from the remote: {}",
                 error.message()

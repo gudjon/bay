@@ -389,7 +389,8 @@ pub const MAX_RED_UNDO_AFTER_S: u64 = 30 * 86_400;
 pub const MAX_HOLD_TIMEOUT_S: u64 = 120;
 
 /// How long a closed change keeps its drafts before the retention cut (§ 5), and the bay ref
-/// count past which an executor compacts markers (§ 10a ref-growth budget, `crate::compact`).
+/// count past which an executor moves cut changes into their shard indexes (§ 10a ref-growth
+/// budget, `crate::compact`).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Retention {
@@ -1169,7 +1170,8 @@ impl Config {
         )
     }
 
-    /// The ref-growth budget (§ 10a): bay refs on the remote past which markers are compacted.
+    /// The ref-growth budget (§ 10a): bay refs on the remote past which the refs of changes cut
+    /// by retention move into their shard indexes. None by default: the window bounds the refs.
     #[must_use]
     pub fn ref_budget(&self) -> u64 {
         self.retention
@@ -1832,7 +1834,7 @@ product = "claude"                 # leave this table out when the box does not 
         assert_eq!(config.heartbeat().as_secs(), 2);
         assert_eq!(config.retention_window().as_secs(), 0);
         assert_eq!(config.ref_budget(), 7);
-        assert_eq!(Config::default().ref_budget(), 100_000);
+        assert_eq!(Config::default().ref_budget(), 0);
     }
 
     /// N-17: a candidate's checks run one after another by default, and at most

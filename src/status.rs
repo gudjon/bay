@@ -331,13 +331,16 @@ fn refresh_chains(repo: &Repo, chain: &Chain, ids: &[String]) -> Result<(), Stri
         // Local work the remote lacks was pushed by the sync above, or is kept here.
         let _ = repo.remote_chain(id);
         // A change named here but not local is read from the remote.
-        if chain.head(id).map_err(|error| error.message())?.is_none() {
-            repo.fetch_refs(&[change_ref(id)]).map_err(|error| {
-                format!(
-                    "change {id} is not here or on the remote: {}",
-                    error.message()
-                )
-            })?;
+        if chain.head(id).map_err(|error| error.message())?.is_none()
+            && let Err(error) = repo.fetch_refs(&[change_ref(id)])
+            // G921: a change whose chain moved into its shard index reads from the record kept
+            // there.
+            && crate::compact::remote_kept(repo, id)?.is_none()
+        {
+            return Err(format!(
+                "change {id} is not here or on the remote: {}",
+                error.message()
+            ));
         }
     }
     Ok(())
@@ -422,11 +425,13 @@ fn settle_listed(
     }
     updates.extend(settle_held(repo, swept, &settled));
     sweep::apply(&repo.git, &updates);
-    // A change named here but not local is read from the remote, which must hold it.
+    // A change named here but not local is read from the remote, which must hold it, or, G921,
+    // from the record the remote's shard index of its chain keeps: one shard, read only then.
     if let [id] = ids.as_slice()
         && is_named
         && !swept.moves.contains_key(&change_ref(id))
         && chain.head(id).map_err(|error| error.message())?.is_none()
+        && crate::compact::remote_kept(repo, id)?.is_none()
     {
         return Err(format!(
             "change {id} is not here or on the remote: the remote holds no {}",
@@ -691,7 +696,7 @@ fn shown_changes(
     read: &Read,
 ) -> Result<Shown, String> {
     let pending = receipts::pending(repo);
-    let mut records = held_records(&Chain::new(&repo.git), ids, named)?;
+    let mut records = held_records(&repo.git, ids, named)?;
     let queued: usize = records.iter().map(crate::presence::waiting).sum();
     records.sort_by_key(|record| me != Some(record.actor.name.as_str()));
     let mine_only = ids.len() > 1 && me.is_some();
@@ -741,9 +746,15 @@ fn shown_changes(
 
 /// The records of `ids`, read in one batch of every chain (G200b), never one walk per change (a
 /// fleet finding, 2026-10-26: 2,408 state reads, a third of a five-minute status). One named
-/// change is read alone. A listing (`named` false) leaves out a copy of another change's chain,
-/// which is no change (G563); a read of the copy alone names it.
-fn held_records(chain: &Chain, ids: &[String], named: bool) -> Result<Vec<ChangeRecord>, String> {
+/// change is read alone, G921: from the record its shard index keeps once its chain moved there.
+/// A listing (`named` false) leaves out a copy of another change's chain, which is no change
+/// (G563); a read of the copy alone names it.
+fn held_records(
+    git: &crate::git::Git,
+    ids: &[String],
+    named: bool,
+) -> Result<Vec<ChangeRecord>, String> {
+    let chain = Chain::new(git);
     let mut held: std::collections::BTreeMap<String, ChangeRecord> = if ids.len() == 1 {
         std::collections::BTreeMap::new()
     } else {
@@ -760,7 +771,11 @@ fn held_records(chain: &Chain, ids: &[String], named: bool) -> Result<Vec<Change
             None => match chain.read(id) {
                 Ok((_, record)) => Some(Ok(record)),
                 Err(crate::change::ChainError::Copy { .. }) if !named => None,
-                Err(error) => Some(Err(error.message())),
+                Err(error) => Some(match crate::compact::kept(git, id) {
+                    Ok(Some(record)) => Ok(record),
+                    Ok(None) => Err(error.message()),
+                    Err(why) => Err(why),
+                }),
             },
         })
         .collect()
@@ -1333,6 +1348,15 @@ fn settle_swept(
         updates.extend(swept.taken(local, |name, _| name == local));
     }
     sweep::apply(&first.git, &updates);
+    // G921: a chain the remote no longer holds, which its shard index records, moved into the
+    // shard: it goes from this store too, so a listing reads only live chains. The sweep asks
+    // for no shard: only such a chain brings in the shards that record it.
+    let moved: Vec<(String, String)> = swept
+        .under(CHANGES_PREFIX)
+        .filter(|(_, found)| found.flag == '-')
+        .filter_map(|(name, found)| Some((name.to_owned(), found.old.clone()?)))
+        .collect();
+    let _ = crate::compact::forget_moved(&first, &moved);
     crate::coord::fetched(&first.work_root);
     crate::fleet::record(&first, &swept.at);
     let repo = if swept.moves.contains_key(&tracking) {

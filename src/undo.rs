@@ -259,11 +259,16 @@ pub(crate) fn marked_commit(
     if !matches!(repo.git.is_ancestor(&landed, trunk), Ok(true)) {
         return Ok(None);
     }
-    // G199: the remote's chain, read beside this store's copy, which only ever moves forward.
-    let remote = repo.remote_chain(change).map_err(unreadable)?;
-    let record = Chain::new(&repo.git)
-        .record_at(&remote)
-        .map_err(|error| error.message())?;
+    // G199: the remote's chain, read beside this store's copy, which only ever moves forward;
+    // G921: once it moved into its shard index, the record kept there.
+    let record = match repo.remote_chain(change) {
+        Ok(remote) => Chain::new(&repo.git)
+            .record_at(&remote)
+            .map_err(|error| error.message())?,
+        Err(error) => {
+            crate::compact::remote_kept(repo, change)?.ok_or_else(|| unreadable(error))?
+        }
+    };
     let scan = publish::scan(&repo.git, &record.base_first, trunk, change)?;
     Ok(scan
         .publications

@@ -389,19 +389,75 @@ fn an_abandoned_change_is_cut_after_retention_and_keeps_its_draft() {
     assert_eq!(change["retention_cut"], true, "{status}");
 }
 
-/// `refs/bay/landed-index/<shard>` and the path that records `name` (ruling R11): the shard is
-/// the first byte of sha256(name) in decimal, the path is the name with `/` as `%2F`.
+/// `refs/bay/landed-index/<shard>` and the path that records `name` (ruling R11, G923): the
+/// shard is the first byte of sha256(name) in decimal, the path is the second byte in hex, then
+/// the name with `/` as `%2F`.
 fn index_entry(name: &str) -> (String, String) {
     use sha2::Digest as _;
-    let shard = sha2::Sha256::digest(name.as_bytes())[0];
+    let digest = sha2::Sha256::digest(name.as_bytes());
     (
-        format!("refs/bay/landed-index/{shard}"),
-        name.replace('/', "%2F"),
+        format!("refs/bay/landed-index/{}", digest[0]),
+        format!("{:02x}/{}", digest[1], name.replace('/', "%2F")),
     )
 }
 
+/// Runner passes in `executor` until each of `names` and `records` moved: the names they moved.
+fn compact_all(
+    test_box: &TestBox,
+    executor: &Path,
+    names: &[&str],
+    records: &[&str],
+) -> serde_json::Value {
+    let mut moved: Vec<serde_json::Value> = Vec::new();
+    for _ in 0..12 {
+        if names
+            .iter()
+            .chain(records)
+            .all(|name| moved.iter().any(|entry| entry == *name))
+        {
+            break;
+        }
+        let ran = test_box.bay_ok(executor, &["runner", "run", "--once"]);
+        for entry in ran["detail"]["ran"].as_array().unwrap() {
+            if let Some(list) = entry["compacted"].as_array() {
+                moved.extend(list.iter().cloned());
+            }
+        }
+    }
+    serde_json::Value::Array(moved)
+}
+
+/// Asserts the chain and the request moved whole (G921): each left a record tree of its target,
+/// its record file at that target, and its log, and the chain's record is the cut one.
+fn assert_moved_whole(test_box: &TestBox, host: &Path, chain: &str, request: &str) {
+    for (name, file) in [(chain, "change.json"), (request, "request.json")] {
+        assert_eq!(
+            test_box.git_bare(host, &["for-each-ref", "--format=%(refname)", name]),
+            "",
+            "{name} is gone from the host"
+        );
+        let (shard, path) = index_entry(name);
+        let target = test_box.git_bare(
+            host,
+            &["cat-file", "blob", &format!("{shard}:{path}/target")],
+        );
+        assert_eq!(
+            test_box.git_bare(host, &["rev-parse", &format!("{shard}:{path}/{file}")]),
+            test_box.git_bare(host, &["rev-parse", &format!("{target}:{file}")]),
+            "{shard} keeps the {file} of {name}"
+        );
+        let log = test_box.git_bare(host, &["cat-file", "blob", &format!("{shard}:{path}/log")]);
+        assert_eq!(log.lines().count(), 1, "{log}");
+        if name == chain {
+            let kept = test_box.git_bare(host, &["cat-file", "blob", &format!("{target}:{file}")]);
+            assert!(kept.contains("\"retention_cut\": true"), "{kept}");
+        }
+    }
+}
+
 /// G21's compaction clause (`DESIGN` § 10a): over a ref budget of 1, the executor moves the
-/// landed, intent and landed-intent markers of a cut change into the shard index.
+/// landed, intent and landed-intent markers of a cut change into the shard index, and its chain
+/// and request with their records (G921).
 #[test]
 fn a_compacted_marker_is_never_created_again_and_still_answers() {
     let test_box = TestBox::new();
@@ -433,6 +489,11 @@ fn a_compacted_marker_is_never_created_again_and_still_answers() {
         .iter()
         .map(|name| test_box.git_bare(&host, &["rev-parse", name]))
         .collect();
+    let (chain, request) = (
+        format!("refs/bay/changes/{id}"),
+        format!("refs/bay/requests/{id}"),
+    );
+    let records = [chain.as_str(), request.as_str()];
 
     // A marker is never deleted on its own, only by its compaction.
     for name in names {
@@ -455,22 +516,7 @@ fn a_compacted_marker_is_never_created_again_and_still_answers() {
     // moves one shard (BACKLOG 332), so the three names take as many passes as their shards.
     let executor = test_box.clone_of(&host, "executor");
     test_box.use_keys(&executor, &keys);
-    let mut moved: Vec<serde_json::Value> = Vec::new();
-    for _ in 0..8 {
-        if names
-            .iter()
-            .all(|name| moved.iter().any(|entry| entry == *name))
-        {
-            break;
-        }
-        let ran = test_box.bay_ok(&executor, &["runner", "run", "--once"]);
-        for entry in ran["detail"]["ran"].as_array().unwrap() {
-            if let Some(list) = entry["compacted"].as_array() {
-                moved.extend(list.iter().cloned());
-            }
-        }
-    }
-    let compacted = serde_json::Value::Array(moved);
+    let compacted = compact_all(&test_box, &executor, &names, &records);
     for (name, target) in names.iter().zip(&targets) {
         assert!(
             compacted
@@ -490,6 +536,7 @@ fn a_compacted_marker_is_never_created_again_and_still_answers() {
             "{shard} records {name}"
         );
     }
+    assert_moved_whole(&test_box, &host, &chain, &request);
 
     // A re-create of each compacted name is refused at the host, by the shard index.
     for (name, target) in names.iter().zip(&targets) {

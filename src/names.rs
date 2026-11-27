@@ -27,7 +27,8 @@ pub const LEASE: &str = "refs/bay/lease/";
 pub const INTENT: &str = "refs/bay/intent/";
 /// `refs/bay/landed-intent/<hash>/<generation>`: a landed intent claim.
 pub const LANDED_INTENT: &str = "refs/bay/landed-intent/";
-/// `refs/bay/landed-index/<shard>`: compacted landing markers (ruling R11).
+/// `refs/bay/landed-index/<shard>`: compacted markers, and the records of compacted changes
+/// (ruling R11, G921).
 pub const LANDED_INDEX: &str = "refs/bay/landed-index/";
 /// `refs/bay/queue/<n>`: the publication queue.
 pub const QUEUE: &str = "refs/bay/queue/";

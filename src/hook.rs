@@ -28,7 +28,7 @@
 //! change; both must be at least the takeover window (`[runner] takeover_s` on trunk) old.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use serde_json::Value;
@@ -419,6 +419,21 @@ fn holds_claim(record: &crate::change::ChangeRecord, claim: &str) -> bool {
 /// The records one shard index update adds: compacted name to the target it records.
 type Appended = Rc<HashMap<String, String>>;
 
+/// G921: change `id` of `record` ended, landed or abandoned, and retention cut its chain, so its
+/// chain and its request may move into their shard indexes.
+fn cut_ended(id: &str, record: &crate::change::ChangeRecord) -> Result<(), String> {
+    let ended = matches!(
+        record.state,
+        crate::change::ChangeState::Landed | crate::change::ChangeState::Abandoned
+    );
+    if record.id != id || !record.retention_cut || !ended {
+        return Err(format!(
+            "change {id} has not ended with its chain cut by retention"
+        ));
+    }
+    Ok(())
+}
+
 struct Judge<'a> {
     git: &'a Git,
     registry: &'a Registry,
@@ -476,16 +491,20 @@ impl Judge<'_> {
             .any(|other| other.name == release && is_zero(&other.old))
     }
 
-    /// The record of `change` as this push leaves its chain, if the host holds one.
+    /// The record of `change` as this push leaves it, if the host holds one: its chain's, or,
+    /// once its chain moved into its shard index, the record the shard keeps (G921).
     fn change_record(&self, change: &str) -> Result<Option<crate::change::ChangeRecord>, String> {
         let name = format!("{}{change}", crate::change::CHANGES_PREFIX);
-        let Some(head) = self.after(&name)? else {
-            return Ok(None);
-        };
-        crate::change::Chain::new(self.git)
-            .record_at(&head)
-            .map(Some)
-            .map_err(|error| error.message())
+        if let Some(head) = self.after(&name)? {
+            return crate::change::Chain::new(self.git)
+                .record_at(&head)
+                .map(Some)
+                .map_err(|error| error.message());
+        }
+        match self.after(&compact::index_ref(&name))? {
+            Some(index) => compact::kept_at(self.git, &index, change),
+            None => Ok(None),
+        }
     }
 
     /// G897: the evidence records on `tree` as this push leaves the producer refs, so the notes
@@ -548,10 +567,14 @@ impl Judge<'_> {
         Ok(())
     }
 
-    /// A marker is deleted only by its compaction: the same push appends its shard index with
-    /// a record of the marker's target. Only a landed change that retention cut gives up its
-    /// markers (§ 10a). A claim and a landed claim go only when the landed claim's publication
-    /// is the landing of a change that held that claim, so the landed claim still names it.
+    /// A marker, a chain or a request is deleted only by its compaction: the same push appends
+    /// its shard index with a record of the ref's target (§ 10a), and of a chain's or a request's
+    /// record as that target holds it (G921, [`Judge::read_appended`]). Only a landed change that
+    /// retention cut gives up its markers. A chain goes once its record says its change ended,
+    /// landed or abandoned, and retention cut it; a request once its change's record, as this
+    /// push leaves it, says the same. A claim and a landed claim go only when the landed claim's
+    /// publication is the landing of a change that held that claim, so the landed claim still
+    /// names it.
     fn compacted_delete(&self, update: &Update) -> Result<(), String> {
         let index = compact::index_ref(&update.name);
         let records = match self.by_name.get(index.as_str()) {
@@ -560,11 +583,23 @@ impl Judge<'_> {
         };
         if records.get(&update.name) != Some(&update.old) {
             return Err(format!(
-                "a marker is never deleted, except by its compaction into {index} in the same push"
+                "is never deleted, except by its compaction into {index} in the same push"
             ));
         }
         if let Some(id) = update.name.strip_prefix(crate::names::LANDED) {
             return self.cut_landing(id, None);
+        }
+        if let Some(id) = update.name.strip_prefix(crate::names::CHANGES) {
+            let record = Chain::new(self.git)
+                .record_at(&update.old)
+                .map_err(|error| error.message())?;
+            return cut_ended(id, &record);
+        }
+        if let Some(id) = update.name.strip_prefix(crate::names::REQUESTS) {
+            let record = self
+                .change_record(id)?
+                .ok_or_else(|| format!("change {id} has no record"))?;
+            return cut_ended(id, &record);
         }
         let (claim, publication) =
             if let Some(claim) = update.name.strip_prefix(crate::names::INTENT) {
@@ -593,10 +628,7 @@ impl Judge<'_> {
         {
             return Err(refused());
         }
-        let head = self.after(&chain)?.ok_or_else(refused)?;
-        let record = Chain::new(self.git)
-            .record_at(&head)
-            .map_err(|error| error.message())?;
+        let record = self.change_record(id)?.ok_or_else(refused)?;
         if !record.retention_cut || record.state != crate::change::ChangeState::Landed {
             return Err(refused());
         }
@@ -621,35 +653,103 @@ impl Judge<'_> {
     }
 
     /// Each record a shard index update adds: a name of that shard in a compacted namespace,
-    /// at its one path, at most [`compact::PUSH_MAX`] of them.
+    /// at its one two-level path (G923), at most [`compact::PUSH_MAX`] of them. A marker's is a
+    /// blob of its target; a chain's or a request's is a tree of its target, the record file that
+    /// target holds and its step log ([`compact::logs`]), each as the target has them (G921).
     fn read_appended(&self, update: &Update) -> Result<Appended, String> {
         let shard = update
             .name
             .strip_prefix(compact::INDEX_PREFIX)
             .ok_or("is not a shard index")?;
-        let added = self.index_additions(update)?;
-        if added.len() > compact::PUSH_MAX {
+        let stranger = |path: &str| format!("{path} is not a compacted name of shard {shard}");
+        let mut markers: Vec<(String, String)> = Vec::new();
+        let mut kept: BTreeMap<String, (&str, BTreeMap<String, String>)> = BTreeMap::new();
+        for (path, blob) in self.index_additions(update)? {
+            let (entry, file) = match path.rsplit_once('/') {
+                Some((entry, file)) if entry.contains('/') => (entry, Some(file)),
+                _ => (path.as_str(), None),
+            };
+            let name = compact::name_of(entry)
+                .filter(|name| compact::path(name) == entry)
+                .ok_or_else(|| stranger(&path))?;
+            crate::names::bay_ref(&name)?;
+            if !compact::compactable(&name) || compact::shard(&name).to_string() != shard {
+                return Err(stranger(&path));
+            }
+            match (compact::record_file(&name), file) {
+                (None, None) => markers.push((name, blob)),
+                (Some(record), Some(file))
+                    if [compact::TARGET_FILE, record, compact::LOG_FILE].contains(&file) =>
+                {
+                    kept.entry(name)
+                        .or_insert_with(|| (record, BTreeMap::new()))
+                        .1
+                        .insert(file.to_owned(), blob);
+                }
+                _ => return Err(stranger(&path)),
+            }
+        }
+        if markers.len() + kept.len() > compact::PUSH_MAX {
             return Err(format!(
                 "a shard index takes at most {} records per push",
                 compact::PUSH_MAX
             ));
         }
-        let blobs: Vec<String> = added.iter().map(|(_, blob)| blob.clone()).collect();
-        let targets = compact::read_blobs(self.git, &blobs)?;
         let mut records = HashMap::new();
-        for (path, blob) in &added {
-            let name = compact::name_of(path);
-            crate::names::bay_ref(&name)?;
-            if !compact::compactable(&name)
-                || compact::path(&name) != *path
-                || compact::shard(&name).to_string() != shard
-            {
-                return Err(format!("{path} is not a compacted name of shard {shard}"));
-            }
-            let target = targets
+        let mut blobs: Vec<String> = markers.iter().map(|(_, blob)| blob.clone()).collect();
+        let mut held = Vec::new();
+        for (name, (file, files)) in &kept {
+            let (Some(target), Some(record), Some(step), 3) = (
+                files.get(compact::TARGET_FILE),
+                files.get(*file),
+                files.get(compact::LOG_FILE),
+                files.len(),
+            ) else {
+                return Err(format!(
+                    "the record of {name} holds its target, its {file} and its log, and only them"
+                ));
+            };
+            blobs.push(target.clone());
+            held.push((name, file, target, record, step));
+        }
+        let targets = compact::read_blobs(self.git, &blobs)?;
+        let target_of = |name: &str, blob: &str| {
+            targets
                 .get(blob)
-                .ok_or_else(|| format!("the record of {name} cannot be read"))?;
-            records.insert(name, target.clone());
+                .cloned()
+                .ok_or_else(|| format!("the record of {name} cannot be read"))
+        };
+        for (name, blob) in &markers {
+            records.insert(name.clone(), target_of(name, blob)?);
+        }
+        let mut wanted = Vec::new();
+        let mut steps = Vec::new();
+        let mut step_blobs = Vec::new();
+        for (name, file, target, _, step) in &held {
+            let target = target_of(name, target)?;
+            wanted.push(format!("{target}:{file}"));
+            steps.push(target.clone());
+            step_blobs.push((*step).clone());
+            records.insert((*name).clone(), target);
+        }
+        let files = self
+            .git
+            .object_ids(&wanted)
+            .map_err(|error| message(&error))?;
+        let logs = compact::logs(self.git, &steps)?;
+        let written = self
+            .git
+            .objects(&step_blobs)
+            .map_err(|error| message(&error))?;
+        for ((((name, _, _, record, _), file), target), written) in
+            held.iter().zip(files).zip(&steps).zip(written)
+        {
+            let log = logs.get(target).map(String::as_bytes);
+            if file.as_deref() != Some(record.as_str()) || written.as_deref() != log {
+                return Err(format!(
+                    "the record of {name} is not the one {target} holds"
+                ));
+            }
         }
         Ok(Rc::new(records))
     }
@@ -684,15 +784,15 @@ impl Judge<'_> {
         Ok(())
     }
 
-    /// The (path, blob) records a shard index update adds. Any other change to its tree, or an
-    /// entry that is not a plain file at the top, is refused.
+    /// The (path, blob) files a shard index update adds. Any other change to its tree, or an
+    /// entry that is not a plain file, is refused.
     fn index_additions(&self, update: &Update) -> Result<Vec<(String, String)>, String> {
         let not_append = || "a shard index only appends records".to_owned();
         let mut added = Vec::new();
         if is_zero(&update.old) {
             let listed = self
                 .git
-                .run(&["ls-tree", &update.new])
+                .run(&["ls-tree", "-r", &update.new])
                 .map_err(|error| message(&error))?;
             for line in listed.lines() {
                 let (entry, path) = line.split_once('\t').ok_or_else(not_append)?;
@@ -723,9 +823,6 @@ impl Judge<'_> {
             let [_, "100644", _, blob, "A"] = fields.as_slice() else {
                 return Err(not_append());
             };
-            if path.contains('/') {
-                return Err(not_append());
-            }
             added.push((path.to_owned(), (*blob).to_owned()));
         }
         Ok(added)
@@ -1209,9 +1306,6 @@ impl Judge<'_> {
     }
 
     fn chain(&self, update: &Update, id: &str) -> Result<(), String> {
-        if is_zero(&update.new) {
-            return Err("a change chain is never deleted".to_owned());
-        }
         let chain = Chain::new(self.git);
         let fast_forward =
             is_zero(&update.old) || self.git.is_ancestor(&update.old, &update.new)?;
@@ -1739,9 +1833,6 @@ impl Judge<'_> {
     }
 
     fn request_ref(&self, update: &Update, id: &str) -> Result<(), String> {
-        if is_zero(&update.new) {
-            return Err("a requests ref is never deleted".to_owned());
-        }
         let text = self
             .git
             .file_at(&update.new, "request.json")
@@ -2153,12 +2244,10 @@ impl Judge<'_> {
             if crate::names::bay_ref(&chain).is_err() {
                 return Ok(false);
             }
-            let Some(head) = self.after(&chain)? else {
+            // G921: a change whose chain moved into its shard reads from the record kept there.
+            let Some(current) = self.change_record(&before.id)? else {
                 return Ok(false);
             };
-            let current = Chain::new(self.git)
-                .record_at(&head)
-                .map_err(|error| error.message())?;
             return Ok(ended_unlanded(current.state));
         }
         if self.recorded(&claim)?.is_none() {

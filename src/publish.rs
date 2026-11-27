@@ -10712,13 +10712,12 @@ fn provenance(
     policy: &policy::Policy,
 ) -> Result<policy::Provenance, String> {
     // One read of the remote's landed markers serves every path (§ 10a).
-    let landed: std::cell::OnceCell<std::collections::HashMap<String, String>> =
-        std::cell::OnceCell::new();
+    let landed: std::cell::OnceCell<LandedMarkers> = std::cell::OnceCell::new();
     let edits = policy::outside_edits(&ctx.repo.git, trunk, policy, &|commit| {
         let markers = if let Some(markers) = landed.get() {
             markers
         } else {
-            let read = landed_markers(ctx.repo)?;
+            let read = LandedMarkers::read(ctx.repo)?;
             landed.get_or_init(|| read)
         };
         is_publication(&ctx.repo.git, markers, commit)
@@ -10752,11 +10751,7 @@ const OUTSIDE_EVENT: &str = "policy_changed_outside_bay";
 
 /// Whether trunk commit `commit` is a bay publication (`DESIGN` § 10a): it carries one
 /// `Change-Id` and the remote's `refs/bay/landed/<Change-Id>` (in `markers`) names it.
-fn is_publication(
-    git: &Git,
-    markers: &std::collections::HashMap<String, String>,
-    commit: &str,
-) -> Result<bool, String> {
+fn is_publication(git: &Git, markers: &LandedMarkers, commit: &str) -> Result<bool, String> {
     let change = git
         .run(&[
             "log",
@@ -10769,42 +10764,58 @@ fn is_publication(
     if change.is_empty() || change.contains(',') {
         return Ok(false);
     }
-    Ok(markers.get(change).map(String::as_str) == Some(commit))
+    Ok(markers.of(git, change)?.as_deref() == Some(commit))
 }
 
-/// The remote's landed markers: `Change-Id` to the commit its `refs/bay/landed/<Change-Id>`
-/// names, in one `ls-remote`, and those the shard indexes record (§ 10a, one fetch of them).
-/// A remote that cannot be read is an error, never "no marker":
-/// an unread provenance is never taken for either answer.
-pub(crate) fn landed_markers(
-    repo: &Repo,
-) -> Result<std::collections::HashMap<String, String>, String> {
-    let listed = repo
-        .git
-        .run(&[
-            "ls-remote",
-            repo.remote(),
-            &format!("{}*", crate::names::LANDED),
-        ])
-        .map_err(|error| error.message())?;
-    let mut markers: std::collections::HashMap<String, String> = listed
-        .lines()
-        .filter_map(|line| {
-            let (oid, name) = line.split_once('\t')?;
-            Some((
-                name.strip_prefix(crate::names::LANDED)?.to_owned(),
-                oid.to_owned(),
-            ))
-        })
-        .collect();
-    // § 10a: a compacted marker's shard index record stands in for the ref.
-    crate::compact::fetch(repo)?;
-    for (name, target) in crate::compact::entries(&repo.git, crate::names::LANDED)? {
-        if let Some(id) = name.strip_prefix(crate::names::LANDED) {
-            markers.entry(id.to_owned()).or_insert(target);
+/// The remote's landed markers (§ 10a), read once: `Change-Id` to the commit its
+/// `refs/bay/landed/<Change-Id>` names, in one `ls-remote`, and a compacted one from the record
+/// its shard index keeps, one shard read for each change asked about, never every record (G921).
+pub(crate) struct LandedMarkers {
+    listed: std::collections::HashMap<String, String>,
+}
+
+impl LandedMarkers {
+    /// One listing of the remote's landed markers, and one fetch of its shard indexes.
+    ///
+    /// # Errors
+    ///
+    /// A remote that cannot be read is an error, never "no marker": an unread provenance is
+    /// never taken for either answer.
+    pub(crate) fn read(repo: &Repo) -> Result<Self, String> {
+        let listed = repo
+            .git
+            .run(&[
+                "ls-remote",
+                repo.remote(),
+                &format!("{}*", crate::names::LANDED),
+            ])
+            .map_err(|error| error.message())?;
+        let listed = listed
+            .lines()
+            .filter_map(|line| {
+                let (oid, name) = line.split_once('\t')?;
+                Some((
+                    name.strip_prefix(crate::names::LANDED)?.to_owned(),
+                    oid.to_owned(),
+                ))
+            })
+            .collect();
+        crate::compact::fetch(repo)?;
+        Ok(Self { listed })
+    }
+
+    /// The commit the landed marker of `change` names, or the shard index record that stands in
+    /// for it.
+    ///
+    /// # Errors
+    ///
+    /// A git fault reading the shard, or a malformed record.
+    pub(crate) fn of(&self, git: &Git, change: &str) -> Result<Option<String>, String> {
+        match self.listed.get(change) {
+            Some(commit) => Ok(Some(commit.clone())),
+            None => crate::compact::recorded(git, &format!("{}{change}", crate::names::LANDED)),
         }
     }
-    Ok(markers)
 }
 
 /// Renews the executor's lease while a check runs (§ 9a). G787 (owner ruling 2026-11-18): one
