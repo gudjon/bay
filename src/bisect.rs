@@ -315,7 +315,9 @@ pub(crate) fn serves_post_work(git: &Git, commit: &str) -> bool {
 /// or a red the red judgement (`crate::red`) ranges and `[runner] bisect_post` narrows. A red check
 /// runs again on each new tip (G492), and its request names `rerun`: the units that failed in its
 /// newest failing record (G540). One piece for each environment none of `taken` names: its first
-/// check in the order [`in_turn`] gives.
+/// check in the order [`in_turn`] gives. G951: a machine that could not run a check lately
+/// leaves it to the others, and no runner elects it ([`electors`]).
+#[allow(clippy::too_many_lines)]
 fn tips(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<Planned, String> {
     if !repo.config.post_tips() {
         return Ok((Vec::new(), Vec::new()));
@@ -359,15 +361,17 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<Plan
             .find(|red| red.check == entry.id && red.environment == entry.environment)
     };
     let trust = (registry.as_ref(), &writer, &policy);
-    let (entries, ran) = in_turn(git, trust, &tip, entries, &reds);
-    let here = (tip.as_str(), evidence::records_for(git, &tree)?);
-    let elsewhere = answered_elsewhere(git, trust, &entries, here)?;
+    let landings = main_line(git, &tip);
+    let (entries, ran) = in_turn(git, trust, (&tip, &landings), entries, &reds);
+    let here = evidence::records_for(git, &tree)?;
+    let elsewhere = answered_elsewhere(git, trust, &entries, (&tip, &here))?;
     let live = fresh.live(repo);
     let now = crate::presence::reader_now();
     let landed = git
         .run(&["log", "-1", "--format=%ct", &tip])
         .ok()
         .and_then(|time| time.trim().parse::<u64>().ok());
+    let machine = crate::live::machine(git).ok();
     let mut pieces: Vec<Piece> = Vec::new();
     for entry in entries {
         if pieces
@@ -381,7 +385,17 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<Plan
             continue;
         }
         let last = ran.get(&(entry.id.clone(), entry.environment.clone()));
-        if left_to(entry, (&keys.executor_name, &live), last, (landed, now)).is_some() {
+        let unable = unable_machines(
+            &landings,
+            &id,
+            (&writer.name, machine.as_deref()),
+            &live,
+            now,
+        );
+        let Some(electors) = electors(entry, machine.as_deref(), &live, &unable) else {
+            continue;
+        };
+        if left_to(entry, (&keys.executor_name, &electors), last, (landed, now)).is_some() {
             continue;
         }
         // BACKLOG 117: a check no worker answered here lately waits, and this pass runs the
@@ -461,7 +475,7 @@ fn tips(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<Plan
 fn in_turn<'a>(
     git: &Git,
     (registry, writer, policy): (Option<&Registry>, &Writer, &crate::policy::Policy),
-    tip: &str,
+    (tip, line): (&str, &[Landing]),
     mut entries: Vec<&'a crate::policy::CheckEntry>,
     reds: &[Red],
 ) -> (
@@ -484,7 +498,7 @@ fn in_turn<'a>(
     // so it went first on every tip, and a check in the policy's tail (a Python check, fifth on its
     // box) ran on no tip for eight hours. The check this box ran longest ago goes first; ties
     // keep the rule above.
-    let ran = last_runs(git, (registry, writer, policy), tip, &entries);
+    let ran = last_runs(git, (registry, writer, policy), line, &entries);
     // G582 (a fleet finding, 2026-10-30: with one runner for its environment and red Python check
     // runs of ~30 min, a scripts check ran on no tip for 49 merges and passed the red window, so a
     // failure there could no longer be ranged): a red check goes first on each new tip, and one
@@ -611,28 +625,41 @@ fn strings(value: Option<&Value>) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// How many landings back from `tip` this box last recorded each of `entries` (G433), or another
-/// producer answered it there ([`answered_elsewhere`], G625), over the newest [`RAN_SPAN`]
-/// commits of main's first-parent line; a check answered on none is absent. One read for every
-/// landing's records (G196). Only an order: a line or a note it cannot read counts as no record,
-/// never as no post work.
-fn last_runs(
-    git: &Git,
-    trust: (Option<&Registry>, &Writer, &crate::policy::Policy),
-    tip: &str,
-    entries: &[&crate::policy::CheckEntry],
-) -> std::collections::HashMap<(String, String), LastRun> {
+/// A landing of main's first-parent line and the evidence records on its tree ([`main_line`]).
+type Landing = (String, Vec<EvidenceRecord>);
+
+/// Main's newest [`RAN_SPAN`] first-parent landings from `tip`, newest first, each with the
+/// records on its tree: one read for every landing's records (G196). Empty when the line or a
+/// note cannot be read, which [`last_runs`] and [`unable_machines`] read as no record, never as
+/// no post work.
+fn main_line(git: &Git, tip: &str) -> Vec<Landing> {
     let span = RAN_SPAN.to_string();
-    let mut ran = std::collections::HashMap::new();
     let Ok(line) = git.run(&["log", "--first-parent", "-n", &span, "--format=%H %T", tip]) else {
-        return ran;
+        return Vec::new();
     };
     let landings: Vec<(&str, &str)> = line.lines().filter_map(|l| l.split_once(' ')).collect();
     let trees: Vec<&str> = landings.iter().map(|(_, tree)| *tree).collect();
     let Ok(records) = evidence::records_for_many(git, &trees) else {
-        return ran;
+        return Vec::new();
     };
-    for (ago, ((commit, _), records)) in landings.iter().zip(records).enumerate() {
+    landings
+        .into_iter()
+        .map(|(commit, _)| commit.to_owned())
+        .zip(records)
+        .collect()
+}
+
+/// How many landings back from the tip this box last recorded each of `entries` (G433), or
+/// another producer answered it there ([`answered_elsewhere`], G625), on main's line from the
+/// tip (`line`); a check answered on none is absent. Only an order.
+fn last_runs(
+    git: &Git,
+    trust: (Option<&Registry>, &Writer, &crate::policy::Policy),
+    line: &[Landing],
+    entries: &[&crate::policy::CheckEntry],
+) -> std::collections::HashMap<(String, String), LastRun> {
+    let mut ran = std::collections::HashMap::new();
+    for (ago, (commit, records)) in line.iter().enumerate() {
         if ran.len() == entries.len() {
             break;
         }
@@ -649,7 +676,7 @@ fn last_runs(
             .filter_map(|record| Some((record.check.clone(), crate::clock::unix_of(&record.at)?)))
             .collect();
         let elsewhere =
-            answered_elsewhere(git, trust, entries, (*commit, records)).unwrap_or_default();
+            answered_elsewhere(git, trust, entries, (commit, records)).unwrap_or_default();
         for check in own.into_iter().chain(elsewhere) {
             if entries
                 .iter()
@@ -716,19 +743,135 @@ fn left_to(
 /// any, the one whose name weighs most with it ([`weight`]). G857 elects the runner that
 /// bisects a red of the check by it too ([`bisected_by`]).
 fn owner_of<'a>(entry: &crate::policy::CheckEntry, me: &'a str, live: &'a [Value]) -> &'a str {
-    let listed = |record: &Value| {
-        entry.producers.as_ref().is_none_or(|producers| {
-            record["producer"]
-                .as_str()
-                .is_some_and(|producer| producers.iter().any(|it| it == producer))
-        })
-    };
     live.iter()
-        .filter(|record| crate::presence::serves(record, &entry.environment) && listed(record))
+        .filter(|record| {
+            crate::presence::serves(record, &entry.environment) && lists(entry, record)
+        })
         .filter_map(|record| record["executor"].as_str())
         .chain([me])
         .max_by_key(|runner| (weight(entry, runner), *runner))
         .unwrap_or(me)
+}
+
+/// G822: `entry` lists the producer that the presence `record` names, or lists no producer.
+fn lists(entry: &crate::policy::CheckEntry, record: &Value) -> bool {
+    entry.producers.as_ref().is_none_or(|producers| {
+        record["producer"]
+            .as_str()
+            .is_some_and(|producer| producers.iter().any(|it| it == producer))
+    })
+}
+
+/// G951: how long a machine that could not run a check leaves the check to the other machines
+/// after its newest such record ([`unable_machines`]): one day. A machine that gets its fix
+/// outside main runs the check again within that time.
+const UNABLE_FOR_S: u64 = 24 * 60 * 60;
+
+/// G951: `record` says that its machine could not run the check. Its verdict is an
+/// `infra_failure`; or its verdict is unknown, at least one unit is an `infra_failure`, and
+/// every unit that did not pass is an `infra_failure` (the G950 gap).
+fn could_not_run(record: &EvidenceRecord) -> bool {
+    match record.verdict {
+        Verdict::InfraFailure => true,
+        Verdict::Unknown => {
+            record
+                .units
+                .iter()
+                .any(|unit| unit.verdict == Verdict::InfraFailure)
+                && record
+                    .units
+                    .iter()
+                    .all(|unit| matches!(unit.verdict, Verdict::Pass | Verdict::InfraFailure))
+        }
+        Verdict::Pass | Verdict::ProductFailure => false,
+    }
+}
+
+/// G951 (a fleet finding, 2026-11-27): on one machine, a post check had a unit that could not
+/// load a native addon. That unit was an `infra_failure` on every run, and the check passed on
+/// the other machines. The election ([`owner_of`]) gave the check to a runner on that machine,
+/// so the other runners left the check to it, and main stayed without an answer for hours.
+///
+/// Returns the machines that could not run `id` lately. For each such machine, its two newest
+/// records of `id` on main's line (`landings`) both say that it could not run the check
+/// ([`could_not_run`]), and the newer record is less than [`UNABLE_FOR_S`] old. Each record
+/// names its machine through its producer: this runner's own producer (`own`), or the
+/// producer that a live presence (`live`) names. A record whose producer is not mapped to a
+/// machine is ignored. The result changes placement only: when a machine's records leave the
+/// line, or become old, that machine runs the check again.
+fn unable_machines(
+    landings: &[Landing],
+    id: &CheckId,
+    (own_producer, own_machine): (&str, Option<&str>),
+    live: &[Value],
+    now: u64,
+) -> BTreeSet<String> {
+    let mut machine_of: BTreeMap<&str, &str> = live
+        .iter()
+        .filter_map(|record| Some((record["producer"].as_str()?, record["machine"].as_str()?)))
+        .collect();
+    if let Some(machine) = own_machine {
+        machine_of.insert(own_producer, machine);
+    }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    let mut runs: BTreeMap<&str, Vec<(u64, bool)>> = BTreeMap::new();
+    for record in landings.iter().flat_map(|(_, records)| records) {
+        if record.kind != evidence::KIND_CHECK
+            || record.check != *id
+            || !seen.insert(record.id.as_str())
+        {
+            continue;
+        }
+        let (Some(machine), Some(at)) = (
+            machine_of.get(record.producer.name.as_str()).copied(),
+            crate::clock::unix_of(&record.at),
+        ) else {
+            continue;
+        };
+        runs.entry(machine)
+            .or_default()
+            .push((at, could_not_run(record)));
+    }
+    runs.into_iter()
+        .filter_map(|(machine, mut runs)| {
+            runs.sort_unstable_by_key(|run| std::cmp::Reverse(run.0));
+            let newest = runs.first()?.0;
+            (runs.len() >= 2
+                && runs[..2].iter().all(|run| run.1)
+                && now.saturating_sub(newest) < UNABLE_FOR_S)
+                .then(|| machine.to_owned())
+        })
+        .collect()
+}
+
+/// G951: the runners that the election for `entry` weighs ([`owner_of`]): the live runners
+/// (`live`) that are not on a machine in `unable`. Returns `None`, so this runner leaves the
+/// check, when this runner's machine (`machine`) is in `unable` and a live runner on another
+/// machine, not in `unable`, serves the check. When no such runner is live, the election uses
+/// all of `live`, as before G951.
+fn electors(
+    entry: &crate::policy::CheckEntry,
+    machine: Option<&str>,
+    live: &[Value],
+    unable: &BTreeSet<String>,
+) -> Option<Vec<Value>> {
+    let able: Vec<Value> = live
+        .iter()
+        .filter(|record| {
+            record["machine"]
+                .as_str()
+                .is_none_or(|it| !unable.contains(it))
+        })
+        .cloned()
+        .collect();
+    if !machine.is_some_and(|it| unable.contains(it)) {
+        return Some(able);
+    }
+    // `able` holds no runner on this machine, which is in `unable`.
+    let elsewhere = able
+        .iter()
+        .any(|record| crate::presence::serves(record, &entry.environment) && lists(entry, record));
+    (!elsewhere).then(|| live.to_vec())
 }
 
 /// G822: `runner`'s rendezvous weight for `entry`: the first eight bytes of the SHA-256 of the
@@ -764,19 +907,20 @@ fn answered_elsewhere(
     git: &Git,
     (registry, writer, policy): (Option<&Registry>, &Writer, &crate::policy::Policy),
     entries: &[&crate::policy::CheckEntry],
-    (commit, records): (&str, Vec<EvidenceRecord>),
+    (commit, records): (&str, &[EvidenceRecord]),
 ) -> Result<Vec<CheckId>, String> {
     let ids: Vec<CheckId> = entries
         .iter()
         .map(|entry| CheckId::new(&entry.id, &entry.environment))
         .collect();
     let others: Vec<EvidenceRecord> = records
-        .into_iter()
+        .iter()
         .filter(|record| {
             record.producer.name != writer.name
                 && record.kind == evidence::KIND_CHECK
                 && ids.contains(&record.check)
         })
+        .cloned()
         .collect();
     if others.is_empty() {
         return Ok(Vec::new());
