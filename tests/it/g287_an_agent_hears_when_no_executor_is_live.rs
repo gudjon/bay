@@ -164,8 +164,10 @@ fn queued_work_with_no_executor_is_told_once_per_state() {
 /// reported missing, which sent seats to start runners of their own.
 #[test]
 fn a_live_runner_is_never_reported_missing_from_an_old_record() {
-    // A takeover window of ten seconds: twice this lease.
-    let (test_box, repo, executor) = seeded_with(Some("[runner]\nlease_s = 5\nheartbeat_s = 1\n"));
+    // A takeover window of twenty seconds: twice this lease. The runner's presence must still read
+    // fresh from its second pass through the queued change to the prompt, and on a loaded box
+    // (the release gate, 2026-11-27) that took more than ten seconds.
+    let (test_box, repo, executor) = seeded_with(Some("[runner]\nlease_s = 10\nheartbeat_s = 1\n"));
     // A session with a cursor, which is what the line is told to.
     let started = hook(&test_box, &repo, "s-1", "session.start", 0);
     assert!(!started.contains(LINE), "{started}");
@@ -183,12 +185,14 @@ fn a_live_runner_is_never_reported_missing_from_an_old_record() {
     let (code, status) = result_json(test_box.bay(&repo).arg("status"));
     assert_eq!(code, 0, "{status}");
     // The record ages past the window while the runner writes a newer presence it lacks.
-    std::thread::sleep(std::time::Duration::from_secs(12));
+    std::thread::sleep(std::time::Duration::from_secs(22));
     pass();
+    let passed = std::time::Instant::now();
     queue_one(&test_box, &repo);
     let told = prompt(&test_box, &repo, "s-1", 0);
     assert!(
         !told.contains(LINE),
-        "a live runner was reported missing from an old record: {told}"
+        "a live runner was reported missing from an old record, {:?} after its pass (window 20 s): {told}",
+        passed.elapsed()
     );
 }
