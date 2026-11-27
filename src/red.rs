@@ -34,6 +34,13 @@
 //!   a first failure that changed the check itself was judged with its first parent's check
 //!   (G91), so it is never the culprit ([`Suspect::judged_old`]); its row says the next landing
 //!   on the check's paths judges the new check.
+//! - G947 (a fleet finding, 2026-11-27: a merge added a unit to a post check, its own run passed
+//!   under the old check, and the next merge, a change to one document, was named the culprit of
+//!   the new unit's failure and undone): a pass judged with another definition of the check than
+//!   the first failure says nothing of the check that failed. The walk to a pass ends at the
+//!   newest merge between them that changed the check, as at the one that added it (G584): that
+//!   merge owns the red ([`Suspect::changed`]), and the run of no change on it (BACKLOG 348)
+//!   judges it with the new check.
 //! - G627 (fleet findings, 2026-11-02: a canary merge and a card merge were each named the
 //!   culprit of a flaky test's failure): with a footprint, the check reads only its read set.
 //!   When the same check judged the pass and the first failure right above it, and the read set
@@ -211,9 +218,13 @@ pub struct Suspect {
     /// `None` when `passed` or `added` names where the walk stopped.
     pub searched: Option<usize>,
     /// G584: with no pass found, the landing that added the check: its base policy lists other
-    /// post checks and not this one. It owns the red, and the range ends at it. BACKLOG 348:
+    /// post checks and not this one. G947: or the landing that changed it, under a pass of the
+    /// old check ([`Suspect::changed`]). It owns the red, and the range ends at it. BACKLOG 348:
     /// `None` once a run of no change on it passed, which makes it `passed`.
     pub added: Option<Mark>,
+    /// G947: `added` changed the check rather than added it: the pass below it was judged with
+    /// another definition of the check than the failures above it.
+    pub changed: bool,
     /// G622: the landing right above the pass, when it changed the check itself. Its post run
     /// judged it with its first parent's check (G91), so no run proves it the cause: it is not
     /// the culprit, and the next landing on the check's paths judges the new check.
@@ -300,7 +311,8 @@ impl Suspect {
             "landings": self.landings.iter().map(Mark::to_json).collect::<Vec<_>>(),
             "failing": self.failing.iter().map(Mark::to_json).collect::<Vec<_>>(),
             "searched": self.searched,
-            "check_added": self.added.as_ref().map(Mark::to_json),
+            "check_added": self.added.as_ref().filter(|_| !self.changed).map(Mark::to_json),
+            "check_changed": self.added.as_ref().filter(|_| self.changed).map(Mark::to_json),
             "judged_old": self.judged_old.as_ref().map(Mark::to_json),
             "same_read": self.same_read.as_ref().map(Mark::to_json),
             "base_failed": self.base_failed.as_ref().map(Mark::to_json),
@@ -466,6 +478,12 @@ impl Red {
                     .unwrap_or_default(),
                 passed.named()
             ),
+            (None, Some(added), Some(_)) if suspect.changed => format!(
+                "{} changed the check, and the pass below it ran the old check; a run of the new \
+                 check there failed as well, so the red is the check's own, not a merge's: fix \
+                 the check or its setup, and its next run on main clears the red",
+                added.named()
+            ),
             (None, Some(added), Some(_)) => format!(
                 "a run where {} added it to the policy failed as well, so the red is the check's \
                  own, not a merge's: fix the check or its setup, and its next run on main clears \
@@ -476,6 +494,12 @@ impl Red {
                 "a run at {}, main's first merge, failed as well, so the red is the check's own, \
                  not a merge's: fix the check or its setup, and its next run on main clears the red",
                 base.named()
+            ),
+            (None, Some(added), None) if suspect.changed => format!(
+                "{} changed the check, and the pass below it ran the old check, so that merge \
+                 owns the red: the new check has not passed since, and the cause is the new \
+                 check, its setup, or a merge since, on its paths or not",
+                added.named()
             ),
             (None, Some(added), None) => format!(
                 "it has not passed since {} added it to the policy, so that merge owns the red: \
@@ -540,7 +564,7 @@ impl Red {
     }
 
     /// E36: the one name a fix gives in `--fixes`, stable while the red stands: the landing
-    /// that added a check that never passed (G584), else the first failure (the culprit, when
+    /// that added a check that never passed (G584) or changed it (G947), else the first failure (the culprit, when
     /// the evidence pins one), else the owning change. The owner moves to each newer failure
     /// while neither pins it.
     #[must_use]
@@ -1647,6 +1671,29 @@ impl<'a> Answers<'a> {
         }))
     }
 
+    /// G947: the newest landing from `first`'s first parent down to `pass` that changed `post`
+    /// (else `pass`), when the check that judged `pass` (its first parent's, G91) is not the one
+    /// that judged `first`; `None` when one check judged both, or either policy cannot be read.
+    fn changed_since(
+        &self,
+        first: usize,
+        pass: usize,
+        post: &crate::policy::ManifestEntry,
+    ) -> Option<usize> {
+        let judged = |at: usize| {
+            let parent = first_parent(self.git, &self.line.landings[at].commit)?;
+            check_at(self.git, &parent, post).map(|(digest, _)| digest)
+        };
+        if judged(pass)? == judged(first)? {
+            return None;
+        }
+        Some(
+            (first + 1..=pass)
+                .find(|&at| changed_check(self.git, &self.line.landings[at].commit, post))
+                .unwrap_or(pass),
+        )
+    }
+
     /// G584: whether landing `at`'s base policy lists other post checks and not `post`, so the
     /// landing added it. A base with no post checks, or no valid policy, says nothing.
     fn unlisted(&mut self, at: usize, post: &crate::policy::ManifestEntry) -> Result<bool, String> {
@@ -1741,6 +1788,17 @@ impl<'a> Answers<'a> {
         }))
     }
 
+    /// BACKLOG 340: the units two failing landings failed, sorted once; `None` when either names
+    /// none.
+    fn union(failed: Option<Vec<String>>, more: Option<Vec<String>>) -> Option<Vec<String>> {
+        failed.zip(more).map(|(mut failed, more)| {
+            failed.extend(more);
+            failed.sort();
+            failed.dedup();
+            failed
+        })
+    }
+
     /// BACKLOG 340 (a fleet finding, 2026-11-26: a landing that changed one file the red's check
     /// read, flaky there on a timing test, unpinned a culprit whose five runs all failed clippy,
     /// so no undo came): whether landing `at` answers `post` `flaky` and no run there failed
@@ -1792,6 +1850,7 @@ impl<'a> Answers<'a> {
         let mut passed_units = None;
         let mut older = at + 1;
         let mut base_failed = None;
+        let mut changed = false;
         loop {
             while older < self.line.landings.len() || self.past()? {
                 // Landings are first-parent commits of main, newest first: `older` sits at depth
@@ -1804,13 +1863,7 @@ impl<'a> Answers<'a> {
                 match self.decides(older, post)? {
                     Some(true) => {
                         first = older;
-                        let more = self.failed_units(older, post)?;
-                        failed = failed.zip(more).map(|(mut failed, more)| {
-                            failed.extend(more);
-                            failed.sort();
-                            failed.dedup();
-                            failed
-                        });
+                        failed = Self::union(failed, self.failed_units(older, post)?);
                     }
                     Some(false) => {
                         passed = Some((older, "pass"));
@@ -1824,6 +1877,16 @@ impl<'a> Answers<'a> {
                     None => {}
                 }
                 older += 1;
+            }
+            // G947: a pass judged with another check than the first failure is no pass of it;
+            // the merge that changed the check ends the range, as one that added it does.
+            if let Some((pass, _)) = passed
+                && let Some(change) = self.changed_since(first, pass, post)
+            {
+                passed = None;
+                passed_units = None;
+                added = Some(change);
+                changed = true;
             }
             // BACKLOG 348: with no pass, the range's base answers as a run of no change on it: the
             // landing that added the check, or the oldest landing read.
@@ -1883,6 +1946,7 @@ impl<'a> Answers<'a> {
                 culprit,
                 searched: (passed.is_none() && added.is_none()).then_some(self.line.depth),
                 added: added.map(|added| Mark::of(&landings[added])),
+                changed: changed && added.is_some(),
                 judged_old: judged_old.then(|| Mark::of(&landings[first])),
                 same_read: same_read.then(|| Mark::of(&landings[first])),
                 base_failed: base_failed.map(|base| Mark::of(&landings[base])),

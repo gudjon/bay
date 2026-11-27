@@ -554,6 +554,7 @@ mod tests {
                 }),
                 searched: None,
                 added: None,
+                changed: false,
                 judged_old: None,
                 same_read: None,
                 base_failed: None,

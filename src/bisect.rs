@@ -972,9 +972,28 @@ fn culprits(repo: &Repo, taken: &BTreeSet<String>, fresh: &mut Fresh) -> Result<
 /// already. Its run there decided nothing (an infra failure, say), or the range would have a
 /// good end or be the check's own, so it is not run again, as a bisect step that decided
 /// nothing is not ([`bisect`]).
+///
+/// G947: only a run under the base's own policy counts, as only it answers the judgement
+/// ([`crate::publish::own_answers`]): the post run of a merge that changed the check ran the old
+/// check, under its first parent's policy, and says nothing of the new one.
 fn ran_on(git: &Git, writer: &Writer, red: &Red, base: &Mark) -> Result<bool, String> {
     let id = CheckId::new(&red.check, &red.environment);
-    Ok(writer.records(git, &tree_of(git, &base.landing)?, &id)? > 0)
+    let own = match crate::policy::load_at(git, &base.landing) {
+        Ok(Some(policy)) => Some(policy.manifest_digest),
+        Ok(None) | Err(crate::policy::LoadError::Invalid(_)) => None,
+        Err(crate::policy::LoadError::Git(why)) => return Err(why),
+    };
+    Ok(
+        evidence::producer_records(git, &writer.name, &tree_of(git, &base.landing)?)?
+            .iter()
+            .any(|record| {
+                record.kind == evidence::KIND_CHECK
+                    && record.check == id
+                    && own
+                        .as_ref()
+                        .is_none_or(|own| &record.manifest_digest == own)
+            }),
+    )
 }
 
 /// G857 (a fleet finding, 2026-11-22: two runners that served one environment each ran the same
