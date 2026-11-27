@@ -1670,7 +1670,10 @@ fn submit_land(
             .map(|op| (op.op_id.clone(), op.revision.clone()))
         && let Some(commit) = published_commit(&ctx.record).map(str::to_owned)
     {
-        return landed_if_on_main(&mut ctx, &op_id, &revision, &commit);
+        // G931: a landing main never took opens the change again, and this land goes on.
+        if let Some(result) = landed_if_on_main(&mut ctx, &op_id, &revision, &commit)? {
+            return Ok(result);
+        }
     }
 
     step.set("freeze");
@@ -1712,18 +1715,26 @@ fn submit_land(
         .find(|op| op.state == OpState::Published)
         .map(|op| (op.op_id.clone(), op.revision.clone()));
     if let Some((op_id, landed_revision)) = landed_op {
-        if landed_revision == revision
+        // G931: a landing main never took opens the change again, and this land goes on.
+        let reopened = if landed_revision == revision
             && let Some(commit) = published_commit(&ctx.record).map(str::to_owned)
         {
-            return landed_if_on_main(&mut ctx, &op_id, &revision, &commit);
+            match landed_if_on_main(&mut ctx, &op_id, &revision, &commit)? {
+                Some(result) => return Ok(result),
+                None => true,
+            }
+        } else {
+            false
+        };
+        if !reopened {
+            let mut detail = json!({"landed_revision": landed_revision, "op_id": op_id});
+            if let Some(carry) = carry(&ctx, &trunk, &revision, &landed_revision)? {
+                detail["carry"] = carry;
+            }
+            return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded)
+                .with_change(id)
+                .with_detail(detail));
         }
-        let mut detail = json!({"landed_revision": landed_revision, "op_id": op_id});
-        if let Some(carry) = carry(&ctx, &trunk, &revision, &landed_revision)? {
-            detail["carry"] = carry;
-        }
-        return Ok(BayResult::blocked(Reason::ChangeAlreadyLanded)
-            .with_change(id)
-            .with_detail(detail));
     }
     // NEW-4: a change of no lane whose view reaches a lane's commits off trunk never lands them.
     if ctx.record.lane.is_none()
@@ -11833,28 +11844,95 @@ fn scanned(ctx: &mut Ctx, trunk: &str, revision: &str) -> Result<Option<BayResul
     ))
 }
 
+/// G931: how long a landing's record stands on its chain, unmarked and with main lacking its
+/// commit, before its change opens again. A landing push under way (a batch's re-push included)
+/// ends in seconds; its record is never reopened under it.
+const REOPEN_AFTER_S: u64 = 600;
+
 /// G875 (a fleet finding, 2026-11-23: `bay merge --wait` answered a change merged from its
 /// chain's record, which another process had pushed before the landing's own push was refused;
 /// main never held the commit): [`derive_landed`] for a landing read from the change's record
 /// alone, once main holds its commit. One main does not hold is answered `MERGE_OUTCOME_UNKNOWN`,
-/// never merged, and nothing is recorded.
+/// never merged.
+///
+/// G931 (a fleet finding, 2026-11-27: one landing batch of six changes left every member's
+/// chain saying landed, while main, fetched again, never held the batch and the remote held no
+/// landed marker of any member; each change kept its intent, so neither it nor a new change
+/// could carry that intent on): a landing main lacks once fetched again, which the remote marks
+/// nowhere, and whose record is older than [`REOPEN_AFTER_S`], never happened. Its operation
+/// ends failed `MERGE_OUTCOME_UNKNOWN`, the change is ready again, and `None` tells the land
+/// to go on as for any ready change. Only the author's land reopens: a runner's pass never does.
 ///
 /// # Errors
 ///
-/// As [`derive_landed`].
+/// As [`derive_landed`]; the reopened record could not be saved.
 fn landed_if_on_main(
     ctx: &mut Ctx,
     op_id: &str,
     revision: &str,
     commit: &str,
-) -> Result<BayResult, String> {
-    if main_holds(ctx.repo, commit) {
-        return derive_landed(ctx, op_id, revision, commit);
+) -> Result<Option<BayResult>, String> {
+    let unknown = |ctx: &Ctx, reopens_in: Option<u64>| {
+        let mut detail = json!({"recorded_merged": commit, "on_main": false});
+        if let Some(seconds) = reopens_in {
+            detail["reopens_in_s"] = json!(seconds);
+        }
+        Ok(Some(
+            BayResult::blocked(Reason::PublishOutcomeUnknown)
+                .with_change(ctx.id.clone())
+                .with_op(op_id)
+                .with_detail(detail),
+        ))
+    };
+    let repo = ctx.repo;
+    let holds = |tip: &str| repo.git.is_ancestor(commit, tip);
+    let tracking = repo
+        .git
+        .ref_target(&repo.trunk_tracking_ref())
+        .ok()
+        .flatten();
+    if tracking
+        .as_deref()
+        .is_some_and(|tip| holds(tip).unwrap_or(false))
+    {
+        return derive_landed(ctx, op_id, revision, commit).map(Some);
     }
-    Ok(BayResult::blocked(Reason::PublishOutcomeUnknown)
-        .with_change(ctx.id.clone())
-        .with_op(op_id)
-        .with_detail(json!({"recorded_merged": commit, "on_main": false})))
+    // Main as the remote holds it now: a fetch or a read that fails says nothing.
+    let fetched = repo.refetch_trunk().ok();
+    match fetched.as_deref().map(holds) {
+        Some(Ok(true)) => return derive_landed(ctx, op_id, revision, commit).map(Some),
+        Some(Ok(false)) if ctx.online => {}
+        _ => return unknown(ctx, None),
+    }
+    if !matches!(crate::undo::marker(repo, &ctx.id), Ok(None)) {
+        return unknown(ctx, None);
+    }
+    let recorded = repo
+        .git
+        .run(&["show", "-s", "--format=%ct", &ctx.head])
+        .ok()
+        .and_then(|time| time.trim().parse::<u64>().ok());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    match recorded.map(|at| now.saturating_sub(at)) {
+        Some(age) if age >= REOPEN_AFTER_S => {}
+        Some(age) => return unknown(ctx, Some(REOPEN_AFTER_S - age)),
+        None => return unknown(ctx, None),
+    }
+    let op = ctx.op_mut(op_id);
+    op.state = OpState::Failed;
+    op.outcome = Some(Reason::PublishOutcomeUnknown.code().to_owned());
+    ctx.record.state = ChangeState::Ready;
+    let message = format!(
+        "reopened {}: main never took {op_id}'s landing {commit}",
+        ctx.id
+    );
+    ctx.save_or_moved(revision, None, &message)?;
+    if !ctx.push_chain() {
+        return Err(CHAIN_MOVED.to_owned());
+    }
+    Ok(None)
 }
 
 /// G875: whether main holds `commit`: as this store's tracking ref holds main, else as the
