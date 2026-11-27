@@ -50,6 +50,23 @@ pub const NETWORK_ETC: &[&str] = &[
     "/etc/pki/ca-trust",
 ];
 
+/// G948: where a check under `bwrap` finds its scratch's `tmp`, the path its `TMPDIR` names.
+/// The scratch lies deep in bay's state directory (98 bytes for a post check on a fleet box), and
+/// a Unix socket a check binds in a directory of its `TMPDIR` must fit the 107 bytes of an
+/// `AF_UNIX` path. `/tmp` is the sandbox's own empty tmpfs, so this path is free in every check.
+pub const BWRAP_TMP: &str = "/tmp/bay";
+
+/// The `TMPDIR` of a check or provider whose scratch is `scratch`, run in sandbox `kind`: the
+/// scratch's `tmp`, at [`BWRAP_TMP`] under `bwrap` (G948), else at its own path.
+#[must_use]
+pub fn tmp_dir(kind: &str, scratch: &Path) -> PathBuf {
+    if kind == "bwrap" {
+        PathBuf::from(BWRAP_TMP)
+    } else {
+        scratch.join("tmp")
+    }
+}
+
 fn real(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -129,7 +146,10 @@ pub fn bwrap_args(
         args.extend([os("--ro-bind"), dir.clone(), dir]);
     }
     let scratch = real(scratch).into_os_string();
+    let tmp = Path::new(&scratch).join("tmp").into_os_string();
     args.extend([os("--bind"), scratch.clone(), scratch]);
+    // G948: the scratch's `tmp` again, at a short path in the sandbox's own `/tmp`.
+    args.extend([os("--bind"), tmp, os(BWRAP_TMP)]);
     args
 }
 
@@ -312,7 +332,8 @@ mod tests {
     }
 
     /// G62 on Linux, as arguments: `/` is never bound, the network is unshared unless the
-    /// check declares it, and the scratch is bound read-write last.
+    /// check declares it, and the scratch is bound read-write last, then its `tmp` at the short
+    /// path (G948).
     #[test]
     fn the_bwrap_arguments_are_an_allow_list() {
         let scratch = Path::new("/nonexistent/scratch/check-0");
@@ -330,18 +351,21 @@ mod tests {
             "{text:?}"
         );
         assert_eq!(
-            &args[args.len() - 3..],
+            &args[args.len() - 6..],
             &[
                 OsString::from("--bind"),
                 OsString::from(scratch),
-                OsString::from(scratch)
+                OsString::from(scratch),
+                OsString::from("--bind"),
+                OsString::from(scratch.join("tmp")),
+                OsString::from(super::BWRAP_TMP)
             ]
         );
         let open = bwrap_args(&[], (scratch, &[]), true);
         assert!(!open.contains(&OsString::from("--unshare-net")));
         assert!(open.contains(&OsString::from("/etc/resolv.conf")));
         // G267: the store a history check reads is bound read-only at its own path, before the
-        // scratch, which stays the last bind.
+        // scratch, which stays the last bind but for its `tmp` (G948).
         let store = PathBuf::from("/nonexistent/repo/.git/objects");
         let history = bwrap_args(&[], (scratch, std::slice::from_ref(&store)), false);
         assert!(
@@ -359,6 +383,6 @@ mod tests {
                 .any(|pair| pair[0] == "--bind" && pair[1] == store.as_os_str()),
             "{history:?}"
         );
-        assert_eq!(history[history.len() - 3], OsString::from("--bind"));
+        assert_eq!(history[history.len() - 6], OsString::from("--bind"));
     }
 }

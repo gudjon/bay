@@ -2445,14 +2445,15 @@ fn run_one(
     };
     // `INTERFACES` § 7: the check starts from a fixed baseline and nothing else, so evidence
     // names everything it could read: `PATH` from the policy, `HOME` and `TMPDIR` inside the
-    // sandbox's scratch, `LANG=C.UTF-8`, bay's own `BAY_ADAPTER_DIR`, and the declared names.
+    // sandbox's scratch (`TMPDIR` at a short path under `bwrap`, G948), `LANG=C.UTF-8`, bay's
+    // own `BAY_ADAPTER_DIR`, and the declared names.
     // The working directory is the candidate tree, the root an adapter judges its paths from:
     // neither its absolute path nor a path inside it holds `/.git` (G241, `scratch_root`).
     cmd.current_dir(tree_dir)
         .env_clear()
         .env("BAY_ADAPTER_DIR", adapter_dir)
         .env("HOME", &scratch_home)
-        .env("TMPDIR", &scratch_tmp)
+        .env("TMPDIR", sandbox::tmp_dir(place.sandbox, place.scratch))
         .env("LANG", "C.UTF-8")
         // The policy states `path` or takes its stated default, so `PATH` is always set: a
         // shell never falls back to a search path no policy names.

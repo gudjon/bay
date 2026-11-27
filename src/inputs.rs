@@ -432,7 +432,10 @@ fn run_provider(
         .env_clear()
         .env("BAY_ADAPTER_DIR", &adapter_dir)
         .env("HOME", &home)
-        .env("TMPDIR", &tmp)
+        .env(
+            "TMPDIR",
+            crate::check::sandbox::tmp_dir(sandbox.kind, scratch),
+        )
         .env("LANG", "C.UTF-8");
     if !entry.path.is_empty() {
         cmd.env("PATH", crate::platform::search_path(&entry.path));
