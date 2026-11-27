@@ -4744,6 +4744,13 @@ fn after_refused_push(
         std::thread::sleep(HOOK_RETRY_WAIT);
         return Ok(None);
     }
+    // G936: a runner that came while this operation ran free of an empty line, before this one
+    // read its presence, gave it a place (`queue_gate`), so that what came meanwhile waits behind
+    // it, and the host holds the line for it. It takes that place and pushes the same candidate
+    // again, releasing it.
+    if now == *trunk && takes_given_place(ctx.repo, op_id, seq, error)? {
+        return Ok(None);
+    }
     if now == *trunk {
         return Ok(Some(
             BayResult::failed(format!("the publishing push was refused: {error}"))
@@ -5326,8 +5333,19 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
         crate::queue::join(ctx.repo, signer.as_ref(), op_id, &ctx.id)?;
         queue = crate::queue::Queue::read(ctx.repo)?;
     }
-    let Some(head) = queue.head().cloned() else {
-        return unless_red(ctx, op_id, trunk, Gate::Free);
+    let head = match queue.head().cloned() {
+        Some(head) => head,
+        None if !races_free(ctx) => return unless_red(ctx, op_id, trunk, Gate::Free),
+        // G936: with another runner live, an operation takes a place even in an empty line, so
+        // a change that comes while it runs waits behind it instead of publishing beside it.
+        None => {
+            crate::queue::join(ctx.repo, signer.as_ref(), op_id, &ctx.id)?;
+            queue = crate::queue::Queue::read(ctx.repo)?;
+            queue
+                .head()
+                .cloned()
+                .ok_or("the queue reservation vanished")?
+        }
     };
     if head.op_id == op_id {
         return unless_red(ctx, op_id, trunk, Gate::Head(head.seq));
@@ -5372,6 +5390,41 @@ fn queue_gate(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Gate, String> {
         detail["batch_unnamed"] = json!(true);
     }
     Ok(Gate::Wait(Box::new(queued)))
+}
+
+/// G936 (BACKLOG 349; a load test, 2026-11-27: with the line empty, two runners each published
+/// a different change free on one main; the second landing push was refused and its change
+/// checked again, twelve times in a row in one minute, each runner losing to the other): whether
+/// another runner's presence this store holds reads live, so that a publication free of the line
+/// here would race its own on main.
+fn races_free(ctx: &Ctx) -> bool {
+    let me = crate::presence::presence_ref(&ctx.executor_name());
+    crate::presence::serving_until(&ctx.repo.git, &me, &[]).is_some()
+}
+
+/// G936: whether `error`, the host's refusal of a free publishing push while the line is held,
+/// was for the place another runner gave `op_id` meanwhile. `seq` takes that place then.
+fn takes_given_place(
+    repo: &Repo,
+    op_id: &str,
+    seq: &mut Option<u64>,
+    error: &str,
+) -> Result<bool, String> {
+    if seq.is_some() || !error.contains(crate::hook::QUEUE_HELD_BY) {
+        return Ok(false);
+    }
+    *seq = placed_meanwhile(repo, op_id)?;
+    Ok(seq.is_some())
+}
+
+/// G936: the place another runner gave `op_id` while it ran free, when that place heads the line
+/// on the remote now.
+fn placed_meanwhile(repo: &Repo, op_id: &str) -> Result<Option<u64>, String> {
+    let queue = crate::queue::Queue::read(repo)?;
+    Ok(queue
+        .head()
+        .filter(|head| head.op_id == op_id)
+        .map(|head| head.seq))
 }
 
 /// BACKLOG 326: grants the expedite `op_id`'s request asks, when the operation never held a place:
@@ -6110,7 +6163,8 @@ fn shown_precheck(on: &str, precheck: &Precheck) -> serde_json::Value {
 /// whose check did not fail), batching is off at this trunk, by a rule or by the failure rate, a
 /// policy change ends the prediction, or main moved. [`Ahead::Open`] when no planned check
 /// covers it (G861): the plan ends at `[runner] ahead` entries before it, it leads a batch
-/// smaller than `[runner] batch` lets form, or the check of its batch failed.
+/// smaller than `[runner] batch` lets form other than the one right behind the head's (G936: that
+/// one is checked as it is, a batch of one included), or the check of its batch failed.
 fn speculate_batch(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Ahead, String> {
     let repo = ctx.repo;
     let git = &repo.git;
@@ -6142,6 +6196,7 @@ fn speculate_batch(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Ahead, Str
     let mut covered = 0;
     let mut at = 0;
     let mut first = true;
+    let mut planned = 0;
     let reach = repo.ahead();
     while at < line.len() && covered <= reach {
         let head = &line[at];
@@ -6198,7 +6253,11 @@ fn speculate_batch(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Ahead, Str
             if leader.op_id != op_id {
                 return Ok(if failed { Ahead::Open } else { Ahead::Leave });
             }
-            if failed || members.len() < bounds.min.max(2) {
+            // G936 (BACKLOG 349): an operation alone right behind the head's batch is checked
+            // as a batch of one on the tip the head predicts, not alone on trunk: once the head
+            // lands, its turn is the same tree on the same base, and exact reuse lands it.
+            let next_to_head = planned == 1;
+            if failed || (members.len() < bounds.min.max(2) && !next_to_head) {
                 return Ok(Ahead::Open);
             }
             let (commit, tree) = (last.commit.clone(), last.tree.clone());
@@ -6213,6 +6272,7 @@ fn speculate_batch(ctx: &mut Ctx, op_id: &str, trunk: &str) -> Result<Ahead, Str
         base.clone_from(&last.commit);
         covered += members.len();
         first = false;
+        planned += 1;
         at = line
             .iter()
             .position(|queued| queued.seq == last_seq)
