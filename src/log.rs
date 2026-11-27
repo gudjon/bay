@@ -26,19 +26,21 @@ pub fn log_ref(executor: &str) -> String {
 
 /// Fetches every executor's log from the remote (best effort: offline keeps what is local).
 pub fn fetch(repo: &Repo) {
+    fetch_with(repo, &[]);
+}
+
+/// As [`fetch`], with `more` refspecs in the same round trip: G930 brings the presences a red's
+/// teller is chosen by.
+pub fn fetch_with(repo: &Repo, more: &[String]) {
     let refspec = format!("+{LOG_PREFIX}*:{LOG_PREFIX}*");
     // A10 (the no-work-is-lost rule, 2026-10-27): this executor's own log is never forced, so a
     // record whose push has not reached the remote yet is never fetched over; the remote's
     // moves it only forward.
     let own = log_ref(&crate::signing::Keys::load(&repo.git).executor_name);
-    let _ = repo.git.run(&[
-        "fetch",
-        "-q",
-        "--no-tags",
-        repo.remote(),
-        &refspec,
-        &format!("^{own}"),
-    ]);
+    let unforced = format!("^{own}");
+    let mut args = vec!["fetch", "-q", "--no-tags", repo.remote(), &refspec, &unforced];
+    args.extend(more.iter().map(String::as_str));
+    let _ = repo.git.run(&args);
     let _ = repo.git.run(&[
         "fetch",
         "-q",

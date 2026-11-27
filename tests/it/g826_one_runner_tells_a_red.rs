@@ -4,8 +4,9 @@
 //! the red: the one whose name weighs most with the check and its environment, as G822 chooses the
 //! runner of a post check. Another runner tells it once that runner's presence reads stale.
 //!
-//! Guard to mutate, in `src/red_owner.rs` `told`: the `teller` test (drop it and the runner
-//! that does not own the check tells the red beside its live owner).
+//! Guards to mutate, in `src/red_owner.rs` `told`: the `teller` test (drop it and the runner
+//! that does not own the check tells the red beside its live owner); G930, the logs' fetch before
+//! the first write (drop it and the owner, live again, tells the red the other runner told).
 
 #![cfg(unix)]
 

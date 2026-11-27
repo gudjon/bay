@@ -37,6 +37,15 @@
 //! told, and the culprit was never told it broke the check, because its event's id was the one it
 //! had as a merge of the range): a culprit's event has its own id, so it is told once more, that
 //! it broke the check.
+//!
+//! G930 (a fleet finding, 2026-11-27: one runner wrote 4 of another's 5 `red_owner` events again
+//! in 24 h, 35 to 50 s after it, with the same ids, each about 45 s after both had run the check
+//! and found it red): a runner read the logs once, before it read the owners, which took tens of
+//! seconds on a loaded machine, and wrote an event another runner had pushed meanwhile. The
+//! logs, with the presences, are read after the owners and just before the first write, and
+//! only when this store's logs lack an event the runner would write: the teller reads them, not
+//! every runner on every pass while a red stands. A runner that does not serve the red's environment
+//! is never its teller while one that serves it reads live.
 
 use std::collections::BTreeSet;
 
@@ -68,8 +77,6 @@ fn told(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
     if reds.is_empty() {
         return Ok(Vec::new());
     }
-    crate::log::fetch(repo);
-    let held = crate::log::held_events(git)?;
     let keys = Keys::load(git);
     // N-21: executor logs are signed only where the registry signs everything.
     let signer = match registry.as_ref().filter(|registry| registry.signs_all()) {
@@ -80,8 +87,11 @@ fn told(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
     };
     let chain = Chain::new(git);
     let live = crate::presence::live(git);
+    // G930: the logs this store holds; the remote's are read only for an event none of them holds.
+    let held = crate::log::held_events(git)?;
     let mut notes = Vec::new();
-    let mut written = BTreeSet::new();
+    let mut due = Vec::new();
+    let mut seen = BTreeSet::new();
     for red in &reds {
         if teller(red, &keys.executor_name, &live) != keys.executor_name {
             continue;
@@ -102,31 +112,45 @@ fn told(repo: &Repo, trunk: &str) -> Result<Vec<Value>, String> {
                 notes.push(json!({"red_owner": null, "check": red.check, "error": error}));
             }
         }
-        for (owner, owns) in &owners {
-            let id = event_id(red, owner, owns)?;
-            if held.contains(&id) || !written.insert(id.clone()) {
-                continue;
+        for (owner, owns) in owners {
+            let id = event_id(red, &owner, &owns)?;
+            if !held.contains(&id) && seen.insert(id.clone()) {
+                due.push((red, owner, owns, id));
             }
-            let Ok((_, record)) = chain.read(owner) else {
-                continue;
-            };
-            told_one(repo, (&keys, signer.as_ref()), red, (&id, owns, &record))?;
-            notes.push(json!({"red_owner": owner, "check": red.check, "event": id}));
         }
+    }
+    if due.is_empty() {
+        return Ok(notes);
+    }
+    // G930: the logs and the presences as the remote holds them now, read after the owners and
+    // just before the first write: another runner may have told the red, or come live, meanwhile.
+    crate::log::fetch_with(repo, &[crate::presence::refspec()]);
+    let held = crate::log::held_events(git)?;
+    let live = crate::presence::live(git);
+    for (red, owner, owns, id) in &due {
+        if held.contains(id) || teller(red, &keys.executor_name, &live) != keys.executor_name {
+            continue;
+        }
+        let Ok((_, record)) = chain.read(owner) else {
+            continue;
+        };
+        told_one(repo, (&keys, signer.as_ref()), red, (id, owns, &record))?;
+        notes.push(json!({"red_owner": owner, "check": red.check, "event": id}));
     }
     Ok(notes)
 }
 
-/// G826: the runner that tells `red`: of `me` and the runners whose presence reads live
-/// (`live`, [`crate::presence::live`]) and that serve the red's environment, the one whose name
-/// weighs most with the check and its environment, as the runner that runs a post check is
-/// chosen (G822, [`crate::bisect::rendezvous`]). Every runner names the same one; once its
-/// presence reads stale, the next one tells.
+/// G826: the runner that tells `red`: of the runners whose presence reads live (`live`,
+/// [`crate::presence::live`]) and that serve the red's environment, the one whose name weighs
+/// most with the check and its environment, as the runner that runs a post check is chosen
+/// (G822, [`crate::bisect::rendezvous`]); `me` when none does. Every runner names the same one;
+/// once its presence reads stale, the next one tells. G930: `me` is not one of them unless its
+/// own presence is: a runner that does not serve the environment named itself beside the one
+/// that does.
 pub(crate) fn teller<'a>(red: &Red, me: &'a str, live: &'a [Value]) -> &'a str {
     live.iter()
         .filter(|record| crate::presence::serves(record, &red.environment))
         .filter_map(|record| record["executor"].as_str())
-        .chain([me])
         .max_by_key(|runner| {
             let weight = crate::bisect::rendezvous(&red.check, &red.environment, runner);
             (weight, *runner)
@@ -513,5 +537,35 @@ mod tests {
         ];
         let told = on_paths(&red, marks.iter().zip(&off), &marks[2]);
         assert_eq!(told, (vec![&marks[2]], 0));
+    }
+
+    /// G930: a live runner that serves the red's environment tells it, whatever a runner that
+    /// does not serve it weighs; with none live, the reader does.
+    #[test]
+    fn a_red_is_told_by_a_live_runner_that_serves_it_never_by_one_that_does_not() {
+        let red = Red {
+            check: "suite".to_owned(),
+            environment: "local".to_owned(),
+            paths: None,
+            landing: "c".to_owned(),
+            change: None,
+            suspect: None,
+            fix: None,
+            changed_check: false,
+        };
+        let weight = |runner: &str| crate::bisect::rendezvous("suite", "local", runner);
+        let heavier = ["b", "c", "d", "e", "f", "g", "h", "i"]
+            .into_iter()
+            .find(|runner| weight(runner) > weight("a"))
+            .unwrap();
+        let presence = |runner: &str, environment: &str| {
+            json!({"executor": runner, "environments": {"source": "declared", "declared": [environment]}})
+        };
+        let live = [presence("a", "local"), presence(heavier, "other")];
+        assert_eq!(teller(&red, heavier, &live), "a");
+        assert_eq!(teller(&red, "a", &live), "a");
+        let both = [presence("a", "local"), presence(heavier, "local")];
+        assert_eq!(teller(&red, "a", &both), heavier);
+        assert_eq!(teller(&red, "a", &[]), "a");
     }
 }

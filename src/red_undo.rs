@@ -103,6 +103,9 @@ fn undone(
     let mut notes = Vec::new();
     let mut seen = BTreeSet::new();
     let mut read_main = false;
+    // G930: the remote's logs, read once a pass before the first decision; the tell no longer
+    // reads them on every pass while a red stands.
+    let mut fresh: Option<BTreeSet<String>> = None;
     for (red, culprit) in due {
         if crate::red_owner::teller(red, &keys.executor_name, &present) != keys.executor_name
             || !seen.insert(culprit)
@@ -127,6 +130,13 @@ fn undone(
             || line.iter().any(|names| red.answered_by(names))
             || crate::start::claimed(repo, &format!("undo of {culprit}"), "1")?
         {
+            continue;
+        }
+        if fresh.is_none() {
+            crate::log::fetch(repo);
+            fresh = Some(crate::log::held_events(git)?);
+        }
+        if fresh.as_ref().is_some_and(|held| held.contains(&id)) {
             continue;
         }
         // Main where the remote holds it now, read once a pass before the first undo: a landing
