@@ -9,8 +9,8 @@
 //!
 //! Guards to mutate, in `src/red_undo.rs` `undone`: the `held` test (a culprit is undone again),
 //! the `record.reverts` test (an undo is undone), the `answered_by` test (a culprit is undone
-//! while its fix is in line) and the wait (a culprit is undone at once). The `read_main` test
-//! covers a fix another runner lands within the pass, which one runner here cannot make. In
+//! while its fix is in line) and the wait (a culprit is undone at once). The `read_main` test,
+//! main moved under the decision, is G943's. In
 //! `name_in`: a row that names no undo (BACKLOG 322: `bay status` names the undo, or when it is due).
 
 #![cfg(unix)]

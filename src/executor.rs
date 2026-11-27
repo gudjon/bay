@@ -889,7 +889,9 @@ fn word(state: impl serde::Serialize) -> Option<String> {
 ///
 /// #123: after the queue's work, [`post_pass`] collects the post pieces that ended and starts
 /// the next ones in `post`; once the runner is leaving it starts none, and the pass stops
-/// between operations only when no piece runs.
+/// between operations only when no piece runs. BACKLOG 358: between its visits, once every
+/// [`RED_EVERY`], it also tells and undoes main's reds and starts the post pieces that are due
+/// ([`between`]).
 #[allow(clippy::too_many_lines)]
 fn pass(
     shared: &Arc<Repo>,
@@ -919,6 +921,8 @@ fn pass(
     repo.fetch_evidence(&Keys::load(&repo.git));
     let began = std::time::Instant::now();
     let bound = pass_bound();
+    // BACKLOG 358: when the pass last did its red work and planned its post pieces ([`between`]).
+    let mut red_beat = Instant::now();
     let chain = Chain::new(&repo.git);
     let mut ran = Vec::new();
     // The heads this pass took first or between its operations: the loop, which reads the
@@ -954,6 +958,21 @@ fn pass(
         let rows = run_op(repo, visit, Some(took), depth, beat, arrivals);
         record_rows(repo, rows, (&mut ran, &mut taken, parked));
         just = head_op;
+        if red_beat.elapsed() >= red_every() {
+            red_beat = Instant::now();
+            let local: Vec<ChangeRecord> = local_records(&chain)
+                .into_iter()
+                .map(|held| held.record)
+                .collect();
+            let watched = (&mut *notes, &mut ran);
+            between(
+                shared,
+                watch,
+                &local,
+                watched,
+                (post, beat, depth, arrivals),
+            );
+        }
         took = Instant::now();
     }
     // The places those heads freed are counted in the line as read from here on, and the probe
@@ -1023,6 +1042,7 @@ fn pass(
     crate::log::push(repo, &Keys::load(&repo.git).executor_name);
     notes.extend(early_conflicts(repo, &queue));
     notes.extend(red_owners(repo, &records));
+    red_beat = Instant::now();
     let due = publish::retention_due(repo, &chains);
     let reach = within_reach(repo, &queue);
     // G788: when this pass last asked the remote whether the line's head moved.
@@ -1096,6 +1116,17 @@ fn pass(
                 && let Ok(queue) = Queue::read_shared(repo)
             {
                 notes.extend(early_conflicts(repo, &queue));
+            }
+            if red_beat.elapsed() >= red_every() {
+                red_beat = Instant::now();
+                let watched = (&mut *notes, &mut ran);
+                between(
+                    shared,
+                    watch,
+                    &records,
+                    watched,
+                    (post, beat, depth, &mut arrivals),
+                );
             }
         }
     }
@@ -1243,6 +1274,22 @@ fn post_pass(
     plans: bool,
     (beat, depth, arrivals): (&mut crate::presence::Beat, usize, &mut Arrivals),
 ) -> Vec<Value> {
+    let mut rows = post_started(repo, post, plans, (beat, depth, &mut *arrivals));
+    if post.waits && post.holds() {
+        let mut placing = || arrivals.step(repo, "post");
+        rows.extend(beat.meanwhile(repo, "post", depth, &mut placing, || post.finish()));
+    }
+    post::rows(rows)
+}
+
+/// [`post_pass`] without its wait: the post pieces that ended, and, with `plans`, the next ones
+/// started.
+fn post_started(
+    repo: &Arc<Repo>,
+    post: &mut Post,
+    plans: bool,
+    (beat, depth, arrivals): (&mut crate::presence::Beat, usize, &mut Arrivals),
+) -> Vec<(&'static str, Value)> {
     let mut rows = post.collect();
     if plans && !holds_the_head(repo) {
         let busy = post.busy();
@@ -1262,11 +1309,32 @@ fn post_pass(
             rows.extend(post.start(repo, piece));
         }
     }
-    if post.waits && post.holds() {
-        let mut placing = || arrivals.step(repo, "post");
-        rows.extend(beat.meanwhile(repo, "post", depth, &mut placing, || post.finish()));
-    }
-    post::rows(rows)
+    rows
+}
+
+/// BACKLOG 358 (a load measurement, 2026-11-27: two runners landed batches on a red main, each
+/// pass took heads for its whole bound, and the work a pass did once after them waited as long:
+/// the red's bisection began 295 s after the red, and its culprit was never undone). Between
+/// its visits, once every [`RED_EVERY`], a pass reads the post records again, tells and undoes
+/// main's reds ([`red_owners`], `records` the changes as the pass holds them), and starts the
+/// post pieces that are due. It never waits for a piece.
+fn between(
+    shared: &Arc<Repo>,
+    watch: (Option<&Binary>, Option<&Drain>),
+    records: &[ChangeRecord],
+    (notes, ran): (&mut Vec<Value>, &mut Vec<Value>),
+    (post, beat, depth, arrivals): (&mut Post, &mut crate::presence::Beat, usize, &mut Arrivals),
+) {
+    let repo: &Repo = shared;
+    repo.fetch_evidence(&Keys::load(&repo.git));
+    notes.extend(red_owners(repo, records));
+    let plans = !leaving(watch) && !box_busy(shared);
+    ran.extend(post::rows(post_started(
+        shared,
+        post,
+        plans,
+        (beat, depth, arrivals),
+    )));
 }
 
 /// BACKLOG 280: whether this box is at or above a check-start load limit it sets, or its limits
@@ -1861,6 +1929,22 @@ fn serving_until(repo: &Repo, environments: &[String]) -> Option<Instant> {
 
 /// How long a pass starts operations before it ends and the next reads every chain again.
 const PASS_BOUND: Duration = Duration::from_secs(300);
+
+/// BACKLOG 358: how often a pass does its red work and starts its post pieces between its
+/// visits ([`between`]).
+const RED_EVERY: Duration = Duration::from_secs(60);
+
+/// [`RED_EVERY`]; a test build honours `BAY_TEST_RED_EVERY_S`, a release build never does.
+fn red_every() -> Duration {
+    if crate::version::TEST_HOOKS
+        && let Some(secs) = std::env::var("BAY_TEST_RED_EVERY_S")
+            .ok()
+            .and_then(|secs| secs.parse().ok())
+    {
+        return Duration::from_secs(secs);
+    }
+    RED_EVERY
+}
 
 /// [`PASS_BOUND`]; a test build honours `BAY_TEST_PASS_BOUND_S`, a release build never does.
 fn pass_bound() -> Duration {

@@ -15,9 +15,12 @@
 //!   [`Red::answered_by`]): one with an operation that waits for a runner, submitted or
 //!   queued; and no undo of it is claimed;
 //! - it is not an undo itself: no undo is ever undone automatically;
-//! - main has not moved since the pass read it: the remote's main, read once a pass before the
-//!   first undo. A fix the pass itself merged, or another runner's, is not in the pass's read of
-//!   main and answers the red; the decision waits for the next pass;
+//! - main has not moved since the decision read it: the remote's main, read again before the
+//!   first undo. A fix the pass itself merged, or another runner's, is not in that read and
+//!   answers the red, so when main moved the pass decides again on main as it read it now, at
+//!   most [`DECISIONS`] times (BACKLOG 358: on a busy line main moved before nearly every
+//!   decision, which then waited for a next pass that found it moved too, and a due culprit was
+//!   never undone);
 //! - its revert merges onto main's tip without a conflict, and still changes main.
 //!
 //! The undo is `bay undo <culprit>`, run as a child process under the runner's name
@@ -57,6 +60,19 @@ const UNDO_BOUND: Duration = Duration::from_secs(300);
 /// The verdict of a culprit's own run that an automatic undo needs.
 const PRODUCT_FAILURE: &str = "product_failure";
 
+/// How many times one pass decides on main (BACKLOG 358): a decision main moved under is taken
+/// again on main as the remote holds it then, which another landing moves again only rarely
+/// within the few reads of one decision.
+const DECISIONS: usize = 3;
+
+/// What one decision on main came to.
+enum Decided {
+    /// One note per decision, or none.
+    Notes(Vec<Value>),
+    /// Main moved under the decision before any undo: the remote's main now.
+    Moved(String),
+}
+
 /// Opens the undo of each red's culprit that is due, when `[red] undo_after_s` is set, and
 /// writes one `red_undo` event per decision. `records` are the changes this pass read. Returns
 /// one note per decision, or one note naming the fault, for the pass's notes.
@@ -65,8 +81,15 @@ pub fn undo(repo: &Repo, trunk: &str, records: &[ChangeRecord]) -> Vec<Value> {
     let Some(after) = repo.config.red_undo_after() else {
         return Vec::new();
     };
-    undone(repo, trunk, records, after)
-        .unwrap_or_else(|error| vec![json!({"red_undo": null, "error": error})])
+    let mut trunk = trunk.to_owned();
+    for _ in 0..DECISIONS {
+        match undone(repo, &trunk, records, after) {
+            Ok(Decided::Notes(notes)) => return notes,
+            Ok(Decided::Moved(now)) => trunk = now,
+            Err(error) => return vec![json!({"red_undo": null, "error": error})],
+        }
+    }
+    Vec::new()
 }
 
 /// G930: whether the remote's logs hold event `id`, fetched into `fresh` once a pass.
@@ -78,10 +101,11 @@ fn held_now(repo: &Repo, fresh: &mut Option<BTreeSet<String>>, id: &str) -> Resu
     Ok(fresh.as_ref().is_some_and(|held| held.contains(id)))
 }
 
-/// Whether main, fetched again now, still stands at `trunk`.
-fn main_stands(repo: &Repo, trunk: &str) -> Result<bool, String> {
+/// Main as the remote holds it now, fetched again, when it no longer stands at `trunk`.
+fn moved(repo: &Repo, trunk: &str) -> Result<Option<String>, String> {
     let now = repo.refetch_trunk().map_err(|error| error.message())?;
-    Ok(now.trim() == trunk)
+    let now = now.trim();
+    Ok((now != trunk).then(|| now.to_owned()))
 }
 
 fn undone(
@@ -89,7 +113,7 @@ fn undone(
     trunk: &str,
     records: &[ChangeRecord],
     after: Duration,
-) -> Result<Vec<Value>, String> {
+) -> Result<Decided, String> {
     let git = &repo.git;
     let registry = Registry::current(git)?;
     let reds = crate::red::judged(git, trunk, registry.as_ref())?.red;
@@ -98,14 +122,14 @@ fn undone(
         .filter_map(|red| pinned(red).map(|culprit| (red, culprit)))
         .collect();
     if due.is_empty() {
-        return Ok(Vec::new());
+        return Ok(Decided::Notes(Vec::new()));
     }
     if registry.as_ref().is_some_and(Registry::signs_all) {
-        return Ok(vec![json!({
+        return Ok(Decided::Notes(vec![json!({
             "red_undo": null,
             "error": "the key registry signs every request and a runner key cannot sign a \
                       change's requests, so bay opens no automatic undo",
-        })]);
+        })]));
     }
     let held = crate::log::held_events(git)?;
     let keys = Keys::load(git);
@@ -150,13 +174,14 @@ fn undone(
         if held_now(repo, &mut fresh, &id)? {
             continue;
         }
-        // Main where the remote holds it now, read once a pass before the first undo: a landing
-        // this pass made, or another runner's, is not in the pass's read of main, and a fix among
-        // them answers the red. While main moved, the decision waits for the next pass.
+        // Main where the remote holds it now, read once a decision before the first undo: a
+        // landing this pass made, or another runner's, is not in the decision's read of main, and
+        // a fix among them answers the red. When main moved, the pass decides again on it; no
+        // note was written before this read.
         if !read_main {
             read_main = true;
-            if !main_stands(repo, trunk)? {
-                break;
+            if let Some(now) = moved(repo, trunk)? {
+                return Ok(Decided::Moved(now));
             }
         }
         let Some(commit) = crate::undo::landed_commit(repo, culprit, trunk)? else {
@@ -193,7 +218,7 @@ fn undone(
             "reason": event.get("reason"),
         }));
     }
-    Ok(notes)
+    Ok(Decided::Notes(notes))
 }
 
 /// BACKLOG 322: names `red`'s automatic undo in its `bay status` row (`detail.red[]`). `undo`
