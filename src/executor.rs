@@ -2024,6 +2024,31 @@ fn op_line(op_id: &str, result: &BayResult) -> String {
         line.push_str(": ");
         line.extend(why.chars().take(400));
     }
+    // G945 (a fleet finding, 2026-11-27: one box's runners handed 20 claimed operations in a day
+    // to other runners, each after up to 310 s of checks, and each line said only "waiting for
+    // worker"): a wait for a worker names why, the adapter's answer or the cause of the hand-back,
+    // or the environments this runner does not serve.
+    if result.reason == Some(Reason::CheckUnavailable)
+        && let Some(detail) = result.detail.as_ref()
+    {
+        let why = detail["unavailable"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| {
+                let environments: Vec<&str> = detail["environments"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect();
+                (!environments.is_empty())
+                    .then(|| format!("not served here: {}", environments.join(", ")))
+            });
+        if let Some(why) = why {
+            let why: String = why.split_whitespace().collect::<Vec<_>>().join(" ");
+            line.push_str(": ");
+            line.extend(why.chars().take(400));
+        }
+    }
     // BACKLOG 157, G604: a wait on a change that was never submitted, or that stopped, names it
     // and who must act on it.
     if result.reason == Some(Reason::DependencyPending) {
@@ -3092,6 +3117,34 @@ mod tests {
         assert_eq!(
             op_line("abcd1234.1", &failed),
             "abcd1234.1 failed: git push: the remote refused the ref"
+        );
+    }
+
+    /// G945: a wait for a worker names why: the adapter's answer or the cause of a hand-back, or
+    /// the environments this runner does not serve.
+    #[test]
+    fn a_wait_for_a_worker_names_why() {
+        let waiting = |detail: serde_json::Value| {
+            let mut result =
+                BayResult::refused(Decision::Queued, Reason::CheckUnavailable).with_detail(detail);
+            result.waiting_for = Some("worker".to_owned());
+            result
+        };
+        let handed = waiting(serde_json::json!({
+            "environments": ["linux"],
+            "unavailable": "this machine (m1) could not run it: timed out\nafter 120 s",
+        }));
+        assert_eq!(
+            op_line("abcd1234.1", &handed),
+            "abcd1234.1 queued CHECK_UNAVAILABLE waiting for worker: this machine (m1) could not run it: timed out after 120 s"
+        );
+        let unserved = waiting(serde_json::json!({
+            "environments": ["linux", "gpu"],
+            "recovery": "a runner whose box serves them claims this operation",
+        }));
+        assert_eq!(
+            op_line("abcd1234.1", &unserved),
+            "abcd1234.1 queued CHECK_UNAVAILABLE waiting for worker: not served here: linux, gpu"
         );
     }
 
