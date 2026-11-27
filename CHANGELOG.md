@@ -4,6 +4,7 @@
 
 - `bay status --green-tip` names the newest landing of main with every post check green.
 - Each check record names its CPU seconds and whether it was carried; the flow sums them per landing.
+- A push the hosted remote refuses through an origin names the hosted remote's own reason first.
 
 ## 0.7.38
 

@@ -391,6 +391,9 @@ fn forwarding(busy: &HashSet<(String, String)>, name: &str, hosted: Option<&Stri
 struct Pushed {
     taken: Vec<String>,
     rejected: Vec<(String, String)>,
+    /// G929: the hosted remote's own words of a refusal, its `remote:` lines: a hook's reason,
+    /// which each refused ref names only as `pre-receive hook declined`.
+    said: Vec<String>,
 }
 
 impl Pushed {
@@ -414,9 +417,32 @@ impl Pushed {
         pushed
     }
 
+    /// G929 (a fleet measurement, 2026-11-27: of 16 refused landing pushes in 12 h, the runner's
+    /// journal named the cause of none past "pre-receive hook declined", since the origin kept
+    /// only each ref's summary): keeps up to three distinct `remote:` lines of `err`, the push's
+    /// stderr, each cut to 160 characters.
+    fn heard(mut self, err: &str) -> Self {
+        for line in err.lines() {
+            let Some(said) = line.trim().strip_prefix("remote:") else {
+                continue;
+            };
+            let said: String = said.trim().chars().take(160).collect();
+            if !said.is_empty() && !self.said.contains(&said) && self.said.len() < 3 {
+                self.said.push(said);
+            }
+        }
+        self
+    }
+
+    /// The refusal in one line: what the hosted remote said, then each refused ref, the ref whose
+    /// own refusal refused the rest first (an atomic push refuses the others as `atomic push
+    /// failed`, a hosted remote as `failed`), so a reader that keeps the start keeps the cause.
+    /// A line that says a ref moved is left out unless a refused ref says so too, so the words
+    /// never make a refusal read as a moved ref.
     fn refusals(&self) -> String {
-        let mut shown: Vec<String> = self
-            .rejected
+        let mut rejected: Vec<&(String, String)> = self.rejected.iter().collect();
+        rejected.sort_by_key(|(_, why)| collateral(why));
+        let mut shown: Vec<String> = rejected
             .iter()
             .take(5)
             .map(|(name, why)| format!("{name} {why}"))
@@ -424,8 +450,27 @@ impl Pushed {
         if self.rejected.len() > shown.len() {
             shown.push(format!("and {} more", self.rejected.len() - shown.len()));
         }
-        shown.join(", ")
+        let moved = self
+            .rejected
+            .iter()
+            .any(|(_, why)| crate::git::ref_moved(why));
+        let said: Vec<&str> = self
+            .said
+            .iter()
+            .map(String::as_str)
+            .filter(|line| moved || !crate::git::ref_moved(line))
+            .collect();
+        if said.is_empty() {
+            shown.join(", ")
+        } else {
+            format!("it said: {}; {}", said.join(" / "), shown.join(", "))
+        }
     }
+}
+
+/// Whether `why`, a refused ref's summary, says it was refused for another ref's refusal.
+fn collateral(why: &str) -> bool {
+    why.contains("atomic push failed") || why.ends_with("(failed)")
 }
 
 /// Pushes each of `updates` to `url`: its `new` value (absent deletes) by compare-and-swap
@@ -461,7 +506,7 @@ fn push(
     let (code, out, err) = git
         .run_status_for(&args, within)
         .map_err(|error| error.message())?;
-    let pushed = Pushed::read(&out);
+    let pushed = Pushed::read(&out).heard(&err);
     if code != 0 && pushed.rejected.is_empty() {
         return Err(if err.is_empty() { out } else { err });
     }
@@ -1044,6 +1089,32 @@ mod tests {
             )]
         );
         assert!(crate::git::ref_moved(&pushed.refusals()));
+    }
+
+    #[test]
+    fn a_refusal_names_what_the_hosted_remote_said_then_the_ref_that_caused_it() {
+        let out = "To /x/hosted.git\n!\tabc:refs/bay/changes/a\t[remote rejected] (failed)\n!\tdef:refs/heads/main\t[remote rejected] (missing necessary objects)\nDone\n";
+        let err = "remote: \nremote: fatal: did not receive expected object def\nremote: fatal: did not receive expected object def\nerror: failed to push some refs to '/x/hosted.git'\n";
+        let pushed = Pushed::read(out).heard(err);
+        assert_eq!(pushed.said, ["fatal: did not receive expected object def"]);
+        assert_eq!(
+            pushed.refusals(),
+            "it said: fatal: did not receive expected object def; refs/heads/main [remote rejected] (missing necessary objects), refs/bay/changes/a [remote rejected] (failed)"
+        );
+    }
+
+    #[test]
+    fn words_of_a_moved_ref_from_the_hosted_remote_never_make_a_refusal_read_moved() {
+        let out = "!\tabc:refs/heads/main\t[remote rejected] (pre-receive hook declined)\n";
+        let err =
+            "remote: error: GH006: Protected branch update failed\nremote: hint: fetch first\n";
+        let refusals = Pushed::read(out).heard(err).refusals();
+        assert!(!crate::git::ref_moved(&refusals), "{refusals}");
+        assert!(refusals.starts_with("it said: error: GH006"), "{refusals}");
+        // A refusal that is a moved ref keeps every word.
+        let out = "!\tabc:refs/heads/main\t[rejected] (stale info)\n";
+        let refusals = Pushed::read(out).heard(err).refusals();
+        assert!(refusals.contains("hint: fetch first"), "{refusals}");
     }
 
     #[test]
